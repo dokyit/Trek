@@ -20,6 +20,11 @@
 //! | `mock:visualization stream`  | the same, a few characters at a time, slowly, so the card's   |
 //! | [type]                       | frame and then its marks can be watched arriving              |
 //! | `mock:visualization invalid` | a block that closes but can't be drawn (an unknown field)     |
+//! | `mock:page`                  | prose, a live page (`trek-html`: tabs, a cube to drag round,  |
+//! |                              | a sortable table; nothing from the web), then enough prose    |
+//! |                              | after it to scroll the page half out of view                  |
+//! | `mock:page stream`           | the same, a few characters at a time, slowly, so the page's   |
+//! |                              | placeholder can be watched before the page itself             |
 //! | `mock:explore` [dur]         | tools at a steady pace for `dur` (default 30s): reads, finds, |
 //! |                              | commands, edits and web lookups, in groups between messages  |
 //! | `mock:history` [n]           | a long history in one go, at once: `n` rounds (default 100,   |
@@ -173,6 +178,8 @@ enum Script {
     VisualizationStream(Option<&'static str>),
     /// An answer whose visualization block closes invalid.
     VisualizationInvalid,
+    /// An answer with a live page in it (`PAGE`); `stream`: slowly.
+    Page { stream: bool },
     Explore(Duration),
     /// `n` rounds of work at once, for a long transcript.
     History(u32),
@@ -268,6 +275,7 @@ impl Script {
                         _ => Script::Visualization(kind(i + 1)),
                     }
                 }
+                "page" if w.starts_with("mock:") => Script::Page { stream: words.get(i + 1).is_some_and(|w| w == "stream") },
                 "explore" if w.starts_with("mock:") => Script::Explore(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 "history" if w.starts_with("mock:") => Script::History(words.get(i + 1).and_then(|n| n.parse().ok()).unwrap_or(100).clamp(1, MAX_HISTORY)),
                 // The one script that changes files: only when asked for by its full name.
@@ -335,6 +343,7 @@ pub fn title(request: &str) -> String {
         Script::Stream(_) => "Walk through the codebase",
         Script::Prose => "Tour the startup code",
         Script::Visualization(_) | Script::VisualizationStream(_) | Script::VisualizationInvalid => "Compare release health dashboards",
+        Script::Page { .. } => "Check the monitor arm fits",
         Script::Explore(_) => "Animate the title as it appears",
         Script::History(_) => "Harden the request parser",
         Script::Error => "Fix the failing build",
@@ -722,6 +731,9 @@ impl Session {
             // Slow enough to watch (and capture) a card's frame and then its marks arrive.
             Script::VisualizationStream(kind) => self.say_at(kind.and_then(|kind| VIZ_GALLERY.iter().find(|(k, _)| *k == kind)).map_or(VISUALIZATION, |(_, answer)| answer), 90).await?,
             Script::VisualizationInvalid => self.say(VIZ_INVALID).await?,
+            Script::Page { stream: false } => self.say(PAGE).await?,
+            // Slow enough to watch (and capture) the placeholder count up before the page shows.
+            Script::Page { stream: true } => self.say_at(PAGE, 12).await?,
             Script::Explore(total) => self.explore(total).await?,
             Script::History(rounds) => self.history(rounds).await?,
             Script::Write(file) => self.write(file.as_deref().unwrap_or("NOTES.md")).await?,
@@ -1277,9 +1289,9 @@ impl Session {
     /// Change `src/notes.rs` in the session's folder (`broken`: leaving a `todo!()` in it), then
     /// check the change with the verification CLI Trek named for the project. Both for real.
     async fn verify(&mut self, broken: bool) -> Step {
-        // The verification note names its CLI in "(`…`)"; the visualization note every session
-        // carries comes first and is no place to look.
-        let notes = self.instructions.as_deref().map(|i| i.replace(trek_core::visualization::AGENT_INSTRUCTIONS, ""));
+        // The verification note names its CLI in "(`…`)"; the visualization and page notes every
+        // session carries come first and are no place to look.
+        let notes = self.instructions.as_deref().map(|i| i.replace(trek_core::visualization::AGENT_INSTRUCTIONS, "").replace(trek_core::page::AGENT_INSTRUCTIONS, ""));
         let cli = notes.as_deref().and_then(|i| i.split_once("(`")).and_then(|(_, rest)| rest.split_once('`')).map(|(cli, _)| cli.to_string());
         let Some(cli) = cli else { return self.say("This project has no verification skill yet, so there's nothing to check the change with.").await };
         let body = if broken { "pub fn load() -> Vec<String> {\n    todo!()\n}\n" } else { "pub fn load() -> Vec<String> {\n    Vec::new()\n}\n" };
@@ -1909,6 +1921,170 @@ pub const VIZ_GALLERY: &[(&str, &str)] = &[
 ```"#),
 ];
 
+/// `mock:page`: a live page between prose. Tabs that switch panels, a wireframe on a canvas that
+/// turns as it's dragged, a table sorted by its headings, all in Trek's colours (`--trek-*`) and
+/// with nothing from the web, so it draws offline; then enough prose after it that the page can
+/// be scrolled half out of view.
+pub const PAGE: &str = r###"## Will the clamp fit?
+
+Yes, with two of the four clamps. Your desk top is 52 mm thick and the cable tray sits 90 mm back from the edge, so a clamp has to open past 52 mm and stay shallower than 90 mm. Here's the model and the shortlist; drag the box to look at it from underneath.
+
+```trek-html
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monitor arm: will the clamp fit?</title>
+<style>
+  :root { --bg: var(--trek-bg, #fbfaf8); --fg: var(--trek-fg, #1d1d1f); --muted: var(--trek-muted, #6e6e73); --accent: var(--trek-accent, #e8603c); --border: var(--trek-border, rgba(0,0,0,.12)); }
+  @media (prefers-color-scheme: dark) { :root { --bg: var(--trek-bg, #16161a); --fg: var(--trek-fg, #ececf1); --muted: var(--trek-muted, #9a9aa6); --border: var(--trek-border, rgba(255,255,255,.12)); } }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { padding: 14px 16px 18px; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+  .tabs button { font: inherit; color: var(--muted); background: none; border: 0; border-bottom: 2px solid transparent; padding: 7px 12px; cursor: pointer; }
+  .tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+  .panel[hidden] { display: none; }
+  canvas { display: block; width: 100%; height: 250px; border: 1px solid var(--border); border-radius: 8px; cursor: grab; touch-action: none; }
+  canvas.dragging { cursor: grabbing; }
+  .hint { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; cursor: pointer; user-select: none; white-space: nowrap; }
+  th[aria-sort] { color: var(--fg); }
+  th[aria-sort="ascending"]::after { content: " ↑"; }
+  th[aria-sort="descending"]::after { content: " ↓"; }
+  .n { text-align: right; font-variant-numeric: tabular-nums; }
+  .yes { color: var(--accent); font-weight: 600; }
+  ul { margin: 0; padding-left: 18px; }
+  li + li { margin-top: 6px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <div class="tabs" role="tablist">
+    <button role="tab" aria-selected="true" data-panel="model">Model</button>
+    <button role="tab" aria-selected="false" data-panel="clamps">Clamps</button>
+    <button role="tab" aria-selected="false" data-panel="notes">Notes</button>
+  </div>
+  <section class="panel" id="model">
+    <canvas id="cube" aria-label="The clamp's footprint as a wireframe box; drag to turn it"></canvas>
+    <p class="hint">Drag to turn it. The box is the clamp's footprint: 120 × 60 × 80 mm.</p>
+  </section>
+  <section class="panel" id="clamps" hidden>
+    <table id="table">
+      <thead><tr><th data-key="0">Clamp</th><th data-key="1" data-num>Opens to (mm)</th><th data-key="2" data-num>Depth (mm)</th><th data-key="3">Fits</th></tr></thead>
+      <tbody>
+        <tr><td>Ergotron LX</td><td class="n">60</td><td class="n">85</td><td class="yes">Yes</td></tr>
+        <tr><td>Amazon Basics</td><td class="n">80</td><td class="n">88</td><td class="yes">Yes</td></tr>
+        <tr><td>Humanscale M2</td><td class="n">50</td><td class="n">70</td><td>No</td></tr>
+        <tr><td>Kensington SmartFit</td><td class="n">45</td><td class="n">95</td><td>No</td></tr>
+      </tbody>
+    </table>
+    <p class="hint">Click a heading to sort by it.</p>
+  </section>
+  <section class="panel" id="notes" hidden>
+    <ul>
+      <li>The desk top is 52 mm thick: a clamp that opens less than that won't close on it.</li>
+      <li>The cable tray is 90 mm back from the edge, so a deeper clamp runs into it.</li>
+      <li><a href="https://www.ergotron.com/">Ergotron's spec sheets</a> open in your browser.</li>
+    </ul>
+  </section>
+</main>
+<script>
+  const tabs = [...document.querySelectorAll('[role=tab]')];
+  for (const tab of tabs) {
+    tab.addEventListener('click', () => {
+      for (const t of tabs) {
+        const on = t === tab;
+        t.setAttribute('aria-selected', on);
+        document.getElementById(t.dataset.panel).hidden = !on;
+      }
+      draw();
+    });
+  }
+
+  const canvas = document.getElementById('cube');
+  const ctx = canvas.getContext('2d');
+  let yaw = 0.6, pitch = -0.45, drag = null;
+  const corners = [];
+  for (const x of [-1.2, 1.2]) for (const y of [-0.6, 0.6]) for (const z of [-0.8, 0.8]) corners.push([x, y, z]);
+  const edges = [[0, 1], [2, 3], [4, 5], [6, 7], [0, 2], [1, 3], [4, 6], [5, 7], [0, 4], [1, 5], [2, 6], [3, 7]];
+  function draw() {
+    const r = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    if (!r.width) return;
+    canvas.width = Math.round(r.width * dpr);
+    canvas.height = Math.round(r.height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, r.width, r.height);
+    const s = Math.min(r.width, r.height) * 0.3, cx = r.width / 2, cy = r.height / 2;
+    const at = corners.map(([x, y, z]) => {
+      const x1 = x * Math.cos(yaw) - z * Math.sin(yaw), z1 = x * Math.sin(yaw) + z * Math.cos(yaw);
+      const y1 = y * Math.cos(pitch) - z1 * Math.sin(pitch), z2 = y * Math.sin(pitch) + z1 * Math.cos(pitch);
+      const k = 4 / (4 + z2);
+      return [cx + x1 * s * k, cy + y1 * s * k];
+    });
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#e8603c';
+    ctx.beginPath();
+    for (const [a, b] of edges) { ctx.moveTo(...at[a]); ctx.lineTo(...at[b]); }
+    ctx.stroke();
+  }
+  canvas.addEventListener('pointerdown', (e) => {
+    drag = [e.clientX, e.clientY, yaw, pitch];
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+    canvas.classList.add('dragging');
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    yaw = drag[2] + (e.clientX - drag[0]) * 0.01;
+    pitch = drag[3] + (e.clientY - drag[1]) * 0.01;
+    draw();
+  });
+  canvas.addEventListener('pointerup', () => { drag = null; canvas.classList.remove('dragging'); });
+  window.addEventListener('resize', draw);
+  // Trek sets its colours on the root, and again when its theme changes.
+  new MutationObserver(draw).observe(document.documentElement, { attributes: true });
+  draw();
+
+  const body = document.querySelector('#table tbody');
+  for (const th of document.querySelectorAll('#table th')) {
+    th.addEventListener('click', () => {
+      const key = Number(th.dataset.key), numeric = 'num' in th.dataset;
+      const up = th.getAttribute('aria-sort') !== 'ascending';
+      for (const other of th.parentNode.children) other.removeAttribute('aria-sort');
+      th.setAttribute('aria-sort', up ? 'ascending' : 'descending');
+      const rows = [...body.rows].sort((a, b) => {
+        const x = a.cells[key].textContent, y = b.cells[key].textContent;
+        const d = numeric ? Number(x) - Number(y) : x.localeCompare(y);
+        return up ? d : -d;
+      });
+      body.append(...rows);
+    });
+  }
+</script>
+</body>
+</html>
+```
+
+### What I'd buy
+
+The **Ergotron LX** is the one I'd pick: it opens to 60 mm, so it closes on the 52 mm top with room for a protective pad, and at 85 mm deep it clears the cable tray by 5 mm.
+
+- The **Amazon Basics** clamp fits too, with more room on both counts, but its arm sags under monitors past 8 kg.
+- The **Humanscale M2** clamp is shallow enough but doesn't open far enough for the top.
+- The **Kensington SmartFit** clamp neither opens far enough nor clears the tray.
+
+### Before you mount it
+
+1. Measure the top where the clamp will go, not at the edge: some desks are thinner at a bevel.
+2. Put the pad that comes with the arm under the clamp's lower jaw, or it will mark the underside.
+3. Tighten the clamp until the arm doesn't move when you push the monitor, then a quarter turn more.
+
+If the tray turns out to be closer than 90 mm, the grommet mount is the way round it: it goes through the desk instead of over the edge."###;
+
 const PLAN: &str = "## Require a session on every route\n\n1. Add `require_session` middleware in `src/auth.rs`.\n2. Wrap the router in `src/routes.rs` with it, keeping `/health` public.\n3. Return `401` with a JSON body when the session is missing or expired.\n4. Add tests for an authenticated and an anonymous request.\n\nNo database changes.";
 
 const LS_OUTPUT: &str = "total 48\ndrwxr-xr-x  8 me  staff   256 Oct  2 09:14 .\n-rw-r--r--  1 me  staff  1184 Oct  2 09:14 Cargo.toml\n-rw-r--r--  1 me  staff   912 Oct  2 09:14 README.md\ndrwxr-xr-x  5 me  staff   160 Oct  2 09:14 src\ndrwxr-xr-x  3 me  staff    96 Oct  2 09:14 tests";
@@ -1943,6 +2119,9 @@ mod tests {
         assert_eq!(Script::parse("mock:visualization stream", false), Script::VisualizationStream(None));
         assert_eq!(Script::parse("mock:visualization invalid", false), Script::VisualizationInvalid);
         assert_eq!(Script::parse("show a visualization", false), Script::Answer, "only by its full name");
+        assert_eq!(Script::parse("mock:page", false), Script::Page { stream: false });
+        assert_eq!(Script::parse("mock:page stream", false), Script::Page { stream: true });
+        assert_eq!(Script::parse("turn the page", false), Script::Answer, "bare `page` is just a word");
         assert_eq!(Script::parse("mock:write CHANGELOG.md", false), Script::Write(Some("CHANGELOG.md".into())), "the file's name as written");
         assert_eq!(Script::parse("Start one: mock:write docs/Notes.md.", false), Script::Write(Some("docs/Notes.md".into())));
         assert_eq!(
@@ -2011,6 +2190,7 @@ mod tests {
         assert_eq!(title("ask a question"), "Choose a database");
         assert_eq!(title("mock:write"), "Add a note");
         assert_eq!(title("mock:visualization"), "Compare release health dashboards");
+        assert_eq!(title("mock:page stream"), "Check the monitor arm fits");
         assert_eq!(title("write it down"), "How the app starts", "only `mock:write` writes");
     }
 
@@ -2079,6 +2259,29 @@ mod tests {
             assert_eq!(blocks(answer).iter().map(|v| v.content.kind()).collect::<Vec<_>>(), vec![*kind]);
             assert_eq!(tokens(answer).concat(), *answer);
         }
+    }
+
+    #[test]
+    fn page_script_streams_one_whole_page_between_prose() {
+        let blocks: Vec<&str> = PAGE.split("```trek-html\n").skip(1).map(|tail| tail.split_once("\n```").expect("a closed page fence").0).collect();
+        assert_eq!(blocks.len(), 1);
+        let page = trek_core::page::parse(blocks[0]).expect("mock emits a page Trek shows");
+        assert_eq!(page.title, "Monitor arm: will the clamp fit?");
+        // Offline: nothing from the web but the one link, which is the browser's to open.
+        assert!(!page.html.contains("<script src") && !page.html.contains("<link"));
+        for part in ["role=\"tab\"", "<canvas", "aria-sort", "--trek-accent", "--trek-bg", "pointermove"] {
+            assert!(page.html.contains(part), "{part}");
+        }
+        // Prose on both sides, more after it than a screenful's worth of lines.
+        let (before, after) = PAGE.split_once("```trek-html").unwrap();
+        assert!(!before.trim().is_empty());
+        assert!(after.rsplit_once("\n```").unwrap().1.lines().count() > 12);
+        assert_eq!(tokens(PAGE).concat(), PAGE);
+        trek_core::runtime().block_on(async {
+            let m = Live::start(HandHolding::Supervised, false);
+            m.prompt("mock:page stream").await;
+            assert_eq!(text(&m.turn().await), PAGE);
+        });
     }
 
     struct Live {
