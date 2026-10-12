@@ -442,8 +442,8 @@ private struct BlockRow: View, Equatable {
                 UserBubble(text: text, images: images)
                 MessageActions(item: block.itemID, text: text, at: at, latest: latest, busy: busy, act: act)
             }
-        case .assistant(let text):
-            MarkdownText(text: text)
+        case .assistant(let text, let streaming):
+            MarkdownText(text: text, live: streaming)
                 .equatable()
                 .textSelection(.enabled)
         case .group(let items):
