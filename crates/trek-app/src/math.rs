@@ -1919,7 +1919,11 @@ fn set(formula: &Formula, style: Style, size: f32, fonts: &Fonts, window: &Windo
 
 /// The element that paints `laid`, sized to it, under the test-support `id`.
 fn canvas_of(laid: Laid, id: SharedString, ink: MathInk, fonts: Fonts) -> impl IntoElement {
-    let (width, height, ascent) = (laid.width.max(1.), laid.height().max(1.), laid.ascent);
+    // An inline object falls back to plain text unless its baseline lands inside the measured
+    // box, and the measured box can snap a fraction of a pixel below the declared size. A
+    // descent-free formula (`6\%`) has `height == ascent`; half a pixel of slack keeps its
+    // baseline inside.
+    let (width, height, ascent) = (laid.width.max(1.), laid.height().max(laid.ascent + 0.5), laid.ascent);
     div().id(id).test_support().flex_none().w(px(width)).h(px(height)).child(
         canvas(
             |_, _, _| {},
