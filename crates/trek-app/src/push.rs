@@ -12,7 +12,7 @@ use gpui_kit::Context;
 use std::time::Duration;
 use trek_core::settings::PushWhen;
 
-/// No keyboard or mouse for this long counts as away from the Mac.
+/// No keyboard or mouse for this long counts as away from the computer.
 const AWAY_AFTER: Duration = Duration::from_secs(120);
 
 /// A new topic: `trek-` and 32 random URL-safe characters.
@@ -89,7 +89,14 @@ fn idle_seconds() -> f64 {
     unsafe { CGEventSourceSecondsSinceLastEventType(0, u32::MAX) }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Seconds since the last keyboard or mouse input in this session. When Windows won't say, away:
+/// a note the user didn't need beats one they never got.
+#[cfg(windows)]
+fn idle_seconds() -> f64 {
+    crate::winsys::idle_seconds().unwrap_or(f64::MAX)
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn idle_seconds() -> f64 {
     f64::MAX
 }
@@ -124,13 +131,28 @@ fn screen_locked() -> bool {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Whether the screen is locked (or the session switched away from, on Windows).
+#[cfg(windows)]
+fn screen_locked() -> bool {
+    crate::winsys::session_locked()
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn screen_locked() -> bool {
     false
 }
 
 fn away(idle: f64, locked: bool) -> bool {
     locked || idle >= AWAY_AFTER.as_secs_f64()
+}
+
+/// Whether a note goes out now: always, or when the user is away. The system is asked (idle time,
+/// lock state) only when it matters, as that is a call per alert.
+fn due(when: PushWhen, idle: impl FnOnce() -> f64, locked: impl FnOnce() -> bool) -> bool {
+    match when {
+        PushWhen::Away => away(idle(), locked()),
+        PushWhen::Always => true,
+    }
 }
 
 /// How long after a try that failed the next one goes: a network that blinked, or a server
@@ -173,7 +195,7 @@ impl Workspace {
         if !m.push || m.push_topic.is_empty() || cfg!(test) {
             return;
         }
-        if m.push_when == PushWhen::Away && !away(idle_seconds(), screen_locked()) {
+        if !due(m.push_when, idle_seconds, screen_locked) {
             return;
         }
         let project = self.thread(thread).and_then(|t| t.project_id.as_deref()).and_then(|p| self.project(p)).map(|p| p.name.clone());
@@ -201,7 +223,7 @@ impl Workspace {
         if m.push_topic.is_empty() {
             return;
         }
-        let mut note = note_for(&m.push_topic, "Notifications from this Mac will come here.", None, None, true);
+        let mut note = note_for(&m.push_topic, &format!("Notifications from {} will come here.", crate::words::words().this_computer), None, None, true);
         note.title = "Trek is connected".into();
         note.tags = vec!["tada".into()];
         // Once: the user is waiting to hear how it went.
@@ -265,6 +287,18 @@ mod tests {
         assert!(!away(1., false));
         assert!(away(1., true));
         assert!(away(AWAY_AFTER.as_secs_f64(), false));
+        assert!(!away(AWAY_AFTER.as_secs_f64() - 0.5, false), "two minutes, not a moment less");
+    }
+
+    #[test]
+    fn a_note_goes_out_when_the_user_is_away_or_always() {
+        let (idle, locked) = (|| 5.0, || false);
+        assert!(!due(PushWhen::Away, idle, locked), "at the keyboard");
+        assert!(due(PushWhen::Away, || 600.0, locked), "idle for ten minutes");
+        assert!(due(PushWhen::Away, idle, || true), "locked, though the last input was a moment ago");
+        assert!(due(PushWhen::Always, idle, locked));
+        // `Always` doesn't ask the system anything: the queries cost a call per alert.
+        assert!(due(PushWhen::Always, || unreachable!("idle time"), || unreachable!("lock state")));
     }
 
     #[test]

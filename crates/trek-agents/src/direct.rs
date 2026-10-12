@@ -492,14 +492,30 @@ async fn openai_turn(
 mod tests {
     use super::*;
 
+    /// Read the request head, as a server does before it answers: a socket closed with the request
+    /// unread resets the connection on Windows, and the client sees that instead of the answer.
+    async fn read_request_head(socket: &mut tokio::net::TcpStream) {
+        use tokio::io::AsyncReadExt as _;
+        let mut head = vec![];
+        let mut buf = [0u8; 1024];
+        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+            match socket.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => head.extend_from_slice(&buf[..n]),
+            }
+        }
+    }
+
     async fn sse_server(body: &'static str) -> String {
         use tokio::io::AsyncWriteExt as _;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
+            read_request_head(&mut socket).await;
             let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}", body.len());
             socket.write_all(response.as_bytes()).await.unwrap();
+            let _ = socket.shutdown().await;
         });
         url
     }
@@ -561,6 +577,7 @@ mod tests {
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
+            read_request_head(&mut socket).await;
             tokio::time::sleep(Duration::from_millis(30)).await;
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.unwrap();
         });

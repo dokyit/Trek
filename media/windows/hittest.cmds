@@ -1,0 +1,67 @@
+# media/windows/hittest.cmds — what the window answers when Windows asks where the pointer is
+# (WM_NCHITTEST), which decides whether a press clicks what's under it or starts a window drag; and
+# real clicks (the move, press and release a mouse sends) on the title bar and the sidebar. Windows
+# only. Every answer is written to hittest.txt; a wrong one fails its line.
+# Run: pwsh script/capture.ps1 windows/hittest     (SIZE=1280x820; the DPI is the display's)
+
+pace 0
+theme night
+glass off
+project @REPO@
+send hello
+wait idle 30000
+elements
+
+# The Agents title bar: each control takes its own press...
+hittest toggle-sidebar HTCLIENT
+hittest mode-agents HTCLIENT
+hittest mode-editor HTCLIENT
+hittest run-actions HTCLIENT
+hittest open-in HTCLIENT
+hittest pop-out HTCLIENT
+hittest toggle-tools HTCLIENT
+hittest settle HTCLIENT
+# ...the title, the project beside it and the empty strip are the window's handle (a press there moves
+# the window and a double click maximises it), and the caption buttons answer their own codes.
+hittest title-text HTCAPTION
+hittest title-project HTCAPTION
+hittest 800 17 HTCAPTION
+hittest -17 17 HTCLOSE
+hittest -51 17 HTMAXBUTTON
+hittest -85 17 HTMINBUTTON
+# Under the title bar everything is the window's own.
+hittest 100 400 HTCLIENT
+hittest 800 400 HTCLIENT
+
+# A real click on the Editor toggle switches to the Editor, and back.
+realclick mode-editor
+wait 700
+hittest command-center HTCLIENT
+hittest toggle-primary HTCLIENT
+hittest toggle-panel HTCLIENT
+hittest toggle-ai HTCLIENT
+hittest ide-settings HTCLIENT
+hittest mode-switch HTCLIENT
+# Between the switch and the Command Center is the Editor's empty strip.
+hittest 490 17 HTCAPTION
+hittest 800 17 HTCLIENT
+hittest -17 17 HTCLOSE
+shot hit-editor
+realclick mode-agents
+wait 700
+hittest settle HTCLIENT
+
+# Real clicks in the sidebar: the nav rows, New thread, and the thread's own row and its project's header
+# (a thread's id starts 01 as every id made now does: `live-line-01*` is the one element whose id starts so).
+realclick open-basecamp
+wait 500
+realclick open-notes
+wait 500
+realclick new-thread
+wait 500
+realclick live-line-01*
+wait 700
+hittest settle HTCLIENT
+realclick live-proj-head-01*
+wait 500
+shot hit-sidebar

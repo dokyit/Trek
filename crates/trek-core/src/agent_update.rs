@@ -3,20 +3,36 @@
 //! that updates it the way its vendor documents.
 //!
 //! Channels: npm (and Bun, pnpm) global packages are asked of the npm registry and updated with
-//! the package manager that installed them; Homebrew formulae and casks are asked of
+//! the package manager that installed them; Homebrew formulae and casks (macOS only) are asked of
 //! formulae.brew.sh (a third-party tap's formula of its GitHub repository) and updated with
-//! `brew upgrade`; anything else came from the vendor's own installer, whose release feed says
-//! what's newest and whose CLI updates itself (`claude update`, `grok update`, …).
+//! `brew upgrade`; WinGet packages (Windows: Claude Code's and Copilot CLI's) are asked of
+//! `winget` itself (`winget`: what its source has, which is what it installs from; winget-pkgs,
+//! a few hours ahead of it, only when it can't answer) and updated with `winget upgrade`,
+//! Chocolatey's of its repository with `choco
+//! upgrade` (as an administrator: Windows asks the user first, `elevated`); anything else came
+//! from the vendor's own installer, whose release feed says what's newest and whose CLI updates
+//! itself (`claude update`, `grok update`, …), or, where it doesn't (Devin on Windows), Trek
+//! installs the vendor's release bundle itself. Nothing is left for the user to type.
+//!
+//! On Windows the layouts differ, not the channels: npm's global prefix has no `lib` folder
+//! (`%APPDATA%\npm\node_modules\<package>`), a package's shim is a `.cmd` (read for the package it
+//! runs), package managers are `.cmd` files found with `PATHEXT`, the PATH separator is `;`, and
+//! scripts (the package move, a vendor's `install.ps1`) run through PowerShell, not `/bin/sh`.
+//! The release feeds name versions only, not per-platform downloads, so they are the same on both.
 //!
 //! Everything here is read-only except `run_update`. Checks never fail as a whole: an agent
 //! whose feed can't be reached (offline) keeps the newest version the last check found
 //! (`carry_over`), and the results are cached (`Snapshot`) so a launch shows them at once.
 
 use crate::detect::{login_path, which};
+use crate::feeds::{Feeds, Reply};
 use crate::types::AgentId;
 use serde::{Deserialize, Serialize};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::time::Duration;
+
+/// What separates the folders of a PATH string.
+const PATH_SEP: char = if cfg!(windows) { ';' } else { ':' };
 
 /// An agent CLI Trek can keep up to date.
 #[derive(Debug, Clone, Copy)]
@@ -80,8 +96,76 @@ impl Harness {
                 self.npm == Some(package.as_str()) || self.moved(package) || self.majors.iter().any(|(_, p)| p == package)
             }
             Install::Brew { formula: name, .. } | Install::Cask { cask: name, .. } => self.brew.contains(&name.as_str()),
+            Install::Winget { id } => self.winget().contains(&id.as_str()),
+            Install::Scoop { app: name } | Install::Chocolatey { package: name } => self.packages().contains(&name.as_str()),
             Install::Volta | Install::Native => true,
         }
+    }
+
+    /// The names a Scoop app or Chocolatey package of this CLI goes by: its binary's, and the
+    /// ones its vendor's packages are published as. Another package of the same binary name
+    /// isn't the agent.
+    pub fn packages(&self) -> Vec<&'static str> {
+        match self.agent {
+            "claude-code" => vec!["claude-code", "claude"],
+            "acp:github-copilot" => vec!["copilot", "copilot-cli"],
+            "acp:goose" => vec!["goose", "block-goose-cli"],
+            "acp:kimi" => vec!["kimi", "kimi-cli"],
+            _ => vec![self.binary],
+        }
+    }
+
+    /// The WinGet package ids that are this CLI: Claude Code's `winget install Anthropic.ClaudeCode`
+    /// (its documentation), and Copilot CLI's `GitHub.Copilot` (the folder its WinGet install
+    /// lays out). Another package of the same binary name isn't the agent.
+    pub fn winget(&self) -> &'static [&'static str] {
+        match self.agent {
+            "claude-code" => &["Anthropic.ClaudeCode"],
+            "acp:github-copilot" => &["GitHub.Copilot"],
+            _ => &[],
+        }
+    }
+
+    /// `install` as it applies to this agent: a WinGet package that isn't one of its known ids
+    /// is read as the vendor's own install (its CLI's `update`), not as a package Trek would
+    /// `winget upgrade` on a guess.
+    pub fn reading(&self, install: Install) -> Install {
+        match install {
+            Install::Winget { id } if !self.winget().contains(&id.as_str()) => Install::Native,
+            Install::Scoop { .. } | Install::Chocolatey { .. } if !self.owns(&install) => Install::Native,
+            other => other,
+        }
+    }
+
+    /// The line that re-runs the vendor's installer (`installer`), as this platform's shell runs it:
+    /// the `curl … | sh` of `installer`, or on Windows the PowerShell line the vendor documents
+    /// (`catalog`'s install hint for the agent).
+    pub fn installer_line(&self) -> Option<&'static str> {
+        let unix = self.installer?;
+        if !cfg!(windows) {
+            return Some(unix);
+        }
+        self.windows_installer()
+    }
+
+    /// The PowerShell line the vendor documents for installing this CLI on Windows.
+    fn windows_installer(&self) -> Option<&'static str> {
+        crate::catalog::agent_setup(self.agent.strip_prefix("acp:").unwrap_or(self.agent)).map(|s| s.install)
+    }
+
+    /// A Windows install of `binary` that its CLI's own `update` doesn't update, so Trek installs
+    /// its release bundle (`Builtin::DevinBundle`): Devin's `irm … | iex` install marks itself
+    /// (`distribution`, beside its `bin` folder), and its `devin update` only says to run that
+    /// line again, then exits 0. That line ends by starting Devin's interactive setup wizard
+    /// (sign-in, MCP servers), unfit to run unattended; and a script downloaded and run is code
+    /// Trek has no way to check, where the bundle comes with a checksum.
+    ///
+    /// The other Windows installers Trek runs end without asking anything (Factory's prints "Run
+    /// 'droid' to get started!"; Cursor's, Claude Code's and Grok's CLIs update themselves).
+    fn bundle_install(&self, binary: &Path) -> bool {
+        cfg!(windows)
+            && self.agent == "acp:devin"
+            && binary.parent().and_then(Path::parent).and_then(|cli| std::fs::read_to_string(cli.join("distribution")).ok()).is_some_and(|m| m.trim() == "irm-iex")
     }
 }
 
@@ -134,17 +218,25 @@ pub fn harness(id: &str) -> Option<&'static Harness> {
     HARNESSES.iter().find(|h| h.binary == id)
 }
 
-/// How an agent CLI got onto this Mac.
+/// How an agent CLI got onto this computer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Install {
-    /// A global npm package, under `prefix` (`<prefix>/lib/node_modules/<package>`).
+    /// A global npm package, under `prefix`: `<prefix>/lib/node_modules/<package>`, or on Windows
+    /// `<prefix>\node_modules\<package>` (`%APPDATA%\npm` unless the user set another).
     Npm { package: String, prefix: PathBuf },
     Bun { package: String },
     Pnpm { package: String },
     /// A Homebrew formula; `tap` is `None` for homebrew/core.
     Brew { formula: String, prefix: PathBuf, tap: Option<String> },
     Cask { cask: String, prefix: PathBuf },
+    /// A WinGet package (`winget upgrade --id <id>`).
+    Winget { id: String },
+    /// A Scoop app (`scoop update <app>`), found through its shim in `scoop\shims`.
+    Scoop { app: String },
+    /// A Chocolatey package (`choco upgrade <package> -y`), found through its shim in
+    /// `chocolatey\bin`.
+    Chocolatey { package: String },
     /// A Volta-managed package: its binary on PATH is Volta's shim.
     Volta,
     /// The vendor's own installer.
@@ -159,6 +251,9 @@ impl Install {
             Install::Bun { .. } => "Bun",
             Install::Pnpm { .. } => "pnpm",
             Install::Brew { .. } | Install::Cask { .. } => "Homebrew",
+            Install::Winget { .. } => "WinGet",
+            Install::Scoop { .. } => "Scoop",
+            Install::Chocolatey { .. } => "Chocolatey",
             Install::Volta => "Volta",
             Install::Native => "Installer",
         }
@@ -174,28 +269,74 @@ fn names(path: &Path) -> Vec<String> {
         .collect()
 }
 
-fn rooted(parts: &[String]) -> PathBuf {
-    let mut p = PathBuf::from("/");
+/// What `names` leaves out of `path`: its root (`/`, or `C:\`). A verbatim path, which is what
+/// `canonicalize` gives on Windows (`\\?\C:\…`), comes back as the plain one: npm, handed the
+/// verbatim form as its prefix, doesn't understand it.
+fn root_of(path: &Path) -> PathBuf {
+    let mut root = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::Prefix(p) => match p.kind() {
+                Prefix::VerbatimDisk(drive) => root.push(format!("{}:", drive as char)),
+                Prefix::VerbatimUNC(server, share) => root.push(format!(r"\\{}\{}", server.to_string_lossy(), share.to_string_lossy())),
+                _ => root.push(c.as_os_str()),
+            },
+            Component::RootDir => root.push(c.as_os_str()),
+            _ => break,
+        }
+    }
+    if root.as_os_str().is_empty() {
+        root.push("/");
+    }
+    root
+}
+
+fn rooted(root: &Path, parts: &[String]) -> PathBuf {
+    let mut p = root.to_path_buf();
     p.extend(parts);
     p
+}
+
+/// `run` is a stretch of folders in `parts`, one after the other. Windows paths don't care about case.
+fn has_run(parts: &[String], run: &[&str]) -> bool {
+    parts.windows(run.len()).any(|w| w.iter().zip(run).all(|(a, b)| if cfg!(windows) { a.eq_ignore_ascii_case(b) } else { a == b }))
+}
+
+/// The WinGet package whose folder (`…\WinGet\Packages\<Id>_<source>`) holds the binary.
+fn winget_package(parts: &[String]) -> Option<String> {
+    let i = parts.windows(2).position(|w| w[0].eq_ignore_ascii_case("WinGet") && w[1].eq_ignore_ascii_case("Packages"))?;
+    let id = parts.get(i + 2)?.split('_').next()?;
+    (!id.is_empty()).then(|| id.to_string())
 }
 
 /// How the binary at `resolved` (symlinks followed) was installed, from where it lives. A
 /// formula's tap isn't in its path: `detect_install` reads it from the keg's receipt.
 pub fn install_of(resolved: &Path) -> Install {
     let parts = names(resolved);
+    let root = root_of(resolved);
     let at = |name: &str| parts.iter().position(|p| p == name);
-    // Before Cellar: Volta itself may be a formula, its shim a link into its keg.
-    if parts.last().is_some_and(|n| n == "volta-shim") || resolved.to_string_lossy().contains("/.volta/tools/image/packages/") {
+    // Before Cellar: Volta itself may be a formula, its shim a link into its keg. On Windows
+    // Volta's home is `%LOCALAPPDATA%\Volta`, its shims `bin\<tool>.exe` copies of one program.
+    let volta_dir = has_run(&parts, &[".volta", "tools", "image", "packages"]) || (cfg!(windows) && has_run(&parts, &["Volta", "tools", "image", "packages"]));
+    let volta_shim = parts.last().is_some_and(|n| n == "volta-shim") || (cfg!(windows) && parts.len() >= 3 && has_run(&parts[parts.len() - 3..parts.len() - 1], &["Volta", "bin"]));
+    if volta_shim || volta_dir {
         return Install::Volta;
     }
-    // Before node_modules: a formula may be an npm package installed into its keg (gemini-cli,
-    // qwen-code), and only brew may change a keg.
-    if let Some(i) = at("Cellar").filter(|i| parts.len() > i + 1) {
-        return Install::Brew { formula: parts[i + 1].clone(), prefix: rooted(&parts[..i]), tap: None };
+    // Homebrew exists on macOS only: a Windows folder called Cellar is just a folder.
+    if !cfg!(windows) {
+        // Before node_modules: a formula may be an npm package installed into its keg
+        // (gemini-cli, qwen-code), and only brew may change a keg.
+        if let Some(i) = at("Cellar").filter(|i| parts.len() > i + 1) {
+            return Install::Brew { formula: parts[i + 1].clone(), prefix: rooted(&root, &parts[..i]), tap: None };
+        }
+        if let Some(i) = at("Caskroom").filter(|i| parts.len() > i + 1) {
+            return Install::Cask { cask: parts[i + 1].clone(), prefix: rooted(&root, &parts[..i]) };
+        }
     }
-    if let Some(i) = at("Caskroom").filter(|i| parts.len() > i + 1) {
-        return Install::Cask { cask: parts[i + 1].clone(), prefix: rooted(&parts[..i]) };
+    if cfg!(windows)
+        && let Some(id) = winget_package(&parts)
+    {
+        return Install::Winget { id };
     }
     if let Some(i) = at("node_modules") {
         let Some(first) = parts.get(i + 1) else { return Install::Native };
@@ -204,17 +345,64 @@ pub fn install_of(resolved: &Path) -> Install {
             (true, None) => return Install::Native,
             (false, _) => first.clone(),
         };
-        let path = resolved.to_string_lossy();
-        if path.contains("/.bun/install/global/") {
+        if has_run(&parts, &[".bun", "install", "global"]) {
             return Install::Bun { package };
         }
         if parts[..i].iter().any(|p| p == "pnpm") {
             return Install::Pnpm { package };
         }
+        // npm's prefix holds `lib/node_modules` on Unix, and on Windows `node_modules` itself.
         let end = if i > 0 && parts[i - 1] == "lib" { i - 1 } else { i };
-        return Install::Npm { package, prefix: rooted(&parts[..end]) };
+        return Install::Npm { package, prefix: rooted(&root, &parts[..end]) };
+    }
+    // After node_modules: a Node installed by Scoop or Chocolatey has npm packages of its own.
+    if cfg!(windows)
+        && let Some(install) = scoop_install(&parts).or_else(|| chocolatey_install(&parts))
+    {
+        return install;
     }
     Install::Native
+}
+
+/// What follows `root` in `parts`, whatever case the folders are written in.
+fn tail_after<'a>(parts: &'a [String], root: &Path) -> Option<&'a [String]> {
+    let root = names(root);
+    (!root.is_empty() && parts.len() >= root.len() && parts.iter().zip(&root).all(|(a, b)| a.eq_ignore_ascii_case(b))).then(|| &parts[root.len()..])
+}
+
+/// What follows a package manager's folder in `parts`: the folder called `name` (`scoop`,
+/// `chocolatey`) wherever it is, or the one the manager's environment variable (`SCOOP`,
+/// `ChocolateyInstall`) puts elsewhere.
+fn manager_tails<'a>(parts: &'a [String], name: &str, vars: &[&str]) -> Vec<&'a [String]> {
+    let named = parts.iter().position(|p| p.eq_ignore_ascii_case(name)).map(|i| &parts[i + 1..]);
+    let moved = vars.iter().filter_map(|v| std::env::var_os(v)).filter_map(|root| tail_after(parts, Path::new(&root)));
+    named.into_iter().chain(moved).collect()
+}
+
+fn stem_of(file: &str) -> Option<String> {
+    Path::new(file).file_stem().map(|s| s.to_string_lossy().into_owned())
+}
+
+/// A Scoop app's folder (`scoop\apps\<app>\…`) or its shim (`scoop\shims\<app>.exe`, the app
+/// taking the shim's name when its `.shim` file isn't read: see `script_of`).
+fn scoop_install(parts: &[String]) -> Option<Install> {
+    manager_tails(parts, "scoop", &["SCOOP", "SCOOP_GLOBAL"]).into_iter().find_map(|tail| match tail {
+        [kind, app, ..] if kind.eq_ignore_ascii_case("apps") => Some(app.clone()),
+        [kind, file] if kind.eq_ignore_ascii_case("shims") => stem_of(file),
+        _ => None,
+    })
+    .map(|app| Install::Scoop { app })
+}
+
+/// A Chocolatey package's folder (`chocolatey\lib\<package>\…`) or its shim
+/// (`chocolatey\bin\<name>.exe`, a package's program, named as the package is for the CLIs).
+fn chocolatey_install(parts: &[String]) -> Option<Install> {
+    manager_tails(parts, "chocolatey", &["ChocolateyInstall"]).into_iter().find_map(|tail| match tail {
+        [kind, package, ..] if kind.eq_ignore_ascii_case("lib") => Some(package.clone()),
+        [kind, file] if kind.eq_ignore_ascii_case("bin") => stem_of(file),
+        _ => None,
+    })
+    .map(|package| Install::Chocolatey { package })
 }
 
 /// The tap a formula came from, from its keg's `INSTALL_RECEIPT.json`; `None` for homebrew/core.
@@ -232,9 +420,14 @@ pub fn shim_target(shim: &Path, text: &str) -> Option<PathBuf> {
     }
     let dir = shim.parent()?;
     let target = text.split('"').find_map(|t| t.strip_prefix("$basedir/").filter(|t| t.contains("node_modules/")))?;
-    // Lexically: the shim's folder may be reached through `..`.
+    Some(lexical(&dir.join(target)))
+}
+
+/// `path` with its `.` and `..` folded away, without asking the disk: the shim's folder may be
+/// reached through `..`.
+fn lexical(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
-    for c in dir.join(target).components() {
+    for c in path.components() {
         match c {
             Component::ParentDir => {
                 out.pop();
@@ -243,13 +436,53 @@ pub fn shim_target(shim: &Path, text: &str) -> Option<PathBuf> {
             c => out.push(c),
         }
     }
-    Some(out)
+    out
 }
 
-/// The script a binary runs: what a package manager's shell-script shim points at, or itself.
+/// What a `.cmd` shim runs. npm (cmd-shim) and pnpm write one beside every global binary, and
+/// the script it runs is named by a quoted `%dp0%\…\node_modules\<package>\…` (older ones
+/// `%~dp0\…`), `dp0` being the shim's own folder:
+/// `endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\node_modules\@openai\codex\bin\codex.js" %*`.
+pub fn cmd_shim_target(shim: &Path, text: &str) -> Option<PathBuf> {
+    let dir = shim.parent()?;
+    let target = text.split('"').find_map(|t| t.strip_prefix("%dp0%").or_else(|| t.strip_prefix("%~dp0")).filter(|t| t.contains("node_modules")))?;
+    Some(lexical(&dir.join(target.trim_start_matches(['\\', '/']))))
+}
+
+/// What a Bun shim runs. `bun add -g` on Windows leaves `<name>.exe` (one launcher program for all)
+/// beside `<name>.bunx`, whose UTF-16 text holds the path of the script, relative to the folder
+/// or absolute. Read for the first path in it that goes through `node_modules`.
+pub fn bunx_target(shim: &Path, bytes: &[u8]) -> Option<PathBuf> {
+    let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let text = String::from_utf16_lossy(&units);
+    let path = text.split(['\0', '"']).find(|t| t.contains("node_modules"))?.trim_start_matches(r"\??\");
+    let path = Path::new(path);
+    Some(lexical(&if path.is_absolute() { path.to_path_buf() } else { shim.parent()?.join(path) }))
+}
+
+/// What a Scoop shim runs. Scoop writes `<name>.shim` beside every `<name>.exe` in `shims`
+/// (one launcher program for all), a line of which says `path = "<app>\current\<name>.exe"`.
+pub fn scoop_shim_target(text: &str) -> Option<PathBuf> {
+    let value = text.lines().find_map(|l| l.trim().strip_prefix("path").and_then(|rest| rest.trim_start().strip_prefix('=')))?;
+    let path = PathBuf::from(value.trim().trim_matches('"'));
+    path.is_absolute().then_some(path)
+}
+
+/// The script a binary runs: what a package manager's shim points at (a shell script's, or on
+/// Windows a `.cmd`'s or Bun's), or itself.
 pub fn script_of(resolved: &Path) -> PathBuf {
     let small = std::fs::metadata(resolved).is_ok_and(|m| m.len() < 8 * 1024);
-    small.then(|| std::fs::read_to_string(resolved).ok()).flatten().and_then(|t| shim_target(resolved, &t)).unwrap_or_else(|| resolved.to_path_buf())
+    let extension = resolved.extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
+    let target = match extension.as_deref() {
+        Some("cmd" | "bat") if cfg!(windows) => small.then(|| std::fs::read_to_string(resolved).ok()).flatten().and_then(|t| cmd_shim_target(resolved, &t)),
+        Some("exe") if cfg!(windows) => std::fs::read_to_string(resolved.with_extension("shim"))
+            .ok()
+            .filter(|t| t.len() < 8 * 1024)
+            .and_then(|t| scoop_shim_target(&t))
+            .or_else(|| std::fs::read(resolved.with_extension("bunx")).ok().filter(|b| b.len() < 8 * 1024).and_then(|b| bunx_target(resolved, &b))),
+        _ => small.then(|| std::fs::read_to_string(resolved).ok()).flatten().and_then(|t| shim_target(resolved, &t)),
+    };
+    target.unwrap_or_else(|| resolved.to_path_buf())
 }
 
 /// A vendor installer's marker (Pi's `managed-install.json`): what's under its folder is the
@@ -279,7 +512,7 @@ pub fn package_dir(script: &Path) -> Option<PathBuf> {
     let i = parts.iter().rposition(|p| p == "node_modules")?;
     let first = parts.get(i + 1)?;
     let end = if first.starts_with('@') { i + 3 } else { i + 2 };
-    (parts.len() >= end).then(|| rooted(&parts[..end]))
+    (parts.len() >= end).then(|| rooted(&root_of(script), &parts[..end]))
 }
 
 /// The version in a package's `package.json`.
@@ -345,6 +578,12 @@ pub enum Source {
     Formula(String),
     TapFormula { tap: String, formula: String },
     Cask(String),
+    /// A WinGet package: the versions WinGet's community source has, as `winget` says (what
+    /// `winget upgrade` installs from), or else as winget-pkgs has manifests for, which is a few
+    /// hours ahead of it. The vendor's release reaches either hours or days later.
+    Winget(String),
+    /// A Chocolatey package: the community repository's latest, which may lag the vendor's too.
+    Chocolatey(String),
     Feed(Feed),
 }
 
@@ -360,7 +599,14 @@ pub fn source(h: &Harness, install: &Install, installed: Option<&str>) -> Option
         Install::Brew { formula, tap: Some(tap), .. } => Some(Source::TapFormula { tap: tap.clone(), formula: formula.clone() }),
         Install::Cask { cask, .. } => Some(Source::Cask(cask.clone())),
         Install::Volta => h.npm_for(installed).map(|p| Source::Npm(p.into())),
-        Install::Native => match h.feed {
+        // What the package manager has, not what the vendor released: an update it can't install
+        // yet isn't one to offer (Claude Code 2.1.296 was out while WinGet still had 2.1.292,
+        // and `winget upgrade` of the install said so by failing).
+        Install::Winget { id } => package_name(id).then(|| Source::Winget(id.clone())),
+        Install::Chocolatey { package } => package_name(package).then(|| Source::Chocolatey(package.clone())),
+        // Scoop's buckets are git repositories it pulls before updating: they follow the
+        // vendor's release closely.
+        Install::Native | Install::Scoop { .. } => match h.feed {
             Feed::Npm => h.npm_for(installed).map(|p| Source::Npm(p.into())),
             feed => Some(Source::Feed(feed)),
         },
@@ -379,16 +625,24 @@ pub fn urls(source: &Source) -> Vec<String> {
             vec![format!("{base}/Formula/{formula}.rb"), format!("{base}/{formula}.rb")]
         }
         Source::Cask(c) => vec![format!("https://formulae.brew.sh/api/cask/{c}.json")],
-        Source::Feed(feed) => vec![match feed {
-            Feed::Npm => return vec![],
-            Feed::ClaudeReleases => "https://downloads.claude.ai/claude-code-releases/latest".into(),
-            Feed::ClaudeStable => "https://downloads.claude.ai/claude-code-releases/stable".into(),
-            Feed::GrokStable => "https://x.ai/cli/stable".into(),
-            Feed::DevinManifest => "https://static.devin.ai/cli/current/manifest.json".into(),
-            Feed::CursorInstaller => "https://cursor.com/install".into(),
-            Feed::DroidInstaller => "https://app.factory.ai/cli".into(),
-            Feed::GitHub(repo) => format!("https://api.github.com/repos/{repo}/releases/latest"),
-        }],
+        // `Publisher.Package` is `manifests/p/Publisher/Package`, a folder per version.
+        Source::Winget(id) => {
+            let first = id.chars().next().map(|c| c.to_ascii_lowercase()).unwrap_or_default();
+            vec![format!("https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/{first}/{}", id.replace('.', "/"))]
+        }
+        Source::Chocolatey(p) => vec![format!("https://community.chocolatey.org/api/v2/Packages()?$filter=Id%20eq%20'{p}'%20and%20IsLatestVersion&$select=Version")],
+        // The feeds name a version, not a download: the same on every platform. Cursor's and
+        // Factory's are their install scripts, and each has a Windows one that names it too.
+        Source::Feed(feed) => match feed {
+            Feed::Npm => vec![],
+            Feed::ClaudeReleases => vec!["https://downloads.claude.ai/claude-code-releases/latest".into()],
+            Feed::ClaudeStable => vec!["https://downloads.claude.ai/claude-code-releases/stable".into()],
+            Feed::GrokStable => vec!["https://x.ai/cli/stable".into()],
+            Feed::DevinManifest => vec!["https://static.devin.ai/cli/current/manifest.json".into()],
+            Feed::CursorInstaller => vec!["https://cursor.com/install".into(), "https://cursor.com/install?win32=true".into()],
+            Feed::DroidInstaller => vec!["https://app.factory.ai/cli".into(), "https://app.factory.ai/cli/windows".into()],
+            Feed::GitHub(repo) => vec![format!("https://api.github.com/repos/{repo}/releases/latest")],
+        },
     }
 }
 
@@ -407,6 +661,16 @@ fn between<'a>(text: &'a str, start: &str, end: char) -> Option<&'a str> {
     Some(&rest[..rest.find(end)?])
 }
 
+/// The newest of `versions`, as a feed that lists several.
+fn newest(versions: impl Iterator<Item = String>) -> Option<Latest> {
+    versions.reduce(|a, b| if is_newer(&b, &a) { b } else { a }).map(|version| Latest { version, auto_updates: false })
+}
+
+/// `name` (a WinGet id, a Chocolatey package) goes into a URL as it is.
+fn package_name(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+}
+
 /// Read the newest version out of `body`, a response from one of `source`'s URLs.
 pub fn parse_latest(source: &Source, body: &str) -> Option<Latest> {
     let json = || serde_json::from_str::<serde_json::Value>(body).ok();
@@ -421,12 +685,22 @@ pub fn parse_latest(source: &Source, body: &str) -> Option<Latest> {
             Some(Latest { version, auto_updates: v["auto_updates"].as_bool().unwrap_or(false) })
         }
         Source::TapFormula { .. } => plain(body.lines().find_map(|l| l.trim().strip_prefix("version ").map(|v| v.trim().trim_matches('"').to_string()))),
+        // A version's folder is named as the version ("2.1.292", Copilot's "v1.0.95"); a folder
+        // of another name is another package (`GitHub.Copilot.Prerelease`).
+        Source::Winget(_) => newest(json()?.as_array()?.iter().filter(|e| e["type"] == "dir").filter_map(|e| crate::winget::version_row(e["name"].as_str()?))),
+        // An OData feed: `<d:Version>1.19.0</d:Version>` in its one entry.
+        Source::Chocolatey(_) => newest(body.split("<d:Version>").skip(1).filter_map(|rest| parse_version(rest.split('<').next()?))),
         Source::Feed(feed) => match feed {
             Feed::Npm => None,
             Feed::ClaudeReleases | Feed::ClaudeStable | Feed::GrokStable => plain(body.lines().next().map(|l| l.trim().to_string())),
             Feed::DevinManifest => plain(json()?["version"].as_str().map(String::from)),
             Feed::CursorInstaller => plain(between(body, "downloads.cursor.com/lab/", '/').map(String::from)),
-            Feed::DroidInstaller => plain(body.lines().find_map(|l| l.trim().strip_prefix("VER=").map(|v| v.trim_matches('"').to_string()))),
+            // `VER="0.233.0"` in the shell script, `$version = '0.237.0'` in the PowerShell one.
+            Feed::DroidInstaller => plain(body.lines().find_map(|l| {
+                let l = l.trim();
+                let value = l.strip_prefix("VER=").or_else(|| l.strip_prefix("$version").and_then(|v| v.trim_start().strip_prefix('=')))?;
+                Some(value.trim().trim_matches(['"', '\'']).to_string())
+            })),
             Feed::GitHub(_) => plain(json()?["tag_name"].as_str().map(String::from)),
         },
     }
@@ -447,26 +721,117 @@ pub struct UpdateCommand {
     /// that put the old package back).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub on_exit: Vec<(i32, String)>,
+    /// What to show instead of the program and its arguments, for a script that runs through
+    /// PowerShell (`irm https://… | iex`) and does more than it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+    /// Run as an administrator (`run_elevated`): the package manager of an install that's the
+    /// machine's (Chocolatey's, a global Scoop's, a machine-wide WinGet package's) upgrades only
+    /// elevated. Windows asks the user to allow it. Never on macOS.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub elevated: bool,
+    /// Done by Trek itself rather than by running `program`: what the vendor's installer does,
+    /// without what makes it unfit to run unattended. `program` is then the binary it installs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<Builtin>,
+    /// An older Trek's: why it left this command to the user to run. Read only so that
+    /// `Snapshot::load` can drop such a command (this Trek runs it another way, as an
+    /// administrator); never written.
+    #[serde(default, skip_serializing)]
+    pub manual: Option<String>,
+}
+
+/// An update Trek carries out itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Builtin {
+    /// Devin's `irm … | iex` install on Windows, whose `devin update` only says to run that line
+    /// again: its release bundle (manifest, SHA-256, zip) installed as the line installs it, short
+    /// of the PATH change it already made and the setup wizard it ends with (`install_devin_bundle`).
+    DevinBundle,
+}
+
+/// The extensions `CreateProcess` can run, in the order `PATHEXT` gives them (its own default
+/// when it names none of them).
+fn runnable_extensions() -> Vec<String> {
+    let pathext = std::env::var("PATHEXT").unwrap_or_default();
+    let mut found: Vec<String> = pathext.split(';').map(|e| e.trim().to_ascii_lowercase()).filter(|e| [".com", ".exe", ".bat", ".cmd"].contains(&e.as_str())).collect();
+    if found.is_empty() {
+        found = [".com", ".exe", ".bat", ".cmd"].map(String::from).to_vec();
+    }
+    found
+}
+
+/// The file a bare `program` is, in `search_path`'s folders: that name on Unix; on Windows
+/// that name with an extension from `PATHEXT` (`npm` is `npm.cmd`; the extensionless `npm`
+/// beside it is a shell script Windows can't run, and is never taken).
+fn resolve_program(program: &Path, search_path: &str) -> Option<PathBuf> {
+    if program.is_absolute() {
+        return Some(program.to_path_buf());
+    }
+    let name = program.to_string_lossy();
+    let extensions = runnable_extensions();
+    let names: Vec<String> = if !cfg!(windows) || extensions.iter().any(|e| name.to_ascii_lowercase().ends_with(e.as_str())) {
+        vec![name.to_string()]
+    } else {
+        extensions.iter().map(|e| format!("{name}{e}")).collect()
+    };
+    std::env::split_paths(search_path).filter(|d| !d.as_os_str().is_empty()).find_map(|dir| names.iter().map(|n| dir.join(n)).find(|p| p.is_file()))
+}
+
+/// Windows PowerShell, the one every Windows has (PowerShell 7 isn't on all of them).
+fn powershell() -> PathBuf {
+    let system = std::env::var_os("SystemRoot").map(|root| PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"));
+    system.filter(|p| p.is_file()).unwrap_or_else(|| PathBuf::from("powershell"))
 }
 
 impl UpdateCommand {
     pub fn new(program: impl Into<PathBuf>, args: &[&str]) -> Self {
-        Self { program: program.into(), args: args.iter().map(|a| a.to_string()).collect(), path: vec![], env: vec![], on_exit: vec![] }
+        Self {
+            program: program.into(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+            path: vec![],
+            env: vec![],
+            on_exit: vec![],
+            display: None,
+            elevated: false,
+            builtin: None,
+            manual: None,
+        }
+    }
+
+    /// This command, run as an administrator.
+    pub fn as_admin(self) -> Self {
+        Self { elevated: true, ..self }
+    }
+
+    /// `script` run by PowerShell, which is how a Windows installer line (`irm … | iex`) and the
+    /// package move run where there's no `/bin/sh`. Shown as `shown`.
+    pub fn powershell(script: &str, shown: &str) -> Self {
+        Self { display: Some(shown.to_string()), ..Self::new(powershell(), &["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]) }
     }
 
     /// The PATH it runs with.
     pub fn search_path(&self) -> String {
-        self.path.iter().map(|p| p.display().to_string()).chain(std::iter::once(login_path().to_string())).collect::<Vec<_>>().join(":")
+        self.path.iter().map(|p| p.display().to_string()).chain(std::iter::once(login_path().to_string())).collect::<Vec<_>>().join(&PATH_SEP.to_string())
     }
 
     /// As the user would type it: "npm install -g @openai/codex@latest", "claude update".
     pub fn shown(&self) -> String {
+        if let Some(shown) = &self.display {
+            return shown.clone();
+        }
         let program = self.program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.program.display().to_string());
         // A script runs through `sh -c`: show the line itself, or what it's named after it (the
         // script's `$0`) when it does more than it says.
         if program == "sh" && self.args.first().is_some_and(|a| a == "-c") {
             return self.args.get(2).unwrap_or(&self.args[1]).clone();
         }
+        // On Windows `claude.exe` and `npm.cmd` are typed `claude` and `npm`.
+        let program = match program.rsplit_once('.') {
+            Some((stem, ext)) if cfg!(windows) && [".com", ".exe", ".bat", ".cmd"].contains(&format!(".{}", ext.to_ascii_lowercase()).as_str()) => stem.to_string(),
+            _ => program,
+        };
         std::iter::once(program).chain(self.args.iter().cloned()).collect::<Vec<_>>().join(" ")
     }
 }
@@ -490,20 +855,40 @@ pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_update
         let new = h.npm?;
         // Into a shell line: only a version that can't run anything.
         let back = installed.filter(|v| safe_version(v)).map_or_else(|| old.to_string(), |v| format!("{old}@{v}"));
-        let script = format!("{remove} {old} || exit $?; {add} {new}@latest && exit 0; {add} {offline}{back} && exit {PUT_BACK}; exit {LOST}");
         let shown = format!("{remove} {old} && {add} {new}@latest");
         let name = h.name();
+        let command = if cfg!(windows) {
+            // The same steps in PowerShell, which reads a bare `@scope/name` as splatting: each
+            // package is quoted. Stopping on an error makes a missing program exit 1, not go on.
+            let step = |line: String, test: &str, then: String| format!("{line}; if ($LASTEXITCODE -{test}) {{ {then} }}");
+            let script = [
+                "$ErrorActionPreference = 'Stop'".to_string(),
+                step(format!("{remove} '{old}'"), "ne 0", "exit $LASTEXITCODE".into()),
+                step(format!("{add} '{new}@latest'"), "eq 0", "exit 0".into()),
+                step(format!("{add} {offline}'{back}'"), "eq 0", format!("exit {PUT_BACK}")),
+                format!("exit {LOST}"),
+            ]
+            .join("; ");
+            UpdateCommand::powershell(&script, &shown)
+        } else {
+            // Into a shell line: only a version that can't run anything.
+            let script = format!("{remove} {old} || exit $?; {add} {new}@latest && exit 0; {add} {offline}{back} && exit {PUT_BACK}; exit {LOST}");
+            UpdateCommand::new("/bin/sh", &["-c", &script, &shown])
+        };
         Some(UpdateCommand {
             on_exit: vec![
                 (PUT_BACK, format!("Couldn't install {new}, so {back} was put back.")),
                 (LOST, format!("Couldn't install {new}, nor put {back} back: {name} isn't installed now. Run {add} {new} to install it.")),
             ],
-            ..UpdateCommand::new("/bin/sh", &["-c", &script, &shown])
+            ..command
         })
     };
+    // Where an npm prefix keeps its programs: `<prefix>/bin`, and on Windows the prefix itself
+    // (`npm.cmd`, `node.exe` and the shims of its packages, an nvm version's folder included).
+    let npm_dir = |prefix: &Path| if cfg!(windows) { prefix.to_path_buf() } else { prefix.join("bin") };
     match install {
         Install::Npm { package, prefix } if h.moved(package) => moving("npm uninstall -g", "npm install -g", "--prefer-offline ", package).map(|c| UpdateCommand {
-            path: vec![prefix.join("bin")],
+            path: vec![npm_dir(prefix)],
             env: vec![("npm_config_prefix".into(), prefix.display().to_string())],
             ..c
         }),
@@ -513,7 +898,7 @@ pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_update
         // and the prefix is set outright: a prefix of the user's own (`~/.npm-global`) has
         // neither, so the npm on PATH installs there.
         Install::Npm { package, prefix } => Some(UpdateCommand {
-            path: vec![prefix.join("bin")],
+            path: vec![npm_dir(prefix)],
             env: vec![("npm_config_prefix".into(), prefix.display().to_string())],
             ..UpdateCommand::new("npm", &["install", "-g", &format!("{package}@latest")])
         }),
@@ -528,8 +913,60 @@ pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_update
             Some(cmd) => Some(cmd),
             None => Some(UpdateCommand::new(prefix.join("bin/brew"), &["upgrade", "--cask", cask])),
         },
-        Install::Native => own().or_else(|| h.installer.map(|script| UpdateCommand::new("/bin/sh", &["-c", script]))),
+        // `winget upgrade`, as Claude Code's documentation says: WinGet's installs don't update
+        // themselves. One installed for every user (Program Files) upgrades as an administrator.
+        Install::Winget { id } => {
+            let upgrade = UpdateCommand {
+                on_exit: winget_exits(h),
+                // Nothing to ask, or to wait for: it may run where no one can answer.
+                ..UpdateCommand::new("winget", &["upgrade", "--id", id, "--exact", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"])
+            };
+            Some(if needs_admin(binary) { upgrade.as_admin() } else { upgrade })
+        }
+        // A Scoop for every user (ProgramData) updates its apps as an administrator.
+        Install::Scoop { app } if needs_admin(binary) => Some(UpdateCommand::new("scoop", &["update", app, "-g"]).as_admin()),
+        Install::Scoop { app } => Some(UpdateCommand::new("scoop", &["update", app])),
+        // Chocolatey installs into ProgramData, and upgrades from there as an administrator.
+        Install::Chocolatey { package } => {
+            // No progress bars: its output is read from a file.
+            let upgrade = UpdateCommand::new("choco", &["upgrade", package, "-y", "--no-progress"]);
+            Some(if needs_admin(binary) { upgrade.as_admin() } else { upgrade })
+        }
+        // Devin's `irm … | iex` install, which Trek does itself: its release bundle, checked, put
+        // where that installer puts it; no script is run, and no wizard started.
+        Install::Native if h.bundle_install(binary) => Some(UpdateCommand {
+            builtin: Some(Builtin::DevinBundle),
+            display: Some(format!("{}'s installer steps, without its setup wizard", h.name())),
+            ..UpdateCommand::new(binary, &[])
+        }),
+        Install::Native => own().or_else(|| {
+            h.installer_line().map(|line| if cfg!(windows) { UpdateCommand::powershell(line, line) } else { UpdateCommand::new("/bin/sh", &["-c", line]) })
+        }),
     }
+}
+
+/// `path` is in a folder only an administrator can write to: Program Files, or ProgramData
+/// (where Chocolatey and a machine-wide Scoop live). Never on macOS.
+fn needs_admin(path: &Path) -> bool {
+    cfg!(windows) && names(path).iter().any(|p| ["program files", "program files (x86)", "programdata"].contains(&p.to_ascii_lowercase().as_str()))
+}
+
+/// What `winget upgrade`'s exit codes (`winget`'s return-codes table) mean, said in words. None
+/// asks the user to type anything: what's left to them is to wait, or to close the agent.
+fn winget_exits(h: &Harness) -> Vec<(i32, String)> {
+    let name = h.name();
+    vec![
+        // The check asks `winget` first; it falls back to winget-pkgs, which WinGet's own source
+        // index follows by a few hours (and `winget` itself may be a few minutes behind its source).
+        (0x8A15002Bu32 as i32, format!("WinGet's package list doesn't have this version of {name} yet. Trek tries again on its next check.")),
+        (0x8A150019u32 as i32, format!("WinGet needs an administrator to upgrade {name}.")),
+        (0x8A150010u32 as i32, format!("WinGet has no installer of {name} for this computer.")),
+        (0x8A150008u32 as i32, format!("WinGet couldn't download {name}'s update: offline, or the download was blocked.")),
+        (0x8A150045u32 as i32, "WinGet couldn't open its package source: offline, or it's busy. Try again in a minute.".into()),
+        (0x8A15004Bu32 as i32, "WinGet couldn't open its package sources: offline, or they're busy. Try again in a minute.".into()),
+        (0x8A150101u32 as i32, format!("{name} is running somewhere else (a terminal?). Close it and try again.")),
+        (0x8A150103u32 as i32, format!("{name}'s files are in use by something else. Close it and try again.")),
+    ]
 }
 
 /// One agent CLI as the last check found it.
@@ -602,6 +1039,12 @@ impl Snapshot {
             }
         }
         snap.agents.retain(|v| !v.id.is_empty());
+        // Commands an older Trek left to the user: this one runs them, as an administrator or
+        // unattended, and the next check works out how. Until then there's none to run (nor to
+        // carry over to a check that can't reach the feed).
+        for v in snap.agents.iter_mut().filter(|v| v.command.as_ref().is_some_and(|c| c.manual.is_some())) {
+            v.command = None;
+        }
         snap
     }
 
@@ -623,19 +1066,36 @@ fn client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
-async fn fetch_latest(client: &reqwest::Client, source: &Source) -> Result<Latest, String> {
+/// Why there's no version from a feed that asked to be left alone when no answer of it was kept
+/// either (what the check before found stays, `carry_over`). A limit with an answer kept is no
+/// error: that answer is used, and the row says nothing of it.
+const LIMITED: &str = "The release feed is rate-limited, so Trek asks again later";
+
+async fn fetch_latest(feeds: &Feeds, source: &Source) -> Result<Latest, String> {
+    fetch_from(feeds, source, urls(source), "winget").await
+}
+
+/// `fetch_latest`, from `urls` (and WinGet's `winget` program): a WinGet package is asked of
+/// WinGet itself, which is what `winget upgrade` installs from, and of winget-pkgs only when it
+/// can't say; every other feed is asked through the cache (`Feeds`).
+async fn fetch_from(feeds: &Feeds, source: &Source, urls: Vec<String>, winget: &str) -> Result<Latest, String> {
+    if let Source::Winget(id) = source
+        && let Some(latest) = crate::winget::latest(winget, id).await
+    {
+        return Ok(latest);
+    }
     let mut last = "Nothing to ask".to_string();
-    for url in urls(source) {
-        match client.get(&url).send().await {
-            Ok(r) if r.status().is_success() => match r.text().await {
-                Ok(body) => match parse_latest(source, &body) {
-                    Some(l) => return Ok(l),
-                    None => last = format!("No version in {url}"),
-                },
-                Err(e) => last = format!("Couldn't read {url}: {e}"),
+    for url in urls {
+        match feeds.get(&url).await {
+            // A feed that's out of requests answers with what it said last, as of then.
+            Ok(Reply::Body(body) | Reply::Remembered { body, .. }) => match parse_latest(source, &body) {
+                Some(l) => return Ok(l),
+                None => last = format!("No version in {url}"),
             },
-            Ok(r) => last = format!("{url} answered {}", r.status()),
+            Ok(Reply::Limited { .. }) => last = LIMITED.into(),
+            Ok(Reply::Refused(status)) => last = format!("{url} answered {status}"),
             Err(e) if e.is_connect() || e.is_timeout() => last = "Offline, or the release feed didn't answer".into(),
+            Err(e) if e.is_body() || e.is_decode() => last = format!("Couldn't read {url}: {e}"),
             Err(e) => last = format!("Couldn't reach {url}: {e}"),
         }
     }
@@ -667,11 +1127,11 @@ fn claude_channel_stable() -> bool {
 
 /// Check one agent: `None` when its agent isn't installed (Trek doesn't detect it), or what's
 /// on PATH under its name is another tool (another package, another formula).
-pub async fn check(h: &Harness, client: &reqwest::Client) -> Option<AgentVersion> {
+pub async fn check(h: &Harness, feeds: &Feeds) -> Option<AgentVersion> {
     which(h.detected_by())?;
     let binary = which(h.binary)?;
     let resolved = std::fs::canonicalize(&binary).unwrap_or_else(|_| binary.clone());
-    let install = detect_install(&resolved);
+    let install = h.reading(detect_install(&resolved));
     if !h.owns(&install) {
         return None;
     }
@@ -681,7 +1141,7 @@ pub async fn check(h: &Harness, client: &reqwest::Client) -> Option<AgentVersion
         s => s,
     });
     let latest = match source {
-        Some(s) => fetch_latest(client, &s).await,
+        Some(s) => fetch_latest(feeds, &s).await,
         None => Err("Its vendor publishes no release feed Trek can read".into()),
     };
     let auto_updates = latest.as_ref().is_ok_and(|l| l.auto_updates);
@@ -698,10 +1158,12 @@ pub async fn check(h: &Harness, client: &reqwest::Client) -> Option<AgentVersion
     })
 }
 
-/// Check every agent CLI on this Mac, side by side. Takes a few seconds; never fails as a whole.
+/// Check every agent CLI on this computer, side by side. Takes a few seconds; never fails as a whole.
 pub async fn check_all() -> Vec<AgentVersion> {
-    let client = client();
-    futures::future::join_all(HARNESSES.iter().map(|h| check(h, &client))).await.into_iter().flatten().collect()
+    let feeds = Feeds::open(client());
+    let found = futures::future::join_all(HARNESSES.iter().map(|h| check(h, &feeds))).await.into_iter().flatten().collect();
+    feeds.save();
+    found
 }
 
 /// How an update went.
@@ -748,47 +1210,362 @@ const UPDATE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// Run `v`'s update command, then ask the CLI its version again: a command that exits fine but
 /// leaves the old version installed failed too.
 pub async fn run_update(v: &AgentVersion) -> Outcome {
-    let Some(cmd) = &v.command else {
-        return Outcome::Failed { summary: format!("Trek doesn't know how to update {}.", v.name), output: String::new() };
+    // One that runs as an administrator goes through `run_elevated`, which checks it.
+    if v.command.as_ref().is_some_and(|c| c.elevated) {
+        return run_elevated(std::slice::from_ref(v)).await.pop().unwrap_or_else(|| no_command(v));
+    }
+    run_update_settling(v, if cfg!(windows) { SETTLE } else { (0, Duration::ZERO) }).await
+}
+
+/// `run_update`, waiting for a version that hasn't changed yet `settle` (polls, and the time
+/// between them).
+async fn run_update_settling(v: &AgentVersion, settle: (u32, Duration)) -> Outcome {
+    let Some(cmd) = &v.command else { return no_command(v) };
+    // Not here: an administrator's command is checked first (`run_update`, `run_elevated`).
+    if cmd.elevated {
+        return not_trek_command(v);
+    }
+    let ran = match cmd.builtin {
+        Some(Builtin::DevinBundle) => match tokio::time::timeout(UPDATE_TIMEOUT, install_devin_bundle(&cmd.program, &devin_manifest_url(), DEVIN_HOST)).await {
+            Ok(done) => done.map(|said| (Some(0), said)).map_err(|summary| Outcome::Failed { summary, output: String::new() }),
+            Err(_) => Err(timed_out(cmd)),
+        },
+        None => {
+            let path = cmd.search_path();
+            let Some(program) = resolve_program(&cmd.program, &path).filter(|p| p.is_file()) else { return not_installed(cmd) };
+            run_command(cmd, &program, &path).await
+        }
     };
-    let path = cmd.search_path();
-    let program = if cmd.program.is_absolute() { Some(cmd.program.clone()) } else { path.split(':').map(|d| Path::new(d).join(&cmd.program)).find(|p| p.is_file()) };
-    let Some(program) = program.filter(|p| p.is_file()) else {
-        return Outcome::Failed { summary: format!("{} isn't installed.", cmd.program.display()), output: String::new() };
-    };
-    let run = tokio::process::Command::new(&program)
-        .args(&cmd.args)
-        .env("PATH", path)
-        .envs(cmd.env.iter().map(|(k, v)| (k, v)))
-        .env("NO_COLOR", "1")
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
-    let out = match tokio::time::timeout(UPDATE_TIMEOUT, run).await {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => return Outcome::Failed { summary: format!("Couldn't run {}: {e}", cmd.shown()), output: String::new() },
-        Err(_) => return Outcome::Failed { summary: format!("{} took longer than 15 minutes, so Trek stopped it.", cmd.shown()), output: String::new() },
-    };
-    let output = strip_ansi(&format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))).trim().to_string();
-    if !out.status.success() {
-        if let Some((_, said)) = out.status.code().and_then(|c| cmd.on_exit.iter().find(|(e, _)| *e == c)) {
+    match ran {
+        Ok((code, output)) => conclude(v, cmd, code, output, settle).await,
+        Err(failed) => failed,
+    }
+}
+
+fn no_command(v: &AgentVersion) -> Outcome {
+    Outcome::Failed { summary: format!("Trek doesn't know how to update {}.", v.name), output: String::new() }
+}
+
+fn not_installed(cmd: &UpdateCommand) -> Outcome {
+    Outcome::Failed { summary: format!("{} isn't installed.", cmd.program.display()), output: String::new() }
+}
+
+/// `program` (`cmd`'s, found on `path`) run with `cmd`'s arguments and environment: its exit code
+/// and all it printed.
+async fn run_command(cmd: &UpdateCommand, program: &Path, path: &str) -> Result<(Option<i32>, String), Outcome> {
+    let mut run = crate::procs::async_command(program);
+    run.args(&cmd.args).env("PATH", path).envs(cmd.env.iter().map(|(k, v)| (k, v))).env("NO_COLOR", "1").stdin(std::process::Stdio::null()).kill_on_drop(true);
+    match tokio::time::timeout(UPDATE_TIMEOUT, run.output()).await {
+        Ok(Ok(out)) => Ok((out.status.code(), all_output(&out.stdout, &out.stderr))),
+        Ok(Err(e)) => Err(Outcome::Failed { summary: format!("Couldn't run {}: {e}", cmd.shown()), output: String::new() }),
+        Err(_) => Err(timed_out(cmd)),
+    }
+}
+
+fn timed_out(cmd: &UpdateCommand) -> Outcome {
+    Outcome::Failed { summary: format!("{} took longer than 15 minutes, so Trek stopped it.", cmd.shown()), output: String::new() }
+}
+
+/// What an update command that ran came to: its exit code said in words when it failed, or else
+/// the version installed now.
+async fn conclude(v: &AgentVersion, cmd: &UpdateCommand, code: Option<i32>, output: String, settle: (u32, Duration)) -> Outcome {
+    if code != Some(0) {
+        if let Some((_, said)) = code.and_then(|c| cmd.on_exit.iter().find(|(e, _)| *e == c)) {
             return Outcome::Failed { summary: said.clone(), output };
         }
-        let code = out.status.code().map_or("a signal".to_string(), |c| format!("code {c}"));
+        let code = code.map_or("a signal".to_string(), code_words);
         return Outcome::Failed { summary: format!("{} stopped with {code}.", cmd.shown()), output };
     }
-    // The binary on PATH may have moved (a new keg): look it up again.
     let Some(h) = harness(&v.id) else { return verify(v, None, output) };
-    let binary = which(h.binary).unwrap_or_else(|| v.binary.clone());
-    verify(v, installed_version(h, &binary).await, output)
+    // On macOS the binary on PATH may have moved (a new keg): look it up again. On Windows it is
+    // the one the check found, the install this update is for: a shim is replaced in place, and
+    // another install further along the PATH must not answer for it.
+    let binary = if cfg!(windows) && v.binary.is_file() { v.binary.clone() } else { which(h.binary).unwrap_or_else(|| v.binary.clone()) };
+    verify(v, settled_version(v, h, &binary, settle.0, settle.1).await, output)
+}
+
+/// How long, on Windows, a version that hasn't changed yet is waited for: an updater may hand
+/// the replacing to a process of its own that outlives it (a running `.exe` can't be replaced
+/// by itself), or the shim may take a launch to see the new files. Polls, and the time between.
+const SETTLE: (u32, Duration) = (10, Duration::from_secs(2));
+
+/// The version installed at `binary` once the update's done: asked again, up to `polls` more times
+/// `every` apart, while it's still older than what the update was for.
+async fn settled_version(v: &AgentVersion, h: &Harness, binary: &Path, polls: u32, every: Duration) -> Option<String> {
+    let mut now = installed_version(h, binary).await;
+    for _ in 0..polls {
+        if now.as_ref().is_some_and(|n| v.latest.as_ref().is_none_or(|l| !is_newer(l, n))) {
+            break;
+        }
+        tokio::time::sleep(every).await;
+        now = installed_version(h, binary).await;
+    }
+    now
+}
+
+/// The release bundle Devin's manifest names for a platform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Bundle {
+    version: String,
+    url: String,
+    sha256: String,
+}
+
+/// Where Devin's release bundles are served from; no bundle from anywhere else is installed.
+const DEVIN_HOST: &str = "https://static.devin.ai/";
+
+fn devin_manifest_url() -> String {
+    urls(&Source::Feed(Feed::DevinManifest)).remove(0)
+}
+
+/// The bundle `manifest` (Devin's `manifest.json`) names for `target`. Only what's safe to use as
+/// it is: a version fit for a folder name, a download from `host`, a SHA-256. A manifest without
+/// the checksum has no bundle: it isn't installed unchecked, nor by running the vendor's script.
+fn devin_bundle(manifest: &str, target: &str, host: &str) -> Option<Bundle> {
+    let v: serde_json::Value = serde_json::from_str(manifest).ok()?;
+    let version = v["version"].as_str().filter(|s| parse_version(s).as_deref() == Some(*s))?;
+    let platform = &v["platforms"][target];
+    let url = platform["url"].as_str().filter(|u| u.starts_with(host) && !u.contains(".."))?;
+    let sha256 = platform["sha256"].as_str().filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))?;
+    Some(Bundle { version: version.into(), url: url.into(), sha256: sha256.to_ascii_lowercase() })
+}
+
+/// The Windows platform Devin's manifest names this computer by, as its installer picks it. An
+/// x64 Trek on an Arm computer sees its own architecture in `PROCESSOR_ARCHITECTURE`, the
+/// computer's in `PROCESSOR_ARCHITEW6432`.
+fn windows_target() -> &'static str {
+    let arm = ["PROCESSOR_ARCHITEW6432", "PROCESSOR_ARCHITECTURE"].iter().any(|v| std::env::var(v).is_ok_and(|a| a.eq_ignore_ascii_case("ARM64")));
+    if arm { "aarch64-pc-windows" } else { "x86_64-pc-windows" }
+}
+
+/// Larger than any CLI's bundle: a download past it isn't one.
+const MAX_BUNDLE_BYTES: u64 = 1 << 30;
+
+/// Install Devin's newest release for the install whose entry point is `entry`
+/// (`…\devin\cli\bin\devin.exe`), as its `install.ps1` does for an `irm-iex` install: the bundle
+/// `manifest_url` names (from `host`) checked against the manifest's SHA-256, unpacked into
+/// `_versions\<version>`, and copied over the entry point. The installer's other steps are done
+/// already (its `distribution` marker is what makes this Devin's install; its folder is on the
+/// user's PATH) or aren't for this kind of install (`devin-updater.exe` is the enterprise
+/// portal's), and its last, the setup wizard, is the one not wanted. All in Trek: nothing
+/// downloaded is run. What it did, a line a step, or why it couldn't.
+async fn install_devin_bundle(entry: &Path, manifest_url: &str, host: &str) -> Result<String, String> {
+    use sha2::Digest as _;
+    use tokio::io::AsyncWriteExt as _;
+    let cli = entry.parent().and_then(Path::parent).ok_or_else(|| format!("{} isn't in Devin's install folder.", entry.display()))?;
+    let client = reqwest::Client::builder().user_agent(format!("Trek/{}", crate::VERSION)).connect_timeout(Duration::from_secs(10)).read_timeout(Duration::from_secs(60)).build().map_err(|e| e.to_string())?;
+    let manifest = async { client.get(manifest_url).send().await?.error_for_status()?.text().await }.await.map_err(|e| format!("Couldn't read Devin's release manifest: {e}"))?;
+    let target = windows_target();
+    let bundle = devin_bundle(&manifest, target, host).ok_or_else(|| format!("Devin's release manifest names no bundle for {target} that Trek can check (a download from {host} with its SHA-256), so Trek didn't install it."))?;
+    let mut said = vec![format!("Devin {} for {target}", bundle.version)];
+    let versions = cli.join("_versions");
+    let dir = versions.join(&bundle.version);
+    let exe = dir.join("bin").join("devin.exe");
+    if exe.is_file() {
+        said.push(format!("Already unpacked in {}", dir.display()));
+    } else {
+        std::fs::create_dir_all(&versions).map_err(|e| format!("Couldn't make {}: {e}", versions.display()))?;
+        let (download, staging) = (versions.join(format!(".download-{}", std::process::id())), versions.join(format!(".unpack-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&staging);
+        let fetched = async {
+            let mut resp = client.get(&bundle.url).send().await.and_then(|r| r.error_for_status()).map_err(|e| format!("Couldn't download {}: {e}", bundle.url))?;
+            let mut file = tokio::fs::File::create(&download).await.map_err(|e| e.to_string())?;
+            let (mut hasher, mut done) = (sha2::Sha256::new(), 0u64);
+            while let Some(chunk) = resp.chunk().await.map_err(|e| format!("The download of {} was cut off: {e}", bundle.url))? {
+                done += chunk.len() as u64;
+                if done > MAX_BUNDLE_BYTES {
+                    return Err(format!("{} is larger than 1 GB, so it wasn't installed.", bundle.url));
+                }
+                hasher.update(&chunk);
+                file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+            }
+            file.flush().await.map_err(|e| e.to_string())?;
+            drop(file);
+            if hex::encode(hasher.finalize()) != bundle.sha256 {
+                return Err(format!("{} doesn't match the SHA-256 in Devin's manifest, so it wasn't installed.", bundle.url));
+            }
+            let (zip, into) = (download.clone(), staging.clone());
+            tokio::task::spawn_blocking(move || crate::registry::unpack_zip(&zip, &into)).await.map_err(|e| e.to_string())?.map_err(|e| format!("Couldn't unpack {}: {e:#}", bundle.url))?;
+            if !staging.join("bin").join("devin.exe").is_file() {
+                return Err(format!("{} has no bin\\devin.exe.", bundle.url));
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::rename(&staging, &dir).map_err(|e| format!("Couldn't move Devin {} into {}: {e}", bundle.version, dir.display()))?;
+            Ok(done)
+        }
+        .await;
+        let _ = std::fs::remove_file(&download);
+        let _ = std::fs::remove_dir_all(&staging);
+        let bytes = fetched?;
+        said.push(format!("Downloaded {} ({} MB); its SHA-256 matches the manifest's", bundle.url, bytes / (1 << 20)));
+        said.push(format!("Unpacked into {}", dir.display()));
+    }
+    replace_entry(&exe, entry)?;
+    said.push(format!("Copied it to {}", entry.display()));
+    Ok(said.join("\n"))
+}
+
+/// Put `new` in place of `entry`, which may be running (Devin open in a terminal): Windows lets a
+/// running program be renamed but not overwritten, so it's moved aside first, and put back
+/// should the copy fail. The copy moved aside goes now if it can, or at the next update.
+fn replace_entry(new: &Path, entry: &Path) -> Result<(), String> {
+    let (Some(dir), Some(name)) = (entry.parent(), entry.file_name().map(|n| n.to_string_lossy().into_owned())) else {
+        return Err(format!("{} isn't a file.", entry.display()));
+    };
+    let old = format!("{name}.old-");
+    for left in std::fs::read_dir(dir).into_iter().flatten().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&old)) {
+        let _ = std::fs::remove_file(left.path());
+    }
+    let aside = dir.join(format!("{old}{}", crate::store::now_ms()));
+    let moved = entry.exists();
+    if moved {
+        std::fs::rename(entry, &aside).map_err(|e| format!("Couldn't move the old {} aside: {e}", entry.display()))?;
+    }
+    if let Err(e) = std::fs::copy(new, entry) {
+        if moved {
+            let _ = std::fs::rename(&aside, entry);
+        }
+        return Err(format!("Couldn't copy the new version to {}: {e}", entry.display()));
+    }
+    if moved {
+        let _ = std::fs::remove_file(&aside);
+    }
+    Ok(())
+}
+
+/// What the card says when Windows' prompt was turned down, and when it gave up unanswered
+/// (`elevated::refused` tells them apart by how long it was up; Windows words both the same).
+pub const DECLINED: &str = "Windows didn't allow it (the prompt was cancelled).";
+pub const UNANSWERED: &str = "Windows's prompt went unanswered for two minutes. Try Update again when you're at the computer.";
+
+/// Run the updates of `vs` that are run as an administrator (`UpdateCommand::elevated`), together:
+/// one script, so Windows asks once. Each is then told apart (its own output and exit code) and
+/// verified as `run_update` verifies. The outcomes are in `vs`' order.
+pub async fn run_elevated(vs: &[AgentVersion]) -> Vec<Outcome> {
+    // Only what Trek works out itself goes to an administrator; the rest is answered, not run.
+    let fit: Vec<bool> = vs.iter().map(is_what_trek_would_run).collect();
+    let rows: Vec<AgentVersion> = vs.iter().zip(&fit).map(|(v, &fit)| if fit { v.clone() } else { AgentVersion { command: None, ..v.clone() } }).collect();
+    let mut outcomes = run_elevated_with(&rows, if cfg!(windows) { SETTLE } else { (0, Duration::ZERO) }, crate::elevated::run_as_admin).await;
+    for ((outcome, v), &fit) in outcomes.iter_mut().zip(vs).zip(&fit) {
+        if !fit && v.command.is_some() {
+            *outcome = not_trek_command(v);
+        }
+    }
+    outcomes
+}
+
+/// `run_elevated`, the script started by `launch`.
+async fn run_elevated_with(vs: &[AgentVersion], settle: (u32, Duration), launch: crate::elevated::Launch) -> Vec<Outcome> {
+    use crate::elevated::{Failure, Run, Step, code_file, output_file};
+    let mut outcomes: Vec<Option<Outcome>> = vec![None; vs.len()];
+    // Each step's row; rows whose program isn't there are answered without running anything.
+    let mut steps = vec![];
+    let mut rows = vec![];
+    for (i, v) in vs.iter().enumerate() {
+        let Some(cmd) = &v.command else {
+            outcomes[i] = Some(no_command(v));
+            continue;
+        };
+        let path = cmd.search_path();
+        let Some(program) = resolve_program(&cmd.program, &path).filter(|p| p.is_file()) else {
+            outcomes[i] = Some(not_installed(cmd));
+            continue;
+        };
+        steps.push(Step { program, args: cmd.args.clone(), env: cmd.env.clone(), path });
+        rows.push(i);
+    }
+    if !steps.is_empty() {
+        let fail_all = |outcomes: &mut Vec<Option<Outcome>>, summary: &dyn Fn(&UpdateCommand) -> String| {
+            for &i in &rows {
+                let cmd = vs[i].command.as_ref().expect("a row with a step has a command");
+                outcomes[i] = Some(Outcome::Failed { summary: summary(cmd), output: String::new() });
+            }
+        };
+        // The script's folder is the run's alone, and what's in it is held as it was written until
+        // the run is done (`Run`): it is read by an administrator's process after the user says yes.
+        match Run::create(&crate::paths::data_dir().join("tmp")) {
+            Err(e) => fail_all(&mut outcomes, &|c| format!("Couldn't write the script that runs {} as an administrator: {e}", c.shown())),
+            Ok(mut run) => {
+                let written = crate::elevated::script(run.dir(), &steps).and_then(|text| run.seal(&text, steps.len()));
+                let ran = match written {
+                    Err(why) => Err(Failure::Other(format!("Trek couldn't write the script for it: {why}"))),
+                    Ok(script) => tokio::task::spawn_blocking(move || launch(&script, UPDATE_TIMEOUT)).await.unwrap_or_else(|e| Err(Failure::Other(e.to_string()))),
+                };
+                let dir = run.dir().to_path_buf();
+                match ran {
+                    Err(Failure::Cancelled) => fail_all(&mut outcomes, &|_| DECLINED.into()),
+                    Err(Failure::Unanswered) => fail_all(&mut outcomes, &|_| UNANSWERED.into()),
+                    Err(Failure::Other(e)) => fail_all(&mut outcomes, &|c| format!("Couldn't run {} as an administrator: {e}", c.shown())),
+                    ran => {
+                        let stopped = match ran {
+                            Err(Failure::TimedOut { ended }) => Some(ended),
+                            _ => None,
+                        };
+                        for (step, &i) in rows.iter().enumerate() {
+                            let (v, cmd) = (&vs[i], vs[i].command.as_ref().expect("a row with a step has a command"));
+                            let output = std::fs::read(output_file(&dir, step)).map(|b| all_output(&b, b"")).unwrap_or_default();
+                            let code = std::fs::read_to_string(code_file(&dir, step)).ok().and_then(|c| c.trim().parse::<i32>().ok());
+                            outcomes[i] = Some(match (code, stopped) {
+                                (Some(code), _) => conclude(v, cmd, Some(code), output, settle).await,
+                                (None, Some(true)) => Outcome::Failed { summary: format!("{} took longer than 15 minutes, so Trek stopped it.", cmd.shown()), output },
+                                (None, Some(false)) => Outcome::Failed {
+                                    summary: format!("{} took longer than 15 minutes. Trek stopped waiting, but Windows doesn't let it end what runs as an administrator: it may still be running.", cmd.shown()),
+                                    output,
+                                },
+                                (None, None) => Outcome::Failed { summary: format!("{} didn't say how it went: the administrator's script stopped before it was done.", cmd.shown()), output },
+                            });
+                        }
+                    }
+                }
+                // `run` goes here: its files are let go, and its folder removed.
+            }
+        }
+    }
+    outcomes.into_iter().zip(vs).map(|(o, v)| o.unwrap_or_else(|| no_command(v))).collect()
+}
+
+/// `v`'s command is the one Trek itself works out for the install it found (`update_command`),
+/// not something else: what runs as an administrator may only be the package manager's own
+/// upgrade, and the rows come back from `agent-versions.json`, a file any program of the user's
+/// can write. The command is worked out again from the install, and must be the same.
+fn is_what_trek_would_run(v: &AgentVersion) -> bool {
+    let (Some(cmd), Some(h)) = (&v.command, harness(&v.id)) else { return false };
+    h.owns(&v.install)
+        && update_command(h, &v.install, &v.binary, false, v.installed.as_deref())
+            .is_some_and(|own| own.elevated == cmd.elevated && own.program == cmd.program && own.args == cmd.args && own.env == cmd.env && own.path == cmd.path && own.builtin == cmd.builtin)
+}
+
+fn not_trek_command(v: &AgentVersion) -> Outcome {
+    Outcome::Failed { summary: format!("Trek didn't run the update of {}: its command isn't the one Trek works out for how it's installed. Check again, and then update.", v.name), output: String::new() }
+}
+
+/// Everything a command printed: its stdout, then its stderr on a line of its own (a progress
+/// line left unfinished mustn't swallow what the error stream says next).
+fn all_output(stdout: &[u8], stderr: &[u8]) -> String {
+    let (out, err) = (strip_ansi(&String::from_utf8_lossy(stdout)), strip_ansi(&String::from_utf8_lossy(stderr)));
+    [out.trim(), err.trim()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n")
+}
+
+/// "code 1"; a Windows status as its documentation writes it ("code 0x8A15002B (-1978335189)").
+fn code_words(code: i32) -> String {
+    if code < 0 { format!("code 0x{:08X} ({code})", code as u32) } else { format!("code {code}") }
+}
+
+/// The last lines of what an updater printed, for a sentence: what it said is often the reason.
+fn last_lines(output: &str) -> Option<String> {
+    let lines: Vec<&str> = output.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let tail = &lines[lines.len().saturating_sub(3)..];
+    (!tail.is_empty()).then(|| tail.join(" / "))
 }
 
 /// What an update that ran without error came to, given the version installed afterwards.
 pub fn verify(v: &AgentVersion, now: Option<String>, output: String) -> Outcome {
+    // An updater that exits 0 and changes nothing usually says why (Devin's: "To update, run: …").
+    let said = last_lines(&output).map(|l| format!(" It said: {l}")).unwrap_or_default();
     match now {
         Some(now) if v.latest.as_ref().is_none_or(|l| !is_newer(l, &now)) => Outcome::Updated { version: now, output },
-        Some(now) => Outcome::Failed { summary: format!("{} is still at {now} after the update.", v.name), output },
-        None => Outcome::Failed { summary: format!("{} didn't say its version after the update.", v.name), output },
+        Some(now) => Outcome::Failed { summary: format!("{} is still at {now} after the update.{said}", v.name), output },
+        None => Outcome::Failed { summary: format!("{} didn't say its version after the update.{said}", v.name), output },
     }
 }
 
@@ -797,7 +1574,8 @@ pub fn verify(v: &AgentVersion, now: Option<String>, output: String) -> Outcome 
 pub async fn dry_run(v: &AgentVersion) -> Outcome {
     tokio::time::sleep(Duration::from_millis(2500)).await;
     let shown = v.command.as_ref().map(|c| c.shown()).unwrap_or_default();
-    Outcome::Updated { version: v.latest.clone().or_else(|| v.installed.clone()).unwrap_or_default(), output: format!("Dry run: Trek would have run `{shown}`. Nothing was changed.") }
+    let how = if v.command.as_ref().is_some_and(|c| c.elevated) { " as an administrator" } else { "" };
+    Outcome::Updated { version: v.latest.clone().or_else(|| v.installed.clone()).unwrap_or_default(), output: format!("Dry run: Trek would have run `{shown}`{how}. Nothing was changed.") }
 }
 
 /// Made-up agents with updates out, as MonoCode's card shows them, for design review
@@ -866,7 +1644,7 @@ mod tests {
         let cmd = update_command(h("acp:pi"), &old, Path::new("/opt/homebrew/bin/pi"), false, Some("0.73.1-$(id)")).unwrap();
         assert!(cmd.args.iter().all(|a| !a.contains("$(id)")), "{:?}", cmd.args);
         let cmd = update_command(h("acp:pi"), &old, Path::new("/opt/homebrew/bin/pi"), false, Some("0.73.1")).unwrap();
-        assert!(cmd.args[1].contains("@mariozechner/pi-coding-agent@0.73.1"));
+        assert!(cmd.args.iter().any(|a| a.contains("@mariozechner/pi-coding-agent@0.73.1")), "{:?}", cmd.args);
     }
 
     #[test]
@@ -902,21 +1680,25 @@ mod tests {
         assert_eq!(p("/usr/local/lib/node_modules/opencode-ai/bin/opencode"), Install::Npm { package: "opencode-ai".into(), prefix: "/usr/local".into() });
         assert_eq!(p("/Users/me/.bun/install/global/node_modules/@google/gemini-cli/dist/index.js"), Install::Bun { package: "@google/gemini-cli".into() });
         assert_eq!(p("/Users/me/Library/pnpm/global/5/node_modules/@qwen-code/qwen-code/cli.js"), Install::Pnpm { package: "@qwen-code/qwen-code".into() });
-        assert_eq!(p("/opt/homebrew/Cellar/opencode/1.18.34/bin/opencode"), Install::Brew { formula: "opencode".into(), prefix: "/opt/homebrew".into(), tap: None });
-        assert_eq!(p("/usr/local/Cellar/block-goose-cli/1.9.3/bin/goose"), Install::Brew { formula: "block-goose-cli".into(), prefix: "/usr/local".into(), tap: None });
-        assert_eq!(p("/opt/homebrew/Caskroom/copilot-cli/1.0.69/copilot"), Install::Cask { cask: "copilot-cli".into(), prefix: "/opt/homebrew".into() });
-        // Formulae that are npm packages installed into their keg: brew's, not npm's.
-        assert_eq!(
-            p("/opt/homebrew/Cellar/gemini-cli/0.46.0/libexec/lib/node_modules/@google/gemini-cli/dist/index.js"),
-            Install::Brew { formula: "gemini-cli".into(), prefix: "/opt/homebrew".into(), tap: None }
-        );
-        assert_eq!(
-            p("/usr/local/Cellar/qwen-code/0.24.7/libexec/lib/node_modules/@qwen-code/qwen-code/cli.js"),
-            Install::Brew { formula: "qwen-code".into(), prefix: "/usr/local".into(), tap: None }
-        );
-        let keg = install_of(Path::new("/opt/homebrew/Cellar/gemini-cli/0.46.0/libexec/lib/node_modules/@google/gemini-cli/dist/index.js"));
-        assert!(h("acp:gemini").owns(&keg));
-        assert_eq!(update_command(h("acp:gemini"), &keg, Path::new("/opt/homebrew/bin/gemini"), false, None).unwrap().shown(), "brew upgrade gemini-cli");
+        // Homebrew is macOS's: on Windows these are folders like any other (see
+        // `homebrew_is_not_looked_for_on_windows`).
+        if !cfg!(windows) {
+            assert_eq!(p("/opt/homebrew/Cellar/opencode/1.18.34/bin/opencode"), Install::Brew { formula: "opencode".into(), prefix: "/opt/homebrew".into(), tap: None });
+            assert_eq!(p("/usr/local/Cellar/block-goose-cli/1.9.3/bin/goose"), Install::Brew { formula: "block-goose-cli".into(), prefix: "/usr/local".into(), tap: None });
+            assert_eq!(p("/opt/homebrew/Caskroom/copilot-cli/1.0.69/copilot"), Install::Cask { cask: "copilot-cli".into(), prefix: "/opt/homebrew".into() });
+            // Formulae that are npm packages installed into their keg: brew's, not npm's.
+            assert_eq!(
+                p("/opt/homebrew/Cellar/gemini-cli/0.46.0/libexec/lib/node_modules/@google/gemini-cli/dist/index.js"),
+                Install::Brew { formula: "gemini-cli".into(), prefix: "/opt/homebrew".into(), tap: None }
+            );
+            assert_eq!(
+                p("/usr/local/Cellar/qwen-code/0.24.7/libexec/lib/node_modules/@qwen-code/qwen-code/cli.js"),
+                Install::Brew { formula: "qwen-code".into(), prefix: "/usr/local".into(), tap: None }
+            );
+            let keg = install_of(Path::new("/opt/homebrew/Cellar/gemini-cli/0.46.0/libexec/lib/node_modules/@google/gemini-cli/dist/index.js"));
+            assert!(h("acp:gemini").owns(&keg));
+            assert_eq!(update_command(h("acp:gemini"), &keg, Path::new("/opt/homebrew/bin/gemini"), false, None).unwrap().shown(), "brew upgrade gemini-cli");
+        }
         // A global prefix of the user's own (npm's fix for EACCES).
         assert_eq!(
             p("/Users/me/.npm-global/lib/node_modules/@openai/codex/bin/codex.js"),
@@ -1079,22 +1861,24 @@ mod tests {
     #[test]
     fn updates_run_the_vendors_documented_command() {
         let bin = Path::new("/opt/homebrew/bin/x");
+        // Where an npm prefix keeps its programs, and how PATH strings are joined.
+        let (dir, sep) = (|prefix: &str| if cfg!(windows) { PathBuf::from(prefix) } else { Path::new(prefix).join("bin") }, if cfg!(windows) { ";" } else { ":" });
         let shown = |agent: &str, install: Install, auto: bool| update_command(h(agent), &install, bin, auto, None).map(|c| c.shown());
         let npm = |p: &str| Install::Npm { package: p.into(), prefix: "/opt/homebrew".into() };
         assert_eq!(shown("acp:kimi", npm("@moonshot-ai/kimi-code"), false).as_deref(), Some("npm install -g @moonshot-ai/kimi-code@latest"));
         // The npm (and node) of the prefix it's in first on PATH, and that prefix set outright.
         let cmd = update_command(h("codex"), &npm("@openai/codex"), bin, false, None).unwrap();
         assert_eq!(cmd.program, Path::new("npm"));
-        assert_eq!(cmd.path, [Path::new("/opt/homebrew/bin")]);
+        assert_eq!(cmd.path, [dir("/opt/homebrew")]);
         assert_eq!(cmd.env, [("npm_config_prefix".to_string(), "/opt/homebrew".to_string())]);
-        assert!(cmd.search_path().starts_with("/opt/homebrew/bin:"));
+        assert!(cmd.search_path().starts_with(&format!("{}{sep}", dir("/opt/homebrew").display())), "{}", cmd.search_path());
         // A prefix of the user's own has no npm in it: the one on PATH installs into it.
         let own = Install::Npm { package: "@openai/codex".into(), prefix: "/Users/me/.npm-global".into() };
         let cmd = update_command(h("codex"), &own, bin, false, None).unwrap();
         assert_eq!(cmd.env, [("npm_config_prefix".to_string(), "/Users/me/.npm-global".to_string())]);
         assert_eq!(cmd.shown(), "npm install -g @openai/codex@latest");
         let nvm = Install::Npm { package: "@openai/codex".into(), prefix: "/Users/me/.nvm/versions/node/v22.3.0".into() };
-        assert_eq!(update_command(h("codex"), &nvm, bin, false, None).unwrap().path, [Path::new("/Users/me/.nvm/versions/node/v22.3.0/bin")]);
+        assert_eq!(update_command(h("codex"), &nvm, bin, false, None).unwrap().path, [dir("/Users/me/.nvm/versions/node/v22.3.0")]);
         assert_eq!(shown("codex", Install::Volta, false).as_deref(), Some("volta install @openai/codex@latest"));
         assert_eq!(shown("acp:grok", Install::Volta, false), None, "no package to install");
         assert_eq!(shown("acp:gemini", Install::Bun { package: "@google/gemini-cli".into() }, false).as_deref(), Some("bun add -g @google/gemini-cli@latest"));
@@ -1110,8 +1894,15 @@ mod tests {
         assert_eq!(shown("claude-code", Install::Native, false).as_deref(), Some("x update"));
         assert_eq!(shown("opencode", Install::Native, false).as_deref(), Some("x upgrade"));
         let droid = update_command(h("droid"), &Install::Native, bin, false, None).unwrap();
-        assert_eq!(droid.program, Path::new("/bin/sh"));
-        assert_eq!(droid.shown(), "curl -fsSL https://app.factory.ai/cli | sh");
+        if cfg!(windows) {
+            // Factory's PowerShell installer, re-run: it's the update.
+            assert_eq!(droid.program.file_stem().unwrap().to_string_lossy().to_lowercase(), "powershell");
+            assert_eq!(droid.shown(), "irm https://app.factory.ai/cli/windows | iex");
+            assert_eq!(droid.args.last().unwrap(), "irm https://app.factory.ai/cli/windows | iex");
+        } else {
+            assert_eq!(droid.program, Path::new("/bin/sh"));
+            assert_eq!(droid.shown(), "curl -fsSL https://app.factory.ai/cli | sh");
+        }
         assert_eq!(shown("acp:pi", Install::Native, false).as_deref(), Some("x update"));
         assert_eq!(shown("acp:gemini", Install::Native, false), None, "no update command, no installer");
     }
@@ -1131,9 +1922,19 @@ mod tests {
         assert_eq!(update_command(pi, &new, bin, false, None).unwrap().shown(), "npm install -g @earendil-works/pi-coding-agent@latest");
         // The old package goes first: its `pi` would block the new one's.
         let cmd = update_command(pi, &old, bin, false, Some("0.73.1")).unwrap();
-        assert_eq!(cmd.program, Path::new("/bin/sh"));
+        if cfg!(windows) {
+            assert_eq!(cmd.program.file_stem().unwrap().to_string_lossy().to_lowercase(), "powershell");
+            // Each package is quoted for PowerShell, where a bare `@scope/name` is splatting.
+            let script = cmd.args.last().unwrap();
+            assert!(script.contains("npm uninstall -g '@mariozechner/pi-coding-agent'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"), "{script}");
+            assert!(script.contains("npm install -g '@earendil-works/pi-coding-agent@latest'; if ($LASTEXITCODE -eq 0) { exit 0 }"), "{script}");
+            assert!(script.contains("npm install -g --prefer-offline '@mariozechner/pi-coding-agent@0.73.1'; if ($LASTEXITCODE -eq 0) { exit 75 }"), "{script}");
+            assert!(script.ends_with("; exit 76"), "{script}");
+        } else {
+            assert_eq!(cmd.program, Path::new("/bin/sh"));
+        }
         assert_eq!(cmd.shown(), "npm uninstall -g @mariozechner/pi-coding-agent && npm install -g @earendil-works/pi-coding-agent@latest");
-        assert_eq!(cmd.path, [Path::new("/opt/homebrew/bin")]);
+        assert_eq!(cmd.path, [if cfg!(windows) { PathBuf::from("/opt/homebrew") } else { PathBuf::from("/opt/homebrew/bin") }]);
         assert_eq!(cmd.env, [("npm_config_prefix".to_string(), "/opt/homebrew".to_string())]);
         let pnpm = update_command(pi, &Install::Pnpm { package: "@mariozechner/pi-coding-agent".into() }, bin, false, None).unwrap();
         assert_eq!(pnpm.shown(), "pnpm remove -g @mariozechner/pi-coding-agent && pnpm add -g @earendil-works/pi-coding-agent@latest");
@@ -1152,6 +1953,27 @@ mod tests {
         assert!(v.update_available());
     }
 
+    /// A fake `npm` in `root` (`root\npm.cmd` on Windows, where the prefix itself is on PATH;
+    /// `root/bin/npm` on Unix) that appends each line of arguments it's given to `log` and
+    /// fails with `npm error <line>` for each of `fail`, exiting 1.
+    fn fake_npm(root: &Path, log: &Path, fail: &[&str]) {
+        #[cfg(windows)]
+        {
+            // The redirection comes first: `echo 0.73.1>> log` would redirect handle 1.
+            let fails: String = fail.iter().map(|f| format!("if \"%*\"==\"{f}\" (>&2 echo npm error {f}& exit /b 1)\r\n")).collect();
+            let npm = format!("@echo off\r\n>> \"{}\" echo %*\r\n{fails}exit /b 0\r\n", log.display());
+            std::fs::write(root.join("npm.cmd"), npm).unwrap();
+        }
+        #[cfg(unix)]
+        {
+            let fails: String = fail.iter().map(|f| format!("  \"{f}\") echo \"npm error {f}\" >&2; exit 1;;\n")).collect();
+            let npm = format!("#!/bin/sh\necho \"$*\" >> \"{}\"\ncase \"$*\" in\n{fails}esac\nexit 0\n", log.display());
+            let fake = root.join("bin/npm");
+            std::fs::write(&fake, npm).unwrap();
+            std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+    }
+
     /// Pi's move to its new package, run against a fake `npm` that logs what it's asked and fails
     /// at `fail` (each a line of arguments): the old package is never simply gone.
     fn move_pi(fail: &[&str]) -> (Outcome, Vec<String>) {
@@ -1159,11 +1981,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("bin")).unwrap();
         let log = root.join("npm.log");
-        let fails: String = fail.iter().map(|f| format!("  \"{f}\") echo \"npm error {f}\" >&2; exit 1;;\n")).collect();
-        let npm = format!("#!/bin/sh\necho \"$*\" >> \"{}\"\ncase \"$*\" in\n{fails}esac\nexit 0\n", log.display());
-        let fake = root.join("bin/npm");
-        std::fs::write(&fake, npm).unwrap();
-        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        fake_npm(&root, &log, fail);
         let old = Install::Npm { package: "@mariozechner/pi-coding-agent".into(), prefix: root.clone() };
         let v = AgentVersion {
             id: "pi".into(),
@@ -1238,19 +2056,966 @@ mod tests {
         let amp_acp = r#"{"name":"amp-acp","version":"0.9.0","type":"module","bin":{"amp-acp":"dist/index.js"}}"#;
         assert_eq!(version_in_package_json(amp_acp).as_deref(), Some("0.9.0"));
         assert_eq!(version_in_package_json("{}"), None);
-        // Read from disk, through the binary's link.
-        let root = std::env::temp_dir().join(format!("trek-adapter-{}", std::process::id()));
-        let pkg = root.join("lib/node_modules/pi-acp");
-        std::fs::create_dir_all(pkg.join("dist")).unwrap();
-        std::fs::write(pkg.join("package.json"), pi_acp).unwrap();
-        std::fs::write(pkg.join("dist/index.js"), "#!/usr/bin/env node\n").unwrap();
-        std::fs::create_dir_all(root.join("bin")).unwrap();
-        let link = root.join("bin/pi-acp");
-        let _ = std::fs::remove_file(&link);
-        std::os::unix::fs::symlink(pkg.join("dist/index.js"), &link).unwrap();
-        let adapter = harness("pi-acp").unwrap();
-        assert_eq!(crate::runtime().block_on(installed_version(adapter, &link)).as_deref(), Some("0.0.34"));
+        // Read from disk, through the binary's link (on Windows, through its `.cmd`: a symlink
+        // there needs a privilege the tests can't count on).
+        #[cfg(windows)]
+        {
+            let root = std::env::temp_dir().join(format!("trek-adapter-{}", std::process::id()));
+            let pkg = root.join(r"node_modules\pi-acp");
+            std::fs::create_dir_all(pkg.join("dist")).unwrap();
+            std::fs::write(pkg.join("package.json"), pi_acp).unwrap();
+            std::fs::write(pkg.join(r"dist\index.js"), "#!/usr/bin/env node\n").unwrap();
+            let shim = root.join("pi-acp.cmd");
+            std::fs::write(&shim, CODEX_CMD.replace(r"@openai\codex\bin\codex.js", r"pi-acp\dist\index.js")).unwrap();
+            let adapter = harness("pi-acp").unwrap();
+            assert_eq!(crate::runtime().block_on(installed_version(adapter, &shim)).as_deref(), Some("0.0.34"));
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        #[cfg(unix)]
+        {
+            let root = std::env::temp_dir().join(format!("trek-adapter-{}", std::process::id()));
+            let pkg = root.join("lib/node_modules/pi-acp");
+            std::fs::create_dir_all(pkg.join("dist")).unwrap();
+            std::fs::write(pkg.join("package.json"), pi_acp).unwrap();
+            std::fs::write(pkg.join("dist/index.js"), "#!/usr/bin/env node\n").unwrap();
+            std::fs::create_dir_all(root.join("bin")).unwrap();
+            let link = root.join("bin/pi-acp");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(pkg.join("dist/index.js"), &link).unwrap();
+            let adapter = harness("pi-acp").unwrap();
+            assert_eq!(crate::runtime().block_on(installed_version(adapter, &link)).as_deref(), Some("0.0.34"));
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// npm's `.cmd` shim for `@openai/codex`, as `npm i -g` writes it (copied from a real one).
+    #[cfg(windows)]
+    const CODEX_CMD: &str = "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\r\n";
+
+    #[test]
+    #[cfg(windows)]
+    fn npm_on_windows_has_no_lib_folder() {
+        let p = |s: &str| install_of(Path::new(s));
+        let npm = |package: &str, prefix: &str| Install::Npm { package: package.into(), prefix: prefix.into() };
+        // The default prefix, `%APPDATA%\npm`.
+        let roaming = r"C:\Users\me\AppData\Roaming\npm";
+        assert_eq!(p(r"C:\Users\me\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js"), npm("@openai/codex", roaming));
+        assert_eq!(p(r"C:\Users\me\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode.exe"), npm("opencode-ai", roaming));
+        assert_eq!(p(r"C:\Users\me\AppData\Roaming\npm\node_modules\@opencode\cli\bin\opencode.exe"), npm("@opencode/cli", roaming));
+        // `canonicalize` gives `\\?\C:\…`, which npm can't take as a prefix: it's the plain path.
+        assert_eq!(p(r"\\?\C:\Users\me\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js"), npm("@openai/codex", roaming));
+        assert_eq!(p(r"\\?\UNC\server\share\npm\node_modules\opencode-ai\bin\opencode"), npm("opencode-ai", r"\\server\share\npm"));
+        // nvm for Windows (and Node's own folder) keep packages beside node.exe.
+        assert_eq!(p(r"C:\Users\me\AppData\Local\nvm\v22.3.0\node_modules\@openai\codex\bin\codex.js"), npm("@openai/codex", r"C:\Users\me\AppData\Local\nvm\v22.3.0"));
+        // A Unix-shaped prefix (npm in Git Bash or MSYS) still has its `lib`.
+        assert_eq!(p(r"C:\npm\lib\node_modules\opencode-ai\bin\opencode"), npm("opencode-ai", r"C:\npm"));
+        // Other package managers.
+        assert_eq!(p(r"C:\Users\me\AppData\Local\pnpm\global\5\node_modules\@qwen-code\qwen-code\cli.js"), Install::Pnpm { package: "@qwen-code/qwen-code".into() });
+        assert_eq!(p(r"C:\Users\me\.bun\install\global\node_modules\@google\gemini-cli\dist\index.js"), Install::Bun { package: "@google/gemini-cli".into() });
+        assert_eq!(p(r"C:\Users\me\AppData\Local\Volta\bin\codex.exe"), Install::Volta);
+        assert_eq!(p(r"C:\Users\me\AppData\Local\Volta\tools\image\packages\@openai\codex\node_modules\@openai\codex\bin\codex.js"), Install::Volta);
+        assert_eq!(
+            p(r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe\claude.exe"),
+            Install::Winget { id: "Anthropic.ClaudeCode".into() }
+        );
+        // The vendors' own installers, where they put the CLIs.
+        for native in [
+            r"C:\Users\me\.local\bin\claude.exe",
+            r"C:\Users\me\AppData\Local\devin\cli\bin\devin.exe",
+            r"C:\Users\me\AppData\Local\devin\cli\_versions\3000.11.3\devin.exe",
+            r"C:\Users\me\.grok\bin\grok.exe",
+            r"C:\Users\me\AppData\Local\cursor-agent\cursor-agent.exe",
+            r"C:\Users\me\bin\droid.exe",
+            r"C:\Users\me\.opencode\bin\opencode.exe",
+        ] {
+            assert_eq!(p(native), Install::Native, "{native}");
+        }
+        // The package managers' own folders: Scoop's shims and apps, Chocolatey's bin and lib.
+        let scoop = |app: &str| Install::Scoop { app: app.into() };
+        let choco = |package: &str| Install::Chocolatey { package: package.into() };
+        assert_eq!(p(r"C:\Users\me\scoop\shims\opencode.exe"), scoop("opencode"));
+        assert_eq!(p(r"C:\Users\me\scoop\apps\opencode\current\opencode.exe"), scoop("opencode"));
+        assert_eq!(p(r"C:\Users\me\SCOOP\Apps\opencode\1.2.27\opencode.exe"), scoop("opencode"), "whatever the case");
+        assert_eq!(p(r"C:\ProgramData\scoop\shims\opencode.exe"), scoop("opencode"), "Scoop's global apps");
+        assert_eq!(p(r"C:\ProgramData\chocolatey\bin\opencode.exe"), choco("opencode"));
+        assert_eq!(p(r"C:\ProgramData\chocolatey\lib\opencode\tools\opencode.exe"), choco("opencode"));
+        // npm's packages inside a Node that Scoop or Chocolatey installed are npm's.
+        assert_eq!(
+            p(r"C:\Users\me\scoop\apps\nodejs\current\bin\node_modules\@openai\codex\bin\codex.js"),
+            Install::Npm { package: "@openai/codex".into(), prefix: r"C:\Users\me\scoop\apps\nodejs\current\bin".into() }
+        );
+        // A folder that merely has a manager's name later on isn't its install.
+        assert_eq!(p(r"C:\Users\me\scoop\notes\opencode.exe"), Install::Native);
+        assert_eq!(p(r"C:\ProgramData\chocolatey\bin\sub\opencode.exe"), Install::Native);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn scoop_and_chocolatey_only_count_for_the_agents_own_packages() {
+        let (scoop, choco) = (|a: &str| Install::Scoop { app: a.into() }, |p: &str| Install::Chocolatey { package: p.into() });
+        assert!(h("opencode").owns(&scoop("opencode")) && h("opencode").owns(&choco("opencode")));
+        assert!(h("claude-code").owns(&scoop("claude-code")) && h("claude-code").owns(&choco("claude-code")));
+        assert!(!h("opencode").owns(&scoop("7zip")), "another app");
+        assert!(!h("codex").owns(&choco("opencode")), "another agent's package");
+        // Not the agent's: the vendor's own install, as WinGet's other ids are.
+        assert_eq!(h("opencode").reading(choco("fzf")), Install::Native);
+        assert_eq!(h("opencode").reading(scoop("fzf")), Install::Native);
+        assert_eq!(h("opencode").reading(choco("opencode")), choco("opencode"));
+        assert_eq!((scoop("x").label(), choco("x").label()), ("Scoop", "Chocolatey"));
+        // Their versions are the vendor's feed's, as WinGet's are.
+        assert_eq!(source(h("claude-code"), &choco("claude-code"), None), Some(Source::Chocolatey("claude-code".into())));
+        assert_eq!(source(h("opencode"), &scoop("opencode"), Some("1.2.27")), Some(Source::Npm("opencode-ai".into())));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_scoop_shim_is_read_for_the_app_it_runs() {
+        let shim = "path = \"C:\\Users\\me\\scoop\\apps\\7zip\\current\\7z.exe\"\r\n";
+        assert_eq!(scoop_shim_target(shim).unwrap(), Path::new(r"C:\Users\me\scoop\apps\7zip\current\7z.exe"));
+        assert_eq!(scoop_shim_target("path = C:\\x\\y.exe\r\nargs = --a\r\n").unwrap(), Path::new(r"C:\x\y.exe"));
+        assert_eq!(scoop_shim_target("args = --a\r\n"), None);
+        assert_eq!(scoop_shim_target("path = \"relative\\y.exe\""), None);
+        // From disk: the shim's name isn't the app's (`7z.exe` is the app `7zip`'s).
+        let root = std::env::temp_dir().join(format!("trek-scoop-shim-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
+        let shims = root.join(r"scoop\shims");
+        std::fs::create_dir_all(&shims).unwrap();
+        std::fs::write(shims.join("7z.exe"), "").unwrap();
+        std::fs::write(shims.join("7z.shim"), format!("path = \"{}\"\r\n", root.join(r"scoop\apps\7zip\current\7z.exe").display())).unwrap();
+        assert_eq!(detect_install(&shims.join("7z.exe")), Install::Scoop { app: "7zip".into() });
+        // No `.shim` beside it: named as the shim is.
+        std::fs::write(shims.join("opencode.exe"), "").unwrap();
+        assert_eq!(detect_install(&shims.join("opencode.exe")), Install::Scoop { app: "opencode".into() });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn of_two_installs_the_one_first_on_the_path_is_the_one_updated() {
+        // Claude Code twice, as on a real machine: WinGet's package folder and Claude's own installer.
+        let root = std::env::temp_dir().join(format!("trek-two-installs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let winget = root.join(r"Microsoft\WinGet\Packages\Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe");
+        let native = root.join(r".local\bin");
+        let (scoop, choco) = (root.join(r"scoop\shims"), root.join(r"ProgramData\chocolatey\bin"));
+        for (dir, file) in [(&winget, "claude.exe"), (&native, "claude.exe"), (&scoop, "opencode.exe"), (&choco, "opencode.exe")] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(file), "").unwrap();
+        }
+        let path = |dirs: &[&Path]| std::env::join_paths(dirs).unwrap().to_string_lossy().into_owned();
+        let picked = |dirs: &[&Path], binary: &str| {
+            let found = crate::detect::which_in(&path(dirs), binary).unwrap();
+            (detect_install(&found), found)
+        };
+        let (install, found) = picked(&[&winget, &native], "claude");
+        assert_eq!((install, found), (Install::Winget { id: "Anthropic.ClaudeCode".into() }, winget.join("claude.exe")));
+        let (install, found) = picked(&[&native, &winget], "claude");
+        assert_eq!((install, found), (Install::Native, native.join("claude.exe")));
+        // OpenCode twice: Scoop's shim and Chocolatey's.
+        let (install, found) = picked(&[&choco, &scoop], "opencode");
+        assert_eq!((install, found), (Install::Chocolatey { package: "opencode".into() }, choco.join("opencode.exe")));
+        let (install, found) = picked(&[&scoop, &choco], "opencode");
+        assert_eq!((install, found), (Install::Scoop { app: "opencode".into() }, scoop.join("opencode.exe")));
+        // And what is updated follows: the install on the PATH, by its own owner.
+        let command = |install: Install, binary: PathBuf, agent: &str| update_command(h(agent), &install, &binary, false, None).unwrap();
+        let first = command(Install::Native, native.join("claude.exe"), "claude-code");
+        assert_eq!((first.program.as_path(), first.args.as_slice()), (native.join("claude.exe").as_path(), &["update".to_string()][..]));
+        let second = command(Install::Winget { id: "Anthropic.ClaudeCode".into() }, winget.join("claude.exe"), "claude-code");
+        assert_eq!(second.program, Path::new("winget"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn each_windows_install_updates_through_its_own_manager() {
+        let bin = |s: &str| PathBuf::from(s);
+        // Scoop: its own `scoop update <app>`, run by Trek as it is.
+        let scoop = update_command(h("opencode"), &Install::Scoop { app: "opencode".into() }, &bin(r"C:\Users\me\scoop\shims\opencode.exe"), false, Some("1.2.27")).unwrap();
+        assert_eq!((scoop.shown().as_str(), scoop.elevated), ("scoop update opencode", false));
+        assert_eq!(scoop.program, Path::new("scoop"));
+        // A machine-wide Scoop (ProgramData) updates as an administrator: run by Trek, Windows asking.
+        let global = update_command(h("opencode"), &Install::Scoop { app: "opencode".into() }, &bin(r"C:\ProgramData\scoop\shims\opencode.exe"), false, None).unwrap();
+        assert_eq!((global.shown().as_str(), global.elevated), ("scoop update opencode -g", true));
+        // Chocolatey: `choco upgrade <package> -y`, as an administrator.
+        let choco = update_command(h("opencode"), &Install::Chocolatey { package: "opencode".into() }, &bin(r"C:\ProgramData\chocolatey\bin\opencode.exe"), false, None).unwrap();
+        assert_eq!((choco.shown().as_str(), choco.elevated), ("choco upgrade opencode -y --no-progress", true));
+        assert_eq!(choco.program, Path::new("choco"));
+        // WinGet: for the user it's run as it is, machine-wide as an administrator; both with
+        // their failures said in words.
+        let winget = Install::Winget { id: "Anthropic.ClaudeCode".into() };
+        let user = update_command(h("claude-code"), &winget, &bin(r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\Anthropic.ClaudeCode_x\claude.exe"), false, None).unwrap();
+        assert!(!user.elevated && user.on_exit.iter().any(|(code, _)| *code == -1978335189));
+        let machine = update_command(h("claude-code"), &winget, &bin(r"C:\Program Files\WinGet\Links\claude.exe"), false, None).unwrap();
+        assert_eq!(machine.shown(), "winget upgrade --id Anthropic.ClaudeCode --exact --accept-package-agreements --accept-source-agreements --disable-interactivity");
+        assert!(machine.elevated && machine.on_exit.iter().any(|(code, _)| *code == -1978335189));
+        // The native installer's own `claude update` is run by Trek as before.
+        let native = update_command(h("claude-code"), &Install::Native, &bin(r"C:\Users\me\.local\bin\claude.exe"), false, None).unwrap();
+        assert!(!native.elevated && native.args == ["update"]);
+        // No Windows arm is the user's to run any more.
+        for cmd in [&scoop, &global, &choco, &user, &machine, &native] {
+            assert_eq!(cmd.manual, None, "{}", cmd.shown());
+        }
+    }
+
+    #[test]
+    fn nothing_runs_as_an_administrator_on_macos() {
+        // Paths that would need an administrator on Windows mean nothing on macOS.
+        let choco = update_command(h("opencode"), &Install::Chocolatey { package: "opencode".into() }, Path::new("/ProgramData/chocolatey/bin/opencode"), false, None).unwrap();
+        let winget = update_command(h("claude-code"), &Install::Winget { id: "Anthropic.ClaudeCode".into() }, Path::new("/Program Files/WinGet/Links/claude"), false, None).unwrap();
+        assert_eq!((choco.elevated, winget.elevated), (cfg!(windows), cfg!(windows)));
+        let brew = update_command(h("opencode"), &Install::Brew { formula: "opencode".into(), prefix: "/opt/homebrew".into(), tap: None }, Path::new("/opt/homebrew/bin/opencode"), false, None).unwrap();
+        assert!(!brew.elevated && brew.builtin.is_none());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn devin_on_windows_is_updated_from_its_release_bundle_by_trek() {
+        // `devin update` on an `irm | iex` install exits 0 having done nothing, printing
+        // "To update, run: irm https://cli.devin.ai/install.ps1 | iex"; that installer ends in
+        // Devin's interactive setup wizard. Trek installs the bundle the installer would.
+        let root = std::env::temp_dir().join(format!("trek-devin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cli = root.join(r"devin\cli");
+        std::fs::create_dir_all(cli.join("bin")).unwrap();
+        let binary = cli.join(r"bin\devin.exe");
+        let devin = |install: &Install| update_command(h("acp:devin"), install, &binary, false, Some("3000.11.1")).unwrap();
+        // No marker (an install of another kind, or an older one): its own `devin update`.
+        assert_eq!(devin(&Install::Native).args, ["update"]);
+        std::fs::write(cli.join("distribution"), "irm-iex\n").unwrap();
+        let cmd = devin(&Install::Native);
+        assert_eq!((cmd.builtin, cmd.program.as_path(), cmd.elevated), (Some(Builtin::DevinBundle), binary.as_path(), false));
+        assert_eq!(cmd.shown(), "Devin's installer steps, without its setup wizard");
+        // An enterprise portal's install updates through its own updater: `devin update`.
+        std::fs::write(cli.join("distribution"), "enterprise-portal").unwrap();
+        assert_eq!(devin(&Install::Native).args, ["update"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn winget_failures_are_said_in_words() {
+        let claude = h("claude-code");
+        let said = |code: u32| winget_exits(claude).into_iter().find(|(c, _)| *c == code as i32).map(|(_, m)| m);
+        // 0x8A15002B: nothing newer in WinGet's source index yet, which follows winget-pkgs by hours.
+        assert_eq!(said(0x8A15002B).as_deref(), Some("WinGet's package list doesn't have this version of Claude Code yet. Trek tries again on its next check."));
+        for code in [0x8A150019, 0x8A150010, 0x8A150008, 0x8A150045, 0x8A15004B, 0x8A150101, 0x8A150103] {
+            assert!(said(code).is_some_and(|m| !m.is_empty()), "{code:#X}");
+        }
+        // Nothing for the user to type.
+        assert!(winget_exits(claude).iter().all(|(_, m)| !m.contains('`')), "{:?}", winget_exits(claude));
+        // Any other Windows status is shown the way its documentation writes it.
+        assert_eq!(code_words(-1978335189), "code 0x8A15002B (-1978335189)");
+        assert_eq!(code_words(1), "code 1");
+        assert_eq!(code_words(243), "code 243");
+    }
+
+    #[test]
+    fn an_update_that_changed_nothing_says_what_the_updater_said() {
+        let v = version("devin", "3000.11.1", Some("3000.11.3"));
+        let output = "⡆⠀ Checking for updates... · 0s (esc twice to interrupt)\n◆ To update, run: irm https://cli.devin.ai/install.ps1 | iex";
+        let Outcome::Failed { summary, output: kept } = verify(&v, Some("3000.11.1".into()), output.into()) else { panic!() };
+        assert_eq!(summary, "devin is still at 3000.11.1 after the update. It said: ⡆⠀ Checking for updates... · 0s (esc twice to interrupt) / ◆ To update, run: irm https://cli.devin.ai/install.ps1 | iex");
+        assert_eq!(kept, output, "the card's output is all of it");
+        // Only the last lines, not a page of progress.
+        let long = (1..=10).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+        let Outcome::Failed { summary, .. } = verify(&v, None, long) else { panic!() };
+        assert_eq!(summary, "devin didn't say its version after the update. It said: line 8 / line 9 / line 10");
+        // Nothing said, nothing added.
+        let Outcome::Failed { summary, .. } = verify(&v, Some("3000.11.1".into()), "\n  \n".into()) else { panic!() };
+        assert_eq!(summary, "devin is still at 3000.11.1 after the update.");
+    }
+
+    #[test]
+    fn what_a_command_printed_is_kept_whole_stdout_then_stderr() {
+        // An unfinished progress line on stdout mustn't swallow the first words of stderr.
+        assert_eq!(all_output(b"\x1b[32mChecking\x1b[0m...", b" \xe2\x97\x86 To update, run: x\r\n"), "Checking...\n\u{25c6} To update, run: x");
+        assert_eq!(all_output(b"", b"npm error code EACCES\n"), "npm error code EACCES");
+        assert_eq!(all_output(b"ok\n", b""), "ok");
+    }
+
+    #[test]
+    fn commands_an_older_trek_left_to_the_user_are_worked_out_again() {
+        // Snapshots written before commands ran as an administrator still load.
+        let old: UpdateCommand = serde_json::from_value(serde_json::json!({ "program": "claude", "args": ["update"] })).unwrap();
+        assert_eq!(old, UpdateCommand::new("claude", &["update"]));
+        // One an older Trek left to the user loads too (its `manual`), and is never written back.
+        let manual = serde_json::json!({ "program": "choco", "args": ["upgrade", "opencode", "-y"], "manual": "OpenCode is installed with Chocolatey, which upgrades only from an administrator terminal." });
+        let choco: UpdateCommand = serde_json::from_value(manual.clone()).unwrap();
+        assert!(choco.manual.is_some() && !choco.elevated);
+        assert_eq!(serde_json::to_value(&choco).unwrap(), serde_json::json!({ "program": "choco", "args": ["upgrade", "opencode", "-y"], "path": [], "env": [] }));
+        // Loaded from the cache, it's dropped: run as it was, it would fail without an
+        // administrator; the next check works out the command that runs as one.
+        let dir = std::env::temp_dir().join(format!("trek-old-snapshot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::paths::isolate_thread(dir.clone());
+        let mut agents = serde_json::to_value(vec![version("opencode", "1.2.27", Some("1.3.0")), version("codex", "0.159.2", Some("0.160.0"))]).unwrap();
+        agents[0]["command"] = manual;
+        agents[1]["command"] = serde_json::json!({ "program": "npm", "args": ["install", "-g", "@openai/codex@latest"] });
+        std::fs::write(crate::paths::data_dir().join("agent-versions.json"), serde_json::json!({ "checked_at": 1, "agents": agents }).to_string()).unwrap();
+        let snap = Snapshot::load();
+        assert_eq!(snap.agents[0].command, None);
+        assert_eq!(snap.agents[1].command.as_ref().map(|c| c.shown()).as_deref(), Some("npm install -g @openai/codex@latest"), "others stay");
+        // Round trips with the new fields.
+        let elevated = AgentVersion { command: Some(UpdateCommand::new("choco", &["upgrade", "opencode", "-y"]).as_admin()), ..version("opencode", "1.2.27", Some("1.3.0")) };
+        let bundle = AgentVersion { command: Some(UpdateCommand { builtin: Some(Builtin::DevinBundle), ..UpdateCommand::new(r"C:\x\devin.exe", &[]) }), ..version("devin", "1", Some("2")) };
+        for v in [elevated, bundle] {
+            let back: AgentVersion = serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
+            assert_eq!(back, v);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn devins_manifest_names_the_bundle_to_install_and_nothing_unsafe() {
+        let sha = "dded69a40dc54012612eda47e0935f2fb394b97cd38cb4d7d84b1e1d71c5f7ea";
+        let manifest = |version: &str, url: &str, sha: &str| serde_json::json!({ "version": version, "platforms": { "x86_64-pc-windows": { "url": url, "sha256": sha } } }).to_string();
+        let url = "https://static.devin.ai/cli/3000.11.3/devin-3000.11.3-x86_64-pc-windows.zip";
+        let bundle = |m: &str| devin_bundle(m, "x86_64-pc-windows", DEVIN_HOST);
+        assert_eq!(bundle(&manifest("3000.11.3", url, sha)), Some(Bundle { version: "3000.11.3".into(), url: url.into(), sha256: sha.into() }));
+        assert_eq!(devin_bundle(&manifest("3000.11.3", url, sha), "aarch64-pc-windows", DEVIN_HOST), None, "no bundle for that platform");
+        assert_eq!(bundle(&manifest(r"..\..\x", url, sha)), None, "a version is a folder name");
+        assert_eq!(bundle(&manifest("3000.11.3", "https://example.com/devin.zip", sha)), None, "Devin's own host only");
+        assert_eq!(bundle(&manifest("3000.11.3", "https://static.devin.ai/../evil.zip", sha)), None);
+        assert_eq!(bundle(&manifest("3000.11.3", url, "abc")), None, "a SHA-256");
+        // Without its checksum a bundle isn't installed, nor is the vendor's script run in its place.
+        assert_eq!(bundle(&serde_json::json!({ "version": "3000.11.3", "platforms": { "x86_64-pc-windows": { "url": url } } }).to_string()), None);
+        assert_eq!(bundle("not json"), None);
+        assert_eq!(bundle(&manifest("3000.11.3", url, &sha.to_uppercase())).map(|b| b.sha256).as_deref(), Some(sha), "compared in lower case");
+    }
+
+    /// A zip with `files` in it, and the manifest naming it (as `url`) for both Windows platforms.
+    #[cfg(windows)]
+    fn serve_bundle(dir: &Path, version: &str, files: &[(&str, &[u8])], sha256: Option<&str>) -> String {
+        use std::io::Write as _;
+        use sha2::Digest as _;
+        std::fs::create_dir_all(dir).unwrap();
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(dir.join("devin.zip")).unwrap());
+        for (name, bytes) in files {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap();
+        let sha = hex::encode(sha2::Sha256::digest(std::fs::read(dir.join("devin.zip")).unwrap()));
+        let base = serve(dir);
+        let platform = serde_json::json!({ "url": format!("{base}/devin.zip"), "sha256": sha256.unwrap_or(&sha) });
+        std::fs::write(dir.join("manifest.json"), serde_json::json!({ "version": version, "platforms": { "x86_64-pc-windows": platform, "aarch64-pc-windows": platform } }).to_string()).unwrap();
+        base
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_devin_bundle_is_checked_unpacked_and_put_where_the_installer_puts_it() {
+        let root = std::env::temp_dir().join(format!("trek-devin-bundle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cli = root.join(r"devin\cli");
+        std::fs::create_dir_all(cli.join("bin")).unwrap();
+        std::fs::write(cli.join("distribution"), "irm-iex\n").unwrap();
+        // The install as it is: a running program of the old version, the vendor's real shape
+        // (the fixture binary stands in, and answers `sleep`).
+        let entry = cli.join(r"bin\devin.exe");
+        let program = std::fs::read(trek_test_fixtures::bin("fixture")).unwrap();
+        std::fs::write(&entry, &program).unwrap();
+        let mut running = KillOnDrop(crate::procs::command(&entry).args(["sleep", "60"]).stdin(std::process::Stdio::null()).spawn().unwrap());
+        // The new version's bundle: the program with a byte more, and a file beside it.
+        let new_program = [program.as_slice(), b"\0"].concat();
+        let base = serve_bundle(&root.join("served"), "9000.1.2", &[("bin/devin.exe", &new_program), ("bin/readme.txt", b"hi")], None);
+        let manifest = format!("{base}/manifest.json");
+        let said = crate::runtime().block_on(install_devin_bundle(&entry, &manifest, "http://127.0.0.1:")).unwrap();
+        assert!(said.contains("SHA-256 matches") && said.contains("Copied it to"), "{said}");
+        // Where the installer puts it: `_versions\<version>\bin\devin.exe`, copied over the entry
+        // point (which was running, and is replaced all the same); nothing left over.
+        assert_eq!(std::fs::read(cli.join(r"_versions\9000.1.2\bin\devin.exe")).unwrap(), new_program);
+        assert_eq!(std::fs::read(cli.join(r"_versions\9000.1.2\bin\readme.txt")).unwrap(), b"hi");
+        assert_eq!(std::fs::read(&entry).unwrap(), new_program);
+        assert!(running.0.try_wait().unwrap().is_none(), "the old one runs on");
+        let names = |dir: PathBuf| std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert_eq!(names(cli.join("_versions")), ["9000.1.2"]);
+        assert_eq!(std::fs::read_to_string(cli.join("distribution")).unwrap(), "irm-iex\n", "its marker is left as it is");
+        // Once more (the same version, unpacked already): the entry point is made again from it.
+        std::fs::write(&entry, b"damaged").unwrap();
+        let said = crate::runtime().block_on(install_devin_bundle(&entry, &manifest, "http://127.0.0.1:")).unwrap();
+        assert!(said.contains("Already unpacked"), "{said}");
+        assert_eq!(std::fs::read(&entry).unwrap(), new_program);
+        // A bundle that isn't the one the manifest says isn't installed, and leaves nothing behind.
+        std::fs::write(&entry, &program).unwrap();
+        let base = serve_bundle(&root.join("bad"), "9000.1.3", &[("bin/devin.exe", &new_program)], Some(&"0".repeat(64)));
+        let Err(why) = crate::runtime().block_on(install_devin_bundle(&entry, &format!("{base}/manifest.json"), "http://127.0.0.1:")) else { panic!("installed") };
+        assert!(why.contains("doesn't match the SHA-256"), "{why}");
+        assert_eq!(std::fs::read(&entry).unwrap(), program, "the install is as it was");
+        assert_eq!(names(cli.join("_versions")), ["9000.1.2"]);
+        // One from another host isn't downloaded at all; nor is one with no program in it.
+        let Err(why) = crate::runtime().block_on(install_devin_bundle(&entry, &manifest, "https://static.devin.ai/")) else { panic!("installed") };
+        assert!(why.contains("names no bundle"), "{why}");
+        let base = serve_bundle(&root.join("empty"), "9000.1.4", &[("readme.txt", b"hi")], None);
+        let Err(why) = crate::runtime().block_on(install_devin_bundle(&entry, &format!("{base}/manifest.json"), "http://127.0.0.1:")) else { panic!("installed") };
+        assert!(why.contains("has no bin\\devin.exe"), "{why}");
+        assert_eq!(std::fs::read(&entry).unwrap(), program);
+        assert_eq!(names(cli.join("_versions")), ["9000.1.2"]);
+        drop(running);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A child process, killed (and waited for) when it goes.
+    #[cfg(windows)]
+    struct KillOnDrop(std::process::Child);
+
+    #[cfg(windows)]
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_running_program_is_moved_aside_to_be_replaced() {
+        let root = std::env::temp_dir().join(format!("trek-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let (new, entry) = (root.join("new.exe"), root.join(r"bin\devin.exe"));
+        std::fs::write(&new, "new").unwrap();
+        std::fs::write(&entry, "old").unwrap();
+        // One an earlier update couldn't remove while it ran.
+        std::fs::write(root.join(r"bin\devin.exe.old-1"), "older").unwrap();
+        replace_entry(&new, &entry).unwrap();
+        assert_eq!(std::fs::read_to_string(&entry).unwrap(), "new");
+        let left: Vec<_> = std::fs::read_dir(root.join("bin")).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, ["devin.exe"], "nothing left aside");
+        // Nothing to copy: the old one is put back.
+        let Err(e) = replace_entry(&root.join("missing.exe"), &entry) else { panic!() };
+        assert!(e.starts_with("Couldn't copy the new version"), "{e}");
+        assert_eq!(std::fs::read_to_string(&entry).unwrap(), "new");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A fake CLI at `dir\claude.cmd` that says the version in `dir\version.txt`, as `claude --version`
+    /// does (the file is what an updater changes).
+    #[cfg(windows)]
+    fn fake_cli(dir: &Path, version: &str) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("version.txt"), version).unwrap();
+        let cli = dir.join("claude.cmd");
+        std::fs::write(&cli, "@echo off\r\ntype \"%~dp0version.txt\"\r\n").unwrap();
+        cli
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_updates_are_verified_on_the_install_that_was_updated() {
+        let root = std::env::temp_dir().join(format!("trek-verify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cli = fake_cli(&root.join("updated"), "2.1.1");
+        // Asked at the install's own path, not wherever `claude` is first found on the PATH (the
+        // real one on this computer, here): another install must not answer for it.
+        // An updater that writes the new version, as `claude update` does for its own install.
+        let updater = root.join("updater.cmd");
+        std::fs::write(&updater, format!("@echo off\r\necho 2.1.2> \"{}\"\r\necho updated\r\n", root.join(r"updated\version.txt").display())).unwrap();
+        let v = AgentVersion { id: "claude".into(), binary: cli, command: Some(UpdateCommand::new(&updater, &[])), ..version("claude", "2.1.1", Some("2.1.2")) };
+        let outcome = crate::runtime().block_on(run_update_settling(&v, (0, Duration::ZERO)));
+        assert_eq!(outcome, Outcome::Updated { version: "2.1.2".into(), output: "updated".into() });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn an_updater_that_changes_nothing_shows_its_words_not_just_a_version() {
+        let root = std::env::temp_dir().join(format!("trek-nochange-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cli = fake_cli(&root.join("bin"), "3000.11.1");
+        let updater = root.join("updater.cmd");
+        // Devin's `update` on an installer-made install: all of it on stderr, exit 0.
+        std::fs::write(&updater, "@echo off\r\necho Checking for updates...\r\n>&2 echo To update, run: irm https://cli.devin.ai/install.ps1 ^| iex\r\n").unwrap();
+        let v = AgentVersion { id: "claude".into(), binary: cli, command: Some(UpdateCommand::new(&updater, &[])), ..version("claude", "3000.11.1", Some("3000.11.3")) };
+        let Outcome::Failed { summary, output } = crate::runtime().block_on(run_update_settling(&v, (1, Duration::from_millis(20)))) else { panic!() };
+        assert_eq!(summary, "claude is still at 3000.11.1 after the update. It said: Checking for updates... / To update, run: irm https://cli.devin.ai/install.ps1 | iex");
+        assert_eq!(output, "Checking for updates...\nTo update, run: irm https://cli.devin.ai/install.ps1 | iex");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_version_that_arrives_after_the_updater_exits_is_waited_for() {
+        // An updater may hand the replacing to a process that outlives it: the version changes on
+        // the third time it's asked, not the first.
+        let root = std::env::temp_dir().join(format!("trek-settle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let cli = root.join("claude.cmd");
+        let script = "@echo off\r\nset n=0\r\nif exist \"%~dp0count.txt\" set /p n=<\"%~dp0count.txt\"\r\nset /a n+=1\r\n>\"%~dp0count.txt\" echo %n%\r\nif %n% GEQ 3 (echo 2.1.2) else (echo 2.1.1)\r\n";
+        std::fs::write(&cli, script).unwrap();
+        let v = version("claude", "2.1.1", Some("2.1.2"));
+        let claude = h("claude-code");
+        let waited = crate::runtime().block_on(settled_version(&v, claude, &cli, 5, Duration::from_millis(20)));
+        assert_eq!(waited.as_deref(), Some("2.1.2"));
+        assert_eq!(std::fs::read_to_string(root.join("count.txt")).unwrap().trim(), "3", "asked until it changed, then no more");
+        // Given no time to wait, the old version stands.
+        std::fs::write(root.join("count.txt"), "0").unwrap();
+        assert_eq!(crate::runtime().block_on(settled_version(&v, claude, &cli, 0, Duration::ZERO)).as_deref(), Some("2.1.1"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// How many times `counted` started a script.
+    #[cfg(windows)]
+    static LAUNCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// The elevated script run as it is (tests never bring up a UAC prompt), counted.
+    #[cfg(windows)]
+    fn counted(script: &Path, limit: Duration) -> Result<u32, crate::elevated::Failure> {
+        LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        crate::elevated::run_plain(script, limit)
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn updates_run_as_an_administrator_go_together_in_one_script() {
+        use crate::elevated::Failure;
+        let root = std::env::temp_dir().join(format!("trek-elevated-updates-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        crate::paths::isolate_thread(root.join("data"));
+        // Two installs, in folders with what cmd.exe would read as operators; their package manager
+        // a script that upgrades one and fails the other with WinGet's "nothing newer".
+        let odd = root.join("Program Files (x86) & 100%");
+        std::fs::create_dir_all(&odd).unwrap();
+        let (a, b) = (fake_cli(&root.join(r"clis\a"), "1.0.0"), fake_cli(&root.join(r"clis\b"), "1.18.32"));
+        let manager = odd.join("manager.cmd");
+        // Its arguments arrive quoted (`"upgrade"`), as Trek's script passes every one: `%~1`.
+        let script = format!("@echo off\r\nif \"%~1\"==\"upgrade\" (\r\n  >\"{}\" echo 2.0.0\r\n  echo upgraded %~2\r\n  exit /b 0\r\n)\r\necho No newer package found.\r\nexit /b -1978335189\r\n", root.join(r"clis\a\version.txt").display());
+        std::fs::write(&manager, script).unwrap();
+        let admin = |args: &[&str], on_exit: Vec<(i32, String)>| Some(UpdateCommand { on_exit, ..UpdateCommand::new(&manager, args).as_admin() });
+        let rows = [
+            AgentVersion { id: "claude".into(), binary: a, command: admin(&["upgrade", "claude-code"], vec![]), ..version("claude", "1.0.0", Some("2.0.0")) },
+            AgentVersion { id: "opencode".into(), binary: b, command: admin(&["nothing"], winget_exits(h("claude-code"))), ..version("opencode", "1.18.32", Some("1.18.34")) },
+            // Its program isn't there: answered without running anything.
+            AgentVersion { command: Some(UpdateCommand::new(odd.join("gone.exe"), &["upgrade"]).as_admin()), ..version("fake", "1", Some("2")) },
+        ];
+        let before = LAUNCHES.load(std::sync::atomic::Ordering::SeqCst);
+        let outcomes = crate::runtime().block_on(run_elevated_with(&rows, (0, Duration::ZERO), counted));
+        assert_eq!(LAUNCHES.load(std::sync::atomic::Ordering::SeqCst) - before, 1, "one script, so one prompt");
+        assert_eq!(outcomes[0], Outcome::Updated { version: "2.0.0".into(), output: "upgraded claude-code".into() });
+        let Outcome::Failed { summary, output } = &outcomes[1] else { panic!("{:?}", outcomes[1]) };
+        assert!(summary.starts_with("WinGet's package list doesn't have this version of Claude Code yet"), "{summary}");
+        assert_eq!(output, "No newer package found.", "each step's own output");
+        assert_eq!(outcomes[2], Outcome::Failed { summary: format!("{} isn't installed.", odd.join("gone.exe").display()), output: String::new() });
+        // Its files are cleared away.
+        assert_eq!(std::fs::read_dir(root.join(r"data\tmp")).unwrap().count(), 0);
+
+        // The prompt declined: said so for each, and never as a line to copy.
+        fn cancelled(_: &Path, _: Duration) -> Result<u32, Failure> {
+            Err(Failure::Cancelled)
+        }
+        let outcomes = crate::runtime().block_on(run_elevated_with(&rows[..2], (0, Duration::ZERO), cancelled));
+        for o in &outcomes {
+            assert_eq!(*o, Outcome::Failed { summary: "Windows didn't allow it (the prompt was cancelled).".into(), output: String::new() });
+        }
+        // Nobody there: the prompt gave up (Windows says the same as for a "No", only later).
+        fn unanswered(_: &Path, _: Duration) -> Result<u32, Failure> {
+            Err(Failure::Unanswered)
+        }
+        let outcomes = crate::runtime().block_on(run_elevated_with(&rows[..1], (0, Duration::ZERO), unanswered));
+        assert_eq!(outcomes[0], Outcome::Failed { summary: "Windows's prompt went unanswered for two minutes. Try Update again when you're at the computer.".into(), output: String::new() });
+        assert!(matches!(crate::elevated::refused(Duration::from_secs(4)), Failure::Cancelled));
+        assert!(matches!(crate::elevated::refused(Duration::from_secs(122)), Failure::Unanswered));
+        // Past its time, with what it started out of Trek's reach.
+        fn stuck(_: &Path, _: Duration) -> Result<u32, Failure> {
+            Err(Failure::TimedOut { ended: false })
+        }
+        let Outcome::Failed { summary, .. } = &crate::runtime().block_on(run_elevated_with(&rows[..1], (0, Duration::ZERO), stuck))[0] else { panic!() };
+        assert!(summary.contains("took longer than 15 minutes") && summary.contains("may still be running"), "{summary}");
+        // One update on its own (an Update button) goes through the same script.
+        assert!(rows[0].command.as_ref().is_some_and(|c| c.elevated));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An administrator's command is only ever the package manager's own upgrade of the install
+    /// Trek found, worked out again when it runs: the rows are read from a file in the data folder,
+    /// which a program of the user's can write.
+    #[test]
+    #[cfg(windows)]
+    fn only_the_package_managers_own_upgrade_runs_as_an_administrator() {
+        let binary = PathBuf::from(r"C:\ProgramData\chocolatey\bin\opencode.exe");
+        let install = Install::Chocolatey { package: "opencode".into() };
+        let own = update_command(h("opencode"), &install, &binary, false, Some("1.2.27")).unwrap();
+        assert!(own.elevated);
+        let row = |command: UpdateCommand, install: Install| AgentVersion { id: "opencode".into(), binary: binary.clone(), install, command: Some(command), ..version("opencode", "1.2.27", Some("1.3.0")) };
+        assert!(is_what_trek_would_run(&row(own.clone(), install.clone())));
+        // Anything else in the file is not run: another program, other arguments, another folder
+        // of programs or variable, another package, the same row asking for more.
+        let swaps: [UpdateCommand; 5] = [
+            UpdateCommand { program: r"C:\Users\me\evil.exe".into(), ..own.clone() },
+            UpdateCommand { args: [own.args.clone(), vec!["--source".into(), "http://evil".into()]].concat(), ..own.clone() },
+            UpdateCommand { path: vec![r"C:\Users\me\evil".into()], ..own.clone() },
+            UpdateCommand { env: vec![("PATHEXT".into(), ".evil".into())], ..own.clone() },
+            UpdateCommand::new("cmd", &["/c", "calc"]).as_admin(),
+        ];
+        for swapped in swaps {
+            assert!(!is_what_trek_would_run(&row(swapped.clone(), install.clone())), "{:?}", swapped.shown());
+            // Said so, and nothing run (this would bring up a prompt if it ran).
+            let Outcome::Failed { summary, output } = crate::runtime().block_on(run_elevated(&[row(swapped.clone(), install.clone())])).remove(0) else { panic!() };
+            assert!(summary.starts_with("Trek didn't run the update of opencode: its command isn't the one Trek works out"), "{summary}");
+            assert_eq!(output, "");
+            assert!(matches!(crate::runtime().block_on(run_update(&row(swapped, install.clone()))), Outcome::Failed { .. }));
+        }
+        // A package that isn't the agent's, an agent Trek doesn't know, and no command at all.
+        let evil = Install::Chocolatey { package: "evil-package".into() };
+        assert!(!is_what_trek_would_run(&row(UpdateCommand::new("choco", &["upgrade", "evil-package", "-y"]).as_admin(), evil)));
+        assert!(!is_what_trek_would_run(&AgentVersion { id: "fake".into(), ..row(own.clone(), install.clone()) }));
+        assert!(!is_what_trek_would_run(&AgentVersion { command: None, ..row(own, install) }));
+    }
+
+    /// Serve the files in `dir` on 127.0.0.1; their base URL.
+    #[cfg(windows)]
+    fn serve(dir: &Path) -> String {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let dir = dir.to_path_buf();
+        std::thread::spawn(move || trek_test_fixtures::serve::serve(listener, dir));
+        format!("http://127.0.0.1:{port}")
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_windows_status_code_is_said_in_words_when_the_command_stops() {
+        let root = std::env::temp_dir().join(format!("trek-exit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let fake = |name: &str, code: i32| {
+            let file = root.join(name);
+            std::fs::write(&file, format!("@echo off\r\necho some output\r\n>&2 echo some error\r\nexit /b {code}\r\n")).unwrap();
+            file
+        };
+        // WinGet's 0x8A15002B, as the command says it.
+        let winget = UpdateCommand { on_exit: winget_exits(h("claude-code")), ..UpdateCommand::new(fake("winget.cmd", -1978335189), &[]) };
+        let v = AgentVersion { command: Some(winget), ..version("fake", "2.1.292", Some("2.1.296")) };
+        let Outcome::Failed { summary, output } = crate::runtime().block_on(run_update(&v)) else { panic!() };
+        assert!(summary.starts_with("WinGet's package list doesn't have this version of Claude Code yet"), "{summary}");
+        assert_eq!(output, "some output\nsome error", "Show output holds stdout and stderr");
+        // A status nobody gave words to: its hex, as WinGet's documentation lists them.
+        let other = AgentVersion { command: Some(UpdateCommand::new(fake("other.cmd", -1978335140), &[])), ..version("fake", "1", Some("2")) };
+        let Outcome::Failed { summary, .. } = crate::runtime().block_on(run_update(&other)) else { panic!() };
+        assert!(summary.ends_with("stopped with code 0x8A15005C (-1978335140)."), "{summary}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn homebrew_is_not_looked_for_on_windows() {
+        // The code stays; a Windows path just can't be Homebrew's, whatever its folders are called.
+        let keg = install_of(Path::new("/opt/homebrew/Cellar/opencode/1.18.34/bin/opencode"));
+        let cask = install_of(Path::new("/opt/homebrew/Caskroom/copilot-cli/1.0.69/copilot"));
+        if cfg!(windows) {
+            assert_eq!((keg, cask), (Install::Native, Install::Native));
+        } else {
+            assert!(matches!(keg, Install::Brew { .. }) && matches!(cask, Install::Cask { .. }));
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_cmd_shim_is_read_for_the_package_it_runs() {
+        let at = Path::new(r"C:\nvm\v22.3.0\codex.cmd");
+        let target = cmd_shim_target(at, CODEX_CMD).unwrap();
+        assert_eq!(target, Path::new(r"C:\nvm\v22.3.0\node_modules\@openai\codex\bin\codex.js"));
+        assert_eq!(install_of(&target), Install::Npm { package: "@openai/codex".into(), prefix: r"C:\nvm\v22.3.0".into() });
+        // Older cmd-shim's `%~dp0\`, and a script reached through `..` (a prefix with `lib`).
+        let old = "@IF EXIST \"%~dp0\\node.exe\" (\r\n  \"%~dp0\\node.exe\"  \"%~dp0\\..\\lib\\node_modules\\pi-acp\\dist\\index.js\" %*\r\n)\r\n";
+        assert_eq!(cmd_shim_target(Path::new(r"C:\x\bin\pi-acp.cmd"), old).unwrap(), Path::new(r"C:\x\lib\node_modules\pi-acp\dist\index.js"));
+        // pnpm's global bin: its packages live under `global\5`.
+        let pnpm = "@ECHO off\r\n\"%_prog%\"  \"%dp0%\\global\\5\\node_modules\\@qwen-code\\qwen-code\\cli.js\" %*\r\n";
+        let target = cmd_shim_target(Path::new(r"C:\Users\me\AppData\Local\pnpm\qwen.cmd"), pnpm).unwrap();
+        assert_eq!(install_of(&target), Install::Pnpm { package: "@qwen-code/qwen-code".into() });
+        // A batch file that runs no package isn't a shim.
+        assert_eq!(cmd_shim_target(at, "@echo off\r\necho \"%dp0%\\hello\"\r\n"), None);
+        assert!(cmd_shim_target(at, "@echo off\r\ncall \"%dp0%\\node_modules\\.bin\\x\"\r\n").is_some(), "any node_modules path counts");
+        // From disk: the shim in an npm prefix says what's installed there.
+        let root = std::env::temp_dir().join(format!("trek-cmd-shim-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("codex.cmd"), CODEX_CMD).unwrap();
+        assert_eq!(detect_install(&root.join("codex.cmd")), Install::Npm { package: "@openai/codex".into(), prefix: root.clone() });
+        assert_eq!(script_of(&root.join("codex.cmd")), root.join(r"node_modules\@openai\codex\bin\codex.js"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_bun_shim_is_read_for_the_package_it_runs() {
+        // UNVERIFIED against a real Bun: the `.bunx` file is read as UTF-16 text holding the script's
+        // path, which is how Bun's source writes it; a layout that differs reads as the vendor's own.
+        let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>();
+        let shim = Path::new(r"C:\Users\me\.bun\bin\gemini.exe");
+        let relative = utf16("..\\install\\global\\node_modules\\@google\\gemini-cli\\dist\\index.js\0");
+        let target = bunx_target(shim, &relative).unwrap();
+        assert_eq!(target, Path::new(r"C:\Users\me\.bun\install\global\node_modules\@google\gemini-cli\dist\index.js"));
+        assert_eq!(install_of(&target), Install::Bun { package: "@google/gemini-cli".into() });
+        let absolute = utf16("\\??\\C:\\Users\\me\\.bun\\install\\global\\node_modules\\qwen\\cli.js\0");
+        assert_eq!(install_of(&bunx_target(shim, &absolute).unwrap()), Install::Bun { package: "qwen".into() });
+        assert_eq!(bunx_target(shim, &utf16("not a script\0")), None);
+        assert_eq!(bunx_target(shim, &[1]), None);
+    }
+
+    #[test]
+    fn winget_installs_update_with_winget() {
+        let claude = h("claude-code");
+        let winget = Install::Winget { id: "Anthropic.ClaudeCode".into() };
+        assert!(claude.owns(&winget));
+        assert!(!h("codex").owns(&winget), "another agent's package id");
+        assert!(!claude.owns(&Install::Winget { id: "Other.Tool".into() }));
+        assert_eq!(winget.label(), "WinGet");
+        // Copilot CLI's WinGet package (the one installed on a real Windows machine).
+        let copilot = Install::Winget { id: "GitHub.Copilot".into() };
+        assert!(h("acp:github-copilot").owns(&copilot) && !claude.owns(&copilot));
+        assert_eq!(h("acp:github-copilot").reading(copilot.clone()), copilot);
+        // A package of another id isn't `winget upgrade`d on a guess: it's the vendor's own install.
+        assert_eq!(h("codex").reading(Install::Winget { id: "OpenAI.Codex".into() }), Install::Native);
+        assert_eq!(claude.reading(Install::Native), Install::Native);
+        // Its newest is WinGet's, not the vendor's: `winget upgrade` installs only what WinGet has
+        // (Claude Code 2.1.296 was out while WinGet still had 2.1.292, and the upgrade failed).
+        assert_eq!(source(claude, &winget, None), Some(Source::Winget("Anthropic.ClaudeCode".into())));
+        assert_eq!(source(claude, &Install::Winget { id: "Anthropic.Claude Code".into() }, None), None, "an id that doesn't go into a URL as it is");
+        let cmd = update_command(claude, &winget, Path::new(r"C:\x\claude.exe"), false, Some("2.1.1")).unwrap();
+        assert_eq!(cmd.program, Path::new("winget"));
+        assert_eq!(cmd.shown(), "winget upgrade --id Anthropic.ClaudeCode --exact --accept-package-agreements --accept-source-agreements --disable-interactivity");
+    }
+
+    /// A WinGet package is asked of `winget` first (what `winget upgrade` installs from), and of
+    /// winget-pkgs only when `winget` can't say; a feed that's out of requests is no failure.
+    #[test]
+    #[cfg(windows)]
+    fn a_winget_package_is_asked_of_winget_and_only_then_of_winget_pkgs() {
+        use crate::feeds::tests::{reply, serve};
+        let root = std::env::temp_dir().join(format!("trek-winget-source-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // A `winget` that says what a real one said (and keeps what it was asked), or fails.
+        let table = "Found Claude Code [Anthropic.ClaudeCode]\r\nVersion\r\n-------\r\n2.1.292\r\n2.1.291\r\n";
+        std::fs::write(root.join("table.txt"), table).unwrap();
+        let winget = |name: &str, exit: i32| {
+            let script = root.join(name);
+            let asked = root.join(format!("{name}.asked"));
+            std::fs::write(&script, format!("@echo off\r\n>\"{}\" echo %*\r\ntype \"{}\"\r\nexit /b {exit}\r\n", asked.display(), root.join("table.txt").display())).unwrap();
+            (script.display().to_string(), asked)
+        };
+        let source = Source::Winget("Anthropic.ClaudeCode".into());
+        let listing = |version: &str| format!(r#"[{{"name":"{version}","type":"dir"}}]"#);
+        let ask = |feeds: &Feeds, program: &str, url: &str| crate::runtime().block_on(fetch_from(feeds, &source, vec![url.to_string()], program));
+        let memory = || Feeds::memory(reqwest::Client::new(), crate::feeds::Cache::default());
+
+        // `winget` answers: its newest version, asked with exactly what a lookup needs, and
+        // winget-pkgs (which has a newer one) not asked at all.
+        let (base, seen) = serve(vec![reply("200 OK", &[("etag", "\"1\"".into())], &listing("2.1.296"))]);
+        let (ok, asked) = winget("ok.cmd", 0);
+        assert_eq!(ask(&memory(), &ok, &format!("{base}/pkgs")).unwrap().version, "2.1.292");
+        assert_eq!(std::fs::read_to_string(asked).unwrap().trim(), "show --exact --id Anthropic.ClaudeCode --versions --source winget --disable-interactivity --accept-source-agreements");
+        assert!(seen.lock().unwrap().is_empty(), "winget-pkgs wasn't asked");
+
+        // It fails, or isn't there: winget-pkgs is asked, through the cache.
+        let (broken, _) = winget("broken.cmd", 1);
+        let missing = root.join("no-such-winget.exe").display().to_string();
+        for program in [broken, missing] {
+            let (base, seen) = serve(vec![reply("200 OK", &[("etag", "\"1\"".into())], &listing("2.1.296"))]);
+            assert_eq!(ask(&memory(), &program, &format!("{base}/pkgs")).unwrap().version, "2.1.296", "{program}");
+            assert_eq!(seen.lock().unwrap().len(), 1);
+        }
+
+        // winget-pkgs out of requests: the answer kept from before stands, and says nothing; with
+        // none kept the reason is said once, as no failure of the feed.
+        let reset = (crate::store::now_ms() / 1000 + 3600).to_string();
+        let limited = reply("403 Forbidden", &[("x-ratelimit-remaining", "0".into()), ("x-ratelimit-reset", reset)], r#"{"message":"API rate limit exceeded"}"#);
+        let (base, _) = serve(vec![reply("200 OK", &[("etag", "\"1\"".into())], &listing("2.1.296")), limited.clone()]);
+        let (url, feeds) = (format!("{base}/pkgs"), memory());
+        assert_eq!(ask(&feeds, "no-such-winget", &url).unwrap().version, "2.1.296");
+        assert_eq!(ask(&feeds, "no-such-winget", &url).unwrap().version, "2.1.296", "limited: the kept answer");
+        assert_eq!(ask(&feeds, "no-such-winget", &url).unwrap().version, "2.1.296", "and not asked again");
+        let (base, seen) = serve(vec![limited]);
+        assert_eq!(ask(&memory(), "no-such-winget", &format!("{base}/pkgs")), Err(LIMITED.to_string()));
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The other feeds are asked through the cache too: GitHub's release feed, say.
+    #[test]
+    fn a_github_release_feed_is_asked_with_its_etag_and_a_limit_keeps_its_last_answer() {
+        use crate::feeds::tests::{reply, serve};
+        let release = |tag: &str| format!(r#"{{"tag_name":"{tag}"}}"#);
+        let reset = (crate::store::now_ms() / 1000 + 600).to_string();
+        let (base, seen) = serve(vec![
+            reply("200 OK", &[("etag", "W/\"a\"".into())], &release("v0.9.1")),
+            reply("304 Not Modified", &[], ""),
+            reply("403 Forbidden", &[("x-ratelimit-remaining", "0".into()), ("x-ratelimit-reset", reset)], r#"{"message":"API rate limit exceeded"}"#),
+        ]);
+        let source = Source::Feed(Feed::GitHub("o/r"));
+        let feeds = Feeds::memory(reqwest::Client::new(), crate::feeds::Cache::default());
+        let ask = || crate::runtime().block_on(fetch_from(&feeds, &source, vec![format!("{base}/releases/latest")], "winget"));
+        assert_eq!(ask().unwrap().version, "0.9.1");
+        assert_eq!(ask().unwrap().version, "0.9.1", "a 304 is the kept answer");
+        assert!(seen.lock().unwrap()[1].contains("if-none-match: w/\"a\""), "{}", seen.lock().unwrap()[1]);
+        assert_eq!(ask().unwrap().version, "0.9.1", "out of requests: the last answer, not a 403");
+        assert_eq!(ask().unwrap().version, "0.9.1");
+        assert_eq!(seen.lock().unwrap().len(), 3, "and the fourth wasn't asked");
+        // Offline stays what it was.
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+        let feeds = Feeds::memory(reqwest::Client::new(), crate::feeds::Cache::default());
+        let offline = crate::runtime().block_on(fetch_from(&feeds, &source, vec![format!("http://127.0.0.1:{port}/x")], "winget"));
+        assert_eq!(offline, Err("Offline, or the release feed didn't answer".into()));
+    }
+
+    #[test]
+    fn winget_and_chocolatey_say_what_they_have() {
+        assert_eq!(urls(&Source::Winget("Anthropic.ClaudeCode".into())), ["https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/a/Anthropic/ClaudeCode"]);
+        assert_eq!(urls(&Source::Winget("GitHub.Copilot".into())), ["https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/g/GitHub/Copilot"]);
+        // winget-pkgs lists its folders by name, not by version; a subfolder is another package.
+        let folders = r#"[{"name":"2.1.10","type":"dir"},{"name":"2.1.292","type":"dir"},{"name":"2.1.96","type":"dir"},{"name":"Prerelease","type":"dir"},{"name":"9.9.9","type":"file"}]"#;
+        assert_eq!(parse_latest(&Source::Winget("Anthropic.ClaudeCode".into()), folders).unwrap().version, "2.1.292");
+        let copilot = r#"[{"name":"v1.0.93","type":"dir"},{"name":"v1.0.95","type":"dir"}]"#;
+        assert_eq!(parse_latest(&Source::Winget("GitHub.Copilot".into()), copilot).unwrap().version, "1.0.95");
+        assert_eq!(parse_latest(&Source::Winget("x".into()), r#"{"message":"API rate limit exceeded"}"#), None);
+        assert_eq!(parse_latest(&Source::Winget("x".into()), "[]"), None);
+        // Chocolatey's repository, asked for the package's latest.
+        let choco = Source::Chocolatey("opencode".into());
+        assert_eq!(urls(&choco), ["https://community.chocolatey.org/api/v2/Packages()?$filter=Id%20eq%20'opencode'%20and%20IsLatestVersion&$select=Version"]);
+        let feed = r#"<feed><entry><m:properties><d:Version>1.19.0</d:Version></m:properties></entry></feed>"#;
+        assert_eq!(parse_latest(&choco, feed).unwrap().version, "1.19.0");
+        assert_eq!(parse_latest(&choco, "<feed></feed>"), None, "no such package");
+        // What an id may hold to go into a URL; a package outside it has no source to ask.
+        assert_eq!(source(h("opencode"), &Install::Chocolatey { package: "opencode".into() }, None), Some(choco));
+        assert_eq!(source(h("opencode"), &Install::Chocolatey { package: "a'b".into() }, None), None);
+        // Scoop's buckets follow the vendor's release closely: its feed.
+        assert_eq!(source(h("opencode"), &Install::Scoop { app: "opencode".into() }, Some("1.2.27")), Some(Source::Npm("opencode-ai".into())));
+    }
+
+    #[test]
+    fn a_program_is_found_the_way_the_platform_runs_it() {
+        let root = std::env::temp_dir().join(format!("trek-resolve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (first, second) = (root.join("first"), root.join("second"));
+        for dir in [&first, &second] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let search = std::env::join_paths([&first, &second]).unwrap().to_string_lossy().into_owned();
+        // On Windows the extensionless `tool` is a shell script, which Windows can't run: only
+        // `tool.cmd` (and `.exe`, …) count, in `PATHEXT` order, and the first folder's one first.
+        std::fs::write(first.join("tool"), "#!/bin/sh\n").unwrap();
+        assert_eq!(resolve_program(Path::new("tool"), &search), if cfg!(windows) { None } else { Some(first.join("tool")) });
+        if cfg!(windows) {
+            std::fs::write(second.join("tool.exe"), "").unwrap();
+            assert_eq!(resolve_program(Path::new("tool"), &search), Some(second.join("tool.exe")));
+            std::fs::write(first.join("tool.cmd"), "").unwrap();
+            assert_eq!(resolve_program(Path::new("tool"), &search), Some(first.join("tool.cmd")));
+            assert_eq!(resolve_program(Path::new("tool.exe"), &search), Some(second.join("tool.exe")), "a name with its extension is taken as it is");
+        }
+        assert_eq!(resolve_program(Path::new("nothing"), &search), None);
+        // An absolute path is the program, found or not (`run_update` says it isn't there).
+        assert_eq!(resolve_program(&first.join("tool"), &search), Some(first.join("tool")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_npm_update_runs_the_npm_of_its_prefix() {
+        let root = std::env::temp_dir().join(format!("trek-npm-update-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let log = root.join("npm.log");
+        fake_npm(&root, &log, &[]);
+        let install = Install::Npm { package: "@openai/codex".into(), prefix: root.clone() };
+        // An id no harness has: nothing real is asked its version afterwards.
+        let v = AgentVersion { command: update_command(h("codex"), &install, &root.join("codex"), false, None), install, ..version("fake", "0.159.2", Some("0.160.0")) };
+        let outcome = crate::runtime().block_on(run_update(&v));
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().collect::<Vec<_>>(), ["install -g @openai/codex@latest"]);
+        assert!(matches!(outcome, Outcome::Failed { ref summary, .. } if summary.contains("didn't say its version")), "{outcome:?}");
+        // A program that isn't there is said so.
+        let v = AgentVersion { command: Some(UpdateCommand::new("trek-no-such-package-manager", &["update"])), ..version("fake", "1.0.0", None) };
+        let Outcome::Failed { summary, .. } = crate::runtime().block_on(run_update(&v)) else { panic!() };
+        assert_eq!(summary, "trek-no-such-package-manager isn't installed.");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `std::process::Command` runs a `.cmd` through `cmd.exe`, which splits its command line by
+    /// rules of its own. Rust quotes each argument for them (a space, `&`, `^` or `%` arrives as
+    /// one literal argument) and refuses what it can't quote safely (a line break), as an
+    /// `InvalidInput` error: "batch file arguments are invalid". Package names and flags need none
+    /// of this, but update commands are built from data (a package id, a path), so what happens to
+    /// the rest is pinned here.
+    #[test]
+    #[cfg(windows)]
+    fn a_cmd_files_arguments_arrive_whole_or_are_refused() {
+        let root = std::env::temp_dir().join(format!("trek-cmd-args-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let log = root.join("args.log");
+        // `%1`, quotes and all (`%~1` would put `a&b` into the line `echo` is parsed from).
+        // Redirection first: a digit before `>>` is a handle.
+        std::fs::write(root.join("fake.cmd"), format!("@echo off\r\n>> \"{}\" echo [%1][%2]\r\n", log.display())).unwrap();
+        let run = |args: &[&str]| std::process::Command::new(root.join("fake.cmd")).args(args).output();
+        for (args, logged) in [
+            (&["install", "-g"][..], "[install][-g]"),
+            (&["@openai/codex@latest"], "[@openai/codex@latest][]"),
+            (&["a b", "c"], r#"["a b"][c]"#),
+            (&["100%", "x"], r#"["100%"][x]"#),
+            (&["%PATH%"], r#"["%PATH%"][]"#),
+            (&["a&b"], r#"["a&b"][]"#),
+            (&["^x"], r#"["^x"][]"#),
+            (&[r"--prefix=C:\Program Files\x"], r#"["--prefix=C:\Program Files\x"][]"#),
+        ] {
+            let _ = std::fs::remove_file(&log);
+            assert!(run(args).unwrap().status.success(), "{args:?}");
+            assert_eq!(std::fs::read_to_string(&log).unwrap().trim_end(), logged, "{args:?}");
+        }
+        // Refused, not mangled: nothing runs.
+        let _ = std::fs::remove_file(&log);
+        for args in [&["a\nb"][..], &["a\r"]] {
+            let err = run(args).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{args:?}");
+            assert!(err.to_string().contains("batch file arguments are invalid"), "{err}");
+        }
+        assert!(!log.exists());
+        // So an update command with such an argument fails with that said, and runs nothing.
+        let bad = UpdateCommand::new(root.join("fake.cmd"), &["bad\nargument"]);
+        let v = AgentVersion { command: Some(bad), ..version("fake", "1.0.0", Some("1.1.0")) };
+        let Outcome::Failed { summary, .. } = crate::runtime().block_on(run_update(&v)) else { panic!() };
+        assert!(summary.starts_with("Couldn't run") && summary.contains("batch file arguments are invalid"), "{summary}");
+        assert!(!log.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn commands_on_windows_read_as_they_are_typed() {
+        // A binary found as `claude.exe` or `npm.cmd` is typed `claude`, `npm`.
+        assert_eq!(UpdateCommand::new(r"C:\Users\me\.local\bin\claude.exe", &["update"]).shown(), "claude update");
+        assert_eq!(UpdateCommand::new(r"C:\nvm\v22\codex.cmd", &["update"]).shown(), "codex update");
+        assert_eq!(UpdateCommand::new("npm", &["install", "-g", "x@latest"]).shown(), "npm install -g x@latest");
+        // PATH is `;`-separated, the login PATH last.
+        let cmd = UpdateCommand { path: vec![r"C:\nvm\v22".into(), r"C:\other".into()], ..UpdateCommand::new("npm", &[]) };
+        assert!(cmd.search_path().starts_with(r"C:\nvm\v22;C:\other;"), "{}", cmd.search_path());
+        // The vendor's PowerShell installers, run by Windows PowerShell with what's shown as typed.
+        let droid = h("droid");
+        let line = droid.installer_line().unwrap();
+        assert!(line.starts_with("irm https://") && line.ends_with(" | iex"), "{line}");
+        let cmd = update_command(droid, &Install::Native, Path::new(r"C:\Users\me\bin\droid.exe"), false, None).unwrap();
+        assert_eq!((cmd.shown().as_str(), cmd.args.last().map(String::as_str)), (line, Some(line)));
+        assert!(cmd.args.windows(2).any(|w| w == ["-ExecutionPolicy", "Bypass"]) && cmd.args.contains(&"-NoProfile".to_string()), "{:?}", cmd.args);
+        // The CLIs with their own update command use it, not the installer.
+        for (agent, bin) in [("claude-code", r"C:\Users\me\.local\bin\claude.exe"), ("acp:grok", r"C:\Users\me\.grok\bin\grok.exe"), ("acp:devin", r"C:\Users\me\AppData\Local\devin\cli\bin\devin.exe"), ("acp:cursor", r"C:\Users\me\AppData\Local\cursor-agent\cursor-agent.exe")] {
+            let cmd = update_command(h(agent), &Install::Native, Path::new(bin), false, None).unwrap();
+            assert_eq!(cmd.program, Path::new(bin));
+            assert_eq!(cmd.args, ["update"], "{agent}");
+        }
+    }
+
+    #[test]
+    fn the_windows_install_scripts_of_cursor_and_factory_name_their_version_too() {
+        assert_eq!(urls(&Source::Feed(Feed::CursorInstaller)), ["https://cursor.com/install", "https://cursor.com/install?win32=true"]);
+        assert_eq!(urls(&Source::Feed(Feed::DroidInstaller)), ["https://app.factory.ai/cli", "https://app.factory.ai/cli/windows"]);
+        // Cursor's PowerShell script (`$downloadUrl = 'https://downloads.cursor.com/lab/<version>/'`).
+        let cursor = "$downloadUrl = 'https://downloads.cursor.com/lab/2026.10.01-e373342/'\r\n$agentPath = \"$env:LOCALAPPDATA\\cursor-agent\"\r\n";
+        assert_eq!(parse_latest(&Source::Feed(Feed::CursorInstaller), cursor).unwrap().version, "2026.10.01-e373342");
+        // Factory's: `$version = '0.237.0'`, where the shell one has `VER="0.233.0"`.
+        let droid = "$ErrorActionPreference = 'Stop'\r\n$version = '0.237.0'\r\n$baseUrl = \"https://downloads.factory.ai\"\r\n";
+        assert_eq!(parse_latest(&Source::Feed(Feed::DroidInstaller), droid).unwrap().version, "0.237.0");
+        assert_eq!(parse_latest(&Source::Feed(Feed::DroidInstaller), "VER=\"0.233.0\"\n").unwrap().version, "0.233.0");
+        // The feeds say a version, not a download per platform: Devin's manifest lists its
+        // Windows builds (`x86_64-pc-windows`, `aarch64-pc-windows`) beside the Mac's, and the
+        // version is the same for all.
+        let devin = r#"{"version":"3000.11.3","platforms":{"aarch64-pc-windows":{"url":"…"},"x86_64-pc-windows":{"url":"…"},"aarch64-apple-darwin":{"url":"…"}}}"#;
+        assert_eq!(parse_latest(&Source::Feed(Feed::DevinManifest), devin).unwrap().version, "3000.11.3");
     }
 
     fn version(agent: &str, installed: &str, latest: Option<&str>) -> AgentVersion {
@@ -1324,6 +3089,8 @@ mod tests {
             assert_ne!(h.name(), h.agent.trim_start_matches("acp:"), "{} has a display name", h.agent);
             assert!(h.feed != Feed::Npm || h.npm.is_some(), "{} needs its package for its feed", h.agent);
             assert!(h.self_update.is_some() || h.installer.is_some() || h.npm.is_some(), "{} can be updated somehow", h.agent);
+            // An installer to re-run is a line this platform's shell can run.
+            assert!(h.installer.is_none() || h.installer_line().is_some_and(|l| if cfg!(windows) { l.starts_with("irm https://") && l.ends_with(" | iex") } else { l.starts_with("curl ") }), "{} installer", h.agent);
             assert_eq!(harness(h.binary).map(|o| o.agent), Some(h.agent), "{} is one row", h.binary);
         }
     }
@@ -1345,5 +3112,24 @@ mod tests {
             let cmd = v.command.as_ref().map(|c| c.shown()).unwrap_or_default();
             println!("{:<16} {:<10} {:>22} -> {:<22} update: {:<5} via `{cmd}`{}", v.name, v.install.label(), v.installed.as_deref().unwrap_or("?"), v.latest.as_deref().unwrap_or("?"), v.update_available(), v.error.as_ref().map(|e| format!("  ({e})")).unwrap_or_default());
         }
+    }
+
+    /// Devin's real bundle, installed into a scratch install of its own (never the one on PATH):
+    /// `cargo test -p trek-core live_devin_bundle -- --ignored --nocapture`.
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "downloads Devin's release (about 60 MB)"]
+    fn live_devin_bundle() {
+        let root = std::env::temp_dir().join(format!("trek-live-devin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let entry = root.join(r"devin\cli\bin\devin.exe");
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(entry.parent().unwrap().parent().unwrap().join("distribution"), "irm-iex\n").unwrap();
+        let said = crate::runtime().block_on(install_devin_bundle(&entry, &devin_manifest_url(), DEVIN_HOST)).unwrap();
+        println!("{said}");
+        let version = crate::runtime().block_on(installed_version(h("acp:devin"), &entry));
+        println!("installed: {version:?}");
+        assert!(version.is_some());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -16,6 +16,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Selectable as _, Siz
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use crate::mentions::{self, PickKind};
+use crate::screenclip;
 use std::path::PathBuf;
 use trek_core::catalog::ModelInfo;
 use trek_core::orchestrate::{Consult, Consultant, Style};
@@ -38,6 +39,10 @@ pub struct Composer {
     /// Images going out with the next message.
     outbox: Outbox,
     snapshotting: bool,
+    /// Windows: the wait for what Snipping Tool puts on the clipboard (`snapshot_by_screenclip`).
+    /// It ends with the composer, and with `window` (a composer can outlive its window).
+    screenclip: Option<Task<()>>,
+    window: AnyWindowHandle,
     /// `general.send_with_cmd_enter`: ↩ inserts a newline and ⌘↩ sends (else ↩ sends, ⇧↩ newline).
     cmd_enter: bool,
     /// Width of the composer card at last layout; narrow cards get compact pills.
@@ -68,7 +73,7 @@ pub struct Composer {
     /// Where the text on screen belongs (`Attaching::target`): a thread, or a new one in a project.
     draft_key: String,
     /// The prompt's placeholder as last set (`placeholder`).
-    placeholder: &'static str,
+    placeholder: std::borrow::Cow<'static, str>,
     /// What was typed for the threads and drafts not on screen, by `draft_key`.
     drafts: std::collections::HashMap<String, Draft>,
     _subscriptions: Vec<Subscription>,
@@ -202,7 +207,7 @@ impl Composer {
     pub fn new(workspace: Entity<Workspace>, scope: Scope, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cmd_enter = workspace.read(cx).settings.general.send_with_cmd_enter;
         let input = cx.new(|cx| {
-            TextareaState::new(window, cx).auto_grow(2, 12).submit_on_enter(!cmd_enter).placeholder(placeholder(None))
+            TextareaState::new(window, cx).auto_grow(2, 12).submit_on_enter(!cmd_enter).placeholder(placeholder(None).to_string())
         });
         let pickers = Pickers::new(window, cx);
         let clone_input = cx.new(|cx| InputState::new(window, cx).placeholder("owner/repo or URL"));
@@ -249,8 +254,8 @@ impl Composer {
                     placeholder(running.then_some(ws.settings.general.follow_up))
                 };
                 if this.placeholder != placeholder {
+                    this.input.update(cx, |s, cx| s.set_placeholder(placeholder.to_string(), window, cx));
                     this.placeholder = placeholder;
-                    this.input.update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
                 }
                 // An open @ picker follows the folder on screen.
                 if this.pickers.trigger.as_ref().is_some_and(|t| t.kind == PickKind::Mention) {
@@ -270,6 +275,8 @@ impl Composer {
             pickers,
             outbox: Outbox::default(),
             snapshotting: false,
+            screenclip: None,
+            window: window.window_handle(),
             cmd_enter,
             width: std::rc::Rc::new(std::cell::Cell::new(px(760.))),
             height: std::rc::Rc::new(std::cell::Cell::new(px(0.))),
@@ -810,6 +817,12 @@ impl Composer {
         (self.outbox.paths.clone(), self.outbox.saving)
     }
 
+    /// A snapshot is waiting on Snipping Tool.
+    #[cfg(test)]
+    pub(crate) fn snapshot_waiting(&self) -> bool {
+        self.screenclip.is_some()
+    }
+
     #[cfg(test)]
     pub(crate) fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |s, cx| s.set_value(text, window, cx));
@@ -993,6 +1006,10 @@ impl Composer {
 
     /// Take a screenshot with macOS's own picker and attach it. `mode`: "window", "area" or "screen".
     fn snapshot(&mut self, mode: &'static str, cx: &mut Context<Self>) {
+        if cfg!(windows) {
+            // Snipping Tool's overlay picks the window or area itself, so `mode` has no say.
+            return self.snapshot_by_screenclip(cx);
+        }
         if self.snapshotting {
             return;
         }
@@ -1040,6 +1057,81 @@ impl Composer {
             });
         })
         .detach();
+    }
+
+    /// Windows: open Snipping Tool's overlay and attach what is picked in it, which it puts on the
+    /// clipboard (`screenclip`). Asking again while waiting gives up on the snip, quietly: a snip
+    /// that is cancelled in the overlay leaves nothing to tell it by.
+    pub(crate) fn snapshot_by_screenclip(&mut self, cx: &mut Context<Self>) {
+        if self.snapshotting {
+            if self.screenclip.take().is_some() {
+                self.snapshotting = false;
+                cx.notify();
+            }
+            return;
+        }
+        let backend = screenclip::backend(cx);
+        let mut source = backend.source();
+        // Taken before the overlay opens, so only an image copied after it counts.
+        let seen = source.sequence();
+        if let Err(e) = backend.launch() {
+            self.toast(format!("Couldn't open the snipping tool: {e}."), cx);
+            return;
+        }
+        self.snapshotting = true;
+        cx.notify();
+        let path = mentions::snapshot_path();
+        let (interval, timeout) = (backend.interval(), backend.timeout());
+        self.screenclip = Some(cx.spawn(async move |this, cx| {
+            let mut pickup = screenclip::Pickup::new(seen, interval, timeout);
+            let arrived = loop {
+                cx.background_executor().timer(interval).await;
+                // The window was closed meanwhile: nobody is left to attach it to.
+                let open = this.update(cx, |this, cx| cx.windows().contains(&this.window)).unwrap_or(false);
+                if !open {
+                    let _ = this.update(cx, |this, _| {
+                        this.snapshotting = false;
+                        if let Some(task) = this.screenclip.take() {
+                            task.detach();
+                        }
+                    });
+                    return;
+                }
+                let (back, wait, poll) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let poll = pickup.poll(source.as_mut());
+                        (source, pickup, poll)
+                    })
+                    .await;
+                (source, pickup) = (back, wait);
+                match poll {
+                    screenclip::Poll::Waiting => {}
+                    screenclip::Poll::Arrived(clip) => break Some(clip),
+                    screenclip::Poll::TimedOut => break None,
+                }
+            };
+            let saved = match arrived {
+                Some(clip) => {
+                    let out = path.clone();
+                    Some(cx.background_executor().spawn(async move { screenclip::to_png(clip).and_then(|png| Ok(std::fs::write(&out, png)?)) }).await)
+                }
+                None => None,
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.snapshotting = false;
+                // This task is the one finishing: let it go on rather than cancel itself.
+                if let Some(task) = this.screenclip.take() {
+                    task.detach();
+                }
+                match saved {
+                    Some(Ok(())) => this.outbox.add([path]),
+                    Some(Err(e)) => this.toast(format!("Couldn't attach the snapshot: {e}."), cx),
+                    None => this.toast(crate::keys::localize("Nothing was picked in a minute, so no snapshot was attached. ⌘⇧S tries again.").into_owned(), cx),
+                }
+                cx.notify();
+            });
+        }));
     }
 
     fn add_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
@@ -1092,7 +1184,23 @@ impl Composer {
                 cx.notify();
             });
         };
-        Some(div().px(px(14.)).pt(px(12.)).child(attachments::thumbnails(&self.outbox.paths, px(56.), self.snapshotting || self.outbox.saving > 0, remove, cx)).into_any_element())
+        let waiting = self.screenclip.is_some().then(|| {
+            div()
+                .id("snapshot-wait")
+                .test_support()
+                .pt(px(6.))
+                .text_size(px(12.))
+                .text_color(cx.theme().muted_foreground)
+                .child(crate::keys::localize("Pick a region… ⌘⇧S cancels").into_owned())
+        });
+        Some(
+            div()
+                .px(px(14.))
+                .pt(px(12.))
+                .child(attachments::thumbnails(&self.outbox.paths, px(56.), self.snapshotting || self.outbox.saving > 0, remove, cx))
+                .children(waiting)
+                .into_any_element(),
+        )
     }
 
     /// "+" menu: files and photos, snapshots, the three pickers, and restating first.
@@ -1108,14 +1216,20 @@ impl Composer {
             .icon(Icon::new(IconName::Plus).text_color(theme.muted_foreground))
             .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
                 let (a, b, c, d, e, f, g, h) = (me.clone(), me.clone(), me.clone(), me.clone(), me.clone(), me.clone(), me.clone(), me.clone());
-                menu.min_w(px(230.))
+                let menu = menu
+                    .min_w(px(230.))
                     .check_side(gpui_kit::component::Side::Right)
                     .item(PopupMenuItem::new("Add photos & files").icon(crate::assets::Lucide::Image).on_click(move |_, window, cx| a.update(cx, |c, cx| c.attach(window, cx))))
-                    .separator()
-                    .item(PopupMenuItem::new("Snapshot a window").icon(crate::assets::Lucide::Camera).on_click(move |_, _, cx| b.update(cx, |c, cx| c.snapshot("window", cx))))
-                    .item(PopupMenuItem::new("Snapshot an area").icon(crate::assets::Lucide::Crosshair).on_click(move |_, _, cx| c.update(cx, |c, cx| c.snapshot("area", cx))))
-                    .item(PopupMenuItem::new("Snapshot the screen").icon(crate::assets::Lucide::Monitor).on_click(move |_, _, cx| d.update(cx, |c, cx| c.snapshot("screen", cx))))
-                    .separator()
+                    .separator();
+                // Snipping Tool has the window, area and screen choice in its own toolbar.
+                let menu = if cfg!(windows) {
+                    menu.item(PopupMenuItem::new("Take a snapshot").icon(crate::assets::Lucide::Camera).on_click(move |_, _, cx| b.update(cx, |c, cx| c.snapshot("area", cx))))
+                } else {
+                    menu.item(PopupMenuItem::new("Snapshot a window").icon(crate::assets::Lucide::Camera).on_click(move |_, _, cx| b.update(cx, |c, cx| c.snapshot("window", cx))))
+                        .item(PopupMenuItem::new("Snapshot an area").icon(crate::assets::Lucide::Crosshair).on_click(move |_, _, cx| c.update(cx, |c, cx| c.snapshot("area", cx))))
+                        .item(PopupMenuItem::new("Snapshot the screen").icon(crate::assets::Lucide::Monitor).on_click(move |_, _, cx| d.update(cx, |c, cx| c.snapshot("screen", cx))))
+                };
+                menu.separator()
                     .item(PopupMenuItem::new("Mention a file  @").icon(IconName::File).on_click(move |_, window, cx| e.update(cx, |c, cx| c.insert_trigger("@", window, cx))))
                     .item(PopupMenuItem::new("Use a skill  $").icon(crate::assets::Lucide::Sparkle).on_click(move |_, window, cx| f.update(cx, |c, cx| c.insert_trigger("$", window, cx))))
                     .item(PopupMenuItem::new("Run a command  /").icon(IconName::SquareTerminal).on_click(move |_, window, cx| g.update(cx, |c, cx| c.insert_trigger("/", window, cx))))
@@ -1731,7 +1845,7 @@ impl Composer {
             chip("env-local")
                 .child(Icon::new(crate::assets::Lucide::Laptop).small().text_color(theme.muted_foreground))
                 .child("Local")
-                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Runs on this Mac, in the project folder").build(window, cx))
+                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(format!("Runs on {}, in the project folder", crate::words::words().this_computer)).build(window, cx))
                 .into_any_element()
         } else {
             // A thread in the project folder is the usual case: only a worktree is worth a chip.
@@ -1990,7 +2104,7 @@ impl Render for Composer {
             square("stop")
                 .test_support()
                 .cursor_pointer()
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(format!("Stop ⌘. · {hint}")).build(window, cx))
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(crate::keys::localize(&format!("Stop ⌘. · {hint}")).into_owned()).build(window, cx))
                 .bg(palette::red(cx))
                 .child(div().size(px(10.)).rounded(px(2.)).bg(rgb(0xFFFFFF)))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -2013,7 +2127,8 @@ impl Render for Composer {
                 .into_any_element()
         };
 
-        // The mic takes dictation when the bundle can ask for it (see dictate::available).
+        // The mic takes dictation when the bundle can ask for it (see dictate::available). Windows
+        // has no mic button: Win+H is its own dictation, which types into the input.
         let dictating = self.dictation.as_ref();
         let mic = dictate::available().then(|| {
             let recording = dictating.is_some_and(|d| d.recording());
@@ -2023,7 +2138,7 @@ impl Render for Composer {
                 .cursor_pointer()
                 .when(recording, |el| el.bg(palette::red(cx)))
                 .tooltip({
-                    let tip = if recording { "Stop and transcribe" } else if transcribing { "Transcribing…" } else { "Dictate" };
+                    let tip = if recording { "Stop and transcribe" } else if transcribing { "Transcribing…" } else { crate::words::words().dictate_tip };
                     move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
                 })
                 .child(if transcribing {
@@ -2141,7 +2256,7 @@ impl Render for Composer {
                     .child(
                         Pill::new("plan-pill")
                             .selected(plan)
-                            .tooltip(if plan { "Plan mode is on: the agent plans before it changes anything (⇧⇥)" } else { "Plan mode: the agent plans before it changes anything (⇧⇥)" })
+                            .tooltip(crate::keys::shared(if plan { "Plan mode is on: the agent plans before it changes anything (⇧⇥)" } else { "Plan mode: the agent plans before it changes anything (⇧⇥)" }))
                             .child(Icon::new(crate::assets::Lucide::ListChecks).small().text_color(if plan { palette::indigo(cx) } else { theme.muted_foreground }))
                             .when(!narrow, |p| p.child("Plan"))
                             .on_click(cx.listener(|this, _, _, cx| pickers::update_prefs(this, cx, |p| p.plan = !p.plan))),
@@ -2268,7 +2383,7 @@ impl Render for Composer {
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 // ⌥↩ sends the other way from the default while a turn runs (steer ⇄ queue).
                 let k = &ev.keystroke;
-                if k.key == "enter" && k.modifiers.alt && !k.modifiers.platform && !k.modifiers.shift && this.pickers.trigger.is_none() {
+                if k.key == "enter" && k.modifiers.alt && !k.modifiers.secondary() && !k.modifiers.shift && this.pickers.trigger.is_none() {
                     cx.stop_propagation();
                     let other = match this.workspace.read(cx).settings.general.follow_up {
                         FollowUp::Steer => FollowUp::Queue,
@@ -2293,25 +2408,27 @@ impl Render for Composer {
 
 /// The prompt's placeholder: what to type, or mid-turn (`running`: the default way a message
 /// goes), where a message sent now goes.
-fn placeholder(running: Option<FollowUp>) -> &'static str {
+fn placeholder(running: Option<FollowUp>) -> std::borrow::Cow<'static, str> {
     match running {
-        None => "Ask or build · / commands · @ files",
-        Some(FollowUp::Steer) => "Steer the running turn · ⌥↩ queues for after it",
-        Some(FollowUp::Queue) => "Queue a follow-up · ⌥↩ steers the running turn",
+        None => "Ask or build · / commands · @ files".into(),
+        Some(FollowUp::Steer) => crate::keys::localize("Steer the running turn · ⌥↩ queues for after it"),
+        Some(FollowUp::Queue) => crate::keys::localize("Queue a follow-up · ⌥↩ steers the running turn"),
     }
 }
 
 /// The send button's tooltip: which keys send and add a line, and while a turn runs (`running`),
 /// which key steers it and which queues for after it.
 pub(crate) fn delivery_hint(cmd_enter: bool, follow: FollowUp, running: bool) -> String {
-    let (send, line) = if cmd_enter { ("⌘↩", "↩") } else { ("↩", "⇧↩") };
-    if !running {
-        return format!("Send {send} · New line {line}");
-    }
-    match follow {
-        FollowUp::Steer => format!("{send} steers the running turn · ⌥↩ queues for after it"),
-        FollowUp::Queue => format!("{send} queues for after the turn · ⌥↩ steers it now"),
-    }
+    let (send, line) = if cmd_enter { ("⌘↩", "↩") } else { ("↩", "⇧↩") }; // keys::localize below
+    let text = if !running {
+        format!("Send {send} · New line {line}")
+    } else {
+        match follow {
+            FollowUp::Steer => format!("{send} steers the running turn · ⌥↩ queues for after it"), // keys::localize below
+            FollowUp::Queue => format!("{send} queues for after the turn · ⌥↩ steers it now"), // keys::localize below
+        }
+    };
+    crate::keys::localize(&text).into_owned()
 }
 
 /// The API cost estimate in the status strip, with its breakdown on hover (worked out only then).

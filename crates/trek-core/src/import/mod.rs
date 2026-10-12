@@ -140,17 +140,60 @@ pub(crate) fn classify(e: &Evidence) -> Option<Skip> {
     }
 }
 
+/// A folder as an agent recorded it, in the form Trek and the user write it. Codex on Windows
+/// records `\\?\C:\Users\me\app` (and `\\?\UNC\server\share\app`): the same folder as `C:\Users\me\app`,
+/// but a different project to Trek, whose folders come from pickers and `cd`. Read by shape, not
+/// by the running system, so a history synced from another machine reads the same.
+pub(crate) fn recorded_path(text: &str) -> PathBuf {
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        if let Some(share) = rest.strip_prefix(r"UNC\") {
+            return PathBuf::from(format!(r"\\{share}"));
+        }
+        let b = rest.as_bytes();
+        if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+            return PathBuf::from(rest);
+        }
+    }
+    PathBuf::from(text)
+}
+
 /// System temp folders, where apps run title generators, scratch runs and tests.
 pub(crate) fn is_temp_dir(path: &Path) -> bool {
     in_temp_dir(path, &std::env::temp_dir())
 }
 
+/// Whether `path` is in a temp folder: the Unix ones, Windows' (`%TEMP%` under a profile, or
+/// `C:\Windows\Temp`), or `tmp` itself. It reads the path's shape, not the running OS's rules: a
+/// session recorded on one system may be imported on another, so `\` and `/` are both separators
+/// and case doesn't matter.
 fn in_temp_dir(path: &Path, tmp: &Path) -> bool {
-    ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders", "/var/tmp", "/private/var/tmp"]
-        .iter()
-        .any(|root| path.starts_with(root))
-        // An empty or relative TMPDIR would make every path look temporary.
-        || (tmp.is_absolute() && tmp.components().count() > 1 && path.starts_with(tmp))
+    const UNIX: [&[&str]; 6] = [&["tmp"], &["private", "tmp"], &["var", "folders"], &["private", "var", "folders"], &["var", "tmp"], &["private", "var", "tmp"]];
+    fn under(path: &[String], root: &[impl AsRef<str>]) -> bool {
+        path.len() >= root.len() && path.iter().zip(root).all(|(a, b)| a == b.as_ref())
+    }
+    let Some((drive, path)) = segments(path) else { return false };
+    if if drive { windows_temp(&path) } else { UNIX.iter().any(|root| under(&path, root)) } {
+        return true;
+    }
+    // An empty or relative TMPDIR would make every path look temporary.
+    segments(tmp).is_some_and(|(_, tmp)| !tmp.is_empty() && under(&path, &tmp))
+}
+
+/// A path as lowercase segments, with whether it starts with a drive (`c:`), or `None` for a
+/// relative one.
+fn segments(path: &Path) -> Option<(bool, Vec<String>)> {
+    let text = path.to_string_lossy().replace('\\', "/").to_lowercase();
+    let text = text.strip_prefix("//?/").unwrap_or(&text);
+    let segs: Vec<String> = text.split('/').filter(|s| !s.is_empty()).map(String::from).collect();
+    let drive = segs.first().is_some_and(|s| s.len() == 2 && s.ends_with(':') && s.as_bytes()[0].is_ascii_alphabetic());
+    // `c:/` alone is a drive's root, as `/` is: nothing under it is meant.
+    if drive { (segs.len() > 1).then_some((true, segs)) } else { text.starts_with('/').then_some((false, segs)) }
+}
+
+/// `c:\users\<name>\appdata\local\temp\…` or `c:\windows\temp\…`.
+fn windows_temp(segs: &[String]) -> bool {
+    let is = |i: usize, name: &str| segs.get(i).is_some_and(|s| s == name);
+    segs.first().is_some_and(|s| s.ends_with(':')) && ((is(1, "users") && segs.len() > 2 && is(3, "appdata") && is(4, "local") && is(5, "temp")) || (is(1, "windows") && is(2, "temp")))
 }
 
 /// A prompt written by an app to name one of its threads, not by a person.
@@ -427,6 +470,12 @@ pub(crate) fn user_text(raw: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
+/// Text that starts like an absolute path, whichever system wrote it: `/x`, `\\server\x`, `C:\x`, `C:/x`.
+fn absolute_start(text: &str) -> bool {
+    let b = text.as_bytes();
+    text.starts_with(['/', '\\']) || (b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/'))
+}
+
 /// Files a Codex desktop message lists above the request (`## name: /path`), as (name, path).
 pub(crate) fn codex_attachments(raw: &str) -> Vec<(&str, &str)> {
     let t = raw.trim_start();
@@ -438,7 +487,8 @@ pub(crate) fn codex_attachments(raw: &str) -> Vec<(&str, &str)> {
         .lines()
         .filter_map(|l| {
             let entry = l.strip_prefix("## ")?;
-            let at = entry.find(": /")?;
+            // The path starts at the first ": " followed by an absolute one: `/…` or `C:\…`.
+            let at = entry.match_indices(": ").map(|(i, _)| i).find(|&i| absolute_start(&entry[i + 2..]))?;
             Some((entry[..at].trim(), entry[at + 2..].trim()))
         })
         .collect()
@@ -969,6 +1019,34 @@ mod tests {
         assert!(!in_temp_dir(home, Path::new("/")));
         assert!(in_temp_dir(Path::new("/Users/me/scratch/run"), Path::new("/Users/me/scratch")));
         assert!(in_temp_dir(Path::new("/private/tmp/x"), Path::new("")));
+        // Windows folders are recognised by their shape wherever the session is imported.
+        let win_home = Path::new(r"C:\Users\me\code");
+        assert!(!in_temp_dir(win_home, Path::new("")));
+        assert!(!in_temp_dir(win_home, Path::new(r"C:\")));
+        assert!(!in_temp_dir(Path::new(r"C:\"), Path::new(r"C:\")));
+        assert!(!in_temp_dir(Path::new(r"C:\Users\me\AppData\Local\Programs\x"), Path::new("")));
+        assert!(!in_temp_dir(Path::new(r"C:\Users\me\AppData\Local\Temporary"), Path::new("")));
+        assert!(in_temp_dir(Path::new(r"C:\Users\me\AppData\Local\Temp"), Path::new("")));
+        assert!(in_temp_dir(Path::new(r"c:\users\ME\appdata\local\temp\claude-1\run"), Path::new("")));
+        assert!(in_temp_dir(Path::new(r"D:/Users/me/AppData/Local/Temp/x"), Path::new("")));
+        assert!(in_temp_dir(Path::new(r"\\?\C:\Users\me\AppData\Local\Temp\x"), Path::new("")));
+        assert!(in_temp_dir(Path::new(r"C:\Windows\Temp\x"), Path::new("")));
+        assert!(!in_temp_dir(Path::new(r"C:\Windows\System32"), Path::new("")));
+        // %TEMP% where the user moved it, in any spelling.
+        assert!(in_temp_dir(Path::new(r"D:\scratch\run"), Path::new(r"d:\Scratch")));
+        assert!(in_temp_dir(Path::new("D:/scratch/run"), Path::new(r"D:\scratch")));
+        assert!(!in_temp_dir(Path::new(r"D:\scratch2"), Path::new(r"D:\scratch")));
+    }
+
+    #[test]
+    fn recorded_folders_lose_the_verbatim_prefix_only() {
+        assert_eq!(recorded_path(r"\\?\C:\Users\me\app"), PathBuf::from(r"C:\Users\me\app"));
+        assert_eq!(recorded_path(r"\\?\c:/Users/me/app"), PathBuf::from("c:/Users/me/app"));
+        assert_eq!(recorded_path(r"\\?\UNC\nas\share\app"), PathBuf::from(r"\\nas\share\app"));
+        assert_eq!(recorded_path(r"\\?\Volume{0000}\app"), PathBuf::from(r"\\?\Volume{0000}\app"));
+        assert_eq!(recorded_path(r"C:\Users\me\app"), PathBuf::from(r"C:\Users\me\app"));
+        assert_eq!(recorded_path("/Users/me/app"), PathBuf::from("/Users/me/app"));
+        assert_eq!(recorded_path(""), PathBuf::new());
     }
 
     #[test]

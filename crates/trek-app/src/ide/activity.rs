@@ -26,12 +26,12 @@ impl SideView {
         }
     }
 
-    fn tooltip(self) -> &'static str {
+    fn tooltip(self) -> std::borrow::Cow<'static, str> {
         match self {
-            SideView::Explorer => "Explorer (⌘⇧E)",
-            SideView::Search => "Search (⌘⇧F)",
-            SideView::Scm => "Source Control (⌃⇧G)",
-            SideView::Agents => "Agents in this folder",
+            SideView::Explorer => crate::keys::localize("Explorer (⌘⇧E)"),
+            SideView::Search => crate::keys::localize("Search (⌘⇧F)"),
+            SideView::Scm => crate::keys::localize("Source Control (⌃⇧G)"),
+            SideView::Agents => "Agents in this folder".into(),
         }
     }
 
@@ -114,7 +114,7 @@ impl IdeWorkbench {
                                 .child(if badge > 99 { "99+".to_string() } else { badge.to_string() }),
                         )
                     })
-                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(v.tooltip()).build(window, cx))
+                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(v.tooltip().into_owned()).build(window, cx))
                     .on_click(cx.listener(move |this, _, window, cx| this.show_view(v, window, cx)))
             }))
     }

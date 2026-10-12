@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::Command;
 
 pub(crate) fn command(dir: &Path) -> Command {
-    let mut c = Command::new("git");
+    let mut c = trek_core::procs::command("git");
     c.current_dir(dir)
         .env("PATH", trek_core::detect::login_path())
         .env("GIT_OPTIONAL_LOCKS", "0")

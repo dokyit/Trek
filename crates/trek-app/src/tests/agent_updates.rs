@@ -88,7 +88,8 @@ fn an_update_waits_for_its_agents_running_turn() {
     run(async |cx| {
         let trek = open(cx);
         let runs = found(&trek, cx);
-        let id = trek.send(cx, "mock:long 2s");
+        // Running through the checks below: a loaded runner can take seconds to reach them.
+        let id = trek.send(cx, "mock:long 8s");
         let tid = id.clone();
         trek.wait(cx, "the turn to start", |ws| ws.turn_running(&tid)).await;
         trek.update(cx, |ws, cx| ws.update_agent("mock", cx));
@@ -143,6 +144,61 @@ fn settings_has_the_switch_the_updates_and_update_all() {
         trek.wait(cx, "Pi to update", |ws| matches!(ws.agent_updates.job("pi"), Some(Job::Updated { .. }))).await;
         trek.render(cx);
         assert!(!trek.visible(cx, "agent-updates-all"), "nothing left to update all of");
+    });
+}
+
+#[test]
+fn update_all_runs_the_updates_windows_asks_for_too_last_and_together() {
+    run(async |cx| {
+        let trek = open(cx);
+        found(&trek, cx);
+        let batches = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+        // OpenCode installed with Chocolatey and Codex machine-wide with WinGet: both upgrade as
+        // an administrator. Listed first, they still go last, in one script (one prompt).
+        let admin = |of: &AgentVersion, id: &str, command: trek_core::agent_update::UpdateCommand| AgentVersion { id: id.into(), command: Some(command.as_admin()), ..of.clone() };
+        trek.update(cx, |ws, cx| {
+            let u = &mut ws.agent_updates;
+            let opencode = u.found.iter().find(|v| v.id == "opencode").cloned().unwrap();
+            let codex = u.found.iter().find(|v| v.id == "codex").cloned().unwrap();
+            u.found.insert(0, admin(&opencode, "opencode-choco", trek_core::agent_update::UpdateCommand::new("choco", &["upgrade", "opencode", "-y"])));
+            u.found.insert(1, admin(&codex, "codex-winget", trek_core::agent_update::UpdateCommand::new("winget", &["upgrade", "--id", "OpenAI.Codex"])));
+            u.runner = Runner::Recorded(batches.clone());
+            cx.notify();
+        });
+        trek.click(cx, "agent-updates");
+        trek.render(cx);
+        // An Update button like the others' (no command to copy).
+        assert!(trek.visible(cx, "agent-update-row-opencode-choco"));
+        assert!(trek.visible(cx, "agent-update-opencode-choco"));
+        assert!(!trek.visible(cx, "agent-update-copy-opencode-choco"));
+        trek.click(cx, "agent-updates-all");
+        trek.wait(cx, "every update to finish", |ws| ws.agent_updates.found.iter().all(|v| matches!(ws.agent_updates.job(&v.id), Some(Job::Updated { .. })))).await;
+        let batches = batches.lock().unwrap().clone();
+        assert_eq!(batches, [vec!["codex"], vec!["opencode"], vec!["pi"], vec!["mock"], vec!["opencode-choco", "codex-winget"]]);
+        trek.render(cx);
+        assert!(trek.visible(cx, "agent-updated-opencode-choco") && trek.visible(cx, "agent-updated-codex-winget"));
+        assert!(!trek.visible(cx, "agent-updates-all"), "nothing left");
+    });
+}
+
+#[test]
+fn a_declined_prompt_is_said_in_words_and_can_be_retried() {
+    run(async |cx| {
+        let trek = open(cx);
+        found(&trek, cx);
+        trek.update(cx, |ws, cx| {
+            let u = &mut ws.agent_updates;
+            for v in u.found.iter_mut().filter(|v| v.id == "opencode") {
+                v.command = v.command.take().map(|c| c.as_admin());
+            }
+            u.runner = Runner::Fake(Arc::new(|_: &AgentVersion| Outcome::Failed { summary: trek_core::agent_update::DECLINED.into(), output: String::new() }));
+            ws.update_agent("opencode", cx);
+        });
+        trek.wait(cx, "OpenCode's update to fail", |ws| matches!(ws.agent_updates.job("opencode"), Some(Job::Failed { .. }))).await;
+        assert_eq!(job(&trek, cx, "opencode"), Some(Job::Failed { summary: "Windows didn't allow it (the prompt was cancelled).".into(), output: String::new() }));
+        trek.click(cx, "agent-updates");
+        trek.render(cx);
+        assert!(trek.visible(cx, "agent-update-opencode"), "Retry");
     });
 }
 
@@ -359,7 +415,9 @@ fn an_update_waits_for_its_agents_background_work() {
         let trek = open(cx);
         let runs = found(&trek, cx);
         // Answered, with a dev server left running: replacing the CLI would end it.
-        let id = trek.send(cx, "mock:server 800ms");
+        // Serving through the Queued checks below (a click and two frames): a runner busy with
+        // other builds can take well over eight seconds to reach them, so it serves for fifteen.
+        let id = trek.send(cx, "mock:server 15s");
         trek.wait_done(cx, &id, RunState::Idle).await;
         assert!(trek.read(cx, |ws, _| !ws.live[&id].background.is_empty() && !ws.turn_running(&id)));
         trek.update(cx, |ws, cx| ws.update_agent("mock", cx));
@@ -396,7 +454,7 @@ fn an_update_waiting_on_a_dev_server_doesnt_hold_back_trek_restarting() {
         cx.executor().advance_clock(crate::workspace::RESTART_GRACE);
         cx.run_until_parked();
         let status = trek.read(cx, |ws, _| ws.updater.status.clone());
-        assert!(matches!(&status, UpdateStatus::Failed(e) if e.contains("not running from an app bundle")), "{status:?}");
+        assert!(matches!(&status, UpdateStatus::Failed(e) if e.contains(super::harness::INSTALL_BLOCKED)), "{status:?}");
         assert!(trek.read(cx, |ws, _| !ws.live[&id].background.is_empty()), "the server was still running");
     });
 }
@@ -408,7 +466,10 @@ fn a_parent_whose_agent_updated_while_its_sub_agent_reported_still_wakes() {
         found(&trek, cx);
         let (release, gate) = async_channel::bounded::<()>(1);
         trek.update(cx, |ws, _| ws.agent_updates.runner = Runner::Gated(gate));
-        let id = trek.send(cx, "mock:delegate mock:long 600ms");
+        // Long enough that a loaded runner still finds the job Queued while the sub-agent works:
+        // it can't be asked for before the parent's answer, and the sub-agent's clock runs from
+        // its start, so a stall of seconds between the two would otherwise let it finish first.
+        let id = trek.send(cx, "mock:delegate mock:long 15s");
         let p = id.clone();
         trek.wait(cx, "the parent's answer", move |ws| ws.live[&p].turn_started.is_none() && !ws.children(&p).is_empty()).await;
         // Asked for while the sub-agent (the same agent) works: it starts as that turn ends, so

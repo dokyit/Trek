@@ -1,4 +1,7 @@
 //! Process, file and image helpers shared by the tool families.
+// Windows computer use needs only the numbers and the image size; the process and file helpers
+// serve the macOS tools (`screencapture`, `sips`, `open`, `simctl`).
+#![cfg_attr(windows, allow(dead_code))]
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -39,7 +42,15 @@ impl Output {
 
 /// Run `program args…`, optionally feeding `stdin`, killing it after `timeout`.
 pub fn run(program: &str, args: &[&str], stdin: Option<&str>, timeout: Duration) -> Result<Output, String> {
-    let mut child = Command::new(program)
+    let mut command = Command::new(program); // spawn: ok
+    // On Windows nothing here runs today (these helpers serve the macOS tools), but if one does,
+    // no console window. (trek-mcp can't use `trek_core::procs`: it doesn't depend on trek-core.)
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    let mut child = command
         .args(args)
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
@@ -148,6 +159,7 @@ pub fn load_png(path: &Path) -> Result<(String, u32, u32), String> {
 }
 
 /// Find an executable by name on PATH plus common install dirs.
+#[cfg(unix)]
 pub fn find_executable(name: &str, extra_dirs: &[&str]) -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
@@ -159,6 +171,7 @@ pub fn find_executable(name: &str, extra_dirs: &[&str]) -> Option<PathBuf> {
     dirs.into_iter().map(|d| d.join(name)).find(|p| is_executable(p))
 }
 
+#[cfg(unix)]
 fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
@@ -193,11 +206,13 @@ mod tests {
 
     #[test]
     fn run_captures_and_times_out() {
-        let out = run("/bin/sh", &["-c", "cat; echo err >&2"], Some("hello"), Duration::from_secs(5)).unwrap();
+        let fixture = trek_test_fixtures::bin("fixture");
+        let fixture = fixture.to_str().unwrap();
+        let out = run(fixture, &["cat", "--stderr", "err"], Some("hello"), Duration::from_secs(5)).unwrap();
         assert!(out.success());
         assert_eq!(out.stdout, "hello");
         assert_eq!(out.stderr.trim(), "err");
-        let out = run("/bin/sleep", &["5"], None, Duration::from_millis(100)).unwrap();
+        let out = run(fixture, &["sleep", "5"], None, Duration::from_millis(100)).unwrap();
         assert_eq!(out.status, None);
     }
 }

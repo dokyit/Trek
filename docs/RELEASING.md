@@ -129,9 +129,133 @@ What it does:
    With `--dry-run` the version bump is undone and nothing leaves the machine; the artifacts stay in
    `dist/release/<version>/`.
 
-Environment: `TREK_MINISIGN_KEY` (secret key path), `TREK_RELEASE_REPO` (default `dokyit/Trek`),
+Environment: `TREK_MINISIGN_KEY` (secret key path), `TREK_MINISIGN_PASSWORD` (its password, for a run with
+no terminal; otherwise it's asked for), `TREK_RELEASE_REPO` (default `dokyit/Trek`),
 `TREK_SIGN_IDENTITY`, and `TREK_RELEASE_DOWNLOAD_URL` to point the manifest's archive URL somewhere else
 (a staging server).
+
+## Publishing from anywhere
+
+`.github/workflows/release.yml` publishes a whole release without the Mac in the loop: its macOS job runs
+`release.sh` on GitHub's macOS runner, exactly as above, then it calls `release-windows.yml` for the
+Windows half. Start it from any machine with `gh`, or with **Run workflow** on the repository's Actions
+tab:
+
+**The first time**, in this order: add the secrets (below), run a dry run, then the real run.
+
+```sh
+gh workflow run release.yml --ref windows-port -f version=0.4.1-beta.4 -f channel=beta -f dry_run=true  # publish nothing
+gh workflow run release.yml --ref windows-port -f version=0.4.1-beta.4 -f channel=beta                  # the real thing
+```
+
+`--ref` is the branch the workflow file is on and the release is built from. Once `release.yml` is on the
+default branch, `--ref` can go for a release from there, and the **Run workflow** button on the Actions tab
+is the sure way to start it (GitHub documents `workflow_dispatch` as a default-branch feature).
+
+Inputs: `version`, `channel` (stable, beta or nightly; stable by default), optional `notes` (Markdown, used
+as `--notes`; empty means the commit subjects as usual) and `dry_run`. Run it on the branch you release
+from: a stable release commits `Release v<version>` to that branch and pushes it (as the runner's
+`github-actions[bot]`, so CI doesn't run on that commit, and a protected branch would refuse the push
+before anything is published), and a beta or nightly is built from its head. The macOS job takes about 15
+minutes, the Windows job about 27 more. Between the two, Trek on Windows sees the new version without a
+Windows build and says "the Windows build is on its way"; Mac users can update at once.
+
+If the Windows job fails, the release exists with only `darwin-aarch64`: re-run just that job (**Re-run
+failed jobs** on the run, or `gh workflow run release-windows.yml --ref windows-port` with the same version
+and channel). It only attaches to the release that exists and replaces its own assets, so it can be run
+again. If the macOS job fails after pushing the tag but before the release exists, `release.sh` refuses the
+same version again ("tag … already exists"): take the next version, or delete the tag it pushed
+(`git push origin :refs/tags/v<version>`).
+
+A dry run builds, code-signs and minisigns both halves, verifies the signatures against
+`assets/update/minisign.pub`, shows both manifests and SHA-256s in the run's summary, and publishes
+nothing: no commit, no tag, no release. Without the code-signing secrets below it signs with a throwaway
+"Trek Local Signing" that `script/signing-identity.sh` makes on the runner. A dry run does not prove the
+real p12, the pushes or the release upload; the first real run is the first time those happen.
+
+Secrets, added once from the Mac that has `~/.trek-signing/` (repository Settings > Secrets and
+variables > Actions, or `gh`):
+
+```sh
+gh secret set TREK_CODESIGN_P12 --body "$(base64 -i ~/.trek-signing/codesign.p12)"
+gh secret set TREK_CODESIGN_P12_PASSWORD < ~/.trek-signing/codesign.p12.password
+gh secret set TREK_MINISIGN_KEY < ~/.trek-signing/minisign.key   # already set for the Windows workflow
+gh secret set TREK_MINISIGN_PASSWORD                              # if the key has a password; gh asks for it
+```
+
+The job imports the p12 into a keychain of its own on the runner (only `/usr/bin/codesign` may use the
+key), signs with it, and deletes that keychain and the key files when it ends, failed or not. A real
+release refuses to run without `TREK_CODESIGN_P12`: a different certificate would reset every user's
+Accessibility and Screen Recording grants. `release.sh` reads the minisign password from
+`TREK_MINISIGN_PASSWORD` when it's set, and asks at the terminal otherwise; on a runner (`CI` set) a key
+with a password and no `TREK_MINISIGN_PASSWORD` stops the job before the build.
+
+The minisign key is the one secret that matters most (see "Update signing key" above): anyone who can
+push a workflow to this repository can read the secrets (true since the Windows workflow got the key), so
+keep the repository's write access as tight as the Mac's. The key uploaded should carry a password, and
+`TREK_MINISIGN_PASSWORD` should hold it: that protects the key where the secret alone leaks, not against
+someone who can run a workflow, which sees both. A key without a password still signs, with
+`release.sh`'s warning in the log.
+
+The Mac's own way, `script/release.sh` on the Mac, works as before. Run one or the other for a release,
+not both.
+
+## Windows
+
+The Mac's `release.sh` publishes first - it creates the release and its `<channel>.json`. Windows then
+attaches to the same release: `.github/workflows/release-windows.yml` runs on `windows-latest` and never
+creates a release itself; it fails if the tag's release doesn't exist yet. The order matters in both
+directions: `release.sh` writes `<channel>.json` with only the Mac's entry, so a Mac publish (a new
+beta or nightly, or a re-run of one) drops the Windows entry until the workflow runs again.
+
+- **Stable**: publishing the `v<version>` release triggers the workflow automatically.
+- **Beta / nightly**: run it by hand once the Mac's prerelease exists under the moving `beta`/`nightly`
+  tag: `gh workflow run release-windows.yml -f version=0.3.0-beta.1 -f channel=beta`.
+- **From `release.yml`**: it runs right after the macOS job, whatever the channel. A release that run
+  creates raises no `release: published` event (GitHub doesn't start workflows for its own token's
+  events), so a stable release isn't attached twice.
+
+The job checks out the version's tag (`v<version>`; the moving `nightly` tag for nightlies), builds
+`cargo build --release --locked -p trek-app -p trek-mcp`, smokes it with `cargo test -p trek-core
+--locked`, packs `Trek-<version>-windows-x86_64.zip` - flat: `trek.exe`, `trek-mcp.exe` and
+`trek-update.exe`, nothing else - and signs it with the same minisign key (trusted comment `Trek
+<version> windows-x86_64`). It then downloads the release's `<channel>.json`, adds or replaces the
+`windows-x86_64` entry (keeping the Mac's; a version mismatch, or a manifest with no `darwin-*` entry
+because the Mac hasn't published, fails the job before anything is uploaded) and uploads the zip, its
+`.minisig` and finally the manifest, with `--clobber`. On beta and nightly it also deletes the previous
+build's Windows zip, as `release.sh` does for the Mac's. The merge lives in
+`script/lib/release-manifest.ps1`, shared between the workflow and `script/release.ps1`;
+`script/tests/release-manifest.Tests.ps1` covers it and runs in CI's Windows job.
+
+Secrets the workflow needs (repo Settings > Secrets and variables > Actions):
+
+- `TREK_MINISIGN_KEY`: the contents of `~/.trek-signing/minisign.key`, pasted whole (it is all ASCII).
+- `TREK_MINISIGN_PASSWORD`: that key's password. minisign reads it from stdin, so a non-interactive
+  runner works.
+
+The job downloads `minisign-0.12-win64.zip` from jedisct1/minisign's GitHub release and checks it
+against a pinned SHA-256 before running it; bump the version and hash together.
+
+Local run: `pwsh script/release.ps1 0.4.0` dry-runs on a Windows machine (build, zip, sign if a key is
+configured, manifest in `dist/release/0.4.0/`; nothing is uploaded). `-Publish` does what the workflow
+does against the release that must already exist. `-Key`, `-PubKey` and `-Minisign` point at other keys
+or binaries for testing; publishing always verifies against `assets/update/minisign.pub`. `BUILD=0`
+reuses the binaries already in the release target dir for exercising the script (refused with
+`-Publish`).
+
+Windows binaries are **not Authenticode-signed** - there is no certificate yet - so SmartScreen shows a
+one-time warning on first launch (**More info** > **Run anyway**). The minisign signature still gates
+updates: the updater verifies it before touching the install folder. To install, the user unzips into a
+folder of its own that Windows doesn't guard, such as `C:\Users\<you>\Trek` or
+`%LOCALAPPDATA%\Programs\Trek` (not Documents, Desktop, Downloads or `Program Files`), and runs
+`trek.exe`; `trek-update.exe` swaps the install folder on update, which is why it must stay
+user-writable. Documents and Desktop look like folders the user owns, but Defender's Controlled folder
+access (ransomware protection), when it's on, lets only programs it trusts write there, and judges the
+`trek-update.exe` each update brings on its own.
+
+`release.sh` writes no install line into the notes; a hand-written `--notes` file that has one should
+say the same, e.g. "Unzip it into a folder of its own that Windows doesn't guard, such as
+C:\Users\<you>\Trek (not Documents, Desktop, Downloads or Program Files), and run trek.exe."
 
 ## How an update installs
 
@@ -166,6 +290,98 @@ older published build. `TREK_UPDATE_LOCAL_BUNDLE=1` lets a local bundle update a
 macOS runs translocated from Downloads, nor one in a folder Trek can't write to (a standard account with
 Trek in `/Applications`): Settings → Updates says to move it to a folder you own.
 
+### Windows
+
+The Windows artifact is `Trek-<version>-windows-x86_64.zip` (`windows-aarch64` on Arm), listed in the
+same channel manifests under the platform key `windows-x86_64`, signed the same way (trusted comment
+`Trek <version> windows-x86_64`). The zip is **flat**: exactly `trek.exe`, `trek-mcp.exe` and
+`trek-update.exe` (built with `cargo build --release -p trek-app -p trek-mcp -p trek-update`), nothing
+else, no folder around them; assets are embedded. Trek is installed as the folder holding them, and
+`trek.exe`'s version resource (`ProductVersion`, written by trek-app's `build.rs`) must be the release's
+full semver, as `CFBundleVersion` is on macOS.
+
+The steps above, with these differences:
+
+- **Stage**: the zip unpacks into `updates\download-<pid>-<n>.noindex\stage\` and is refused unless it
+  holds exactly those three files (no folders, links or other names, at most 1 GiB) and `trek.exe`'s
+  version is the advertised one and newer than the running one. A refusal deletes the download folder.
+- **Install**: Windows won't let Trek replace the folder it runs from. On **Restart to update** (or on
+  quit) Trek starts `trek-update.exe` from the staged folder and exits. The helper waits up to a minute
+  for Trek to exit (then gives up, changing nothing), brings the staged folder next to the install (a
+  rename, or a copy if it's on another drive: `<install>.old-incoming-<version>`), renames the install to
+  `<install>.old-<version>` and the update into its place, checks `trek.exe` is there
+  and, on a restart, starts it. If any step fails, or the new Trek exits with an error in its first five
+  seconds, it puts the previous folder back, starts it, and leaves `updates\install-failed`, which Trek
+  shows as a toast; a new version that wouldn't start also goes into `updates\skip-version`. Renames are
+  retried for about two seconds (antivirus scans hold files). The helper deletes nothing; it logs to
+  `%LOCALAPPDATA%\Trek\logs\update.log` (`<TREK_DATA_DIR>\logs\update.log` when that's set).
+- **After**: half a minute after it starts (the helper watches it for five seconds and may need the
+  previous folder back), the new Trek deletes `<install>.old-*` (only folders holding nothing but Trek's
+  files, never a link) and, at once, the download folders of Trek processes that are gone.
+- **When it can't**: a `cargo` build (the exe is in a folder with `.fingerprint`), Trek in Program Files
+  or WindowsApps, a folder it or its parent can't be written to, and a folder that holds anything besides
+  Trek's three files (unzipped straight into Downloads, say: the whole folder is what gets replaced), or
+  one that is a junction or symlink. Settings → Updates says which and what to do.
+- **Ransomware protection**: inside Documents, Desktop, Pictures, Videos, Music or Favorites (where
+  `SHGetKnownFolderPath` says they are, OneDrive included, and in OneDrive either way) while Controlled
+  folder access is on (`EnableControlledFolderAccess` = 1 under `HKLM\SOFTWARE\Microsoft\Windows
+  Defender\Windows Defender Exploit Guard\Controlled Folder Access`, or its twin under
+  `HKLM\SOFTWARE\Policies\…`, which wins; both read without administrator rights) **and** Defender is
+  scanning in real time (the setting enforces nothing otherwise: `DisableRealtimeMonitoring`,
+  `DisableAntiSpyware` and `DisableAntiVirus`, setting and policy, aren't 1, and Windows Security's
+  list of antivirus products, `HKLM\SOFTWARE\Microsoft\Security Center\Provider\Av`, has Defender on
+  and no other product on beside it), Settings → Updates says to move Trek out. With real-time
+  protection switched off, nothing is guarded, whatever the setting says. If any of that can't be read
+  or is ambiguous (Defender passive under another antivirus, say), a refused write there decides, and
+  no refused write means no blocker. A refused write
+  (this, or a folder Trek can't write to) is asked again on **Check now**: Defender judges each program
+  as it runs, and the user may turn it off. If the helper is still turned away (access denied bringing
+  the update next to the install), its toast says the same.
+- **Moving out in one click**: for ransomware protection, Program Files, a folder holding more than
+  Trek's files and a folder Trek can't write to, Settings → Updates offers **Move Trek to its own
+  folder** (and so does the launch toast, from a guarded folder, and the toast for an update that
+  ransomware protection turned away). Reading is never refused, only writing, so Trek copies
+  `trek.exe`, `trek-mcp.exe` and `trek-update.exe` to `%LOCALAPPDATA%\Programs\Trek` (an own folder
+  of Trek's with nothing running from it is replaced; otherwise `Trek-2`, …), checks each copy's size
+  and SHA-256 against the original, writes `relocated-from` (the old and the new folder) in the
+  updates folder and starts the copy's `trek-update.exe --relaunch`, which waits for Trek to exit
+  and starts the copy; then Trek quits, after agents finish their turns as for "Restart to update".
+  The copy says where it runs and, on **Remove old copy**, deletes the old folder (only Trek's files
+  from one that holds more); if Windows refuses it says so, the one thing left to the user. Nothing
+  in the old folder is written or changed before that. `TREK_RELOCATE_TO=<folder>` sends the copy
+  elsewhere (testing), `TREK_RELOCATE_KEEP=TREK_SHOT_DIR,…` lets named `TREK_*` variables follow it.
+  - **Check now** stays beside the move for a block Windows may lift (ransomware protection, a
+    read-only place): Defender judges each program, and the user may have told it to let Trek be.
+  - **The old copy stays on Settings → Updates** (a row above the page's own status, **Remove old
+    copy** / **Dismiss**), not only on the launch toast, which lasts seconds. `relocated-from` is
+    read once, so the copy writes a second note, `old-copy` (old and new folder), in the updates
+    folder; every launch from the new folder offers the copy again until it's removed, gone, no
+    longer holds `trek.exe`, or dismissed, and opening the page looks again. Another Trek sharing the
+    data folder leaves the note alone.
+  - **Shortcuts**: at the copy's first launch, the `.lnk` files in the user's own Start menu
+    (`%APPDATA%\Microsoft\Windows\Start Menu\Programs`, two folders deep), Desktop (one deep) and
+    taskbar pins (`…\Internet Explorer\Quick Launch\User Pinned\TaskBar`) whose target is exactly the
+    old `trek.exe` (any case, `\\?\` ignored) get the new `trek.exe` as target, and the new folder as
+    the working folder and the new exe as the icon when those were the old copy's (an icon or folder
+    the user chose stays). Nothing else is touched or made; the shortcuts every user shares
+    (`ProgramData`, the public Desktop) are the administrator's. The toast and the page say how many
+    changed. The Desktop is a folder ransomware protection guards, so a change there may be refused:
+    they say which shortcut still starts the old copy, in words. A taskbar pin may need Explorer
+    restarted (or a re-pin) before the taskbar shows the change. `trek://` follows the move by itself:
+    the copy registers it at launch, as every launch does (a process with its own `TREK_DATA_DIR` or
+    `TREK_SHOT_DIR` doesn't).
+- **A release without this platform's build**: the manifest lists each platform's build as it's
+  published, the Mac's first. A newer version with no `windows-x86_64` entry yet shows "Trek <version> is
+  out; the Windows build is on its way. Check again in a while." and is checked again within the hour.
+
+A file added to the Windows release must first be added to `TREK_FILES` (trek-core `update.rs` and
+`trek-update`) in an earlier release: older versions refuse a zip, and a folder, holding a file they
+don't know.
+
+To roll back by hand on Windows: quit Trek, rename the install folder, rename `<install>.old-<version>`
+back if it's still there (or unzip the previous release in its place), and write the version you left
+into `skip-version` in `%APPDATA%\trek\Trek\data\updates`.
+
 To roll back by hand: quit Trek, then
 
 ```sh
@@ -195,3 +411,25 @@ this test: it restarts as soon as an update is ready instead of waiting for a cl
 are still waited for). The script passes when the old version downloads, verifies, swaps itself and the
 new version starts — or, with `--tamper`, when the damaged archive is refused and the app is untouched —
 and then stops everything it started and deletes its folder.
+
+On Windows, `script/update-e2e.ps1` does the same with zips, plus `-Lock`, which holds a file in the
+install open so the swap fails and must roll back. Without the release key, sign test builds with a
+key of your own (`fixture` makes it; Trek trusts it when built with `TREK_UPDATE_PUBKEY`):
+
+```powershell
+script/update-e2e.ps1 -NewKey $env:TEMP\trek-e2e-key      # prints the key line
+$env:TREK_UPDATE_PUBKEY = '<that line>'
+cargo build --release -p trek-app -p trek-mcp -p trek-update  # once at each version, copying the three .exe files out
+script/update-e2e.ps1 -Pack <old exes> -Key $env:TEMP\trek-e2e-key -Out <old dir>
+script/update-e2e.ps1 -Pack <new exes> -Key $env:TEMP\trek-e2e-key -Out <new dir>
+script/update-e2e.ps1 <old dir>\Trek-<old>-windows-x86_64.zip <new dir>
+script/update-e2e.ps1 <old zip> <new dir> -Tamper checksum
+script/update-e2e.ps1 <old zip> <new dir> -Tamper signature
+script/update-e2e.ps1 <old zip> <new dir> -Lock
+```
+
+The feed is `fixture serve` on 127.0.0.1 (no Python needed), and the test Trek runs from
+`%TEMP%\trek-update-e2e` with its own data folder. Where several checkouts share one target folder,
+each building its own `fixture.exe` into it, copy yours out and name it in `TREK_E2E_FIXTURE`. The
+release builds can skip LTO (`CARGO_PROFILE_RELEASE_LTO=false`) to save time; it changes nothing the
+updater does.

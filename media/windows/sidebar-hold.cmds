@@ -1,0 +1,37 @@
+# media/windows/sidebar-hold.cmds — the sidebar's rows hold still while the pointer is over them (so a
+# row doesn't slide away under the next click), and let go when it leaves. On Windows nothing tells
+# GPUI that a pointer went off the window's edge: 0.4.1-beta.1 went on holding (and left the last
+# thing hovered lit, its tooltip up), and a thread started meanwhile never showed in the list until
+# the pointer came back and crossed it. `realleave` is Windows saying the pointer left (the machine's
+# cursor isn't one a script can move: the window is told where it is). Windows only.
+# Run: pwsh script/capture.ps1 windows/sidebar-hold
+
+pace 0
+theme night
+glass off
+project @REPO@
+send first
+wait idle 30000
+route draft
+count live-line-0* 1
+
+# As the beta had it: the pointer is on the sidebar, a thread starts elsewhere, its row waits...
+legacy-pointer on
+realmove open-notes
+send second
+wait idle 30000
+count live-line-0* 1
+shot hold-beta-held
+# ...the pointer goes off the window's edge, and it waits still, Notes still lit with its tooltip.
+realleave
+wait 600
+count live-line-0* 1
+shot hold-beta-gone
+
+# Now: the same pointer, off the window's edge, lets the list catch up and takes the light off Notes.
+legacy-pointer off
+realmove open-notes
+realleave
+wait 600
+count live-line-0* 2
+shot hold-gone

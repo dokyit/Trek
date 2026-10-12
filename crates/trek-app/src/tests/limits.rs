@@ -3,7 +3,7 @@
 //! snoozes until it, or moves to another agent with a handoff divider. The mock's `mock:limit`
 //! plays the limit; the workspace's clock follows the test clock, so the reset can be skipped to.
 
-use super::harness::{Trek, launch, mock, new_project, open, open_with, run, settings};
+use super::harness::{REAL_TIME_LIMIT, Trek, launch, mock, new_project, open, open_with, run, settings};
 use crate::workspace::{Clock, Prefs, Route, Scope, WorkspaceEvent};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{AppContext as _, ElementId, SharedString, TestAppContext};
@@ -51,6 +51,13 @@ fn said(trek: &Trek, cx: &TestAppContext, id: &str) -> Vec<String> {
 fn lift(trek: &Trek, cx: &TestAppContext, id: &str) {
     let session = trek.read(cx, |ws, _| ws.thread(id).and_then(|t| t.native_id.clone())).expect("a session");
     trek_agents::mock::lift_limit(&session);
+}
+
+/// Keep the mock's limit on `id`'s session in force however long the real clock runs on (it
+/// resets 5 s after it was hit, in real time; the test's own clock is skipped past that).
+fn hold(trek: &Trek, cx: &TestAppContext, id: &str) {
+    let session = trek.read(cx, |ws, _| ws.thread(id).and_then(|t| t.native_id.clone())).expect("a session");
+    trek_agents::mock::hold_limit(&session);
 }
 
 fn events(trek: &Trek, cx: &mut TestAppContext) -> Rc<RefCell<Vec<String>>> {
@@ -359,7 +366,7 @@ fn switching_agents_ends_a_pause_and_hands_its_messages_back() {
 /// The handoff with real agents: Claude Code (claude-haiku-4-5) hears a word, then the thread
 /// moves to Codex (gpt-5.6-luna), which must know it from the recap alone. Not run by default (two
 /// tiny turns): `TREK_LIVE_AGENT=handoff cargo test -p trek-app live_handoff -- --ignored`. Works
-/// in /tmp/trek-limits-e2e.
+/// in `trek-limits-e2e` in the temp folder.
 #[test]
 #[ignore = "live: runs real agents"]
 fn live_handoff_carries_the_conversation() {
@@ -369,7 +376,7 @@ fn live_handoff_carries_the_conversation() {
             s.general.default_model = Some("claude-haiku-4-5".into());
             s.general.default_effort = Effort::Low;
         });
-        let project = std::path::PathBuf::from("/tmp/trek-limits-e2e");
+        let project = std::env::temp_dir().join("trek-limits-e2e");
         std::fs::create_dir_all(&project).unwrap();
         trek.update(cx, |ws, cx| {
             ws.store.ensure_project(&project).unwrap();
@@ -413,13 +420,21 @@ fn a_resume_that_meets_the_limit_again_keeps_its_messages_and_waits_longer() {
         test_clock(&trek, cx);
         let seen = events(&trek, cx);
         let id = hit_limit(&trek, cx, "mock:limit 5s").await;
+        // The mock's limit doesn't lift: the resume sends the first message into it. Left to
+        // its own 5 s of real time, a machine slow enough to take longer than that to get to
+        // the resume had the mock let the message through (one Limit row, no pause).
+        hold(&trek, cx, &id);
         trek.send(cx, "first follow-up");
         trek.send(cx, "second follow-up");
-        // The mock's limit doesn't lift: the resume sends the first message into it.
         skip(cx, 75);
         let thread = id.clone();
         let limits = |ws: &crate::workspace::Workspace, n: usize| ws.live.get(&thread).is_some_and(|l| l.items.iter().filter(|i| matches!(i, Item::Limit { .. })).count() == n);
-        trek.wait(cx, "the resume to meet the limit", |ws| limits(ws, 2) && !ws.turn_running(&thread) && ws.pause(&thread).is_some()).await;
+        // What a failure says of where the thread got to: the clock is the test's, the rest real.
+        let state = |ws: &crate::workspace::Workspace| {
+            let seen = ws.live.get(&thread).map(|l| l.items.iter().filter(|i| matches!(i, Item::Limit { .. })).count());
+            format!("now={} limit items={seen:?} turn_running={} pause={:?}", ws.now(), ws.turn_running(&thread), ws.pause(&thread))
+        };
+        trek.wait_explained(cx, "the resume to meet the limit", REAL_TIME_LIMIT, |ws| limits(ws, 2) && !ws.turn_running(&thread) && ws.pause(&thread).is_some(), state).await;
         let p = pause(&trek, cx, &id).unwrap();
         // Nothing the user wrote is lost: the message it sent goes again, first.
         assert_eq!(p.queued.iter().map(|q| q.text.as_str()).collect::<Vec<_>>(), ["first follow-up", "second follow-up"]);
@@ -434,7 +449,7 @@ fn a_resume_that_meets_the_limit_again_keeps_its_messages_and_waits_longer() {
         let wait = ((p.resets_at.unwrap() - now) / 1000) as u64 + RESUME_GRACE_MS as u64 / 1000 + 10;
         skip(cx, wait);
         let thread = id.clone();
-        trek.wait(cx, "the next try to meet the limit", |ws| limits(ws, 3) && !ws.turn_running(&thread) && ws.pause(&thread).is_some()).await;
+        trek.wait_explained(cx, "the next try to meet the limit", REAL_TIME_LIMIT, |ws| limits(ws, 3) && !ws.turn_running(&thread) && ws.pause(&thread).is_some(), state).await;
         let p = pause(&trek, cx, &id).unwrap();
         assert_eq!((p.tries, p.queued.len()), (2, 2));
         assert_eq!(alerts(&seen, "Resumed: "), 1, "no news: {:?}", seen.borrow());
@@ -838,7 +853,8 @@ fn usage_read_while_a_turn_runs_asks_it_to_wrap_up_once() {
     run(async |cx| {
         let trek = open(cx);
         test_clock(&trek, cx);
-        let id = trek.send(cx, "mock:long 2s");
+        // Running while the reads below ask it to wrap up: a loaded runner can take seconds.
+        let id = trek.send(cx, "mock:long 8s");
         let thread = id.clone();
         trek.wait(cx, "the turn to start", |ws| ws.turn_running(&thread) && ws.live.get(&thread).is_some_and(|l| l.commands.is_some())).await;
         let now = trek.read(cx, |ws, _| ws.now());

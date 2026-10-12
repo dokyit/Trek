@@ -5,6 +5,35 @@ mod connections;
 mod mobile;
 mod pages;
 
+/// What the settings pages said, in words, since the last `take`: row titles and descriptions,
+/// headings and notes. The test harness sees elements, not text, so a test asks this instead.
+#[cfg(test)]
+pub(crate) mod shown {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static SAID: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn text(text: &str) {
+        SAID.with(|s| s.borrow_mut().push(text.to_string()));
+    }
+
+    /// A row's title (when it is plain text) and description.
+    pub(super) fn title_and(title: &dyn std::any::Any, description: &str) {
+        if let Some(t) = title.downcast_ref::<&str>() {
+            text(t);
+        } else if let Some(t) = title.downcast_ref::<String>() {
+            text(t);
+        }
+        text(description);
+    }
+
+    pub(crate) fn take() -> Vec<String> {
+        SAID.with(|s| std::mem::take(&mut *s.borrow_mut()))
+    }
+}
+
 use crate::palette;
 use crate::ui;
 use crate::workspace::{Route, SettingsPage, Workspace, WorkspaceEvent};
@@ -21,6 +50,9 @@ use trek_core::detect::Availability;
 use trek_core::import::{ImportedThread, Skip};
 use trek_core::settings::{Settings, secrets};
 use trek_core::AgentId;
+
+/// What the iOS Simulator section says where Windows has nothing to show.
+const SIMULATOR_NEEDS_A_MAC: &str = "The iOS Simulator needs macOS, so Trek doesn't offer it on Windows.";
 
 pub(crate) fn page_icon(p: SettingsPage) -> Icon {
     match p {
@@ -62,24 +94,30 @@ pub fn page_named(name: &str) -> Option<SettingsPage> {
     pages().find(|p| p.label().to_lowercase().replace(' ', "-") == name)
 }
 
-pub(crate) fn page_blurb(p: SettingsPage) -> &'static str {
+pub(crate) fn page_blurb(p: SettingsPage) -> std::borrow::Cow<'static, str> {
+    let w = crate::words::words();
     match p {
-        SettingsPage::Project => "",
-        SettingsPage::General => "What a new thread starts with, and how the composer behaves while an agent works.",
-        SettingsPage::Appearance => "Theme, text size, background art and motion.",
-        SettingsPage::Notifications => "How Trek tells you an agent finished or needs a decision.",
-        SettingsPage::Snapshots => "Screenshots you attach from the composer’s + menu or with ⌘⇧S.",
-        SettingsPage::Skills => "Instructions your agents can load on demand. Turn a skill off and every agent stops seeing it; turn it on to bring it back.",
-        SettingsPage::Shortcuts => "Every keyboard shortcut in Trek.",
-        SettingsPage::Agents => "Trek runs each vendor's own agent with the login you already have, so your subscriptions just work. Trek never reads or stores those credentials.",
-        SettingsPage::Tools => "Computer use, the iOS Simulator, and the MCP servers, skills and plugins your agents can call.",
-        SettingsPage::Mobile => "Keep your threads going from your iPhone: see what every agent is doing, answer approvals and questions, and steer or start work. The agents keep running on this Mac.",
-        SettingsPage::ApiKeys => "Pay-as-you-go models outside your subscriptions. Keys live in the macOS Keychain; keys exported in your shell are used automatically.",
-        SettingsPage::LocalModels => "Model servers running on this Mac: Ollama, LM Studio, and llama.cpp or MLX. Trek finds them on their usual ports.",
-        SettingsPage::Permissions => "How much each agent may do without asking.",
-        SettingsPage::Import => "Trek reads, and never changes, the threads other agents keep on this Mac, so you can browse and continue them here.",
-        SettingsPage::Updates => "Trek checks for signed updates, gets them ready in the background, and installs them when you restart or quit.",
-        SettingsPage::About => "",
+        SettingsPage::Snapshots => crate::keys::localize("Screenshots you attach from the composer’s + menu or with ⌘⇧S."),
+        SettingsPage::Mobile => format!(
+            "Keep your threads going from your iPhone: see what every agent is doing, answer approvals and questions, and steer or start work. The agents keep running on {}.",
+            w.this_computer
+        )
+        .into(),
+        SettingsPage::ApiKeys => w.api_keys_blurb.into(),
+        SettingsPage::LocalModels => format!("Model servers running on {}: Ollama, LM Studio, and llama.cpp or MLX. Trek finds them on their usual ports.", w.this_computer).into(),
+        SettingsPage::Import => format!("Trek reads, and never changes, the threads other agents keep on {}, so you can browse and continue them here.", w.this_computer).into(),
+        SettingsPage::Project | SettingsPage::About => "".into(),
+        SettingsPage::General => "What a new thread starts with, and how the composer behaves while an agent works.".into(),
+        SettingsPage::Appearance => "Theme, text size, background art and motion.".into(),
+        SettingsPage::Notifications => "How Trek tells you an agent finished or needs a decision.".into(),
+        SettingsPage::Skills => "Instructions your agents can load on demand. Turn a skill off and every agent stops seeing it; turn it on to bring it back.".into(),
+        SettingsPage::Shortcuts => "Every keyboard shortcut in Trek.".into(),
+        SettingsPage::Agents => "Trek runs each vendor's own agent with the login you already have, so your subscriptions just work. Trek never reads or stores those credentials.".into(),
+        // Windows has no iOS Simulator, so its blurb doesn't promise one.
+        SettingsPage::Tools if crate::words::is_windows() => "Computer use, and the MCP servers, skills and plugins your agents can call.".into(),
+        SettingsPage::Tools => "Computer use, the iOS Simulator, and the MCP servers, skills and plugins your agents can call.".into(),
+        SettingsPage::Permissions => "How much each agent may do without asking.".into(),
+        SettingsPage::Updates => "Trek checks for signed updates, gets them ready in the background, and installs them when you restart or quit.".into(),
     }
 }
 
@@ -295,7 +333,7 @@ impl SettingsView {
         let mcp_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. github"));
         let mcp_command = cx.new(|cx| InputState::new(window, cx).placeholder("A command, a URL, or a server's JSON config"));
         let mcp_header_name = cx.new(|cx| InputState::new(window, cx).placeholder("Header name"));
-        let mcp_header_value = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Value, kept in your Keychain (optional)"));
+        let mcp_header_value = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(format!("Value, kept in {} (optional)", crate::words::words().your_credential_store)));
         let skill_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter skills"));
         let skill_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. Review pull requests"));
         let skill_desc = cx.new(|cx| InputState::new(window, cx).placeholder("When should an agent use it?"));
@@ -485,13 +523,15 @@ impl SettingsView {
         }
     }
 
-    fn row(title: impl IntoElement, description: impl Into<SharedString>, control: impl IntoElement, cx: &App) -> AnyElement {
+    fn row(title: impl IntoElement + 'static, description: impl Into<SharedString>, control: impl IntoElement, cx: &App) -> AnyElement {
         Self::row_with(title, description, None, control, cx)
     }
 
     /// `row`, with a line of its own under the description (a server's status).
-    fn row_with(title: impl IntoElement, description: impl Into<SharedString>, extra: Option<AnyElement>, control: impl IntoElement, cx: &App) -> AnyElement {
+    fn row_with(title: impl IntoElement + 'static, description: impl Into<SharedString>, extra: Option<AnyElement>, control: impl IntoElement, cx: &App) -> AnyElement {
         let description: SharedString = description.into();
+        #[cfg(test)]
+        shown::title_and(&title, &description);
         h_flex()
             .w_full()
             .min_h(px(52.))
@@ -519,10 +559,14 @@ impl SettingsView {
 
     /// Section heading: more space above than below (rhythm), real weight instead of an eyebrow.
     fn heading(text: &str, cx: &App) -> AnyElement {
+        #[cfg(test)]
+        shown::text(text);
         div().pt(px(36.)).pb(px(10.)).text_size(px(13.)).font_semibold().text_color(cx.theme().foreground).child(text.to_string()).into_any_element()
     }
 
     fn note(text: &str, cx: &App) -> AnyElement {
+        #[cfg(test)]
+        shown::text(text);
         div().pb(px(16.)).max_w(px(560.)).text_size(px(13.)).line_height(relative(1.55)).text_color(cx.theme().muted_foreground).child(text.to_string()).into_any_element()
     }
 
@@ -728,10 +772,10 @@ impl SettingsView {
         // Nothing installed: the guidance still shows, under it the CLIs a scan can install.
         let none = rows.is_empty();
         let empty = Self::note(
-            if detecting {
-                "Looking for agents on this Mac…"
+            &if detecting {
+                format!("Looking for agents on {}…", crate::words::words().this_computer)
             } else {
-                "No agents found. Install an agent's CLI — Claude Code, Codex or another — and press Scan again; it joins with the login it already has. Or add one from the ACP Registry."
+                "No agents found. Install an agent's CLI — Claude Code, Codex or another — and press Scan again; it joins with the login it already has. Or add one from the ACP Registry.".to_string()
             },
             cx,
         );
@@ -838,7 +882,8 @@ impl SettingsView {
             (false, at, None) => format!("Checked {}.", relative_ago(at)),
         };
         let description = format!(
-            "At launch and every 12 hours, Trek checks each agent CLI against where it came from: npm, Homebrew or its maker. Updates wait for running turns to end. {last}"
+            "At launch and every 12 hours, Trek checks each agent CLI against where it came from: npm, {} or its maker. Updates wait for running turns to end. {last}",
+            crate::words::words().package_manager
         );
         let controls = h_flex()
             .gap(px(10.))
@@ -950,7 +995,7 @@ impl SettingsView {
                     continue;
                 }
                 if let Err(e) = server.stash_secrets(None) {
-                    notes.push(format!("{} wasn't added: its tokens couldn't be saved to your Keychain ({e}).", server.name));
+                    notes.push(format!("{} wasn't added: its tokens couldn't be saved to {} ({e}).", server.name, crate::words::words().your_credential_store));
                     continue;
                 }
                 added.push(server.name.clone());
@@ -1024,50 +1069,58 @@ impl SettingsView {
         let sr = probe.as_ref().map(|p| p.screen_recording);
         out.extend(self.connections(cx));
         out.push(Self::heading("Computer use", cx));
-        out.push(ui::group(
-            vec![
-                Self::row(
-                    "Computer use tools",
-                    "Off until you turn it on. Agents can then see the screen, click, type and switch apps through Trek's MCP tools, following your hand-holding level.",
-                    self.switch("computer-use", s.tools.computer_use, |s, v| s.tools.computer_use = v),
-                    cx,
-                ),
-                Self::row("Accessibility", "Lets Trek click and type for the agent.", permission("ax-perm", "Accessibility", ax, crate::integrations::ACCESSIBILITY_PANE, cx), cx),
-                Self::row(
-                    "Screen Recording",
-                    "Lets Trek take screenshots of other apps.",
-                    permission("sr-perm", "Screen Recording", sr, crate::integrations::SCREEN_RECORDING_PANE, cx),
-                    cx,
-                ),
-            ],
+        let mut computer_use = vec![Self::row(
+            "Computer use tools",
+            "Off until you turn it on. Agents can then see the screen, click, type and switch apps through Trek's MCP tools, following your hand-holding level.",
+            self.switch("computer-use", s.tools.computer_use, |s, v| s.tools.computer_use = v),
             cx,
-        ));
+        )];
+        let permissions_note = crate::words::words().computer_use_note;
+        // Where the system asks for no permission, a sentence says so instead of two rows that could only say Allowed.
+        if permissions_note.is_none() {
+            computer_use.push(Self::row("Accessibility", "Lets Trek click and type for the agent.", permission("ax-perm", "Accessibility", ax, crate::integrations::ACCESSIBILITY_PANE, cx), cx));
+            computer_use.push(Self::row(
+                "Screen Recording",
+                "Lets Trek take screenshots of other apps.",
+                permission("sr-perm", "Screen Recording", sr, crate::integrations::SCREEN_RECORDING_PANE, cx),
+                cx,
+            ));
+        }
+        out.push(ui::group(computer_use, cx));
+        if let Some(note) = permissions_note {
+            out.push(div().pt_3().child(Self::note(note, cx)).into_any_element());
+        }
         out.push(Self::heading("iOS Simulator", cx));
-        let axe_control: AnyElement = match probe.as_ref().map(|p| p.axe) {
-            None => checking("install-axe"),
-            Some(true) => Self::status_dot(palette::emerald(cx), "Installed"),
-            Some(false) => Button::new("install-axe")
-                .small()
-                .outline()
-                .icon(IconName::ArrowDown)
-                .label("Install AXe")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: crate::integrations::AXE_INSTALL.into(), cwd: None }))
-                }))
-                .into_any_element(),
-        };
-        out.push(ui::group(
-            vec![
-                Self::row(
-                    "Simulator tools",
-                    "Agents can boot simulators, install and launch your app, take screenshots and tap through it.",
-                    self.switch("sim-tools", s.tools.simulator, |s, v| s.tools.simulator = v),
-                    cx,
-                ),
-                Self::row("Touch input (AXe)", "Taps, swipes and typing in the simulator, for you and for agents.", axe_control, cx),
-            ],
-            cx,
-        ));
+        if crate::words::is_windows() {
+            // Xcode's tools are all it has to run on: nothing to switch, install or allow.
+            out.push(Self::note(SIMULATOR_NEEDS_A_MAC, cx));
+        } else {
+            let axe_control: AnyElement = match probe.as_ref().map(|p| p.axe) {
+                None => checking("install-axe"),
+                Some(true) => Self::status_dot(palette::emerald(cx), "Installed"),
+                Some(false) => Button::new("install-axe")
+                    .small()
+                    .outline()
+                    .icon(IconName::ArrowDown)
+                    .label("Install AXe")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: crate::integrations::AXE_INSTALL.into(), cwd: None }))
+                    }))
+                    .into_any_element(),
+            };
+            out.push(ui::group(
+                vec![
+                    Self::row(
+                        "Simulator tools",
+                        "Agents can boot simulators, install and launch your app, take screenshots and tap through it.",
+                        self.switch("sim-tools", s.tools.simulator, |s, v| s.tools.simulator = v),
+                        cx,
+                    ),
+                    Self::row("Touch input (AXe)", "Taps, swipes and typing in the simulator, for you and for agents.", axe_control, cx),
+                ],
+                cx,
+            ));
+        }
         out.push(Self::heading("Sub-agents", cx));
         out.push(ui::group(
             vec![Self::row(
@@ -1527,7 +1580,7 @@ impl Render for SettingsView {
                     .pb(px(80.))
                     .child(div().text_size(px(20.)).font_semibold().child(page.label()))
                     .when(!page_blurb(page).is_empty(), |el| {
-                        el.child(div().pt(px(6.)).max_w(px(560.)).text_size(px(13.)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground).child(page_blurb(page)))
+                        el.child(div().pt(px(6.)).max_w(px(560.)).text_size(px(13.)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground).child(page_blurb(page).into_owned()))
                     })
                     .child(div().h(px(28.)))
                     .children(body),

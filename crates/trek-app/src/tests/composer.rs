@@ -68,10 +68,18 @@ fn option_return_sends_the_other_way_mid_turn() {
 fn the_send_hint_names_the_keys() {
     use crate::composer::delivery_hint;
     use trek_core::settings::FollowUp;
-    assert_eq!(delivery_hint(false, FollowUp::Steer, false), "Send ↩ · New line ⇧↩");
-    assert_eq!(delivery_hint(true, FollowUp::Steer, false), "Send ⌘↩ · New line ↩");
-    assert_eq!(delivery_hint(false, FollowUp::Steer, true), "↩ steers the running turn · ⌥↩ queues for after it");
-    assert_eq!(delivery_hint(false, FollowUp::Queue, true), "↩ queues for after the turn · ⌥↩ steers it now");
+    crate::keys::with_mac(true, || {
+        assert_eq!(delivery_hint(false, FollowUp::Steer, false), "Send ↩ · New line ⇧↩");
+        assert_eq!(delivery_hint(true, FollowUp::Steer, false), "Send ⌘↩ · New line ↩");
+        assert_eq!(delivery_hint(false, FollowUp::Steer, true), "↩ steers the running turn · ⌥↩ queues for after it");
+        assert_eq!(delivery_hint(false, FollowUp::Queue, true), "↩ queues for after the turn · ⌥↩ steers it now");
+    });
+    crate::keys::with_mac(false, || {
+        assert_eq!(delivery_hint(false, FollowUp::Steer, false), "Send Enter · New line Shift+Enter");
+        assert_eq!(delivery_hint(true, FollowUp::Steer, false), "Send Ctrl+Enter · New line Enter");
+        assert_eq!(delivery_hint(false, FollowUp::Steer, true), "Enter steers the running turn · Alt+Enter queues for after it");
+        assert_eq!(delivery_hint(false, FollowUp::Queue, true), "Enter queues for after the turn · Alt+Enter steers it now");
+    });
 }
 
 /// The context ring stays out of the way early in a thread and shows once there's something to
@@ -132,7 +140,7 @@ fn command_e_settles_with_an_undo() {
         cx.update(|cx| crate::root::init(trek.ws.clone(), cx));
         trek.window(cx, |window, _| window.activate_window());
         cx.run_until_parked();
-        trek.press(cx, "cmd-e");
+        trek.press(cx, "secondary-e");
         assert!(trek.read(cx, |ws, _| ws.thread(&id).is_some_and(|t| t.settled_at.is_some())));
         assert_eq!(*seen.borrow(), [("Settled “Add a note”".to_string(), true)]);
         // The toast is on screen, with its Undo.

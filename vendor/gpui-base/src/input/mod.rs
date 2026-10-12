@@ -68,6 +68,9 @@ mod search;
 mod selection;
 #[path = "base/state.rs"]
 mod state;
+// Trek: tabs get their width on Windows (see the module).
+#[path = "base/tab_stops.rs"]
+mod tab_stops;
 mod textarea;
 #[path = "base/touch.rs"]
 mod touch;
@@ -120,4 +123,5 @@ pub use rope_ext::{InputEdit, Point, RopeExt, RopeLines};
 pub use ropey::Rope;
 pub use search::{SearchMatcher, SearchSession};
 pub use state::*;
+pub use tab_stops::with_tab_stops;
 pub use textarea::{Textarea, TextareaState};

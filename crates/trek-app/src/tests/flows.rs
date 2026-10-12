@@ -95,7 +95,9 @@ fn tool_calls_fold_into_summary_rows() {
 fn sub_agents_out_after_the_answer_keep_the_thread_waiting_until_they_report() {
     run(async |cx| {
         let trek = open(cx);
-        let id = trek.send(cx, "send subagents 3s");
+        // Out for 10 s of real time, which the assertions below must beat: 3 s didn't survive a
+        // loaded machine (the rows were "Done" by the time they were read).
+        let id = trek.send(cx, "send subagents 10s");
         let tid = id.clone();
         trek.wait(cx, "the first turn to end with agents still out", |ws| {
             let l = &ws.live[&tid];
@@ -183,7 +185,7 @@ fn stopping_while_a_card_is_up_clears_it() {
         let id = trek.send(cx, "permission");
         trek.wait_needs_you(cx, &id).await;
         assert!(trek.visible(cx, "deny"));
-        trek.press(cx, "cmd-.");
+        trek.press(cx, "secondary-.");
         trek.wait_done(cx, &id, RunState::Idle).await;
         assert!(!trek.visible(cx, "deny"));
         assert!(trek.read(cx, |ws, _| ws.live[&id].permissions.is_empty() && ws.needs_you_count() == 0));
@@ -195,14 +197,16 @@ fn stopping_while_a_card_is_up_clears_it() {
 fn the_working_bar_follows_the_thread_on_screen() {
     run(async |cx| {
         let trek = open(cx);
-        let id = trek.send(cx, "mock:long 30s");
+        // Longer than any other turn here can take (30 s ran out on a loaded machine while the
+        // other thread's turn was still being waited for): the delete below ends it.
+        let id = trek.send(cx, "mock:long 600s");
         let tid = id.clone();
         trek.wait(cx, "the build to start", |ws| ws.live[&tid].items.iter().any(|i| matches!(i, Item::Tool { .. }))).await;
         assert!(trek.visible(cx, "working-bar"));
         // The build shows live in the bar, not (yet) in the transcript.
         assert!(trek.visible(cx, "live-group"));
         assert_eq!(trek.rows(cx), ["user"]);
-        trek.press(cx, "cmd-n");
+        trek.press(cx, "secondary-n");
         assert_eq!(trek.working_bar(cx), None, "a draft has no working bar");
         let other = trek.send(cx, "meanwhile, explain");
         trek.wait_done(cx, &other, RunState::Idle).await;
@@ -303,6 +307,54 @@ fn documents_follow_answers_that_move() {
         }
         assert_eq!(trek.answers(cx, &id), "First answer.\nSecond, longer answer here.\nAlpha\nOmega");
         assert_eq!(trek.rows(cx).iter().filter(|r| *r == "assistant").count(), 4);
+    });
+}
+
+/// A long answer as agents write them: sections with headings, paragraphs with paths and bold,
+/// lists, and a code block with a blank line in it, about 15 KB.
+pub(super) fn long_answer() -> String {
+    (0..12)
+        .map(|s| {
+            let para = format!("Section {s} reads `src/server/routes.rs` and changes **three** things in the retry loop, so the log lines up with the trace. ");
+            format!("## Section {s}\n\n{}\n\n{}\n\n- First, the backoff.\n- Then the cap, at 30 s.\n\n```rust\nfn backoff(n: u32) -> u64 {{\n\n    250 * 2u64.pow(n.min(7))\n}}\n```\n\n{}\n\n", para.repeat(4), para.repeat(3), para.repeat(2))
+        })
+        .collect()
+}
+
+#[test]
+fn a_long_answer_is_drawn_in_parts_that_add_up_to_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        let full = long_answer();
+        assert!(full.len() > 12_000, "{} bytes", full.len());
+        // Streamed a couple of hundred bytes at a time, each batch drawn before the next.
+        let chars: Vec<char> = full.chars().collect();
+        for chunk in chars.chunks(200) {
+            trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TextDelta(chunk.iter().collect())], cx));
+            trek.render(cx);
+        }
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TextDone(full.clone()), AgentEvent::TurnComplete { error: None }], cx));
+        trek.render(cx);
+        assert_eq!(trek.answers(cx, &id), full);
+        let parts = trek.rows(cx).iter().filter(|r| r.starts_with("assistant part")).count();
+        assert!(parts >= 5, "{:?}", trek.rows(cx));
+        assert!(!trek.rows(cx).iter().any(|r| r == "assistant"), "one answer, in parts only: {:?}", trek.rows(cx));
+        // Every part was drawn as it streamed (each was the last for a while); their documents
+        // hold the answer between them, each cut where a new block starts.
+        let answer = trek.item_ix(cx, &id, |i| matches!(i, Item::Assistant { .. }));
+        let docs: Vec<String> = trek.drawn_markdown(cx).into_iter().filter(|(ix, _)| *ix == answer).map(|(_, t)| t).collect();
+        assert_eq!(docs.len(), parts);
+        assert_eq!(docs.concat(), full);
+        for doc in &docs[1..] {
+            assert!(!doc.starts_with(char::is_whitespace), "a part starts mid-block: {:?}", &doc[..40]);
+        }
+        // The last part is on screen, at the end of the transcript, and the first is the top of
+        // the answer.
+        assert!(trek.visible(cx, gpui_kit::ElementId::NamedInteger("answer-part".into(), ((answer as u64) << 20) | (parts as u64 - 1))));
+        // A short answer after it is one row, as ever.
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TextDelta("Done.".into()), AgentEvent::TextDone("Done.".into()), AgentEvent::TurnComplete { error: None }], cx));
+        assert_eq!(trek.rows(cx).iter().filter(|r| *r == "assistant").count(), 1);
     });
 }
 
@@ -433,7 +485,7 @@ fn plans_can_be_sent_back_or_approved() {
 fn queued_follow_ups_wait_for_the_turn() {
     run(async |cx| {
         let trek = open_with(cx, |s| s.general.follow_up = FollowUp::Queue);
-        let id = trek.send(cx, "mock:long 3s");
+        let id = trek.send(cx, "mock:long 8s");
         let tid = id.clone();
         trek.wait(cx, "the build to start", |ws| ws.live[&tid].items.iter().any(|i| matches!(i, Item::Tool { .. }))).await;
         trek.send(cx, "then summarize");
@@ -453,7 +505,7 @@ fn queued_follow_ups_wait_for_the_turn() {
 fn steered_follow_ups_join_the_running_turn() {
     run(async |cx| {
         let trek = open(cx);
-        let id = trek.send(cx, "mock:long 3s");
+        let id = trek.send(cx, "mock:long 8s");
         let tid = id.clone();
         trek.wait(cx, "the build to start", |ws| ws.live[&tid].items.iter().any(|i| matches!(i, Item::Tool { .. }))).await;
         trek.send(cx, "use tabs");
@@ -470,7 +522,7 @@ fn steered_follow_ups_join_the_running_turn() {
 fn a_message_while_sub_agents_are_out_is_a_turn_of_its_own_and_they_stay_tracked() {
     run(async |cx| {
         let trek = open(cx);
-        let id = trek.send(cx, "send subagents 3s");
+        let id = trek.send(cx, "send subagents 10s");
         let tid = id.clone();
         trek.wait(cx, "the answer with agents out", |ws| ws.live[&tid].turn_started.is_none() && ws.live[&tid].active_tasks() == 2).await;
         trek.send(cx, "check the auth routes too");
@@ -495,7 +547,7 @@ fn stopping_a_turn_returns_queued_follow_ups_to_the_composer() {
         trek.wait(cx, "the build to start", |ws| ws.live[&tid].items.iter().any(|i| matches!(i, Item::Tool { .. }))).await;
         assert!(trek.working_bar(cx).is_some());
         trek.send(cx, "and deploy it");
-        trek.press(cx, "cmd-.");
+        trek.press(cx, "secondary-.");
         trek.wait_done(cx, &id, RunState::Idle).await;
         let items = trek.items(cx, &id);
         assert!(matches!(items.last(), Some(Item::Notice { text }) if text == "Interrupted"), "{items:?}");
@@ -527,10 +579,10 @@ fn keyboard_shortcuts_reach_their_actions() {
         let id = trek.send(cx, "hello");
         trek.wait_done(cx, &id, RunState::Idle).await;
 
-        trek.press(cx, "cmd-shift-a");
+        trek.press(cx, "secondary-shift-a");
         assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).map(|t| t.hand_holding)), Some(HandHolding::AutoAcceptEdits));
         assert!(trek.visible(cx, "settle"), "the title bar offers Settle");
-        trek.press(cx, "cmd-e");
+        trek.press(cx, "secondary-e");
         assert!(trek.read(cx, |ws, _| ws.thread(&id).is_some_and(|t| t.settled_at.is_some())));
         assert!(!trek.visible(cx, "settle"));
         // The title bar is a cached view: a workspace change alone brings the button back.
@@ -538,19 +590,19 @@ fn keyboard_shortcuts_reach_their_actions() {
         assert!(trek.visible(cx, "settle"));
 
         let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
-        trek.press(cx, "cmd-j");
+        trek.press(cx, "secondary-j");
         assert!(panel.read_with(cx, |p, _| p.open));
-        trek.press(cx, "cmd-j");
+        trek.press(cx, "secondary-j");
         assert!(!panel.read_with(cx, |p, _| p.open));
 
-        trek.press(cx, "cmd-b");
+        trek.press(cx, "secondary-b");
         assert!(trek.read(cx, |ws, _| ws.sidebar_collapsed));
-        trek.press(cx, "cmd-b");
+        trek.press(cx, "secondary-b");
 
-        trek.press(cx, "cmd-n");
+        trek.press(cx, "secondary-n");
         assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: None });
 
-        trek.press(cx, "cmd-,");
+        trek.press(cx, "secondary-,");
         assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Settings(SettingsPage::General));
     });
 }
@@ -586,7 +638,7 @@ fn updates_wait_for_a_turn_paused_on_a_card() {
         cx.run_until_parked();
         // Then the install went ahead (and stopped, as no app bundle runs here).
         let status = update_status(&trek, cx);
-        assert!(matches!(&status, UpdateStatus::Failed(e) if e.contains("not running from an app bundle")), "{status:?}");
+        assert!(matches!(&status, UpdateStatus::Failed(e) if e.contains(super::harness::INSTALL_BLOCKED)), "{status:?}");
     });
 }
 

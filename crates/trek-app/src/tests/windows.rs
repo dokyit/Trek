@@ -65,7 +65,7 @@ fn a_reopened_main_window_starts_afresh() {
         trek.update(cx, |ws, cx| ws.open_thread_at(&id, ItemRef::Id(hit), cx));
         assert!(trek.visible(cx, ("answer", 503usize)));
         // The palette is up (the browser hides under it) when the window closes.
-        trek.press(cx, "cmd-k");
+        trek.press(cx, "secondary-k");
         assert!(trek.read(cx, |ws, _| ws.overlay_open));
         close_main(&trek, cx);
         assert!(!trek.read(cx, |ws, _| ws.overlay_open), "nothing covers the tools panel any more");
@@ -130,7 +130,7 @@ fn a_reopened_main_window_takes_the_keys() {
         let view = trek_window(cx, main);
         assert_eq!(cx.read(|cx| view.read(cx).composer.read(cx).text(cx)), "hello");
         // Its shortcuts work as well.
-        cx.update_window(main, |_, window, cx| gpui_kit::test::TestWindowExt::press(window, "cmd-b", cx)).expect("window");
+        cx.update_window(main, |_, window, cx| gpui_kit::test::TestWindowExt::press(window, "secondary-b", cx)).expect("window");
         cx.run_until_parked();
         assert!(trek.read(cx, |ws, _| ws.sidebar_collapsed));
     });
@@ -184,5 +184,87 @@ fn the_file_picker_follows_the_folder_on_screen() {
         trek.wait(cx, "project B's files", |_| true).await;
         assert!(picks(&trek, cx).contains(&"beta_only.rs".to_string()), "{:?}", picks(&trek, cx));
         assert!(!picks(&trek, cx).contains(&"alpha_only.rs".to_string()), "{:?}", picks(&trek, cx));
+    });
+}
+
+#[test]
+fn quitting_leaves_no_handle_on_the_workspace() {
+    run(async |cx| {
+        let trek = open(cx);
+        // What `main` leaves running around the workspace: the loop that waits on the pipe for
+        // other launches (open, as it is for as long as Trek is).
+        let (_other_launches, rx) = async_channel::unbounded();
+        let (links, _heard) = async_channel::unbounded();
+        let ws = trek.ws.clone();
+        cx.update(|cx| crate::single_instance::hear(Some(rx), vec![], ws, links, cx));
+        cx.run_until_parked();
+        let ws = trek.ws.downgrade();
+        drop(trek);
+        // The app quits as `Quit` does it: GPUI runs the quit handlers and closes the windows.
+        // What it drops afterwards is its entities, before its globals and the tasks still
+        // waiting, so a handle in a waiting task is one the leak detector reports as `run`
+        // returns (the "Exited with leaked handles" panic of a `shots` build on Windows). A
+        // global's handle is let go with the globals, after the detector has looked.
+        cx.update(|cx| {
+            cx.shutdown();
+            cx.clear_globals();
+        });
+        cx.run_until_parked();
+        ws.assert_released();
+    });
+}
+
+#[test]
+fn quitting_closes_the_windows_first_on_windows() {
+    run(async |cx| {
+        let trek = open(cx);
+        cx.update(|cx| crate::root::quit(cx));
+        cx.run_until_parked();
+        // Where a window's native state is let go by a task that a quitting loop never runs, the
+        // windows are closed before the app ends (see `root::quit`); the Mac ends the app and its
+        // windows with it.
+        assert_eq!(cx.update(|cx| cx.windows().len()), if cfg!(windows) { 0 } else { 1 });
+        drop(trek);
+    });
+}
+
+/// The note on screen as saved on disk.
+fn note_on_disk() -> String {
+    trek_core::notes::list_in(&trek_core::notes::notes_dir()).first().map(|n| n.body.clone()).unwrap_or_default()
+}
+
+#[test]
+fn a_note_typed_just_before_quitting_is_kept() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.click(cx, "open-notes");
+        trek.render(cx);
+        // Typed, then quit before the save that follows typing comes round. The Notes view is
+        // the main window's, and only the window holds it (as in the app, not the harness): on
+        // Windows `quit` closes the windows before GPUI's quit handlers run.
+        trek.type_text(cx, "milk");
+        drop(trek);
+        cx.update(|cx| crate::root::quit(cx));
+        cx.run_until_parked();
+        cx.update(|cx| cx.shutdown());
+        cx.run_until_parked();
+        assert_eq!(note_on_disk(), "milk");
+    });
+}
+
+#[test]
+fn a_note_typed_just_before_the_main_window_closes_is_kept() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.click(cx, "open-notes");
+        trek.render(cx);
+        trek.type_text(cx, "eggs");
+        cx.update(|cx| crate::root::init(trek.ws.clone(), cx));
+        let window = trek.window;
+        drop(trek);
+        // Closed as on macOS, where Trek keeps running.
+        let _ = cx.update(|cx| window.update(cx, |_, window, _| window.remove_window()));
+        cx.run_until_parked();
+        assert_eq!(note_on_disk(), "eggs");
     });
 }

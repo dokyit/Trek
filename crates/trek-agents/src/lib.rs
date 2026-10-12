@@ -13,6 +13,10 @@ pub mod mcp_check;
 pub mod mock;
 mod opencode;
 mod status;
+#[cfg(test)]
+mod tests_stop;
+#[cfg(all(test, windows))]
+mod tests_cmd_args;
 
 pub use acp::{AcpInfo, acp_probe};
 pub use codex::list_models as codex_models;
@@ -112,9 +116,92 @@ impl McpServer {
     }
 }
 
-/// `{name: {…}, ...}` for a set of servers.
-pub(crate) fn mcp_servers_json(servers: &[McpServer]) -> serde_json::Value {
-    serde_json::Value::Object(servers.iter().map(|s| (s.name.clone(), s.to_json())).collect())
+/// `{name: {…}, ...}` for a set of servers, as `agent` can start them, and the notices for the
+/// ones it can't (left out). The user's own settings are never changed, only what's handed over.
+pub(crate) fn mcp_servers_json(servers: &[McpServer], agent: BatchHandOff) -> (serde_json::Value, Vec<String>) {
+    mcp_servers_json_with(servers, agent, cfg!(windows), |name| trek_core::detect::which_in(trek_core::detect::login_path(), name))
+}
+
+/// `mcp_servers_json` with the platform and the lookup of a command name as arguments, so both
+/// platforms' output is tested on either.
+pub(crate) fn mcp_servers_json_with(servers: &[McpServer], agent: BatchHandOff, windows: bool, resolve: impl Fn(&str) -> Option<PathBuf>) -> (serde_json::Value, Vec<String>) {
+    let mut out = serde_json::Map::new();
+    let mut left_out = vec![];
+    for server in servers {
+        let mut entry = server.to_json();
+        if let McpTransport::Stdio { command, args, .. } = &server.transport {
+            match agent_stdio_command(agent, command, args, windows, &resolve) {
+                Ok(Some((command, args))) => {
+                    entry["command"] = serde_json::json!(command);
+                    entry["args"] = serde_json::json!(args);
+                }
+                Ok(None) => {}
+                Err(problem) => {
+                    left_out.push(mcp_left_out_notice(&server.name, &problem));
+                    continue;
+                }
+            }
+        }
+        out.insert(server.name.clone(), entry);
+    }
+    (serde_json::Value::Object(out), left_out)
+}
+
+/// What the user is told about a stdio server `agent_stdio_command` found a `problem` with.
+pub(crate) fn mcp_left_out_notice(server: &str, problem: &str) -> String {
+    format!("MCP server {server} wasn't started: {problem}")
+}
+
+/// How an agent can start a stdio MCP server whose command is a batch script (`npx.cmd`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BatchHandOff {
+    /// `cmd /c <command> <args>`: Claude Code starts servers with Node's `spawn`, which refuses a
+    /// batch file (and finds no `npx` without the extension); cmd.exe starts it, and reads the
+    /// whole command line by its own rules.
+    CmdWrapper,
+    /// The script's own path: Codex is a Rust program starting servers with tokio's `Command`,
+    /// which runs a `.cmd` path through cmd.exe with every argument safely quoted.
+    ResolvedPath,
+}
+
+/// What an agent is told to run for a stdio server's `command` and `args`: `None` when as written
+/// is right. On Windows a command that is (or is found as) a `.cmd` or `.bat` is handed over as
+/// `agent` says; an `Err` says why it can't be (in words for the user).
+fn agent_stdio_command(
+    agent: BatchHandOff,
+    command: &str,
+    args: &[String],
+    windows: bool,
+    resolve: &dyn Fn(&str) -> Option<PathBuf>,
+) -> Result<Option<(String, Vec<String>)>, String> {
+    if !windows {
+        return Ok(None);
+    }
+    let bare = trek_core::detect::is_bare_name_on(command, true);
+    let program = if bare { resolve(command) } else { Some(PathBuf::from(command)) };
+    let Some(program) = program.filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))) else {
+        return Ok(None);
+    };
+    if let Some(problem) = trek_core::detect::batch_script_problem(&program, args) {
+        return Err(problem);
+    }
+    match agent {
+        BatchHandOff::ResolvedPath => Ok(Some((program.to_string_lossy().into_owned(), args.to_vec()))),
+        BatchHandOff::CmdWrapper => {
+            // Found by name, cmd.exe finds it again by that name; a path is written with backslashes
+            // (a `/` begins cmd's switches).
+            let target = if bare { command.to_string() } else { command.replace('/', "\\") };
+            let name = trek_core::detect::script_name(&program);
+            if let Some(n) = std::iter::once(&target).chain(args).position(|a| a.contains(['&', '|', '<', '>', '^', '%', '"'])) {
+                let which = if n == 0 { "its name".to_string() } else { format!("argument {n}") };
+                return Err(format!("{name} is a batch script, which the agent can only start through cmd.exe, and cmd.exe would act on a character in {which} (one of & | < > ^ % or a quote)."));
+            }
+            if target.contains(' ') {
+                return Err(format!("{name} is a batch script in a folder with a space in its name, which can't be handed through cmd.exe; use its name (it's on your PATH) instead."));
+            }
+            Ok(Some(("cmd".into(), ["/c".to_string(), target].into_iter().chain(args.iter().cloned()).collect())))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -543,19 +630,107 @@ impl<R: tokio::io::AsyncBufRead + Unpin> ProtocolLines<R> {
     }
 }
 
-/// A child and everything it starts, in a process group of its own.
+/// A child and everything it starts, in a process group of its own (on Windows, a job object).
 pub(crate) struct GroupChild {
     child: Option<tokio::process::Child>,
     group: i32,
+    /// The job holding the child and all it starts; closing it ends them all.
+    #[cfg(windows)]
+    job: Option<job::Job>,
 }
 
 /// Start `command` in a process group of its own, tracked by `trek_core::procs` until it's ended.
+#[cfg(unix)]
 pub(crate) fn spawn_group(command: &mut tokio::process::Command) -> std::io::Result<GroupChild> {
     command.process_group(0);
     let child = command.spawn()?;
     let group = child.id().unwrap_or_default() as i32;
     trek_core::procs::register(group);
     Ok(GroupChild { child: Some(child), group })
+}
+
+/// Start `command` in a job object of its own, with no console window, tracked by
+/// `trek_core::procs` (by the child's pid) until it's ended. The job ends everything in it when
+/// its last handle closes, so a Trek that crashes or is killed takes its agents along.
+///
+/// This sets the command's creation flags, replacing any the caller set (tokio's `Command` has
+/// no way to read them back to add to): callers set none.
+#[cfg(windows)]
+pub(crate) fn spawn_group(command: &mut tokio::process::Command) -> std::io::Result<GroupChild> {
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+    let job = job::Job::new()?;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    let child = command.spawn()?;
+    // The child runs from here until it's in the job, a few microseconds: anything it starts in
+    // that time (it would have to load and get going first) isn't in the job. Starting it
+    // suspended would close that gap, but the handle of its first thread, needed to resume it, is
+    // one std doesn't hand out. A child that's in a job already (Trek run under a CI runner or a
+    // terminal that uses jobs) can be put in this one too: jobs nest since Windows 8.
+    let assigned = child.raw_handle().map(|handle| job.assign(handle));
+    let job = match assigned {
+        Some(Ok(())) => Some(job),
+        // Without the job, ending the group ends what can be found under the child by parent ids
+        // (`trek_core::procs::end_tree`); what it starts outlives a Trek that crashes.
+        Some(Err(e)) => {
+            tracing::warn!("couldn't put process {:?} in a job; it will be ended by its process tree instead: {e}", child.id());
+            None
+        }
+        // It has been reaped already: nothing to put in a job.
+        None => None,
+    };
+    let group = child.id().unwrap_or_default() as i32;
+    trek_core::procs::register(group);
+    Ok(GroupChild { child: Some(child), group, job })
+}
+
+/// A Windows job object that ends the processes in it when its last handle closes.
+#[cfg(windows)]
+mod job {
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle, RawHandle};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, TerminateJobObject,
+    };
+
+    pub(crate) struct Job(OwnedHandle);
+
+    impl Job {
+        /// A new, unnamed job whose handle no child inherits (a child holding it would keep the
+        /// job, and itself, alive). Without JOB_OBJECT_LIMIT_BREAKAWAY_OK nothing in it can
+        /// leave: what the child starts stays in.
+        pub(crate) fn new() -> std::io::Result<Job> {
+            // SAFETY: no security attributes and no name: both may be null.
+            let h = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if h.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: `h` was just created, and is owned from here on.
+            let job = Job(unsafe { OwnedHandle::from_raw_handle(h) });
+            // SAFETY: all zeroes is a valid limit information (integers only): no limits.
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let size = std::mem::size_of_val(&info) as u32;
+            // SAFETY: `info` is the structure the class names, `size` long.
+            if unsafe { SetInformationJobObject(h, JobObjectExtendedLimitInformation, &info as *const _ as *const _, size) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(job)
+        }
+
+        pub(crate) fn assign(&self, process: RawHandle) -> std::io::Result<()> {
+            // SAFETY: both handles are open: the job is this one's, the process the caller's child's.
+            match unsafe { AssignProcessToJobObject(self.0.as_raw_handle(), process) } {
+                0 => Err(std::io::Error::last_os_error()),
+                _ => Ok(()),
+            }
+        }
+
+        /// End every process in the job, the way KILL to a process group does.
+        pub(crate) fn terminate(&self) {
+            // SAFETY: a job handle this owns, with all access.
+            unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) };
+        }
+    }
 }
 
 /// Run `command` in a group of its own, with `input` (if any) on its stdin, and collect its
@@ -589,9 +764,34 @@ pub(crate) async fn output_group(command: &mut tokio::process::Command, input: O
 }
 
 impl GroupChild {
+    /// End the child and everything it started: the gentle stop, up to 2 s for the child to
+    /// exit, then the whole group (or job) is killed. For an agent that may have something to
+    /// save (a session's transcript, its state); a probe that has its answer uses `kill_now`.
+    ///
+    /// On Windows the gentle stop is the end of the child's stdin, so it only works when the
+    /// caller has dropped any stdin writer it took from the child (`child.stdin.take()`) first;
+    /// otherwise the child doesn't hear it and the full 2 s pass before the kill.
     pub(crate) async fn terminate(&mut self) {
         let Some(child) = self.child.take() else { return };
+        #[cfg(unix)]
         finish_group(child, self.group).await;
+        #[cfg(windows)]
+        finish_group(child, self.group, self.job.take()).await;
+    }
+
+    /// End the group at once, with no grace: KILL (the job's, on Windows), then reap. For a
+    /// read-only probe that has what it came for, where the process has nothing to save and
+    /// waiting for it to wind down only keeps the caller waiting.
+    pub(crate) async fn kill_now(&mut self) {
+        let Some(mut child) = self.child.take() else { return };
+        #[cfg(unix)]
+        signal_group(self.group, libc::SIGKILL);
+        // While the child is still held, so its id is still its own.
+        #[cfg(windows)]
+        end_job_or_tree(self.job.take().as_ref(), self.group);
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(REAP_AFTER_KILL, child.wait()).await;
+        trek_core::procs::unregister(self.group);
     }
 }
 
@@ -609,6 +809,7 @@ impl std::ops::DerefMut for GroupChild {
     }
 }
 
+#[cfg(unix)]
 fn signal_group(group: i32, signal: i32) {
     if group > 0 {
         // SAFETY: a negative pid asks kill(2) to signal that process group.
@@ -616,12 +817,54 @@ fn signal_group(group: i32, signal: i32) {
     }
 }
 
+#[cfg(unix)]
 async fn finish_group(mut child: tokio::process::Child, group: i32) {
     signal_group(group, libc::SIGTERM);
     let waited = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await;
     // The leader can exit while a descendant ignores TERM. KILL the group even when the
     // leader was already reaped, so nothing it started is left behind.
     signal_group(group, libc::SIGKILL);
+    if waited.is_err() {
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(REAP_AFTER_KILL, child.wait()).await;
+    }
+    trek_core::procs::unregister(group);
+}
+
+/// Windows has no TERM. The gentle stop is the end of the child's stdin, which agents take as the
+/// cue to exit, when it's still the group's to close: callers that write to the child take its
+/// stdin, and the stop is theirs, by dropping it. A console CTRL_BREAK would be the nearest thing
+/// to TERM, but it only reaches processes on the sender's console, and a child started with
+/// CREATE_NO_WINDOW has one of its own (Trek, a GUI app, has none to share); attaching to the
+/// child's console to send it would change the console of the whole of Trek while other
+/// threads run. So past the grace period it's the job's KILL.
+#[cfg(windows)]
+fn soft_stop(child: &mut tokio::process::Child) {
+    drop(child.stdin.take());
+}
+
+/// Kill everything in `group`: its job, or with none (the child couldn't be put in one), the
+/// child and what can be found under it by parent ids. The caller still holds the child, so its
+/// id is its own even once it has exited, and what it left running can be found.
+#[cfg(windows)]
+fn end_job_or_tree(job: Option<&job::Job>, group: i32) {
+    match job {
+        Some(job) => job.terminate(),
+        None => {
+            if !trek_core::procs::end_tree(group) {
+                tracing::warn!("couldn't end all of process {group}'s tree");
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn finish_group(mut child: tokio::process::Child, group: i32, job: Option<job::Job>) {
+    soft_stop(&mut child);
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await;
+    // As with KILL to a process group: end the whole job even when the child has exited, so
+    // nothing it started is left behind.
+    end_job_or_tree(job.as_ref(), group);
     if waited.is_err() {
         let _ = child.start_kill();
         let _ = tokio::time::timeout(REAP_AFTER_KILL, child.wait()).await;
@@ -645,6 +888,27 @@ fn reaped(child: &mut tokio::process::Child, limit: std::time::Duration) -> bool
     }
 }
 
+#[cfg(windows)]
+impl Drop for GroupChild {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else { return };
+        let (group, job) = (self.group, self.job.take());
+        soft_stop(&mut child);
+        // As on Unix, a thread rather than a runtime task. It holds the job: were the handle
+        // closed here, the job would end its processes at once, with no grace.
+        std::thread::spawn(move || {
+            let exited = reaped(&mut child, std::time::Duration::from_secs(2));
+            end_job_or_tree(job.as_ref(), group);
+            if !exited {
+                let _ = child.start_kill();
+                reaped(&mut child, REAP_AFTER_KILL);
+            }
+            trek_core::procs::unregister(group);
+        });
+    }
+}
+
+#[cfg(unix)]
 impl Drop for GroupChild {
     fn drop(&mut self) {
         let Some(mut child) = self.child.take() else { return };
@@ -853,14 +1117,35 @@ mod tests {
         assert_eq!(l.next_line().await.unwrap(), None);
     }
 
+    /// A shell that runs `unix` under `sh -c`, or `windows` under `cmd /c`.
+    fn echo_to_stderr(unix: &str, windows: &str) -> tokio::process::Command {
+        if cfg!(windows) {
+            let mut c = tokio::process::Command::new("cmd.exe");
+            c.args(["/d", "/c", windows]);
+            c
+        } else {
+            let mut c = tokio::process::Command::new("sh");
+            c.args(["-c", unix]);
+            c
+        }
+    }
+
     #[tokio::test]
     async fn stderr_tail_keeps_draining_after_invalid_utf8() {
         use std::process::Stdio;
-        let mut child = tokio::process::Command::new("sh")
-            .args(["-c", "printf '\\377\\nvalid\\n' >&2"])
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut command = if cfg!(windows) {
+            // cmd has no printf: `type` a file holding the same bytes.
+            let file = std::env::temp_dir().join(format!("trek-stderr-bytes-{}.bin", std::process::id()));
+            std::fs::write(&file, b"\xff\nvalid\n").unwrap();
+            let mut c = tokio::process::Command::new("cmd.exe");
+            c.args(["/d", "/c", "type"]).arg(file).arg("1>&2");
+            c
+        } else {
+            let mut c = tokio::process::Command::new("sh");
+            c.args(["-c", "printf '\\377\\nvalid\\n' >&2"]);
+            c
+        };
+        let mut child = command.stderr(Stdio::piped()).spawn().unwrap();
         let tail = StderrTail::capture(child.stderr.take().unwrap(), "test");
         child.wait().await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -873,7 +1158,7 @@ mod tests {
         let log = SessionLog::default();
         SESSION_LOG
             .scope(log.clone(), async {
-                let mut child = tokio::process::Command::new("sh").args(["-c", "echo 'warning: slow' >&2; echo done >&2"]).stderr(Stdio::piped()).spawn().unwrap();
+                let mut child = echo_to_stderr("echo 'warning: slow' >&2; echo done >&2", "(echo warning: slow)>&2 & (echo done)>&2").stderr(Stdio::piped()).spawn().unwrap();
                 let _tail = StderrTail::capture(child.stderr.take().unwrap(), "test");
                 child.wait().await.unwrap();
             })
@@ -886,13 +1171,14 @@ mod tests {
         }
         assert_eq!(log.lines(), ["warning: slow", "done"]);
         // Outside a session nothing is kept but the tail.
-        let mut child = tokio::process::Command::new("sh").args(["-c", "echo stray >&2"]).stderr(Stdio::piped()).spawn().unwrap();
+        let mut child = echo_to_stderr("echo stray >&2", "(echo stray)>&2").stderr(Stdio::piped()).spawn().unwrap();
         let _tail = StderrTail::capture(child.stderr.take().unwrap(), "test");
         child.wait().await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert_eq!(log.len(), 2);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn ending_or_dropping_a_group_kills_its_grandchild() {
         use std::process::Stdio;
@@ -941,6 +1227,7 @@ mod tests {
         assert_eq!(split.finish().as_deref(), Some("last"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn groups_are_tracked_until_ended() {
         let sleeper = || {
@@ -964,6 +1251,7 @@ mod tests {
         assert!(!trek_core::procs::live().contains(&group), "a dropped group is untracked once reaped");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_command_s_output_is_collected_and_a_slow_one_ended() {
         let mut cat = tokio::process::Command::new("cat");
@@ -976,6 +1264,240 @@ mod tests {
         let err = output_group(&mut slow, None, std::time::Duration::from_millis(200)).await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
         assert!(started.elapsed() < std::time::Duration::from_secs(3), "the group was ended, not waited out");
+    }
+
+    /// A process held open from before it's ended, so its id can't be another's when it's checked.
+    #[cfg(windows)]
+    struct Held(std::os::windows::io::OwnedHandle);
+
+    #[cfg(windows)]
+    impl Held {
+        fn open(pid: u32) -> Held {
+            use std::os::windows::io::FromRawHandle as _;
+            use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+            // SAFETY: plain call; the handle is checked before it's owned.
+            let h = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+            assert!(!h.is_null(), "process {pid} runs");
+            Held(unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(h) })
+        }
+
+        fn exits_within(&self, limit: std::time::Duration) -> bool {
+            use std::os::windows::io::AsRawHandle as _;
+            use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+            use windows_sys::Win32::System::Threading::WaitForSingleObject;
+            // SAFETY: a process handle with SYNCHRONIZE.
+            let waited = unsafe { WaitForSingleObject(self.0.as_raw_handle(), limit.as_millis() as u32) };
+            waited == WAIT_OBJECT_0
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn ending_or_dropping_a_job_kills_its_grandchild() {
+        use std::process::Stdio;
+        use std::time::Duration;
+        use tokio::io::{AsyncBufReadExt as _, BufReader};
+        // PowerShell starts a ping, says its pid, then runs `then`. The ping doesn't read stdin, so
+        // closing it doesn't stop it: only the job's end does.
+        async fn tree(then: &str) -> (GroupChild, Held) {
+            let script = format!(
+                "$i = New-Object Diagnostics.ProcessStartInfo 'ping.exe', '-n 300 127.0.0.1'; $i.UseShellExecute = $false; $i.RedirectStandardOutput = $true; \
+                 $p = [Diagnostics.Process]::Start($i); [Console]::Out.WriteLine($p.Id); [Console]::Out.Flush(); {then}"
+            );
+            let mut command = tokio::process::Command::new("powershell.exe");
+            command.args(["-NoProfile", "-NonInteractive", "-Command", &script]).stdin(Stdio::piped()).stdout(Stdio::piped());
+            let mut child = spawn_group(&mut command).unwrap();
+            let mut line = String::new();
+            let mut stdout = BufReader::new(child.stdout.take().unwrap());
+            tokio::time::timeout(Duration::from_secs(60), stdout.read_line(&mut line)).await.expect("PowerShell said the ping's pid").unwrap();
+            (child, Held::open(line.trim().parse().unwrap()))
+        }
+
+        let (mut child, grandchild) = tree("Start-Sleep 300").await;
+        child.terminate().await;
+        assert!(grandchild.exits_within(Duration::from_secs(10)), "the grandchild survived its job");
+
+        let (child, grandchild) = tree("Start-Sleep 300").await;
+        drop(child);
+        assert!(grandchild.exits_within(Duration::from_secs(10)), "the grandchild survived its dropped job");
+
+        // Its parent gone, the grandchild is still the job's: no parent id leads to it any more.
+        let (mut child, grandchild) = tree("exit").await;
+        assert!(tokio::time::timeout(Duration::from_secs(30), child.wait()).await.unwrap().unwrap().success());
+        assert!(!grandchild.exits_within(Duration::from_millis(500)), "the ping runs on");
+        child.terminate().await;
+        assert!(grandchild.exits_within(Duration::from_secs(10)), "the orphaned grandchild survived its job");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn groups_are_tracked_until_ended_on_windows() {
+        let pinger = || {
+            let mut command = tokio::process::Command::new("ping.exe");
+            command.args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null());
+            spawn_group(&mut command).unwrap()
+        };
+        let mut child = pinger();
+        let group = child.group;
+        assert!(trek_core::procs::live().contains(&group));
+        child.terminate().await;
+        assert!(!trek_core::procs::live().contains(&group));
+
+        let child = pinger();
+        let group = child.group;
+        drop(child);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while trek_core::procs::live().contains(&group) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(!trek_core::procs::live().contains(&group), "a dropped group is untracked once reaped");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_finished_child_is_gone_and_untracked() {
+        let mut command = tokio::process::Command::new("cmd.exe");
+        command.args(["/d", "/c", "exit 3"]);
+        let mut child = spawn_group(&mut command).unwrap();
+        let group = child.group;
+        let status = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await.unwrap().unwrap();
+        assert_eq!(status.code(), Some(3));
+        let started = std::time::Instant::now();
+        child.terminate().await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "nothing to wait for once it's exited");
+        assert!(!trek_core::procs::live().contains(&group));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_command_s_output_is_collected_and_a_slow_one_ended_on_windows() {
+        // System32's own sort, not one from Git or MSYS that may come first on PATH.
+        let sort = std::path::Path::new(&std::env::var_os("SystemRoot").unwrap()).join(r"System32\sort.exe");
+        let out = output_group(&mut tokio::process::Command::new(sort), Some(b"b\r\na\r\n".to_vec()), std::time::Duration::from_secs(30)).await.unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"a\r\nb\r\n");
+        // cmd waits for the ping under it; both go when the time is up.
+        let mut slow = tokio::process::Command::new("cmd.exe");
+        slow.args(["/d", "/c", "ping -n 60 127.0.0.1 >nul"]);
+        let started = std::time::Instant::now();
+        let err = output_group(&mut slow, None, std::time::Duration::from_secs(1)).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "the group was ended, not waited out");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_group_with_no_job_is_ended_by_its_tree() {
+        use std::process::Stdio;
+        use std::time::Duration;
+        use tokio::io::{AsyncBufReadExt as _, BufReader};
+        // As `spawn_group` leaves a child it couldn't put in a job: tracked, with no job. PowerShell
+        // starts a ping, says its pid, then runs `then`.
+        async fn tree(then: &str) -> (GroupChild, Held) {
+            use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+            let script = format!(
+                "$i = New-Object Diagnostics.ProcessStartInfo 'ping.exe', '-n 300 127.0.0.1'; $i.UseShellExecute = $false; $i.RedirectStandardOutput = $true; \
+                 $p = [Diagnostics.Process]::Start($i); [Console]::Out.WriteLine($p.Id); [Console]::Out.Flush(); {then}"
+            );
+            let mut command = tokio::process::Command::new("powershell.exe");
+            command.args(["-NoProfile", "-NonInteractive", "-Command", &script]).stdin(Stdio::piped()).stdout(Stdio::piped()).creation_flags(CREATE_NO_WINDOW);
+            let mut child = command.spawn().unwrap();
+            let group = child.id().unwrap() as i32;
+            trek_core::procs::register(group);
+            let mut line = String::new();
+            let mut stdout = BufReader::new(child.stdout.take().unwrap());
+            tokio::time::timeout(Duration::from_secs(60), stdout.read_line(&mut line)).await.expect("PowerShell said the ping's pid").unwrap();
+            (GroupChild { child: Some(child), group, job: None }, Held::open(line.trim().parse().unwrap()))
+        }
+
+        let (mut child, grandchild) = tree("Start-Sleep 300").await;
+        child.terminate().await;
+        assert!(grandchild.exits_within(Duration::from_secs(10)), "the grandchild survived its group");
+
+        let (child, grandchild) = tree("Start-Sleep 300").await;
+        drop(child);
+        assert!(grandchild.exits_within(Duration::from_secs(10)), "the grandchild survived its dropped group");
+
+        // Its parent gone, the grandchild is still found by its parent's id, which the group
+        // holds on to.
+        let (mut child, grandchild) = tree("exit").await;
+        assert!(tokio::time::timeout(Duration::from_secs(30), child.wait()).await.unwrap().unwrap().success());
+        assert!(!grandchild.exits_within(Duration::from_millis(500)), "the ping runs on");
+        child.terminate().await;
+        assert!(grandchild.exits_within(Duration::from_secs(10)), "the orphaned grandchild survived its group");
+    }
+
+    /// A Trek that dies without cleaning up (killed: no destructors, no atexit) takes its agents
+    /// along: the job's last handle closes with it. The test binary runs itself as that Trek: it
+    /// starts a ping in a group, says the ping's pid, and waits to be killed.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_killed_trek_takes_its_jobs_along() {
+        use tokio::io::{AsyncBufReadExt as _, BufReader};
+        if std::env::var_os("TREK_TEST_KILLED_TREK").is_some() {
+            let mut command = tokio::process::Command::new("ping.exe");
+            command.args(["-n", "120", "127.0.0.1"]).stdout(std::process::Stdio::null());
+            let child = spawn_group(&mut command).unwrap();
+            println!("PING PID {}", child.id().unwrap());
+            tokio::time::sleep(std::time::Duration::from_secs(100)).await;
+            return;
+        }
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "tests::a_killed_trek_takes_its_jobs_along", "--nocapture", "--test-threads=1"])
+            .env("TREK_TEST_KILLED_TREK", "1")
+            .stdout(std::process::Stdio::piped());
+        let mut trek = command.spawn().unwrap();
+        let mut lines = BufReader::new(trek.stdout.take().unwrap()).lines();
+        let pid: u32 = loop {
+            let line = tokio::time::timeout(std::time::Duration::from_secs(60), lines.next_line()).await.unwrap().unwrap().expect("the stand-in Trek ended before saying the ping's pid");
+            // After libtest's "test … ... " on the same line.
+            if let Some((_, pid)) = line.split_once("PING PID ") {
+                break pid.trim().parse().unwrap();
+            }
+        };
+        let ping = Held::open(pid);
+        assert!(!ping.exits_within(std::time::Duration::from_millis(500)), "the ping runs while its Trek does");
+        trek.start_kill().unwrap();
+        let _ = trek.wait().await;
+        let ended = ping.exits_within(std::time::Duration::from_secs(10));
+        if !ended {
+            let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output();
+        }
+        assert!(ended, "the agent outlived a Trek that was killed");
+    }
+
+    /// Trek run inside a job of its own (a CI runner's, a terminal's) still gets its agents into
+    /// theirs, nested, and ending that ends the tree. The test binary re-runs itself as that Trek.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_job_works_inside_the_job_trek_runs_in() {
+        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        if std::env::var_os("TREK_TEST_NESTED_JOB").is_some() {
+            // SAFETY: plain calls. This stand-in Trek joins a job of its own first (not ended on
+            // close; it's left open until the process exits).
+            let outer = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            assert!(!outer.is_null());
+            assert_ne!(unsafe { AssignProcessToJobObject(outer, GetCurrentProcess()) }, 0, "{}", std::io::Error::last_os_error());
+            let mut command = tokio::process::Command::new("ping.exe");
+            command.args(["-n", "120", "127.0.0.1"]).stdout(std::process::Stdio::null());
+            let mut child = spawn_group(&mut command).unwrap();
+            assert!(child.job.is_some(), "the child is in a job of its own, inside Trek's");
+            let ping = Held::open(child.id().unwrap());
+            assert!(!ping.exits_within(std::time::Duration::from_millis(300)));
+            child.terminate().await;
+            assert!(ping.exits_within(std::time::Duration::from_secs(10)), "the nested job didn't end the ping");
+            println!("NESTED JOB OK");
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::a_job_works_inside_the_job_trek_runs_in", "--nocapture", "--test-threads=1"])
+            .env("TREK_TEST_NESTED_JOB", "1")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && text.contains("NESTED JOB OK"), "{text}");
     }
 
     #[test]
@@ -1107,7 +1629,7 @@ mod live_usage {
     }
 
     fn turn_in(agent: AgentId, model: &str, resume: Option<String>, prompt: &str, hand_holding: HandHolding) -> Vec<AgentEvent> {
-        let cwd = std::path::PathBuf::from("/tmp/trek-basecamp-e2e");
+        let cwd = std::env::temp_dir().join("trek-basecamp-e2e");
         std::fs::create_dir_all(&cwd).unwrap();
         let session = start(SessionConfig {
             agent,
@@ -1176,7 +1698,7 @@ mod live_usage {
     #[test]
     #[ignore = "talks to the real Claude Code"]
     fn claude_live_background_shell_outlives_the_turn_and_wakes_it() {
-        let cwd = std::path::PathBuf::from("/tmp/trek-background-e2e");
+        let cwd = std::env::temp_dir().join("trek-background-e2e");
         std::fs::create_dir_all(&cwd).unwrap();
         let session = start(SessionConfig {
             agent: AgentId::ClaudeCode,
@@ -1227,7 +1749,7 @@ mod live_usage {
     #[test]
     #[ignore = "talks to the real Claude Code"]
     fn claude_live_stopped_background_agent_and_what_follows() {
-        let cwd = std::path::PathBuf::from("/tmp/trek-background-e2e");
+        let cwd = std::env::temp_dir().join("trek-background-e2e");
         std::fs::create_dir_all(&cwd).unwrap();
         let session = start(SessionConfig {
             agent: AgentId::ClaudeCode,
@@ -1309,5 +1831,104 @@ mod live_usage {
         let ev = one_turn(AgentId::OpenCode, &std::env::var("TREK_LIVE_OPENCODE_MODEL").unwrap_or_else(|_| "opencode/ling-3.1-flash-free".into()));
         assert!(matches!(ev.last(), Some(AgentEvent::TurnComplete { error: None, .. })), "{ev:?}");
         println!("reported: {:?}", reported(&ev));
+    }
+}
+
+#[cfg(test)]
+mod mcp_hand_off_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// `npx` is a `.cmd` in a folder with a space in its name; `uvx` and `node` are `.exe`s.
+    fn found(name: &str) -> Option<PathBuf> {
+        match name {
+            "npx" => Some(r"C:\Program Files\nodejs\npx.cmd".into()),
+            "uvx" => Some(r"C:\Users\me\.local\bin\uvx.exe".into()),
+            _ => None,
+        }
+    }
+
+    fn strings(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn hand_off(agent: BatchHandOff, command: &str, args: &[&str]) -> Result<Option<(String, Vec<String>)>, String> {
+        agent_stdio_command(agent, command, &strings(args), true, &found)
+    }
+
+    #[test]
+    fn claude_is_given_a_batch_script_through_cmd() {
+        let wrapped = |command: &str, args: &[&str]| hand_off(BatchHandOff::CmdWrapper, command, args);
+        // By name, as the user wrote it (cmd.exe finds `npx.cmd`, even from a folder with spaces).
+        assert_eq!(wrapped("npx", &["-y", "@scope/pkg@1.0"]), Ok(Some(("cmd".into(), strings(&["/c", "npx", "-y", "@scope/pkg@1.0"])))));
+        // By path, with the backslashes cmd.exe wants.
+        assert_eq!(wrapped("D:/tools/run.cmd", &["a b"]), Ok(Some(("cmd".into(), strings(&["/c", r"D:\tools\run.cmd", "a b"])))));
+        assert_eq!(wrapped(r"C:\tools\run.BAT", &[]), Ok(Some(("cmd".into(), strings(&["/c", r"C:\tools\run.BAT"])))));
+        // An `.exe`, a name that isn't found, and a path to something else: as written.
+        assert_eq!(wrapped("uvx", &["tool"]), Ok(None));
+        assert_eq!(wrapped("not-installed", &["x"]), Ok(None));
+        assert_eq!(wrapped(r"C:\tools\agent.exe", &["x"]), Ok(None));
+    }
+
+    #[test]
+    fn claude_is_not_given_what_cmd_would_misread() {
+        let wrapped = |command: &str, args: &[&str]| hand_off(BatchHandOff::CmdWrapper, command, args);
+        let err = wrapped("npx", &["-y", "two\nlines"]).unwrap_err();
+        assert_eq!(err, "npx.cmd is a batch script, which Windows runs through cmd.exe, and cmd.exe can't be given an argument with a line break in it (argument 2 has one).");
+        for bad in ["a&b", "a|b", "<x", "x>", "a^b", "%PATH%", "say \"hi\""] {
+            let err = wrapped("npx", &["-y", bad]).unwrap_err();
+            assert!(err.starts_with("npx.cmd is a batch script") && err.contains("argument 2") && !err.contains(bad), "{bad}: {err}");
+        }
+        assert!(wrapped(r"C:\a&b\run.cmd", &[]).unwrap_err().contains("its name"));
+        assert!(wrapped(r"C:\Program Files\tools\run.cmd", &[]).unwrap_err().contains("folder with a space"));
+        let long = "x".repeat(9000);
+        assert!(wrapped("npx", &[&long]).unwrap_err().contains("over cmd.exe's limit"));
+    }
+
+    #[test]
+    fn codex_is_given_the_scripts_own_path() {
+        // Codex starts a server with tokio's `Command`, which runs a `.cmd` path with every argument
+        // quoted (see `tests_cmd_args`), so `&` and quotes get through; a line break still can't.
+        let given = |command: &str, args: &[&str]| hand_off(BatchHandOff::ResolvedPath, command, args);
+        assert_eq!(given("npx", &["-y", "a&b", "say \"hi\""]), Ok(Some((r"C:\Program Files\nodejs\npx.cmd".into(), strings(&["-y", "a&b", "say \"hi\""])))));
+        assert_eq!(given(r"C:\tools\run.cmd", &["x"]), Ok(Some((r"C:\tools\run.cmd".into(), strings(&["x"])))));
+        assert_eq!(given("uvx", &["tool"]), Ok(None));
+        assert!(given("npx", &["two\r\nlines"]).unwrap_err().contains("line break"));
+    }
+
+    #[test]
+    fn nothing_is_different_off_windows() {
+        for agent in [BatchHandOff::CmdWrapper, BatchHandOff::ResolvedPath] {
+            assert_eq!(agent_stdio_command(agent, "npx", &strings(&["-y", "a&b\nc"]), false, &found), Ok(None));
+        }
+        // The same JSON as before, to the byte, however the lookup answers.
+        let servers = [
+            McpServer::stdio("fs", "npx", strings(&["-y", "srv"]), vec![("K".into(), "v".into())]),
+            McpServer::stdio("trek", "/Applications/Trek.app/Contents/MacOS/trek-mcp", vec![], vec![]),
+            McpServer::http("linear", "https://mcp.linear.app/mcp", vec![("Authorization".into(), "Bearer t".into())]),
+        ];
+        let expected = r#"{"fs":{"args":["-y","srv"],"command":"npx","env":{"K":"v"}},"linear":{"headers":{"Authorization":"Bearer t"},"type":"http","url":"https://mcp.linear.app/mcp"},"trek":{"args":[],"command":"/Applications/Trek.app/Contents/MacOS/trek-mcp","env":{}}}"#;
+        // As values: serde_json keeps keys in a different order on each platform's build.
+        let expected: serde_json::Value = serde_json::from_str(expected).unwrap();
+        for agent in [BatchHandOff::CmdWrapper, BatchHandOff::ResolvedPath] {
+            let (out, left_out) = mcp_servers_json_with(&servers, agent, false, found);
+            assert_eq!(out, expected);
+            assert!(left_out.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_server_that_cant_be_handed_over_is_left_out_with_its_reason() {
+        let servers = [
+            McpServer::stdio("fs", "npx", strings(&["-y", "srv"]), vec![("K".into(), "v".into())]),
+            McpServer::stdio("bad", "npx", strings(&["a\nb"]), vec![]),
+            McpServer::http("linear", "https://mcp.linear.app/mcp", vec![]),
+        ];
+        let (out, left_out) = mcp_servers_json_with(&servers, BatchHandOff::CmdWrapper, true, found);
+        assert_eq!(out, json!({"fs":{"command":"cmd","args":["/c","npx","-y","srv"],"env":{"K":"v"}},"linear":{"type":"http","url":"https://mcp.linear.app/mcp","headers":{}}}));
+        assert_eq!(left_out.len(), 1);
+        assert!(left_out[0].starts_with("MCP server bad wasn't started: npx.cmd is a batch script"), "{left_out:?}");
+        // The user's own settings are what they were.
+        assert_eq!(servers[0].transport, McpTransport::Stdio { command: "npx".into(), args: strings(&["-y", "srv"]), env: vec![("K".into(), "v".into())] });
     }
 }

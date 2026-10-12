@@ -22,15 +22,37 @@
 //! (an ACP Registry install's row, without downloading), `toast [undo|error] <message>` (a toast, with
 //! an Undo or the error icon), `shot <name>`, `quit`.
 //!
+//! The Browser tool (open it with `tools browser`; its page is a native view, so `shot` doesn't
+//! show it): `browser go <address>|back|forward|reload`, `browser state` (the page, the native
+//! view's rectangle beside the panel's and which window has the keys, to `browser.json`), and
+//! `browser snap <name>` (the page as its screenshot button captures it, to `<name>.png`; Windows).
+//!
 //! Input without a pointer or a keyboard (events dispatched to the window, never real OS input):
 //! `click|rclick|hover <element id>` (`name#3` for a row's id; `elements` writes the ids on screen
 //! to `elements.txt`), `type <text>` (into the focused field, else the main composer),
-//! `key <keystroke>…` (`cmd-k`, `escape`, `shift-tab`, `down down enter`), `scroll <element id> <px>`
+//! `count <element id>[*] <n>` (fails unless n such elements are on screen; `*` ends a prefix),
+//! `key <keystroke>…` (`secondary-k`: ⌘K on a Mac, Ctrl+K on Windows; `escape`, `shift-tab`,
+//! `down down enter`; `cmd`/`win`/`super` modifiers are read as `secondary`, so one manifest is
+//! right on both platforms), `scroll <element id> <px>`
 //! (a wheel over that element, positive down the page), `resize <w> <h>` (the main window, logical
-//! px). The thread on screen: `approve` / `deny` its waiting permission, plan
+//! px). On Windows `hittest <element id>|<x> <y> [HTCLIENT|HTCAPTION|…]` asks the window what it
+//! answers to `WM_NCHITTEST` there (to `hittest.txt`; a different answer than the one given fails the
+//! command) and `realclick <element id>|<x> <y>` sends the window the move, press and release of a real
+//! click, to its own handle, where it answers `HTCLIENT` (see `hittest`); `realmove <element id>|<x> <y>`
+//! is the move alone, with the pointer left there, and `realleave` is Windows telling the window
+//! the pointer has left it; `legacy-pointer on|off` handles the pointer as 0.4.1-beta.1 did (every
+//! title bar control the window's handle; a pointer leaving the window leaving the sidebar's rows
+//! held), to show what it did then. The thread on screen: `approve` / `deny` its waiting permission, plan
 //! or question card, `answer <n>|<text>` (option n of each question, or a typed answer), and
 //! `rewind [n] [keep]` (undo the n-th turn from the end, 1 = the latest, as its Undo does; `keep`
 //! leaves the files).
+//!
+//! Measurements (with `TREK_PERF=1`; each logs one `perf:` line, see `perf.rs`): `perf frames
+//! <ms> <label>` (every frame painted meanwhile, and how late the main thread answers a 5 ms
+//! timer, `lag_`), `perf scroll <element id> <px> <steps> <label>`
+//! (a wheel step of `px` over that element each 60 Hz frame, each step timed to its paint),
+//! `perf type <count> <label>` (`count` characters typed one at a time into the focused field,
+//! each timed to its paint) and `perf mark <label>`.
 //! Lines starting with `#` are comments.
 
 use crate::workspace::{PanelTool, Route, SettingsPage, Workspace};
@@ -43,6 +65,9 @@ use std::time::{Duration, Instant};
 pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     let Some(dir) = std::env::var_os("TREK_SHOT_DIR").map(PathBuf::from) else { return };
     let _ = std::fs::create_dir_all(&dir);
+    // Weak between batches: this loop outlives the app's own wind-down, and a handle it held
+    // would be one left when GPUI drops its entities (the leak detector panics on that).
+    let workspace = workspace.downgrade();
     cx.spawn(async move |cx| {
         let mut recording: Option<Recording> = None;
         loop {
@@ -50,14 +75,27 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
             let cmd = dir.join("cmd");
             let Ok(text) = std::fs::read_to_string(&cmd) else { continue };
             let _ = std::fs::remove_file(&cmd);
+            let Some(workspace) = workspace.upgrade() else { break };
             let mut errors = Vec::new();
             for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
                 let (verb, arg) = line.split_once(' ').unwrap_or((line, ""));
                 let result = match verb {
                     "wait" => wait(&workspace, arg, cx).await,
                     "shot" => shot(&workspace, &dir, arg, cx).await,
+                    "browser" => browser(&workspace, &dir, arg, cx).await,
+                    "editor" if arg.starts_with("snap ") => editor_snap(&workspace, &dir, arg["snap ".len()..].trim(), cx).await,
+                    "hittest" | "realclick" | "realmove" | "realleave" => hittest(&workspace, &dir, verb, arg, cx).await,
+                    "legacy-pointer" => cx.update(|cx| match arg {
+                        "on" | "off" => {
+                            crate::chrome::LEGACY_POINTER.store(arg == "on", Ordering::Relaxed);
+                            cx.refresh_windows();
+                            Ok(())
+                        }
+                        _ => Err(anyhow::anyhow!("legacy-pointer on|off")),
+                    }),
                     "record" => record(&workspace, &dir, arg, &mut recording, cx).await,
-                    "quit" => quit(&workspace, cx),
+                    "perf" => perf(&workspace, arg, cx).await,
+                    "quit" => quit(cx),
                     _ => cx.update(|cx| run(&workspace, verb, arg, cx)),
                 };
                 if let Err(e) = result {
@@ -118,16 +156,43 @@ async fn wait(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
     }
 }
 
+/// Set once a manifest has put the pointer somewhere (`click`, `hover`, `scroll` …): from then on
+/// it's where it was put.
+static POINTER_SCRIPTED: AtomicBool = AtomicBool::new(false);
+
+/// Until then, a frame is drawn with the pointer outside the window. The window isn't in front, but
+/// a real mouse resting over it still hovers what's under it (p08 of the parity set caught a
+/// Basecamp bar's tooltip that way), and a capture shouldn't depend on where the mouse is.
+fn park_pointer(window: &mut Window, cx: &mut App) {
+    if !POINTER_SCRIPTED.load(Ordering::Relaxed) {
+        window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position: point(px(-100.), px(-100.)), pressed_button: None, modifiers: Default::default() }), cx);
+    }
+}
+
 async fn shot(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
     if arg.is_empty() {
         anyhow::bail!("shot needs a name");
     }
     // A few frames for whatever the last command changed to be drawn.
     cx.background_executor().timer(Duration::from_millis(400)).await;
+    // And for the git reads the command set going (the composer's branch chip): a process spawn
+    // costs a hundred milliseconds on Windows, so they can land after those few frames.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut waited = false;
+    while cx.update(|cx| ws.read(cx).git_inflight) > 0 && Instant::now() < deadline {
+        cx.background_executor().timer(Duration::from_millis(50)).await;
+        waited = true;
+    }
+    if waited {
+        cx.background_executor().timer(Duration::from_millis(200)).await;
+    }
     let path = dir.join(format!("{arg}.png"));
     let image = cx.update(|cx| -> anyhow::Result<image::RgbaImage> {
         let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
-        main.update(cx, |_, window, _| window.render_to_image())?
+        main.update(cx, |_, window, cx| {
+            park_pointer(window, cx);
+            window.render_to_image()
+        })?
     })?;
     let path2 = path.clone();
     cx.background_executor()
@@ -140,6 +205,185 @@ async fn shot(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) 
         .await?;
     tracing::info!("shot: {}", path.display());
     Ok(())
+}
+
+/// `hittest <element id>|<x> <y> [HTCLIENT|HTCAPTION|HTCLOSE …]` (Windows): what the window answers
+/// when Windows asks `WM_NCHITTEST` there — the question asked before every real mouse message,
+/// whose answer decides whether a press clicks what's under it or starts a window drag. An element
+/// is asked at its middle; a point is in logical px from the window's top left, a negative x from
+/// its right edge. The answer goes to `hittest.txt`, and when one is expected a different answer
+/// fails the command. `realclick <element id>|<x> <y>` then sends the window the move, press and
+/// release a mouse delivers (to this window's own handle, never the desktop) — but only where the
+/// answer is `HTCLIENT`: elsewhere a real press is a window drag, and it says so.
+#[cfg(windows)]
+async fn hittest(ws: &Entity<Workspace>, dir: &Path, verb: &str, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    use gpui_kit::test::TestWindowExt as _;
+    use std::io::Write as _;
+    let mut words: Vec<&str> = arg.split_whitespace().collect();
+    // `HTCAPTION` expects the handle (and the press to go through to its move); `HTCAPTION:swallowed`
+    // the handle with the window taking the press for something of its own (a dropdown's).
+    let expected = words.last().filter(|w| w.starts_with("HT")).map(|w| w.to_string());
+    if expected.is_some() {
+        words.pop();
+    }
+    let (expect, swallowed) = match expected.as_deref().map(|e| e.split_once(':').unwrap_or((e, ""))) {
+        Some((code, flag)) => (Some(code.to_string()), flag == "swallowed"),
+        None => (None, false),
+    };
+    let main = cx.update(|cx| ws.read(cx).main_window).ok_or_else(|| anyhow::anyhow!("no main window"))?;
+    if verb == "realleave" {
+        let hwnd = main.update(cx, |_, window, _| crate::winsys::hwnd_of(window))?.ok_or_else(|| anyhow::anyhow!("realleave: no window handle"))?;
+        // The real cursor isn't where a script can put it: the window is told where it is.
+        crate::chrome::SCRIPTED_CURSOR_AWAY.store(true, Ordering::Relaxed);
+        crate::winsys::mouse_leave(hwnd);
+        writeln!(std::fs::OpenOptions::new().create(true).append(true).open(dir.join("hittest.txt"))?, "realleave: Windows told the window the pointer left it")?;
+        cx.update(|cx| cx.refresh_windows());
+        return Ok(());
+    }
+    // The window is only asked inside an update; the question itself is sent outside of one, as the
+    // window's procedure updates it to answer.
+    let (hwnd, at, x, y) = main.update(cx, |_, window, cx| -> anyhow::Result<(isize, Point<Pixels>, i32, i32)> {
+        POINTER_SCRIPTED.store(true, Ordering::Relaxed);
+        window.render_frame(cx);
+        let at = match words.as_slice() {
+            [x, y] if x.parse::<f32>().is_ok() && y.parse::<f32>().is_ok() => {
+                let (x, y): (f32, f32) = (x.parse()?, y.parse()?);
+                point(px(if x < 0. { f32::from(window.viewport_size().width) + x } else { x }), px(y))
+            }
+            [id] => {
+                // `card-*` is the one element whose id starts so (a row's id has its thread's in it).
+                let named = |s: &gpui_kit::test::ElementSnapshot| match (id.strip_suffix('*'), s.path().last()) {
+                    (Some(prefix), Some(last)) => id_text(last).starts_with(prefix),
+                    (None, last) => last == Some(&element_id(id)),
+                    _ => false,
+                };
+                let found: Vec<_> = gpui_kit::base::test_support::snapshots(window).into_iter().filter(|s| named(s) && s.visible()).collect();
+                let [one] = found.as_slice() else { anyhow::bail!("{verb}: {} elements on screen are {id}", found.len()) };
+                let b = one.bounds();
+                b.origin + point(b.size.width / 2., b.size.height / 2.)
+            }
+            _ => anyhow::bail!("{verb} <element id>|<x> <y>{}", if verb == "hittest" { " [HTCLIENT|HTCAPTION|…]" } else { "" }),
+        };
+        // The pointer is there first, as a real one is before it asks: what the window answers comes from what it last saw under the pointer.
+        if verb != "realmove" {
+            window.simulate_mouse_move(at, cx);
+        }
+        let hwnd = crate::winsys::hwnd_of(window).ok_or_else(|| anyhow::anyhow!("{verb}: no window handle"))?;
+        let scale = window.scale_factor();
+        Ok((hwnd, at, (f32::from(at.x) * scale).round() as i32, (f32::from(at.y) * scale).round() as i32))
+    })??;
+    if verb == "realmove" {
+        // Only the move: the pointer is left there, in the window.
+        crate::chrome::SCRIPTED_CURSOR_AWAY.store(false, Ordering::Relaxed);
+        crate::winsys::client_move(hwnd, x, y);
+        writeln!(std::fs::OpenOptions::new().create(true).append(true).open(dir.join("hittest.txt"))?, "realmove {} @ {x},{y}", words.join(" "))?;
+        cx.update(|cx| cx.refresh_windows());
+        return Ok(());
+    }
+    let hit = crate::winsys::hit_test(hwnd, x, y);
+    let answer = crate::winsys::hit_name(hit);
+    // On the window's handle a press goes to what Windows does with it (a move; a double click
+    // maximises) only if nothing in the window swallows it first: Windows hands the press to the
+    // window before its own handling, and a window that answers it takes it for its own.
+    let through = if answer == "HTCAPTION" {
+        let press = |click_count| MouseDownEvent { button: MouseButton::Left, position: at, modifiers: Modifiers::default(), click_count, first_mouse: false };
+        let passed = main.update(cx, |_, window, cx| {
+            let first = window.dispatch_event(PlatformInput::MouseDown(press(1)), cx).propagate;
+            let second = window.dispatch_event(PlatformInput::MouseDown(press(2)), cx).propagate;
+            // Let go off the window: where it was pressed, the release would be a click on whatever
+            // is there (in the beta's title bar, a button).
+            window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: point(px(-100.), px(-100.)), modifiers: Modifiers::default(), click_count: 2 }), cx);
+            first && second
+        })?;
+        Some(passed)
+    } else {
+        None
+    };
+    let mut log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("hittest.txt"))?;
+    writeln!(log, "{verb} {} @ {x},{y} -> {answer}{}", words.join(" "), through.map(|p| if p { " (a press goes through to the window's move and maximize)" } else { " (a press is swallowed in the window)" }).unwrap_or_default())?;
+    if let Some(expect) = expect.filter(|e| e != answer) {
+        anyhow::bail!("{verb} {}: the window answers {answer}, not {expect}", words.join(" "));
+    }
+    anyhow::ensure!(swallowed || through != Some(false), "{verb} {}: the window's handle, but something in the window swallows a press there", words.join(" "));
+    anyhow::ensure!(!swallowed || through == Some(false), "{verb} {}: expected the press swallowed, and it goes through", words.join(" "));
+    if verb == "realclick" {
+        anyhow::ensure!(answer == "HTCLIENT", "realclick {}: the window answers {answer}, so a real press there is a window drag, not a click", words.join(" "));
+        // A press on a window behind first asks whether to activate it and let the press through.
+        let activation = crate::winsys::mouse_activate(hwnd, hit);
+        writeln!(log, "  a press with the window behind: {activation}")?;
+        anyhow::ensure!(activation == "MA_ACTIVATE", "realclick {}: a first click on the window behind answers {activation}, so it would be lost or the window left behind", words.join(" "));
+        crate::chrome::SCRIPTED_CURSOR_AWAY.store(false, Ordering::Relaxed);
+        let [moved, pressed, released] = crate::winsys::client_click(hwnd, x, y);
+        writeln!(log, "  the window took {} ms to take the move, {} ms the press, {} ms the release", moved.as_millis(), pressed.as_millis(), released.as_millis())?;
+        cx.update(|cx| cx.refresh_windows());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+async fn hittest(_: &Entity<Workspace>, _: &Path, verb: &str, _: &str, _: &mut AsyncApp) -> anyhow::Result<()> {
+    anyhow::bail!("{verb}: Windows only (macOS has no WM_NCHITTEST)")
+}
+
+/// `editor snap <name>`: the editor's preview in front (a PDF, a video), its web view as WebView2
+/// draws it, to `<name>.png` (a native view: `shot` doesn't show it). Windows only.
+async fn editor_snap(ws: &Entity<Workspace>, dir: &Path, name: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    anyhow::ensure!(!name.is_empty(), "editor snap needs a name");
+    #[cfg(windows)]
+    {
+        let main = cx.update(|cx| ws.read(cx).main_window).ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        let png = main.update(cx, |root, _, cx| {
+            let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
+            let trek = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok())?;
+            let web = trek.read(cx).ide.read(cx).active_preview()?.read(cx).web_view()?;
+            Some(crate::panels::browser::capture_png(web.read(cx).raw()))
+        })?;
+        let png = png.ok_or_else(|| anyhow::anyhow!("editor snap: no web view in front (open a PDF or a video)"))?;
+        let bytes = png.recv().await.map_err(|_| anyhow::anyhow!("editor snap: the view closed"))?.map_err(|e| anyhow::anyhow!("editor snap: {e}"))?;
+        std::fs::write(dir.join(format!("{name}.png")), bytes)?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (ws, dir, cx);
+        anyhow::bail!("editor snap: Windows only (WebView2's CapturePreview)")
+    }
+}
+
+async fn browser(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    let (cmd, rest) = arg.split_once(' ').unwrap_or((arg, ""));
+    let main = cx.update(|cx| ws.read(cx).main_window).ok_or_else(|| anyhow::anyhow!("no main window"))?;
+    let panel = main.update(cx, |root, _, cx| {
+        let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
+        view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok()).and_then(|trek| trek.read(cx).right_panel.read(cx).browser())
+    })?;
+    let panel = panel.ok_or_else(|| anyhow::anyhow!("browser: the Browser tool isn't open (tools browser)"))?;
+    match cmd {
+        "state" => {
+            // A beat for the last command's layout to reach the native view.
+            cx.background_executor().timer(Duration::from_millis(400)).await;
+            let state = main.update(cx, |_, window, cx| panel.read(cx).shots_state(window, cx))?;
+            std::fs::write(dir.join("browser.json"), serde_json::to_string_pretty(&state)?)?;
+            Ok(())
+        }
+        "snap" => {
+            anyhow::ensure!(!rest.is_empty(), "browser snap needs a name");
+            #[cfg(windows)]
+            {
+                let png = cx.update(|cx| panel.read(cx).shots_capture(cx)).ok_or_else(|| anyhow::anyhow!("browser snap: no page"))?;
+                let bytes = png.recv().await.map_err(|_| anyhow::anyhow!("browser snap: the page closed"))?.map_err(|e| anyhow::anyhow!("browser snap: {e}"))?;
+                std::fs::write(dir.join(format!("{rest}.png")), bytes)?;
+                Ok(())
+            }
+            #[cfg(not(windows))]
+            anyhow::bail!("browser snap: Windows only (WebView2's CapturePreview)")
+        }
+        _ => {
+            cx.update(|cx| panel.update(cx, |p, cx| p.shots(cmd, rest, cx)))?;
+            cx.update(|cx| cx.refresh_windows());
+            Ok(())
+        }
+    }
 }
 
 async fn record(ws: &Entity<Workspace>, dir: &Path, arg: &str, slot: &mut Option<Recording>, cx: &mut AsyncApp) -> anyhow::Result<()> {
@@ -203,7 +447,10 @@ fn start_recording(ws: Entity<Workspace>, dir: PathBuf, name: String, ms: u64, f
         while started.elapsed() < Duration::from_millis(ms) && !flag.load(Ordering::Relaxed) {
             let image = cx.update(|cx| -> anyhow::Result<image::RgbaImage> {
                 let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
-                main.update(cx, |_, window, _| window.render_to_image())?
+                main.update(cx, |_, window, cx| {
+                    park_pointer(window, cx);
+                    window.render_to_image()
+                })?
             })?;
             times.push(started.elapsed().as_secs_f64());
             let path = frames_dir.join(format!("f{index:05}.png"));
@@ -229,11 +476,132 @@ fn start_recording(ws: Entity<Workspace>, dir: PathBuf, name: String, ms: u64, f
     Recording { stop, task }
 }
 
-fn quit(ws: &Entity<Workspace>, cx: &mut AsyncApp) -> anyhow::Result<()> {
-    cx.update(|cx| {
-        ws.update(cx, |ws, _| ws.shutdown_sessions());
-        cx.quit();
+/// What `perf type` types, over and over: words and spaces, as prose is typed.
+const TYPED: &str = "the quick brown fox jumps over the lazy dog while the agent reads the build log ";
+
+/// `perf frames|scroll|type|mark …` (see the header): input dispatched as events, never real OS
+/// input, and each step waits for the frame that shows it.
+async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    use crate::perf::{BUDGET, ms, summarize};
+    anyhow::ensure!(crate::perf::on(), "perf: launch with TREK_PERF=1");
+    let main = cx.update(|cx| ws.read(cx).main_window).ok_or_else(|| anyhow::anyhow!("no main window"))?;
+    let args: Vec<&str> = arg.split_whitespace().collect();
+    let num = |i: usize, what: &str| -> anyhow::Result<u64> { args.get(i).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("perf: {arg:?}: bad or missing {what}")) };
+    let frame_pairs = |frames: &[crate::perf::Frame]| {
+        let took: Vec<Duration> = frames.iter().map(crate::perf::Frame::took).collect();
+        let s = summarize(&took, BUDGET);
+        format!("frames={} {}", s.n, s.pairs("frame_"))
+    };
+    match args.first().copied() {
+        Some("mark") => tracing::info!("perf: mark label={}", args.get(1).unwrap_or(&"-")),
+        Some("frames") => {
+            let span = num(1, "<ms>")?;
+            let label = args.get(2).unwrap_or(&"frames");
+            crate::perf::record();
+            // Beside the frames, how late the main thread comes back to a 5 ms timer: work done
+            // outside a frame (a save, a parse) shows there and not in frame times.
+            let stop = Arc::new(AtomicBool::new(false));
+            let sampler = {
+                let stop = stop.clone();
+                cx.spawn(async move |cx| {
+                    let mut lags = vec![];
+                    while !stop.load(Ordering::Relaxed) {
+                        let asked = Instant::now();
+                        cx.background_executor().timer(Duration::from_millis(5)).await;
+                        lags.push(asked.elapsed().saturating_sub(Duration::from_millis(5)));
+                    }
+                    lags
+                })
+            };
+            cx.background_executor().timer(Duration::from_millis(span)).await;
+            stop.store(true, Ordering::Relaxed);
+            let lags = sampler.await;
+            let frames = crate::perf::take_recorded();
+            tracing::info!("perf: frames label={label} ms={span} {} {}", frame_pairs(&frames), summarize(&lags, BUDGET).pairs("lag_"));
+        }
+        Some("scroll") => {
+            let id = *args.get(1).ok_or_else(|| anyhow::anyhow!("perf scroll <element id> <px> <steps> <label>"))?;
+            let dy: f32 = args.get(2).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("perf scroll: bad or missing <px>"))?;
+            let steps = num(3, "<steps>")?;
+            let label = args.get(4).unwrap_or(&"scroll");
+            // The pointer goes over the element once, as a hand on a wheel stays put: over the
+            // middle of what's on screen of it (a tall row's own middle can be off the window).
+            let position = main.update(cx, |_, window, cx| -> anyhow::Result<Point<Pixels>> {
+                pointer(window, "hover", id, cx)?;
+                let id = element_id(id);
+                let found = gpui_kit::base::test_support::snapshots(window).into_iter().find(|s| s.path().last() == Some(&id));
+                let bounds = found.ok_or_else(|| anyhow::anyhow!("perf scroll: {id:?} went away"))?.bounds();
+                Ok(bounds.intersect(&Bounds::new(point(px(0.), px(0.)), window.viewport_size())).center())
+            })??;
+            crate::perf::record();
+            let (mut latency, mut unpainted) = (vec![], 0);
+            for _ in 0..steps {
+                let began = Instant::now();
+                let (tx, rx) = crate::perf::next_frame();
+                main.update(cx, |_, window, cx| {
+                    let event = ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.), px(-dy))), ..Default::default() };
+                    window.dispatch_event(event.to_platform_input(), cx);
+                })?;
+                match painted_within(tx, rx, Duration::from_millis(500), cx).await {
+                    Some(f) => latency.push(f.painted.saturating_duration_since(began)),
+                    // Nothing to draw (the end of the list), or no frame in time.
+                    None => unpainted += 1,
+                }
+                let spent = began.elapsed();
+                if spent < BUDGET {
+                    cx.background_executor().timer(BUDGET - spent).await;
+                }
+            }
+            let frames = crate::perf::take_recorded();
+            let l = summarize(&latency, BUDGET);
+            tracing::info!("perf: scroll label={label} steps={steps} unpainted={unpainted} {} {}", frame_pairs(&frames), l.pairs("latency_"));
+        }
+        Some("type") => {
+            let count = num(1, "<count>")? as usize;
+            let label = args.get(2).unwrap_or(&"type");
+            crate::perf::record();
+            let (mut latency, mut unpainted) = (vec![], 0);
+            for c in TYPED.chars().cycle().take(count) {
+                let began = Instant::now();
+                let (tx, rx) = crate::perf::next_frame();
+                let typed = main.update(cx, |_, window, cx| {
+                    window.focused(cx).is_some() && window.dispatch_keystroke(Keystroke { modifiers: Modifiers::default(), key: String::new(), key_char: Some(c.to_string()) }, cx)
+                })?;
+                anyhow::ensure!(typed, "perf type: nothing has the keyboard (focus a field first)");
+                match painted_within(tx, rx, Duration::from_millis(500), cx).await {
+                    Some(f) => latency.push(f.painted.saturating_duration_since(began)),
+                    None => unpainted += 1,
+                }
+                // About 20 keys a second, a fast typist's pace.
+                let spent = began.elapsed();
+                if spent < Duration::from_millis(50) {
+                    cx.background_executor().timer(Duration::from_millis(50) - spent).await;
+                }
+            }
+            let frames = crate::perf::take_recorded();
+            let l = summarize(&latency, BUDGET);
+            tracing::info!("perf: type label={label} keys={count} unpainted={unpainted} {} {} latency_mean={}", frame_pairs(&frames), l.pairs("latency_"), ms(latency.iter().sum::<Duration>() / latency.len().max(1) as u32));
+        }
+        _ => anyhow::bail!("perf frames <ms> <label> | scroll <element id> <px> <steps> <label> | type <count> <label> | mark <label>"),
+    }
+    Ok(())
+}
+
+/// The frame `perf::next_frame` was armed for, or `None` after `limit`.
+async fn painted_within(tx: async_channel::Sender<Option<crate::perf::Frame>>, rx: async_channel::Receiver<Option<crate::perf::Frame>>, limit: Duration, cx: &mut AsyncApp) -> Option<crate::perf::Frame> {
+    let executor = cx.background_executor().clone();
+    let timeout = cx.background_executor().spawn(async move {
+        executor.timer(limit).await;
+        let _ = tx.try_send(None);
     });
+    let frame = rx.recv().await.ok().flatten();
+    drop(timeout);
+    frame
+}
+
+fn quit(cx: &mut AsyncApp) -> anyhow::Result<()> {
+    // As the Quit menu item does.
+    cx.update(crate::root::quit);
     Ok(())
 }
 
@@ -343,7 +711,7 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         // `editor diag <abs-path> <line> <message>` (a problem, as a language server would say),
         // `editor fix` (Fix with Agent on the first problem), `editor term-chat`, and
         // `editor rclick|hover <element id>` (a context menu, a hover, without a pointer; `name#3`
-        // for a row's id).
+        // for a row's id). `editor snap <name>`: the preview's web view (see `editor_snap`).
         let (sub, rest) = arg.split_once(' ').unwrap_or((arg, ""));
         let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
         main.update(cx, |root, window, cx| -> anyhow::Result<()> {
@@ -530,7 +898,7 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         cx.refresh_windows();
         return Ok(());
     }
-    if matches!(verb, "click" | "rclick" | "hover" | "scroll" | "type" | "key" | "resize" | "elements") {
+    if matches!(verb, "click" | "rclick" | "hover" | "scroll" | "type" | "key" | "resize" | "elements" | "count") {
         let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
         main.update(cx, |root, window, cx| -> anyhow::Result<()> {
             match verb {
@@ -541,12 +909,16 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                 }
                 "key" => {
                     use gpui_kit::test::TestWindowExt as _;
-                    anyhow::ensure!(!arg.is_empty(), "key needs a keystroke (cmd-k, escape, shift-tab …)");
+                    anyhow::ensure!(!arg.is_empty(), "key needs a keystroke (secondary-k, escape, shift-tab …)");
+                    // Manifests write the Mac's keys (`cmd-k`); Trek's bindings read a Mac ⌘ as
+                    // Ctrl on Windows, so the harness does too — `secondary` is gpui's spelling
+                    // of exactly that, keeping one manifest right on both platforms.
+                    let keys: Vec<String> = arg.split_whitespace().map(manifest_key).collect();
                     // All of them parse before any is pressed: a typo doesn't leave half a sequence done.
-                    for k in arg.split_whitespace() {
+                    for k in &keys {
                         Keystroke::parse(k).map_err(|e| anyhow::anyhow!("key: bad keystroke {k:?}: {e}"))?;
                     }
-                    for k in arg.split_whitespace() {
+                    for k in &keys {
                         window.press(k, cx);
                     }
                     Ok(())
@@ -558,6 +930,23 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                     pointer(window, "hover", id, cx)?;
                     // Positive is down the page, as a wheel turned towards you.
                     window.scroll(element_id(id), ScrollDelta::Pixels(point(px(0.), px(-dy))), cx);
+                    Ok(())
+                }
+                "count" => {
+                    use gpui_kit::test::TestWindowExt as _;
+                    let (id, n) = arg.rsplit_once(' ').ok_or_else(|| anyhow::anyhow!("count <element id>[*] <n>"))?;
+                    let n: usize = n.trim().parse()?;
+                    window.render_frame(cx);
+                    let found = gpui_kit::base::test_support::snapshots(window)
+                        .into_iter()
+                        .filter(|s| s.visible())
+                        .filter(|s| match (id.strip_suffix('*'), s.path().last()) {
+                            (Some(prefix), Some(last)) => id_text(last).starts_with(prefix),
+                            (None, last) => last == Some(&element_id(id)),
+                            _ => false,
+                        })
+                        .count();
+                    anyhow::ensure!(found == n, "count {id}: {found} on screen, not {n}");
                     Ok(())
                 }
                 "resize" => {
@@ -773,12 +1162,27 @@ fn usage_demo(ws: &Entity<Workspace>, cx: &mut App) {
     });
 }
 
+/// A manifest's `key` keystroke as this platform means it: `cmd`/`win`/`super` name the Mac's ⌘,
+/// which Trek's bindings read as Ctrl off the Mac — gpui's `secondary` is exactly that mapping.
+/// Anything else (a bare `ctrl-`, `shift-`, a key) passes through.
+fn manifest_key(key: &str) -> String {
+    let mut parts: Vec<&str> = key.split('-').collect();
+    let modifiers = parts.len().saturating_sub(1);
+    for part in parts.iter_mut().take(modifiers) {
+        if matches!(part.to_ascii_lowercase().as_str(), "cmd" | "win" | "super") {
+            *part = "secondary";
+        }
+    }
+    parts.join("-")
+}
+
 /// `click|rclick|hover <id>`: the pointer on the one element on screen with that id, as events
 /// dispatched to the window (no real input). The kit's lookup panics on a missing or ambiguous id,
 /// so both are checked first.
 fn pointer(window: &mut Window, verb: &str, id: &str, cx: &mut App) -> anyhow::Result<()> {
     use gpui_kit::test::TestWindowExt as _;
     anyhow::ensure!(!id.is_empty(), "{verb} needs an element id (see `elements`)");
+    POINTER_SCRIPTED.store(true, Ordering::Relaxed);
     window.render_frame(cx);
     let id = element_id(id);
     let found: Vec<_> = gpui_kit::base::test_support::snapshots(window).into_iter().filter(|s| s.path().last() == Some(&id)).collect();
