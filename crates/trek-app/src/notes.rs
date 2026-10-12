@@ -163,6 +163,8 @@ pub struct NotesView {
     colors_open: bool,
     /// The toolbar's width as last laid out (0 before): it gives up room below `TOOLBAR_*`.
     toolbar_width: std::rc::Rc<std::cell::Cell<f32>>,
+    /// The preview's width as last laid out (0 before): images in it are drawn no wider.
+    preview_width: std::rc::Rc<std::cell::Cell<f32>>,
     /// The note's text changed and isn't saved yet.
     dirty: bool,
     /// Undo and redo for the note on screen.
@@ -219,6 +221,7 @@ impl NotesView {
             mode: Mode::Split,
             colors_open: false,
             toolbar_width: Default::default(),
+            preview_width: Default::default(),
             dirty: false,
             history: History::default(),
             epoch,
@@ -788,12 +791,43 @@ impl Render for NotesView {
                     .h_full(),
             );
         // The notes folder is where `assets/…` links start from: the images in them are drawn,
-        // and open in the image preview when clicked.
-        let preview = div().id("note-preview").flex_1().min_w_0().h_full().overflow_y_scroll().px(px(32.)).py(px(22.)).child(if body.trim().is_empty() {
-            div().text_color(theme.muted_foreground).text_size(size).child("Nothing to show yet.").into_any_element()
-        } else {
-            crate::md::keyed(SharedString::from(format!("note-md-{id}")), body, Some(notes::notes_dir()), None, size, false, false, cx).into_any_element()
-        });
+        // and open in the image preview when clicked. Beside the text (Split) the column is
+        // narrower than an image is drawn at: its width, measured after layout, bounds them (a
+        // width that changes draws the preview again, as the toolbar's does).
+        const PREVIEW_PAD: f32 = 32.;
+        let measured = self.preview_width.get();
+        let images_within = (measured > 0.).then(|| px(measured - 2. * PREVIEW_PAD));
+        let preview_width = self.preview_width.clone();
+        let preview = div()
+            .id("note-preview")
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_y_scroll()
+            .px(px(PREVIEW_PAD))
+            .py(px(22.))
+            .child(
+                canvas(
+                    move |bounds, window, _| {
+                        let w = f32::from(bounds.size.width);
+                        if (preview_width.replace(w) - w).abs() > 1. {
+                            window.request_animation_frame();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .w_full()
+                .h_0(),
+            )
+            .child(if body.trim().is_empty() {
+                div().text_color(theme.muted_foreground).text_size(size).child("Nothing to show yet.").into_any_element()
+            } else {
+                crate::md::keyed(SharedString::from(format!("note-md-{id}")), body, Some(notes::notes_dir()), None, size, false, false, images_within, cx).into_any_element()
+            });
         let drop_tint = crate::palette::ember(cx).opacity(0.08);
         let main = match self.mode {
             Mode::Write => write.into_any_element(),
