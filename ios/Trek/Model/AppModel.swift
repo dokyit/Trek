@@ -297,6 +297,7 @@ final class AppModel {
                 fullAccessAllowed = s.fullAccess ?? false
             }
             for t in s.unlisted { setUnlisted(t) }
+            learnIcons()
         case .thread(let t):
             if unlisted[t.id] != nil { unlisted[t.id] = nil }
             if let i = threads.firstIndex(where: { $0.id == t.id }) {
@@ -337,7 +338,7 @@ final class AppModel {
             reply(re, message)
         case .usage(let re, _), .basecamp(let re, _), .notes(let re, _), .note(let re, _), .gitStatus(let re, _),
              .gitDiff(let re, _), .gitBranches(let re, _), .commands(let re, _, _), .settings(let re, _),
-             .searchResults(let re, _):
+             .searchResults(let re, _), .attachment(let re, _), .backgroundOutput(let re, _), .icon(let re, _):
             reply(re, message)
         case .unlisted(let t):
             setUnlisted(t)
@@ -358,6 +359,7 @@ final class AppModel {
         let needs = threads.count { $0.waitsOnYou && $0.section != .snoozed }
         if working != workingCount { workingCount = working }
         if needs != needsYouCount { needsYouCount = needs }
+        learnIcons()
     }
 
     private func reply(_ re: String?, _ message: ServerMessage) {

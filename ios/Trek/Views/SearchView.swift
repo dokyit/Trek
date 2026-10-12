@@ -14,7 +14,7 @@ struct SearchView: View {
     @Environment(\.compactRows) private var compact
 
     private var trimmed: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var onMac: Bool { model.serves(MacFeature.search) }
+    private var onMac: Bool { model.serves(.search) }
 
     /// What the phone has that matches: titles, projects, agents, branches.
     private var local: [ThreadSummary] {
@@ -44,7 +44,7 @@ struct SearchView: View {
                 if searching {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("Searching messages on \(model.host?.name ?? "your Mac")…").font(.footnote).foregroundStyle(Trek.muted)
+                        Text("Searching messages on \(model.host?.name ?? "your Mac")…").font(.ui(.footnote)).foregroundStyle(Trek.muted)
                     }
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
@@ -111,11 +111,11 @@ private struct SearchHitLine: View {
             VStack(alignment: .leading, spacing: 2) {
                 if result.thread.parentId != nil {
                     Label(parent.map { "Sub-agent of \($0)" } ?? "Sub-agent", systemImage: "person.2")
-                        .font(.caption).foregroundStyle(Trek.muted).lineLimit(1)
+                        .font(.ui(.caption)).foregroundStyle(Trek.muted).lineLimit(1)
                 }
                 if let snippet = result.snippet {
                     Text(Self.highlighted(snippet, result.ranges ?? []))
-                        .font(.footnote)
+                        .font(.ui(.footnote))
                         .foregroundStyle(Trek.muted)
                         .lineLimit(2)
                 }

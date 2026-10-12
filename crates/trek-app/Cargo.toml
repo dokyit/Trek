@@ -38,7 +38,9 @@ rust-embed = "8"
 tray-icon = "0.26"
 png = "0.18"
 # Same version GPUI decodes clipboard images with; converts TIFF/BMP pastes to PNG.
-image = { version = "0.25", default-features = false, features = ["png", "tiff", "bmp", "ico", "pnm"] }
+image = { version = "0.25", default-features = false, features = ["png", "tiff", "bmp", "ico", "pnm", "jpeg", "gif", "webp"] }
+# Draws added agents' and projects' SVG icons for the phone. The version GPUI draws SVGs with.
+resvg = { version = "0.46", default-features = false }
 portable-pty = "0.9"
 vt100 = "0.16"
 gpui-wry = "=0.7.0"

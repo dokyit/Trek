@@ -763,6 +763,12 @@ const CLIENT_TYPES: &[&str] = &[
     "set_settings",
     "ping",
     "search",
+    "use_reset",
+    "queue_action",
+    "attachment",
+    "background_output",
+    "stop_background",
+    "icon",
 ];
 
 /// Parse a text frame: its `id` (for the reply's `re`, even when the rest is bad) and message.
@@ -916,6 +922,12 @@ async fn call<H: RemoteHost>(host: &H, re: Option<String>, msg: ClientMessage) -
         ClientMessage::Settings => host.settings().await.map(ServerMessage::Settings),
         ClientMessage::SetSettings(change) => host.set_settings(change).await.map(ServerMessage::Settings),
         ClientMessage::Search(req) => host.search(req).await.map(ServerMessage::SearchResults),
+        ClientMessage::UseReset { credit_id } => host.use_reset(&credit_id).await.map(|()| ack(None)),
+        ClientMessage::QueueAction(req) => host.queue_action(req).await.map(|text| ServerMessage::Ack { thread_id: None, open: None, text }),
+        ClientMessage::Attachment(req) => host.attachment(req).await.map(ServerMessage::Attachment),
+        ClientMessage::BackgroundOutput { thread_id, task_id } => host.background_output(&thread_id, &task_id).await.map(ServerMessage::BackgroundOutput),
+        ClientMessage::StopBackground { thread_id, task_id } => host.stop_background(&thread_id, &task_id).await.map(|()| ack(None)),
+        ClientMessage::Icon(req) => host.icon(req).await.map(ServerMessage::Icon),
         other => Err(HostError::bad_request(format!("Unexpected \"{}\"", other.kind()))),
     };
     match result {

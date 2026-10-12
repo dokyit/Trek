@@ -9,11 +9,8 @@ struct SubAgentNeedsCard: View {
     @Environment(\.openThread) private var openThread
 
     private var tint: Color {
-        switch needs?.kind {
-        case .question: Trek.question
-        case .plan: Trek.plan
-        default: Trek.approval
-        }
+        // Amber for anything waiting on you, as on the Mac; plans keep theirs.
+        needs?.kind == .plan ? Trek.plan : Trek.approval
     }
 
     private var waitsFor: String {
@@ -35,13 +32,13 @@ struct SubAgentNeedsCard: View {
                         .offset(x: 2, y: 2)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Sub-agent needs you").font(.subheadline.weight(.semibold))
+                    Text("Sub-agent needs you").font(.ui(.subheadline).weight(.semibold))
                     Text(kid.map { "\($0.title) · \(waitsFor)" } ?? waitsFor)
-                        .font(.footnote).foregroundStyle(Trek.muted).lineLimit(2)
+                        .font(.ui(.footnote)).foregroundStyle(Trek.muted).lineLimit(2)
                 }
                 Spacer(minLength: 6)
                 Text("Open")
-                    .font(.subheadline.weight(.semibold))
+                    .font(.ui(.subheadline).weight(.semibold))
                     .foregroundStyle(Trek.background)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 7)

@@ -41,11 +41,11 @@ struct SnoozePicker: View {
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 12) {
-                Text(thread.title).font(.subheadline).foregroundStyle(Trek.muted).lineLimit(2)
+                Text(thread.title).font(.ui(.subheadline)).foregroundStyle(Trek.muted).lineLimit(2)
                 DatePicker("Until", selection: $at, in: Date.now.addingTimeInterval(60)..., displayedComponents: [.date, .hourAndMinute])
                     .datePickerStyle(.graphical)
                 Text("It comes back to the inbox then, or sooner if it needs you.")
-                    .font(.footnote).foregroundStyle(Trek.muted)
+                    .font(.ui(.footnote)).foregroundStyle(Trek.muted)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 20)
