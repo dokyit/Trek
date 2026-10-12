@@ -108,6 +108,7 @@ fn an_agent_starts_a_thread_of_the_users_own() {
         let list = trek.read(cx, |ws, _| ws.list_threads(&id));
         assert_eq!(list["threads"][0]["id"].as_str(), Some(new.as_str()));
         assert_eq!(list["threads"][0]["relation"], "started");
+        assert_eq!(list["threads"][0]["link"].as_str(), Some(format!("trek://thread/{new}").as_str()), "a link that opens it");
         assert_eq!(list["this_thread"]["can_start_threads"], true);
     });
 }
