@@ -36,7 +36,7 @@ on:
           - beta
           - nightly
       notes:
-        description: 'Release notes (Markdown); empty: the commit subjects since the last release'
+        description: 'Release notes (Markdown); empty: the commit subjects since the last release. The install block (the Mac and Windows downloads) is added to the GitHub release body for you, unless the notes already have one'
         required: false
         type: string
         default: ''
@@ -242,6 +242,9 @@ jobs:
           what="published"; [[ $DRY_RUN == true ]] && what="dry run: nothing published"
           echo "$name  sha256 $sha  (code-signed by \"$signer\")"
           cat "$out/$CHANNEL.json"
+          # The GitHub release's body, as a real run publishes it (the Windows job adds only assets).
+          echo "--- $out/release-notes.md"
+          cat "$out/release-notes.md"
           {
             echo "### macOS ($what)"
             echo
@@ -250,6 +253,10 @@ jobs:
             echo '```json'
             cat "$out/$CHANNEL.json"
             echo '```'
+            echo
+            echo "### Release body ($what)"
+            echo
+            cat "$out/release-notes.md"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # The Windows dry run merges into this manifest, as a real run merges into the release's.
