@@ -793,9 +793,9 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     });
     cx.subscribe(&workspace, |ws, event: &WorkspaceEvent, cx| match event {
         WorkspaceEvent::Toast { message, undo } => toast(&ws, message.clone(), undo.clone(), cx),
-        WorkspaceEvent::Attention { message, thread } => {
+        WorkspaceEvent::Attention { message, thread, button } => {
             ws.update(cx, |ws, _| ws.push_alert(message, thread));
-            attention(&ws, message.clone(), thread, cx)
+            attention(&ws, message.clone(), thread, *button, cx)
         }
         WorkspaceEvent::ActivateMain => show_main(ws, cx),
         WorkspaceEvent::OpenPalette => show_palette(ws, cx),
@@ -874,7 +874,7 @@ fn notice_window(workspace: &Entity<Workspace>, front: Option<AnyWindowHandle>, 
 /// A thread needs the user or finished: toast, banner and sound per the notification settings.
 /// Decided once for all windows, so a sound or banner never doubles up. Clicking either opens
 /// the thread.
-fn attention(workspace: &Entity<Workspace>, message: String, thread: &str, cx: &mut App) {
+fn attention(workspace: &Entity<Workspace>, message: String, thread: &str, button: Option<&'static str>, cx: &mut App) {
     let front = key_window(cx);
     let ws = workspace.read(cx);
     let alert = crate::system::alert_for(&ws.settings.notifications, front.is_some(), ws.viewing(thread, front));
@@ -891,7 +891,26 @@ fn attention(workspace: &Entity<Workspace>, message: String, thread: &str, cx: &
     if alert.toast {
         let Some(target) = notice_window(workspace, front, cx) else { return };
         let (ws, thread) = (workspace.clone(), thread.to_string());
-        let note = crate::toast::Toast::new(message).on_click(move |_, _, cx| reveal_thread(&ws, &thread, cx));
+        let note = match button {
+            None => crate::toast::Toast::new(message),
+            // The way to the thread spelled out, for one the user may not know is there (an
+            // agent started it): the whole toast still opens it.
+            Some(label) => {
+                let (ws, thread) = (ws.clone(), thread.clone());
+                let lifetime = toast_lifetime(&message, true);
+                crate::toast::Toast::content(move |_, cx| {
+                    let (ws, thread) = (ws.clone(), thread.clone());
+                    h_flex()
+                        .id("toast-body")
+                        .gap_3()
+                        .child(div().flex_1().min_w_0().text_sm().text_color(cx.theme().foreground).child(message.clone()))
+                        .child(Button::new("toast-open-thread").label(label).small().flex_none().on_click(move |_, _, cx| reveal_thread(&ws, &thread, cx)))
+                        .into_any_element()
+                })
+                .lifetime(lifetime)
+            }
+        }
+        .on_click(move |_, _, cx| reveal_thread(&ws, &thread, cx));
         let _ = target.update(cx, |_, window, cx| crate::toast::push(window, note, cx));
     }
 }
@@ -1003,6 +1022,7 @@ pub(crate) fn toast_button_label(action: &UndoAction) -> &'static str {
         UndoAction::MaintainVerification(_) => "Maintain",
         UndoAction::MoveTrek => "Move Trek",
         UndoAction::RemoveOldCopy(_) => "Remove old copy",
+        UndoAction::OpenThread(_) => "Open thread",
         _ => "Undo",
     }
 }

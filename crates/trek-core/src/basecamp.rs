@@ -1496,6 +1496,7 @@ mod tests {
             title: "Review".into(),
             model: "Sol".into(),
             outcome: crate::orchestrate::Outcome::Done("Looks right.".into()),
+            thread: None,
         }]);
         let mut parent_items = crate::transcript::Transcript::unsaved(vec![
             user("Ask Sol", p),

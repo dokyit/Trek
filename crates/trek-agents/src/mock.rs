@@ -36,6 +36,12 @@
 //! | `mock:consult` [prompt]      | asks a mock sub-agent (Trek's `delegate_task`) and waits      |
 //! | `mock:delegate` [prompt]     | starts a mock sub-agent and ends its turn; Trek wakes it      |
 //! | `mock:pair` [prompt]         | starts two mock sub-agents on the same task and ends its turn |
+//! | `mock:start-thread` [prompt] | starts a thread of the user's own (Trek's `start_thread`) and |
+//! |                              | ends its turn; `mock:start-worktree-thread` starts it in a    |
+//! |                              | new worktree, `mock:start-thread-wait` waits for its answer   |
+//! |                              | (`read_thread`)                                               |
+//! | `mock:handoff` [brief]       | hands its work to a fresh thread (Trek's `handoff`) with a    |
+//! |                              | brief ending in what follows the keyword, and ends its turn   |
 //! | `mock:server` [dur]          | leaves a dev server running in the background (for `dur`, or  |
 //! |                              | until stopped), printing a line now and then (to a file too,  |
 //! |                              | which its call names, as Claude Code's shells do)             |
@@ -195,6 +201,11 @@ enum Script {
     Delegate { wait: bool },
     /// Start two sub-agents on the same task, and end the turn.
     Pair,
+    /// Start a thread of the user's own through Trek (`start_thread`): in a worktree of its own,
+    /// or not; waiting for its answer (`read_thread`), or not.
+    StartThread { worktree: bool, wait: bool },
+    /// Hand the work to a fresh thread through Trek (`handoff`).
+    Handoff,
     /// Leave a dev server running in the background, for a while or until stopped.
     Server(Option<Duration>),
     /// Leave a test watcher running that reports a failure after a while.
@@ -276,6 +287,10 @@ impl Script {
                 "consult" if w.starts_with("mock:") => Script::Delegate { wait: true },
                 "delegate" if w.starts_with("mock:") => Script::Delegate { wait: false },
                 "pair" if w.starts_with("mock:") => Script::Pair,
+                "start-thread" if w.starts_with("mock:") => Script::StartThread { worktree: false, wait: false },
+                "start-worktree-thread" if w.starts_with("mock:") => Script::StartThread { worktree: true, wait: false },
+                "start-thread-wait" if w.starts_with("mock:") => Script::StartThread { worktree: false, wait: true },
+                "handoff" if w.starts_with("mock:") => Script::Handoff,
                 "task" if w.starts_with("mock:") => Script::Task(duration_after(i).unwrap_or(Duration::from_secs(6))),
                 "server" if w.starts_with("mock:") => Script::Server(duration_after(i)),
                 "watch" if w.starts_with("mock:") => Script::Watch(duration_after(i).unwrap_or(Duration::from_secs(3))),
@@ -344,6 +359,8 @@ pub fn title(request: &str) -> String {
         Script::Deaf(_) => "Run the long migration",
         Script::Delegate { .. } => "Get a second opinion",
         Script::Pair => "Get two opinions",
+        Script::StartThread { .. } => "Split off the test work",
+        Script::Handoff => "Refactor the request parser",
         Script::Server(_) => "Start the dev server",
         Script::Watch(_) => "Watch the tests",
         Script::Dev => "Run the app while we work",
@@ -684,6 +701,8 @@ impl Session {
         match script {
             Script::Delegate { wait } => self.delegate(text, wait).await?,
             Script::Pair => self.pair(text).await?,
+            Script::StartThread { worktree, wait } => self.start_thread(text, worktree, wait).await?,
+            Script::Handoff => self.handoff(text).await?,
             Script::Server(until) => self.server(until).await?,
             Script::Watch(after) => self.watch(after).await?,
             Script::Dev => {
@@ -693,7 +712,8 @@ impl Session {
             Script::Wake => {
                 let body = text.split_once(":\n\n").map_or(text, |(_, b)| b);
                 let gist = trek_core::orchestrate::preview(body.split("\n\n---\n\n").next().unwrap_or(body), 160);
-                self.say(&format!("The sub-agent reported back: {gist}")).await?;
+                let who = if trek_core::orchestrate::is_thread_wake(text) { "The thread" } else { "The sub-agent" };
+                self.say(&format!("{who} reported back: {gist}")).await?;
             }
             Script::Answer => {
                 self.think("The user wants an overview. I'll keep it short and point at the files that matter.").await?;
@@ -1473,6 +1493,45 @@ impl Session {
             self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
         }
         self.say("Both are on it. I'll compare what they say when they report back.").await
+    }
+
+    /// `mock:start-thread`: a thread of the user's own for whatever follows the keyword, started
+    /// through Trek; with `wait`, its answer read back once it's done.
+    async fn start_thread(&mut self, text: &str, worktree: bool, wait: bool) -> Step {
+        let task = after_keyword(text, &["mock:start-thread-wait", "mock:start-worktree-thread", "mock:start-thread"]).unwrap_or("Find the slowest tests and say why they're slow.").to_string();
+        self.say("That's separate work: I'll start a thread of its own for it.").await?;
+        let title = "Speed up the slow tests";
+        let params = serde_json::json!({ "title": title, "prompt": task, "agent": format!("direct:{PROVIDER}"), "model": "mock-swift", "worktree": worktree });
+        let started = match self.orchestrate_call("start_thread", title, params).await? {
+            Ok(v) => v,
+            Err(e) => return self.say(&format!("I couldn't start the thread: {e}")).await,
+        };
+        let id = started["id"].as_str().unwrap_or_default().to_string();
+        if !wait {
+            return self.say(&format!("Started “{title}”: it's in your sidebar, and I'll keep an eye on it.")).await;
+        }
+        match self.orchestrate_call("read_thread", title, serde_json::json!({ "id": id, "wait": true })).await? {
+            Ok(v) => {
+                let answer = v["answer"].as_str().unwrap_or("(nothing yet)");
+                self.say(&format!("The thread is {}: {}", v["status"].as_str().unwrap_or("?"), trek_core::orchestrate::preview(answer, 160))).await
+            }
+            Err(e) => self.say(&format!("I couldn't read the thread: {e}")).await,
+        }
+    }
+
+    /// `mock:handoff`: the work goes to a fresh thread, with a brief whose next step is whatever
+    /// follows the keyword.
+    async fn handoff(&mut self, text: &str) -> Step {
+        let next = after_keyword(text, &["mock:handoff"]).unwrap_or("Run the parser's tests and fix what fails.").to_string();
+        self.say("My context is nearly full, so I'll hand this over to a fresh thread.").await?;
+        let brief = format!(
+            "Goal: refactor the request parser in src/parser.rs.\nDone: split tokenising from parsing; the existing tests pass.\nDecisions: keep the public API as it is.\nFiles: src/parser.rs, src/lexer.rs.\nNext: {next}"
+        );
+        let params = serde_json::json!({ "brief": brief, "title": "Finish the parser refactor" });
+        match self.orchestrate_call("handoff", "Finish the parser refactor", params).await? {
+            Ok(_) => self.say("Handed off: the work goes on in the new thread.").await,
+            Err(e) => self.say(&format!("I couldn't hand off: {e}")).await,
+        }
     }
 
     /// `mock:server`: a dev server left running in the background, printing as it goes. It runs
@@ -2602,6 +2661,7 @@ mod tests {
                 title: "Second opinion".into(),
                 model: "Mock Swift".into(),
                 outcome: trek_core::orchestrate::Outcome::Failed("The mock agent hit an error".into()),
+                thread: None,
             }]))
             .await;
             assert!(text(&m.turn().await).starts_with("The sub-agent reported back"), "not read as `mock:error`");

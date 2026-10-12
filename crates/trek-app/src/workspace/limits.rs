@@ -181,7 +181,7 @@ impl Workspace {
         // A sub-agent's limit goes to its parent, as its failure (`task_turn_ended`), not to the user.
         // A turn that wrapped up has its own alert, as any finished turn: its answer says where it stopped.
         if resuming.is_none() && thread.parent_id.is_none() && !hit.wrapped {
-            cx.emit(WorkspaceEvent::Attention { message: notice, thread: id.to_string() });
+            cx.emit(WorkspaceEvent::Attention { message: notice, thread: id.to_string(), button: None });
         }
         self.schedule_limits(cx);
     }
@@ -504,7 +504,7 @@ impl Workspace {
         self.send_resume(id, &pause, cx);
         let title = self.thread(id).map(|t| t.title.clone()).unwrap_or_default();
         if pause.tries == 0 && self.thread(id).is_some_and(|t| t.side_of.is_none() && t.parent_id.is_none()) {
-            cx.emit(WorkspaceEvent::Attention { message: format!("Resumed: {title}"), thread: id.to_string() });
+            cx.emit(WorkspaceEvent::Attention { message: format!("Resumed: {title}"), thread: id.to_string(), button: None });
         }
     }
 

@@ -147,14 +147,21 @@ pub fn plain_preview(text: &str, max: usize) -> String {
     preview(&lines.join(" "), max)
 }
 
-/// How a sub-agent ended, for the agent that started it.
+/// How a sub-agent ended, for the agent that started it; or where a thread it started
+/// (`start_thread`) stands now that its turn is over.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Report {
     pub id: String,
     pub title: String,
     /// "Sol", "Opus 5.5".
     pub model: String,
+    /// A sub-agent's answer or why it failed; a thread's answer (in short), why it failed, or
+    /// what it asks the user.
     pub outcome: Outcome,
+    /// Set for a thread an agent started: how it stands (`ThreadState` keys: `finished`,
+    /// `failed`, `waiting_for_approval`). Unset for a sub-agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -173,11 +180,29 @@ pub fn is_wake(text: &str) -> bool {
     text.starts_with(WAKE_PREFIX)
 }
 
-/// The message that wakes an agent with what its sub-agents came back with.
+/// Whether a wake-up message carries news of a thread the agent started (`start_thread`).
+pub fn is_thread_wake(text: &str) -> bool {
+    is_wake(text) && text.contains(&format!("{WAKE_PREFIX}Thread “"))
+}
+
+/// The message that wakes an agent with what its sub-agents came back with, and how the threads
+/// it started stand.
 pub fn wake_text(reports: &[Report]) -> String {
     let blocks: Vec<String> = reports
         .iter()
         .map(|r| {
+            if let Some(state) = &r.thread {
+                let who = format!("“{}” ({}, thread {})", r.title, r.model, r.id);
+                let said = match &r.outcome {
+                    Outcome::Done(t) | Outcome::Failed(t) => preview(t, PREVIEW_CAP),
+                    Outcome::Cancelled => String::new(),
+                };
+                return match state.as_str() {
+                    "failed" => format!("{WAKE_PREFIX}Thread {who} failed: {said}\n\nCall read_thread for more."),
+                    "waiting_for_approval" => format!("{WAKE_PREFIX}Thread {who} is waiting for the user's approval: {said}\n\nOnly the user can answer it there."),
+                    _ => format!("{WAKE_PREFIX}Thread {who} finished:\n\n{said}\n\nCall read_thread for its full answer."),
+                };
+            }
             let who = format!("“{}” ({}, task {})", r.title, r.model, r.id);
             match &r.outcome {
                 Outcome::Done(text) => format!("{WAKE_PREFIX}Sub-agent {who} finished:\n\n{}", cap(text, WAKE_CAP, "Call task_result for the whole answer.")),
@@ -192,6 +217,21 @@ pub fn wake_text(reports: &[Report]) -> String {
 /// The wake-up note as the transcript shows it: "Sol reported back on “Review the cache”".
 pub fn wake_summary(text: &str) -> String {
     let n = text.matches(WAKE_PREFIX).count();
+    // A thread the agent started: "Thread “Speed up the tests” finished".
+    if let Some(first) = text.strip_prefix(WAKE_PREFIX).and_then(|t| t.strip_prefix("Thread ")) {
+        let title = first.split_once('”').map(|(t, _)| t.trim_start_matches('“')).unwrap_or("a thread");
+        let how = if first.contains(") failed: ") {
+            "failed"
+        } else if first.contains(") is waiting for the user's approval") {
+            "needs your approval"
+        } else {
+            "finished"
+        };
+        return match n {
+            0 | 1 => format!("Thread “{title}” {how}"),
+            n => format!("{n} threads and sub-agents reported back"),
+        };
+    }
     let first = text.strip_prefix(WAKE_PREFIX).and_then(|t| t.strip_prefix("Sub-agent ")).unwrap_or_default();
     let title = first.split_once('”').map(|(t, _)| t.trim_start_matches('“')).unwrap_or("a task");
     let model = first.split_once("” (").and_then(|(_, rest)| rest.split_once(',')).map(|(m, _)| m).unwrap_or("A sub-agent");
@@ -214,13 +254,33 @@ pub const SERVER: &str = "trek-orchestrate";
 /// Whether tool row `title` is Trek's own `tool`, named however the agent names MCP tools:
 /// `mcp__trek-orchestrate__delegate_task` (Claude, and Codex as Trek reports it),
 /// `trek-orchestrate_delegate_task` (OpenCode). Another server's tool of the same name isn't.
-fn is_ours(title: &str, tool: &str) -> bool {
+pub(crate) fn is_ours(title: &str, tool: &str) -> bool {
     title.strip_suffix(tool).is_some_and(|server| server.trim_end_matches(['_', '.', '/', ':', '-']).ends_with(SERVER))
 }
 
 /// Whether an agent's tool row is a call to Trek's `delegate_task`.
 pub fn is_delegate_call(title: &str) -> bool {
     is_ours(title, "delegate_task")
+}
+
+/// Whether an agent's tool row is a call that starts work Trek shows with a row of its own: a
+/// sub-agent (`delegate_task`), a thread (`start_thread`) or a handoff (`handoff`). The row
+/// stands for the call, which has none of its own (unless it failed).
+pub fn is_spawn_call(title: &str) -> bool {
+    is_delegate_call(title) || crate::lineage::is_thread_call(title)
+}
+
+/// What a spawning call that failed reads as (it says why when opened).
+pub fn spawn_failed_label(title: &str) -> Option<&'static str> {
+    if is_delegate_call(title) {
+        Some("Couldn't start a sub-agent")
+    } else if is_ours(title, "start_thread") {
+        Some("Couldn't start a thread")
+    } else if is_ours(title, "handoff") {
+        Some("Couldn't hand off")
+    } else {
+        None
+    }
 }
 
 /// A readable title for a row of one of Trek's other orchestration tools.
@@ -230,6 +290,10 @@ pub fn tool_label(title: &str) -> Option<&'static str> {
         ("task_status", "Checked on a sub-agent"),
         ("task_result", "Read a sub-agent's answer"),
         ("cancel_task", "Stopped a sub-agent"),
+        ("list_threads", "Listed its threads"),
+        ("thread_status", "Checked on a thread"),
+        ("read_thread", "Read a thread's answer"),
+        ("send_to_thread", "Sent a thread a message"),
     ]
     .into_iter()
     .find(|(tool, _)| is_ours(title, tool))
@@ -597,8 +661,8 @@ mod tests {
     #[test]
     fn wake_ups_carry_each_result_and_read_as_a_note() {
         let reports = vec![
-            Report { id: "a1".into(), title: "Review the cache".into(), model: "Sol".into(), outcome: Outcome::Done("Looks good.".into()) },
-            Report { id: "b2".into(), title: "Check the tests".into(), model: "Opus 5.5".into(), outcome: Outcome::Failed("Usage limit reached".into()) },
+            Report { id: "a1".into(), title: "Review the cache".into(), model: "Sol".into(), outcome: Outcome::Done("Looks good.".into()), thread: None },
+            Report { id: "b2".into(), title: "Check the tests".into(), model: "Opus 5.5".into(), outcome: Outcome::Failed("Usage limit reached".into()), thread: None },
         ];
         let one = wake_text(&reports[..1]);
         assert!(is_wake(&one));
@@ -614,6 +678,28 @@ mod tests {
         let big = wake_text(&[Report { outcome: Outcome::Done("x ".repeat(5000)), ..reports[0].clone() }]);
         assert!(big.len() < WAKE_CAP + 300 && big.contains("Call task_result"), "capped");
         assert!(!is_wake("hello [Trek] "));
+        assert!(!is_thread_wake(&one));
+    }
+
+    #[test]
+    fn a_thread_the_agent_started_wakes_it_with_how_it_stands() {
+        let r = |state: &str, outcome| Report { id: "t1".into(), title: "Speed up the tests".into(), model: "Sol".into(), outcome, thread: Some(state.into()) };
+        let done = wake_text(&[r("finished", Outcome::Done("All green.\n\nDetails follow.".into()))]);
+        assert_eq!(done, "[Trek] Thread “Speed up the tests” (Sol, thread t1) finished:\n\nAll green. Details follow.\n\nCall read_thread for its full answer.");
+        assert!(is_wake(&done) && is_thread_wake(&done));
+        assert_eq!(wake_summary(&done), "Thread “Speed up the tests” finished");
+        let long = wake_text(&[r("finished", Outcome::Done("x ".repeat(5000)))]);
+        assert!(long.len() < PREVIEW_CAP + 200, "a short preview: {}", long.len());
+        let failed = wake_text(&[r("failed", Outcome::Failed("The build broke.".into()))]);
+        assert!(failed.contains(") failed: The build broke.") && failed.contains("read_thread"), "{failed}");
+        assert_eq!(wake_summary(&failed), "Thread “Speed up the tests” failed");
+        let asks = wake_text(&[r("waiting_for_approval", Outcome::Done("Run command: make deploy".into()))]);
+        assert!(asks.contains("is waiting for the user's approval: Run command: make deploy") && asks.contains("Only the user"), "{asks}");
+        assert_eq!(wake_summary(&asks), "Thread “Speed up the tests” needs your approval");
+        // Older reports, kept in the store before threads had any, still read.
+        let old: Report = serde_json::from_str(r#"{"id":"a","title":"T","model":"Sol","outcome":{"done":"ok"}}"#).unwrap();
+        assert_eq!(old.thread, None);
+        assert!(!serde_json::to_string(&old).unwrap().contains("thread"), "a sub-agent's report is written as before");
     }
 
     #[test]
@@ -627,6 +713,12 @@ mod tests {
         assert_eq!(tool_label("trek-orchestrate_cancel_task"), Some("Stopped a sub-agent"));
         assert_eq!(tool_label("cancel_task"), None);
         assert_eq!(tool_label("mcp__other__list_models"), None, "another server's tool keeps its name");
+        assert_eq!(tool_label("mcp__trek-orchestrate__read_thread"), Some("Read a thread's answer"));
+        assert!(is_spawn_call("mcp__trek-orchestrate__start_thread") && is_spawn_call("mcp__trek-orchestrate__handoff") && is_spawn_call("mcp__trek-orchestrate__delegate_task"));
+        assert!(!is_spawn_call("mcp__trek-orchestrate__read_thread") && !is_spawn_call("mcp__other__handoff"));
+        assert_eq!(spawn_failed_label("mcp__trek-orchestrate__handoff"), Some("Couldn't hand off"));
+        assert_eq!(spawn_failed_label("mcp__trek-orchestrate__start_thread"), Some("Couldn't start a thread"));
+        assert_eq!(spawn_failed_label("mcp__trek-orchestrate__list_threads"), None);
     }
 
     #[test]
