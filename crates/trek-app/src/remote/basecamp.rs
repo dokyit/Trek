@@ -40,7 +40,7 @@ impl Workspace {
     }
 
     fn basecamp_for_phone(&self, range: Range, recap: &Recap) -> tr::Basecamp {
-        let project_ref = |id: &str| self.project(id).map(|p| tr::ProjectRef { id: p.id.clone(), name: p.name.clone(), hue: tr::project_hue(&p.name, self.project_prefs(&p.path).color), monogram: tr::monogram(&p.name) });
+        let project_ref = |id: &str| self.project(id).map(|p| tr::ProjectRef { id: p.id.clone(), name: p.name.clone(), hue: tr::project_hue(&p.name, self.project_prefs(&p.path).color), monogram: tr::monogram(&p.name), icon: super::icons::project_icon(self.project_prefs(&p.path).icon.as_deref()) });
         let by_name = |name: &str| self.projects.iter().find(|p| p.name == name).and_then(|p| project_ref(&p.id));
         let empty = recap.is_empty();
         tr::Basecamp {
@@ -122,6 +122,7 @@ impl Workspace {
                         name: p.name.clone(),
                         hue: tr::project_hue(&p.name, self.project_prefs(&p.path).color),
                         monogram: tr::monogram(&p.name),
+                        icon: super::icons::project_icon(self.project_prefs(&p.path).icon.as_deref()),
                     }),
                     additions: t.additions.max(0) as u32,
                     deletions: t.deletions.max(0) as u32,

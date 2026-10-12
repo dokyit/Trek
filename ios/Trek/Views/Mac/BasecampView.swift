@@ -73,6 +73,7 @@ struct BasecampView: View {
                 }
             }
             .task(id: range) { model.loadBasecamp(range) }
+            .onAppear { if Launch.sheet == "usage", path.isEmpty { path.append(.usage) } }
             .navigationDestination(for: BasecampRoute.self) { route in
                 switch route {
                 case .thread(let id): ThreadView(threadID: id)

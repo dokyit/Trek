@@ -12,6 +12,8 @@ nonisolated struct Usage: Codable, Hashable {
     var providers: [ProviderUsage] = []
     /// The Mac was still asking an agent when it answered: ask again shortly for the rest.
     var loading: Bool? = nil
+    /// The providers are the Mac's Usage card's: picked there by the user (true) or by Trek.
+    var picked: Bool? = nil
 }
 
 nonisolated struct ProviderUsage: Codable, Hashable, Identifiable {
@@ -23,6 +25,14 @@ nonisolated struct ProviderUsage: Codable, Hashable, Identifiable {
     /// Something the plan reports besides its limits (Devin's on-demand balance).
     var note: String? = nil
     var error: String? = nil
+    /// It said it has no plan limits.
+    var noLimits: Bool? = nil
+    /// Kept from an earlier run, read at this time (ms).
+    var asOf: Int64? = nil
+    /// With no limits to show: "Today in Trek: 12K tokens".
+    var today: String? = nil
+    /// Resets Codex granted and the user hasn't spent.
+    var resets: [ResetCredit]? = nil
     var id: String { agent.key }
 }
 

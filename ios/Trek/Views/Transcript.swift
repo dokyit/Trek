@@ -3,12 +3,17 @@ import SwiftUI
 struct UserBubble: View {
     var text: String
     var images: Int
+    var threadID = ""
+    var itemID = ""
+    @Environment(AppModel.self) private var model
 
     var body: some View {
         HStack {
             Spacer(minLength: 48)
             VStack(alignment: .trailing, spacing: 6) {
-                if images > 0 {
+                if images > 0, model.supports(.attachment), !itemID.isEmpty {
+                    MessageImages(threadID: threadID, itemID: itemID, count: images)
+                } else if images > 0 {
                     Label("\(images) image\(images == 1 ? "" : "s")", systemImage: "photo")
                         .font(.caption).foregroundStyle(Trek.muted)
                 }

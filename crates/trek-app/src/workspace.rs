@@ -5553,7 +5553,13 @@ impl Workspace {
 
     /// Spend one granted rate-limit reset (Usage › "Use reset"), then re-read the plan.
     pub fn use_reset_credit(&mut self, credit_id: String, cx: &mut Context<Self>) {
+        self.use_reset_credit_then(credit_id, |_| {}, cx);
+    }
+
+    /// `use_reset_credit`, telling `done` how it went (a phone waits to hear).
+    pub(crate) fn use_reset_credit_then(&mut self, credit_id: String, done: impl FnOnce(Result<(), String>) + 'static, cx: &mut Context<Self>) {
         if !self.reset_credits_in_flight.insert(credit_id.clone()) {
+            done(Err("That reset is being used already".into()));
             return;
         }
         cx.notify();
@@ -5575,7 +5581,7 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 this.reset_credits_in_flight.remove(&credit_id);
                 cx.notify();
-                match res {
+                match &res {
                     Ok(()) => {
                         // Spent: gone from the list now, not when the re-read lands.
                         for st in this.agent_status.values_mut() {
@@ -5587,6 +5593,7 @@ impl Workspace {
                     }
                     Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't use the reset: {e:#}"), undo: None }),
                 }
+                done(res.map_err(|e| format!("Couldn't use the reset: {e:#}")));
             });
         })
         .detach();

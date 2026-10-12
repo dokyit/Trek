@@ -57,6 +57,8 @@ pub struct ServerConfig {
     /// Speak TLS with this certificate (`wss://`), pinned by phones through the pairing QR code.
     /// `None` is plain `ws://`, for tests and the demo host only.
     pub tls: Option<crate::tls::TlsIdentity>,
+    /// The optional requests the host answers, for `welcome` and `paired` (`FEATURES`).
+    pub features: Vec<String>,
 }
 
 /// The default port.
@@ -88,6 +90,7 @@ impl ServerConfig {
             max_message: 8 << 20,
             ping_interval: Duration::from_secs(20),
             tls: None,
+            features: vec![],
         }
     }
 }
@@ -650,7 +653,7 @@ async fn authenticate(
                     Ok((token, conn_id)) => {
                         tracing::info!(%peer, device_id, name, "device paired");
                         inner.notice(ServerNotice::Paired { device_id: device_id.clone(), name });
-                        let paired = ServerMessage::Paired { protocol: PROTOCOL_VERSION, token, host };
+                        let paired = ServerMessage::Paired { protocol: PROTOCOL_VERSION, token, host, features: inner.config.features.clone() };
                         let _ = send(ws, ServerEnvelope::reply(re, paired)).await;
                         Some(Authenticated { device_id, conn_id, kick })
                     }
@@ -673,7 +676,7 @@ async fn authenticate(
                 };
                 match conn_id {
                     Some(conn_id) => {
-                        let welcome = ServerMessage::Welcome { protocol: PROTOCOL_VERSION, host };
+                        let welcome = ServerMessage::Welcome { protocol: PROTOCOL_VERSION, host, features: inner.config.features.clone() };
                         let _ = send(ws, ServerEnvelope::reply(re, welcome)).await;
                         Some(Authenticated { device_id, conn_id, kick })
                     }
@@ -758,6 +761,12 @@ const CLIENT_TYPES: &[&str] = &[
     "settings",
     "set_settings",
     "ping",
+    "use_reset",
+    "queue_action",
+    "attachment",
+    "background_output",
+    "stop_background",
+    "icon",
 ];
 
 /// Parse a text frame: its `id` (for the reply's `re`, even when the rest is bad) and message.
@@ -910,6 +919,12 @@ async fn call<H: RemoteHost>(host: &H, re: Option<String>, msg: ClientMessage) -
         }
         ClientMessage::Settings => host.settings().await.map(ServerMessage::Settings),
         ClientMessage::SetSettings(change) => host.set_settings(change).await.map(ServerMessage::Settings),
+        ClientMessage::UseReset { credit_id } => host.use_reset(&credit_id).await.map(|()| ack(None)),
+        ClientMessage::QueueAction(req) => host.queue_action(req).await.map(|text| ServerMessage::Ack { thread_id: None, open: None, text }),
+        ClientMessage::Attachment(req) => host.attachment(req).await.map(ServerMessage::Attachment),
+        ClientMessage::BackgroundOutput { thread_id, task_id } => host.background_output(&thread_id, &task_id).await.map(ServerMessage::BackgroundOutput),
+        ClientMessage::StopBackground { thread_id, task_id } => host.stop_background(&thread_id, &task_id).await.map(|()| ack(None)),
+        ClientMessage::Icon(req) => host.icon(req).await.map(ServerMessage::Icon),
         other => Err(HostError::bad_request(format!("Unexpected \"{}\"", other.kind()))),
     };
     match result {

@@ -21,7 +21,7 @@ final class MockHost: Backend {
     private var tick = 0
     private var notes = DemoMac.notes()
     private var settings = DemoMac.settings()
-    private let host = HostInfo(id: "demo-mac", name: "Tobias’s MacBook Pro", version: "0.3.2")
+    private let host = HostInfo(id: "demo-mac", name: "Tobias’s MacBook Pro", version: "0.3.2", features: DemoMac.features)
 
     let projects: [ProjectSummary] = [
         MockHost.project("p-trek", "trek", hue: 24, branch: "main"),
@@ -46,7 +46,7 @@ final class MockHost: Backend {
     ]
 
     static func project(_ id: String, _ name: String, hue: Int, branch: String) -> ProjectSummary {
-        ProjectSummary(id: id, name: name, hue: hue, monogram: monogram(name), branch: branch, isRepo: true)
+        ProjectSummary(id: id, name: name, hue: hue, monogram: monogram(name), branch: branch, isRepo: true, icon: DemoMac.projectIcon(id))
     }
 
     /// The desktop's two-letter badge: first letters of the first two words, else two letters.
@@ -66,7 +66,7 @@ final class MockHost: Backend {
         seed()
         // What the Mac's composer shows for each: efforts per model, each thread's effort and access.
         let efforts = ["low", "medium", "high", "xhigh", "max"]
-        agents = agents.map { a in
+        agents = (agents + DemoMac.addedAgents).map { a in
             var a = a
             a.models = a.models.map { m in var m = m; m.efforts = efforts; return m }
             return a
@@ -138,6 +138,8 @@ final class MockHost: Backend {
             update(tid, push: false) { $0.unseen = false }
         case .ping:
             deliver(.pong(re: id))
+        case .useReset, .queueAction, .attachment, .backgroundOutput, .stopBackground, .icon:
+            takeParity(message, id: id)
         case .interrupt(let tid):
             ack(id)
             for item in items[tid] ?? [] {
@@ -341,20 +343,20 @@ final class MockHost: Backend {
             items[newID] = all.prefix(end).filter { !$0.isPendingRequest }
             seq[newID] = seq[tid]
             counters[newID] = counters[tid]
-            if isMessage, case .user(let text, _) = all[i].body {
+            if isMessage, case .user(let text, _, _) = all[i].body {
                 deliver(.ack(re: id, threadId: newID, text: text))
             } else {
                 deliver(.ack(re: id, threadId: newID))
             }
             deliver(.thread(t))
         case .rewind:
-            guard case .user(let text, _) = all[i].body else { return refuse(id, .badRequest, "Rewind from one of your messages.") }
+            guard case .user(let text, _, _) = all[i].body else { return refuse(id, .badRequest, "Rewind from one of your messages.") }
             cut(tid, at: i)
             deliver(.ack(re: id, threadId: nil, text: text))
             rewound(tid, restoreFiles: restoreFiles)
         case .undo, .retry:
             guard let start = all[...i].lastIndex(where: { if case .user = $0.body { true } else { false } }),
-                  case .user(let text, let images) = all[start].body else {
+                  case .user(let text, let images, _) = all[start].body else {
                 return refuse(id, .badRequest, "This turn didn't start from a message of yours.")
             }
             cut(tid, at: start)
@@ -507,11 +509,11 @@ final class MockHost: Backend {
         }
     }
 
-    private func later(_ secs: Double, _ f: @escaping () -> Void) {
+    func later(_ secs: Double, _ f: @escaping () -> Void) {
         DispatchQueue.main.asyncAfter(deadline: .now() + secs) { f() }
     }
 
-    private func deliver(_ m: ServerMessage, after: Double = 0.03) {
+    func deliver(_ m: ServerMessage, after: Double = 0.03) {
         DispatchQueue.main.asyncAfter(deadline: .now() + after) { [weak self] in self?.post(.message(m)) }
     }
 
@@ -568,7 +570,7 @@ final class MockHost: Backend {
         DispatchQueue.main.asyncAfter(deadline: .now() + after) { [weak self] in self?.post(.wire(message)) }
     }
 
-    private func ack(_ id: String?, after: Double = 0.03) { deliver(.ack(re: id, threadId: nil), after: after) }
+    func ack(_ id: String?, after: Double = 0.03) { deliver(.ack(re: id, threadId: nil), after: after) }
 
     private func nextSeq(_ tid: String) -> Int64 {
         let n = (seq[tid] ?? 0) + 1
@@ -603,7 +605,7 @@ final class MockHost: Backend {
         update(tid, push: false) { $0.updatedAt = Self.now }
     }
 
-    private func update(_ tid: String, push: Bool = true, _ f: (inout ThreadSummary) -> Void) {
+    func update(_ tid: String, push: Bool = true, _ f: (inout ThreadSummary) -> Void) {
         guard let i = threads.firstIndex(where: { $0.id == tid }) else { return }
         f(&threads[i])
         if push { deliver(.thread(threads[i])) }
@@ -736,7 +738,7 @@ final class MockHost: Backend {
 
         // Other working threads
         id = "t-offline"
-        add(id, .user(text: "Show a banner when the Mac is unreachable and queue sends until it's back.", images: 0), at: now - 3 * m)
+        add(id, .user(text: "Show a banner when the Mac is unreachable and queue sends until it's back.", images: 2), at: now - 3 * m)
         add(id, tool(.read, "Read", "Fieldnotes/Sync/Connection.swift"))
         add(id, tool(.edit, "Write", "Fieldnotes/Views/OfflineBanner.swift", add: 64, del: 0))
         add(id, tool(.edit, "Edit", "Fieldnotes/Views/RootView.swift", .running, add: 8, del: 2))
