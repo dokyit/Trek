@@ -133,7 +133,7 @@ struct ElevationChart: View, Animatable {
 
         // Axis labels.
         for tick in profile?.ticks ?? [] {
-            let label = ctx.resolve(Text(tick.label).font(.caption2).foregroundStyle(Trek.muted))
+            let label = ctx.resolve(Text(tick.label).font(.ui(.caption2)).foregroundStyle(Trek.muted))
             let w = label.measure(in: size).width
             let tx = min(max(left + CGFloat(tick.at) * width, left + w / 2), left + width - w / 2)
             ctx.draw(label, at: CGPoint(x: tx, y: base + 5), anchor: .top)

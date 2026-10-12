@@ -112,7 +112,7 @@ struct ContextCostLabel: View {
                 Text(cost.label).foregroundStyle(Trek.muted).lineLimit(1).truncationMode(.tail)
             }
         }
-        .font(.footnote.weight(.medium))
+        .font(.ui(.footnote).weight(.medium))
         .padding(.horizontal, 11)
         .frame(height: 30)
         .contentShape(Capsule())
@@ -134,9 +134,9 @@ struct ContextCostDetail: View {
                 HStack(spacing: 12) {
                     ContextRing(percent: context.percent, size: 34, line: 3.5)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("\(context.percent)% context used").font(.headline)
+                        Text("\(context.percent)% context used").font(.ui(.headline))
                         Text("\(Tokens.short(context.used)) of \(Tokens.short(context.window)) tokens")
-                            .font(.subheadline).monospacedDigit().foregroundStyle(Trek.muted)
+                            .font(.ui(.subheadline)).monospacedDigit().foregroundStyle(Trek.muted)
                     }
                 }
             }
@@ -145,13 +145,13 @@ struct ContextCostDetail: View {
             }
             if let cost {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(cost.label).font(.headline)
+                    Text(cost.label).font(.ui(.headline))
                     if let billing = cost.billing, billing != .unknown {
                         row(Self.billingLabel(billing), symbol: Self.billingSymbol(billing))
                     }
                     if let plan = cost.plan { row(plan, symbol: "person.crop.circle") }
                     if let detail = cost.detail {
-                        Text(detail).font(.footnote).foregroundStyle(Trek.muted).fixedSize(horizontal: false, vertical: true)
+                        Text(detail).font(.ui(.footnote)).foregroundStyle(Trek.muted).fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -161,7 +161,7 @@ struct ContextCostDetail: View {
     }
 
     private func row(_ text: String, symbol: String) -> some View {
-        Label(text, systemImage: symbol).font(.subheadline).foregroundStyle(Trek.foreground.opacity(0.9))
+        Label(text, systemImage: symbol).font(.ui(.subheadline)).foregroundStyle(Trek.foreground.opacity(0.9))
     }
 
     static func billingLabel(_ b: Billing) -> String {
@@ -205,7 +205,7 @@ struct AtWorkLabel: View {
         HStack(spacing: 8) {
             ForEach(Self.byAgent(agents), id: \.agent.key) { entry in
                 HStack(spacing: 3) {
-                    AgentGlyph(key: entry.agent.logo ?? entry.agent.key, size: 15)
+                    AgentGlyph(entry.agent, size: 15)
                     Text("\(entry.count)").monospacedDigit()
                 }
             }
@@ -216,7 +216,7 @@ struct AtWorkLabel: View {
                 }
             }
         }
-        .font(.footnote.weight(.semibold))
+        .font(.ui(.footnote).weight(.semibold))
         .foregroundStyle(Trek.foreground)
         .padding(.horizontal, 11)
         .frame(height: 30)
@@ -258,7 +258,7 @@ struct AtWorkSheet: View {
                     Section {
                         ForEach(background, id: \.self) { title in
                             Label {
-                                Text(title).font(.system(.subheadline, design: .monospaced)).lineLimit(2)
+                                Text(title).font(.code(.subheadline)).lineLimit(2)
                             } icon: {
                                 Image(systemName: "apple.terminal").foregroundStyle(Trek.muted)
                             }
@@ -267,6 +267,7 @@ struct AtWorkSheet: View {
                         Text("In the background")
                     } footer: {
                         Text("Dev servers, watchers and other work \(thread?.agent.name ?? "the agent") left running. Stop them on the Mac.")
+                            .font(.ui(.footnote))
                     }
                 }
                 if agents.isEmpty && background.isEmpty {
@@ -274,7 +275,7 @@ struct AtWorkSheet: View {
                 }
             }
             .scrollContentBackground(.hidden)
-            .background(Trek.background)
+            .background(Trek.grouped)
             .navigationTitle("At work")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -296,9 +297,9 @@ struct SubAgentRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            AgentGlyph(key: sub.agent.logo ?? sub.agent.key, size: 24)
+            AgentGlyph(sub.agent, size: 24)
             VStack(alignment: .leading, spacing: 3) {
-                Text(sub.title).font(.subheadline.weight(.medium)).lineLimit(3)
+                Text(sub.title).font(.ui(.subheadline).weight(.medium)).lineLimit(3)
                 HStack(spacing: 5) {
                     Text(sub.model.map { "\(sub.agent.name) · \($0)" } ?? sub.agent.name)
                     if let since = sub.since, sub.state == .running || sub.state == .needsYou {
@@ -306,7 +307,7 @@ struct SubAgentRow: View {
                         Text(When.duration(max(0, Int(now.timeIntervalSince1970 - Double(since) / 1000)))).monospacedDigit()
                     }
                 }
-                .font(.footnote)
+                .font(.ui(.footnote))
                 .foregroundStyle(Trek.muted)
                 .lineLimit(1)
             }

@@ -52,7 +52,7 @@ struct TurnActions: View {
             RowIconButton(systemImage: "doc.on.doc", label: "Copy response") { act(.copyResponse(end: end)) }
             if at != nil || secs != nil {
                 Text([at.map { When.clock($0) }, secs.map { When.duration($0) }].compactMap { $0 }.joined(separator: " · "))
-                    .font(.caption.monospacedDigit())
+                    .font(.ui(.caption).monospacedDigit())
                     .foregroundStyle(Trek.muted.opacity(0.85))
                     .fixedSize()
                     .accessibilityLabel("Finished\(at.map { " at \(When.clock($0))" } ?? "")\(secs.map { ", worked for \(When.duration($0))" } ?? "")")
@@ -116,7 +116,7 @@ struct MessageActions: View {
         HStack(spacing: 0) {
             if let at {
                 Text(When.clock(at))
-                    .font(.caption.monospacedDigit())
+                    .font(.ui(.caption).monospacedDigit())
                     .foregroundStyle(Trek.muted.opacity(0.85))
                     .padding(.trailing, 4)
                     .accessibilityLabel("Sent at \(When.clock(at))")

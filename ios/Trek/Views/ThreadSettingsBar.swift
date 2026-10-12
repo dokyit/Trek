@@ -39,7 +39,7 @@ struct ThreadSettingsBar: View {
             picking = true
         } label: {
             chip {
-                ModelChipLabel(agentKey: thread.agent.key, model: modelName, effort: thread.effort)
+                ModelChipLabel(agentKey: thread.agent.key, agentLogo: thread.agent.logo, model: modelName, effort: thread.effort)
             }
         }
         .buttonStyle(.plain)
@@ -82,8 +82,8 @@ struct ThreadSettingsBar: View {
                 .disabled(level == .fullAccess && !model.fullAccessAllowed)
             }
         } label: {
-            chip(tint: access.tint) {
-                Image(systemName: access.icon).font(.system(size: 12, weight: .semibold))
+            chip {
+                Image(systemName: access.icon).font(.system(size: 12, weight: .semibold)).foregroundStyle(access.tint ?? Trek.muted)
                 Text(access.label)
                 Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(Trek.muted)
             }
@@ -103,8 +103,8 @@ struct ThreadSettingsBar: View {
         Button {
             model.setPrefs(thread.id, plan: !plan)
         } label: {
-            chip(tint: plan ? Trek.plan : nil) {
-                Image(systemName: plan ? "list.bullet.clipboard.fill" : "list.bullet.clipboard").font(.system(size: 12, weight: .semibold))
+            chip(selected: plan) {
+                Image(systemName: "checklist").font(.system(size: 12, weight: .semibold)).foregroundStyle(plan ? Trek.plan : Trek.muted)
                 Text("Plan")
             }
         }
@@ -112,15 +112,14 @@ struct ThreadSettingsBar: View {
         .accessibilityLabel(plan ? "Plan mode on" : "Plan mode off")
     }
 
-    private func chip<Content: View>(tint: Color? = nil, @ViewBuilder _ content: () -> Content) -> some View {
+    /// A pill as the Mac's composer has them: neutral, its icon tinted where it means something,
+    /// a shade darker when `selected` (plan mode on).
+    private func chip<Content: View>(selected: Bool = false, @ViewBuilder _ content: () -> Content) -> some View {
         HStack(spacing: 5) { content() }
-            .font(.footnote.weight(.medium))
-            .foregroundStyle(tint ?? Trek.foreground)
+            .font(.ui(.footnote).weight(.medium))
+            .foregroundStyle(Trek.foreground)
             .padding(.horizontal, 11)
             .frame(height: 30)
-            .glassEffect(tint.map { .regular.tint($0.opacity(0.16)).interactive() } ?? .regular.interactive(), in: Capsule())
-            .overlay {
-                if let tint { Capsule().strokeBorder(tint.opacity(0.35), lineWidth: 0.75) }
-            }
+            .glassEffect(selected ? .regular.tint(Trek.foreground.opacity(0.12)).interactive() : .regular.interactive(), in: Capsule())
     }
 }

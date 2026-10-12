@@ -375,7 +375,7 @@ private struct EarlierMarker: View {
             if loading {
                 ProgressView().controlSize(.small)
             } else {
-                Text("Earlier messages").font(.caption).foregroundStyle(Trek.muted.opacity(0.7))
+                Text("Earlier messages").font(.ui(.caption)).foregroundStyle(Trek.muted.opacity(0.7))
             }
             Spacer()
         }
@@ -390,7 +390,7 @@ private struct WorkingFooter: View {
 
     var body: some View {
         if let t = store.summary, t.runState == .working {
-            WorkingLine(threadID: t.id, agentKey: t.agent.key, since: t.workingSince, activity: t.activity)
+            WorkingLine(threadID: t.id, agentKey: t.agent.logo ?? t.agent.key, since: t.workingSince, activity: t.activity)
                 .padding(.top, 2)
                 .transaction { $0.animation = nil }
         }
@@ -453,14 +453,14 @@ private struct BlockRow: View, Equatable {
         case .turnEnd(let secs, let at):
             TurnActions(end: block.itemID, secs: secs, at: at, latest: latest, busy: busy, models: retryModels, act: act)
         case .notice(let text):
-            Label(text, systemImage: "info.circle").font(.subheadline).foregroundStyle(Trek.muted)
+            Label(text, systemImage: "info.circle").font(.ui(.subheadline)).foregroundStyle(Trek.muted)
         case .error(let text):
             Label {
                 Text(text)
             } icon: {
                 Image(systemName: "exclamationmark.triangle.fill")
             }
-            .font(.subheadline)
+            .font(.ui(.subheadline))
             .foregroundStyle(Trek.failed)
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -470,17 +470,17 @@ private struct BlockRow: View, Equatable {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(text)
                     if let resets {
-                        Text("Resets \(Date(timeIntervalSince1970: Double(resets) / 1000), style: .relative)").font(.caption)
+                        Text("Resets \(Date(timeIntervalSince1970: Double(resets) / 1000), style: .relative)").font(.ui(.caption))
                     }
                 }
             } icon: {
                 Image(systemName: "clock.fill")
             }
-            .font(.subheadline)
+            .font(.ui(.subheadline))
             .foregroundStyle(Trek.approval)
         case .handoff(let from, let to):
             Label("Handed over from \(from) to \(to)", systemImage: "arrow.left.arrow.right")
-                .font(.subheadline).foregroundStyle(Trek.muted)
+                .font(.ui(.subheadline)).foregroundStyle(Trek.muted)
         case .changes(let changes):
             ChangesCard(changes: changes, threadID: threadID, rootName: projectName,
                         folded: Binding(get: { folded }, set: { fold($0) }))

@@ -44,5 +44,20 @@
 			</array>
 		</dict>
 	</array>
+	<!-- The Mac's faces (Resources/Fonts, SIL Open Font License 1.1): Inter for the interface,
+	     JetBrains Mono NL for code. -->
+	<key>UIAppFonts</key>
+	<array>
+		<string>Inter-Regular.ttf</string>
+		<string>Inter-Medium.ttf</string>
+		<string>Inter-SemiBold.ttf</string>
+		<string>Inter-Bold.ttf</string>
+		<string>Inter-Italic.ttf</string>
+		<string>JetBrainsMonoNL-Regular.ttf</string>
+		<string>JetBrainsMonoNL-Medium.ttf</string>
+		<string>JetBrainsMonoNL-SemiBold.ttf</string>
+		<string>JetBrainsMonoNL-Bold.ttf</string>
+		<string>JetBrainsMonoNL-Italic.ttf</string>
+	</array>
 </dict>
 </plist>

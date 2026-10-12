@@ -10,7 +10,7 @@ struct UserBubble: View {
             VStack(alignment: .trailing, spacing: 6) {
                 if images > 0 {
                     Label("\(images) image\(images == 1 ? "" : "s")", systemImage: "photo")
-                        .font(.caption).foregroundStyle(Trek.muted)
+                        .font(.ui(.caption)).foregroundStyle(Trek.muted)
                 }
                 RichText(markdown: text, size: 16)
                     .lineSpacing(2)
@@ -49,7 +49,7 @@ struct ToolGroupView: View {
                     }
                     Spacer(minLength: 0)
                 }
-                .font(.subheadline)
+                .font(.ui(.subheadline))
                 .foregroundStyle(Trek.muted)
                 .contentShape(Rectangle())
             }
@@ -195,15 +195,15 @@ struct ToolRow: View {
     private var content: some View {
         switch item.body {
         case .reasoning:
-            Text("Thought process").font(.subheadline).foregroundStyle(Trek.muted)
+            Text("Thought process").font(.ui(.subheadline)).foregroundStyle(Trek.muted)
         case .tool(let c):
             HStack(spacing: 8) {
-                Text(verb(c)).font(.subheadline).foregroundStyle(Trek.muted)
+                Text(verb(c)).font(.ui(.subheadline)).foregroundStyle(Trek.muted)
                 if (c.tool == .read || c.tool == .edit), !c.detail.contains(" ") {
                     FileChip(path: c.detail, added: c.added, removed: c.removed)
                 } else {
                     Text(c.detail)
-                        .font(.system(.subheadline, design: .monospaced))
+                        .font(.code(.subheadline))
                         .foregroundStyle(Trek.foreground.opacity(0.85))
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -230,16 +230,16 @@ struct ToolRow: View {
     private var detailView: some View {
         switch item.body {
         case .reasoning(let text):
-            Text(text).font(.subheadline).italic().foregroundStyle(Trek.muted)
+            Text(text).font(.ui(.subheadline)).italic().foregroundStyle(Trek.muted)
         case .tool(let c):
             VStack(alignment: .leading, spacing: 6) {
                 if c.detail.count > 38 || c.tool == .command {
-                    Text(c.detail).font(.system(.caption, design: .monospaced)).foregroundStyle(Trek.foreground)
+                    Text(c.detail).font(.code(.caption)).foregroundStyle(Trek.foreground)
                 }
                 if !c.output.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         Text(c.output)
-                            .font(.system(size: 11.5, design: .monospaced))
+                            .font(.code(size: 11.5))
                             .foregroundStyle(c.status == .failed ? Trek.failed : Trek.muted)
                             .padding(10)
                     }
@@ -262,7 +262,7 @@ struct ResolvedRequestRow: View {
             Image(systemName: symbol).foregroundStyle(color)
             RichText(markdown: text, size: 15, style: .subheadline).lineLimit(2)
         }
-        .font(.subheadline)
+        .font(.ui(.subheadline))
         .foregroundStyle(Trek.muted)
     }
 
@@ -278,7 +278,7 @@ struct ResolvedRequestRow: View {
     private var color: Color {
         switch item.body {
         case .approval(let a): a.state == .denied ? Trek.failed : Trek.done
-        case .question: Trek.question
+        case .question: Trek.muted
         case .plan: Trek.plan
         default: Trek.muted
         }
@@ -343,7 +343,7 @@ struct WorkingLine: View {
                             .truncationMode(.tail)
                     }
                 }
-                .font(.subheadline)
+                .font(.ui(.subheadline))
             }
         }
         .accessibilityElement(children: .combine)

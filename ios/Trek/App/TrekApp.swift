@@ -4,6 +4,10 @@ import SwiftUI
 struct TrekApp: App {
     @State private var model = AppModel()
 
+    init() {
+        TrekFont.styleBars()
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()
@@ -44,7 +48,7 @@ enum Launch {
     static var open: String? { UserDefaults.standard.string(forKey: "TrekOpen") }
     /// Seconds to wait before opening `open`, as if tapped once the app has settled (to measure).
     static var openDelay: Double { UserDefaults.standard.double(forKey: "TrekOpenDelay") }
-    /// `basecamp`, `notes`, `settings` or `search`.
+    /// `basecamp`, `usage`, `notes`, `settings`, `appearance` or `search`.
     static var tab: String? { UserDefaults.standard.string(forKey: "TrekTab") }
     /// A note to open on the Notes tab.
     static var note: String? { UserDefaults.standard.string(forKey: "TrekNote") }
@@ -106,6 +110,7 @@ struct RootView: View {
             }
         }
         .tint(Trek.foreground)
+        .font(.ui(.body))
         .sheet(item: $model.pendingLink) { link in
             PairingConfirmSheet(link: link)
         }
@@ -180,8 +185,11 @@ struct MainView: View {
         .onAppear {
             switch Launch.tab {
             case "basecamp": tab = .basecamp
+            case "usage":
+                tab = .basecamp
+                basecampPath = [.usage]
             case "notes": tab = .notes
-            case "settings": tab = .settings
+            case "settings", "appearance": tab = .settings
             case "search": tab = .search
             default: break
             }
@@ -261,20 +269,20 @@ struct NewThreadAccessory: View {
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Trek.foreground)
                 Text("New thread")
-                    .font(.body.weight(.medium))
+                    .font(.ui(.body).weight(.medium))
                     .foregroundStyle(Trek.foreground)
                 Spacer(minLength: 8)
                 if placement != .inline {
                     if needsYou > 0 {
                         Label("\(needsYou)", systemImage: "hand.raised.fill")
-                            .font(.footnote.weight(.semibold))
+                            .font(.ui(.footnote).weight(.semibold))
                             .foregroundStyle(Trek.approval)
                             .labelStyle(.titleAndIcon)
                     }
                     if working > 0 {
                         HStack(spacing: 6) {
                             BeaconDot(color: Trek.working, pulses: true, size: 6)
-                            Text("\(working) working").font(.footnote.weight(.medium)).foregroundStyle(Trek.muted)
+                            Text("\(working) working").font(.ui(.footnote).weight(.medium)).foregroundStyle(Trek.muted)
                         }
                     }
                 }

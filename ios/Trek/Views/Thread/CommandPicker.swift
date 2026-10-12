@@ -54,10 +54,10 @@ struct CommandPicker: View {
                 .background(Trek.foreground.opacity(0.06), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
-                    Text("/\(c.name)").font(.system(.subheadline, design: .monospaced).weight(.medium)).lineLimit(1)
+                    Text("/\(c.name)").font(.code(.subheadline).weight(.medium)).lineLimit(1)
                     if c.kind != .command {
                         Text(c.kind == .skill ? "skill" : "agent")
-                            .font(.caption2.weight(.semibold))
+                            .font(.ui(.caption2).weight(.semibold))
                             .foregroundStyle(Trek.muted)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
@@ -65,7 +65,7 @@ struct CommandPicker: View {
                     }
                 }
                 if !c.description.isEmpty {
-                    Text(c.description).font(.caption).foregroundStyle(Trek.muted).lineLimit(1)
+                    Text(c.description).font(.ui(.caption)).foregroundStyle(Trek.muted).lineLimit(1)
                 }
             }
             Spacer(minLength: 0)
