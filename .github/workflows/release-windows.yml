@@ -11,10 +11,29 @@ name: Release (Windows)
 #
 #   gh workflow run release-windows.yml -f version=0.4.0-beta.1 -f channel=beta
 #
+# release.yml calls this too (workflow_call), right after its macOS job published; with
+# dry_run it builds and signs from the caller's commit, merges into the manifest the macOS
+# job left as an artifact, and uploads nothing.
+#
 # Secrets (Settings > Secrets and variables > Actions):
 #   TREK_MINISIGN_KEY       the whole ~/.trek-signing/minisign.key file, pasted
 #   TREK_MINISIGN_PASSWORD  that key's password
 on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      channel:
+        type: string
+        required: true
+      dry_run:
+        type: boolean
+        default: false
+      # A dry run's stand-in for the release's <channel>.json: an artifact of the calling run.
+      manifest_artifact:
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
       version:
@@ -37,8 +56,10 @@ permissions:
   contents: write
 
 # One Windows publish per release at a time; re-running the same one replaces its assets.
+# A dry run (release.yml's) queues apart: a group keeps one pending run, so sharing it could
+# cancel a real publish that was waiting.
 concurrency:
-  group: release-windows-${{ github.event.release.tag_name || inputs.channel }}
+  group: release-windows-${{ github.event.release.tag_name || inputs.channel }}${{ inputs.dry_run && '-dry-run' || '' }}
   cancel-in-progress: false
 
 env:
@@ -53,7 +74,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 120
     # A published release starts this only for a stable tag; beta and nightly prereleases
-    # (fixed "beta"/"nightly" tags) are attached through workflow_dispatch.
+    # (fixed "beta"/"nightly" tags) are attached through workflow_dispatch. Called from
+    # release.yml, github.event_name is the caller's: workflow_dispatch.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))
@@ -69,6 +91,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_CHANNEL: ${{ inputs.channel }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           if ($env:GITHUB_EVENT_NAME -eq 'release') {
             $version = $env:RELEASE_TAG.TrimStart('v')
@@ -81,6 +104,8 @@ jobs:
           # What to build: stable and beta versions get a v<version> tag from release.sh;
           # a nightly only moves the "nightly" tag.
           $ref = if ($channel -eq 'nightly') { 'nightly' } else { "v$version" }
+          # A dry run tagged nothing: build the commit the caller built.
+          if ($env:DRY_RUN -eq 'true') { $ref = $env:GITHUB_SHA }
           "version=$version" >> $env:GITHUB_OUTPUT
           "channel=$channel" >> $env:GITHUB_OUTPUT
           "ref=$ref" >> $env:GITHUB_OUTPUT
@@ -125,7 +150,10 @@ jobs:
           [System.IO.File]::WriteAllText($key, $env:TREK_MINISIGN_KEY_FILE)
           "TREK_MINISIGN_KEY=$key" >> $env:GITHUB_ENV
 
+      # inputs.dry_run is only ever set by release.yml; a published release and a dispatch of
+      # this workflow leave it empty and publish as they always have.
       - name: Build, sign and attach
+        if: inputs.dry_run != true
         env:
           TREK_MINISIGN_PASSWORD: ${{ secrets.TREK_MINISIGN_PASSWORD }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -134,3 +162,39 @@ jobs:
         run: >-
           ./script/release.ps1 $env:TREK_VERSION -Channel $env:TREK_CHANNEL
           -Minisign $env:TREK_MINISIGN_EXE -Publish
+
+      - name: Manifest from the macOS dry run
+        if: inputs.dry_run == true && inputs.manifest_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.manifest_artifact }}
+          path: ${{ runner.temp }}/mac-manifest
+
+      # release.ps1 without -Publish: the same build, zip, signature and manifest merge, nothing
+      # uploaded.
+      - name: Build and sign (dry run)
+        if: inputs.dry_run == true
+        env:
+          TREK_MINISIGN_PASSWORD: ${{ secrets.TREK_MINISIGN_PASSWORD }}
+          TREK_VERSION: ${{ steps.resolve.outputs.version }}
+          TREK_CHANNEL: ${{ steps.resolve.outputs.channel }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $more = @{}
+          $mac = "$env:RUNNER_TEMP\mac-manifest\$env:TREK_CHANNEL.json"
+          if (Test-Path $mac) { $more.ExistingManifest = $mac }
+          ./script/release.ps1 $env:TREK_VERSION -Channel $env:TREK_CHANNEL -Minisign $env:TREK_MINISIGN_EXE @more
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $out = "dist\release\$env:TREK_VERSION"
+          $zip = Get-Item "$out\Trek-$env:TREK_VERSION-windows-x86_64.zip"
+          $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $manifest = Get-Content "$out\$env:TREK_CHANNEL.json" -Raw
+          @(
+            "### Windows (dry run: nothing uploaded)"
+            ''
+            "``$($zip.Name)`` sha256 ``$sha``"
+            ''
+            '```json'
+            $manifest.TrimEnd()
+            '```'
+          ) -join "`n" >> $env:GITHUB_STEP_SUMMARY

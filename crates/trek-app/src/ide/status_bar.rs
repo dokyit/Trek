@@ -18,6 +18,9 @@ pub struct IdeStatus {
     editor: Option<Entity<EditorView>>,
     /// Watches the editor in front (dirty, read-only) and its text (the caret).
     _editor_watch: Vec<Subscription>,
+    /// The preview in front (an image, a PDF…): its kind and size where a file's language goes.
+    preview: Option<Entity<super::preview::PreviewView>>,
+    _preview_watch: Option<Subscription>,
     _subscription: Subscription,
 }
 
@@ -29,7 +32,17 @@ pub fn language(path: &std::path::Path) -> &'static str {
 impl IdeStatus {
     pub fn new(workspace: Entity<Workspace>, workbench: WeakEntity<IdeWorkbench>, cx: &mut Context<Self>) -> Self {
         let _subscription = cx.observe(&workspace, |_, _, cx| cx.notify());
-        Self { workspace, workbench, editor: None, _editor_watch: vec![], _subscription }
+        Self { workspace, workbench, editor: None, _editor_watch: vec![], preview: None, _preview_watch: None, _subscription }
+    }
+
+    /// The preview in front changed (or none is).
+    pub fn set_preview(&mut self, preview: Option<Entity<super::preview::PreviewView>>, cx: &mut Context<Self>) {
+        if self.preview == preview {
+            return;
+        }
+        self._preview_watch = preview.as_ref().map(|p| cx.observe(p, |_, _, cx| cx.notify()));
+        self.preview = preview;
+        cx.notify();
     }
 
     /// The editor in front changed (or none is open).
@@ -82,6 +95,7 @@ impl Render for IdeStatus {
             let e = e.read(cx);
             (e.caret(cx), language(&e.path), e.lsp_name, e.problem().is_some(), crate::languages::of(&e.path).hard_tabs)
         });
+        let preview = self.preview.as_ref().map(|p| p.read(cx).status_items());
         let muted = theme.muted_foreground;
         h_flex()
             .id("ide-status")
@@ -129,6 +143,11 @@ impl Render for IdeStatus {
                     .child(Self::item("ide-status-eol", cx).child("LF"))
                     .child(Self::item("ide-status-language", cx).child(lang))
                     .when_some(lsp, |el, name| el.child(Self::item("ide-status-lsp", cx).child(div().text_color(crate::palette::emerald(cx)).child("●")).child(name)))
+            })
+            .when_some(preview, |el, (kind, pixels, size)| {
+                el.when_some(pixels, |el, p| el.child(Self::item("ide-status-pixels", cx).test_support().child(p)))
+                    .when_some(size, |el, s| el.child(Self::item("ide-status-size", cx).test_support().child(s)))
+                    .child(Self::item("ide-status-kind", cx).test_support().child(kind))
             })
             .child(
                 Self::item("ide-status-ai", cx)

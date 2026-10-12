@@ -164,7 +164,13 @@ fn thumb_bounds(path: &Path, window: &Window, cx: &App) -> Option<Bounds<Pixels>
 pub fn pixels(path: &Path) -> Option<(u32, u32)> {
     static SEEN: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, Option<(u32, u32)>>>> = std::sync::LazyLock::new(Default::default);
     let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-    *seen.entry(path.to_path_buf()).or_insert_with(|| image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.into_dimensions().ok())
+    *seen.entry(path.to_path_buf()).or_insert_with(|| pixels_now(path))
+}
+
+/// `pixels`, read from the file now: for one that may have changed since it was last looked at
+/// (the editor's previews), where a remembered size would be the old picture's.
+pub fn pixels_now(path: &Path) -> Option<(u32, u32)> {
+    image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.into_dimensions().ok()
 }
 
 /// How wide a tile `height` tall shows `path` in its own proportions, between `min` and `max`
@@ -465,7 +471,7 @@ fn format_of(path: &Path) -> ImageFormat {
 }
 
 /// A file's size as Finder gives it (decimal units).
-fn file_size(bytes: u64) -> String {
+pub(crate) fn file_size(bytes: u64) -> String {
     match bytes {
         b if b >= 1_000_000_000 => format!("{:.1} GB", b as f64 / 1e9),
         b if b >= 1_000_000 => format!("{:.1} MB", b as f64 / 1e6),
@@ -489,7 +495,7 @@ fn meta(s: &Showing) -> String {
 }
 
 /// Keep a pan offset on the image: offsets run from 0 (top left) down to minus the overhang.
-fn clamp_offset(offset: Point<Pixels>, content: Size<Pixels>, area: Size<Pixels>) -> Point<Pixels> {
+pub(crate) fn clamp_offset(offset: Point<Pixels>, content: Size<Pixels>, area: Size<Pixels>) -> Point<Pixels> {
     let max_x = (content.width - area.width).max(px(0.));
     let max_y = (content.height - area.height).max(px(0.));
     point(offset.x.clamp(-max_x, px(0.)), offset.y.clamp(-max_y, px(0.)))

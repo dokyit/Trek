@@ -126,9 +126,9 @@ impl Review {
         self.pending.iter().any(|f| f.path == path)
     }
 
-    /// Undo all was asked for once, and asking again now does it.
-    pub fn undo_all_armed(&self) -> bool {
-        self.undo_all_asked.is_some_and(|at| at.elapsed() <= UNDO_ALL_CONFIRM)
+    /// Undo all was asked for once, and asking again at `now` (the app's clock) does it.
+    pub fn undo_all_armed(&self, now: Instant) -> bool {
+        self.undo_all_asked.is_some_and(|at| now.saturating_duration_since(at) <= UNDO_ALL_CONFIRM)
     }
 }
 
@@ -462,14 +462,17 @@ impl Workspace {
             cx.emit(WorkspaceEvent::Toast { message: "Stop the running turn to undo its changes.".into(), undo: None });
             return;
         }
+        // The executor's clock, as the rest of the app's timers read it: the confirm window is
+        // the user's time between two clicks, not CPU time a loaded machine takes drawing them.
+        let now = cx.background_executor().now();
         let Some(review) = self.reviews.get_mut(id).filter(|r| !r.busy && r.git) else { return };
         let all = paths.is_none();
-        if all && review.undo_all_asked.is_none_or(|at| at.elapsed() > UNDO_ALL_CONFIRM) {
+        if all && !review.undo_all_armed(now) {
             let n = review.pending.len();
             if n == 0 {
                 return;
             }
-            review.undo_all_asked = Some(Instant::now());
+            review.undo_all_asked = Some(now);
             let what = if n == 1 { "the 1 file".to_string() } else { format!("all {n} files") };
             cx.emit(WorkspaceEvent::Toast { message: format!("Undo all again to put back {what} this chat changed."), undo: None });
             cx.emit(WorkspaceEvent::ReviewChanged { id: id.to_string() });

@@ -230,7 +230,9 @@ CI runs `cargo test --workspace --locked` on Windows too.
 Releases are published to GitHub by `script/release.sh <version> [--channel stable|beta|nightly]`, which
 sets the version, builds and signs the app, signs the archive with minisign, writes the channel manifest
 and creates the GitHub release. Only stable releases commit their version to the branch; betas and
-nightlies are tagged builds off it. Run it with `--dry-run` first. The full process, the channel layout, the
+nightlies are tagged builds off it. Run it with `--dry-run` first. The Release workflow runs the same script on
+GitHub's Mac and then adds the Windows build, so a release can start from any machine (`gh workflow run
+release.yml -f version=<version> -f channel=<channel>`). The full process, the channel layout, the
 keys and how to test an update locally are in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Architecture

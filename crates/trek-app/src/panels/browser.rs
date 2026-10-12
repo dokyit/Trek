@@ -127,7 +127,7 @@ const PICK_JS: &str = r#"(() => {
 const PICK_STOP_JS: &str = "window.__trekPick && window.__trekPick.stop();";
 
 /// Where to get the WebView2 runtime when a Windows system has none.
-const WEBVIEW2_DOWNLOAD: &str = "https://developer.microsoft.com/microsoft-edge/webview2/";
+pub(crate) const WEBVIEW2_DOWNLOAD: &str ="https://developer.microsoft.com/microsoft-edge/webview2/";
 
 /// The scheme Trek's own pages are registered under, which Trek spells `trek://`. WebView2 can't
 /// load a custom scheme, so on Windows wry serves `<scheme>://newtab/…` as `http://<scheme>.newtab/…`
@@ -721,11 +721,17 @@ fn extract_title(html: &str) -> Option<String> {
     (!title.is_empty()).then_some(title)
 }
 
+/// A web view's page as a PNG, WebView2 drawing it (the editor's previews, for `shots`).
+#[cfg(all(windows, feature = "shots"))]
+pub(crate) fn capture_png(wv: &wry::WebView) -> async_channel::Receiver<Result<Vec<u8>, String>> {
+    native::capture_png(wv)
+}
+
 /// Where WebView2 keeps its profile (cookies, cache): `%LOCALAPPDATA%\Trek\WebView2`, beside the
 /// logs, or in the data folder a test or `TREK_DATA_DIR` moved. Left to itself it would write
 /// next to `trek.exe`, a folder an update replaces and that may not be writable.
 #[cfg(windows)]
-fn webview_data_dir() -> PathBuf {
+pub(crate) fn webview_data_dir() -> PathBuf {
     if trek_core::paths::isolated() {
         return trek_core::paths::data_dir().join("WebView2");
     }
