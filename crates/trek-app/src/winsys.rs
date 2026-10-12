@@ -258,9 +258,41 @@ impl PageHost {
         Some(PageHost { hwnd: hwnd as isize, parent })
     }
 
-    /// The host's handle, for the web view to be made a child of.
+    /// The host's handle (the web view is made its child through `HasWindowHandle`).
+    #[cfg(test)]
     pub fn hwnd(&self) -> isize {
         self.hwnd
+    }
+
+    /// Where the host is in its parent's client area and the one window in it (the web view)
+    /// in the host, both `[x, y, width, height]` in device pixels — for `page snap` to draw the
+    /// page's picture where Windows has it. `None` while the host is hidden (nothing of it is on
+    /// screen then), and the view's rect is zeros while the view isn't there.
+    #[cfg(feature = "shots")]
+    pub fn rects(&self) -> Option<([i32; 4], [i32; 4])> {
+        use windows_sys::Win32::Foundation::{HWND, RECT};
+        use windows_sys::Win32::Graphics::Gdi::MapWindowPoints;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GW_CHILD, GetWindow, GetWindowRect, IsWindowVisible};
+        let zero = || RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        // SAFETY: queries on Trek's own windows; `host` is two POINTs, as MapWindowPoints asks.
+        unsafe {
+            if IsWindowVisible(self.hwnd as HWND) == 0 {
+                return None;
+            }
+            let (mut host, mut at) = (zero(), zero());
+            GetWindowRect(self.hwnd as HWND, &mut host);
+            // The view's place inside the host is the page's place in the clip, so it is taken
+            // before the host's leaves the screen coordinates they share.
+            let view = match GetWindow(self.hwnd as HWND, GW_CHILD) {
+                child if child.is_null() => [0; 4],
+                child => {
+                    GetWindowRect(child, &mut at);
+                    [at.left - host.left, at.top - host.top, at.right - at.left, at.bottom - at.top]
+                }
+            };
+            MapWindowPoints(std::ptr::null_mut(), self.parent as HWND, (&mut host as *mut RECT).cast(), 2);
+            Some(([host.left, host.top, host.right - host.left, host.bottom - host.top], view))
+        }
     }
 
     /// Show the host at `at` (x, y, width, height in device pixels, in the parent's client area),
