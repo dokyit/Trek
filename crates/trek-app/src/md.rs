@@ -169,7 +169,7 @@ pub fn style(size: Pixels, tone: Tone, cx: &App) -> TextViewStyle {
 /// A markdown view of an agent's answer in `cwd`, set at `size`, with Trek's style and path
 /// chips. `folder`: the tint of folder icons in the chips (the project's colour).
 pub fn view(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, cx: &App) -> TextView {
-    dress(TextView::new(state), cwd, folder, size, Tone::Prose, None, cx)
+    dress(TextView::new(state), cwd, folder, size, Tone::Prose, None, None, cx)
 }
 
 /// `view`, with Trek's native visualization blocks enabled. Assistant answers use this; tool
@@ -177,19 +177,26 @@ pub fn view(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<
 /// `live`: the answer is still streaming in, so a visualization block it hasn't closed yet is
 /// drawn as far as it's written (in a finished answer one left open can't be drawn).
 pub fn answer(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, live: bool, cx: &App) -> TextView {
-    dress(TextView::new(state), cwd, folder, size, Tone::Prose, Some(live), cx)
+    dress(TextView::new(state), cwd, folder, size, Tone::Prose, Some(live), None, cx)
 }
 
 /// `view`, for the agent's reasoning: the same markdown, a step quieter.
 pub fn thought(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, cx: &App) -> TextView {
-    dress(TextView::new(state), cwd, folder, size, Tone::Muted, None, cx)
+    dress(TextView::new(state), cwd, folder, size, Tone::Muted, None, None, cx)
 }
 
 /// `view` of `text` with its state kept by the window under `id`, for answers shown outside the
-/// transcript (the side chat, which gets visualization blocks; notes, which don't). `live` as
+/// transcript (the side chat, which gets visualization blocks; notes have `note`). `live` as
 /// for `answer`.
 pub fn keyed(id: impl Into<ElementId>, text: impl Into<SharedString>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, visualizations: bool, live: bool, cx: &App) -> TextView {
-    dress(TextView::markdown(id, text), cwd, folder, size, Tone::Prose, visualizations.then_some(live), cx)
+    dress(TextView::markdown(id, text), cwd, folder, size, Tone::Prose, visualizations.then_some(live), None, cx)
+}
+
+/// A note as it reads (its id keys the view's state): links and images relative to the notes
+/// folder, pictures fit to the preview and opened in the viewer (see `note_images`).
+pub fn note(id: impl Into<ElementId>, text: impl Into<SharedString>, images: crate::note_images::NoteImages, size: Pixels, cx: &App) -> TextView {
+    let dir = images.dir.clone();
+    dress(TextView::markdown(id, text), Some(dir), None, size, Tone::Prose, None, Some(images), cx)
 }
 
 /// Text streaming in fades in, as it arrives.
@@ -198,13 +205,16 @@ pub fn streaming() -> TextViewMotion {
 }
 
 /// `visualizations`: draw `trek-viz` blocks, and whether the text is still streaming in.
-fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, tone: Tone, visualizations: Option<bool>, cx: &App) -> TextView {
+/// `note_images`: a note's pictures, instead of an answer's.
+#[allow(clippy::too_many_arguments)]
+fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, tone: Tone, visualizations: Option<bool>, note_images: Option<crate::note_images::NoteImages>, cx: &App) -> TextView {
     let link_cwd = cwd.clone();
-    let view = view.selectable(true)
-        .style(style(size, tone, cx))
-        .text_size(size)
-        .line_height(relative(LINE_HEIGHT))
-        .plugin(LocalImages { cwd: cwd.clone() })
+    let view = view.selectable(true).style(style(size, tone, cx)).text_size(size).line_height(relative(LINE_HEIGHT));
+    let view = match note_images {
+        Some(images) => view.plugin(images),
+        None => view.plugin(LocalImages { cwd: cwd.clone() }),
+    };
+    let view = view
         .plugin(PathChips { cwd, folder })
         .on_link_click(move |url, _, window, cx| {
             // A link to an image on disk previews it here; to another file or folder, opens it

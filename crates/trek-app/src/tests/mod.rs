@@ -28,6 +28,7 @@ mod long_answers;
 mod look;
 mod mcp;
 mod motion;
+mod notes;
 mod orchestrate;
 mod palette;
 mod placement;

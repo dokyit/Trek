@@ -1,7 +1,9 @@
 //! Notes: things to jot down next to the agents' work. Each note is a markdown file in the data
 //! folder's `notes/`, titled by its first line, so they're plain files anywhere else too. Bold,
 //! italics, lists, checklists and headings are markdown; colour and highlights are inline
-//! `<span style="color: …">` and `<mark>`, which Trek's markdown renders.
+//! `<span style="color: …">` and `<mark>`, which Trek's markdown renders. Pictures are files in
+//! `notes/attachments/`, named by their content and linked as `![alt](attachments/<name>)`
+//! (`add_image`), so the folder stays whole wherever it goes.
 //!
 //! The editing helpers below work on the markdown text and a selection in it (byte offsets), and
 //! hand back the new text and selection: wrapping a selection in marks (or taking them off again),
@@ -65,12 +67,40 @@ pub fn create_in(dir: &Path) -> std::io::Result<Note> {
     Ok(Note { id, path, body: String::new(), modified: crate::store::now_ms() })
 }
 
-/// Move `note` out of the list into `Deleted/` beside it, where it can still be got back.
+/// Move `note` out of the list into `Deleted/` beside it, where it can still be got back. Its
+/// images go with it into `Deleted/attachments/`, so it still shows them there: moved when no
+/// other note shows them, copied when one does. Only plain files in the notes' own
+/// `attachments/` are ever touched.
 pub fn delete(note: &Note) -> std::io::Result<PathBuf> {
-    let bin = note.path.parent().unwrap_or(Path::new(".")).join("Deleted");
+    let dir = note.path.parent().unwrap_or(Path::new("."));
+    let bin = dir.join("Deleted");
     std::fs::create_dir_all(&bin)?;
     let to = bin.join(note.path.file_name().unwrap_or_default());
     std::fs::rename(&note.path, &to)?;
+    let mine = attachment_names(&note.body);
+    if !mine.is_empty() {
+        let others: Vec<String> = list_in(dir).into_iter().filter(|n| n.id != note.id).flat_map(|n| attachment_names(&n.body)).collect();
+        let (from, into) = (attachments_dir(dir), attachments_dir(&bin));
+        for name in mine {
+            let src = from.join(&name);
+            // A plain file, not a link to somewhere else.
+            if !std::fs::symlink_metadata(&src).is_ok_and(|m| m.is_file()) {
+                continue;
+            }
+            let dst = into.join(&name);
+            let shared = others.contains(&name);
+            let moved = std::fs::create_dir_all(&into).and_then(|_| match (shared, dst.exists()) {
+                // Named by its content: one already there is the same picture.
+                (true, true) => Ok(()),
+                (true, false) => std::fs::copy(&src, &dst).map(|_| ()),
+                (false, true) => std::fs::remove_file(&src),
+                (false, false) => std::fs::rename(&src, &dst),
+            });
+            if let Err(e) = moved {
+                tracing::warn!("note image {name}: {e}");
+            }
+        }
+    }
     Ok(to)
 }
 
@@ -81,13 +111,161 @@ pub fn save(note: &Note) -> std::io::Result<()> {
     std::fs::rename(&tmp, &note.path)
 }
 
+/// The folder beside the notes their images are kept in: a note links them as
+/// `attachments/<name>`, so the notes folder can go anywhere with its pictures.
+pub const ATTACHMENTS: &str = "attachments";
+
+/// The images folder of the notes in `notes_dir`.
+pub fn attachments_dir(notes_dir: &Path) -> PathBuf {
+    notes_dir.join(ATTACHMENTS)
+}
+
+/// The kinds of image a note keeps as they are.
+pub const IMAGE_KINDS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg"];
+
+/// Keep an image's `bytes` (a `kind` from `IMAGE_KINDS`) with the notes in `notes_dir`, named by
+/// its content so the same picture twice is one file. Returns its link from a note
+/// (`attachments/<hash>.<kind>`).
+pub fn add_image(notes_dir: &Path, bytes: &[u8], kind: &str) -> std::io::Result<String> {
+    let kind = kind.to_ascii_lowercase();
+    if !IMAGE_KINDS.contains(&kind.as_str()) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("a .{kind} file isn't an image a note can show")));
+    }
+    if bytes.is_empty() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "the image is empty"));
+    }
+    let dir = attachments_dir(notes_dir);
+    std::fs::create_dir_all(&dir)?;
+    let hash = crate::registry::sha256_hex(bytes);
+    let name = format!("{}.{kind}", &hash[..32]);
+    let path = dir.join(&name);
+    if !path.is_file() {
+        let tmp = dir.join(format!(".{name}.tmp"));
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, &path)?;
+    }
+    Ok(format!("{ATTACHMENTS}/{name}"))
+}
+
+/// Keep a copy of the image file `src` with the notes (see `add_image`).
+pub fn add_image_file(notes_dir: &Path, src: &Path) -> std::io::Result<String> {
+    let kind = src.extension().and_then(|e| e.to_str()).unwrap_or_default();
+    add_image(notes_dir, &std::fs::read(src)?, kind)
+}
+
+/// The markdown that shows the image at `link`, described by `alt`.
+pub fn image_markdown(alt: &str, link: &str) -> String {
+    let alt: String = alt.chars().filter(|c| !matches!(c, '[' | ']' | '\\')).map(|c| if c.is_control() { ' ' } else { c }).collect();
+    if link.contains([' ', '(', ')', '<', '>']) {
+        format!("![{}](<{link}>)", alt.trim())
+    } else {
+        format!("![{}]({link})", alt.trim())
+    }
+}
+
+/// Put `block` (whole lines, an image or several) in place of the selection, on lines of its
+/// own: the text before and after keeps its lines (an empty line it lands on is taken up), and
+/// the cursor goes to the start of the line after it.
+pub fn insert_lines(text: &str, sel: Range<usize>, block: &str) -> Edit {
+    let sel = clamp(text, sel);
+    let (before, after) = (&text[..sel.start], &text[sel.end..]);
+    let lead = if before.is_empty() || before.ends_with('\n') { "" } else { "\n" };
+    let tail = if after.starts_with('\n') { "" } else { "\n" };
+    let new = format!("{before}{lead}{block}{tail}{after}");
+    let cursor = before.len() + lead.len() + block.len() + 1;
+    Edit { text: new, selection: cursor..cursor }
+}
+
+/// An image a note shows: `![alt](link)`, and where that is in the note.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageRef {
+    pub alt: String,
+    pub link: String,
+    pub range: Range<usize>,
+}
+
+/// The images in a note's markdown, in order (`![alt](link)` and `![alt](<link> "title")`).
+pub fn images(body: &str) -> Vec<ImageRef> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(i) = body[from..].find("![") {
+        let start = from + i;
+        from = start + 2;
+        let Some((alt, link, end)) = image_at(body, start) else { continue };
+        out.push(ImageRef { alt, link, range: start..end });
+        from = end;
+    }
+    out
+}
+
+/// The image whose markdown starts at `start` (on its `!`): its alt text, link and where it ends.
+fn image_at(body: &str, start: usize) -> Option<(String, String, usize)> {
+    let rest = &body[start + 2..];
+    let close = rest.find(']')?;
+    let alt = &rest[..close];
+    if alt.contains('\n') {
+        return None;
+    }
+    let after = rest[close + 1..].strip_prefix('(')?;
+    let line = &after[..after.find('\n').unwrap_or(after.len())];
+    let (link, used) = if let Some(inner) = line.strip_prefix('<') {
+        let end = inner.find('>')?;
+        (inner[..end].to_string(), end + 2)
+    } else {
+        let link: String = line.trim_start().chars().take_while(|c| !c.is_whitespace() && *c != ')').collect();
+        (link.clone(), line.len() - line.trim_start().len() + link.len())
+    };
+    let paren = line[used..].find(')')?;
+    let end = start + 2 + close + 2 + used + paren + 1;
+    Some((alt.to_string(), link, end))
+}
+
+/// The names of the files in the notes' `attachments/` that `body` mentions anywhere (an
+/// image, a link, an `<img>`): plain names only, never a path out of the folder.
+pub fn attachment_names(body: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let prefix = format!("{ATTACHMENTS}/");
+    let mut from = 0;
+    while let Some(i) = body[from..].find(&prefix) {
+        let at = from + i + prefix.len();
+        from = at;
+        // The link starts there (or at `./` before it): not `old-attachments/`, nor some other
+        // folder's `…/attachments/`.
+        let before = body[..at - prefix.len()].strip_suffix("./").unwrap_or(&body[..at - prefix.len()]);
+        let begins = before.chars().next_back().is_none_or(|c| c.is_whitespace() || matches!(c, '(' | '<' | '"' | '\'' | '='));
+        let name: String = body[at..].chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).collect();
+        if begins && !name.is_empty() && !name.starts_with('.') && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 fn title_of(body: &str) -> String {
     body.lines().map(plain).find(|l| !l.is_empty()).map(|l| l.chars().take(80).collect()).unwrap_or_else(|| "Untitled".into())
 }
 
+/// `![alt](link)` as its alt text, for a line read as text.
+fn images_as_alt(line: &str) -> std::borrow::Cow<'_, str> {
+    let found = images(line);
+    if found.is_empty() {
+        return line.into();
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut at = 0;
+    for image in found {
+        out.push_str(&line[at..image.range.start]);
+        out.push_str(&image.alt);
+        at = image.range.end;
+    }
+    out.push_str(&line[at..]);
+    out.into()
+}
+
 /// A line of markdown as text: no heading, list, quote or checkbox marker, no emphasis marks or
-/// inline tags.
+/// inline tags; an image is its alt text.
 fn plain(line: &str) -> String {
+    let line = images_as_alt(line);
     let mut l = line.trim();
     l = l.trim_start_matches('#').trim_start();
     l = l.strip_prefix("> ").unwrap_or(l);
@@ -424,6 +602,103 @@ mod tests {
         let kept = delete(&a).unwrap();
         assert!(list_in(&dir).is_empty(), "out of the list");
         assert_eq!(std::fs::read_to_string(kept).unwrap(), "first", "but not gone");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn temp_notes(what: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("trek-notes-{what}-{}", uuid::Uuid::now_v7().simple()))
+    }
+
+    #[test]
+    fn images_are_kept_with_the_notes_by_their_content() {
+        let dir = temp_notes("images");
+        let png = b"\x89PNG\r\n\x1a\nnot really";
+        let link = add_image(&dir, png, "PNG").unwrap();
+        assert!(link.starts_with("attachments/") && link.ends_with(".png"), "{link}");
+        assert_eq!(std::fs::read(dir.join(&link)).unwrap(), png);
+        // The same picture again is the same file; another is another.
+        assert_eq!(add_image(&dir, png, "png").unwrap(), link);
+        assert_ne!(add_image(&dir, b"other", "png").unwrap(), link);
+        // From a file, by its kind.
+        let src = dir.join("shot.jpeg");
+        std::fs::write(&src, b"jpeg bytes").unwrap();
+        assert!(add_image_file(&dir, &src).unwrap().ends_with(".jpeg"));
+        // What isn't an image a note shows (or is empty) isn't kept.
+        assert!(add_image(&dir, b"x", "exe").is_err());
+        assert!(add_image(&dir, b"", "png").is_err());
+        let names: Vec<_> = std::fs::read_dir(attachments_dir(&dir)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "nothing half-written left: {names:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_image_goes_in_on_lines_of_its_own() {
+        let md = image_markdown("Screen [shot]", "attachments/a.png");
+        assert_eq!(md, "![Screen shot](attachments/a.png)");
+        assert_eq!(image_markdown("x", "/Users/me/My Pics/a.png"), "![x](</Users/me/My Pics/a.png>)");
+        // Mid-line: it breaks the line, and the cursor lands after it.
+        let e = insert_lines("before after", 7..7, &md);
+        assert_eq!(e.text, format!("before \n{md}\nafter"));
+        assert_eq!(&e.text[e.selection.start..], "after");
+        // On an empty line, or at the end: no blank lines added around it.
+        let e = insert_lines("a\n\nb", 2..2, "IMG");
+        assert_eq!(e.text, "a\nIMG\nb");
+        assert_eq!(e.selection, 6..6, "at the start of the next line");
+        assert_eq!(insert_lines("", 0..0, "IMG").text, "IMG\n");
+        // A selection is replaced.
+        assert_eq!(insert_lines("a\nold\nb", 2..5, "IMG").text, "a\nIMG\nb");
+    }
+
+    #[test]
+    fn a_notes_images_are_found_and_read_as_text() {
+        let body = "# Trip\n![The view](attachments/abc.png) and ![](https://x.y/a.jpg \"t\")\n![odd](<My Pics/b.png>)\n![not\nan image](x)";
+        let found = images(body);
+        assert_eq!(found.iter().map(|i| (i.alt.as_str(), i.link.as_str())).collect::<Vec<_>>(), [("The view", "attachments/abc.png"), ("", "https://x.y/a.jpg"), ("odd", "My Pics/b.png")]);
+        assert_eq!(&body[found[0].range.clone()], "![The view](attachments/abc.png)");
+        assert_eq!(&body[found[1].range.clone()], "![](https://x.y/a.jpg \"t\")");
+        // In the list, an image is its description.
+        let n = Note { id: "x".into(), path: PathBuf::new(), body: "![Whiteboard](attachments/w.png)\nmore".into(), modified: 0 };
+        assert_eq!(n.title(), "Whiteboard");
+        let n = Note { body: "Plan\n![](attachments/w.png)\nsteps".into(), ..n };
+        assert_eq!(n.preview(), "steps");
+    }
+
+    #[test]
+    fn only_the_notes_own_attachments_are_its() {
+        let body = "![a](attachments/one.png) [link](./attachments/two.jpg) <img src=\"attachments/three.gif\">\n\
+                    ![x](old-attachments/no.png) ![y](/elsewhere/attachments/no2.png) ![z](attachments/../../../etc/passwd) ![again](attachments/one.png)";
+        assert_eq!(attachment_names(body), ["one.png", "two.jpg", "three.gif"]);
+    }
+
+    #[test]
+    fn deleting_a_note_takes_its_images_along_but_leaves_shared_ones() {
+        let dir = temp_notes("delete");
+        let only = add_image(&dir, b"only mine", "png").unwrap();
+        let shared = add_image(&dir, b"shared", "png").unwrap();
+        let mut a = create_in(&dir).unwrap();
+        a.body = format!("A\n{}\n{}", image_markdown("", &only), image_markdown("", &shared));
+        save(&a).unwrap();
+        let mut b = create_in(&dir).unwrap();
+        b.body = format!("B\n{}", image_markdown("", &shared));
+        save(&b).unwrap();
+        // Something outside the folder a note names can't be reached.
+        let outside = dir.join("keep.png");
+        std::fs::write(&outside, b"not an attachment").unwrap();
+        let mut sneaky = a.clone();
+        sneaky.body.push_str("\n![](attachments/../keep.png)");
+        a = sneaky;
+        save(&a).unwrap();
+
+        delete(&a).unwrap();
+        let bin = dir.join("Deleted");
+        assert!(!dir.join(&only).exists(), "its own image left the list's folder");
+        assert_eq!(std::fs::read(bin.join(&only)).unwrap(), b"only mine", "and went with it to Deleted, still showing there");
+        assert!(dir.join(&shared).exists(), "the other note still shows the shared one");
+        assert!(bin.join(&shared).exists(), "and the deleted note keeps a copy");
+        assert!(outside.exists(), "nothing outside attachments/ is touched");
+        // The other note goes too: now nothing else shows the shared one.
+        delete(&b).unwrap();
+        assert!(!dir.join(&shared).exists() && bin.join(&shared).exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 }
