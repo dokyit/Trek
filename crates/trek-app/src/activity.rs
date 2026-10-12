@@ -119,17 +119,18 @@ fn capitalize(text: &str) -> String {
 pub enum Place {
     /// Folded into the tool group around it.
     Group,
-    /// A row of its own: sub-agents (Trek's, and the agent's own).
+    /// A row of its own: sub-agents (Trek's, and the agent's own), and threads an agent handed
+    /// work to (`start_thread`).
     Own,
-    /// No row: the agent's call to `delegate_task`, which the sub-agent's own row stands for
-    /// (unless it failed: then it says why).
+    /// No row: the agent's call to `delegate_task` or `start_thread`, which the thread's own row
+    /// stands for (unless it failed: then it says why).
     Hidden,
 }
 
 pub fn placement(item: &Item) -> Place {
     match item {
-        Item::Tool { id, title, .. } if orch::task_of_row(id).is_some() || title == "Subagent" => Place::Own,
-        Item::Tool { title, status, .. } if orch::is_delegate_call(title) && *status != ToolStatus::Failed => Place::Hidden,
+        Item::Tool { id, title, .. } if orch::task_of_row(id).is_some() || orch::thread_of_row(id).is_some() || title == "Subagent" => Place::Own,
+        Item::Tool { title, status, .. } if (orch::is_delegate_call(title) || orch::is_start_thread_call(title)) && *status != ToolStatus::Failed => Place::Hidden,
         _ => Place::Group,
     }
 }

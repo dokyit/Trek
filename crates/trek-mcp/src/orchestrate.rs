@@ -28,7 +28,7 @@ impl ToolSet for Orchestrate {
     }
 
     fn instructions(&self) -> &'static str {
-        "Trek runs other agents and models as sub-agents of this thread. Use list_models to see what's available, delegate_task to start one (advise: read-only review; implement: may change files), and task_status / task_result / cancel_task to follow it. Sub-agents see only the prompt you give them."
+        "Trek runs other agents and models as sub-agents of this thread. Use list_models to see what's available, delegate_task to start one (advise: read-only review; implement: may change files), and task_status / task_result / cancel_task to follow it. Sub-agents see only the prompt you give them. To hand work off to a new thread of the user's instead — one they own, that reports to nobody — use start_thread: for work that should stand on its own, or outlive this turn."
     }
 
     fn tools(&self) -> Vec<ToolDef> {
@@ -148,7 +148,7 @@ mod tests {
     fn lists_the_shared_tools() {
         let tools = Orchestrate { client: None };
         let names: Vec<&str> = tools.tools().iter().map(|t| t.name).collect();
-        assert_eq!(names, ["list_models", "delegate_task", "task_status", "task_result", "cancel_task"]);
+        assert_eq!(names, ["list_models", "delegate_task", "start_thread", "task_status", "task_result", "cancel_task"]);
         assert!(tools.tools().iter().all(|t| t.to_json()["inputSchema"]["type"] == "object"));
     }
 
