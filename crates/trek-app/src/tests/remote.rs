@@ -1102,3 +1102,155 @@ fn a_phone_server_that_cant_start_stays_on_and_says_why() {
         assert!(trek.read(cx, |ws, _| ws.remote_error.is_none()));
     });
 }
+
+fn thread_action(id: &str, action: tr::ThreadAction) -> impl FnOnce(tr::Reply<()>) -> tr::HostRequest {
+    let req = tr::ThreadActionRequest { thread_id: id.to_string(), action };
+    move |reply| tr::HostRequest::ThreadAction { req, reply }
+}
+
+#[test]
+fn a_phone_opens_a_sub_agent_answers_it_and_stops_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        let kid = trek.update(cx, |ws, cx| ws.delegate(&id, &serde_json::json!({ "title": "Write it", "prompt": "mock:permission", "mode": "implement" }), cx)).unwrap();
+        let k = kid.clone();
+        trek.wait(cx, "the sub-agent to ask", move |ws| ws.task_state(&k) == crate::workspace::TaskState::NeedsYou).await;
+        trek.update(cx, |ws, cx| {
+            ws.start_test_remote();
+            ws.push_remote_changes(cx);
+        });
+        // Not listed, as on the Mac: an unlisted row, named by its parent's, which carries its request.
+        let (parent, row) = trek.read(cx, |ws, _| {
+            let r = ws.remote.as_ref().unwrap();
+            (r.sent[&id].clone(), r.unlisted.get(&kid).cloned())
+        });
+        let row = row.expect("the sub-agent's row");
+        assert_eq!((row.parent_id.as_deref(), row.run_state), (Some(id.as_str()), tr::RunState::NeedsYou));
+        assert_eq!(parent.sub_agents.iter().map(|s| s.thread_id.clone()).collect::<Vec<_>>(), [Some(kid.clone())]);
+        assert_eq!((parent.needs_thread.as_deref(), parent.needs.as_ref().map(|n| n.text.as_str())), (Some(kid.as_str()), Some("Sub-agent needs you")));
+        assert_eq!(parent.section, tr::Section::Inbox, "in the inbox for it, as on the Mac");
+        let snapshot = ask(&trek, cx, |reply| tr::HostRequest::Snapshot { reply }).unwrap();
+        assert!(snapshot.unlisted.iter().any(|t| t.id == kid) && !snapshot.threads.iter().any(|t| t.id == kid));
+
+        // Opened: its transcript, its request, answered from the phone.
+        let k = kid.clone();
+        let transcript = ask_later(&trek, cx, move |reply| tr::HostRequest::Transcript { thread_id: k, after_seq: None, limit: Some(50), reply }).await.unwrap();
+        let request_id = transcript.items.iter().find_map(|i| match &i.body {
+            tr::ItemBody::Approval { request_id, state: tr::ApprovalState::Pending, .. } => Some(request_id.clone()),
+            _ => None,
+        });
+        let request_id = request_id.expect("its approval");
+        let allow = tr::AnswerRequest { thread_id: kid.clone(), request_id, response: tr::AnswerResponse::Approval { decision: tr::Decision::Allow } };
+        ask(&trek, cx, |reply| tr::HostRequest::Answer { req: allow, reply }).unwrap();
+        let k = kid.clone();
+        trek.wait(cx, "the sub-agent to finish", move |ws| !ws.task_state(&k).live()).await;
+        trek.update(cx, |ws, cx| ws.push_remote_changes(cx));
+        let parent = trek.read(cx, |ws, _| ws.remote.as_ref().unwrap().sent[&id].clone());
+        assert_eq!(parent.needs_thread, None);
+        assert!(trek.read(cx, |ws, _| ws.remote.as_ref().unwrap().unlisted.contains_key(&kid)), "a done sub-agent still opens");
+
+        // Another, stopped from the phone as its own Stop does: its parent hears it was stopped.
+        let other = trek.update(cx, |ws, cx| ws.delegate(&id, &serde_json::json!({ "title": "Write more", "prompt": "mock:permission", "mode": "implement" }), cx)).unwrap();
+        let o = other.clone();
+        trek.wait(cx, "the other to ask", move |ws| ws.task_state(&o) == crate::workspace::TaskState::NeedsYou).await;
+        let o = other.clone();
+        ask(&trek, cx, |reply| tr::HostRequest::Interrupt { thread_id: o, reply }).unwrap();
+        let o = other.clone();
+        trek.wait(cx, "it to stop", move |ws| ws.task_state(&o) == crate::workspace::TaskState::Cancelled).await;
+    });
+}
+
+#[test]
+fn a_phone_snoozes_wakes_marks_unread_retitles_and_deletes_as_the_menu_does() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "tidy the readme");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, _| ws.start_test_remote());
+        let now = trek_core::store::now_ms();
+        let snoozed = |trek: &super::harness::Trek, cx: &gpui_kit::TestAppContext| trek.read(cx, |ws, _| ws.thread(&id).unwrap().snoozed_until);
+
+        ask(&trek, cx, thread_action(&id, tr::ThreadAction::Snooze { until: None, preset: Some(tr::SnoozePreset::Hour) })).unwrap();
+        let until = snoozed(&trek, cx).unwrap();
+        assert!((until - now - 3_600_000).abs() < 60_000, "{until}");
+        let row = ask(&trek, cx, |reply| tr::HostRequest::Snapshot { reply }).unwrap().threads.into_iter().find(|t| t.id == id).unwrap();
+        assert_eq!((row.section, row.snoozed_until), (tr::Section::Snoozed, Some(until)));
+        ask(&trek, cx, thread_action(&id, tr::ThreadAction::Snooze { until: None, preset: Some(tr::SnoozePreset::Tomorrow) })).unwrap();
+        assert_eq!(snoozed(&trek, cx), crate::time::morning(&chrono::Local::now(), 1).map(|t| t.timestamp_millis()), "the Mac's morning");
+        let at = now + 5 * 3_600_000;
+        ask(&trek, cx, thread_action(&id, tr::ThreadAction::Snooze { until: Some(at), preset: None })).unwrap();
+        assert_eq!(snoozed(&trek, cx), Some(at));
+        let past = ask(&trek, cx, thread_action(&id, tr::ThreadAction::Snooze { until: Some(now - 1000), preset: None }));
+        assert_eq!(past.unwrap_err().code, tr::ErrorCode::BadRequest);
+        ask(&trek, cx, thread_action(&id, tr::ThreadAction::Wake)).unwrap();
+        assert!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().section(trek_core::store::now_ms() + 1)) == Some(trek_core::store::Section::Inbox));
+
+        ask(&trek, cx, thread_action(&id, tr::ThreadAction::MarkUnread)).unwrap();
+        assert!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().is_unseen()));
+
+        // The mock agent names its threads itself.
+        trek.update(cx, |ws, cx| ws.rename(&id, "Something else".into(), cx));
+        ask(&trek, cx, thread_action(&id, tr::ThreadAction::RegenerateTitle)).unwrap();
+        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().title.clone()), trek_agents::mock::title("tidy the readme"));
+        let empty = trek.quiet_thread(cx);
+        assert_eq!(ask(&trek, cx, thread_action(&empty, tr::ThreadAction::RegenerateTitle)).unwrap_err().code, tr::ErrorCode::BadRequest);
+
+        // Delete asks first, in the Mac's words (sub-agents named), and deletes once confirmed.
+        let kid = trek.update(cx, |ws, cx| ws.delegate(&id, &serde_json::json!({ "title": "Check it", "prompt": "hello" }), cx)).unwrap();
+        let k = kid.clone();
+        trek.wait(cx, "the sub-agent to finish", move |ws| !ws.task_state(&k).live()).await;
+        let asked = ask(&trek, cx, thread_action(&id, tr::ThreadAction::Delete { confirmed: false })).unwrap_err();
+        assert_eq!(asked.code, tr::ErrorCode::Conflict);
+        assert!(asked.message.contains("can't be undone") && asked.message.contains("Its sub-agent is deleted with it"), "{}", asked.message);
+        assert!(trek.read(cx, |ws, _| ws.thread(&id).is_some()), "nothing happened yet");
+        ask(&trek, cx, thread_action(&id, tr::ThreadAction::Delete { confirmed: true })).unwrap();
+        assert!(trek.read(cx, |ws, _| ws.thread(&id).is_none() && ws.thread(&kid).is_none()));
+        assert_eq!(ask(&trek, cx, thread_action(&id, tr::ThreadAction::Delete { confirmed: true })).unwrap_err().code, tr::ErrorCode::NotFound);
+    });
+}
+
+#[test]
+fn a_phone_searches_titles_and_messages_beyond_its_list() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "look at the flag parser");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        ask(&trek, cx, send(&id, "where does the zanzibar flag get parsed")).unwrap();
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
+        let titled = trek.send(cx, "Zanzibar release checklist");
+        assert_ne!(titled, id);
+        trek.wait_done(cx, &titled, RunState::Idle).await;
+        trek.update(cx, |ws, cx| ws.rename(&titled, "Zanzibar release checklist".into(), cx));
+        let kid = trek.update(cx, |ws, cx| ws.delegate(&titled, &serde_json::json!({ "title": "Zanzibar notes", "prompt": "hello" }), cx)).unwrap();
+        let search = |query: &str| {
+            let req = tr::SearchRequest { query: query.into(), limit: None };
+            move |reply| tr::HostRequest::Search { req, reply }
+        };
+        let found = ask_later(&trek, cx, search("zanzib")).await.unwrap();
+        let ids: Vec<&str> = found.results.iter().map(|r| r.thread.id.as_str()).collect();
+        assert_eq!(found.query, "zanzib");
+        // Titles first (a sub-agent's too, with its parent), then the message match with its words.
+        assert!(ids.contains(&titled.as_str()) && ids.contains(&kid.as_str()), "{ids:?}");
+        let message = found.results.iter().position(|r| r.thread.id == id).expect("the message match");
+        assert!(found.results[..message].iter().all(|r| r.snippet.is_none()), "titles first");
+        let hit = &found.results[message];
+        let snippet = hit.snippet.clone().expect("an excerpt");
+        let words: Vec<String> = hit.ranges.iter().map(|[a, b]| snippet.chars().skip(*a as usize).take((b - a) as usize).collect()).collect();
+        assert!(words.iter().any(|w| w.eq_ignore_ascii_case("zanzibar")), "{snippet} {words:?}");
+        assert_eq!(found.results.iter().find(|r| r.thread.id == kid).and_then(|r| r.thread.parent_id.clone()), Some(titled.clone()));
+        // Nothing to look for: nothing found.
+        assert!(ask_later(&trek, cx, search("  ")).await.unwrap().results.is_empty());
+        let one = tr::SearchRequest { query: "zanzibar".into(), limit: Some(1) };
+        assert_eq!(ask_later(&trek, cx, move |reply| tr::HostRequest::Search { req: one, reply }).await.unwrap().results.len(), 1);
+    });
+}
+
+#[test]
+fn search_ranges_count_characters() {
+    let text = "café — zanzibar";
+    let start = text.find("zanzibar").unwrap();
+    assert_eq!(crate::remote::search::char_ranges(text, std::slice::from_ref(&(start..start + 8))), [[7, 15]]);
+    assert!(crate::remote::search::char_ranges(text, std::slice::from_ref(&(3..99))).is_empty(), "out of the text");
+}

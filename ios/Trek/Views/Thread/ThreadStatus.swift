@@ -5,14 +5,22 @@ import SwiftUI
 /// hasn't said yet.
 struct ThreadStatusStrip: View {
     var thread: ThreadSummary
+    @Environment(AppModel.self) private var model
     @State private var showingCost = false
     @State private var showingWork = false
 
     private var agents: [SubAgent] { thread.subAgents ?? [] }
     private var background: [String] { thread.background ?? [] }
+    /// Sub-agents done with their task, whose threads still open.
+    private var earlier: Int {
+        guard model.serves(MacFeature.subAgents) else { return 0 }
+        let live = Set(agents.compactMap(\.threadId))
+        return model.subAgentThreads(of: thread.id).count { !live.contains($0.id) }
+    }
 
     var body: some View {
-        if thread.context != nil || thread.cost != nil || !agents.isEmpty || !background.isEmpty {
+        let earlier = earlier
+        if thread.context != nil || thread.cost != nil || !agents.isEmpty || !background.isEmpty || earlier > 0 {
             GlassEffectContainer(spacing: 8) {
                 HStack(spacing: 8) {
                     if thread.context != nil || thread.cost != nil {
@@ -28,16 +36,16 @@ struct ThreadStatusStrip: View {
                         .accessibilityLabel(ContextCostLabel.spoken(thread.context, thread.cost))
                         .accessibilityHint("Shows context and cost")
                     }
-                    if !agents.isEmpty || !background.isEmpty {
+                    if !agents.isEmpty || !background.isEmpty || earlier > 0 {
                         Button { showingWork = true } label: {
-                            AtWorkLabel(agents: agents, background: background.count)
+                            AtWorkLabel(agents: agents, background: background.count, earlier: earlier)
                         }
                         .buttonStyle(.plain)
                         .glassEffect(.regular.interactive(), in: Capsule())
                         .sheet(isPresented: $showingWork) {
                             AtWorkSheet(threadID: thread.id)
                         }
-                        .accessibilityLabel(AtWorkLabel.spoken(agents, background.count))
+                        .accessibilityLabel(AtWorkLabel.spoken(agents, background.count, earlier: earlier))
                         .accessibilityHint("Lists them")
                     }
                     Spacer(minLength: 0)
@@ -190,6 +198,8 @@ struct ContextCostDetail: View {
 struct AtWorkLabel: View {
     var agents: [SubAgent]
     var background: Int
+    /// Sub-agents that are done, shown when nothing is at work.
+    var earlier = 0
 
     /// The agents at work, in order of first appearance, with how many each runs.
     static func byAgent(_ agents: [SubAgent]) -> [(agent: AgentRef, count: Int)] {
@@ -215,6 +225,12 @@ struct AtWorkLabel: View {
                     Text("\(background)").monospacedDigit()
                 }
             }
+            if agents.isEmpty, background == 0, earlier > 0 {
+                HStack(spacing: 4) {
+                    Image(systemName: "person.2").font(.system(size: 12, weight: .medium)).foregroundStyle(Trek.muted)
+                    Text("\(earlier)").monospacedDigit()
+                }
+            }
         }
         .font(.ui(.footnote).weight(.semibold))
         .foregroundStyle(Trek.foreground)
@@ -223,8 +239,9 @@ struct AtWorkLabel: View {
         .contentShape(Capsule())
     }
 
-    static func spoken(_ agents: [SubAgent], _ background: Int) -> String {
+    static func spoken(_ agents: [SubAgent], _ background: Int, earlier: Int = 0) -> String {
         var parts: [String] = []
+        if agents.isEmpty, background == 0, earlier > 0 { parts.append("\(earlier) sub-agent\(earlier == 1 ? "" : "s") done") }
         if !agents.isEmpty { parts.append("\(agents.count) sub-agent\(agents.count == 1 ? "" : "s") at work") }
         if background > 0 { parts.append("\(background) background task\(background == 1 ? "" : "s")") }
         return parts.joined(separator: ", ")
@@ -237,20 +254,33 @@ struct AtWorkSheet: View {
     var threadID: String
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openThread) private var openThread
 
     private var thread: ThreadSummary? { model.thread(threadID) }
+    /// Sub-agents' threads open from here (where the Mac says they can).
+    private var opens: Bool { model.serves(MacFeature.subAgents) }
 
     var body: some View {
         NavigationStack {
             List {
                 let agents = thread?.subAgents ?? []
                 let background = thread?.background ?? []
+                let live = Set(agents.compactMap(\.threadId))
+                let earlier = opens ? model.subAgentThreads(of: threadID).filter { !live.contains($0.id) } : []
                 if !agents.isEmpty {
                     Section("Sub-agents") {
                         TimelineView(.periodic(from: .now, by: 1)) { ctx in
                             ForEach(Array(agents.enumerated()), id: \.offset) { _, s in
-                                SubAgentRow(sub: s, now: ctx.date)
+                                subAgent(s, threadID: opens ? s.threadId : nil, now: ctx.date)
                             }
+                        }
+                    }
+                }
+                if !earlier.isEmpty {
+                    Section(agents.isEmpty ? "Sub-agents" : "Done") {
+                        ForEach(earlier) { t in
+                            subAgent(SubAgent(agent: t.agent, model: t.modelLabel, title: t.title, state: SubAgentState(t), threadId: t.id),
+                                     threadID: t.id, now: .now)
                         }
                     }
                 }
@@ -270,7 +300,7 @@ struct AtWorkSheet: View {
                             .font(.ui(.footnote))
                     }
                 }
-                if agents.isEmpty && background.isEmpty {
+                if agents.isEmpty && background.isEmpty && earlier.isEmpty {
                     Text("Nothing at work now.").foregroundStyle(Trek.muted)
                 }
             }
@@ -287,6 +317,44 @@ struct AtWorkSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+    }
+
+    /// A sub-agent's row: with a thread, it opens it (on top of its parent), and one at work can
+    /// be stopped, as from its own window on the Mac.
+    @ViewBuilder
+    private func subAgent(_ s: SubAgent, threadID kid: String?, now: Date) -> some View {
+        if let kid {
+            Button { open(kid) } label: {
+                HStack(spacing: 8) {
+                    SubAgentRow(sub: s, now: now)
+                    Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(Trek.muted.opacity(0.7))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens its thread")
+            .swipeActions {
+                if s.state == .running || s.state == .needsYou {
+                    Button("Stop", systemImage: "stop.fill", role: .destructive) { model.interrupt(kid) }
+                }
+            }
+            .contextMenu {
+                Button("Open", systemImage: "arrow.up.right") { open(kid) }
+                if s.state == .running || s.state == .needsYou {
+                    Button("Stop sub-agent", systemImage: "stop.fill", role: .destructive) { model.interrupt(kid) }
+                }
+            }
+        } else {
+            SubAgentRow(sub: s, now: now)
+        }
+    }
+
+    private func open(_ kid: String) {
+        dismiss()
+        // Once the sheet is down, so the push shows.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [openThread, model] in
+            if let openThread { openThread(kid) } else { model.openRequest = kid }
+        }
     }
 }
 

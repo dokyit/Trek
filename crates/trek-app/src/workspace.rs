@@ -5038,12 +5038,18 @@ impl Workspace {
     /// Snooze until 9:00 on the morning `days` from now (see `time::morning`).
     pub fn snooze_until_morning(&mut self, id: &str, days: i64, cx: &mut Context<Self>) {
         let Some(at) = crate::time::morning(&chrono::Local::now(), days) else { return };
+        self.snooze_until(id, at.timestamp_millis(), cx);
+    }
+
+    /// Snooze until `at` (ms), as `snooze` does.
+    pub fn snooze_until(&mut self, id: &str, at: i64, cx: &mut Context<Self>) {
         self.mutate_thread(id, cx, |t| {
-            t.snoozed_until = Some(at.timestamp_millis());
+            t.snoozed_until = Some(at);
             t.settled_at = None;
             t.branch = None;
         });
-        cx.emit(WorkspaceEvent::Toast { message: format!("Snoozed until {}", at.format("%a %-I:%M %p")), undo: None });
+        let when = chrono::DateTime::from_timestamp_millis(at).map(|t| t.with_timezone(&chrono::Local).format("%a %-I:%M %p").to_string()).unwrap_or_default();
+        cx.emit(WorkspaceEvent::Toast { message: format!("Snoozed until {when}"), undo: None });
     }
 
     pub fn set_never_settle(&mut self, id: &str, never: bool, cx: &mut Context<Self>) {
@@ -5181,7 +5187,7 @@ impl Workspace {
         out
     }
 
-    fn title_inputs(&self, id: &str) -> Option<(String, String)> {
+    pub(crate) fn title_inputs(&self, id: &str) -> Option<(String, String)> {
         let items = match self.live.get(id).filter(|l| l.loaded) {
             Some(l) => l.items.to_vec(),
             None => self.store.items(id).unwrap_or_default(),

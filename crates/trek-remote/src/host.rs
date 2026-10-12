@@ -9,7 +9,7 @@ use tokio::sync::oneshot;
 use crate::protocol::{
     AnswerRequest, Basecamp, BasecampRange, CommandInfo, ErrorCode, GitBranches, GitCommitRequest, GitDiff, GitDiffRequest,
     GitStatus, GitSwitchRequest, GitTarget, Item, MacSettings, NewThreadRequest, Note, NoteSummary, Open, PrefsRequest,
-    SaveNoteRequest, SendRequest, SettingsChange, Snapshot, ThreadActionRequest, ThreadSummary, Transcript, TranscriptPage,
+    SaveNoteRequest, SearchRequest, SearchResults, SendRequest, SettingsChange, Snapshot, ThreadActionRequest, ThreadSummary, Transcript, TranscriptPage,
     TurnActionDone, TurnActionRequest, Usage, WorktreeRemoveRequest,
 };
 
@@ -179,6 +179,11 @@ pub trait RemoteHost: Send + Sync + 'static {
         let _ = req;
         unsupported("undo, retry or fork turns")
     }
+    /// Threads whose title or messages match `req.query`.
+    fn search(&self, req: SearchRequest) -> impl Future<Output = HostResult<SearchResults>> + Send {
+        let _ = req;
+        unsupported("search")
+    }
     /// No phone has `thread_id` open any more (its last subscriber unsubscribed or went away):
     /// the host can stop following its transcript. A `transcript` call for it after this starts
     /// following it again. Called as it happens, in order with the calls that follow.
@@ -199,6 +204,9 @@ pub enum HostEvent {
     Snapshot(Snapshot),
     /// Upsert one thread (to every authenticated phone).
     Thread(ThreadSummary),
+    /// Upsert one thread the list leaves out (a sub-agent's, one opened from a search), as
+    /// `unlisted` (to every authenticated phone).
+    Unlisted(ThreadSummary),
     /// A thread is gone, by id (to every authenticated phone).
     ThreadRemoved(String),
     /// Upsert one transcript item (to phones subscribed to the thread).
@@ -250,6 +258,7 @@ pub enum HostRequest {
     Commands { thread_id: String, reply: Reply<Vec<CommandInfo>> },
     Settings { reply: Reply<MacSettings> },
     SetSettings { change: SettingsChange, reply: Reply<MacSettings> },
+    Search { req: SearchRequest, reply: Reply<SearchResults> },
 }
 
 /// A [`RemoteHost`] that forwards every call as a [`HostRequest`] over an `async_channel`.
@@ -413,5 +422,9 @@ impl RemoteHost for ChannelHost {
 
     async fn set_settings(&self, change: SettingsChange) -> HostResult<MacSettings> {
         self.call(|reply| HostRequest::SetSettings { change, reply }).await
+    }
+
+    async fn search(&self, req: SearchRequest) -> HostResult<SearchResults> {
+        self.call(|reply| HostRequest::Search { req, reply }).await
     }
 }

@@ -53,6 +53,10 @@ enum Launch {
     /// A note to open on the Notes tab.
     static var note: String? { UserDefaults.standard.string(forKey: "TrekNote") }
     static var sheet: String? { UserDefaults.standard.string(forKey: "TrekSheet") }
+    /// Text typed in Search, for screenshots.
+    static var search: String? { UserDefaults.standard.string(forKey: "TrekSearch") }
+    /// Sections of the thread list to start folded, comma-separated ("Pinned,Needs you").
+    static var folded: Set<String> { Set((UserDefaults.standard.string(forKey: "TrekFolded") ?? "").split(separator: ",").map(String.init)) }
     static var appearance: String? { UserDefaults.standard.string(forKey: "TrekAppearance") }
     /// A text size for screenshots: `small`, `large`, `xxLarge`…
     static var textSize: String? { UserDefaults.standard.string(forKey: "TrekTextSize") }

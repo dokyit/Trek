@@ -284,7 +284,7 @@ final class TrekClient: Backend {
 
     private func handle(_ message: ServerMessage) {
         switch message {
-        case .paired(_, let token, let host):
+        case .paired(_, let token, let host, _):
             authenticated = true
             connecting = false
             attempt = 0

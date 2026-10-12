@@ -21,7 +21,8 @@ enum DemoMac {
             t.context = ContextUse(used: 171_000, window: 200_000, percent: 86)
             t.cost = plan
             t.subAgents = [
-                SubAgent(agent: codex, model: "Sol", title: "Review the inbox section rules", state: .running, since: now - 95_000),
+                SubAgent(agent: codex, model: "Sol", title: "Review the inbox section rules", state: .running, since: now - 95_000,
+                         threadId: "t-inbox-review"),
                 SubAgent(agent: claude, title: "Find every place that reads snoozed_until", state: .running, since: now - 40_000),
             ]
             t.background = ["cargo watch -x 'test -p trek-core'"]
@@ -38,11 +39,25 @@ enum DemoMac {
             t.cost = plan
             t.background = ["xcodebuild -scheme Fieldnotes test"]
             t.git = GitSummary(changed: 2, ahead: 0, behind: 3, defaultBranch: "main")
+        case "t-profile":
+            t.subAgents = [SubAgent(agent: claude, model: "Sonnet 5.5", title: "Benchmark the scroll path", state: .needsYou,
+                                    since: now - 240_000, threadId: "t-profile-bench")]
         case "t-tailscale":
             t.context = ContextUse(used: 104_000, window: 200_000, percent: 52)
             t.cost = Cost(label: "≈ $3.10 at API prices", billing: .plan, plan: "Claude Max", detail: "Included in your Claude Max plan")
         default:
             break
+        }
+    }
+
+    /// What "Regenerate title" comes back with, for a few seeded threads.
+    static func betterTitle(for tid: String) -> String? {
+        switch tid {
+        case "t-flaky": "Fix the session refresh race"
+        case "t-ratelimit": "Rate-limit logins per IP and account"
+        case "t-worktree": "What the worktree cleanup deletes"
+        case "t-glass": "Liquid Glass tab bar over the map"
+        default: nil
         }
     }
 
