@@ -473,8 +473,8 @@ pub fn activate_window(window: &mut Window, _: &mut App) {
 /// Run `f` once the update in progress is over, outside any update: for a Win32 call that sends
 /// a window messages there and then (`ShowWindow`, `SetForegroundWindow`, `WindowFromPoint`),
 /// which GPUI hears by updating the window, and can't while the app is being updated (the
-/// callback is dropped, and GPUI logs "RefCell already borrowed"). Not `cx.defer`, nor a window's
-/// `on_next_frame`: both run at the end of an update, still inside it.
+/// callback is dropped, and GPUI logs "RefCell already borrowed"). Not `cx.defer`, which runs at
+/// the end of the update, still inside it, nor a window's `on_next_frame`, inside the next frame's.
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 pub fn after_update(cx: &App, f: impl FnOnce(&mut AsyncApp) + 'static) {
     cx.spawn(async move |cx| f(cx)).detach();
