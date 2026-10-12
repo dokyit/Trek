@@ -289,6 +289,7 @@ final class AppModel {
                 agents = s.agents
                 fullAccessAllowed = s.fullAccess ?? false
             }
+            learnIcons()
         case .thread(let t):
             if let i = threads.firstIndex(where: { $0.id == t.id }) {
                 let old = threads[i]
@@ -326,7 +327,8 @@ final class AppModel {
         case .ack(let re, _, _, _), .pong(let re):
             reply(re, message)
         case .usage(let re, _), .basecamp(let re, _), .notes(let re, _), .note(let re, _), .gitStatus(let re, _),
-             .gitDiff(let re, _), .gitBranches(let re, _), .commands(let re, _, _), .settings(let re, _):
+             .gitDiff(let re, _), .gitBranches(let re, _), .commands(let re, _, _), .settings(let re, _),
+             .attachment(let re, _), .backgroundOutput(let re, _), .icon(let re, _):
             reply(re, message)
         case .error(let re, let code, let text):
             if let re, replies[re] != nil { reply(re, message) } else if code != .unauthorized { show(text, error: true) }
@@ -345,6 +347,7 @@ final class AppModel {
         let needs = threads.count { $0.waitsOnYou && $0.section != .snoozed }
         if working != workingCount { workingCount = working }
         if needs != needsYouCount { needsYouCount = needs }
+        learnIcons()
     }
 
     private func reply(_ re: String?, _ message: ServerMessage) {
@@ -355,7 +358,7 @@ final class AppModel {
     // MARK: Outgoing
 
     @discardableResult
-    private func request(_ message: ClientMessage, then: ((ServerMessage) -> Void)? = nil) -> String {
+    func request(_ message: ClientMessage, then: ((ServerMessage) -> Void)? = nil) -> String {
         let id = "\(nextRequest)"
         nextRequest += 1
         if let then { replies[id] = then }

@@ -46,7 +46,7 @@ struct ThreadStatusStrip: View {
             .onAppear {
                 switch Launch.sheet {
                 case "context": showingCost = true
-                case "agents": showingWork = true
+                case "agents", "background": showingWork = true
                 default: break
                 }
             }
@@ -98,6 +98,18 @@ struct ContextCostLabel: View {
     var cost: Cost?
 
     var body: some View {
+        // The cache's share too, where there's room for it (it's in the details either way).
+        ViewThatFits(in: .horizontal) {
+            line(cached: true)
+            line(cached: false)
+        }
+        .font(.footnote.weight(.medium))
+        .padding(.horizontal, 11)
+        .frame(height: 30)
+        .contentShape(Capsule())
+    }
+
+    private func line(cached: Bool) -> some View {
         HStack(spacing: 6) {
             if let context {
                 ContextRing(percent: context.percent, size: 14, line: 2)
@@ -111,15 +123,15 @@ struct ContextCostLabel: View {
             if let cost {
                 Text(cost.label).foregroundStyle(Trek.muted).lineLimit(1).truncationMode(.tail)
             }
+            if cached, let text = cost?.cached {
+                Text("·").foregroundStyle(Trek.muted.opacity(0.7))
+                Text(text).foregroundStyle(Trek.muted).lineLimit(1).fixedSize()
+            }
         }
-        .font(.footnote.weight(.medium))
-        .padding(.horizontal, 11)
-        .frame(height: 30)
-        .contentShape(Capsule())
     }
 
     static func spoken(_ context: ContextUse?, _ cost: Cost?) -> String {
-        [context.map { "\($0.percent)% of context used" }, cost?.label].compactMap { $0 }.joined(separator: ", ")
+        [context.map { "\($0.percent)% of context used" }, cost?.label, cost?.cached].compactMap { $0 }.joined(separator: ", ")
     }
 }
 
@@ -152,6 +164,12 @@ struct ContextCostDetail: View {
                     if let plan = cost.plan { row(plan, symbol: "person.crop.circle") }
                     if let detail = cost.detail {
                         Text(detail).font(.footnote).foregroundStyle(Trek.muted).fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let cached = cost.cached {
+                        row(cached, symbol: "bolt.horizontal.circle")
+                        if let detail = cost.cachedDetail {
+                            Text(detail).font(.footnote).foregroundStyle(Trek.muted).fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
             }
@@ -237,11 +255,12 @@ struct AtWorkSheet: View {
     var threadID: String
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @State private var path: [String] = []
 
     private var thread: ThreadSummary? { model.thread(threadID) }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
                 let agents = thread?.subAgents ?? []
                 let background = thread?.background ?? []
@@ -254,7 +273,19 @@ struct AtWorkSheet: View {
                         }
                     }
                 }
-                if !background.isEmpty {
+                if let tasks = thread?.backgroundTasks, !tasks.isEmpty, model.supports(.background) {
+                    Section {
+                        TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                            ForEach(tasks) { task in
+                                NavigationLink(value: task.id) { BackgroundTaskRow(task: task, now: ctx.date) }
+                            }
+                        }
+                    } header: {
+                        Text("In the background")
+                    } footer: {
+                        Text("Dev servers, watchers and other work \(thread?.agent.name ?? "the agent") left running. Open one for its output.")
+                    }
+                } else if !background.isEmpty {
                     Section {
                         ForEach(background, id: \.self) { title in
                             Label {
@@ -277,6 +308,8 @@ struct AtWorkSheet: View {
             .background(Trek.background)
             .navigationTitle("At work")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(for: String.self) { BackgroundTaskView(threadID: threadID, taskID: $0) }
+            .onAppear { if Launch.sheet == "background", let first = thread?.backgroundTasks?.first { path = [first.id] } }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { dismiss() } label: { Image(systemName: "checkmark") }

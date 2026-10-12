@@ -9,6 +9,9 @@ struct AgentGlyph: View {
         Group {
             if let asset = AgentLogo.asset(key) {
                 Image(asset).resizable().interpolation(.high).scaledToFit()
+            } else if let hash = IconStore.shared.agentIcons[key] {
+                // An agent added on the Mac: its registry icon.
+                StoredIcon(hash: hash, agent: key, inset: size * 0.06)
             } else {
                 Image(systemName: "sparkle").resizable().scaledToFit().foregroundStyle(Trek.muted).padding(size * 0.12)
             }
@@ -24,12 +27,20 @@ struct ProjectBadge: View {
     var size: CGFloat = 16
 
     var body: some View {
-        Text(project.monogram)
-            .font(.system(size: size * 0.56, weight: .bold, design: .rounded))
-            .foregroundStyle(ProjectColor.ink(project.hue))
-            .frame(width: size, height: size)
-            .background(ProjectColor.fill(project.hue), in: RoundedRectangle(cornerRadius: size * 0.28, style: .continuous))
-            .accessibilityHidden(true)
+        Group {
+            if let icon = project.icon {
+                // The icon chosen for it on the Mac: a symbol in its colours, or a picture.
+                StoredIcon(hash: icon, project: project.id, tint: ProjectColor.ink(project.hue), inset: size * 0.2)
+            } else {
+                Text(project.monogram)
+                    .font(.system(size: size * 0.56, weight: .bold, design: .rounded))
+                    .foregroundStyle(ProjectColor.ink(project.hue))
+            }
+        }
+        .frame(width: size, height: size)
+        .background(ProjectColor.fill(project.hue), in: RoundedRectangle(cornerRadius: size * 0.28, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: size * 0.28, style: .continuous))
+        .accessibilityHidden(true)
     }
 }
 

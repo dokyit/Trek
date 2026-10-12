@@ -437,10 +437,10 @@ private struct BlockRow: View, Equatable {
     @ViewBuilder
     private var content: some View {
         switch block.kind {
-        case .user(let text, let images, let at):
+        case .user(let text, let images, let at, let aside):
             VStack(alignment: .trailing, spacing: 4) {
-                UserBubble(text: text, images: images)
-                MessageActions(item: block.itemID, text: text, at: at, latest: latest, busy: busy, act: act)
+                UserBubble(text: text, images: images, threadID: threadID, itemID: block.itemID)
+                MessageActions(item: block.itemID, text: text, at: at, latest: latest, busy: busy, aside: aside, act: act)
             }
         case .assistant(let text):
             MarkdownText(text: text)
@@ -513,6 +513,13 @@ private struct ComposerArea: View {
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+            if let queued = thread?.queued, !queued.isEmpty, model.supports(.queue) {
+                QueuedStrip(threadID: threadID, queued: queued) { text in
+                    composer.draft = composer.draft.isEmpty ? text : composer.draft + "\n\n" + text
+                    composer.focusRequest += 1
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
             if !commands.isEmpty {
                 CommandPicker(commands: model.commands[threadID] ?? [], query: query ?? "") { cmd in
                     composer.draft = "/\(cmd.name) "
@@ -529,6 +536,7 @@ private struct ComposerArea: View {
         .padding(.bottom, 6)
         .padding(.top, 8)
         .animation(.smooth(duration: 0.3), value: store.pending.map(\.id))
+        .animation(.smooth(duration: 0.3), value: thread?.queued)
         .animation(.snappy(duration: 0.2), value: commands.isEmpty)
         .onChange(of: composer.draft) {
             // `/` typed at the start: the picker wants the thread's commands (asked again each

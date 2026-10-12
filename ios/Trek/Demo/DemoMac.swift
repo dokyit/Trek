@@ -11,7 +11,9 @@ enum DemoMac {
 
     /// The details a Mac row carries, for the seeded threads (context, cost, sub-agents…).
     static func details(_ t: inout ThreadSummary) {
-        let plan = Cost(label: "≈ $1.84 at API prices", billing: .plan, plan: "Claude Max", detail: "Included in your Claude Max plan")
+        let plan = Cost(label: "≈ $1.84 at API prices", billing: .plan, plan: "Claude Max", detail: "Included in your Claude Max plan",
+                        cached: "92% cached",
+                        cachedDetail: "157K of 171K prompt tokens came from the prompt cache, cheaper and faster than sending them again.")
         let metered = Cost(label: "$0.41", billing: .metered, detail: "Billed per token by your API provider")
         t.effortLabel = Effort.label(t.effort ?? "high")
         t.git = GitSummary(changed: 0, ahead: 0, behind: 0, defaultBranch: "main")
@@ -25,6 +27,11 @@ enum DemoMac {
                 SubAgent(agent: claude, title: "Find every place that reads snoozed_until", state: .running, since: now - 40_000),
             ]
             t.background = ["cargo watch -x 'test -p trek-core'"]
+            t.backgroundTasks = [BackgroundTask(id: "bg-watch", kind: .shell, title: "cargo watch -x 'test -p trek-core'",
+                                                line: "test result: ok. 214 passed; 0 failed", since: now - 18 * 60_000,
+                                                readable: true, stoppable: true)]
+            t.queued = [QueuedMessage(text: "Once the tests pass, write a short note in CHANGELOG.md under Unreleased."),
+                        QueuedMessage(text: "Then open a PR against main.")]
             t.git = GitSummary(changed: 3, ahead: 2, behind: 0, defaultBranch: "main")
         case "t-flaky":
             t.context = ContextUse(used: 61_200, window: 200_000, percent: 31)
@@ -37,7 +44,15 @@ enum DemoMac {
             t.context = ContextUse(used: 88_000, window: 200_000, percent: 44)
             t.cost = plan
             t.background = ["xcodebuild -scheme Fieldnotes test"]
+            t.backgroundTasks = [BackgroundTask(id: "bg-xcode", kind: .shell, title: "xcodebuild -scheme Fieldnotes test",
+                                                line: "Test Suite 'OfflineBannerTests' passed", since: now - 4 * 60_000,
+                                                readable: true, stoppable: true)]
             t.git = GitSummary(changed: 2, ahead: 0, behind: 3, defaultBranch: "main")
+        case "t-worktree":
+            // An agent added on the Mac, with its registry icon.
+            t.agent = vibe
+            t.model = "devstral-2"
+            t.modelLabel = "Devstral 2"
         case "t-tailscale":
             t.context = ContextUse(used: 104_000, window: 200_000, percent: 52)
             t.cost = Cost(label: "≈ $3.10 at API prices", billing: .plan, plan: "Claude Max", detail: "Included in your Claude Max plan")
@@ -78,10 +93,10 @@ enum DemoMac {
             ProviderUsage(agent: codex, plan: "ChatGPT Pro", limits: [
                 UsageLimit(label: "5-hour limit", percent: 91, resetsAt: h(1), window: "5h"),
                 UsageLimit(label: "Weekly limit", percent: 33, resetsAt: h(130), window: "7d"),
-            ]),
+            ], resets: resetCredits),
             ProviderUsage(agent: AgentRef(key: "acp:devin", name: "Devin", logo: "devin"), plan: "Devin Core", limits: [],
-                          note: "$18.40 of on-demand credit left"),
-        ])
+                          note: "$18.40 of on-demand credit left", asOf: now - 40 * 60_000),
+        ], picked: false)
     }
 
     // MARK: Basecamp
