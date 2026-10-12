@@ -111,8 +111,10 @@ const CLOUD_PROVIDER_NOT_RUNNING: i32 = 362;
 const CLOUD_PROVIDER_TERMINATED: i32 = 404;
 
 /// The cloud app that keeps `path` (OneDrive, OneDrive - Contoso…), by the folder it's under.
+/// Split on either separator: a Windows path's `\` is no separator to a Mac's `Path`, and the
+/// same words serve a path that came from a Windows machine's text.
 pub fn cloud_app(path: &Path) -> Option<&'static str> {
-    path.components().any(|c| c.as_os_str().to_str().is_some_and(|s| s.len() >= 8 && s[..8].eq_ignore_ascii_case("onedrive"))).then_some("OneDrive")
+    path.to_string_lossy().split(['\\', '/']).any(|s| s.len() >= 8 && s.is_char_boundary(8) && s[..8].eq_ignore_ascii_case("onedrive")).then_some("OneDrive")
 }
 
 /// Why `name` can't be shown, in words a person can act on. `windows`: the error is a Windows
