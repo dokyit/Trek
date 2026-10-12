@@ -15,7 +15,7 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 
 /// A job that ends what's in it when its handle closes.
-struct Job(OwnedHandle);
+pub struct Job(OwnedHandle);
 
 /// The jobs of the servers running, by the pid of the child in each.
 static JOBS: Mutex<Option<HashMap<u32, Job>>> = Mutex::new(None);
@@ -47,7 +47,19 @@ pub fn terminate(pid: u32) {
     }
 }
 
+/// A job of its own for the just-spawned tokio `child`, held by the caller: dropping it ends the
+/// child and everything it started (a `.cmd` shim's `node.exe`, which ending the shim alone
+/// leaves running).
+pub fn hold(child: &tokio::process::Child) -> std::io::Result<Job> {
+    let process = child.raw_handle().ok_or_else(|| std::io::Error::other("the process has ended"))?;
+    make_for(process)
+}
+
 fn make(child: &Child) -> std::io::Result<Job> {
+    make_for(child.as_raw_handle())
+}
+
+fn make_for(process: std::os::windows::io::RawHandle) -> std::io::Result<Job> {
     // SAFETY: no security attributes and no name: both may be null.
     let h = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
     if h.is_null() {
@@ -63,8 +75,9 @@ fn make(child: &Child) -> std::io::Result<Job> {
     if unsafe { SetInformationJobObject(h, JobObjectExtendedLimitInformation, &info as *const _ as *const _, size) } == 0 {
         return Err(std::io::Error::last_os_error());
     }
-    // SAFETY: both handles are open: the job is this one's, the process the child's.
-    if unsafe { AssignProcessToJobObject(h, child.as_raw_handle()) } == 0 {
+    // SAFETY: both handles are open: the job is this one's, the process the child's (not waited
+    // on yet, so its handle is still held).
+    if unsafe { AssignProcessToJobObject(h, process) } == 0 {
         return Err(std::io::Error::last_os_error());
     }
     Ok(job)

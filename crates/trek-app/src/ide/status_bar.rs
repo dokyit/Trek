@@ -26,30 +26,7 @@ pub struct IdeStatus {
 
 /// The language a file is in, by its extension, as the status bar names it.
 pub fn language(path: &std::path::Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).unwrap_or_default() {
-        "rs" => "Rust",
-        "swift" => "Swift",
-        "ts" | "mts" | "cts" => "TypeScript",
-        "tsx" => "TypeScript JSX",
-        "js" | "mjs" | "cjs" => "JavaScript",
-        "jsx" => "JavaScript JSX",
-        "py" => "Python",
-        "go" => "Go",
-        "c" | "h" => "C",
-        "cc" | "cpp" | "hpp" | "cxx" => "C++",
-        "java" => "Java",
-        "kt" | "kts" => "Kotlin",
-        "rb" => "Ruby",
-        "lua" => "Lua",
-        "json" => "JSON",
-        "toml" => "TOML",
-        "yaml" | "yml" => "YAML",
-        "md" | "markdown" => "Markdown",
-        "html" | "htm" => "HTML",
-        "css" => "CSS",
-        "sh" | "bash" | "zsh" => "Shell Script",
-        _ => "Plain Text",
-    }
+    crate::languages::of(path).name
 }
 
 impl IdeStatus {
@@ -116,7 +93,7 @@ impl Render for IdeStatus {
         };
         let editor = self.editor.as_ref().map(|e| {
             let e = e.read(cx);
-            (e.caret(cx), language(&e.path), e.lsp_name, e.problem().is_some())
+            (e.caret(cx), language(&e.path), e.lsp_name, e.problem().is_some(), crate::languages::of(&e.path).hard_tabs)
         });
         let preview = self.preview.as_ref().map(|p| p.read(cx).status_items());
         let muted = theme.muted_foreground;
@@ -158,10 +135,10 @@ impl Render for IdeStatus {
                 )
             })
             .child(div().flex_1())
-            .when_some(editor, |el, ((line, col), lang, lsp, read_only)| {
+            .when_some(editor, |el, ((line, col), lang, lsp, read_only, hard_tabs)| {
                 el.child(Self::item("ide-status-caret", cx).child(format!("Ln {line}, Col {col}")))
                     .when(read_only, |el| el.child(Self::item("ide-status-readonly", cx).child("Read-only")))
-                    .child(Self::item("ide-status-indent", cx).child("Spaces: 4"))
+                    .child(Self::item("ide-status-indent", cx).child(if hard_tabs { "Tab Size: 4" } else { "Spaces: 4" }))
                     .child(Self::item("ide-status-encoding", cx).child("UTF-8"))
                     .child(Self::item("ide-status-eol", cx).child("LF"))
                     .child(Self::item("ide-status-language", cx).child(lang))

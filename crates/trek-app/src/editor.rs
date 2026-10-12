@@ -112,14 +112,14 @@ use gpui_kit::*;
 
 use crate::keys::{self, Id};
 use crate::palette;
-use crate::workspace::{FileReview, Workspace, WorkspaceEvent};
+use crate::workspace::{EditorCommand, FileReview, Workspace, WorkspaceEvent};
 use gpui_kit::component::input::{Input, InputState};
 use trek_core::hunks::{FileDiff, Mark};
 
 /// What a too-big or unreadable file gets instead of an editor: a note and a way out.
 const MAX_FILE_BYTES: u64 = 2_000_000;
 
-actions!(trek_editor, [SaveFile, InlineEdit, KeepHunk, UndoHunk, NextHunk, PreviousHunk]);
+actions!(trek_editor, [SaveFile, FormatDocument, InlineEdit, KeepHunk, UndoHunk, NextHunk, PreviousHunk]);
 
 pub fn key_bindings() -> Vec<KeyBinding> {
     crate::keys::bindings(crate::keys::Group::Editor)
@@ -173,6 +173,8 @@ pub struct EditorView {
     pub(crate) jump_to_hunk: bool,
     /// ⌘K's prompt card, while it's open.
     inline: Option<InlineCard>,
+    /// A formatter is running over the text (Format Document): one at a time.
+    formatting: bool,
     _sub: Subscription,
     _watch: Vec<Subscription>,
 }
@@ -188,17 +190,23 @@ struct InlineCard {
 
 impl EditorView {
     pub fn new(workspace: Entity<Workspace>, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // The extension names the file's language to the language servers; the grammar that
+        // colours it is the table's (`.h`, `.mjs`, `Makefile` have none under that name).
         let lang = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_string();
+        let (grammar, hard_tabs) = {
+            let language = crate::languages::of(&path);
+            (language.grammar, language.hard_tabs)
+        };
         // Empty and read-only until the file is read, off the main thread: a big file, one
         // iCloud evicted, or a device or pipe someone named mustn't hold up the window.
         let state = cx.new(|cx| {
             let mut s = EditorState::new(window, cx)
-                .language(lang.clone())
+                .language(grammar)
                 .line_number(true)
                 .searchable(true)
                 // Code scrolls sideways: a wrap mid-identifier reads as two lines that aren't.
                 .soft_wrap(false)
-                .tab_size(TabSize { tab_size: 4, hard_tabs: false });
+                .tab_size(TabSize { tab_size: 4, hard_tabs });
             s.set_readonly(true, cx);
             s
         });
@@ -268,6 +276,7 @@ impl EditorView {
             hunk: 0,
             jump_to_hunk: false,
             inline: None,
+            formatting: false,
             _sub: sub,
             _watch: watch,
         };
@@ -390,6 +399,7 @@ impl EditorView {
             hunk: 0,
             jump_to_hunk: false,
             inline: None,
+            formatting: false,
             _sub: sub,
             _watch: vec![],
         };
@@ -604,6 +614,74 @@ impl EditorView {
     /// Take the window's focus (the deferred focus call lands here).
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| s.focus(window, cx));
+    }
+
+    fn toast(&self, message: impl Into<String>, cx: &mut Context<Self>) {
+        let message = message.into();
+        self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message, undo: None }));
+    }
+
+    fn format_action(&mut self, _: &FormatDocument, window: &mut Window, cx: &mut Context<Self>) {
+        self.format(window, cx);
+    }
+
+    /// Format Document (⇧⌥F, the palette): the text through the language's formatter, which runs
+    /// off the main thread with the text on its stdin. The buffer is replaced (as an edit, so it
+    /// undoes) only if the formatter exits cleanly with output and the text is still what was
+    /// sent; otherwise a toast says why, and nothing changes.
+    pub(crate) fn format(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.scratch || self.loading || self.formatting {
+            return;
+        }
+        if self.problem.is_some() {
+            return self.toast("This file is read-only, so there's nothing to format", cx);
+        }
+        let Some(formatter) = crate::format::formatter_for(&self.path) else {
+            return self.toast(format!("No formatter for {} on this computer", crate::format::kind_of(&self.path)), cx);
+        };
+        let Some((program, args)) = crate::format::resolve(&formatter) else {
+            return self.toast(format!("Format Document needs {} for {} files, and it isn't on this computer", formatter.program, crate::format::kind_of(&self.path)), cx);
+        };
+        let (text, caret, scrolled) = {
+            let s = self.state.read(cx);
+            (s.value().to_string(), s.cursor(), s.scroll_offset())
+        };
+        // Where the project's own settings (`rustfmt.toml`, `.prettierrc`) are looked for from.
+        let cwd = self.path.parent().map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
+        self.formatting = true;
+        let (tx, rx) = async_channel::bounded(1);
+        let input = text.clone();
+        trek_core::runtime().spawn(async move {
+            let _ = tx.send(crate::format::run(&program, &args, &cwd, input, crate::format::LIMIT).await).await;
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(result) = rx.recv().await else { return };
+            let _ = this.update_in(cx, |this, window, cx| this.formatted(&text, caret, scrolled, result, window, cx));
+        })
+        .detach();
+    }
+
+    /// The formatter answered for `before` (the text it was given, the caret and scroll then).
+    fn formatted(&mut self, before: &str, caret: usize, scrolled: gpui_kit::Point<Pixels>, result: Result<String, String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.formatting = false;
+        let after = match result {
+            Ok(after) => crate::format::keep_line_endings(before, after),
+            Err(message) => return self.toast(message, cx),
+        };
+        if self.state.read(cx).value().to_string() != before {
+            return self.toast("The file changed while it was being formatted, so nothing was replaced", cx);
+        }
+        if after == before {
+            return self.toast("Already formatted", cx);
+        }
+        let to = crate::format::keep_caret(before, caret, &after);
+        self.state.update(cx, |s, cx| {
+            s.replace_all(after, window, cx);
+            s.set_selected_range(to..to, cx);
+        });
+        // The replacement scrolls to the top; the view stays where it was, the caret in it.
+        cx.defer_in(window, move |this, _, cx| this.state.update(cx, |s, cx| s.set_scroll_offset(scrolled, cx)));
+        cx.notify();
     }
 
     fn save(&mut self, _: &SaveFile, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1210,6 +1288,7 @@ impl Render for EditorView {
                 .size_full()
                 .key_context(if hunks { "TrekEditor IdeEditor hunks" } else { "TrekEditor IdeEditor" })
                 .on_action(cx.listener(Self::save))
+                .on_action(cx.listener(Self::format_action))
                 .on_action(cx.listener(Self::inline_action))
                 .on_action(cx.listener(Self::keep_hunk_action))
                 .on_action(cx.listener(Self::undo_hunk_action))
@@ -1235,6 +1314,7 @@ impl Render for EditorView {
             .size_full()
             .key_context("TrekEditor")
             .on_action(cx.listener(Self::save))
+            .on_action(cx.listener(Self::format_action))
             .child(
                 h_flex()
                     .px_3()
@@ -1257,7 +1337,12 @@ impl Render for EditorView {
                     )
                     .child(crate::ui::icon_button("editor-open-default", IconName::ExternalLink, "Open in default app").on_click(move |_, _, cx| {
                         cx.open_with_system(&path);
-                    })),
+                    }))
+                    // The way out: this is the file on its own, nothing else on screen closes it.
+                    .child(
+                        crate::ui::icon_button("editor-close", IconName::Close, format!("Close ({})", keys::hint(Id::CloseTab)))
+                            .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Editor(EditorCommand::Close))))),
+                    ),
             )
             .child(div().flex_1().min_h_0().child(Editor::new(&self.state).appearance(false).bordered(false).h(relative(1.))))
             .into_any_element()
