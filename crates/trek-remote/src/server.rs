@@ -57,6 +57,9 @@ pub struct ServerConfig {
     /// Speak TLS with this certificate (`wss://`), pinned by phones through the pairing QR code.
     /// `None` is plain `ws://`, for tests and the demo host only.
     pub tls: Option<crate::tls::TlsIdentity>,
+    /// The optional requests the host serves, for `welcome` and `paired` (see
+    /// [`crate::protocol::feature`]). None by default.
+    pub features: Vec<String>,
 }
 
 /// The default port.
@@ -88,6 +91,7 @@ impl ServerConfig {
             max_message: 8 << 20,
             ping_interval: Duration::from_secs(20),
             tls: None,
+            features: Vec::new(),
         }
     }
 }
@@ -634,7 +638,7 @@ async fn authenticate(
         }
 
         let (kick_tx, kick) = oneshot::channel();
-        let host = inner.config.host.clone();
+        let (host, features) = (inner.config.host.clone(), inner.config.features.clone());
         return match msg {
             ClientMessage::Pair { code, device_name, .. } => {
                 let name = clean_name(&device_name);
@@ -650,7 +654,7 @@ async fn authenticate(
                     Ok((token, conn_id)) => {
                         tracing::info!(%peer, device_id, name, "device paired");
                         inner.notice(ServerNotice::Paired { device_id: device_id.clone(), name });
-                        let paired = ServerMessage::Paired { protocol: PROTOCOL_VERSION, token, host };
+                        let paired = ServerMessage::Paired { protocol: PROTOCOL_VERSION, token, host, features };
                         let _ = send(ws, ServerEnvelope::reply(re, paired)).await;
                         Some(Authenticated { device_id, conn_id, kick })
                     }
@@ -673,7 +677,7 @@ async fn authenticate(
                 };
                 match conn_id {
                     Some(conn_id) => {
-                        let welcome = ServerMessage::Welcome { protocol: PROTOCOL_VERSION, host };
+                        let welcome = ServerMessage::Welcome { protocol: PROTOCOL_VERSION, host, features };
                         let _ = send(ws, ServerEnvelope::reply(re, welcome)).await;
                         Some(Authenticated { device_id, conn_id, kick })
                     }
@@ -758,6 +762,13 @@ const CLIENT_TYPES: &[&str] = &[
     "settings",
     "set_settings",
     "ping",
+    "search",
+    "use_reset",
+    "queue_action",
+    "attachment",
+    "background_output",
+    "stop_background",
+    "icon",
 ];
 
 /// Parse a text frame: its `id` (for the reply's `re`, even when the rest is bad) and message.
@@ -910,6 +921,13 @@ async fn call<H: RemoteHost>(host: &H, re: Option<String>, msg: ClientMessage) -
         }
         ClientMessage::Settings => host.settings().await.map(ServerMessage::Settings),
         ClientMessage::SetSettings(change) => host.set_settings(change).await.map(ServerMessage::Settings),
+        ClientMessage::Search(req) => host.search(req).await.map(ServerMessage::SearchResults),
+        ClientMessage::UseReset { credit_id } => host.use_reset(&credit_id).await.map(|()| ack(None)),
+        ClientMessage::QueueAction(req) => host.queue_action(req).await.map(|text| ServerMessage::Ack { thread_id: None, open: None, text }),
+        ClientMessage::Attachment(req) => host.attachment(req).await.map(ServerMessage::Attachment),
+        ClientMessage::BackgroundOutput { thread_id, task_id } => host.background_output(&thread_id, &task_id).await.map(ServerMessage::BackgroundOutput),
+        ClientMessage::StopBackground { thread_id, task_id } => host.stop_background(&thread_id, &task_id).await.map(|()| ack(None)),
+        ClientMessage::Icon(req) => host.icon(req).await.map(ServerMessage::Icon),
         other => Err(HostError::bad_request(format!("Unexpected \"{}\"", other.kind()))),
     };
     match result {
@@ -1056,7 +1074,7 @@ impl Session {
 
     fn on_event(&mut self, event: HostEvent) -> Vec<ServerEnvelope> {
         let msg = match event {
-            HostEvent::Snapshot(_) | HostEvent::Thread(_) | HostEvent::ThreadRemoved(_)
+            HostEvent::Snapshot(_) | HostEvent::Thread(_) | HostEvent::Unlisted(_) | HostEvent::ThreadRemoved(_)
                 if self.snapshots_pending > 0 =>
             {
                 self.held_events.push(event);
@@ -1064,6 +1082,7 @@ impl Session {
             }
             HostEvent::Snapshot(snapshot) => ServerMessage::Snapshot(snapshot),
             HostEvent::Thread(thread) => ServerMessage::Thread { thread },
+            HostEvent::Unlisted(thread) => ServerMessage::Unlisted { thread },
             HostEvent::ThreadRemoved(thread_id) => ServerMessage::ThreadRemoved { thread_id },
             HostEvent::Item { thread_id, item } => match self.subs.get_mut(&thread_id) {
                 Some(Sub::Active) => ServerMessage::Item { thread_id, item },

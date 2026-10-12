@@ -1066,6 +1066,9 @@ pub struct Workspace {
     /// The phone server, while Settings › Phone has it on (see `remote`).
     pub remote: Option<crate::remote::Remote>,
     pub(crate) remote_starting: bool,
+    /// Why the phone server last failed to start; it's tried again shortly (`remote::RETRY`).
+    pub(crate) remote_error: Option<String>,
+    pub(crate) remote_retry: Option<Task<()>>,
     pub settled_open: bool,
     /// The sidebar's search text. Change it with `set_search`, which also searches messages.
     pub search: String,
@@ -1467,6 +1470,8 @@ impl Workspace {
             tabs: if cfg!(test) { vec![] } else { tabs::load_tabs() },
             remote: None,
             remote_starting: false,
+            remote_error: None,
+            remote_retry: None,
             settled_open: false,
             search: String::new(),
             search_results: SearchResults::default(),
@@ -5087,12 +5092,18 @@ impl Workspace {
     /// Snooze until 9:00 on the morning `days` from now (see `time::morning`).
     pub fn snooze_until_morning(&mut self, id: &str, days: i64, cx: &mut Context<Self>) {
         let Some(at) = crate::time::morning(&chrono::Local::now(), days) else { return };
+        self.snooze_until(id, at.timestamp_millis(), cx);
+    }
+
+    /// Snooze until `at` (ms), as `snooze` does.
+    pub fn snooze_until(&mut self, id: &str, at: i64, cx: &mut Context<Self>) {
         self.mutate_thread(id, cx, |t| {
-            t.snoozed_until = Some(at.timestamp_millis());
+            t.snoozed_until = Some(at);
             t.settled_at = None;
             t.branch = None;
         });
-        cx.emit(WorkspaceEvent::Toast { message: format!("Snoozed until {}", at.format("%a %-I:%M %p")), undo: None });
+        let when = chrono::DateTime::from_timestamp_millis(at).map(|t| t.with_timezone(&chrono::Local).format("%a %-I:%M %p").to_string()).unwrap_or_default();
+        cx.emit(WorkspaceEvent::Toast { message: format!("Snoozed until {when}"), undo: None });
     }
 
     pub fn set_never_settle(&mut self, id: &str, never: bool, cx: &mut Context<Self>) {
@@ -5230,7 +5241,7 @@ impl Workspace {
         out
     }
 
-    fn title_inputs(&self, id: &str) -> Option<(String, String)> {
+    pub(crate) fn title_inputs(&self, id: &str) -> Option<(String, String)> {
         let items = match self.live.get(id).filter(|l| l.loaded) {
             Some(l) => l.items.to_vec(),
             None => self.store.items(id).unwrap_or_default(),
@@ -5607,7 +5618,13 @@ impl Workspace {
 
     /// Spend one granted rate-limit reset (Usage › "Use reset"), then re-read the plan.
     pub fn use_reset_credit(&mut self, credit_id: String, cx: &mut Context<Self>) {
+        self.use_reset_credit_then(credit_id, |_| {}, cx);
+    }
+
+    /// `use_reset_credit`, telling `done` how it went (a phone waits to hear).
+    pub(crate) fn use_reset_credit_then(&mut self, credit_id: String, done: impl FnOnce(Result<(), String>) + 'static, cx: &mut Context<Self>) {
         if !self.reset_credits_in_flight.insert(credit_id.clone()) {
+            done(Err("That reset is being used already".into()));
             return;
         }
         cx.notify();
@@ -5629,7 +5646,7 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 this.reset_credits_in_flight.remove(&credit_id);
                 cx.notify();
-                match res {
+                match &res {
                     Ok(()) => {
                         // Spent: gone from the list now, not when the re-read lands.
                         for st in this.agent_status.values_mut() {
@@ -5641,6 +5658,7 @@ impl Workspace {
                     }
                     Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't use the reset: {e:#}"), undo: None }),
                 }
+                done(res.map_err(|e| format!("Couldn't use the reset: {e:#}")));
             });
         })
         .detach();

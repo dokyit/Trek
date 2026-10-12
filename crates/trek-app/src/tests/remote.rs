@@ -1074,3 +1074,407 @@ fn thread_rows_are_built_only_when_something_of_the_threads_changed() {
         assert_eq!(row(&trek, cx).as_deref(), Some("Renamed on the Mac"));
     });
 }
+
+#[test]
+fn a_phone_server_that_cant_start_stays_on_and_says_why() {
+    use crate::settings_view::shown;
+    use crate::workspace::SettingsPage;
+    super::harness::run(async |cx| {
+        let trek = super::harness::open(cx);
+        trek.update(cx, |ws, cx| {
+            ws.settings.mobile.enabled = true;
+            // What start_remote leaves when binding failed: the switch as it was, and why.
+            ws.remote_error = Some("Tailscale isn't connected; choose Wi-Fi or connect Tailscale".into());
+            ws.navigate(Route::Settings(SettingsPage::Mobile), cx);
+        });
+        shown::take();
+        trek.render(cx);
+        let said = shown::take();
+        let why = format!("Couldn't start: Tailscale isn't connected; choose Wi-Fi or connect Tailscale. Trying again every {} seconds.", crate::remote::RETRY.as_secs());
+        assert!(said.iter().any(|s| *s == why), "{said:?}");
+        assert!(!said.iter().any(|s| s == "Starting…"), "{said:?}");
+        assert!(trek.read(cx, |ws, _| ws.settings.mobile.enabled));
+        // Turned off, the failure is forgotten.
+        trek.update(cx, |ws, cx| {
+            ws.settings.mobile.enabled = false;
+            ws.sync_remote(cx);
+        });
+        assert!(trek.read(cx, |ws, _| ws.remote_error.is_none()));
+    });
+}
+
+fn thread_action(id: &str, action: tr::ThreadAction) -> impl FnOnce(tr::Reply<()>) -> tr::HostRequest {
+    let req = tr::ThreadActionRequest { thread_id: id.to_string(), action };
+    move |reply| tr::HostRequest::ThreadAction { req, reply }
+}
+
+#[test]
+fn a_phone_opens_a_sub_agent_answers_it_and_stops_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        let kid = trek.update(cx, |ws, cx| ws.delegate(&id, &serde_json::json!({ "title": "Write it", "prompt": "mock:permission", "mode": "implement" }), cx)).unwrap();
+        let k = kid.clone();
+        trek.wait(cx, "the sub-agent to ask", move |ws| ws.task_state(&k) == crate::workspace::TaskState::NeedsYou).await;
+        trek.update(cx, |ws, cx| {
+            ws.start_test_remote();
+            ws.push_remote_changes(cx);
+        });
+        // Not listed, as on the Mac: an unlisted row, named by its parent's, which carries its request.
+        let (parent, row) = trek.read(cx, |ws, _| {
+            let r = ws.remote.as_ref().unwrap();
+            (r.sent[&id].clone(), r.unlisted.get(&kid).cloned())
+        });
+        let row = row.expect("the sub-agent's row");
+        assert_eq!((row.parent_id.as_deref(), row.run_state), (Some(id.as_str()), tr::RunState::NeedsYou));
+        assert_eq!(parent.sub_agents.iter().map(|s| s.thread_id.clone()).collect::<Vec<_>>(), [Some(kid.clone())]);
+        assert_eq!((parent.needs_thread.as_deref(), parent.needs.as_ref().map(|n| n.text.as_str())), (Some(kid.as_str()), Some("Sub-agent needs you")));
+        assert_eq!(parent.section, tr::Section::Inbox, "in the inbox for it, as on the Mac");
+        let snapshot = ask(&trek, cx, |reply| tr::HostRequest::Snapshot { reply }).unwrap();
+        assert!(snapshot.unlisted.iter().any(|t| t.id == kid) && !snapshot.threads.iter().any(|t| t.id == kid));
+
+        // Opened: its transcript, its request, answered from the phone.
+        let k = kid.clone();
+        let transcript = ask_later(&trek, cx, move |reply| tr::HostRequest::Transcript { thread_id: k, after_seq: None, limit: Some(50), reply }).await.unwrap();
+        let request_id = transcript.items.iter().find_map(|i| match &i.body {
+            tr::ItemBody::Approval { request_id, state: tr::ApprovalState::Pending, .. } => Some(request_id.clone()),
+            _ => None,
+        });
+        let request_id = request_id.expect("its approval");
+        let allow = tr::AnswerRequest { thread_id: kid.clone(), request_id, response: tr::AnswerResponse::Approval { decision: tr::Decision::Allow } };
+        ask(&trek, cx, |reply| tr::HostRequest::Answer { req: allow, reply }).unwrap();
+        let k = kid.clone();
+        trek.wait(cx, "the sub-agent to finish", move |ws| !ws.task_state(&k).live()).await;
+        trek.update(cx, |ws, cx| ws.push_remote_changes(cx));
+        let parent = trek.read(cx, |ws, _| ws.remote.as_ref().unwrap().sent[&id].clone());
+        assert_eq!(parent.needs_thread, None);
+        assert!(trek.read(cx, |ws, _| ws.remote.as_ref().unwrap().unlisted.contains_key(&kid)), "a done sub-agent still opens");
+
+        // Another, stopped from the phone as its own Stop does: its parent hears it was stopped.
+        let other = trek.update(cx, |ws, cx| ws.delegate(&id, &serde_json::json!({ "title": "Write more", "prompt": "mock:permission", "mode": "implement" }), cx)).unwrap();
+        let o = other.clone();
+        trek.wait(cx, "the other to ask", move |ws| ws.task_state(&o) == crate::workspace::TaskState::NeedsYou).await;
+        let o = other.clone();
+        ask(&trek, cx, |reply| tr::HostRequest::Interrupt { thread_id: o, reply }).unwrap();
+        let o = other.clone();
+        trek.wait(cx, "it to stop", move |ws| ws.task_state(&o) == crate::workspace::TaskState::Cancelled).await;
+    });
+}
+
+#[test]
+fn a_phone_snoozes_wakes_marks_unread_retitles_and_deletes_as_the_menu_does() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "tidy the readme");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, _| ws.start_test_remote());
+        let now = trek_core::store::now_ms();
+        let snoozed = |trek: &super::harness::Trek, cx: &gpui_kit::TestAppContext| trek.read(cx, |ws, _| ws.thread(&id).unwrap().snoozed_until);
+
+        ask(&trek, cx, thread_action(&id, tr::ThreadAction::Snooze { until: None, preset: Some(tr::SnoozePreset::Hour) })).unwrap();
+        let until = snoozed(&trek, cx).unwrap();
+        assert!((until - now - 3_600_000).abs() < 60_000, "{until}");
+        let row = ask(&trek, cx, |reply| tr::HostRequest::Snapshot { reply }).unwrap().threads.into_iter().find(|t| t.id == id).unwrap();
+        assert_eq!((row.section, row.snoozed_until), (tr::Section::Snoozed, Some(until)));
+        ask(&trek, cx, thread_action(&id, tr::ThreadAction::Snooze { until: None, preset: Some(tr::SnoozePreset::Tomorrow) })).unwrap();
+        assert_eq!(snoozed(&trek, cx), crate::time::morning(&chrono::Local::now(), 1).map(|t| t.timestamp_millis()), "the Mac's morning");
+        let at = now + 5 * 3_600_000;
+        ask(&trek, cx, thread_action(&id, tr::ThreadAction::Snooze { until: Some(at), preset: None })).unwrap();
+        assert_eq!(snoozed(&trek, cx), Some(at));
+        let past = ask(&trek, cx, thread_action(&id, tr::ThreadAction::Snooze { until: Some(now - 1000), preset: None }));
+        assert_eq!(past.unwrap_err().code, tr::ErrorCode::BadRequest);
+        ask(&trek, cx, thread_action(&id, tr::ThreadAction::Wake)).unwrap();
+        assert!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().section(trek_core::store::now_ms() + 1)) == Some(trek_core::store::Section::Inbox));
+
+        ask(&trek, cx, thread_action(&id, tr::ThreadAction::MarkUnread)).unwrap();
+        assert!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().is_unseen()));
+
+        // The mock agent names its threads itself.
+        trek.update(cx, |ws, cx| ws.rename(&id, "Something else".into(), cx));
+        ask(&trek, cx, thread_action(&id, tr::ThreadAction::RegenerateTitle)).unwrap();
+        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().title.clone()), trek_agents::mock::title("tidy the readme"));
+        let empty = trek.quiet_thread(cx);
+        assert_eq!(ask(&trek, cx, thread_action(&empty, tr::ThreadAction::RegenerateTitle)).unwrap_err().code, tr::ErrorCode::BadRequest);
+
+        // Delete asks first, in the Mac's words (sub-agents named), and deletes once confirmed.
+        let kid = trek.update(cx, |ws, cx| ws.delegate(&id, &serde_json::json!({ "title": "Check it", "prompt": "hello" }), cx)).unwrap();
+        let k = kid.clone();
+        trek.wait(cx, "the sub-agent to finish", move |ws| !ws.task_state(&k).live()).await;
+        let asked = ask(&trek, cx, thread_action(&id, tr::ThreadAction::Delete { confirmed: false })).unwrap_err();
+        assert_eq!(asked.code, tr::ErrorCode::Conflict);
+        assert!(asked.message.contains("can't be undone") && asked.message.contains("Its sub-agent is deleted with it"), "{}", asked.message);
+        assert!(trek.read(cx, |ws, _| ws.thread(&id).is_some()), "nothing happened yet");
+        ask(&trek, cx, thread_action(&id, tr::ThreadAction::Delete { confirmed: true })).unwrap();
+        assert!(trek.read(cx, |ws, _| ws.thread(&id).is_none() && ws.thread(&kid).is_none()));
+        assert_eq!(ask(&trek, cx, thread_action(&id, tr::ThreadAction::Delete { confirmed: true })).unwrap_err().code, tr::ErrorCode::NotFound);
+    });
+}
+
+#[test]
+fn a_phone_searches_titles_and_messages_beyond_its_list() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "look at the flag parser");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        ask(&trek, cx, send(&id, "where does the zanzibar flag get parsed")).unwrap();
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
+        let titled = trek.send(cx, "Zanzibar release checklist");
+        assert_ne!(titled, id);
+        trek.wait_done(cx, &titled, RunState::Idle).await;
+        trek.update(cx, |ws, cx| ws.rename(&titled, "Zanzibar release checklist".into(), cx));
+        let kid = trek.update(cx, |ws, cx| ws.delegate(&titled, &serde_json::json!({ "title": "Zanzibar notes", "prompt": "hello" }), cx)).unwrap();
+        let search = |query: &str| {
+            let req = tr::SearchRequest { query: query.into(), limit: None };
+            move |reply| tr::HostRequest::Search { req, reply }
+        };
+        let found = ask_later(&trek, cx, search("zanzib")).await.unwrap();
+        let ids: Vec<&str> = found.results.iter().map(|r| r.thread.id.as_str()).collect();
+        assert_eq!(found.query, "zanzib");
+        // Titles first (a sub-agent's too, with its parent), then the message match with its words.
+        assert!(ids.contains(&titled.as_str()) && ids.contains(&kid.as_str()), "{ids:?}");
+        let message = found.results.iter().position(|r| r.thread.id == id).expect("the message match");
+        assert!(found.results[..message].iter().all(|r| r.snippet.is_none()), "titles first");
+        let hit = &found.results[message];
+        let snippet = hit.snippet.clone().expect("an excerpt");
+        let words: Vec<String> = hit.ranges.iter().map(|[a, b]| snippet.chars().skip(*a as usize).take((b - a) as usize).collect()).collect();
+        assert!(words.iter().any(|w| w.eq_ignore_ascii_case("zanzibar")), "{snippet} {words:?}");
+        assert_eq!(found.results.iter().find(|r| r.thread.id == kid).and_then(|r| r.thread.parent_id.clone()), Some(titled.clone()));
+        // Nothing to look for: nothing found.
+        assert!(ask_later(&trek, cx, search("  ")).await.unwrap().results.is_empty());
+        let one = tr::SearchRequest { query: "zanzibar".into(), limit: Some(1) };
+        assert_eq!(ask_later(&trek, cx, move |reply| tr::HostRequest::Search { req: one, reply }).await.unwrap().results.len(), 1);
+    });
+}
+
+#[test]
+fn search_ranges_count_characters() {
+    let text = "café — zanzibar";
+    let start = text.find("zanzibar").unwrap();
+    assert_eq!(crate::remote::search::char_ranges(text, std::slice::from_ref(&(start..start + 8))), [[7, 15]]);
+    assert!(crate::remote::search::char_ranges(text, std::slice::from_ref(&(3..99))).is_empty(), "out of the text");
+}
+
+// ---- parity with the Mac (`tr::feature`) ----
+
+fn row(trek: &super::harness::Trek, cx: &mut gpui_kit::TestAppContext, id: &str) -> tr::ThreadSummary {
+    ask(trek, cx, |reply| tr::HostRequest::Snapshot { reply }).unwrap().threads.into_iter().find(|t| t.id == id).expect("listed")
+}
+
+fn queue_action(id: &str, index: u32, reset: bool, text: &str, action: tr::QueueAction) -> impl FnOnce(tr::Reply<Option<String>>) -> tr::HostRequest {
+    let req = tr::QueueActionRequest { thread_id: id.to_string(), index, reset, text: text.to_string(), action };
+    move |reply| tr::HostRequest::QueueAction { req, reply }
+}
+
+#[test]
+fn usage_for_the_phone_is_the_usage_card_s_with_its_resets_to_spend() {
+    run(async |cx| {
+        let trek = open(cx);
+        let spent = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        trek.update(cx, |ws, _| {
+            let now = ws.now();
+            let credit = |id: &str| trek_agents::ResetCredit { id: id.into(), title: "Full reset (Weekly + 5 hr)".into(), description: None, expires_at: Some(now + 86_400_000) };
+            let limit = trek_agents::UsageLimit { label: "5-hour limit".into(), percent: 91., resets_at: Some(now + 3_600_000), window: "5h".into() };
+            ws.agent_status.insert(
+                trek_core::AgentId::Codex.key(),
+                trek_agents::AgentStatus { plan: Some("ChatGPT Pro".into()), limits: vec![limit], resets: vec![credit("rc-1"), credit("rc-2")], ..Default::default() },
+            );
+            let spent = spent.clone();
+            ws.reset_consumer = Some(std::sync::Arc::new(move |id| {
+                let spent = spent.clone();
+                Box::pin(async move {
+                    spent.lock().unwrap().push(id.clone());
+                    if id == "rc-2" { Err(anyhow::anyhow!("it lapsed")) } else { Ok(()) }
+                })
+            }));
+        });
+        let usage = trek.read(cx, |ws, _| ws.usage_now());
+        assert_eq!(usage.picked, Some(false), "Trek picked the providers, the user didn't");
+        let codex = usage.providers.iter().find(|p| p.agent.key == "codex").expect("on the card");
+        assert_eq!(codex.resets.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["rc-1", "rc-2"]);
+        assert!(!codex.no_limits && codex.today.is_none(), "limits to show: no line about today");
+        let shown = trek.read(cx, |ws, _| ws.usage_shown().len());
+        assert_eq!(usage.providers.len(), shown, "the card's providers, no more");
+
+        ask_later(&trek, cx, |reply| tr::HostRequest::UseReset { credit_id: "rc-1".into(), reply }).await.unwrap();
+        let left: Vec<String> = trek.read(cx, |ws, _| ws.usage_now().providers.into_iter().flat_map(|p| p.resets).map(|r| r.id).collect());
+        assert_eq!(left, ["rc-2"], "spent, and gone from the list");
+        let failed = ask_later(&trek, cx, |reply| tr::HostRequest::UseReset { credit_id: "rc-2".into(), reply }).await;
+        assert!(failed.unwrap_err().message.contains("it lapsed"), "the phone hears why");
+        let gone = ask(&trek, cx, |reply| tr::HostRequest::UseReset { credit_id: "rc-1".into(), reply });
+        assert_eq!(gone.unwrap_err().code, tr::ErrorCode::NotFound);
+        assert_eq!(*spent.lock().unwrap(), ["rc-1", "rc-2"]);
+    });
+}
+
+#[test]
+fn queued_follow_ups_ride_in_the_row_and_the_phone_changes_or_drops_them() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, _| {
+            let live = ws.live.get_mut(&id).unwrap();
+            live.queued.push(("then write the docs".into(), vec![]));
+            live.queued.push(("and open a PR".into(), vec!["/tmp/shot.png".into()]));
+            let mut pause = trek_core::limit::Pause::new("limit".into(), Some(ws.now() + 60_000), trek_core::limit::LimitScope::Session, 0, true);
+            pause.queued.push(trek_core::limit::Queued { text: "carry on".into(), images: vec![] });
+            ws.threads.iter_mut().find(|t| t.id == id).unwrap().paused = Some(pause);
+            ws.threads_gen += 1;
+        });
+        let queued = row(&trek, cx, &id).queued;
+        assert_eq!(queued.iter().map(|q| (q.text.as_str(), q.images, q.reset)).collect::<Vec<_>>(), [("then write the docs", 0, false), ("and open a PR", 1, false), ("carry on", 0, true)]);
+
+        ask(&trek, cx, queue_action(&id, 1, false, "and open a PR", tr::QueueAction::Edit { text: "and open a draft PR".into() })).unwrap();
+        let taken = ask(&trek, cx, queue_action(&id, 0, false, "then write the docs", tr::QueueAction::Remove)).unwrap();
+        assert_eq!(taken.as_deref(), Some("then write the docs"), "a dropped message comes back for the composer");
+        let live: Vec<(String, usize)> = trek.read(cx, |ws, _| ws.live[&id].queued.iter().map(|(t, i)| (t.clone(), i.len())).collect());
+        assert_eq!(live, [("and open a draft PR".to_string(), 1)], "changed in place, its photo kept");
+        // The queue moved on: what the phone showed at that place isn't there any more.
+        let stale = ask(&trek, cx, queue_action(&id, 0, false, "then write the docs", tr::QueueAction::Remove));
+        assert_eq!(stale.unwrap_err().code, tr::ErrorCode::Conflict);
+
+        // The one waiting for the reset: words can't go, there's nothing else to send.
+        let empty = ask(&trek, cx, queue_action(&id, 0, true, "carry on", tr::QueueAction::Edit { text: " ".into() }));
+        assert_eq!(empty.unwrap_err().code, tr::ErrorCode::BadRequest);
+        ask(&trek, cx, queue_action(&id, 0, true, "carry on", tr::QueueAction::Edit { text: "carry on, then summarise".into() })).unwrap();
+        assert_eq!(trek.read(cx, |ws, _| ws.pause(&id).unwrap().queued[0].text.clone()), "carry on, then summarise");
+        ask(&trek, cx, queue_action(&id, 0, true, "carry on, then summarise", tr::QueueAction::Remove)).unwrap();
+        assert!(trek.read(cx, |ws, _| ws.pause(&id).unwrap().queued.is_empty()));
+        assert_eq!(row(&trek, cx, &id).queued.len(), 1);
+    });
+}
+
+#[test]
+fn a_message_s_images_go_to_the_phone_scaled_down() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // A wide screenshot, with a transparent corner.
+        let mut image = image::RgbaImage::from_pixel(3000, 1000, image::Rgba([40, 90, 200, 255]));
+        image.put_pixel(0, 0, image::Rgba([0, 0, 0, 0]));
+        let mut png = std::io::Cursor::new(vec![]);
+        image::DynamicImage::ImageRgba8(image).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let upload = tr::ImageUpload { mime: "image/png".into(), data: tr::base64(&png.into_inner()) };
+        ask(&trek, cx, |reply| tr::HostRequest::Send { req: tr::SendRequest { thread_id: id.clone(), text: "look".into(), mode: None, images: vec![upload] }, reply }).unwrap();
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let ix = trek.items(cx, &id).iter().rposition(|i| matches!(i, trek_core::store::Item::User { text, .. } if text == "look")).unwrap();
+        let get = |index: u32, max_px: Option<u32>| {
+            let req = tr::AttachmentRequest { thread_id: id.clone(), item_id: format!("i{ix}"), index, max_px };
+            move |reply| tr::HostRequest::Attachment { req, reply }
+        };
+        let thumb = ask_later(&trek, cx, get(0, Some(512))).await.unwrap();
+        assert_eq!((thumb.width, thumb.height, thumb.mime.as_str()), (512, 171, "image/jpeg"));
+        let bytes = base64_decode(&thumb.data);
+        assert!(bytes.starts_with(&[0xFF, 0xD8, 0xFF]), "a JPEG");
+        let full = ask_later(&trek, cx, get(0, Some(100_000))).await.unwrap();
+        assert_eq!(full.width, tr::MAX_ATTACHMENT_PX, "capped");
+        let missing = ask_later(&trek, cx, get(3, None)).await;
+        assert_eq!(missing.unwrap_err().code, tr::ErrorCode::NotFound);
+        let not_a_message = ask_later(&trek, cx, |reply| tr::HostRequest::Attachment { req: tr::AttachmentRequest { thread_id: id.clone(), item_id: format!("i{}", ix + 1), index: 0, max_px: None }, reply }).await;
+        assert_eq!(not_a_message.unwrap_err().code, tr::ErrorCode::NotFound);
+    });
+}
+
+fn base64_decode(s: &str) -> Vec<u8> {
+    tr::ImageUpload { mime: String::new(), data: s.into() }.decode().map(|(b, _)| b).unwrap_or_default()
+}
+
+#[test]
+fn background_tasks_show_their_output_and_stop_from_the_phone() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:server");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let tasks = row(&trek, cx, &id).background_tasks;
+        assert_eq!(tasks.len(), 1, "{tasks:?}");
+        let task = tasks[0].clone();
+        assert!(task.readable && task.stoppable && !task.stopping && task.since.is_some(), "{task:?}");
+        assert_eq!(task.kind, tr::BackgroundKind::Shell);
+
+        let (thread_id, task_id) = (id.clone(), task.id.clone());
+        let out = ask_later(&trek, cx, move |reply| tr::HostRequest::BackgroundOutput { thread_id, task_id, reply }).await.unwrap();
+        assert!(out.output.as_deref().is_some_and(|o| !o.trim().is_empty()), "the end of what it printed: {out:?}");
+
+        let (thread_id, task_id) = (id.clone(), task.id.clone());
+        ask(&trek, cx, move |reply| tr::HostRequest::StopBackground { thread_id, task_id, reply }).unwrap();
+        trek.wait(cx, "the server to stop", |ws| ws.live.values().all(|l| l.background_work().next().is_none())).await;
+        assert!(row(&trek, cx, &id).background_tasks.is_empty());
+        let (thread_id, task_id) = (id.clone(), task.id.clone());
+        let gone = ask(&trek, cx, move |reply| tr::HostRequest::StopBackground { thread_id, task_id, reply });
+        assert_eq!(gone.unwrap_err().code, tr::ErrorCode::NotFound);
+    });
+}
+
+#[test]
+fn project_icons_go_to_the_phone_by_hash() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(row(&trek, cx, &id).project.icon, None, "a monogram");
+        let (project_id, key) = trek.read(cx, |ws, _| {
+            let p = ws.projects.iter().find(|p| p.path == trek.project).unwrap();
+            (p.id.clone(), p.path.display().to_string())
+        });
+        let set_icon = |trek: &super::harness::Trek, cx: &mut gpui_kit::TestAppContext, icon: &str| {
+            let (key, icon) = (key.clone(), icon.to_string());
+            trek.update(cx, move |ws, _| {
+                ws.settings.projects.entry(key).or_default().icon = Some(icon);
+                ws.threads_gen += 1;
+            });
+        };
+        let fetch = |project_id: &str| {
+            let req = tr::IconRequest { agent: None, project_id: Some(project_id.to_string()) };
+            move |reply| tr::HostRequest::Icon { req, reply }
+        };
+
+        set_icon(&trek, cx, "lucide:rocket");
+        let row_icon = row(&trek, cx, &id).project.icon.expect("an icon");
+        let snapshot = ask(&trek, cx, |reply| tr::HostRequest::Snapshot { reply }).unwrap();
+        assert_eq!(snapshot.projects.iter().find(|p| p.id == project_id).unwrap().icon.as_ref(), Some(&row_icon));
+        let icon = ask_later(&trek, cx, fetch(&project_id)).await.unwrap();
+        assert_eq!((icon.hash.as_str(), icon.template), (row_icon.as_str(), true), "a shape, drawn in the project's ink");
+        let png = image::load_from_memory(&base64_decode(&icon.png)).unwrap();
+        assert_eq!((png.width(), png.height()), (96, 96));
+        assert!(png.to_rgba8().pixels().any(|p| p.0[3] > 0), "something drawn");
+
+        // A picture of the user's own.
+        let file = std::env::temp_dir().join(format!("trek-phone-icon-{}.png", std::process::id()));
+        image::RgbaImage::from_pixel(300, 200, image::Rgba([200, 30, 30, 255])).save(&file).unwrap();
+        set_icon(&trek, cx, &format!("file:{}", file.display()));
+        let picture = row(&trek, cx, &id).project.icon.expect("an icon");
+        assert_ne!(picture, row_icon, "another icon, another hash");
+        let icon = ask_later(&trek, cx, fetch(&project_id)).await.unwrap();
+        assert!(!icon.template);
+        let png = image::load_from_memory(&base64_decode(&icon.png)).unwrap().to_rgba8();
+        assert_eq!((png.width(), png.height(), png.get_pixel(48, 48).0), (96, 96, [200, 30, 30, 255]), "cropped to fill");
+        let _ = std::fs::remove_file(&file);
+
+        // Agents the phone has logos for get none.
+        let none = ask(&trek, cx, |reply| tr::HostRequest::Icon { req: tr::IconRequest { agent: Some("codex".into()), project_id: None }, reply });
+        assert_eq!(none.unwrap_err().code, tr::ErrorCode::NotFound);
+    });
+}
+
+#[test]
+fn asides_are_marked_so_the_phone_offers_nothing_to_rewind_to() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        ask(&trek, cx, send(&id, "/permissions full")).unwrap();
+        trek.update(cx, |ws, _| ws.start_test_remote());
+        let t = ask(&trek, cx, transcript_req(&id, None, None)).unwrap();
+        let users: Vec<(String, bool)> = t.items.iter().filter_map(|i| match &i.body {
+            tr::ItemBody::User { aside, .. } => Some((i.id.clone(), *aside)),
+            _ => None,
+        }).collect();
+        assert_eq!(users.iter().map(|(_, a)| *a).collect::<Vec<_>>(), [false, true], "the command Trek answered is an aside");
+        let refused = ask(&trek, cx, turn_action(&id, users[1].0.clone(), tr::TurnAction::Rewind, None));
+        assert_eq!(refused.unwrap_err().code, tr::ErrorCode::BadRequest);
+        let wire = serde_json::to_value(&t.items.iter().find(|i| i.id == users[0].0).unwrap().body).unwrap();
+        assert!(wire.get("aside").is_none(), "a prompt says nothing more than before");
+    });
+}

@@ -202,7 +202,33 @@ Mac → phone:
 ```
 
 `paired` authenticates the connection too (no second `hello` needed). Right after `welcome` or
-`paired` the Mac sends a `snapshot`. Failures: `error` with code `unauthorized` (bad or revoked
+`paired` the Mac sends a `snapshot`.
+
+Both may carry `features`, the optional requests this Mac serves; a phone offers only what's
+listed, so an older Mac (no list) simply doesn't show them. The protocol version stays 1:
+
+```json
+{"type":"welcome","re":"1","protocol":1,"host":{…},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon"]}
+```
+
+| Feature | What it adds |
+|---|---|
+| `search` | the `search` request |
+| `sub_agents` | sub-agents' threads: `unlisted` rows, `sub_agents[].thread_id`, `needs_thread` |
+| `snooze` | `thread_action` `snooze` and `wake` |
+| `mark_unread` | `thread_action` `mark_unread` |
+| `delete` | `thread_action` `delete` |
+| `regenerate_title` | `thread_action` `regenerate_title` |
+| `use_reset` | `use_reset`: spend a Codex rate-limit reset |
+| `queue_action` | change or drop a queued follow-up (rows carry `queued`) |
+| `attachment` | `attachment`: a message's images |
+| `background` | `background_output` and `stop_background` (rows carry `background_tasks`) |
+| `icon` | `icon`: an added agent's or a project's icon |
+
+The last five are described under "Keeping up with the Mac" below.
+
+Names are added as features are (`trek_remote::feature`, `MacFeature` on the phone); a phone
+ignores names it doesn't know. Failures: `error` with code `unauthorized` (bad or revoked
 token), `pairing_failed` (wrong, used or expired code), `rate_limited`, then the socket closes.
 
 ### Snapshot and thread updates (Mac → phone)
@@ -228,8 +254,8 @@ token), `pairing_failed` (wrong, used or expired code), `rate_limited`, then the
 - `run_state`: `idle` · `working` · `needs-you` · `failed` (Trek's `RunState`, kebab-case).
 - `section`: `pinned` · `inbox` · `working` · `snoozed` · `settled` (Trek's `Section`). The phone
   groups by it: **Pinned**, **Needs you** (inbox threads that `needs` you, or failed), **Working**,
-  **Recent** (the rest of inbox, then settled, newest first). Snoozed threads are hidden unless they
-  raise their hand (then the Mac already reports them as `inbox`).
+  **Snoozed** (with `snoozed_until`), **Recent** (the rest of inbox, then settled, newest first).
+  A snoozed thread that raises its hand is reported as `inbox`.
 - `needs`: present when the thread waits on the user. `kind`: `approval` · `question` · `plan` ·
   `failed` · `limit`; `text` is a one-line summary for the row.
 - `project.hue`: degrees 0–359 (the desktop's project colour, chosen or derived from the name);
@@ -267,15 +293,27 @@ Thread details, each optional and left out when there's nothing to say (older Ma
   runs in the background, by title.
 - `base`: for a worktree thread, the branch it merges into (`branch` is the worktree's own).
 - `git`: the folder's state as the Mac last read it (it reads it again on `git_status`).
+- `snoozed_until`: when a snoozed thread wakes (ms).
+- Sub-agents (`sub_agents` feature): a Trek sub-agent's entry carries its `thread_id`, which opens
+  like any thread (`subscribe`, `answer`, `send`, `interrupt`: stopping it is what its Stop on the
+  Mac does, and its parent hears it was stopped). Sub-agents' threads aren't in `threads` (on the
+  Mac they show only under their parent): they come in `unlisted`, with `parent_id`, every one
+  under a listed thread, done ones too. A thread whose sub-agent (at any depth) waits on the user
+  says so as the Mac's card does, `"needs":{"kind":"approval","text":"Sub-agent needs you"}`,
+  `"needs_thread":"<the sub-agent's thread>"`, and is in the `inbox` for it.
 
 Live changes:
 
 ```json
 {"type":"thread","thread":{…same shape as in snapshot…}}
+{"type":"unlisted","thread":{…same shape, "parent_id":"01J…"…}}
 {"type":"thread_removed","thread_id":"01J…"}
 ```
 
-A `thread` message is an upsert. The Mac may send a fresh `snapshot` at any time (it replaces
+A `thread` message is an upsert. `unlisted` is an upsert of a row the list leaves out: a
+sub-agent's, or a thread a phone has open that isn't listed (found by a search, settled long ago).
+A listed thread that drops out of the list while a phone has it open gets `thread_removed`, then
+`unlisted`. Older phones ignore `unlisted`. The Mac may send a fresh `snapshot` at any time (it replaces
 everything: projects and agents included).
 
 ### Transcripts
@@ -392,6 +430,29 @@ All are acknowledged with `{"type":"ack","re":"<id>"}` or answered with an `erro
   `thread` message. `model` null = the project's or agent's default. `worktree` is a request; a
   project that isn't a git repo runs locally.
 - `decision`: `allow` · `allow_for_session` · `deny`.
+- `thread_action`: what the sidebar's thread menu does.
+
+  ```json
+  {"type":"thread_action","id":"20","thread_id":"01J…","action":{"kind":"pin"}}
+  {"type":"thread_action","id":"21","thread_id":"01J…","action":{"kind":"rename","title":"Fix the parser"}}
+  {"type":"thread_action","id":"22","thread_id":"01J…","action":{"kind":"snooze","preset":"tomorrow"}}
+  {"type":"thread_action","id":"23","thread_id":"01J…","action":{"kind":"snooze","until":1791100800000}}
+  {"type":"thread_action","id":"24","thread_id":"01J…","action":{"kind":"delete"}}
+  {"type":"thread_action","id":"25","thread_id":"01J…","action":{"kind":"delete","confirmed":true}}
+  ```
+
+  Kinds: `pin` · `unpin` · `settle` · `unsettle` · `archive` · `rename {title}`, and where the Mac
+  lists them, `snooze` · `wake` · `mark_unread` · `regenerate_title` · `delete`. `snooze` takes one
+  of the Mac's presets, worked out on the Mac in its time zone (`hour` "For 1 hour", `three_hours`,
+  `tomorrow` "Until tomorrow morning", 9:00, `next_week`), or `until` (ms; a time past is
+  `bad_request`). `wake` brings a snoozed thread back now. `regenerate_title` writes a title as the
+  Mac's menu does (the row brings it; `bad_request` for a thread with no message yet). `delete`
+  asks first, as the Mac does: without `confirmed` nothing happens and the answer is `conflict`
+  with the Mac's confirmation text ("The thread and its transcript are deleted from Trek. This
+  can't be undone. Its sub-agent is deleted with it, and stopped.", for a worktree of its own
+  what it would lose); sent again `confirmed`, it's deleted (a worktree of its own goes with it,
+  no more uncommitted changes than were counted then; if the worktree can't go, the thread stays
+  and the answer says why).
 - `turn_action`: what a turn's footer and a message's actions do on the Mac, after its
   confirmation:
 
@@ -422,14 +483,19 @@ Reads (`usage`, `basecamp`, `notes`, `note`, `git_status`, `git_diff`, `git_bran
 `settings`) may be answered out of order with what the phone sends after them; actions keep their
 order. A Mac too old for one answers `bad_request` ("Unknown message type").
 
-**Usage**, as the Mac's Usage popover shows it (asking refreshes it as opening the popover does: the
-agents at most every 30 s, Devin every 10 min; the Mac waits up to 15 s for them, and `loading`
-says one hadn't answered yet):
+**Usage**, as the Mac's Usage card shows it: the providers it shows, in its order (three at most,
+picked on the Mac; `picked` says whether by the user or by Trek). Asking refreshes it as opening
+the card does: the agents at most every 30 s, Devin every 10 min; the Mac waits up to 15 s for
+them, and `loading` says one hadn't answered yet. A provider kept from an earlier run says when
+(`as_of`); one with no limits to show says what Trek recorded today (`today`); `no_limits` when it
+said it has none; `resets` are Codex's granted rate-limit resets, which `use_reset` spends.
 
 ```json
 {"type":"usage","id":"1"}
 {"type":"usage","re":"1","providers":[{"agent":{"key":"claude-code","name":"Claude Code","logo":"claude-code"},"plan":"Claude Max",
-  "limits":[{"label":"5-hour limit","percent":42.0,"resets_at":1791030000000,"window":"5h"},{"label":"Weekly · Opus","percent":64.0,"resets_at":1791370000000,"window":"7d"}]}]}
+  "limits":[{"label":"5-hour limit","percent":42.0,"resets_at":1791030000000,"window":"5h"},{"label":"Weekly · Opus","percent":64.0,"resets_at":1791370000000,"window":"7d"}]},
+  {"agent":{"key":"codex","name":"Codex","logo":"codex"},"plan":"ChatGPT Pro","limits":[…],
+   "resets":[{"id":"rc-1","title":"Full reset (Weekly + 5 hr)","expires_at":1791800000000}]}],"picked":false}
 ```
 
 **Basecamp**, worked out off the main thread as the Mac's is, worded as it words it:
@@ -529,6 +595,90 @@ whole change):
   URL scheme or universal links, so no link can subscribe it. On an iPhone: copy the topic, then
   in ntfy tap +, paste it (and pick "Use another server" for one that isn't ntfy.sh).
 
+**Search**, as the Mac's sidebar search finds threads: titles as typed (a substring, and the
+full-text index's word prefixes, accents folded), then messages (from three letters a word), the
+best match in each thread. Every thread the sidebar's search lists can come back, settled long ago
+or a sub-agent's, with its whole row, so the phone can open it (`subscribe`; its row then comes as
+`unlisted` while it's open). `limit` defaults to 50, at most 200.
+
+```json
+{"type":"search","id":"19","query":"refresh race","limit":50}
+{"type":"search_results","re":"19","query":"refresh race","results":[
+  {"thread":{…a row…}},
+  {"thread":{…a row, "parent_id":"01J…"…},"snippet":"…two concurrent refreshes race on the token…","ranges":[[19,28],[32,36]]}]}
+```
+
+A title match has no `snippet`; a message match has an excerpt on one line, `ranges` the matched
+words in it as `[start, end)` in characters (Unicode scalar values).
+### Keeping up with the Mac (optional requests, listed in `features`)
+
+What the Mac's own screens added after the first phones. Each is additive: rows and items carry
+new fields only when there's something in them, and a Mac that doesn't list a feature answers
+its requests `bad_request`.
+
+**`use_reset`**: Codex's "Use reset" on the Usage card (the phone asks first, with the Mac's
+words: "Your rate limits reset right away. The credit is spent and can't be returned."). The
+`ack` comes once it's spent; usage is read again then. `not_found` for a reset that's gone,
+`host_error` with Codex's reason when it fails.
+
+```json
+{"type":"use_reset","id":"1","credit_id":"rc-1"}   → ack
+```
+
+**`queue_action`**: the follow-ups a thread holds ride in its row, in order: those sent while a
+turn runs (they go one a finished turn), then those waiting for a usage limit to reset
+(`reset: true`). Text is cut at 16 KiB. The phone drops one (`remove`: it comes back in
+`ack.text`, for the composer, as the Mac's ✕ hands it back to its own) or changes its words in
+place (`edit`; its photos stay). `index` counts among those with the same `reset`, and `text` is
+the message as shown: if the queue moved on meanwhile, `conflict`.
+
+```json
+row: "queued":[{"text":"then write the docs"},{"text":"","images":1},{"text":"carry on","reset":true}]
+{"type":"queue_action","id":"2","thread_id":"t","index":0,"text":"then write the docs","action":{"kind":"remove"}}   → {"type":"ack","re":"2","text":"then write the docs"}
+{"type":"queue_action","id":"3","thread_id":"t","index":0,"reset":true,"text":"carry on","action":{"kind":"edit","text":"carry on, then stop"}}  → ack
+```
+
+**`attachment`**: a message's images (a `user` item's `images` is how many), one at a time, as a
+JPEG that fits in `max_px` a side (2048 at most, the default) and ~3 MB (a bigger one is sent
+smaller); transparency goes on white. The phone asks for thumbnails at 480 and for its full-screen
+view at 2048, and keeps them in memory.
+
+```json
+{"type":"attachment","id":"4","thread_id":"t","item_id":"i12","index":0,"max_px":480}
+{"type":"attachment","re":"4","thread_id":"t","item_id":"i12","index":0,"mime":"image/jpeg","data":"/9j/…","width":480,"height":160}
+```
+
+**`background`**: what a thread's agent runs in the background, in full in its row
+(`background` still lists their titles): kind (`shell` · `monitor` · `other`), the last line it
+printed, since when, whether its output can be read and whether it can be stopped.
+`background_output` asks the agent for the end of the output (the last 400 lines, 64 KiB at
+most) and answers once that's in (or after 1.5 s, with what was read before); the phone asks
+every 2 s while it shows it, as the Mac's popover does. `stop_background` is the strip's Stop
+(the row says `stopping` until the agent has).
+
+```json
+row: "background_tasks":[{"id":"b1","kind":"shell","title":"pnpm dev","line":"ready on :5173","since":1791020000000,"readable":true,"stoppable":true}]
+{"type":"background_output","id":"5","thread_id":"t","task_id":"b1"}  → {"type":"background_output","re":"5","thread_id":"t","task_id":"b1","output":"…"}
+{"type":"stop_background","id":"6","thread_id":"t","task_id":"b1"}    → ack
+```
+
+**`icon`**: an agent added on the Mac (`acp:<id>`, no `logo`) carries `icon`, a hash of its
+registry icon; a project with an icon chosen on the Mac (a Lucide one, or a picture) carries one
+in its `project` refs and in the snapshot. `icon` sends it as a 96 px PNG; `template` means a
+shape to draw in the phone's colour (the text colour for an agent, the project's ink on its fill),
+otherwise a picture cropped to fill. The phone keeps them on disk by hash, so a new hash (another
+icon, a changed file) fetches it again.
+
+```json
+{"type":"icon","id":"7","agent":"acp:mistral-vibe"}   (or "project_id":"p")
+{"type":"icon","re":"7","agent":"acp:mistral-vibe","hash":"0f3a…","png":"iVBORw0K…","template":true}
+```
+
+**Also**: a `user` item that isn't a prompt (a command Trek answered itself, a typed answer to a
+question) says `"aside":true`: the Mac refuses to rewind to it or fork from it, so the phone
+doesn't offer to. A thread's `cost` says how much of its prompts the prompt cache served, as the
+Mac's status line does (`"cached":"92% cached"`, and `cached_detail` in words).
+
 ### Errors
 
 ```json
@@ -616,6 +766,12 @@ SwiftUI, iOS 26 (Liquid Glass), bundle id `dev.trek.TrekMobile`, no third-party 
 - `devices.json` is written with mode 0600; an unreadable one is moved aside and phones pair again.
 - The Mac must set `advertise` (LAN or tailnet address) for the QR code, and binds that same
   address; the library's default bind address `0.0.0.0` is no use to a phone.
+- The phone reads lists element by element: a thread in a `snapshot`, an item in a `transcript`
+  or a search result that doesn't decode is left out (and logged), not the whole message. Enums
+  with a value it doesn't know (`send` modes, Basecamp ranges, states…) fall back to a default; an
+  agent without `models` reads with none.
+- The phone offers what the Mac's `features` list: an older Mac's phone sees no search on the Mac,
+  no sub-agents to open, and the thread menu as it was.
 
 ## Phases and milestones
 
@@ -688,6 +844,14 @@ instead and queue).
   `Workspace::notes_epoch` so the Notes screen reloads), **git** (`remote/git.rs`, the Git panel's
   `snapshot`/`git` and `trek_core::worktree`'s review, merge and removal, the confirmations'
   wording from `worktree_ui::losses`), **settings** (`remote/settings.rs`).
+- **Sub-agents, the thread menu and search** (`remote/sub_agents.rs`, `remote/thread_actions.rs`,
+  `remote/search.rs`): unlisted rows are the listed threads' sub-agents (`Workspace::children`,
+  every depth) and threads a phone has open that aren't listed, built and compared with the rows;
+  a parent whose sub-agent waits takes its request as the sidebar card does. Snooze, wake, mark
+  unread and regenerate title call the menu's own `Workspace` methods (`snooze`,
+  `snooze_until_morning`, `snooze_until`, `unsnooze`, `mark_unread`, `regenerate_title`); delete
+  words its confirmation as the sidebar and `worktree_ui::confirm_leave` do. Search runs
+  `Store::search` off the main thread, as the sidebar's does.
 - **Changed files per turn** go out as `changes` items from one function, `turn_changes`, which
   answers `None` until the Mac works them out (`Workspace::turn_changes`, another branch: marked
   `TODO(merge)`).

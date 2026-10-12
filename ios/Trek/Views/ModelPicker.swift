@@ -60,13 +60,15 @@ enum ModelNaming {
 /// The model chip's label, as on the Mac: the agent's logo, the model, its effort in muted text.
 struct ModelChipLabel: View {
     var agentKey: String
+    /// The agent's logo, when the Mac names one (`AgentRef.logo`).
+    var agentLogo: String? = nil
     var model: String
     var effort: String?
     var logo: CGFloat = 15
 
     var body: some View {
         HStack(spacing: 5) {
-            AgentGlyph(key: agentKey, size: logo)
+            AgentGlyph(key: agentLogo ?? agentKey, size: logo)
             Text(model).lineLimit(1)
             if let effort {
                 Text(Effort.label(effort)).foregroundStyle(Trek.muted).lineLimit(1)
@@ -129,13 +131,13 @@ struct ModelPickerSheet: View {
     private var header: some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("Model").font(.title3.weight(.semibold))
+                Text("Model").font(.ui(.title3).weight(.semibold))
                 HStack(spacing: 5) {
-                    AgentGlyph(key: agentKey, size: 13)
+                    AgentGlyph(key: agent?.logo ?? agentKey, size: 13)
                     Text([agent?.name, current?.label, effort.map(Effort.label)].compactMap { $0 }.joined(separator: " · "))
                         .lineLimit(1)
                 }
-                .font(.footnote)
+                .font(.ui(.footnote))
                 .foregroundStyle(Trek.muted)
             }
             Spacer()
@@ -163,7 +165,7 @@ struct ModelPickerSheet: View {
                     Button {
                         withAnimation(.snappy(duration: 0.2)) { rail = a.key }
                     } label: {
-                        AgentGlyph(key: a.key, size: 26)
+                        AgentGlyph(a.ref, size: 26)
                             .frame(width: 50, height: 50)
                             .background {
                                 RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -203,12 +205,12 @@ struct ModelPickerSheet: View {
             VStack(alignment: .leading, spacing: 2) {
                 if let shown {
                     Text(shown.name)
-                        .font(.footnote.weight(.semibold))
+                        .font(.ui(.footnote).weight(.semibold))
                         .foregroundStyle(Trek.muted)
                         .padding(.horizontal, 12)
                         .padding(.bottom, 6)
                     if shown.models.isEmpty {
-                        Text("No models on offer.").font(.subheadline).foregroundStyle(Trek.muted).padding(12)
+                        Text("No models on offer.").font(.ui(.subheadline)).foregroundStyle(Trek.muted).padding(12)
                     }
                     ForEach(shown.models) { m in
                         modelRow(m, of: shown)
@@ -230,10 +232,10 @@ struct ModelPickerSheet: View {
         } label: {
             HStack(spacing: 10) {
                 HStack(spacing: 6) {
-                    Text(m.label).font(.body.weight(selected ? .semibold : .regular)).foregroundStyle(Trek.foreground)
+                    Text(m.label).font(.ui(.body).weight(selected ? .semibold : .regular)).foregroundStyle(Trek.foreground)
                     if isDefault {
                         Text("Default")
-                            .font(.caption2.weight(.semibold))
+                            .font(.ui(.caption2).weight(.semibold))
                             .foregroundStyle(Trek.muted)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -261,14 +263,14 @@ struct ModelPickerSheet: View {
     private var effortSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Effort").font(.subheadline.weight(.semibold))
+                Text("Effort").font(.ui(.subheadline).weight(.semibold))
                 Spacer()
                 HStack(spacing: 4) {
                     Text("Faster")
                     Image(systemName: "arrow.left.and.right").font(.system(size: 9, weight: .semibold))
                     Text("Smarter")
                 }
-                .font(.caption)
+                .font(.ui(.caption))
                 .foregroundStyle(Trek.muted)
             }
             EffortPicker(efforts: currentEfforts, selection: effort, pick: pickEffort)
@@ -298,7 +300,7 @@ struct EffortPicker: View {
                     VStack(spacing: 5) {
                         Meter(level: i + 1, of: efforts.count, on: on)
                         Text(Effort.label(e))
-                            .font(.footnote.weight(on ? .semibold : .medium))
+                            .font(.ui(.footnote).weight(on ? .semibold : .medium))
                             .foregroundStyle(on ? Trek.foreground : Trek.muted)
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)

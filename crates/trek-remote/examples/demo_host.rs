@@ -363,7 +363,7 @@ impl DemoHost {
                     "Add a test for the theme persistence",
                 ];
                 let prompt = prompts[(round as usize - 1) % prompts.len()];
-                self.add(id, ItemBody::User { text: prompt.into(), images: 0 });
+                self.add(id, ItemBody::User { text: prompt.into(), images: 0, aside: false });
             }
             round += 1;
             let g = self.start_turn(id, "Thinking");
@@ -460,7 +460,7 @@ impl RemoteHost for DemoHost {
         let st = self.lock();
         let mut threads = st.threads.clone();
         threads.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
-        Ok(Snapshot { threads, projects: st.projects.clone(), agents: st.agents.clone(), full_access: true })
+        Ok(Snapshot { threads, projects: st.projects.clone(), agents: st.agents.clone(), full_access: true, unlisted: vec![] })
     }
 
     async fn transcript(&self, thread_id: &str) -> HostResult<Transcript> {
@@ -480,7 +480,7 @@ impl RemoteHost for DemoHost {
             match cmd {
                 "new" | "clear" => return Ok(Some(Open::NewThread { project_id: Some(thread.project.id.clone()) })),
                 "usage" | "context" | "cost" | "model" | "permissions" => {
-                    self.add(&req.thread_id, ItemBody::User { text: req.text.clone(), images: 0 });
+                    self.add(&req.thread_id, ItemBody::User { text: req.text.clone(), images: 0, aside: false });
                     let reply = match cmd {
                         "usage" => "**Claude Code** · Claude Max\n- 5-hour limit: 42% used, resets in 2h 10m\n- Weekly limit: 18% used, resets in 4d",
                         "context" => "61.2K of 200K tokens in context (31%).",
@@ -494,7 +494,7 @@ impl RemoteHost for DemoHost {
                 _ => {}
             }
         }
-        self.add(&req.thread_id, ItemBody::User { text: req.text.clone(), images: 0 });
+        self.add(&req.thread_id, ItemBody::User { text: req.text.clone(), images: 0, aside: false });
         self.update(&req.thread_id, |t| t.unseen = false);
         if thread.run_state == RunState::Working {
             match req.mode.unwrap_or(SendMode::Steer) {
@@ -535,7 +535,7 @@ impl RemoteHost for DemoHost {
             id: id.clone(),
             title,
             project: project.to_ref(),
-            agent: AgentRef { key: agent.key.clone(), name: agent.name.clone(), logo: agent.logo.clone() },
+            agent: AgentRef { key: agent.key.clone(), name: agent.name.clone(), logo: agent.logo.clone(), icon: None },
             model,
             model_label,
             branch: if worktree { Some(format!("trek/{id}")) } else { project.branch.clone() },
@@ -553,7 +553,7 @@ impl RemoteHost for DemoHost {
             st.logs.insert(id.clone(), Log::default());
         }
         self.push(HostEvent::Thread(thread));
-        self.add(&id, ItemBody::User { text: req.text.clone(), images: 0 });
+        self.add(&id, ItemBody::User { text: req.text.clone(), images: 0, aside: false });
         tokio::spawn(self.clone().echo_turn(id.clone(), req.text));
         Ok(id)
     }
@@ -617,7 +617,7 @@ impl RemoteHost for DemoHost {
         }
         self.push(HostEvent::TranscriptReset(req.thread_id.clone()));
         if req.action == TurnAction::Retry {
-            self.add(&req.thread_id, ItemBody::User { text: text.clone(), images: 0 });
+            self.add(&req.thread_id, ItemBody::User { text: text.clone(), images: 0, aside: false });
             tokio::spawn(self.clone().echo_turn(req.thread_id, text));
             return Ok(TurnActionDone::default());
         }
@@ -666,7 +666,7 @@ impl RemoteHost for DemoHost {
                 let state = if approve { PlanState::Approved } else { PlanState::Rejected };
                 self.put(&thread_id, &item.id, ItemBody::Plan { request_id, markdown, state });
                 if let Some(feedback) = feedback.filter(|f| !f.trim().is_empty()) {
-                    self.add(&thread_id, ItemBody::User { text: feedback, images: 0 });
+                    self.add(&thread_id, ItemBody::User { text: feedback, images: 0, aside: false });
                 }
                 let summary = if approve { "the plan as written".to_string() } else { "a revised plan".to_string() };
                 tokio::spawn(self.clone().after_answer(thread_id, summary));
@@ -701,7 +701,7 @@ impl RemoteHost for DemoHost {
         }
         self.update(&req.thread_id, |t| {
             if let Some(a) = req.agent.as_ref().and_then(|k| agents.iter().find(|a| &a.key == k)) {
-                t.agent = AgentRef { key: a.key.clone(), name: a.name.clone(), logo: a.logo.clone() };
+                t.agent = AgentRef { key: a.key.clone(), name: a.name.clone(), logo: a.logo.clone(), icon: None };
                 t.model = a.default_model.clone();
                 t.model_label = a.models.iter().find(|o| Some(&o.id) == a.default_model.as_ref()).map(|o| o.label.clone());
             }
@@ -722,9 +722,33 @@ impl RemoteHost for DemoHost {
         Ok(())
     }
 
+    async fn search(&self, req: SearchRequest) -> HostResult<SearchResults> {
+        let q = req.query.trim().to_lowercase();
+        let st = self.lock();
+        let results = st
+            .threads
+            .iter()
+            .filter(|t| !q.is_empty() && t.title.to_lowercase().contains(&q))
+            .map(|t| SearchResult { thread: t.clone(), snippet: None, ranges: vec![] })
+            .take(req.limit.unwrap_or(50).min(MAX_SEARCH) as usize)
+            .collect();
+        Ok(SearchResults { query: req.query, results })
+    }
+
     async fn thread_action(&self, req: ThreadActionRequest) -> HostResult<()> {
-        if self.thread(&req.thread_id).is_none() {
+        let Some(thread) = self.thread(&req.thread_id) else {
             return Err(HostError::not_found(format!("No thread {}", req.thread_id)));
+        };
+        match req.action {
+            ThreadAction::Delete { confirmed: false } => {
+                return Err(HostError::conflict("The thread and its transcript are deleted from Trek. This can't be undone."));
+            }
+            ThreadAction::Delete { confirmed: true } => {
+                self.lock().threads.retain(|t| t.id != thread.id);
+                self.push(HostEvent::ThreadRemoved(thread.id));
+                return Ok(());
+            }
+            _ => {}
         }
         self.update(&req.thread_id, |t| match &req.action {
             ThreadAction::Pin => {
@@ -741,6 +765,22 @@ impl RemoteHost for DemoHost {
             }
             ThreadAction::Archive => t.section = Section::Settled,
             ThreadAction::Rename { title } => t.title = title.clone(),
+            ThreadAction::Snooze { until, preset } => {
+                let hours = match preset {
+                    Some(SnoozePreset::Hour) => 1,
+                    Some(SnoozePreset::ThreeHours) => 3,
+                    Some(SnoozePreset::NextWeek) => 24 * 7,
+                    _ => 16,
+                };
+                t.snoozed_until = Some(until.unwrap_or(now_ms() + hours * 3_600_000));
+                t.section = Section::Snoozed;
+            }
+            ThreadAction::Wake => {
+                t.snoozed_until = None;
+                t.section = Section::Inbox;
+            }
+            ThreadAction::MarkUnread => t.unseen = true,
+            ThreadAction::RegenerateTitle | ThreadAction::Delete { .. } => {}
         });
         Ok(())
     }
@@ -754,18 +794,18 @@ impl RemoteHost for DemoHost {
                     agent: AgentRef::new("claude-code", "Claude Code", Some("claude-code")),
                     plan: Some("Claude Max".into()),
                     limits: vec![limit("5-hour limit", 42.0, hours(2), "5h"), limit("Weekly limit", 18.0, hours(96), "7d"), limit("Weekly · Opus", 64.0, hours(96), "7d")],
-                    note: None,
-                    error: None,
+                    ..Default::default()
                 },
                 ProviderUsage {
                     agent: AgentRef::new("codex", "Codex", Some("codex")),
                     plan: Some("ChatGPT Pro".into()),
                     limits: vec![limit("5-hour limit", 91.0, hours(1), "5h"), limit("Weekly limit", 33.0, hours(130), "7d")],
-                    note: None,
-                    error: None,
+                    resets: vec![ResetCredit { id: "rc-1".into(), title: "Full reset (Weekly + 5 hr)".into(), description: None, expires_at: hours(24 * 9) }],
+                    ..Default::default()
                 },
             ],
             loading: false,
+            picked: Some(false),
         })
     }
 
@@ -1018,6 +1058,7 @@ fn project(id: &str, name: &str, hue: Option<u16>, branch: &str, is_repo: bool) 
         monogram: monogram(name),
         branch: Some(branch.into()),
         is_repo,
+        icon: None,
     }
 }
 
@@ -1031,6 +1072,7 @@ fn agents() -> Vec<AgentOption> {
             logo: Some("claude-code".into()),
             default_model: Some("claude-opus-5-5".into()),
             models: vec![m("claude-opus-5-5", "Opus 5.5"), m("claude-sonnet-5-5", "Sonnet 5.5"), m("claude-haiku-5", "Haiku 5")],
+            icon: None,
         },
         AgentOption {
             key: "codex".into(),
@@ -1038,6 +1080,7 @@ fn agents() -> Vec<AgentOption> {
             logo: Some("codex".into()),
             default_model: Some("gpt-6".into()),
             models: vec![m("gpt-6", "GPT-6"), m("gpt-6-mini", "GPT-6 mini")],
+            icon: None,
         },
         AgentOption {
             key: "opencode".into(),
@@ -1045,6 +1088,7 @@ fn agents() -> Vec<AgentOption> {
             logo: Some("opencode".into()),
             default_model: None,
             models: vec![m("anthropic/claude-sonnet-5-5", "Sonnet 5.5"), m("openai/gpt-6", "GPT-6")],
+            icon: None,
         },
     ]
 }
@@ -1068,7 +1112,7 @@ fn tool(title: &str, detail: &str, status: ToolStatus, output: &str, diff: Optio
 }
 
 fn user(text: &str) -> ItemBody {
-    ItemBody::User { text: text.into(), images: 0 }
+    ItemBody::User { text: text.into(), images: 0, aside: false }
 }
 
 fn assistant(text: &str) -> ItemBody {
@@ -1137,6 +1181,8 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
         billing: Some(Billing::Plan),
         plan: Some("Claude Max".into()),
         detail: Some("Included in your Claude Max plan".into()),
+        cached: Some("92% cached".into()),
+        cached_detail: Some("56.3K of 61.2K prompt tokens came from the prompt cache, cheaper and faster than sending them again.".into()),
     });
     t.git = Some(GitSummary { changed: 2, ahead: 1, behind: 0, default_branch: Some("main".into()) });
     seeds.push(Seed {
@@ -1172,7 +1218,7 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
     t.needs = Some(Needs { kind: NeedsKind::Question, text: "Per IP or per account?".into() });
     t.unseen = true;
     t.context = Some(ContextUse { used: 22_400, window: 272_000, percent: 8 });
-    t.cost = Some(Cost { label: "$0.41".into(), billing: Some(Billing::Metered), plan: None, detail: Some("Billed per token by your API provider".into()) });
+    t.cost = Some(Cost { label: "$0.41".into(), billing: Some(Billing::Metered), plan: None, detail: Some("Billed per token by your API provider".into()), cached: None, cached_detail: None });
     seeds.push(Seed {
         thread: t,
         items: vec![
@@ -1209,8 +1255,8 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
     t.deletions = 8;
     t.context = Some(ContextUse { used: 171_000, window: 200_000, percent: 85 });
     t.sub_agents = vec![
-        SubAgent { agent: AgentRef::new("codex", "Codex", Some("codex")), model: Some("Sol".into()), title: "Review the theme tokens".into(), state: SubAgentState::Running, since: Some(now_ms() - 95_000) },
-        SubAgent { agent: AgentRef::new("claude-code", "Claude Code", Some("claude-code")), model: None, title: "Find every hard-coded colour".into(), state: SubAgentState::Running, since: Some(now_ms() - 40_000) },
+        SubAgent { agent: AgentRef::new("codex", "Codex", Some("codex")), model: Some("Sol".into()), title: "Review the theme tokens".into(), state: SubAgentState::Running, since: Some(now_ms() - 95_000), thread_id: None },
+        SubAgent { agent: AgentRef::new("claude-code", "Claude Code", Some("claude-code")), model: None, title: "Find every hard-coded colour".into(), state: SubAgentState::Running, since: Some(now_ms() - 40_000), thread_id: None },
     ];
     t.background = vec!["pnpm dev".into()];
     t.git = Some(GitSummary { changed: 5, ahead: 0, behind: 2, default_branch: Some("main".into()) });
@@ -1355,7 +1401,7 @@ fn demo_basecamp(range: BasecampRange, threads: &[ThreadSummary]) -> Basecamp {
     let prompts: u32 = buckets.iter().map(|b| b.prompts).sum();
     let agent_secs: u64 = buckets.iter().map(|b| b.agent_secs).sum();
     let tokens: u64 = buckets.iter().map(|b| b.tokens).sum();
-    let api = ProjectRef { id: "p-api".into(), name: "trek-api".into(), hue: 212, monogram: "TA".into() };
+    let api = ProjectRef { id: "p-api".into(), name: "trek-api".into(), hue: 212, monogram: "TA".into(), icon: None };
     let opus = AgentRef::new("claude-code", "Claude Code", Some("claude-code"));
     let codex = AgentRef::new("codex", "Codex", Some("codex"));
     let text = |t: &str| Span::Text { text: t.into() };
@@ -1514,6 +1560,7 @@ async fn main() -> std::io::Result<()> {
     config.bind = bind;
     config.advertise = Some(advertise.clone());
     config.devices_path = Some(devices_path.clone());
+    config.features = [feature::SEARCH, feature::SNOOZE, feature::MARK_UNREAD, feature::DELETE].map(String::from).to_vec();
     if std::env::var_os("TREK_REMOTE_PLAIN").is_none() {
         let dir = devices_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(std::env::temp_dir);
         config.tls = Some(TlsIdentity::load_or_create(&dir, "Trek Demo Mac").expect("TLS identity"));

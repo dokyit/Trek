@@ -1,15 +1,16 @@
 import SwiftUI
 
-// Small pieces the Mac screens share: the glass card, the usage bar, reset times and a layout
+// Small pieces the Mac screens share: the card, the usage bar, reset times and a layout
 // that wraps words and chips like a paragraph.
 
 extension View {
-    /// A card of Liquid Glass, the dashboard's surface.
-    func glassCard(radius: CGFloat = 22, padding: CGFloat = 16) -> some View {
+    /// The dashboard's surface, as the Mac draws its panels: the muted fill, a hairline edge.
+    func card(radius: CGFloat = 16, padding: CGFloat = 16) -> some View {
         self
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .background(Trek.surface, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Trek.border, lineWidth: 0.75))
     }
 }
 

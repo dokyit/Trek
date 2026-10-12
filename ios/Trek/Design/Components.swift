@@ -1,16 +1,31 @@
 import SwiftUI
 
-/// The agent's logo (the desktop's Lobe icons), or a neutral glyph for agents without one.
+/// The agent's logo (the desktop's Lobe icons), rounded as the Mac rounds it, or the Mac's neutral
+/// chip glyph for agents without one.
 struct AgentGlyph: View {
     var key: String
     var size: CGFloat = 22
+
+    init(key: String, size: CGFloat = 22) {
+        self.key = key
+        self.size = size
+    }
+
+    /// An agent's logo: the one the Mac names for it, else its key's.
+    init(_ agent: AgentRef, size: CGFloat = 22) {
+        self.init(key: agent.logo ?? agent.key, size: size)
+    }
 
     var body: some View {
         Group {
             if let asset = AgentLogo.asset(key) {
                 Image(asset).resizable().interpolation(.high).scaledToFit()
+                    .clipShape(RoundedRectangle(cornerRadius: size * 0.22))
+            } else if let hash = IconStore.shared.agentIcons[key] {
+                // An agent added on the Mac: its registry icon.
+                StoredIcon(hash: hash, agent: key, inset: size * 0.06)
             } else {
-                Image(systemName: "sparkle").resizable().scaledToFit().foregroundStyle(Trek.muted).padding(size * 0.12)
+                Image(systemName: "cpu").resizable().scaledToFit().fontWeight(.light).foregroundStyle(Trek.muted).padding(size * 0.06)
             }
         }
         .frame(width: size, height: size)
@@ -18,18 +33,30 @@ struct AgentGlyph: View {
     }
 }
 
-/// Two-letter project badge in the project's hue (desktop `monogram_in`).
+/// Two-letter project badge in the project's hue (desktop `monogram_in`): a little wider than
+/// tall, square-cornered, bold letters.
 struct ProjectBadge: View {
     var project: ProjectRef
     var size: CGFloat = 16
 
     var body: some View {
-        Text(project.monogram)
-            .font(.system(size: size * 0.56, weight: .bold, design: .rounded))
-            .foregroundStyle(ProjectColor.ink(project.hue))
-            .frame(width: size, height: size)
-            .background(ProjectColor.fill(project.hue), in: RoundedRectangle(cornerRadius: size * 0.28, style: .continuous))
-            .accessibilityHidden(true)
+        Group {
+            if let icon = project.icon {
+                // The icon chosen for it on the Mac: a symbol in its colours, or a picture.
+                StoredIcon(hash: icon, project: project.id, tint: ProjectColor.ink(project.hue), inset: size * 0.2)
+                    .frame(width: size, height: size)
+            } else {
+                Text(project.monogram)
+                    .font(.ui(size: size * 0.59, weight: .bold))
+                    .foregroundStyle(ProjectColor.ink(project.hue))
+                    .padding(.horizontal, size * 0.19)
+            }
+        }
+        .frame(minWidth: project.icon == nil ? size * 1.25 : size, minHeight: size, maxHeight: size)
+        .background(ProjectColor.fill(project.hue), in: RoundedRectangle(cornerRadius: size * 0.25))
+        .clipShape(RoundedRectangle(cornerRadius: size * 0.25))
+        .fixedSize()
+        .accessibilityHidden(true)
     }
 }
 
@@ -67,27 +94,20 @@ struct BeaconDot: View {
     }
 }
 
-/// "Working", "Approval", "Question"… in Trek's status colours, on a wash of the same colour.
+/// "Working", "Approval", "Question"… as the Mac's sidebar shows a thread's state: a dot (breathing
+/// while it works) and the word, both in Trek's status colour.
 struct StatusPill: View {
     var look: StatusLook
     var compact = false
 
     var body: some View {
-        HStack(spacing: 5) {
-            if let symbol = look.symbol {
-                Image(systemName: symbol).font(.system(size: 10, weight: .semibold))
-            } else {
-                BeaconDot(color: look.color, pulses: look.pulses, size: 6)
-            }
+        HStack(spacing: 6) {
+            BeaconDot(color: look.color, pulses: look.pulses, size: 7)
             if !compact {
-                Text(look.label).font(.footnote.weight(.semibold))
+                Text(look.label).font(.ui(.footnote).weight(.medium))
             }
         }
         .foregroundStyle(look.color)
-        .padding(.horizontal, compact ? 6 : 9)
-        .padding(.vertical, 4)
-        .background(look.color.opacity(0.13), in: Capsule())
-        .overlay(Capsule().strokeBorder(look.color.opacity(0.24), lineWidth: 0.5))
         .fixedSize()
         .accessibilityElement(children: .combine)
     }
@@ -96,7 +116,7 @@ struct StatusPill: View {
 struct DiffStat: View {
     var additions: Int
     var deletions: Int
-    var font: Font = .caption.monospacedDigit()
+    var font: Font = .ui(.caption).monospacedDigit()
 
     var body: some View {
         HStack(spacing: 4) {
@@ -138,12 +158,12 @@ struct FileChip: View {
         HStack(spacing: s * 0.4) {
             FileBadge(path: path, size: s * 1.1)
             Text(name)
-                .font(.system(size: s, weight: .medium, design: .monospaced))
+                .font(.code(size: s, weight: .medium))
                 .foregroundStyle(tint.ink)
                 .lineLimit(1)
                 .truncationMode(.middle)
             if let added, let removed, added + removed > 0 {
-                DiffStat(additions: added, deletions: removed, font: .system(size: s * 0.88, weight: .medium, design: .monospaced))
+                DiffStat(additions: added, deletions: removed, font: .code(size: s * 0.88, weight: .medium))
             }
         }
         .padding(.leading, s * 0.38)
@@ -161,22 +181,28 @@ struct FileChip: View {
     }
 }
 
-/// The ridge art behind the large titles, fading into the background (the desktop's backdrop).
+/// The ridge art behind the large titles, fading into the background (the desktop's backdrop), when
+/// Settings › Appearance › Background art is on; `always` for the welcome screen. Otherwise the
+/// plain background, as a new Mac shows it.
 struct RidgeBackdrop: View {
     var height: CGFloat = 320
+    var always = false
+    @AppStorage(AppearanceKey.backgroundArt) private var art = false
 
     var body: some View {
         ZStack(alignment: .top) {
             Trek.background
-            Image("Backdrop")
-                .resizable()
-                .interpolation(.none)
-                .scaledToFill()
-                .frame(height: height)
-                .clipped()
-                .opacity(0.9)
-                .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black.opacity(0.6), location: 0.55),
-                                             .init(color: .clear, location: 1)], startPoint: .top, endPoint: .bottom))
+            if art || always {
+                Image("Backdrop")
+                    .resizable()
+                    .interpolation(.none)
+                    .scaledToFill()
+                    .frame(height: height)
+                    .clipped()
+                    .opacity(0.9)
+                    .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black.opacity(0.6), location: 0.55),
+                                                 .init(color: .clear, location: 1)], startPoint: .top, endPoint: .bottom))
+            }
         }
         .ignoresSafeArea()
     }
@@ -190,7 +216,7 @@ struct ToastView: View {
         HStack(spacing: 8) {
             Image(systemName: toast.isError ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
                 .foregroundStyle(toast.isError ? Trek.failed : Trek.done)
-            Text(toast.text).font(.subheadline.weight(.medium)).lineLimit(2)
+            Text(toast.text).font(.ui(.subheadline).weight(.medium)).lineLimit(2)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 11)

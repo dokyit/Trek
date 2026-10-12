@@ -4,7 +4,8 @@ Writes, next to this script:
   trek-icon-ember.svg  the app icon (the default): porcelain stones on a Trek-orange tile
   trek-icon-night.svg  alternative: Trek-orange stones on the Night theme's charcoal
   trek-icon-glass.svg  alternative: frosted glass stones over a sunset (Liquid Glass)
-  trek-icon-*-ios.svg  the same three, full bleed, for iOS
+  trek-icon-*-ios.svg  the same three, full bleed, for iOS (ios/scripts/app-icons.sh renders them)
+  trek-icon-{dark,tinted}-ios.svg  the iOS icon's dark and tinted variants: the stones on clear
   trek-mark.svg        the stones alone, for in-app use (title bar, About, welcome screens)
   menubar-{idle,working,attention}.svg   44 pt template glyphs for the menu bar
 
@@ -173,6 +174,15 @@ add("glass", "Glass Cairn",
     lin("sun3", [(0, "#FF9450"), (.5, "#E9531E"), (1, "#9E2A0C")]) + rad("sun3b", [(0, "#FFD9A8", .75), (1, "#FFD9A8", 0)], cx=.78, cy=.08, r=.55) + gdefs,
     f'<path d="{TILE}" fill="url(#sun3)"/><path d="{TILE}" fill="url(#sun3b)"/>' + gb + finish())
 
+# iOS 18's dark and tinted Home Screen icons: the stones alone on a clear ground (iOS draws the
+# dark tile, or tints the grey stones itself). Dark wears Night's orange; tinted is greyscale.
+def ios_variant(slug, defs, body):
+    open(f"trek-icon-{slug}-ios.svg", "w").write(svg(defs, body))
+
+d, b = porcelain_stack(CAIRN, "#FFC08A", "#FF7A3D", "#D9531E", "cd", side="#B8410F", shadow_col="#000", shadow_op=.6, spec=.6)
+ios_variant("dark", d, b)
+d, b = porcelain_stack(CAIRN, "#FFFFFF", "#E4E4E4", "#BDBDBD", "ct", side="#8C8C8C", shadow_col="#000", shadow_op=.5, spec=.5)
+ios_variant("tinted", d, b)
 
 # The mark: the cairn alone in Trek's orange, nearest the ground the deepest.
 def mark():

@@ -23,13 +23,16 @@ struct DiffSheet: View {
                         NavigationLink(value: f.path) { ChangedFileRow(file: f) }
                     }
                 } footer: {
-                    if let n = model.gitStatus[target]?.files.count, n != files.count {
-                        Text("Diffs come from the folder's git status as it is now: a file committed or changed back since has none.")
+                    Group {
+                        if let n = model.gitStatus[target]?.files.count, n != files.count {
+                            Text("Diffs come from the folder's git status as it is now: a file committed or changed back since has none.")
+                        }
                     }
+                    .font(.ui(.footnote))
                 }
             }
             .scrollContentBackground(.hidden)
-            .background(Trek.background)
+            .background(Trek.grouped)
             .navigationTitle("Changed files")
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: String.self) { p in
@@ -57,7 +60,7 @@ struct ChangedFileRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(file.name)
-                        .font(.subheadline.weight(.medium))
+                        .font(.ui(.subheadline).weight(.medium))
                         .strikethrough(file.status == .deleted)
                         .foregroundStyle(file.status == .deleted ? Trek.muted : Trek.foreground)
                         .lineLimit(1)
@@ -68,7 +71,7 @@ struct ChangedFileRow: View {
                 let dir = (file.path as NSString).deletingLastPathComponent
                 if !dir.isEmpty {
                     Text(dir)
-                        .font(.caption)
+                        .font(.ui(.caption))
                         .foregroundStyle(Trek.muted)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -135,7 +138,7 @@ struct DiffScreen: View {
 
     private func note(_ text: String, symbol: String) -> some View {
         Label(text, systemImage: symbol)
-            .font(.subheadline)
+            .font(.ui(.subheadline))
             .foregroundStyle(Trek.muted)
             .padding(.horizontal, 16)
     }
@@ -198,13 +201,13 @@ struct DiffText: View {
         let gutter = CGFloat(String(lines.compactMap(\.number).max() ?? 0).count) * 7.5 + 10
         LazyVStack(alignment: .leading, spacing: 0) {
             if lines.isEmpty {
-                Text("No lines changed.").font(.subheadline).foregroundStyle(Trek.muted).padding(.horizontal, 16)
+                Text("No lines changed.").font(.ui(.subheadline)).foregroundStyle(Trek.muted).padding(.horizontal, 16)
             }
             ForEach(lines) { line in
                 row(line, gutter: gutter)
             }
         }
-        .font(.system(size: 12, design: .monospaced))
+        .font(.code(size: 12))
         .background(Trek.surface)
         .overlay(alignment: .top) { Rectangle().fill(Trek.border).frame(height: 0.5) }
         .overlay(alignment: .bottom) { Rectangle().fill(Trek.border).frame(height: 0.5) }
@@ -215,13 +218,13 @@ struct DiffText: View {
         switch line.kind {
         case .hunk:
             Text(line.text)
-                .foregroundStyle(Trek.question)
+                .foregroundStyle(Trek.indigo)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 5)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Trek.question.opacity(0.08))
+                .background(Trek.indigo.opacity(0.08))
         case .note:
             Text(line.text).italic().foregroundStyle(Trek.muted).padding(.horizontal, 12).padding(.vertical, 2)
         case .added, .removed, .context:

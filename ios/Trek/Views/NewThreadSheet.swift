@@ -46,10 +46,10 @@ struct NewThreadSheet: View {
                         .frame(width: 54, height: 47)
                         .shadow(color: Color(hex: 0xFF8A3D).opacity(0.45), radius: 18)
                     Text("What are we building?")
-                        .font(.system(size: 28, weight: .semibold))
+                        .font(.ui(size: 28, weight: .semibold))
                         .tracking(-0.5)
                     if let host = model.host?.name {
-                        Text("Runs on \(host)").font(.subheadline).foregroundStyle(Trek.muted)
+                        Text("Runs on \(host)").font(.ui(.subheadline)).foregroundStyle(Trek.muted)
                     }
                 }
                 Spacer()
@@ -80,7 +80,7 @@ struct NewThreadSheet: View {
             if !photos.isEmpty { PhotoStrip(photos: $photos) }
             TextField("Describe the task", text: $text, axis: .vertical)
                 .lineLimit(2...8)
-                .font(.system(size: 17))
+                .font(.ui(size: 17))
                 .focused($focused)
                 .padding(.horizontal, 6)
                 .padding(.top, 6)
@@ -139,8 +139,9 @@ struct NewThreadSheet: View {
                 }
             }
         } label: {
-            chip(tint: access?.tint) {
+            chip {
                 Image(systemName: (access ?? .autoAcceptEdits).icon).font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(access?.tint ?? Trek.muted)
                 Text(access?.label ?? "Access")
             }
         }
@@ -148,8 +149,9 @@ struct NewThreadSheet: View {
 
     private var planChip: some View {
         Button { withAnimation(.snappy(duration: 0.15)) { plan.toggle() } } label: {
-            chip(tint: plan ? Trek.plan : nil) {
-                Image(systemName: plan ? "list.bullet.clipboard.fill" : "list.bullet.clipboard").font(.system(size: 13, weight: .medium))
+            chip(selected: plan) {
+                Image(systemName: "checklist").font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(plan ? Trek.plan : Trek.muted)
                 Text("Plan")
             }
         }
@@ -181,7 +183,7 @@ struct NewThreadSheet: View {
     /// Logo, model and effort, like the thread's chip; opens the same picker.
     private var agentChip: some View {
         Button { choosingModel = true } label: {
-            chip { ModelChipLabel(agentKey: agent?.key ?? "", model: modelLabel, effort: effort, logo: 17) }
+            chip { ModelChipLabel(agentKey: agent?.key ?? "", agentLogo: agent?.logo, model: modelLabel, effort: effort, logo: 17) }
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Model: \(modelLabel)")
@@ -213,17 +215,14 @@ struct NewThreadSheet: View {
         .buttonStyle(.plain)
     }
 
-    /// A chip on a neutral wash, or on a wash of `tint` with a rim of it (access level, plan on).
-    private func chip<Content: View>(tint: Color? = nil, @ViewBuilder _ content: () -> Content) -> some View {
+    /// A chip on a neutral wash (the Mac's composer pills), a shade darker when `selected`.
+    private func chip<Content: View>(selected: Bool = false, @ViewBuilder _ content: () -> Content) -> some View {
         HStack(spacing: 6) { content() }
-            .font(.subheadline.weight(.medium))
-            .foregroundStyle(tint ?? Trek.foreground)
+            .font(.ui(.subheadline).weight(.medium))
+            .foregroundStyle(Trek.foreground)
             .padding(.horizontal, 12)
             .frame(height: 36)
-            .background((tint ?? Trek.foreground).opacity(tint == nil ? 0.06 : 0.13), in: Capsule())
-            .overlay {
-                if let tint { Capsule().strokeBorder(tint.opacity(0.3), lineWidth: 0.75) }
-            }
+            .background(Trek.foreground.opacity(selected ? 0.12 : 0.06), in: Capsule())
     }
 
     private func start() {

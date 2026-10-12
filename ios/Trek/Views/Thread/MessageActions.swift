@@ -52,7 +52,7 @@ struct TurnActions: View {
             RowIconButton(systemImage: "doc.on.doc", label: "Copy response") { act(.copyResponse(end: end)) }
             if at != nil || secs != nil {
                 Text([at.map { When.clock($0) }, secs.map { When.duration($0) }].compactMap { $0 }.joined(separator: " · "))
-                    .font(.caption.monospacedDigit())
+                    .font(.ui(.caption).monospacedDigit())
                     .foregroundStyle(Trek.muted.opacity(0.85))
                     .fixedSize()
                     .accessibilityLabel("Finished\(at.map { " at \(When.clock($0))" } ?? "")\(secs.map { ", worked for \(When.duration($0))" } ?? "")")
@@ -110,18 +110,22 @@ struct MessageActions: View {
     var latest: Bool
     /// A turn is running: edit and rewind wait for it.
     var busy: Bool
+    /// Not a prompt (a command Trek answered, a typed answer): there's nothing to go back to.
+    var aside = false
     var act: (RowAction) -> Void
 
     var body: some View {
         HStack(spacing: 0) {
             if let at {
                 Text(When.clock(at))
-                    .font(.caption.monospacedDigit())
+                    .font(.ui(.caption).monospacedDigit())
                     .foregroundStyle(Trek.muted.opacity(0.85))
                     .padding(.trailing, 4)
                     .accessibilityLabel("Sent at \(When.clock(at))")
             }
-            if latest {
+            if aside {
+                EmptyView()
+            } else if latest {
                 RowIconButton(systemImage: "pencil", label: "Edit", disabled: busy) { act(.rewind(user: item, edit: true)) }
                 RowIconButton(systemImage: "arrow.uturn.backward", label: "Rewind to here", disabled: busy) { act(.rewind(user: item, edit: false)) }
                 RowIconButton(systemImage: "arrow.triangle.branch", label: "Fork from here") { act(.fork(item: item)) }

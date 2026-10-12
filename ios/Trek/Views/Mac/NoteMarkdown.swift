@@ -40,7 +40,7 @@ struct NoteMarkdown: View {
             .padding(.leading, CGFloat(indent) * 18 + 4)
         case .numbered(let n, let indent):
             HStack(alignment: .firstTextBaseline, spacing: 7) {
-                Text("\(n).").font(.system(size: s)).monospacedDigit().foregroundStyle(Trek.muted)
+                Text("\(n).").font(.ui(size: s)).monospacedDigit().foregroundStyle(Trek.muted)
                 inline(line.text, s)
             }
             .padding(.leading, CGFloat(indent) * 18)
@@ -69,7 +69,7 @@ struct NoteMarkdown: View {
         case .code:
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(line.text)
-                    .font(.system(size: s * 0.8, design: .monospaced))
+                    .font(.code(size: s * 0.8))
                     .padding(12)
             }
             .background(Trek.foreground.opacity(0.05), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -80,7 +80,7 @@ struct NoteMarkdown: View {
 
     private func inline(_ text: String, _ size: CGFloat, weight: Font.Weight = .regular) -> some View {
         Text(NoteInline.attributed(text))
-            .font(.system(size: size, weight: weight))
+            .font(.ui(size: size, weight: weight))
             .fixedSize(horizontal: false, vertical: true)
             .lineSpacing(2)
     }

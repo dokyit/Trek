@@ -31,15 +31,28 @@ use trek_core::store::{Item, Section, Thread, ToolStatus, now_ms};
 use trek_core::{AgentId, RunState};
 use trek_remote as tr;
 
+mod attachments;
+mod background;
 mod basecamp;
+pub(crate) mod bonjour;
 mod commands;
 mod git;
+mod icons;
 mod notes;
+pub(crate) mod search;
+mod queue;
 mod settings;
+mod sub_agents;
+mod thread_actions;
 mod usage;
 
 /// How often changes go out to phones.
 const TICK: Duration = Duration::from_millis(250);
+/// A phone server that couldn't start is tried again after this long.
+pub(crate) const RETRY: Duration = Duration::from_secs(10);
+/// How often this Mac's network interfaces are looked at while the server runs, so a new address
+/// (another network, DHCP, Wi-Fi back after sleep) gets a server listening on it.
+const ADDRESSES_EVERY: Duration = Duration::from_secs(5);
 /// Settled threads beyond this many (newest first) stay off the phone.
 const SETTLED_ON_PHONE: usize = 150;
 
@@ -59,6 +72,8 @@ pub struct Remote {
     pub connected: HashSet<String>,
     /// Thread rows as last sent.
     pub(crate) sent: HashMap<String, tr::ThreadSummary>,
+    /// Rows of threads the list leaves out (sub-agents, threads opened from a search), as last sent.
+    pub(crate) unlisted: HashMap<String, tr::ThreadSummary>,
     /// How phones answered requests, by thread and request id, so their cards close saying so.
     pub(crate) answered: HashMap<(String, String), tr::AnswerResponse>,
     /// Transcripts phones have open: followed every tick.
@@ -69,6 +84,8 @@ pub struct Remote {
     pub(crate) dormant: HashMap<String, Watched>,
     /// What the thread rows were last built from (`push_remote_changes`).
     rows_key: Option<(u64, u64, i64)>,
+    /// The server announced on the local network, on Wi-Fi (`bonjour`).
+    _advert: Option<bonjour::Advert>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -338,6 +355,10 @@ impl Workspace {
     pub fn sync_remote(&mut self, cx: &mut Context<Self>) {
         let want = self.settings.mobile.enabled;
         let wanted_with = (self.settings.mobile.port, self.settings.mobile.reach);
+        if !want {
+            self.remote_error = None;
+            self.remote_retry = None;
+        }
         match (&self.remote, want) {
             (None, true) if !self.remote_starting => self.start_remote(cx),
             (Some(_), false) => self.stop_remote(cx),
@@ -355,6 +376,7 @@ impl Workspace {
             return;
         }
         self.remote_starting = true;
+        self.remote_retry = None;
         let port = self.settings.mobile.port;
         let reach = self.settings.mobile.reach;
         cx.spawn(async move |this, cx| {
@@ -362,6 +384,7 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     let host = host_info();
+                    let announce = (host.name.clone(), host.id.clone());
                     let identity = tr::TlsIdentity::load_or_create(&mobile_dir(), &host.name)?;
                     let addresses = Addresses::find();
                     let (bind, advertise) = remote_endpoint(&addresses, reach, port)?;
@@ -370,6 +393,7 @@ impl Workspace {
                     config.advertise = Some(advertise.clone());
                     config.devices_path = Some(mobile_dir().join("devices.json"));
                     config.tls = Some(identity);
+                    config.features = tr::feature::ALL.iter().map(|f| f.to_string()).collect();
                     let (host, requests) = tr::ChannelHost::new();
                     let host = Arc::new(host);
                     let handle = trek_core::runtime()
@@ -389,24 +413,47 @@ impl Workspace {
                         })
                         .await
                         .map_err(std::io::Error::other)??;
-                    anyhow::Ok((handle, requests, addresses, advertise))
+                    anyhow::Ok((handle, requests, addresses, advertise, announce))
                 })
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 ws.remote_starting = false;
                 match started {
-                    Ok((handle, requests, addresses, advertise)) if ws.settings.mobile.enabled => {
-                        let tasks = vec![serve_requests(cx.weak_entity(), requests, cx), push_changes(cx.weak_entity(), cx), hear_notices(cx.weak_entity(), handle.notices(), cx)];
+                    Ok((handle, requests, addresses, advertise, (name, id))) if ws.settings.mobile.enabled => {
+                        ws.remote_error = None;
+                        // Only where phones on this network can reach it: not this Mac alone,
+                        // and not the tailnet (a phone there dials the address it paired with).
+                        let on_lan = reach == trek_core::settings::Reach::Wifi && addresses.lan.is_some();
+                        let advert = on_lan.then(|| bonjour::Advert::new(&name, &id, port)).flatten();
+                        let tasks = vec![
+                            serve_requests(cx.weak_entity(), requests, cx),
+                            push_changes(cx.weak_entity(), cx),
+                            hear_notices(cx.weak_entity(), handle.notices(), cx),
+                            follow_addresses(cx.weak_entity(), advertise.clone(), (port, reach), cx),
+                        ];
                         let devices = handle.devices();
-                        ws.remote = Some(Remote { handle, offer: None, addresses, advertise, started_with: (port, reach), devices, connected: HashSet::new(), sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _tasks: tasks });
+                        ws.remote = Some(Remote { handle, offer: None, addresses, advertise, started_with: (port, reach), devices, connected: HashSet::new(), sent: HashMap::new(), unlisted: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _advert: advert, _tasks: tasks });
                     }
                     // Turned off while it started.
                     Ok((handle, ..)) => handle.shutdown(),
-                    Err(e) => {
-                        ws.settings.mobile.enabled = false;
-                        ws.save_settings(cx);
-                        cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't start the phone server: {e:#}"), undo: None });
+                    // The switch stays on and it's tried again: a Mac that just woke, or hasn't
+                    // joined Wi-Fi or Tailscale yet, gets there in a moment, and a switch that
+                    // turned itself off left phones out until someone looked.
+                    Err(e) if ws.settings.mobile.enabled => {
+                        let message = format!("{e:#}");
+                        if ws.remote_error.as_deref() != Some(message.as_str()) {
+                            cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't start the phone server: {message}. Trying again."), undo: None });
+                        }
+                        ws.remote_error = Some(message);
+                        ws.remote_retry = Some(cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(RETRY).await;
+                            let _ = this.update(cx, |ws, cx| {
+                                ws.remote_retry = None;
+                                ws.sync_remote(cx);
+                            });
+                        }));
                     }
+                    Err(_) => {}
                 }
                 cx.notify();
             });
@@ -424,7 +471,7 @@ impl Workspace {
         let handle = trek_core::runtime().block_on(tr::RemoteServer::start(config, Arc::new(host))).expect("a test server");
         let connected = HashSet::from(["phone".to_string()]);
         let started_with = (0, trek_core::settings::Reach::Wifi);
-        self.remote = Some(Remote { handle, offer: None, addresses: Addresses::default(), advertise: String::new(), started_with, devices: vec![], connected, sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _tasks: vec![] });
+        self.remote = Some(Remote { handle, offer: None, addresses: Addresses::default(), advertise: String::new(), started_with, devices: vec![], connected, sent: HashMap::new(), unlisted: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _advert: None, _tasks: vec![] });
     }
 
     fn stop_remote(&mut self, cx: &mut Context<Self>) {
@@ -498,9 +545,13 @@ impl Workspace {
             tr::HostRequest::SetPrefs { req, reply } => {
                 let _ = reply.send(self.remote_set_prefs(req, cx));
             }
+            tr::HostRequest::ThreadAction { req: tr::ThreadActionRequest { thread_id, action: tr::ThreadAction::Delete { confirmed } }, reply } => {
+                self.remote_delete(thread_id, confirmed, reply, cx)
+            }
             tr::HostRequest::ThreadAction { req, reply } => {
                 let _ = reply.send(self.remote_thread_action(req, cx));
             }
+            tr::HostRequest::Search { req, reply } => self.remote_search(req, reply, cx),
             tr::HostRequest::MarkSeen { thread_id, reply } => {
                 if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
                     t.last_seen_at = now_ms().max(t.updated_at);
@@ -544,6 +595,17 @@ impl Workspace {
             tr::HostRequest::SetSettings { change, reply } => {
                 let _ = reply.send(self.remote_set_settings(change, cx));
             }
+            // Parity with the Mac (`tr::feature`).
+            tr::HostRequest::UseReset { credit_id, reply } => self.remote_use_reset(credit_id, reply, cx),
+            tr::HostRequest::QueueAction { req, reply } => {
+                let _ = reply.send(self.remote_queue_action(req, cx));
+            }
+            tr::HostRequest::Attachment { req, reply } => self.remote_attachment(req, reply, cx),
+            tr::HostRequest::BackgroundOutput { thread_id, task_id, reply } => self.remote_background_output(thread_id, task_id, reply, cx),
+            tr::HostRequest::StopBackground { thread_id, task_id, reply } => {
+                let _ = reply.send(self.remote_stop_background(&thread_id, &task_id, cx));
+            }
+            tr::HostRequest::Icon { req, reply } => self.remote_icon(req, reply, cx),
         }
     }
 
@@ -622,6 +684,7 @@ impl Workspace {
             tr::ThreadAction::Unsettle => self.unsettle(id, cx),
             tr::ThreadAction::Archive => self.archive(id, cx),
             tr::ThreadAction::Rename { title } => self.rename(id, title, cx),
+            action => return self.remote_more_thread_action(id, action, cx),
         }
         Ok(())
     }
@@ -840,10 +903,11 @@ impl Workspace {
     fn remote_project(&self, t: &Thread) -> tr::ProjectRef {
         match t.project_id.as_deref().and_then(|p| self.project(p)) {
             Some(p) => {
-                let hue = tr::project_hue(&p.name, self.project_prefs(&p.path).color);
-                tr::ProjectRef { id: p.id.clone(), name: p.name.clone(), hue, monogram: tr::monogram(&p.name) }
+                let prefs = self.project_prefs(&p.path);
+                let (hue, icon) = (tr::project_hue(&p.name, prefs.color), icons::project_icon(prefs.icon.as_deref()));
+                tr::ProjectRef { id: p.id.clone(), name: p.name.clone(), hue, monogram: tr::monogram(&p.name), icon }
             }
-            None => tr::ProjectRef { id: String::new(), name: "No project".into(), hue: 220, monogram: "··".into() },
+            None => tr::ProjectRef { id: String::new(), name: "No project".into(), hue: 220, monogram: "··".into(), icon: None },
         }
     }
 
@@ -867,7 +931,8 @@ impl Workspace {
                 })
             });
         // (A snoozed thread that needs you is in the inbox already: it raised its hand.)
-        let section = match t.section(now).unwrap_or(Section::Settled) {
+        // A sub-agent (sent `unlisted`): where it would sit on its own.
+        let section = match t.section(now).or_else(|| t.own_section(now)).unwrap_or(Section::Settled) {
             Section::Pinned => tr::Section::Pinned,
             Section::Inbox => tr::Section::Inbox,
             Section::Working => tr::Section::Working,
@@ -890,8 +955,11 @@ impl Workspace {
         });
         let cost = live.and_then(|l| l.spend.as_ref()).and_then(|spend| {
             let billing = self.billing_of(t);
+            let cache = crate::cost::CacheHits::of(spend);
             Some(tr::Cost {
                 label: crate::cost::label(billing.as_ref(), spend)?,
+                cached: cache.map(|c| c.label()),
+                cached_detail: cache.map(|c| c.detail()),
                 detail: crate::cost::billing_note(billing.as_ref()),
                 plan: match &billing {
                     Some(trek_agents::Billing::Plan(plan)) => plan.clone(),
@@ -911,7 +979,7 @@ impl Workspace {
             behind: g.behind,
             default_branch: g.default_branch.clone(),
         });
-        tr::ThreadSummary {
+        let mut row = tr::ThreadSummary {
             id: t.id.clone(),
             title: t.title.clone(),
             project: self.remote_project(t),
@@ -951,7 +1019,14 @@ impl Workspace {
             background,
             base: t.worktree.as_ref().map(|w| w.base.clone()),
             git,
-        }
+            parent_id: t.parent_id.clone(),
+            snoozed_until: t.snoozed_until.filter(|at| *at > now),
+            needs_thread: None,
+            queued: self.remote_queued(t),
+            background_tasks: self.remote_background(t),
+        };
+        self.remote_sub_agent_needs(t, &mut row);
+        row
     }
 
     /// What `t` has at work, as its sidebar card and its tooltip say: its sub-agents (Trek's, and
@@ -976,6 +1051,7 @@ impl Workspace {
                 // Rounded: what it's worked for is time paused at a limit aside, so this can
                 // drift by the odd millisecond between ticks.
                 since: Some((now_ms() - self.task_elapsed(&c.id).as_millis() as i64) / 1000 * 1000),
+                thread_id: Some(c.id.clone()),
             })
             .collect();
         let Some(l) = self.live.get(&t.id) else { return (kids, vec![]) };
@@ -985,6 +1061,7 @@ impl Workspace {
             title: title.to_string(),
             state: tr::SubAgentState::Running,
             since: Some(instant_ms(started)),
+            thread_id: None,
         };
         let out = |id: &str| l.tasks.iter().any(|k| k.id == id && k.done.is_none());
         kids.extend(l.tasks.iter().filter(|k| k.done.is_none()).map(|k| own(&k.description, k.started)));
@@ -1014,17 +1091,22 @@ impl Workspace {
 
     fn remote_snapshot(&self) -> tr::Snapshot {
         let now = now_ms();
-        let threads = self.remote_threads().into_iter().map(|t| self.remote_summary(t, now)).collect();
+        let threads: Vec<tr::ThreadSummary> = self.remote_threads().into_iter().map(|t| self.remote_summary(t, now)).collect();
+        let unlisted = self.remote_unlisted(&threads, now);
         let projects = self
             .workspace_projects()
             .into_iter()
-            .map(|p| tr::ProjectSummary {
-                id: p.id.clone(),
-                name: p.name.clone(),
-                hue: tr::project_hue(&p.name, self.project_prefs(&p.path).color),
-                monogram: tr::monogram(&p.name),
-                branch: self.git_info.get(&p.path).and_then(|g| g.branch.clone()),
-                is_repo: p.is_repo,
+            .map(|p| {
+                let prefs = self.project_prefs(&p.path);
+                tr::ProjectSummary {
+                    id: p.id.clone(),
+                    name: p.name.clone(),
+                    hue: tr::project_hue(&p.name, prefs.color),
+                    monogram: tr::monogram(&p.name),
+                    branch: self.git_info.get(&p.path).and_then(|g| g.branch.clone()),
+                    is_repo: p.is_repo,
+                    icon: icons::project_icon(prefs.icon.as_deref()),
+                }
             })
             .collect();
         // What the composer's model picker offers: signed-in agents, API keys, local models.
@@ -1039,10 +1121,10 @@ impl Workspace {
                     .into_iter()
                     .map(|m| tr::ModelOption { id: m.id, label: m.name, efforts: m.efforts.iter().map(|e| e.as_str().to_string()).collect() })
                     .collect();
-                tr::AgentOption { key: agent.key(), name: agent.display_name(), logo: crate::ui::logo_key(&agent).map(str::to_string), default_model, models }
+                tr::AgentOption { key: agent.key(), name: agent.display_name(), logo: crate::ui::logo_key(&agent).map(str::to_string), default_model, models, icon: icons::agent_icon(&agent) }
             })
             .collect();
-        tr::Snapshot { threads, projects, agents, full_access: self.settings.permissions.full_access_unlocked }
+        tr::Snapshot { threads, projects, agents, full_access: self.settings.permissions.full_access_unlocked, unlisted }
     }
 
     /// Bring `w` up to date with `id`'s transcript, looking only at what can have changed since
@@ -1311,6 +1393,7 @@ impl Workspace {
         // Thread rows, when something of them can have changed (or it's been a while).
         let key = (self.threads_gen, self.live.values().fold(0u64, |sum, l| sum.wrapping_add(l.revision)), now / ROWS_AT_LEAST_MS);
         let rows: Option<Vec<tr::ThreadSummary>> = (remote.rows_key != Some(key)).then(|| self.remote_threads().into_iter().map(|t| self.remote_summary(t, now)).collect());
+        let unlisted = rows.as_ref().map(|rows| (self.remote_unlisted(rows, now), self.threads.iter().map(|t| t.id.clone()).collect::<HashSet<_>>()));
         let Some(remote) = self.remote.as_mut() else { return };
         if let Some(rows) = rows {
             remote.rows_key = Some(key);
@@ -1318,8 +1401,11 @@ impl Workspace {
             let gone: Vec<String> = remote.sent.keys().filter(|id| !ids.contains(id.as_str())).cloned().collect();
             for id in gone {
                 remote.sent.remove(&id);
-                remote.watched.remove(&id);
-                remote.dormant.remove(&id);
+                // Still open on a phone, it's followed on as an unlisted row.
+                if !unlisted.as_ref().is_some_and(|(u, _)| u.iter().any(|r| r.id == id)) {
+                    remote.watched.remove(&id);
+                    remote.dormant.remove(&id);
+                }
                 remote.handle.push(tr::HostEvent::ThreadRemoved(id));
             }
             for row in rows {
@@ -1328,6 +1414,9 @@ impl Workspace {
                     remote.handle.push(tr::HostEvent::Thread(row));
                 }
             }
+        }
+        if let Some((unlisted, existing)) = unlisted {
+            sub_agents::send_unlisted(remote, unlisted, &existing);
         }
         // Open transcripts.
         let watched: Vec<String> = remote.watched.keys().cloned().collect();
@@ -1418,7 +1507,7 @@ fn clip_text_to(text: &str, limit: usize) -> String {
 /// Item `ix` of `live` as the phone shows it (`cwd`: its thread's folder).
 fn item_body(live: &LiveThread, cwd: Option<&std::path::Path>, ix: usize) -> tr::ItemBody {
     match &live.items[ix] {
-        Item::User { text, images, .. } => tr::ItemBody::User { text: clip_text(text), images: images.len() as u32 },
+        Item::User { text, images, aside, .. } => tr::ItemBody::User { text: clip_text(text), images: images.len() as u32, aside: *aside },
         Item::Assistant { text } => tr::ItemBody::Assistant { text: clip_text(text), streaming: live.streaming == Some(ix) },
         Item::Reasoning { text } => tr::ItemBody::Reasoning { text: clip_text(text) },
         // A link to another thread (`trek_core::lineage`): the phone has no rows that open
@@ -1572,7 +1661,7 @@ fn changes_item(files: Vec<tr::ChangedFile>) -> tr::ItemBody {
 
 /// An agent as phones see it: its key, name and the logo the Mac draws for it.
 pub(crate) fn agent_ref(agent: &AgentId) -> tr::AgentRef {
-    tr::AgentRef { key: agent.key(), name: agent.display_name(), logo: crate::ui::logo_key(agent).map(str::to_string) }
+    tr::AgentRef { key: agent.key(), name: agent.display_name(), logo: crate::ui::logo_key(agent).map(str::to_string), icon: icons::agent_icon(agent) }
 }
 
 /// An instant as unix ms, the same each time it's asked (`now - elapsed` drifts by the time it
@@ -1692,6 +1781,34 @@ fn serve_requests(ws: WeakEntity<Workspace>, requests: async_channel::Receiver<t
             if ws.update(cx, |ws, cx| ws.remote_request(req, cx)).is_err() {
                 break;
             }
+        }
+    })
+}
+
+/// Start the server again when the address it should listen on isn't the one it does: Trek
+/// started before Wi-Fi was up (it listened on this Mac only), the network handed out another
+/// address, Tailscale came or went. The interface list is cheap to read and is what changes
+/// first; Tailscale is asked only when it does.
+fn follow_addresses(ws: WeakEntity<Workspace>, advertise: String, (port, reach): (u16, trek_core::settings::Reach), cx: &mut Context<Workspace>) -> Task<()> {
+    cx.spawn(async move |_, cx: &mut AsyncApp| {
+        let mut seen = interface_addresses();
+        loop {
+            cx.background_executor().timer(ADDRESSES_EVERY).await;
+            let now = cx.background_executor().spawn(async { interface_addresses() }).await;
+            if now == seen {
+                continue;
+            }
+            seen = now;
+            let wanted = cx.background_executor().spawn(async move { remote_endpoint(&Addresses::find(), reach, port).map(|(_, a)| a).ok() }).await;
+            if wanted.as_deref() == Some(advertise.as_str()) {
+                continue;
+            }
+            tracing::info!("phone server: this Mac's address is now {wanted:?}, was {advertise}; starting again");
+            let _ = ws.update(cx, |ws, cx| {
+                ws.stop_remote(cx);
+                ws.sync_remote(cx);
+            });
+            break;
         }
     })
 }

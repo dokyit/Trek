@@ -7,6 +7,9 @@ import SwiftUI
 struct MarkdownText: View, Equatable {
     var text: String
     var size: CGFloat = 16
+    /// The answer is still being written: a visualization whose fence is still open is on its
+    /// way, not one that was never finished.
+    var live = false
 
     typealias Align = Markdown.Align
     typealias Block = Markdown.Block
@@ -64,6 +67,8 @@ struct MarkdownText: View, Equatable {
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Trek.border, lineWidth: 0.5))
         case .table(let header, let align, let rows):
             MarkdownTable(header: header, align: align, rows: rows, size: size)
+        case .viz(let block):
+            VizBlockView(block: block, live: live, size: size)
         }
     }
 
@@ -137,13 +142,15 @@ nonisolated enum Markdown {
         case quote(String)
         case code(String, String)
         case table(header: [String], align: [Align], rows: [[String]])
+        /// A ```trek-viz fence: drawn natively.
+        case viz(VizBlock)
 
         /// The inline Markdown in it, for `RichText` (code isn't).
         var inlines: [String] {
             switch self {
             case .heading(_, let s), .paragraph(let s), .quote(let s): [s]
             case .bullet(let items), .numbered(let items): items
-            case .code: []
+            case .code, .viz: []
             case .table(let header, _, let rows): header + rows.flatMap { $0 }
             }
         }
@@ -183,6 +190,13 @@ nonisolated enum Markdown {
         var code: [String]? = nil
         var lang = ""
 
+        /// A fenced block as it ends: a ```trek-viz one is a visualization (`closed`: its fence is).
+        func fence(_ lines: [String], closed: Bool) -> Block {
+            lang.split(separator: " ").first == "trek-viz"
+                ? .viz(VizBlock.make(payload: lines.joined(separator: "\n"), closed: closed))
+                : .code(lang, lines.joined(separator: "\n"))
+        }
+
         func flushTable() {
             guard !table.isEmpty else { return }
             if table.count >= 2, isSeparator(table[1]) {
@@ -216,7 +230,7 @@ nonisolated enum Markdown {
             let line = raw.trimmingCharacters(in: .whitespaces)
             if var c = code {
                 if line.hasPrefix("```") {
-                    out.append(.code(lang, c.joined(separator: "\n")))
+                    out.append(fence(c, closed: true))
                     code = nil
                 } else {
                     c.append(raw)
@@ -233,7 +247,7 @@ nonisolated enum Markdown {
             }
             if line.hasPrefix("```") {
                 flush()
-                lang = String(line.dropFirst(3))
+                lang = line.dropFirst(3).trimmingCharacters(in: .whitespaces)
                 code = []
             } else if line.isEmpty {
                 flush()
@@ -256,7 +270,7 @@ nonisolated enum Markdown {
                 para.append(line)
             }
         }
-        if let c = code { out.append(.code(lang, c.joined(separator: "\n"))) }
+        if let c = code { out.append(fence(c, closed: false)) }
         flush()
         return out
     }

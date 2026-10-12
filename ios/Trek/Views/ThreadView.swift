@@ -40,6 +40,9 @@ private struct ThreadScreen: View {
     @State private var archiving = false
     @State private var showingGit = false
     @State private var newThread: NewThreadRequest?
+    @State private var snoozePicking = false
+    @State private var deleteAsk: DeleteAsk?
+    @Environment(\.dismiss) private var dismiss
 
     private var threadID: String { store.id }
     private var thread: ThreadSummary? { store.summary }
@@ -80,6 +83,8 @@ private struct ThreadScreen: View {
                 Text("It leaves your threads on the Mac too.")
             }
             .sheet(isPresented: $showingGit) { GitSheet(threadID: threadID) }
+            .sheet(isPresented: $snoozePicking) { if let t = thread { SnoozePicker(thread: t) } }
+            .deleteConfirmation($deleteAsk, model: model) { _ in dismiss() }
             .sheet(item: $newThread) { request in
                 NewThreadSheet(project: request.project, prompt: request.prompt) { model.openRequest = $0 }
             }
@@ -97,6 +102,10 @@ private struct ThreadScreen: View {
                 switch Launch.sheet {
                 case "git": showingGit = true
                 case "commands": composer.draft = "/"
+                case "snooze": snoozePicking = true
+                case "delete":
+                    // Once the row is in.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if let t = thread { model.askToDelete(t, into: $deleteAsk) } }
                 default: break
                 }
             }
@@ -113,6 +122,7 @@ private struct ThreadScreen: View {
 
     private var subtitle: String {
         guard let t = thread else { return "" }
+        if t.parentId != nil { return ["Sub-agent", t.modelLabel].compactMap { $0 }.joined(separator: " · ") }
         return [t.project?.name, t.branch].compactMap { $0 }.joined(separator: " · ")
     }
 
@@ -132,28 +142,45 @@ private struct ThreadScreen: View {
                         if let b = t.branch { Label(b, systemImage: "arrow.triangle.branch") }
                         if t.additions + t.deletions > 0 { Label("+\(t.additions) −\(t.deletions)", systemImage: "plus.forwardslash.minus") }
                     }
-                    Section {
-                        if t.pinned {
-                            Button("Unpin", systemImage: "pin.slash") { model.threadAction(threadID, .unpin) }
-                        } else {
-                            Button("Pin", systemImage: "pin") { model.threadAction(threadID, .pin, done: "Pinned") }
-                        }
-                        if t.section == .settled {
-                            Button("Back to the inbox", systemImage: "tray.and.arrow.down") { model.threadAction(threadID, .unsettle) }
-                        } else {
-                            Button("Settle", systemImage: "checkmark.circle") { model.threadAction(threadID, .settle, done: "Settled") }
-                        }
-                        Button("Rename…", systemImage: "pencil") {
-                            newTitle = t.title
-                            renaming = true
+                    // A sub-agent isn't in the list: what moves rows around doesn't apply to it.
+                    if t.parentId == nil {
+                        Section {
+                            if t.pinned {
+                                Button("Unpin", systemImage: "pin.slash") { model.threadAction(threadID, .unpin) }
+                            } else {
+                                Button("Pin", systemImage: "pin") { model.threadAction(threadID, .pin, done: "Pinned") }
+                            }
+                            if t.section == .settled {
+                                Button("Back to the inbox", systemImage: "tray.and.arrow.down") { model.threadAction(threadID, .unsettle) }
+                            } else {
+                                Button("Settle", systemImage: "checkmark.circle") { model.threadAction(threadID, .settle, done: "Settled") }
+                            }
+                            if model.serves(.snooze) {
+                                SnoozeMenu(thread: t) { snoozePicking = true }
+                            }
+                            Button("Rename…", systemImage: "pencil") {
+                                newTitle = t.title
+                                renaming = true
+                            }
+                            if model.serves(.regenerateTitle) {
+                                Button("Regenerate title", systemImage: "text.badge.star") { model.regenerateTitle(threadID) }
+                            }
+                            if model.serves(.markUnread) {
+                                Button("Mark unread", systemImage: "circlebadge") { model.markUnread(threadID) }
+                            }
                         }
                     }
                 }
                 Button("Copy title", systemImage: "doc.on.doc") { UIPasteboard.general.string = thread?.title }
                 if thread?.runState == .working {
-                    Button("Stop", systemImage: "stop.fill", role: .destructive) { model.interrupt(threadID) }
+                    Button(thread?.parentId == nil ? "Stop" : "Stop sub-agent", systemImage: "stop.fill", role: .destructive) { model.interrupt(threadID) }
                 }
-                Button("Archive", systemImage: "archivebox", role: .destructive) { archiving = true }
+                if thread?.parentId == nil {
+                    Button("Archive", systemImage: "archivebox", role: .destructive) { archiving = true }
+                    if model.serves(.delete), let t = thread {
+                        Button("Delete…", systemImage: "trash", role: .destructive) { model.askToDelete(t, into: $deleteAsk) }
+                    }
+                }
             } label: {
                 Image(systemName: "ellipsis")
             }
@@ -228,6 +255,9 @@ private struct TranscriptList: View, Equatable {
     /// Far enough above the latest that the jump-down button is out.
     @State private var awayFromBottom = false
 
+    /// How many of the latest rows are laid out outside the lazy stack.
+    private static let laidOut = 3
+
     private struct ScrollEdges: Equatable {
         /// Within a couple of screens of the top.
         var nearTop: Bool
@@ -251,27 +281,37 @@ private struct TranscriptList: View, Equatable {
         let lastTurn = blocks.last { ends.contains($0.id) }?.id
         let lastUser = blocks.last(where: \.isUser)?.id
         ScrollViewReader { proxy in
+        let row = { (block: Block) in
+            let open = groupOpen[block.id] ?? ((block.id == lastGroup && working) || Launch.expandAll)
+            return BlockRow(block: block, threadID: store.id, projectName: projectName,
+                            expanded: open,
+                            folded: folded[block.id] ?? [],
+                            endsTurn: ends.contains(block.id),
+                            latest: block.id == lastTurn || block.id == lastUser,
+                            busy: working, retryModels: retryModels,
+                            toggle: { groupOpen[block.id] = !open },
+                            fold: { folded[block.id] = $0 },
+                            act: perform)
+                .equatable()
+                .id(block.id)
+        }
+        let earlier = blocks.dropLast(Self.laidOut)
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 18) {
-                if !store.loaded {
-                    ProgressView().frame(maxWidth: .infinity).padding(.top, 80)
-                } else if store.more {
-                    EarlierMarker(loading: store.loadingEarlier)
+            VStack(alignment: .leading, spacing: 18) {
+                if !store.loaded || store.more || !earlier.isEmpty {
+                    LazyVStack(alignment: .leading, spacing: 18) {
+                        if !store.loaded {
+                            ProgressView().frame(maxWidth: .infinity).padding(.top, 80)
+                        } else if store.more {
+                            EarlierMarker(loading: store.loadingEarlier)
+                        }
+                        ForEach(earlier) { row($0) }
+                    }
                 }
-                ForEach(blocks) { block in
-                    let open = groupOpen[block.id] ?? ((block.id == lastGroup && working) || Launch.expandAll)
-                    BlockRow(block: block, threadID: store.id, projectName: projectName,
-                             expanded: open,
-                             folded: folded[block.id] ?? [],
-                             endsTurn: ends.contains(block.id),
-                             latest: block.id == lastTurn || block.id == lastUser,
-                             busy: working, retryModels: retryModels,
-                             toggle: { groupOpen[block.id] = !open },
-                             fold: { folded[block.id] = $0 },
-                             act: perform)
-                        .equatable()
-                        .id(block.id)
-                }
+                // The latest rows are laid out in full, not lazily: an answer still being written
+                // (a chart drawing in) grows many times a second, and a lazy stack loses its place
+                // then, showing blank space where the transcript is.
+                ForEach(blocks.suffix(Self.laidOut)) { row($0) }
                 WorkingFooter(store: store)
                 Color.clear.frame(height: 4).id("end")
             }
@@ -375,7 +415,7 @@ private struct EarlierMarker: View {
             if loading {
                 ProgressView().controlSize(.small)
             } else {
-                Text("Earlier messages").font(.caption).foregroundStyle(Trek.muted.opacity(0.7))
+                Text("Earlier messages").font(.ui(.caption)).foregroundStyle(Trek.muted.opacity(0.7))
             }
             Spacer()
         }
@@ -390,7 +430,7 @@ private struct WorkingFooter: View {
 
     var body: some View {
         if let t = store.summary, t.runState == .working {
-            WorkingLine(threadID: t.id, agentKey: t.agent.key, since: t.workingSince, activity: t.activity)
+            WorkingLine(threadID: t.id, agentKey: t.agent.logo ?? t.agent.key, since: t.workingSince, activity: t.activity)
                 .padding(.top, 2)
                 .transaction { $0.animation = nil }
         }
@@ -437,13 +477,13 @@ private struct BlockRow: View, Equatable {
     @ViewBuilder
     private var content: some View {
         switch block.kind {
-        case .user(let text, let images, let at):
+        case .user(let text, let images, let at, let aside):
             VStack(alignment: .trailing, spacing: 4) {
-                UserBubble(text: text, images: images)
-                MessageActions(item: block.itemID, text: text, at: at, latest: latest, busy: busy, act: act)
+                UserBubble(text: text, images: images, threadID: threadID, itemID: block.itemID)
+                MessageActions(item: block.itemID, text: text, at: at, latest: latest, busy: busy, aside: aside, act: act)
             }
-        case .assistant(let text):
-            MarkdownText(text: text)
+        case .assistant(let text, let streaming):
+            MarkdownText(text: text, live: streaming)
                 .equatable()
                 .textSelection(.enabled)
         case .group(let items):
@@ -453,14 +493,14 @@ private struct BlockRow: View, Equatable {
         case .turnEnd(let secs, let at):
             TurnActions(end: block.itemID, secs: secs, at: at, latest: latest, busy: busy, models: retryModels, act: act)
         case .notice(let text):
-            Label(text, systemImage: "info.circle").font(.subheadline).foregroundStyle(Trek.muted)
+            Label(text, systemImage: "info.circle").font(.ui(.subheadline)).foregroundStyle(Trek.muted)
         case .error(let text):
             Label {
                 Text(text)
             } icon: {
                 Image(systemName: "exclamationmark.triangle.fill")
             }
-            .font(.subheadline)
+            .font(.ui(.subheadline))
             .foregroundStyle(Trek.failed)
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -470,17 +510,17 @@ private struct BlockRow: View, Equatable {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(text)
                     if let resets {
-                        Text("Resets \(Date(timeIntervalSince1970: Double(resets) / 1000), style: .relative)").font(.caption)
+                        Text("Resets \(Date(timeIntervalSince1970: Double(resets) / 1000), style: .relative)").font(.ui(.caption))
                     }
                 }
             } icon: {
                 Image(systemName: "clock.fill")
             }
-            .font(.subheadline)
+            .font(.ui(.subheadline))
             .foregroundStyle(Trek.approval)
         case .handoff(let from, let to):
             Label("Handed over from \(from) to \(to)", systemImage: "arrow.left.arrow.right")
-                .font(.subheadline).foregroundStyle(Trek.muted)
+                .font(.ui(.subheadline)).foregroundStyle(Trek.muted)
         case .changes(let changes):
             ChangesCard(changes: changes, threadID: threadID, rootName: projectName,
                         folded: Binding(get: { folded }, set: { fold($0) }))
@@ -507,9 +547,20 @@ private struct ComposerArea: View {
         let query = CommandPicker.query(composer.draft)
         let commands = query.map { CommandPicker.matches(model.commands[threadID] ?? [], $0) } ?? []
         VStack(spacing: 10) {
+            if let kid = thread?.needsThread, model.serves(.subAgents) {
+                SubAgentNeedsCard(threadID: kid, needs: thread?.needs)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
             ForEach(store.pending) { item in
                 PendingRequestCard(item: item, agentName: thread?.agent.name ?? "The agent") { response in
                     if let rid = Self.requestId(item) { model.answer(threadID, requestId: rid, response) }
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+            if let queued = thread?.queued, !queued.isEmpty, model.serves(.queueAction) {
+                QueuedStrip(threadID: threadID, queued: queued) { text in
+                    composer.draft = composer.draft.isEmpty ? text : composer.draft + "\n\n" + text
+                    composer.focusRequest += 1
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
@@ -529,6 +580,8 @@ private struct ComposerArea: View {
         .padding(.bottom, 6)
         .padding(.top, 8)
         .animation(.smooth(duration: 0.3), value: store.pending.map(\.id))
+        .animation(.smooth(duration: 0.3), value: thread?.needsThread)
+        .animation(.smooth(duration: 0.3), value: thread?.queued)
         .animation(.snappy(duration: 0.2), value: commands.isEmpty)
         .onChange(of: composer.draft) {
             // `/` typed at the start: the picker wants the thread's commands (asked again each
