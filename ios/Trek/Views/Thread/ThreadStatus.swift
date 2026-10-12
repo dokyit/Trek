@@ -379,7 +379,11 @@ struct AtWorkSheet: View {
                 }
             }
         } else {
-            SubAgentRow(sub: s, now: now)
+            // The chevron's room, kept: its state lines up with the rows that open.
+            HStack(spacing: 8) {
+                SubAgentRow(sub: s, now: now)
+                Image(systemName: "chevron.right").font(.ui(.caption).weight(.semibold)).hidden()
+            }
         }
     }
 
