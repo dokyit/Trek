@@ -37,8 +37,11 @@ fn links(trek: &Trek, cx: &TestAppContext, id: &str) -> Vec<(Link, String)> {
         .collect()
 }
 
-/// Every event the workspace raises from now on that's a toast or an alert: (message, its button).
-fn notices(trek: &Trek, cx: &mut TestAppContext) -> Rc<RefCell<Vec<(String, Option<String>)>>> {
+/// Toasts and alerts seen so far: (message, its button).
+type Notices = Rc<RefCell<Vec<(String, Option<String>)>>>;
+
+/// Every event the workspace raises from now on that's a toast or an alert.
+fn notices(trek: &Trek, cx: &mut TestAppContext) -> Notices {
     let seen = Rc::new(RefCell::new(vec![]));
     let sink = seen.clone();
     cx.update(|cx| {
@@ -145,8 +148,12 @@ fn a_handoff_moves_the_work_and_the_user_to_a_fresh_thread() {
         trek.wait_done(cx, &new, RunState::Idle).await;
         // The old thread's agent is told to stop there, and it did.
         assert!(trek.answers(cx, &id).ends_with("Handed off: the work goes on in the new thread."), "{}", trek.answers(cx, &id));
-        // Its turn ending is no news: the work went on elsewhere.
+        // Its turn ending is no news: the work went on elsewhere. Nor is it unread: the user saw
+        // it hand off, and its last words are the agent's own.
         assert!(!seen.borrow().iter().any(|(m, _)| m.starts_with("Finished")), "{:?}", seen.borrow());
+        assert!(!trek.read(cx, |ws, _| ws.thread(&id).unwrap().is_unseen()), "the old thread is read");
+        // A handoff's thread wakes nobody: the thread it continues is done.
+        assert!(!trek.items(cx, &id).iter().any(|i| matches!(i, Item::User { text, .. } if trek_core::orchestrate::is_wake(text))));
         // Back in the old thread, the row says where the work went.
         trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
         assert!(trek.rows(cx).iter().any(|r| r.starts_with("lineage: Continued in: Finish the parser refactor")), "{:?}", trek.rows(cx));
@@ -262,6 +269,10 @@ fn chains_of_started_threads_go_three_deep_and_no_further() {
         assert!(started(&trek, cx, &two).contains(&next));
         trek.wait_done(cx, &fourth, RunState::Idle).await;
         trek.wait_done(cx, &next, RunState::Idle).await;
+        // The handoff's thread, though the thread that started the work follows it, wakes no one.
+        let t2 = two.clone();
+        trek.wait(cx, "the wake-up for the thread `two` started", move |ws| wakes_in(ws, &t2) == 1).await;
+        assert_eq!(trek.read(cx, |ws, _| wakes_in(ws, &two)), 1, "only `fourth`'s");
     });
 }
 
@@ -345,5 +356,86 @@ fn an_agent_starts_a_thread_in_a_worktree_or_another_project() {
         let there = trek.update(cx, |ws, cx| ws.start_agent_thread(&id, &json!({ "prompt": "hi", "project": name }), cx)).unwrap();
         assert_eq!(trek.read(cx, |ws, _| ws.thread(&there).and_then(|t| t.cwd.clone())), Some(elsewhere));
         trek.wait_done(cx, &there, RunState::Idle).await;
+    });
+}
+
+/// Wake-up blocks about threads it started in `id`'s transcript.
+fn wakes_in(ws: &crate::workspace::Workspace, id: &str) -> usize {
+    ws.live.get(id).map_or(0, |l| {
+        l.items.iter().filter_map(|i| if let Item::User { text, .. } = i { Some(text) } else { None }).filter(|t| trek_core::orchestrate::is_thread_wake(t)).map(|t| t.matches("[Trek] Thread “").count()).sum()
+    })
+}
+
+#[test]
+fn a_thread_the_agent_started_wakes_it_when_it_finishes() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:start-thread mock:long 1s");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let new = started(&trek, cx, &id).pop().expect("a thread");
+        // It finishes; its starter takes a turn for the news, as it does for a sub-agent's.
+        let caller = id.clone();
+        trek.wait(cx, "the wake-up", move |ws| wakes_in(ws, &caller) == 1).await;
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let wake = trek.items(cx, &id).into_iter().find_map(|i| match i {
+            Item::User { text, .. } if trek_core::orchestrate::is_thread_wake(&text) => Some(text),
+            _ => None,
+        });
+        let wake = wake.unwrap();
+        assert!(wake.contains("“Speed up the slow tests”") && wake.contains(&new) && wake.contains(") finished:") && wake.contains("The full suite passed") && wake.contains("read_thread"), "{wake}");
+        assert!(trek.answers(cx, &id).contains("The thread reported back: The full suite passed"), "{}", trek.answers(cx, &id));
+        assert!(trek.rows(cx).contains(&"wake".to_string()), "{:?}", trek.rows(cx));
+        // Once: its own turn ending wakes nothing more.
+        cx.background_executor.timer(std::time::Duration::from_millis(1500)).await;
+        cx.run_until_parked();
+        assert_eq!(trek.read(cx, |ws, _| wakes_in(ws, &id)), 1);
+        assert!(trek.read(cx, |ws, _| ws.store.held_reports().unwrap().is_empty()), "nothing left held");
+    });
+}
+
+#[test]
+fn threads_wake_their_starter_as_asked_and_again_after_each_message() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        // notify false: nobody is woken.
+        let quiet = trek.update(cx, |ws, cx| ws.start_agent_thread(&id, &json!({ "prompt": "hi", "notify": false }), cx)).unwrap();
+        trek.wait_done(cx, &quiet, RunState::Idle).await;
+        cx.background_executor.timer(std::time::Duration::from_millis(1500)).await;
+        cx.run_until_parked();
+        assert_eq!(trek.read(cx, |ws, _| wakes_in(ws, &id)), 0);
+        // A thread that needs the user's approval says so.
+        let asking = trek.update(cx, |ws, cx| ws.start_agent_thread(&id, &json!({ "prompt": "permission" }), cx)).unwrap();
+        trek.wait_needs_you(cx, &asking).await;
+        let caller = id.clone();
+        trek.wait(cx, "the wake-up", move |ws| wakes_in(ws, &caller) == 1).await;
+        let last_wake = |trek: &Trek, cx: &TestAppContext| trek.items(cx, &id).into_iter().rev().find_map(|i| match i {
+            Item::User { text, .. } if trek_core::orchestrate::is_thread_wake(&text) => Some(text),
+            _ => None,
+        }).unwrap();
+        assert!(last_wake(&trek, cx).contains("is waiting for the user's approval: "), "{}", last_wake(&trek, cx));
+        trek.update(cx, |ws, cx| ws.interrupt(&asking, cx));
+        trek.wait_done(cx, &asking, RunState::Idle).await;
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // Stopped by the user: no news. A message from its starter wakes it again when it's done.
+        assert_eq!(trek.read(cx, |ws, _| wakes_in(ws, &id)), 1);
+        trek.update(cx, |ws, cx| ws.send_to_thread(&id, &asking, Some("explain the startup instead"), cx)).unwrap();
+        let caller = id.clone();
+        trek.wait(cx, "the second wake-up", move |ws| wakes_in(ws, &caller) == 2).await;
+        assert!(last_wake(&trek, cx).contains(") finished:"), "{}", last_wake(&trek, cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // Past the cap since the user's last message, threads wake it no more.
+        trek.update(cx, |ws, _| {
+            let live = ws.live.get_mut(&id).unwrap();
+            for _ in 0..lineage::MAX_PER_REQUEST {
+                live.items.push(Item::User { text: "[Trek] Thread “x” (Sol, thread t) finished:\n\nok".into(), images: vec![], at: None, resume: None, aside: false });
+            }
+        });
+        let before = trek.read(cx, |ws, _| wakes_in(ws, &id));
+        let more = trek.update(cx, |ws, cx| ws.start_agent_thread(&id, &json!({ "prompt": "hi" }), cx)).unwrap();
+        trek.wait_done(cx, &more, RunState::Idle).await;
+        cx.background_executor.timer(std::time::Duration::from_millis(1500)).await;
+        cx.run_until_parked();
+        assert_eq!(trek.read(cx, |ws, _| wakes_in(ws, &id)), before, "capped");
     });
 }

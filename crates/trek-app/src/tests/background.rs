@@ -422,7 +422,7 @@ fn a_relaunch_delivers_reports_held_and_says_what_quitting_cut_off() {
             store_items(&store, &parent, vec![Item::User { text: "go".into(), images: vec![], at: Some(1), resume: None, aside: false }, Item::Assistant { text: "Asked two models.".into() }]);
             // One finished before the quit, and its parent hadn't heard; one was cut off by it.
             let done = thread("Review the plan", Some(&parent));
-            store.hold_report(&parent, &Report { id: done.clone(), title: "Review the plan".into(), model: "Mock Swift".into(), outcome: Outcome::Done("Ship it.".into()) }).unwrap();
+            store.hold_report(&parent, &Report { id: done.clone(), title: "Review the plan".into(), model: "Mock Swift".into(), outcome: Outcome::Done("Ship it.".into()), thread: None }).unwrap();
             let cut = thread("Check the changelog", Some(&parent));
             store.await_report(&parent, &cut).unwrap();
             store.update_thread(&cut, |t| t.run_state = RunState::Working).unwrap();
@@ -434,7 +434,7 @@ fn a_relaunch_delivers_reports_held_and_says_what_quitting_cut_off() {
             let busy_kid = thread("Its helper", Some(&busy));
             store.await_report(&busy, &busy_kid).unwrap();
             let busy_done = thread("Its scout", Some(&busy));
-            store.hold_report(&busy, &Report { id: busy_done.clone(), title: "Its scout".into(), model: "Mock Swift".into(), outcome: Outcome::Done("Found it.".into()) }).unwrap();
+            store.hold_report(&busy, &Report { id: busy_done.clone(), title: "Its scout".into(), model: "Mock Swift".into(), outcome: Outcome::Done("Found it.".into()), thread: None }).unwrap();
             // Nor is a sub-agent: its answer would have nowhere to go.
             let nested = thread("Nested", Some(&parent));
             let grandkid = thread("Deep", Some(&nested));
@@ -876,7 +876,7 @@ fn an_imported_parent_hears_its_reports_after_its_history_has_loaded() {
             store.save_thread(&t).unwrap();
             let kid = store.create_thread(Some(&project), mock(), None, Effort::Medium, HandHolding::Auto).expect("kid");
             store.update_thread(&kid.id, |k| k.parent_id = Some(t.id.clone())).unwrap();
-            store.hold_report(&t.id, &Report { id: kid.id.clone(), title: "Scout".into(), model: "Mock Swift".into(), outcome: Outcome::Done("Book the hut.".into()) }).unwrap();
+            store.hold_report(&t.id, &Report { id: kid.id.clone(), title: "Scout".into(), model: "Mock Swift".into(), outcome: Outcome::Done("Book the hut.".into()), thread: None }).unwrap();
             t.id
         };
         let mut s = settings();

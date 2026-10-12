@@ -226,6 +226,8 @@ pub struct LiveThread {
     /// The turn running is the agent saying the sub-agents the user stopped were stopped: it
     /// raises no alert as it ends.
     quiet_turn: bool,
+    /// The user was taken off it mid-turn by its own handoff: the turn's end leaves it read.
+    seen_at_turn_end: bool,
     /// The turn running is one the agent took by itself, woken by work in the background.
     self_started: bool,
     /// When a turn its agent took by itself last raised an alert as it ended.
@@ -1238,6 +1240,9 @@ pub struct Workspace {
     /// Calls waiting on a thread an agent started to finish or need the user (`read_thread` with
     /// `wait`), by that thread's id.
     thread_waiters: HashMap<String, Vec<async_channel::Sender<crate::ipc::Reply>>>,
+    /// Threads an agent started whose current work it waits to hear about (`start_thread` with
+    /// `notify`, and each `send_to_thread` since): their turn's end wakes it (`lineage`).
+    awaited: HashSet<String>,
     /// The orchestration key of the pre-warmed draft session (`warm`), until it has a thread.
     warm_ipc: Option<String>,
     /// Threads setting up or maintaining a project's verification skill (`workspace::verification`).
@@ -1545,6 +1550,7 @@ impl Workspace {
             parked: HashMap::new(),
             gathering: HashMap::new(),
             thread_waiters: HashMap::new(),
+            awaited: HashSet::new(),
             warm_ipc: None,
             verify_runs: HashMap::new(),
             changes_cache: Default::default(),
@@ -4006,6 +4012,8 @@ impl Workspace {
             self.windows_used(id, windows, cx);
         }
         let viewing = self.on_screen(id);
+        // Its turn over, it's read if the user is looking, or if its own handoff took them off it.
+        let seen = viewing || (finished && self.live.get_mut(id).is_some_and(|l| std::mem::take(&mut l.seen_at_turn_end)));
         // Streaming text changes nothing on the thread row: skip the database write (this runs
         // up to 60 times a second) unless something actually changed.
         let changed = finished
@@ -4048,7 +4056,7 @@ impl Workspace {
                 }
                 if finished {
                     t.updated_at = now_ms();
-                    if viewing {
+                    if seen {
                         t.last_seen_at = t.updated_at;
                     }
                 }
@@ -4162,7 +4170,7 @@ impl Workspace {
         let side_chat = self.thread(id).is_some_and(|t| t.side_of.is_some() || (t.parent_id.is_some() && !asked));
         // Whoever waits on a thread an agent started hears it's finished, or needs the user.
         if finished || asked {
-            self.lineage_turn_ended(id);
+            self.lineage_turn_ended(id, interrupted, cx);
         }
         if let Some(message) = notify_text.filter(|_| !side_chat) {
             let button = self.thread(id).filter(|t| lineage::agent_started(t)).map(|_| "Open thread");

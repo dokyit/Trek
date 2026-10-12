@@ -712,7 +712,8 @@ impl Session {
             Script::Wake => {
                 let body = text.split_once(":\n\n").map_or(text, |(_, b)| b);
                 let gist = trek_core::orchestrate::preview(body.split("\n\n---\n\n").next().unwrap_or(body), 160);
-                self.say(&format!("The sub-agent reported back: {gist}")).await?;
+                let who = if trek_core::orchestrate::is_thread_wake(text) { "The thread" } else { "The sub-agent" };
+                self.say(&format!("{who} reported back: {gist}")).await?;
             }
             Script::Answer => {
                 self.think("The user wants an overview. I'll keep it short and point at the files that matter.").await?;
@@ -2660,6 +2661,7 @@ mod tests {
                 title: "Second opinion".into(),
                 model: "Mock Swift".into(),
                 outcome: trek_core::orchestrate::Outcome::Failed("The mock agent hit an error".into()),
+                thread: None,
             }]))
             .await;
             assert!(text(&m.turn().await).starts_with("The sub-agent reported back"), "not read as `mock:error`");

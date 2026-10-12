@@ -14,9 +14,9 @@ use crate::ipc::{Call, Reply};
 use gpui_kit::Context;
 use serde_json::{Value, json};
 use trek_core::lineage::{self, Link, MAX_DEPTH, MAX_HANDOFFS_IN_A_ROW, MAX_PER_REQUEST, MAX_RUNNING};
-use trek_core::orchestrate as orch;
+use trek_core::orchestrate::{self as orch, Outcome, Report};
 use trek_core::settings::FollowUp;
-use trek_core::store::{Item, Thread};
+use trek_core::store::{Item, Thread, now_ms};
 use trek_core::{RunState, ThreadSource};
 
 /// Whether an agent started `t` (`start_thread`), or it took over another thread's work (`handoff`).
@@ -89,7 +89,12 @@ impl Workspace {
                     let _ = call.reply.try_send(Reply::WaitingOnThread(id, wait));
                     return None;
                 }
-                self.read_thread(caller, &id)
+                let read = self.read_thread(caller, &id);
+                // Read now, its news needn't wake the agent later.
+                if read.is_ok() && self.thread_state(&id) != ThreadState::Working {
+                    self.heard(caller, &id);
+                }
+                read
             }
             "send_to_thread" => self.send_to_thread(caller, &id, text("prompt"), cx),
             other => Err(format!("Trek has no tool called {other}.")),
@@ -195,6 +200,8 @@ impl Workspace {
             None => self.draft_folder(&parent),
         };
         let worktree = params.get("worktree").and_then(Value::as_bool) == Some(true);
+        // Its starter hears when it's done unless it asked not to.
+        let notify = params.get("notify").and_then(Value::as_bool) != Some(false);
         if worktree && !super::in_repo(folder.as_deref()) {
             let name = folder.as_deref().map(trek_core::paths::tildify).unwrap_or_else(|| "This thread's folder".into());
             return Err(format!("{name} isn't a git repository, so there's no worktree to make: start it without worktree."));
@@ -216,6 +223,7 @@ impl Workspace {
         let id = self
             .make_thread(folder, prefs, title.as_deref().unwrap_or(prompt), false, move |t| {
                 t.started_by = Some(by);
+                t.notify_starter = notify;
                 if let Some(title) = named {
                     t.title = title;
                 }
@@ -223,6 +231,9 @@ impl Workspace {
             .map_err(|e| e.to_string())?;
         let new_title = self.thread(&id).map(|t| t.title.clone()).unwrap_or_default();
         self.link_rows(caller, &parent.title, Link::Started, &id, &new_title, Link::StartedBy, cx);
+        if notify {
+            self.awaited.insert(id.clone());
+        }
         self.send_to(&id, prompt.to_string(), vec![], cx);
         Ok(id)
     }
@@ -295,7 +306,8 @@ impl Workspace {
         live.plan = plan;
         live.fast = fast;
         self.link_rows(caller, &parent.title, Link::ContinuedIn, &id, &title, Link::ContinuedFrom, cx);
-        // The old thread's turn ending isn't news: its work goes on in the new one.
+        // The old thread's turn ending isn't news: its work goes on in the new one. (A handoff's
+        // thread wakes nobody: the thread it continues is done.)
         if let Some(l) = self.live.get_mut(caller).filter(|l| l.turn_started.is_some()) {
             l.quiet_turn = true;
         }
@@ -303,6 +315,12 @@ impl Workspace {
         // The user looking at the old thread follows the work to the new one; anywhere else, a
         // toast says where it went.
         if self.in_main(caller) {
+            // Taken off it by its own handoff, the user has seen all it has to say: its last
+            // words (the agent's own "handed off") leave it read.
+            match self.live.get_mut(caller).filter(|l| l.turn_started.is_some()) {
+                Some(l) => l.seen_at_turn_end = true,
+                None => self.mutate_thread(caller, cx, |t| t.last_seen_at = now_ms().max(t.updated_at)),
+            }
             self.open_thread_here(&id, cx);
         } else {
             cx.emit(WorkspaceEvent::Toast { message: format!("Handed off to a new thread · {title}"), undo: Some(UndoAction::OpenThread(id.clone())) });
@@ -377,10 +395,8 @@ impl Workspace {
         if let Some(next) = self.threads.iter().find(|n| n.continued_from.as_deref() == Some(id)) {
             v["continued_in"] = json!(next.id);
         }
-        if answer && state != ThreadState::Working {
-            if let Some(a) = self.thread_answer(id) {
-                v["answer"] = json!(orch::cap(&a, orch::RESULT_CAP, "Open the thread for the rest."));
-            }
+        if let Some(a) = self.thread_answer(id).filter(|_| answer && state != ThreadState::Working) {
+            v["answer"] = json!(orch::cap(&a, orch::RESULT_CAP, "Open the thread for the rest."));
         }
         v
     }
@@ -462,22 +478,96 @@ impl Workspace {
             return Err("It's waiting on the user (an approval or a question): only they can answer that. Try again once they have.".into());
         }
         let working = self.thread_state(id) == ThreadState::Working;
+        // The agent that sent it hears how this goes, as it heard of the thread's first work.
+        if t.notify_starter {
+            self.awaited.insert(id.to_string());
+        }
         self.send_as(id, prompt.to_string(), vec![], Some(FollowUp::Queue), cx);
         let mut v = self.thread_json(id, false);
         v["note"] = json!(if working { "It's working: your message waits for its turn to end." } else { "Sent." });
         Ok(v)
     }
 
-    /// A turn of `id` ended, or it asked the user something: calls waiting on it get its answer
-    /// unless it's still at work.
-    pub(super) fn lineage_turn_ended(&mut self, id: &str) {
-        if !self.thread_waiters.contains_key(id) || self.thread_state(id) == ThreadState::Working {
+    /// A turn of `id` ended (`interrupted`: stopped), or it asked the user something. Unless it's
+    /// still at work, calls waiting on it get its answer; if none was waiting and the agent that
+    /// started it awaits its work (`awaited`), that agent is woken with how it stands, as it is by
+    /// a sub-agent's report.
+    pub(super) fn lineage_turn_ended(&mut self, id: &str, interrupted: bool, cx: &mut Context<Self>) {
+        let state = self.thread_state(id);
+        if state == ThreadState::Working {
             return;
         }
-        let answer = self.thread_json(id, true);
-        for w in self.thread_waiters.remove(id).unwrap_or_default() {
-            let _ = w.try_send(Reply::Done(Ok(answer.clone())));
+        let mut heard = false;
+        if let Some(waiters) = self.thread_waiters.remove(id) {
+            let answer = self.thread_json(id, true);
+            for w in waiters {
+                heard |= w.try_send(Reply::Done(Ok(answer.clone()))).is_ok();
+            }
         }
+        // Its answer reached the agent in a call, or the user stopped it: no message needed.
+        let finished = matches!(state, ThreadState::Finished | ThreadState::Failed);
+        if heard || interrupted {
+            if finished || interrupted {
+                self.awaited.remove(id);
+            }
+            return;
+        }
+        if !self.awaited.contains(id) || !matches!(state, ThreadState::Finished | ThreadState::Failed | ThreadState::NeedsApproval) {
+            return;
+        }
+        // Done with this stretch of work: the next wake-up waits for the next send_to_thread.
+        if finished {
+            self.awaited.remove(id);
+        }
+        self.wake_starter(id, state, cx);
+    }
+
+    /// Wake the agent that started `id` with how it stands (`state`): in line with its
+    /// sub-agents' reports (`gather_wakes`), kept in the store until it hears it. Not for a
+    /// handoff's thread, not for a starter that's gone or isn't the user's own thread, and not
+    /// past `MAX_PER_REQUEST` such wake-ups since the user's last message there.
+    fn wake_starter(&mut self, id: &str, state: ThreadState, cx: &mut Context<Self>) {
+        let Some(t) = self.thread(id).cloned() else { return };
+        let Some(parent) = t.started_by.clone().filter(|_| t.notify_starter && t.continued_from.is_none()) else { return };
+        if self.thread(&parent).is_none_or(|p| p.archived_at.is_some() || p.parent_id.is_some() || p.side_of.is_some()) {
+            return;
+        }
+        let pending = self.wakes.get(&parent).map_or(0, |w| w.iter().filter(|r| r.thread.is_some() && r.id != id).count());
+        if self.thread_wakes_since_asked(&parent) + pending >= MAX_PER_REQUEST {
+            tracing::info!("not waking {parent} for thread {id}: {MAX_PER_REQUEST} wake-ups since the user's last message");
+            return;
+        }
+        let outcome = match state {
+            ThreadState::Failed => Outcome::Failed(self.thread_answer(id).unwrap_or_else(|| "It stopped without saying why.".into())),
+            ThreadState::NeedsApproval => {
+                let asked = self.live.get(id).and_then(|l| l.permissions.first()).map(|p| if p.detail.is_empty() { p.title.clone() } else { format!("{}: {}", p.title, p.detail) });
+                Outcome::Done(asked.unwrap_or_else(|| "a request".into()))
+            }
+            _ => Outcome::Done(self.thread_answer(id).unwrap_or_else(|| "(It finished without saying anything.)".into())),
+        };
+        let report = Report { id: id.to_string(), title: t.title.clone(), model: self.model_label(&t), outcome, thread: Some(state.key().into()) };
+        if let Err(e) = self.store.hold_report(&parent, &report) {
+            tracing::warn!("keep the thread's report: {e:#}");
+        }
+        // The latest news of a thread replaces any still on its way.
+        let line = self.wakes.entry(parent.clone()).or_default();
+        line.retain(|r| r.id != id);
+        line.push(report);
+        self.gather_wakes(&parent, cx);
+    }
+
+    /// Wake-ups about threads it started that `id`'s agent has had since the user last wrote there.
+    fn thread_wakes_since_asked(&self, id: &str) -> usize {
+        let Some(live) = self.live.get(id) else { return 0 };
+        let mut n = 0;
+        for i in live.items.iter().rev() {
+            match i {
+                Item::User { text, .. } if orch::is_thread_wake(text) => n += text.matches(&format!("{}Thread “", orch::WAKE_PREFIX)).count(),
+                Item::User { text, aside: false, .. } if !orch::is_wake(text) => break,
+                _ => {}
+            }
+        }
+        n
     }
 }
 
