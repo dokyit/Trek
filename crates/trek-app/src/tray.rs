@@ -161,7 +161,7 @@ fn build() -> anyhow::Result<Parts> {
     let open = MenuItem::new("Open Trek", true, None);
     let new_thread = MenuItem::new("New Thread", true, None);
     let settings = MenuItem::new("Settings…", true, None);
-    let quit = MenuItem::new("Quit Trek", true, None);
+    let quit = MenuItem::new(crate::words::words().quit_app, true, None);
     let menu = Menu::new();
     menu.append_items(&[
         &status,

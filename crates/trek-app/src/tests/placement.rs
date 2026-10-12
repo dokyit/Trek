@@ -23,7 +23,7 @@ fn the_main_window_opens_where_it_was_left() {
         let saved = load(&dir).expect("saved");
         assert_eq!((saved.width, saved.height, saved.maximized), (1000., 700., false));
 
-        let min = size(px(760.), px(520.));
+        let min = size(px(crate::window_place::MAIN_MIN_WIDTH_PX), px(crate::window_place::MAIN_MIN_HEIGHT_PX));
         let (display, bounds) = cx.update(|cx| initial(size(px(1280.), px(820.)), min, true, cx));
         assert_eq!(display, cx.update(|cx| cx.displays().first().map(|d| d.id())), "on the display it was on");
         assert_eq!(bounds, WindowBounds::Windowed(gpui_kit::Bounds::new(gpui_kit::point(px(saved.x), px(saved.y)), size(px(1000.), px(700.)))));
