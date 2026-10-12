@@ -44,30 +44,104 @@ nonisolated extension UIColor {
     }
 }
 
+// Taken from the Mac's theme (crates/trek-app/assets/themes/trek.json) and status colours
+// (crates/trek-app/src/palette.rs): (Paper, Night).
 enum Trek {
-    static let background = Color(light: 0xFAF7F2, dark: 0x0E0F12)
-    static let surface = Color(light: 0xFFFFFF, dark: 0x171A1F)
-    static let elevated = Color(light: 0xFFFFFF, dark: 0x1D2027)
-    static let border = Color(light: 0xE4DDD1, dark: 0x262A32)
-    static let foreground = Color(light: 0x17191F, dark: 0xE8ECF3)
-    static let muted = Color(light: 0x6B6558, dark: 0x8A93A3)
+    static let background = Color(light: 0xFFFFFF, dark: 0x0A0A0B)
+    /// Behind grouped lists (Settings): the Mac's sidebar, so the rows' cards stand out.
+    static let grouped = Color(light: 0xF6F5F3, dark: 0x0A0A0B)
+    /// Cards, code and tool blocks (`muted.background`).
+    static let surface = Color(light: 0xF4F3F1, dark: 0x161618)
+    /// Popovers and cards that float over content (`popover.background`).
+    static let elevated = Color(light: 0xFFFFFF, dark: 0x161618)
+    static let border = Color(light: 0xE7E5E1, dark: 0x232327)
+    static let foreground = Color(light: 0x1A1A1C, dark: 0xE4E4E7)
+    static let muted = Color(light: 0x6E6C68, dark: 0x8B8B94)
     static let ember = Color(light: 0xE85D1F, dark: 0xFF7A3D)
+    /// Text on an ember button (`primary.foreground`).
+    static let onEmber = Color(light: 0xFFFFFF, dark: 0x160A04)
+    /// Links in answers: ember, a shade darker on Paper so it reads at body size.
+    static let link = Color(light: 0xC2410C, dark: 0xFF7A3D)
     static let sunrise = LinearGradient(colors: [Color(hex: 0xFF4D2E), Color(hex: 0xFF8A3D), Color(hex: 0xFFC56B)],
                                         startPoint: .bottomLeading, endPoint: .topTrailing)
 
-    // Status
+    // Status. Paper's are dark enough to read as small text.
     static let working = ember
-    static let approval = Color(light: 0xC98500, dark: 0xFFB020)
-    static let question = Color(light: 0x5B5BD6, dark: 0x8B8CFF)
-    static let plan = Color(light: 0x7C4DDB, dark: 0xB48CFF)
-    static let done = Color(light: 0x1E9E62, dark: 0x3FCF8E)
-    static let failed = Color(light: 0xD93A3F, dark: 0xFF5A5F)
-    /// Hand-holding tints (design spec): auto-accept edits sky, auto amber, full access red.
-    static let sky = Color(light: 0x1F78B4, dark: 0x5DB7F2)
+    /// Anything waiting on you (an approval, a question, a plan): amber, as on the Mac.
+    static let approval = Color(light: 0x976300, dark: 0xFFB020)
+    static let indigo = Color(light: 0x5B5BD6, dark: 0x8B8CFF)
+    /// Plan mode and plan cards.
+    static let plan = indigo
+    static let done = Color(light: 0x177D4E, dark: 0x3FCF8E)
+    static let failed = Color(light: 0xCC343A, dark: 0xFF5A5F)
+    /// Work running in the background.
+    static let sky = Color(light: 0x2B6CC4, dark: 0x5AA9FF)
     static let additions = done
     static let deletions = failed
 
-    static let mono = Font.system(.footnote, design: .monospaced)
+    static let mono = Font.code(.footnote)
+}
+
+// MARK: Type
+
+/// The Mac's faces, bundled (OFL): Inter for the interface, JetBrains Mono NL for code, paths and
+/// commands. Both grow with Dynamic Type from the text style they stand in for.
+nonisolated enum TrekFont {
+    static let ui = "Inter"
+    static let code = "JetBrains Mono NL"
+
+    /// The point size of `style` at the Default text size (UIKit's).
+    static func size(_ style: Font.TextStyle) -> CGFloat {
+        switch style {
+        case .largeTitle: 34
+        case .title: 28
+        case .title2: 22
+        case .title3: 20
+        case .headline, .body: 17
+        case .callout: 16
+        case .subheadline: 15
+        case .footnote: 13
+        case .caption: 12
+        case .caption2: 11
+        default: 17
+        }
+    }
+
+    /// Navigation titles in Inter too: UIKit draws them, so SwiftUI's font doesn't reach them.
+    @MainActor static func styleBars() {
+        let bar = UINavigationBar.appearance()
+        if let large = UIFont(name: "Inter-Bold", size: 34) {
+            bar.largeTitleTextAttributes = [.font: UIFontMetrics(forTextStyle: .largeTitle).scaledFont(for: large)]
+        }
+        if let title = UIFont(name: "Inter-SemiBold", size: 17) {
+            bar.titleTextAttributes = [.font: UIFontMetrics(forTextStyle: .headline).scaledFont(for: title)]
+        }
+    }
+}
+
+extension Font {
+    /// Inter in place of a text style (`.ui(.subheadline)` for `.subheadline`).
+    static func ui(_ style: TextStyle) -> Font {
+        let f = Font.custom(TrekFont.ui, size: TrekFont.size(style), relativeTo: style)
+        return style == .headline ? f.weight(.semibold) : f
+    }
+
+    /// Inter at a point size: fixed, or growing with Dynamic Type like `style`.
+    static func ui(size: CGFloat, weight: Weight = .regular, relativeTo style: TextStyle? = nil) -> Font {
+        let f = style.map { Font.custom(TrekFont.ui, size: size, relativeTo: $0) } ?? Font.custom(TrekFont.ui, fixedSize: size)
+        return weight == .regular ? f : f.weight(weight)
+    }
+
+    /// JetBrains Mono NL in place of a text style.
+    static func code(_ style: TextStyle) -> Font {
+        Font.custom(TrekFont.code, size: TrekFont.size(style), relativeTo: style)
+    }
+
+    /// JetBrains Mono NL at a point size: fixed, or growing with Dynamic Type like `style`.
+    static func code(size: CGFloat, weight: Weight = .regular, relativeTo style: TextStyle? = nil) -> Font {
+        let f = style.map { Font.custom(TrekFont.code, size: size, relativeTo: $0) } ?? Font.custom(TrekFont.code, fixedSize: size)
+        return weight == .regular ? f : f.weight(weight)
+    }
 }
 
 // MARK: Thread status
@@ -83,8 +157,8 @@ struct StatusLook {
         if let needs = t.needs {
             switch needs.kind {
             case .approval: return StatusLook(label: "Approval", color: Trek.approval, symbol: "hand.raised.fill", pulses: false)
-            case .question: return StatusLook(label: "Question", color: Trek.question, symbol: "questionmark.bubble.fill", pulses: false)
-            case .plan: return StatusLook(label: "Plan", color: Trek.plan, symbol: "list.bullet.clipboard.fill", pulses: false)
+            case .question: return StatusLook(label: "Question", color: Trek.approval, symbol: "questionmark.bubble.fill", pulses: false)
+            case .plan: return StatusLook(label: "Plan", color: Trek.approval, symbol: "list.bullet.clipboard.fill", pulses: false)
             case .failed: return StatusLook(label: "Failed", color: Trek.failed, symbol: "exclamationmark.triangle.fill", pulses: false)
             case .limit: return StatusLook(label: "Paused", color: Trek.approval, symbol: "clock.fill", pulses: false)
             }
@@ -99,14 +173,9 @@ struct StatusLook {
 }
 
 extension Access {
-    /// The chip's tint: none for Supervised, then rising with what the agent may do unasked.
+    /// The chip icon's tint, as on the Mac: muted, but amber for full access.
     var tint: Color? {
-        switch self {
-        case .supervised: nil
-        case .autoAcceptEdits: Trek.sky
-        case .auto: Trek.approval
-        case .fullAccess: Trek.failed
-        }
+        self == .fullAccess ? Trek.approval : nil
     }
 }
 
@@ -114,9 +183,9 @@ extension Access {
 
 enum ProjectColor {
     /// The badge's letters (desktop `project_ink`).
-    static func ink(_ hue: Int) -> Color { .hsl(Double(hue % 360) / 360, 0.55, light: 0.38, dark: 0.75) }
+    static func ink(_ hue: Int) -> Color { .hsl(Double(hue % 360) / 360, 0.55, light: 0.35, dark: 0.75) }
     /// The fill behind them (desktop `project_fill`).
-    static func fill(_ hue: Int) -> Color { .hsl(Double(hue % 360) / 360, 0.35, light: 0.9, dark: 0.22) }
+    static func fill(_ hue: Int) -> Color { .hsl(Double(hue % 360) / 360, 0.35, light: 0.88, dark: 0.22) }
 }
 
 // MARK: Files
@@ -256,7 +325,7 @@ enum AgentLogo {
     static func asset(_ key: String) -> String? {
         let id: String
         if key.hasPrefix("acp:") { id = String(key.dropFirst(4)) } else if key.hasPrefix("direct:") { id = String(key.dropFirst(7)) } else { id = key }
-        let known: Set<String> = ["amp", "anthropic", "claude-code", "codex", "cursor", "deepseek", "devin", "droid", "gemini",
+        let known: Set<String> = ["amp", "anthropic", "claude-code", "codex", "cursor", "deepseek", "devin", "droid", "figma", "gemini",
                                   "github-copilot", "google", "goose", "grok", "groq", "kimi", "lmstudio", "mistral", "ollama",
                                   "openai", "opencode", "openrouter", "pi", "qwen-code", "xai"]
         let aliases = ["gemini-cli": "gemini", "copilot": "github-copilot", "qwen": "qwen-code", "factory": "droid"]

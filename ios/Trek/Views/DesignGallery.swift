@@ -41,8 +41,8 @@ struct DesignGallery: View {
                             StatusPill(look: StatusLook(label: "Working", color: Trek.working, symbol: nil, pulses: true))
                             StatusPill(look: StatusLook(label: "Needs you", color: Trek.approval, symbol: "hand.raised.fill", pulses: false))
                             StatusPill(look: StatusLook(label: "Approval", color: Trek.approval, symbol: "hand.raised.fill", pulses: false))
-                            StatusPill(look: StatusLook(label: "Question", color: Trek.question, symbol: "questionmark.bubble.fill", pulses: false))
-                            StatusPill(look: StatusLook(label: "Plan", color: Trek.plan, symbol: "list.bullet.clipboard.fill", pulses: false))
+                            StatusPill(look: StatusLook(label: "Question", color: Trek.approval, symbol: "questionmark.bubble.fill", pulses: false))
+                            StatusPill(look: StatusLook(label: "Plan", color: Trek.approval, symbol: "list.bullet.clipboard.fill", pulses: false))
                             StatusPill(look: StatusLook(label: "Failed", color: Trek.failed, symbol: "exclamationmark.triangle.fill", pulses: false))
                             StatusPill(look: StatusLook(label: "Done", color: Trek.done, symbol: "checkmark", pulses: false))
                         }
@@ -65,7 +65,7 @@ struct DesignGallery: View {
 
     private func section<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(title).font(.footnote.weight(.semibold)).foregroundStyle(Trek.muted)
+            Text(title).font(.ui(.footnote).weight(.semibold)).foregroundStyle(Trek.muted)
             content()
         }
     }

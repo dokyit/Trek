@@ -9,9 +9,10 @@ import Observation
 /// an item a new, higher seq whenever it changes), so SwiftUI compares a row in constant time.
 nonisolated struct Block: Identifiable, Equatable {
     enum Kind {
-        /// `at`: when it was sent (ms).
-        case user(text: String, images: Int, at: Int64?)
-        case assistant(String)
+        /// `at`: when it was sent (ms). `aside`: not a prompt, nothing to rewind to.
+        case user(text: String, images: Int, at: Int64?, aside: Bool)
+        /// `streaming`: still being written.
+        case assistant(String, streaming: Bool)
         case group([TItem])
         case resolved(TItem)
         /// `at`: when the turn finished (ms).
@@ -42,8 +43,8 @@ nonisolated struct Block: Identifiable, Equatable {
     static func single(_ item: TItem) -> Block? {
         let kind: Kind
         switch item.body {
-        case .user(let text, let images): kind = .user(text: text, images: images, at: item.at)
-        case .assistant(let text, _): kind = .assistant(text)
+        case .user(let text, let images, let aside): kind = .user(text: text, images: images, at: item.at, aside: aside)
+        case .assistant(let text, let streaming): kind = .assistant(text, streaming: streaming)
         case .approval, .question, .plan: kind = .resolved(item)
         case .turnEnd(let secs): kind = .turnEnd(secs: secs, at: item.at)
         case .notice(let s): kind = .notice(s)
@@ -77,7 +78,8 @@ nonisolated struct Block: Identifiable, Equatable {
         }
         for b in blocks {
             switch b.kind {
-            case .user: close()
+            // An aside (a command Trek answered) doesn't start a turn.
+            case .user(_, _, _, let aside): if !aside { close() }
             case .turnEnd: ends.append(b.id); ended = true
             case .group, .assistant, .resolved: worked = true; stop = nil
             case .error, .limit: stop = b.id

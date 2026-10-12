@@ -37,7 +37,7 @@ struct GitSheet: View {
                 }
             }
             .scrollContentBackground(.hidden)
-            .background(Trek.background)
+            .background(Trek.grouped)
             .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Git")
             .navigationBarTitleDisplayMode(.inline)
@@ -102,12 +102,12 @@ struct GitSheet: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Text(status?.branch ?? thread?.branch ?? "—")
-                            .font(.system(.body, design: .monospaced).weight(.semibold))
+                            .font(.code(.body).weight(.semibold))
                             .lineLimit(1)
                             .truncationMode(.middle)
                         if let b = status?.branch, b == (status?.defaultBranch ?? thread?.git?.defaultBranch) {
                             Text("default")
-                                .font(.caption2.weight(.semibold))
+                                .font(.ui(.caption2).weight(.semibold))
                                 .foregroundStyle(Trek.muted)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 1.5)
@@ -118,7 +118,7 @@ struct GitSheet: View {
                         Text(base.map { "Worktree from \($0)" } ?? "In the project folder")
                         aheadBehind
                     }
-                    .font(.footnote)
+                    .font(.ui(.footnote))
                     .foregroundStyle(Trek.muted)
                     .lineLimit(1)
                 }
@@ -166,7 +166,10 @@ struct GitSheet: View {
                 }
             }
         } footer: {
-            if base != nil { Text("Against \(base ?? "its base"): its commits, and what isn't committed yet.") }
+            Group {
+                if base != nil { Text("Against \(base ?? "its base"): its commits, and what isn't committed yet.") }
+            }
+            .font(.ui(.footnote))
         }
     }
 
@@ -202,6 +205,7 @@ struct GitSheet: View {
             .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
         } footer: {
             Text("Commit takes every change, as the Mac's Git panel does.")
+                .font(.ui(.footnote))
         }
     }
 
@@ -223,11 +227,14 @@ struct GitSheet: View {
         } header: {
             Text("Worktree")
         } footer: {
-            if let why = worktree?.mergeBlocked {
-                Text(why)
-            } else if let n = worktree?.unmerged, n > 0 {
-                Text("\(n) commit\(n == 1 ? "" : "s") \(base ?? "the base") doesn't have yet.")
+            Group {
+                if let why = worktree?.mergeBlocked {
+                    Text(why)
+                } else if let n = worktree?.unmerged, n > 0 {
+                    Text("\(n) commit\(n == 1 ? "" : "s") \(base ?? "the base") doesn't have yet.")
+                }
             }
+            .font(.ui(.footnote))
         }
     }
 
@@ -240,12 +247,12 @@ struct GitSheet: View {
                         model.switchBranch(target, to: b)
                     } label: {
                         HStack(spacing: 8) {
-                            Text(b).font(.system(.subheadline, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                            Text(b).font(.code(.subheadline)).lineLimit(1).truncationMode(.middle)
                             if b == branches.defaultBranch {
-                                Text("default").font(.caption2.weight(.semibold)).foregroundStyle(Trek.muted)
+                                Text("default").font(.ui(.caption2).weight(.semibold)).foregroundStyle(Trek.muted)
                             }
                             Spacer()
-                            if current { Image(systemName: "checkmark").font(.subheadline.weight(.semibold)) }
+                            if current { Image(systemName: "checkmark").font(.ui(.subheadline).weight(.semibold)) }
                         }
                         // Greyed where it can't be checked out now (the footer says why).
                         .foregroundStyle(current || (!busy && status?.canSwitch != false) ? Trek.foreground : Trek.muted)
@@ -259,7 +266,10 @@ struct GitSheet: View {
         } header: {
             Text("Branches")
         } footer: {
-            if let why = status?.switchBlocked { Text(why) }
+            Group {
+                if let why = status?.switchBlocked { Text(why) }
+            }
+            .font(.ui(.footnote))
         }
     }
 }
@@ -282,7 +292,7 @@ struct GitButtonLabel: View {
         HStack(spacing: 4) {
             Image(systemName: "arrow.triangle.branch")
             if changed > 0 {
-                Text("\(changed)").font(.subheadline.weight(.semibold)).monospacedDigit()
+                Text("\(changed)").font(.ui(.subheadline).weight(.semibold)).monospacedDigit()
             }
         }
         .accessibilityElement(children: .ignore)

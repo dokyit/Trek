@@ -6,8 +6,12 @@ struct ThreadsView: View {
     @Environment(AppModel.self) private var model
     @Binding var path: [String]
     @Binding var showNew: Bool
-    @State private var collapsed: Set<String> = []
+    @State private var collapsed: Set<String> = Launch.folded
     @State private var projectFilter: String?
+    @State private var deleteAsk: DeleteAsk?
+    /// A thread whose swipe asked for the snooze menu, or a time of one's own.
+    @State private var snoozeChoice: ThreadSummary?
+    @State private var snoozePicking: ThreadSummary?
     @Environment(\.compactRows) private var compact
 
     var body: some View {
@@ -28,6 +32,7 @@ struct ThreadsView: View {
                 section("Pinned", filtered(model.pinned))
                 section("Needs you", filtered(model.needsYou), tint: Trek.approval)
                 section("Working", filtered(model.working), tint: Trek.working)
+                section("Snoozed", filtered(model.snoozed))
                 section("Recent", filtered(model.recent))
                 if model.threads.isEmpty, model.connection == .connected {
                     ContentUnavailableView("No threads yet", systemImage: "bubble.left.and.text.bubble.right",
@@ -71,7 +76,19 @@ struct ThreadsView: View {
             .navigationDestination(for: String.self) { tid in
                 ThreadView(threadID: tid)
             }
+            .confirmationDialog("Snooze", isPresented: Binding(get: { snoozeChoice != nil }, set: { if !$0 { snoozeChoice = nil } }),
+                                titleVisibility: .visible, presenting: snoozeChoice) { t in
+                ForEach(SnoozePreset.allCases) { preset in
+                    Button(preset.label) { model.snooze(t.id, preset) }
+                }
+                Button("Pick a time…") { snoozePicking = t }
+            } message: { t in
+                Text(t.title)
+            }
+            .sheet(item: $snoozePicking) { SnoozePicker(thread: $0) }
+            .deleteConfirmation($deleteAsk, model: model)
         }
+        .environment(\.openThread, OpenThreadAction { path.append($0) })
     }
 
     private func filtered(_ list: [ThreadSummary]) -> [ThreadSummary] {
@@ -95,12 +112,38 @@ struct ThreadsView: View {
                         .swipeActions(edge: .leading) {
                             if t.unseen {
                                 Button("Read", systemImage: "checkmark") { model.markSeen(t.id) }.tint(Trek.done)
+                            } else if model.serves(.markUnread) {
+                                Button("Unread", systemImage: "circlebadge.fill") { model.markUnread(t.id) }.tint(Trek.working)
+                            }
+                        }
+                        .swipeActions(edge: .trailing) {
+                            if model.serves(.snooze) {
+                                if t.section == .snoozed {
+                                    Button("Wake", systemImage: "sun.max") { model.wake(t.id) }.tint(Trek.approval)
+                                } else {
+                                    Button("Snooze", systemImage: "moon.zzz") { snoozeChoice = t }.tint(.indigo)
+                                }
                             }
                         }
                         .contextMenu {
                             Button("Copy title", systemImage: "doc.on.doc") { UIPasteboard.general.string = t.title }
                             if t.runState == .working {
                                 Button("Stop", systemImage: "stop.fill", role: .destructive) { model.interrupt(t.id) }
+                            }
+                            if model.serves(.snooze) {
+                                SnoozeMenu(thread: t) { snoozePicking = t }
+                            }
+                            if t.unseen {
+                                Button("Mark read", systemImage: "checkmark.circle") { model.markSeen(t.id) }
+                            } else if model.serves(.markUnread) {
+                                Button("Mark unread", systemImage: "circlebadge") { model.markUnread(t.id) }
+                            }
+                            if model.serves(.regenerateTitle) {
+                                Button("Regenerate title", systemImage: "text.badge.star") { model.regenerateTitle(t.id) }
+                            }
+                            if model.serves(.delete) {
+                                Divider()
+                                Button("Delete…", systemImage: "trash", role: .destructive) { model.askToDelete(t, into: $deleteAsk) }
                             }
                         }
                     }
@@ -112,11 +155,11 @@ struct ThreadsView: View {
                     }
                 } label: {
                     HStack(spacing: 7) {
-                        Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(Trek.muted)
-                        Text("\(threads.count)").font(.subheadline.monospacedDigit()).foregroundStyle(tint ?? Trek.muted.opacity(0.7))
+                        Text(title).font(.ui(.subheadline).weight(.semibold)).foregroundStyle(Trek.muted)
+                        Text("\(threads.count)").font(.ui(.subheadline).monospacedDigit()).foregroundStyle(tint ?? Trek.muted.opacity(0.7))
                         Spacer()
                         Image(systemName: "chevron.down")
-                            .font(.caption.weight(.semibold))
+                            .font(.ui(.caption).weight(.semibold))
                             .foregroundStyle(Trek.muted.opacity(0.8))
                             .rotationEffect(.degrees(collapsed.contains(title) ? -90 : 0))
                     }
@@ -144,7 +187,7 @@ struct ThreadRow: View {
     /// One line: logo, project badge, title, status.
     private var compactBody: some View {
         HStack(alignment: .center, spacing: 10) {
-            AgentGlyph(key: thread.agent.key, size: 18)
+            AgentGlyph(thread.agent, size: 18)
                 .opacity(recedes ? 0.7 : 1)
             if let p = thread.project { ProjectBadge(project: p, size: 15) }
             Text(thread.title)
@@ -159,7 +202,7 @@ struct ThreadRow: View {
 
     private var fullBody: some View {
         HStack(alignment: .top, spacing: 13) {
-            AgentGlyph(key: thread.agent.key, size: 24)
+            AgentGlyph(thread.agent, size: 24)
                 .padding(.top, 1)
                 .opacity(recedes ? 0.7 : 1)
             VStack(alignment: .leading, spacing: 5) {
@@ -181,11 +224,11 @@ struct ThreadRow: View {
                         .transaction { $0.animation = nil }
                     Spacer(minLength: 0)
                     if thread.additions + thread.deletions > 0, thread.needs == nil {
-                        DiffStat(additions: thread.additions, deletions: thread.deletions, font: .caption.monospacedDigit())
+                        DiffStat(additions: thread.additions, deletions: thread.deletions, font: .ui(.caption).monospacedDigit())
                             .opacity(recedes ? 0.6 : 0.9)
                     }
                 }
-                .font(.subheadline)
+                .font(.ui(.subheadline))
             }
         }
         .accessibilityElement(children: .combine)
@@ -196,21 +239,17 @@ struct ThreadRow: View {
         if let look = StatusLook.of(thread) {
             StatusPill(look: look)
         } else if thread.unseen {
-            // Done and not read yet: emerald, on its own wash.
-            HStack(spacing: 5) {
-                Circle().fill(Trek.done).frame(width: 6, height: 6)
-                Text(When.short(thread.updatedAt)).font(.footnote.weight(.semibold).monospacedDigit())
+            // Done and not read yet: an emerald dot by the time, as in the Mac's sidebar.
+            HStack(spacing: 6) {
+                Circle().fill(Trek.done).frame(width: 7, height: 7)
+                Text(When.short(thread.updatedAt)).font(.ui(.footnote).weight(.medium).monospacedDigit())
+                    .foregroundStyle(Trek.muted)
             }
-            .foregroundStyle(Trek.done)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Trek.done.opacity(0.13), in: Capsule())
-            .overlay(Capsule().strokeBorder(Trek.done.opacity(0.24), lineWidth: 0.5))
             .fixedSize()
             .accessibilityLabel("Done, unread, \(When.short(thread.updatedAt))")
         } else {
             Text(When.short(thread.updatedAt))
-                .font(.subheadline.monospacedDigit())
+                .font(.ui(.subheadline).monospacedDigit())
                 .foregroundStyle(Trek.muted.opacity(0.8))
         }
     }
@@ -220,6 +259,8 @@ struct ThreadRow: View {
     private var secondary: some View {
         if let needs = thread.needs {
             Text(needs.text.replacingOccurrences(of: "`", with: "")).foregroundStyle(Trek.muted)
+        } else if thread.section == .snoozed, let until = SnoozeWords.until(thread.snoozedUntil) {
+            Label(until, systemImage: "moon.zzz").labelStyle(BranchLabelStyle()).foregroundStyle(Trek.muted.opacity(0.85))
         } else if thread.runState == .working, let activity = thread.activity {
             RichText(markdown: activity, size: 15, style: .subheadline, autoPaths: true)
                 .foregroundStyle(Trek.muted)
@@ -229,7 +270,7 @@ struct ThreadRow: View {
                 Text(branch)
             } icon: {
                 Image(systemName: thread.worktree ? "arrow.triangle.branch" : "arrow.triangle.branch")
-                    .font(.caption2)
+                    .font(.ui(.caption2))
             }
             .labelStyle(BranchLabelStyle())
             .foregroundStyle(Trek.muted.opacity(0.85))
@@ -262,14 +303,14 @@ struct ConnectionBanner: View {
                 Image(systemName: "wifi.exclamationmark").foregroundStyle(Trek.approval)
             }
             VStack(alignment: .leading, spacing: 1) {
-                Text(host ?? "Your Mac").font(.subheadline.weight(.semibold))
-                Text(state.label).font(.caption).foregroundStyle(Trek.muted)
+                Text(host ?? "Your Mac").font(.ui(.subheadline).weight(.semibold))
+                Text(state.label).font(.ui(.caption)).foregroundStyle(Trek.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
             if case .unauthorized = state, let pairAgain {
                 Button("Pair again", action: pairAgain)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.ui(.subheadline).weight(.semibold))
                     .buttonStyle(.glass)
             }
         }
@@ -289,17 +330,17 @@ struct IdentityChangedCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Label {
-                Text("This Mac's identity changed").font(.headline)
+                Text("This Mac's identity changed").font(.ui(.headline))
             } icon: {
                 Image(systemName: "exclamationmark.shield.fill").foregroundStyle(Trek.failed)
             }
             Text("\(host ?? "Your Mac") answered with a different certificate than the one this iPhone paired with. Trek may have been reinstalled on it, or something else on the network is posing as it. Trek won't connect until you pair again.")
-                .font(.subheadline)
+                .font(.ui(.subheadline))
                 .foregroundStyle(Trek.foreground.opacity(0.85))
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 14) {
-                LabeledContent("Paired") { Text(expected).monospaced() }
-                if let seen { LabeledContent("Now") { Text(seen).monospaced().foregroundStyle(Trek.failed) } }
+                LabeledContent("Paired") { Text(expected).font(.code(.footnote)) }
+                if let seen { LabeledContent("Now") { Text(seen).font(.code(.footnote)).foregroundStyle(Trek.failed) } }
             }
             .labeledContentStyle(FingerprintLabelStyle())
             Button(action: pairAgain) {
@@ -322,6 +363,6 @@ private struct FingerprintLabelStyle: LabeledContentStyle {
             configuration.label.foregroundStyle(Trek.muted)
             configuration.content
         }
-        .font(.footnote)
+        .font(.ui(.footnote))
     }
 }

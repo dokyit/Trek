@@ -95,8 +95,8 @@ fn thread_summary_serializes_like_the_spec() {
     let thread = ThreadSummary {
         id: "01J".into(),
         title: "Fix the flaky auth test".into(),
-        project: ProjectRef { id: "p1".into(), name: "trek-api".into(), hue: 212, monogram: "TA".into() },
-        agent: AgentRef { key: "claude-code".into(), name: "Claude Code".into(), logo: None },
+        project: ProjectRef { id: "p1".into(), name: "trek-api".into(), hue: 212, monogram: "TA".into(), icon: None },
+        agent: AgentRef { key: "claude-code".into(), name: "Claude Code".into(), logo: None, icon: None },
         model: Some("claude-opus-5-5".into()),
         model_label: Some("Opus 5.5".into()),
         run_state: RunState::NeedsYou,
@@ -309,7 +309,7 @@ fn every_item_state_round_trips() {
             });
         }
     }
-    bodies.push(ItemBody::User { text: "u".into(), images: 2 });
+    bodies.push(ItemBody::User { text: "u".into(), images: 2, aside: false });
     bodies.push(ItemBody::Assistant { text: "a".into(), streaming: true });
     bodies.push(ItemBody::Limit { text: "l".into(), resets_at: None });
     for body in bodies {
@@ -667,4 +667,127 @@ fn ntfy_links_for_a_topic() {
     assert_eq!(ntfy_links("https://ntfy.sh", "trek-abc"), (Some("https://ntfy.sh/trek-abc".into()), Some("ntfy://ntfy.sh/trek-abc".into())));
     assert_eq!(ntfy_links("http://pi.local:8080/", "t"), (Some("http://pi.local:8080/t".into()), Some("ntfy://pi.local:8080/t?secure=false".into())));
     assert_eq!(ntfy_links("https://ntfy.sh", ""), (None, None));
+}
+
+#[test]
+fn features_sub_agents_the_thread_menu_and_search() {
+    // The Mac's list of what it serves; an older Mac's welcome (none) still reads.
+    let welcome = server_round_trip(r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents"]}"#);
+    assert!(matches!(welcome.msg, ServerMessage::Welcome { ref features, .. } if features == &["search", "sub_agents"]));
+    let old: ServerEnvelope = serde_json::from_str(r#"{"type":"paired","re":"1","protocol":1,"token":"t","host":{"id":"h","name":"Mac","version":"0.3.2"}}"#).unwrap();
+    assert!(matches!(old.msg, ServerMessage::Paired { ref features, .. } if features.is_empty()));
+
+    // The thread menu's actions.
+    for line in [
+        r#"{"type":"thread_action","id":"1","thread_id":"t","action":{"kind":"snooze","preset":"three_hours"}}"#,
+        r#"{"type":"thread_action","id":"2","thread_id":"t","action":{"kind":"snooze","until":1791100800000}}"#,
+        r#"{"type":"thread_action","id":"3","thread_id":"t","action":{"kind":"wake"}}"#,
+        r#"{"type":"thread_action","id":"4","thread_id":"t","action":{"kind":"mark_unread"}}"#,
+        r#"{"type":"thread_action","id":"5","thread_id":"t","action":{"kind":"regenerate_title"}}"#,
+        r#"{"type":"thread_action","id":"6","thread_id":"t","action":{"kind":"delete"}}"#,
+        r#"{"type":"thread_action","id":"7","thread_id":"t","action":{"kind":"delete","confirmed":true}}"#,
+        r#"{"type":"search","id":"8","query":"refresh race","limit":20}"#,
+        r#"{"type":"search","id":"9","query":"x"}"#,
+    ] {
+        client_round_trip(line);
+    }
+    let snooze = client_round_trip(r#"{"type":"thread_action","thread_id":"t","action":{"kind":"snooze","preset":"next_week"}}"#);
+    assert!(matches!(snooze.msg, ClientMessage::ThreadAction(ThreadActionRequest { action: ThreadAction::Snooze { until: None, preset: Some(SnoozePreset::NextWeek) }, .. })));
+    let search = client_round_trip(r#"{"type":"search","query":"race"}"#);
+    assert!(search.msg.is_query());
+    assert_eq!(search.msg.kind(), "search");
+
+    // Sub-agents: the row's thread, the parent's pointer to the one waiting, unlisted rows.
+    let row = server_round_trip(
+        r#"{"type":"unlisted","thread":{"id":"kid","title":"Benchmark it","project":{"id":"p","name":"trek","hue":24,"monogram":"TR"},"agent":{"key":"codex","name":"Codex"},"model":null,"model_label":null,"run_state":"needs-you","needs":{"kind":"approval","text":"Run cargo bench"},"section":"inbox","unseen":false,"pinned":false,"branch":null,"worktree":false,"activity":null,"working_since":null,"updated_at":5,"additions":0,"deletions":0,"parent_id":"t"}}"#,
+    );
+    assert!(matches!(row.msg, ServerMessage::Unlisted { ref thread } if thread.parent_id.as_deref() == Some("t")));
+    let parent = ThreadSummary {
+        id: "t".into(),
+        needs: Some(Needs { kind: NeedsKind::Approval, text: "Sub-agent needs you".into() }),
+        needs_thread: Some("kid".into()),
+        snoozed_until: Some(9),
+        sub_agents: vec![SubAgent { agent: AgentRef::new("codex", "Codex", None), model: Some("Sol".into()), title: "Benchmark it".into(), state: SubAgentState::NeedsYou, since: None, thread_id: Some("kid".into()) }],
+        ..Default::default()
+    };
+    let v = serde_json::to_value(&parent).unwrap();
+    assert_eq!((&v["needs_thread"], &v["snoozed_until"], &v["sub_agents"][0]["thread_id"]), (&json!("kid"), &json!(9), &json!("kid")));
+    assert_eq!(v.get("parent_id"), None, "left out when there's nothing to say");
+    let back: ThreadSummary = serde_json::from_value(v).unwrap();
+    assert_eq!(back, parent);
+    // An older Mac's snapshot (no unlisted rows) still reads.
+    let snapshot: ServerEnvelope = serde_json::from_str(r#"{"type":"snapshot","threads":[],"projects":[],"agents":[]}"#).unwrap();
+    assert!(matches!(snapshot.msg, ServerMessage::Snapshot(ref s) if s.unlisted.is_empty()));
+
+    let results = server_round_trip(
+        r#"{"type":"search_results","re":"8","query":"race","results":[{"thread":{"id":"t","title":"Fix the race","project":{"id":"p","name":"trek","hue":24,"monogram":"TR"},"agent":{"key":"codex","name":"Codex"},"model":null,"model_label":null,"run_state":"idle","needs":null,"section":"settled","unseen":false,"pinned":false,"branch":null,"worktree":false,"activity":null,"working_since":null,"updated_at":5,"additions":0,"deletions":0},"snippet":"two refreshes race","ranges":[[14,18]]}]}"#,
+    );
+    assert!(matches!(results.msg, ServerMessage::SearchResults(ref r) if r.results[0].ranges == [[14, 18]]));
+}
+
+#[test]
+fn parity_requests_and_replies() {
+    let requests = [
+        r#"{"type":"use_reset","id":"1","credit_id":"rc-1"}"#,
+        r#"{"type":"queue_action","id":"2","thread_id":"t","index":1,"text":"and open a PR","action":{"kind":"remove"}}"#,
+        r#"{"type":"queue_action","id":"3","thread_id":"t","index":0,"reset":true,"text":"carry on","action":{"kind":"edit","text":"carry on, then stop"}}"#,
+        r#"{"type":"attachment","id":"4","thread_id":"t","item_id":"i12","index":0,"max_px":480}"#,
+        r#"{"type":"background_output","id":"5","thread_id":"t","task_id":"b1"}"#,
+        r#"{"type":"stop_background","id":"6","thread_id":"t","task_id":"b1"}"#,
+        r#"{"type":"icon","id":"7","agent":"acp:mistral-vibe"}"#,
+        r#"{"type":"icon","id":"8","project_id":"p"}"#,
+    ];
+    for line in requests {
+        let env = client_round_trip(line);
+        assert_eq!(env.msg.kind(), value(line)["type"].as_str().unwrap());
+    }
+    let reads: Vec<bool> = requests.iter().map(|l| serde_json::from_str::<ClientEnvelope>(l).unwrap().msg.is_query()).collect();
+    assert_eq!(reads, [false, false, false, true, true, false, true, true], "only reads may overtake");
+
+    let replies = [
+        r#"{"type":"attachment","re":"4","thread_id":"t","item_id":"i12","index":0,"mime":"image/jpeg","data":"/9j/","width":480,"height":160}"#,
+        r#"{"type":"background_output","re":"5","thread_id":"t","task_id":"b1","output":"ready on :5173"}"#,
+        r#"{"type":"background_output","re":"5","thread_id":"t","task_id":"b1"}"#,
+        r#"{"type":"icon","re":"7","agent":"acp:mistral-vibe","hash":"0f3a","png":"iVBORw0K","template":true}"#,
+        r#"{"type":"ack","re":"2","text":"and open a PR"}"#,
+        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon"]}"#,
+        r#"{"type":"usage","re":"9","providers":[{"agent":{"key":"codex","name":"Codex","logo":"codex"},"plan":"ChatGPT Pro","limits":[],
+            "resets":[{"id":"rc-1","title":"Full reset (Weekly + 5 hr)","expires_at":1791030000000}]},
+            {"agent":{"key":"acp:devin","name":"Devin"},"limits":[],"no_limits":true,"as_of":1791020000000,"today":"Today in Trek: 12K tokens"}],"picked":true}"#,
+    ];
+    for line in replies {
+        server_round_trip(line);
+    }
+    let welcome: ServerEnvelope = serde_json::from_str(replies[5]).unwrap();
+    let ServerMessage::Welcome { features, .. } = welcome.msg else { panic!() };
+    assert_eq!(features, feature::ALL, "a Mac that does them all says so");
+}
+
+#[test]
+fn parity_fields_ride_on_rows_and_older_ones_still_read() {
+    let row = r#"{"id":"t","title":"x","project":{"id":"p","name":"web","hue":10,"monogram":"WE","icon":"9c1e"},
+        "agent":{"key":"acp:mistral-vibe","name":"Mistral Vibe","icon":"0f3a"},"run_state":"working","section":"working",
+        "cost":{"label":"≈ $1.84 at API prices","cached":"92% cached","cached_detail":"157K of 171K prompt tokens came from the prompt cache."},
+        "queued":[{"text":"then the docs"},{"text":"","images":2},{"text":"carry on","reset":true}],
+        "background_tasks":[{"id":"b1","kind":"shell","title":"pnpm dev","line":"ready on :5173","since":1791020000000,"readable":true,"stoppable":true},
+                            {"id":"b2","kind":"something_new","title":"x"}]}"#;
+    let t: ThreadSummary = serde_json::from_str(row).unwrap();
+    assert_eq!(t.project.icon.as_deref(), Some("9c1e"));
+    assert_eq!(t.agent.icon.as_deref(), Some("0f3a"));
+    assert_eq!(t.cost.as_ref().unwrap().cached.as_deref(), Some("92% cached"));
+    assert_eq!((t.queued[1].images, t.queued[2].reset), (2, true));
+    assert_eq!(t.background_tasks[1].kind, BackgroundKind::Other, "a kind this phone doesn't know");
+
+    // Nothing new on the wire when there's nothing to say: older phones read what they did.
+    let plain = serde_json::to_value(ThreadSummary { id: "t".into(), ..Default::default() }).unwrap();
+    for key in ["queued", "background_tasks"] {
+        assert!(plain.get(key).is_none(), "{key} should be skipped when empty");
+    }
+    assert!(plain["project"].get("icon").is_none() && plain["agent"].get("icon").is_none());
+    let user = item_round_trip(r#"{"id":"i3","seq":4,"at":null,"kind":"user","text":"/model sonnet","images":0,"aside":true}"#);
+    assert!(matches!(user.body, ItemBody::User { aside: true, .. }));
+    let old = item_round_trip(r#"{"id":"i2","seq":3,"at":null,"kind":"user","text":"hi","images":0}"#);
+    assert!(matches!(old.body, ItemBody::User { aside: false, .. }), "an older Mac's message is a prompt");
+    let welcome: ServerEnvelope = serde_json::from_str(r#"{"type":"welcome","protocol":1,"host":{"id":"h","name":"Mac","version":"0.3"}}"#).unwrap();
+    assert!(matches!(welcome.msg, ServerMessage::Welcome { ref features, .. } if features.is_empty()), "an older Mac lists nothing");
 }

@@ -55,7 +55,7 @@ struct Composer: View {
                                     Text(mode == .steer ? "Steer the running turn" : "Queue for after this turn")
                                     Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
                                 }
-                                .font(.caption2.weight(.semibold))
+                                .font(.ui(.caption2).weight(.semibold))
                                 .foregroundStyle(Trek.muted)
                             }
                             .transition(.opacity)
@@ -63,7 +63,7 @@ struct Composer: View {
                         }
                         TextField(placeholder, text: $text, axis: .vertical)
                             .lineLimit(1...6)
-                            .font(.system(size: 17))
+                            .font(.ui(size: 17))
                             .focused($focused)
                     }
                     .padding(.vertical, 11)
