@@ -1348,6 +1348,8 @@ impl Render for TrekWindow {
                     .child(div().absolute().top_0().left_0().size_full().bg(side.opacity((0.5 + dim * 0.6).min(0.92))))
             })
             .child(self.focus_anchor())
+            // Interactive artifacts' web views: numbered here, placed by `layer_end` below.
+            .child(crate::artifact::layer_start())
             .child(self.title.clone().cached(StyleRefinement::default().w_full().flex_none().h(gpui_kit::component::TITLE_BAR_HEIGHT)))
             .child(body)
             // ⌘K, drawn over everything else in the window.
@@ -1356,6 +1358,7 @@ impl Render for TrekWindow {
             .children(crate::motion::leaving_sheet(window, cx))
             // Windows: the caption buttons stay reachable over what covers the title bar.
             .children((self.palette.read(cx).open || self.preview.read(cx).is_open()).then(|| crate::chrome::caption_over_overlays(window, cx)).flatten())
+            .child(crate::artifact::layer_end())
             // TREK_PERF: painted last, it times the frame.
             .children(crate::perf::probe())
             .into_any_element()

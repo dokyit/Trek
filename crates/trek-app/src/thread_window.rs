@@ -266,6 +266,7 @@ impl Render for ThreadWindow {
                     .child(img(crate::ui::background_source(&spec)).absolute().top_0().left_0().size_full().object_fit(ObjectFit::Cover))
                     .child(div().absolute().top_0().left_0().size_full().bg(side.opacity((0.5 + dim * 0.6).min(0.92))))
             })
+            .child(crate::artifact::layer_start())
             .child(self.title_bar(window.viewport_size().width < px(640.), cx))
             .child(
                 div().flex_1().min_h_0().px_2().pb_2().child(
@@ -287,5 +288,6 @@ impl Render for ThreadWindow {
             )
             .child(self.preview.clone())
             .children(self.preview.read(cx).is_open().then(|| crate::chrome::caption_over_overlays(window, cx)).flatten())
+            .child(crate::artifact::layer_end())
     }
 }

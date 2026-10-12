@@ -2,6 +2,7 @@
 //! Nothing in this crate depends on the UI toolkit.
 
 pub mod agent_update;
+pub mod artifact;
 pub mod basecamp;
 pub mod catalog;
 pub mod changelog;

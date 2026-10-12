@@ -20,6 +20,10 @@
 //! | `mock:visualization stream`  | the same, a few characters at a time, slowly, so the card's   |
 //! | [type]                       | frame and then its marks can be watched arriving              |
 //! | `mock:visualization invalid` | a block that closes but can't be drawn (an unknown field)     |
+//! | `mock:interactive` [`stream`] | interactive artifacts (`trek-html`): a tabbed report with a   |
+//! |                              | table and a node diagram, and a 3D desk with a monitor clamp  |
+//! |                              | (inline WebGL: drag, scroll, preset views); both offline. With |
+//! |                              | `stream`, slowly, so the "Building…" card can be watched      |
 //! | `mock:explore` [dur]         | tools at a steady pace for `dur` (default 30s): reads, finds, |
 //! |                              | commands, edits and web lookups, in groups between messages  |
 //! | `mock:history` [n]           | a long history in one go, at once: `n` rounds (default 100,   |
@@ -173,6 +177,8 @@ enum Script {
     VisualizationStream(Option<&'static str>),
     /// An answer whose visualization block closes invalid.
     VisualizationInvalid,
+    /// An answer with two interactive artifacts; `stream`: slowly.
+    Interactive { stream: bool },
     Explore(Duration),
     /// `n` rounds of work at once, for a long transcript.
     History(u32),
@@ -266,6 +272,7 @@ impl Script {
                         _ => Script::Visualization(kind(i + 1)),
                     }
                 }
+                "interactive" if w.starts_with("mock:") => Script::Interactive { stream: words.get(i + 1).is_some_and(|w| w == "stream") },
                 "explore" if w.starts_with("mock:") => Script::Explore(duration_after(i).unwrap_or(Duration::from_secs(30))),
                 "history" if w.starts_with("mock:") => Script::History(words.get(i + 1).and_then(|n| n.parse().ok()).unwrap_or(100).clamp(1, MAX_HISTORY)),
                 // The one script that changes files: only when asked for by its full name.
@@ -332,6 +339,7 @@ pub fn title(request: &str) -> String {
         Script::Stream(_) => "Walk through the codebase",
         Script::Prose => "Tour the startup code",
         Script::Visualization(_) | Script::VisualizationStream(_) | Script::VisualizationInvalid => "Compare release health dashboards",
+        Script::Interactive { .. } => "Plan the artifact rollout",
         Script::Explore(_) => "Animate the title as it appears",
         Script::History(_) => "Harden the request parser",
         Script::Error => "Fix the failing build",
@@ -717,6 +725,9 @@ impl Session {
             // Slow enough to watch (and capture) a card's frame and then its marks arrive.
             Script::VisualizationStream(kind) => self.say_at(kind.and_then(|kind| VIZ_GALLERY.iter().find(|(k, _)| *k == kind)).map_or(VISUALIZATION, |(_, answer)| answer), 90).await?,
             Script::VisualizationInvalid => self.say(VIZ_INVALID).await?,
+            // In pieces of a few hundred characters: it's 20 KB, which token by token takes half
+            // a minute; streamed, slow enough to watch the card say "Building…" first.
+            Script::Interactive { stream } => self.say_in_pieces(INTERACTIVE, if stream { 160 } else { 600 }, if stream { 40 } else { 14 }).await?,
             Script::Explore(total) => self.explore(total).await?,
             Script::History(rounds) => self.history(rounds).await?,
             Script::Write(file) => self.write(file.as_deref().unwrap_or("NOTES.md")).await?,
@@ -980,6 +991,21 @@ impl Session {
     /// Stream `text` a token at a time, then send it whole (as agents do at the end of a message).
     async fn say(&mut self, text: &str) -> Step {
         self.say_at(text, 14).await
+    }
+
+    /// `say` in pieces of about `size` bytes (whole characters), `ms` apart.
+    async fn say_in_pieces(&mut self, text: &str, size: usize, ms: u64) -> Step {
+        let mut start = 0;
+        while start < text.len() {
+            let mut end = (start + size).min(text.len());
+            while !text.is_char_boundary(end) {
+                end += 1;
+            }
+            self.emit(AgentEvent::TextDelta(text[start..end].into())).await?;
+            self.pause(paced(ms)).await?;
+            start = end;
+        }
+        self.emit(AgentEvent::TextDone(text.into())).await
     }
 
     /// `say`, `ms` between tokens.
@@ -1261,9 +1287,9 @@ impl Session {
     /// Change `src/notes.rs` in the session's folder (`broken`: leaving a `todo!()` in it), then
     /// check the change with the verification CLI Trek named for the project. Both for real.
     async fn verify(&mut self, broken: bool) -> Step {
-        // The verification note names its CLI in "(`…`)"; the visualization note every session
-        // carries comes first and is no place to look.
-        let notes = self.instructions.as_deref().map(|i| i.replace(trek_core::visualization::AGENT_INSTRUCTIONS, ""));
+        // The verification note names its CLI in "(`…`)"; the visualization and artifact notes
+        // every session carries come first and are no place to look.
+        let notes = self.instructions.as_deref().map(|i| i.replace(trek_core::visualization::AGENT_INSTRUCTIONS, "").replace(trek_core::artifact::AGENT_INSTRUCTIONS, ""));
         let cli = notes.as_deref().and_then(|i| i.split_once("(`")).and_then(|(_, rest)| rest.split_once('`')).map(|(cli, _)| cli.to_string());
         let Some(cli) = cli else { return self.say("This project has no verification skill yet, so there's nothing to check the change with.").await };
         let body = if broken { "pub fn load() -> Vec<String> {\n    todo!()\n}\n" } else { "pub fn load() -> Vec<String> {\n    Vec::new()\n}\n" };
@@ -1825,6 +1851,17 @@ Here is the on-call view I'd ship for it: the status first, the one thing to act
 
 I'd keep the phone view for on-call and leave the full dashboard for the weekly review."#;
 
+/// Two interactive artifacts (`trek-html`), both working offline: a tabbed report (a table, an
+/// SVG node diagram, coloured cards) and a 3D desk with a monitor clamp in inline WebGL (drag to
+/// turn, scroll to zoom, preset views, a legend).
+pub const INTERACTIVE: &str = concat!(
+    "## Rolling out interactive artifacts\n\nHere's the plan as a report you can click through: the milestones, how the pieces fit, and the risks.\n\n```trek-html\n",
+    include_str!("mock_artifacts/report.html"),
+    "```\n\nAnd the desk you asked about. The clamp grips the back edge from behind, so check the view from underneath before you drill anything:\n\n```trek-html\n",
+    include_str!("mock_artifacts/desk.html"),
+    "```\n\nThe clamp needs about 4 cm of clear edge; the desk top here is 4 cm thick, so it fits with the screw fully open."
+);
+
 /// A visualization block that closes but can't be drawn: `color` isn't a field of a bar chart.
 pub const VIZ_INVALID: &str = r#"Here are the build times, though this block won't draw:
 
@@ -1926,6 +1963,8 @@ mod tests {
         assert_eq!(Script::parse("mock:visualization stream bar", false), Script::VisualizationStream(Some("bar")));
         assert_eq!(Script::parse("mock:visualization stream", false), Script::VisualizationStream(None));
         assert_eq!(Script::parse("mock:visualization invalid", false), Script::VisualizationInvalid);
+        assert_eq!(Script::parse("mock:interactive", false), Script::Interactive { stream: false });
+        assert_eq!(Script::parse("mock:interactive stream", false), Script::Interactive { stream: true });
         assert_eq!(Script::parse("show a visualization", false), Script::Answer, "only by its full name");
         assert_eq!(Script::parse("mock:write CHANGELOG.md", false), Script::Write(Some("CHANGELOG.md".into())), "the file's name as written");
         assert_eq!(Script::parse("Start one: mock:write docs/Notes.md.", false), Script::Write(Some("docs/Notes.md".into())));
