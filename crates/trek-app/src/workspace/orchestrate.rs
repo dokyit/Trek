@@ -267,6 +267,11 @@ impl Workspace {
                     result
                 }
                 "cancel_task" => self.cancel_task(&call.thread, &id(), cx),
+                "start_thread" | "handoff" | "list_threads" | "thread_status" | "read_thread" | "send_to_thread" => match self.handle_thread_call(&call, cx) {
+                    Some(result) => result,
+                    // It waits on the thread: the answer comes when that's done.
+                    None => return,
+                },
                 other => Err(format!("Trek has no tool called {other}.")),
             }
         };
@@ -362,33 +367,7 @@ impl Workspace {
             return Err("You're advising, read-only, so a sub-agent you start can't change files either: use mode \"advise\".".into());
         }
         let agent = self.resolve_agent(text("agent"), &parent.agent)?;
-        let models = self.models_for(&agent);
-        let model = match text("model") {
-            // No model picked: the caller's own when the sub-agent is the same agent (a thread on
-            // SWE-2 delegates to SWE-2), else the agent's default.
-            None if agent == parent.agent => parent
-                .model
-                .clone()
-                .or_else(|| crate::composer::default_model(&models).map(|m| m.id.clone())),
-            None => crate::composer::default_model(&models).map(|m| m.id.clone()),
-            Some(m) => Some(
-                models
-                    .iter()
-                    .find(|i| crate::composer::same_model(m, &i.id) || i.id.eq_ignore_ascii_case(m) || i.name.eq_ignore_ascii_case(m))
-                    .map(|i| i.id.clone())
-                    .or_else(|| models.is_empty().then(|| m.to_string()))
-                    .ok_or_else(|| {
-                        let list: Vec<String> = models.iter().map(|i| format!("{} ({})", i.id, i.name)).collect();
-                        format!("{} has no model “{m}”. Its models: {}.", agent.display_name(), list.join(", "))
-                    })?,
-            ),
-        };
-        let effort = match text("effort") {
-            None => parent.effort,
-            Some(e) => Effort::parse(e).ok_or_else(|| format!("effort is one of off, minimal, low, medium, high, xhigh, max; not “{e}”."))?,
-        };
-        let efforts = model.as_ref().and_then(|m| models.iter().find(|i| crate::composer::same_model(m, &i.id))).map(|i| i.efforts.clone()).unwrap_or_default();
-        let effort = if efforts.is_empty() { effort } else { effort.clamp_to(&efforts) };
+        let (model, effort) = self.pick_model(&agent, &parent, text("model"), text("effort"))?;
         if let Some(why) = self.at_limit(&agent, model.as_deref()) {
             return Err(why);
         }
@@ -414,13 +393,48 @@ impl Workspace {
         if let Err(e) = self.store.await_report(caller, &id) {
             tracing::warn!("keep the sub-agent's report due: {e:#}");
         }
-        self.push_task_row(caller, &id, title, cx);
+        let row = Item::Tool { id: orch::task_row(&id), title: "Sub-agent".into(), detail: title.to_string(), output: String::new(), status: ToolStatus::Running };
+        self.push_row(caller, row, cx);
         self.send_to(&id, orch::child_prompt(mode, prompt), vec![], cx);
         Ok(id)
     }
 
+    /// The model and effort a thread of `agent` started on `parent`'s behalf runs: `model` and
+    /// `effort` as an agent asked for them (checked against what `agent` offers), else
+    /// `parent`'s own.
+    pub(super) fn pick_model(&self, agent: &AgentId, parent: &Thread, model: Option<&str>, effort: Option<&str>) -> Result<(Option<String>, Effort), String> {
+        let models = self.models_for(agent);
+        let model = match model {
+            // No model picked: the caller's own when the sub-agent is the same agent (a thread on
+            // SWE-2 delegates to SWE-2), else the agent's default.
+            None if *agent == parent.agent => parent
+                .model
+                .clone()
+                .or_else(|| crate::composer::default_model(&models).map(|m| m.id.clone())),
+            None => crate::composer::default_model(&models).map(|m| m.id.clone()),
+            Some(m) => Some(
+                models
+                    .iter()
+                    .find(|i| crate::composer::same_model(m, &i.id) || i.id.eq_ignore_ascii_case(m) || i.name.eq_ignore_ascii_case(m))
+                    .map(|i| i.id.clone())
+                    .or_else(|| models.is_empty().then(|| m.to_string()))
+                    .ok_or_else(|| {
+                        let list: Vec<String> = models.iter().map(|i| format!("{} ({})", i.id, i.name)).collect();
+                        format!("{} has no model “{m}”. Its models: {}.", agent.display_name(), list.join(", "))
+                    })?,
+            ),
+        };
+        let effort = match effort {
+            None => parent.effort,
+            Some(e) => Effort::parse(e).ok_or_else(|| format!("effort is one of off, minimal, low, medium, high, xhigh, max; not “{e}”."))?,
+        };
+        let efforts = model.as_ref().and_then(|m| models.iter().find(|i| crate::composer::same_model(m, &i.id))).map(|i| i.efforts.clone()).unwrap_or_default();
+        let effort = if efforts.is_empty() { effort } else { effort.clamp_to(&efforts) };
+        Ok((model, effort))
+    }
+
     /// The agent `name` stands for, among those the user can pick (by key or name), else `default`.
-    fn resolve_agent(&self, name: Option<&str>, default: &AgentId) -> Result<AgentId, String> {
+    pub(super) fn resolve_agent(&self, name: Option<&str>, default: &AgentId) -> Result<AgentId, String> {
         let ready = self.ready_agents();
         let Some(name) = name else {
             return Ok(if ready.contains(default) { default.clone() } else { ready.first().cloned().unwrap_or(default.clone()) });
@@ -438,7 +452,7 @@ impl Workspace {
 
     /// Why `agent` can't take more work on `model` now: a usage limit it has used up, as its usage
     /// windows say (those on another model don't count), or as a thread of it paused at one says.
-    fn at_limit(&self, agent: &AgentId, model: Option<&str>) -> Option<String> {
+    pub(super) fn at_limit(&self, agent: &AgentId, model: Option<&str>) -> Option<String> {
         let now = self.now();
         let window = self.agent_status.get(&agent.key()).and_then(|st| {
             st.limits.iter().find(|l| l.percent >= 99.5 && trek_agents::limits::applies(l, &LimitScope::Other, model) && l.resets_at.is_none_or(|r| r > now))
@@ -461,10 +475,10 @@ impl Workspace {
         paused.map(|(r, label)| format!("{} has used up its {} (it resets {}). Pick another agent.", agent.display_name(), label.to_lowercase(), crate::time::reset_clock(r, now)))
     }
 
-    /// The sub-agent's row in its parent's transcript, where the call was made.
-    fn push_task_row(&mut self, parent: &str, child: &str, title: &str, cx: &mut Context<Self>) {
+    /// The row for a sub-agent or thread `parent`'s agent started (or handed off to), in its
+    /// transcript where the call was made.
+    pub(super) fn push_row(&mut self, parent: &str, row: Item, cx: &mut Context<Self>) {
         let Some(live) = self.live.get_mut(parent) else { return };
-        let row = Item::Tool { id: orch::task_row(child), title: "Sub-agent".into(), detail: title.to_string(), output: String::new(), status: ToolStatus::Running };
         live.pending_rows.push_back(row);
         // Asked outside a turn, there's no call row to wait for.
         let idle = live.turn_started.is_none();

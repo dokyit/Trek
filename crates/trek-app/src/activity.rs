@@ -119,17 +119,18 @@ fn capitalize(text: &str) -> String {
 pub enum Place {
     /// Folded into the tool group around it.
     Group,
-    /// A row of its own: sub-agents (Trek's, and the agent's own).
+    /// A row of its own: sub-agents (Trek's, and the agent's own), and threads linked to this
+    /// one (`trek_core::lineage`).
     Own,
-    /// No row: the agent's call to `delegate_task`, which the sub-agent's own row stands for
-    /// (unless it failed: then it says why).
+    /// No row: the agent's call to `delegate_task` (or `start_thread`, `handoff`), which the
+    /// sub-agent's or thread's own row stands for (unless it failed: then it says why).
     Hidden,
 }
 
 pub fn placement(item: &Item) -> Place {
     match item {
-        Item::Tool { id, title, .. } if orch::task_of_row(id).is_some() || title == "Subagent" => Place::Own,
-        Item::Tool { title, status, .. } if orch::is_delegate_call(title) && *status != ToolStatus::Failed => Place::Hidden,
+        Item::Tool { id, title, .. } if orch::task_of_row(id).is_some() || trek_core::lineage::of_row(id).is_some() || title == "Subagent" => Place::Own,
+        Item::Tool { title, status, .. } if orch::is_spawn_call(title) && *status != ToolStatus::Failed => Place::Hidden,
         _ => Place::Group,
     }
 }
@@ -148,7 +149,7 @@ pub struct Op {
 pub fn op(title: &str, detail: &str, cwd: Option<&Path>) -> Op {
     let detail = detail.trim();
     // Trek's own orchestration tools read as what they did; their arguments are noise.
-    if let Some(label) = orch::tool_label(title).or_else(|| orch::is_delegate_call(title).then_some("Couldn't start a sub-agent")) {
+    if let Some(label) = orch::tool_label(title).or_else(|| orch::spawn_failed_label(title)) {
         return Op { verb: label.to_string(), text: String::new(), file: None };
     }
     let path = |d: &str| relative(d, cwd);
@@ -211,6 +212,9 @@ fn file_name(path: &str) -> &str {
 /// one, unless the call under way says something more specific ("Editing auth.rs", "Running
 /// tests"); otherwise read from that call ("Exploring the project").
 pub fn phrase(title: &str, detail: &str, headline: Option<&str>) -> String {
+    if trek_core::lineage::is_thread_tool(title) {
+        return "Working with threads".to_string();
+    }
     if orch::tool_label(title).is_some() || orch::is_delegate_call(title) {
         return "Working with sub-agents".to_string();
     }
@@ -582,6 +586,15 @@ mod tests {
         // Trek's own tools read as what they did.
         assert_eq!(op("mcp__trek-orchestrate__task_status", "{\"id\":\"x\"}", None).verb, "Checked on a sub-agent");
         assert_eq!(phrase("mcp__trek-orchestrate__list_models", "", Some("Picking a model")), "Working with sub-agents");
+        // So do threads it starts or hands off to: the link's row stands for the call.
+        let link = item(&trek_core::lineage::row_id(trek_core::lineage::Link::Started, "t"), "Started thread", ToolStatus::Done);
+        assert_eq!(placement(&link), Place::Own);
+        for tool in ["start_thread", "handoff"] {
+            assert_eq!(placement(&item("c", &format!("mcp__trek-orchestrate__{tool}"), ToolStatus::Done)), Place::Hidden, "{tool}");
+            assert_eq!(placement(&item("c", &format!("mcp__trek-orchestrate__{tool}"), ToolStatus::Failed)), Place::Group, "{tool} failed: it says why");
+        }
+        assert_eq!(op("mcp__trek-orchestrate__handoff", "{}", None).verb, "Couldn't hand off", "a failed call says what failed");
+        assert_eq!(phrase("mcp__trek-orchestrate__read_thread", "", None), "Working with threads");
     }
 
     #[test]

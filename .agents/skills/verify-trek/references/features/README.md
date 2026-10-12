@@ -8,7 +8,7 @@ Start the isolated app before using a CLI route. Each page below describes the u
 - [Thread history and inbox](thread-history-and-inbox.md) — search, pin, snooze, rename, settle, retry, rewind, fork, detach, and reopen work.
 - [Projects and worktrees](projects-and-worktrees.md) — organize folders, set project defaults and actions, and isolate work in Git worktrees.
 - [Basecamp and Notes](basecamp-and-notes.md) — review recent work and keep persistent Markdown notes.
-- [Consulting and delegation](consulting-and-delegation.md) — ask other agents to advise, discuss, or implement as child threads.
+- [Consulting, delegation, started threads and handoffs](consulting-and-delegation.md) — ask other agents to advise, discuss, or implement as child threads; let an agent start threads of the user's own or hand its work to a fresh thread.
 - [Inline visualizations](inline-visualizations.md) — render safe, themed charts, heatmaps, treemaps, and UI treatment previews inside an agent answer.
 
 ## Tools

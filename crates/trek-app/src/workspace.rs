@@ -3,6 +3,7 @@
 mod added_agents;
 mod agent_updates;
 mod limits;
+mod lineage;
 mod mcp;
 mod orchestrate;
 mod tabs;
@@ -22,6 +23,7 @@ pub use review::{FileReview, Review, as_given};
 pub use added_agents::{AddedAgents, Install as AgentInstall, is_added};
 pub use agent_updates::Hold;
 pub use limits::Clock;
+pub use lineage::{LineageRow, ThreadState};
 pub use mcp::{McpCheck, mcp_server_of};
 pub use orchestrate::{TaskState, waiting_label};
 pub use turn_changes::{TurnRange, TurnSpans};
@@ -264,8 +266,8 @@ pub struct LiveThread {
     _events: Option<Task<()>>,
     /// The key its session's orchestration tools use to reach Trek (`ipc`).
     ipc_session: Option<String>,
-    /// Rows for sub-agents it started whose `delegate_task` call hasn't reached the transcript
-    /// yet (`place_task_rows`).
+    /// Rows for sub-agents and threads it started whose `delegate_task` (or `start_thread`,
+    /// `handoff`) call hasn't reached the transcript yet (`place_task_rows`).
     pending_rows: VecDeque<Item>,
     /// Project notes its session gives the agent with the next message: recorded as told once
     /// that message goes (`Store::told_notes`).
@@ -604,8 +606,9 @@ impl LiveThread {
     /// agent's report of it does). `flush`: the turn is over; whatever waits goes in now.
     pub(crate) fn place_task_rows(&mut self, flush: bool) {
         while !self.pending_rows.is_empty() {
-            let calls = self.items.iter().filter(|i| matches!(i, Item::Tool { title, status, .. } if trek_core::orchestrate::is_delegate_call(title) && *status != ToolStatus::Failed)).count();
-            let rows = self.items.iter().filter(|i| matches!(i, Item::Tool { id, .. } if trek_core::orchestrate::task_of_row(id).is_some())).count();
+            // Calls to `start_thread` and `handoff` have rows of their own too (`lineage`).
+            let calls = self.items.iter().filter(|i| matches!(i, Item::Tool { title, status, .. } if trek_core::orchestrate::is_spawn_call(title) && *status != ToolStatus::Failed)).count();
+            let rows = self.items.iter().filter(|i| matches!(i, Item::Tool { id, .. } if trek_core::orchestrate::task_of_row(id).is_some() || trek_core::lineage::of_row(id).is_some_and(|(l, _)| l.answers_a_call()))).count();
             if !flush && calls <= rows {
                 return;
             }
@@ -804,6 +807,26 @@ impl PanelTool {
     }
 }
 
+/// Why `Workspace::make_thread` couldn't make a thread.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MakeThreadError {
+    /// A thread outside any project gets a folder of its own, which couldn't be made.
+    Folder(String),
+    /// Its worktree couldn't be planned.
+    Worktree(String),
+    Create(String),
+}
+
+impl std::fmt::Display for MakeThreadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MakeThreadError::Folder(e) => write!(f, "Couldn't make a folder for the thread: {e}"),
+            MakeThreadError::Worktree(e) => write!(f, "Couldn't start a worktree: {e}"),
+            MakeThreadError::Create(e) => write!(f, "Couldn't create thread: {e}"),
+        }
+    }
+}
+
 /// What can be done to the file in front in the editor from outside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorCommand {
@@ -820,7 +843,7 @@ pub enum WorkspaceEvent {
     Toast { message: String, undo: Option<UndoAction> },
     /// A thread needs the user or finished: an in-app toast when it's off screen, plus a system
     /// banner / sound per the notification settings.
-    Attention { message: String, thread: String },
+    Attention { message: String, thread: String, button: Option<&'static str> },
     FocusComposer,
     /// The editor's AI side bar takes the keys (a chat tab switched or opened, the editor shown).
     FocusAiInput,
@@ -890,6 +913,8 @@ pub enum UndoAction {
     CancelMove,
     /// Not an undo: after a move, delete the copy of Trek that was left in the old folder.
     RemoveOldCopy(PathBuf),
+    /// Not an undo: open a thread (one an agent started or handed off to).
+    OpenThread(String),
 }
 
 /// How long a restart the user asked for while agents worked waits once they're done: they may
@@ -1210,6 +1235,9 @@ pub struct Workspace {
     parked: HashMap<String, Vec<trek_core::orchestrate::Report>>,
     /// Parents about to be woken: reports that come in meanwhile go in the same message.
     gathering: HashMap<String, Task<()>>,
+    /// Calls waiting on a thread an agent started to finish or need the user (`read_thread` with
+    /// `wait`), by that thread's id.
+    thread_waiters: HashMap<String, Vec<async_channel::Sender<crate::ipc::Reply>>>,
     /// The orchestration key of the pre-warmed draft session (`warm`), until it has a thread.
     warm_ipc: Option<String>,
     /// Threads setting up or maintaining a project's verification skill (`workspace::verification`).
@@ -1516,6 +1544,7 @@ impl Workspace {
             wakes: HashMap::new(),
             parked: HashMap::new(),
             gathering: HashMap::new(),
+            thread_waiters: HashMap::new(),
             warm_ipc: None,
             verify_runs: HashMap::new(),
             changes_cache: Default::default(),
@@ -3071,17 +3100,31 @@ impl Workspace {
     /// bar each do that their own way) and sends nothing. `None` when it couldn't be made (said in
     /// a toast; the message goes back to the composer when a worktree couldn't be planned).
     pub fn start_thread(&mut self, project: Option<PathBuf>, prefs: Prefs, text: &str, images: &[PathBuf], cx: &mut Context<Self>) -> Option<String> {
+        match self.make_thread(project, prefs, text, true, |_| {}, cx) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                cx.emit(WorkspaceEvent::Toast { message: e.to_string(), undo: None });
+                // The message goes back to the composer when its worktree couldn't be planned.
+                if matches!(e, MakeThreadError::Worktree(_)) {
+                    cx.emit(WorkspaceEvent::InsertIntoComposer(text.to_string()));
+                    for image in images {
+                        cx.emit(WorkspaceEvent::AttachImage(image.clone()));
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// `start_thread`'s work, saying what went wrong rather than showing it. `warm`: the session
+    /// warmed up while the user typed may be the thread's (an agent's thread leaves it for the
+    /// user's draft). `shape` adjusts the thread before it's first saved.
+    pub(crate) fn make_thread(&mut self, project: Option<PathBuf>, prefs: Prefs, text: &str, warm: bool, shape: impl FnOnce(&mut Thread), cx: &mut Context<Self>) -> Result<String, MakeThreadError> {
         // No project: the thread gets a folder of its own to work in, and belongs to none.
         let chat = project.is_none();
         let cwd = match project {
             Some(cwd) => cwd,
-            None => match trek_core::paths::new_chat_dir() {
-                Ok(dir) => dir,
-                Err(e) => {
-                    cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't make a folder for the thread: {e}"), undo: None });
-                    return None;
-                }
-            },
+            None => trek_core::paths::new_chat_dir().map_err(|e| MakeThreadError::Folder(e.to_string()))?,
         };
         let p = prefs;
         // A worktree of its own: its branch and folder are picked now, and it's made in
@@ -3089,25 +3132,12 @@ impl Workspace {
         // made yet or not.
         let taken: Vec<_> = self.threads.iter().filter_map(|t| t.worktree.clone()).collect();
         let planned = match (p.worktree && !chat).then(|| trek_core::worktree::plan(&trek_core::worktree::worktrees_dir(), &cwd, text, &taken)) {
-            Some(Err(e)) => {
-                cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't start a worktree: {e}"), undo: None });
-                cx.emit(WorkspaceEvent::InsertIntoComposer(text.to_string()));
-                for image in images {
-                    cx.emit(WorkspaceEvent::AttachImage(image.clone()));
-                }
-                return None;
-            }
+            Some(Err(e)) => return Err(MakeThreadError::Worktree(e.to_string())),
             Some(Ok(wt)) => Some(wt),
             None => None,
         };
         let key = self.draft_key_with(&p, &cwd);
-        let mut thread = match self.store.create_thread((!chat).then_some(cwd.as_path()), p.agent, p.model, p.effort, p.hand_holding) {
-            Ok(t) => t,
-            Err(e) => {
-                cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't create thread: {e}"), undo: None });
-                return None;
-            }
-        };
+        let mut thread = self.store.create_thread((!chat).then_some(cwd.as_path()), p.agent, p.model, p.effort, p.hand_holding).map_err(|e| MakeThreadError::Create(e.to_string()))?;
         thread.title = trek_core::import_title(text);
         if chat {
             thread.cwd = Some(cwd.clone());
@@ -3116,6 +3146,7 @@ impl Workspace {
             thread.cwd = Some(wt.path.clone());
             thread.worktree = Some(wt.clone());
         }
+        shape(&mut thread);
         let _ = self.store.save_thread(&thread);
         let id = thread.id.clone();
         self.reload(cx);
@@ -3125,6 +3156,7 @@ impl Workspace {
         live.fast = p.fast;
         match planned {
             Some(wt) => self.make_worktree(&id, cwd, wt, cx),
+            None if !warm => {}
             // Use the session that was started while the message was being typed, if it still fits.
             None => match self.warm.take() {
                 Some((k, handle, _)) if k == key => {
@@ -3143,7 +3175,7 @@ impl Workspace {
                 }
             },
         }
-        Some(id)
+        Ok(id)
     }
 
     /// Send from `scope`'s composer: the main window's (which may start a new thread), a thread
@@ -4097,8 +4129,15 @@ impl Workspace {
                 let woke_again = woke && self.live.get(id).and_then(|l| l.woke_alert).is_some_and(|at| at.elapsed() < WOKE_ALERT_GAP);
                 let failed = self.thread(id).is_some_and(|t| t.run_state == RunState::Failed);
                 if let Some(t) = self.thread(id).filter(|_| !interrupted && !paused && !waiting && !echo && (failed || !woke_again)) {
-                    let verb = if failed { "Failed" } else { "Finished" };
-                    notify_text.get_or_insert(format!("{verb}: {}", t.title));
+                    // A thread an agent started (or handed off to) the user may not have seen
+                    // start: it says so, with a way to it.
+                    let message = match (failed, lineage::agent_started(t)) {
+                        (false, false) => format!("Finished: {}", t.title),
+                        (true, false) => format!("Failed: {}", t.title),
+                        (false, true) => format!("Thread completed · {}", t.title),
+                        (true, true) => format!("Thread failed · {}", t.title),
+                    };
+                    notify_text.get_or_insert(message);
                     if let Some(l) = self.live.get_mut(id).filter(|_| woke) {
                         l.woke_alert = Some(Instant::now());
                     }
@@ -4121,8 +4160,13 @@ impl Workspace {
         // list it, so an alert would lead nowhere. A sub-agent's end goes to its parent, not the
         // user; only its requests for approval are theirs.
         let side_chat = self.thread(id).is_some_and(|t| t.side_of.is_some() || (t.parent_id.is_some() && !asked));
+        // Whoever waits on a thread an agent started hears it's finished, or needs the user.
+        if finished || asked {
+            self.lineage_turn_ended(id);
+        }
         if let Some(message) = notify_text.filter(|_| !side_chat) {
-            cx.emit(WorkspaceEvent::Attention { message, thread: id.to_string() });
+            let button = self.thread(id).filter(|t| lineage::agent_started(t)).map(|_| "Open thread");
+            cx.emit(WorkspaceEvent::Attention { message, thread: id.to_string(), button });
         }
         if let Some(first) = live_group {
             // Text, the turn's end or a stop ended it (not a card, which shows it as it is): it
@@ -5279,6 +5323,11 @@ impl Workspace {
             UndoAction::MoveTrek => self.move_trek(cx),
             UndoAction::CancelMove => self.cancel_move(cx),
             UndoAction::RemoveOldCopy(old) => self.remove_old_copy(old, cx),
+            UndoAction::OpenThread(id) if self.thread(&id).is_some() => {
+                self.open_thread_here(&id, cx);
+                cx.emit(WorkspaceEvent::ActivateMain);
+            }
+            UndoAction::OpenThread(_) => {}
             UndoAction::CancelRestart => {
                 self.restart_countdown = None;
                 if let UpdateStatus::RestartPending { version, staged } = self.updater.status.clone() {

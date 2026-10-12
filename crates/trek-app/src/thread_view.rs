@@ -22,7 +22,7 @@ use trek_agents::Decision;
 use trek_core::checkpoint::{Change, FileChange};
 use trek_core::orchestrate as orch;
 use trek_core::store::{Item, ToolStatus};
-use crate::workspace::TaskState;
+use crate::workspace::{LineageRow, TaskState, ThreadState};
 
 /// How long a message a search result led to stays tinted (it holds, then fades).
 const FLASH: std::time::Duration = std::time::Duration::from_millis(2200);
@@ -55,6 +55,9 @@ enum Row {
     Limit { ix: usize },
     /// The thread moved to another agent, which picks up from a recap.
     Handoff { ix: usize },
+    /// A link to another thread: one this thread's agent started or handed its work to, or the
+    /// one that started this thread or that it continues (`trek_core::lineage`).
+    Lineage { ix: usize },
 }
 
 impl Row {
@@ -72,7 +75,8 @@ impl Row {
             | Row::Notice { ix }
             | Row::Error { ix }
             | Row::Limit { ix }
-            | Row::Handoff { ix } => *ix,
+            | Row::Handoff { ix }
+            | Row::Lineage { ix } => *ix,
         }
     }
 }
@@ -1041,6 +1045,7 @@ impl ThreadView {
                     match &live.items[ix] {
                         Item::User { text, .. } if orch::is_wake(text) => Row::Wake { ix, key: key.clone().into(), open: self.expanded.contains(key) },
                         Item::User { .. } => Row::User { ix, key: key.clone().into(), open: self.expanded.contains(key) },
+                        Item::Tool { id, .. } if trek_core::lineage::of_row(id).is_some() => Row::Lineage { ix },
                         // `TREK_OPEN_BACKGROUND=1` (design review) opens them all.
                         Item::Tool { .. } => Row::SubAgent { ix, key: key.clone().into(), open: self.expanded.contains(key) || review_open() },
                         Item::TurnEnd { .. } => Row::TurnEnd { ix },
@@ -1609,7 +1614,7 @@ impl ThreadView {
                 let has_output = !output.is_empty();
                 let subagent = title == "Subagent";
                 // Trek's own orchestration tools read as what they did; their arguments are noise.
-                let ours = orch::tool_label(&title).or_else(|| orch::is_delegate_call(&title).then_some("Couldn't start a sub-agent"));
+                let ours = orch::tool_label(&title).or_else(|| orch::spawn_failed_label(&title));
                 let label = SharedString::from(match ours {
                     Some(l) => l.to_string(),
                     None if subagent => detail.clone(),
@@ -1887,6 +1892,104 @@ impl ThreadView {
                     ),
                 )
                 .into_any_element()
+            }
+            (Row::Lineage { ix }, Item::Tool { id: row_id, detail, .. }) => {
+                let Some(link) = LineageRow::read(at.workspace.read(cx), &row_id, &detail) else { return div().into_any_element() };
+                use trek_core::lineage::Link;
+                // It opens its thread: in the main window, from a thread's own window too.
+                let from_window = matches!(at.scope, Scope::Thread(_));
+                let go = link.open.then(|| {
+                    let (ws, thread) = (at.workspace.clone(), link.thread.clone());
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        cx.stop_propagation();
+                        ws.update(cx, |ws, cx| LineageRow::go(ws, &thread, from_window, cx));
+                    }
+                });
+                let icon = match link.link {
+                    Link::Started => crate::assets::Lucide::MessageSquarePlus,
+                    Link::StartedBy => crate::assets::Lucide::CornerDownRight,
+                    Link::ContinuedIn | Link::ContinuedFrom => crate::assets::Lucide::ArrowLeftRight,
+                };
+                let tip = match (link.open, link.link) {
+                    (false, _) => "That thread was archived or deleted",
+                    (true, Link::Started) => "A thread this one's agent started: open it",
+                    (true, Link::ContinuedIn) => "This work went on in a new thread: open it",
+                    (true, Link::StartedBy) => "Another thread's agent started this one: open it",
+                    (true, Link::ContinuedFrom) => "This thread took over another's work: open it",
+                };
+                match link.state {
+                    // A thread this one started (or handed off to): who runs it and how it's doing.
+                    Some(state) => {
+                        let dot = match state {
+                            ThreadState::Working => palette::sky(cx),
+                            ThreadState::NeedsApproval | ThreadState::Paused => palette::amber(cx),
+                            ThreadState::Finished => palette::emerald(cx),
+                            ThreadState::Failed => palette::red(cx),
+                        };
+                        let breath = if state == ThreadState::Working && at.pulse { 0.45 + 0.55 * (0.5 - 0.5 * (at.clock * std::f32::consts::TAU / 2.4).cos()) } else { 1. };
+                        let logo = div()
+                            .relative()
+                            .flex_none()
+                            .size(px(22.))
+                            .child(match &link.agent {
+                                Some(a) => crate::ui::agent_logo(a, px(22.), cx),
+                                None => Icon::new(icon).size(px(18.)).text_color(muted).into_any_element(),
+                            })
+                            .child(div().absolute().right(px(-2.)).bottom(px(-2.)).size(px(9.)).rounded_full().border_2().border_color(theme.background).bg(dot.opacity(breath)));
+                        column(
+                            v_flex().py(px(3.)).child(
+                                h_flex()
+                                    .id(("lineage", ix))
+                                    .test_support()
+                                    .gap(px(10.))
+                                    .px(px(8.))
+                                    .py(px(6.))
+                                    .mx(px(-8.))
+                                    .rounded(px(8.))
+                                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
+                                    .when_some(go, |el, go| el.cursor_pointer().hover(|s| s.bg(theme.list_hover)).on_click(go))
+                                    .child(logo)
+                                    .child(
+                                        v_flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(
+                                                h_flex()
+                                                    .gap(px(6.))
+                                                    .text_size(px(13.5))
+                                                    .min_w_0()
+                                                    .child(div().flex_none().text_color(muted).child(link.link.label()))
+                                                    .child(div().min_w_0().font_medium().truncate().child(link.title.clone())),
+                                            )
+                                            .child(div().text_size(px(12.5)).text_color(muted).truncate().child(state.label())),
+                                    )
+                                    .when(link.open, |el| el.child(Icon::new(IconName::ArrowRight).xsmall().text_color(muted))),
+                            ),
+                        )
+                        .into_any_element()
+                    }
+                    // Where this thread came from: a line across the top, like a handoff's.
+                    None => column(
+                        h_flex().justify_center().child(
+                            h_flex()
+                                .id(("lineage", ix))
+                                .test_support()
+                                .gap(px(8.))
+                                .px_2()
+                                .py_2()
+                                .rounded(px(6.))
+                                .text_xs()
+                                .text_color(muted)
+                                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
+                                .when_some(go, |el, go| el.cursor_pointer().hover(|s| s.bg(theme.list_hover)).on_click(go))
+                                .child(Icon::new(icon).xsmall().text_color(muted))
+                                .child(link.link.label())
+                                .child(div().max_w(px(360.)).truncate().font_medium().text_color(theme.foreground.opacity(0.85)).child(link.title.clone()))
+                                .when(link.open, |el| el.child(Icon::new(IconName::ArrowRight).xsmall().text_color(muted))),
+                        ),
+                    )
+                    .into_any_element(),
+                }
             }
             // The transcript changed under the row (it's rebuilt on the next render).
             _ => div().into_any_element(),
@@ -2738,6 +2841,13 @@ impl ThreadView {
                 Row::Error { .. } => format!("{indent}error"),
                 Row::Limit { .. } => format!("{indent}limit"),
                 Row::Handoff { .. } => format!("{indent}handoff"),
+                Row::Lineage { ix } => match items.get(*ix) {
+                    Some(Item::Tool { id, detail, .. }) => match LineageRow::read(ws, id, detail) {
+                        Some(l) => format!("{indent}lineage: {}: {}{}", l.link.label(), l.title, l.state.map(|s| format!(" ({})", s.label())).unwrap_or_default()),
+                        None => format!("{indent}lineage"),
+                    },
+                    _ => format!("{indent}lineage"),
+                },
             });
         };
         let mut out = vec![];

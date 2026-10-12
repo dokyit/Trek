@@ -138,6 +138,12 @@ pub struct Thread {
     /// Set for sub-agents: the thread whose agent started this one (`delegate_task`). Hidden from
     /// the sidebar (they show inline in their parent) but found by search.
     pub parent_id: Option<String>,
+    /// Set for threads an agent started (`start_thread`): the thread whose agent did. A thread of
+    /// the user's like any other (in the sidebar), which that agent can follow and message. A
+    /// handoff's thread inherits it from the thread it continues.
+    pub started_by: Option<String>,
+    /// Set for a thread that took over another's work (`handoff`): the thread it continues.
+    pub continued_from: Option<String>,
 }
 
 /// Sidebar section, computed from thread state (T3 Code's inbox model).
@@ -429,6 +435,8 @@ const THREAD_COLUMNS_ADDED: &[(&str, &str)] = &[
     ("reopen", "TEXT"),
     ("paused", "TEXT"),
     ("parent_id", "TEXT"),
+    ("started_by", "TEXT"),
+    ("continued_from", "TEXT"),
 ];
 
 /// Migrations; each is a no-op once applied. Run inside one transaction (`with_connection`), so
@@ -600,7 +608,7 @@ impl Store {
 
     // ---- threads ----
 
-    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, import_hidden, import_kept, worktree_path, worktree_branch, worktree_base, native_at, reopen, paused, parent_id";
+    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, import_hidden, import_kept, worktree_path, worktree_branch, worktree_base, native_at, reopen, paused, parent_id, started_by, continued_from";
 
     fn row_to_thread(r: &rusqlite::Row) -> rusqlite::Result<Thread> {
         Ok(Thread {
@@ -638,6 +646,8 @@ impl Store {
             reopen: r.get::<_, Option<String>>(30)?.and_then(|j| serde_json::from_str(&j).ok()),
             paused: r.get::<_, Option<String>>(31)?.and_then(|j| serde_json::from_str(&j).ok()),
             parent_id: r.get(32)?,
+            started_by: r.get(33)?,
+            continued_from: r.get(34)?,
         })
     }
 
@@ -710,6 +720,8 @@ impl Store {
             reopen: None,
             paused: None,
             parent_id: None,
+            started_by: None,
+            continued_from: None,
         };
         self.save_thread(&t)?;
         Ok(t)
@@ -777,7 +789,9 @@ impl Store {
                 t.native_at,
                 t.reopen.as_ref().and_then(|r| serde_json::to_string(r).ok()),
                 t.paused.as_ref().and_then(|p| serde_json::to_string(p).ok()),
-                t.parent_id
+                t.parent_id,
+                t.started_by,
+                t.continued_from
             ],
         )?;
         Ok(())
@@ -792,6 +806,8 @@ impl Store {
     fn merge_thread_in(c: &Connection, gone: &str, into: &str) -> rusqlite::Result<()> {
         c.execute("UPDATE threads SET side_of = ?2 WHERE side_of = ?1 AND id <> ?2", params![gone, into])?;
         c.execute("UPDATE threads SET parent_id = ?2 WHERE parent_id = ?1 AND id <> ?2", params![gone, into])?;
+        c.execute("UPDATE threads SET started_by = ?2 WHERE started_by = ?1 AND id <> ?2", params![gone, into])?;
+        c.execute("UPDATE threads SET continued_from = ?2 WHERE continued_from = ?1 AND id <> ?2", params![gone, into])?;
         c.execute("DELETE FROM wakes WHERE child_id = ?1 OR (parent_id = ?1 AND child_id = ?2)", params![gone, into])?;
         c.execute("UPDATE wakes SET parent_id = ?2 WHERE parent_id = ?1", params![gone, into])?;
         c.execute("UPDATE retired_sessions SET thread_id = ?2 WHERE thread_id = ?1", params![gone, into])?;
@@ -1016,6 +1032,8 @@ impl Store {
             reopen: None,
             paused: None,
             parent_id: None,
+            started_by: None,
+            continued_from: None,
         })
     }
 
@@ -1502,6 +1520,43 @@ mod tests {
         s.save_thread(&stray).unwrap();
         let dropped: Vec<String> = s.drop_orphan_side_chats().unwrap().into_iter().map(|(t, _)| t.id).collect();
         assert_eq!(dropped, [stray.id]);
+    }
+
+    #[test]
+    fn threads_an_agent_started_keep_their_lineage_and_stay_in_the_sidebar() {
+        let dir = std::env::temp_dir().join(format!("trek-lineage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trek.sqlite");
+        {
+            // A database from before lineage, with a thread in it.
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(SCHEMA).unwrap();
+            c.execute(
+                "INSERT INTO threads (id, title, agent, effort, hand_holding, source, created_at, updated_at, last_seen_at) VALUES ('old', 'Old', 'claude-code', 'high', 'auto', 'trek', 1, 1, 1)",
+                [],
+            )
+            .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        let old = s.thread("old").unwrap().unwrap();
+        assert_eq!((old.started_by.as_deref(), old.continued_from.as_deref()), (None, None), "older threads have no lineage");
+        let mut started = s.create_thread(None, AgentId::Codex, None, Effort::High, HandHolding::Auto).unwrap();
+        started.started_by = Some("old".into());
+        s.save_thread(&started).unwrap();
+        let mut next = s.create_thread(None, AgentId::Codex, None, Effort::High, HandHolding::Auto).unwrap();
+        next.started_by = Some("old".into());
+        next.continued_from = Some(started.id.clone());
+        s.save_thread(&next).unwrap();
+        // The rows standing for the links are transcript items like any other.
+        let row = crate::lineage::row(crate::lineage::Link::ContinuedFrom, &started.id, "Fix the cache");
+        s.append_items(&next.id, [("r", &row)]).unwrap();
+        drop(s);
+        let s = Store::open(&path).unwrap();
+        let back = s.thread(&next.id).unwrap().unwrap();
+        assert_eq!((back.started_by.as_deref(), back.continued_from.as_deref()), (Some("old"), Some(started.id.as_str())));
+        assert_eq!(s.items(&next.id).unwrap(), [row]);
+        assert_eq!(back.section(now_ms()), Some(Section::Inbox), "in the sidebar, unlike a sub-agent");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
