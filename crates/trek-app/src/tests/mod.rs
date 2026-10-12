@@ -30,6 +30,7 @@ mod mcp;
 mod motion;
 mod notes;
 mod orchestrate;
+mod page;
 mod palette;
 mod placement;
 mod preview;
