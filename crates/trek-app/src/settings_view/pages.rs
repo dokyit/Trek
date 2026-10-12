@@ -222,6 +222,12 @@ impl SettingsView {
                         self.switch("ask-recap", s.general.ask_recap, |s, v| s.general.ask_recap = v),
                         cx,
                     ),
+                    Self::row(
+                        "Interactive artifacts",
+                        "Agents may answer with live HTML (a 3D model, a simulation, a tabbed report), run in a sandboxed web view in the answer that can load scripts from the web over https. Off, agents aren't told and such blocks show as code. Sessions that start from now on follow it.",
+                        self.switch("interactive-artifacts", s.general.interactive_artifacts, |s, v| s.general.interactive_artifacts = v),
+                        cx,
+                    ),
                 ],
                 cx,
             ),

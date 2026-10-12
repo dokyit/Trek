@@ -22,6 +22,9 @@
 //! (an ACP Registry install's row, without downloading), `toast [undo|error] <message>` (a toast, with
 //! an Undo or the error icon), `shot <name>`, `quit`.
 //!
+//! Interactive artifacts (`trek-html` cards; their pages are native views too): `artifacts` writes
+//! each card's state and frame, and the window's frame on screen, to `artifacts.json`.
+//!
 //! The Browser tool (open it with `tools browser`; its page is a native view, so `shot` doesn't
 //! show it): `browser go <address>|back|forward|reload`, `browser state` (the page, the native
 //! view's rectangle beside the panel's and which window has the keys, to `browser.json`), and
@@ -83,6 +86,7 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
                     "wait" => wait(&workspace, arg, cx).await,
                     "shot" => shot(&workspace, &dir, arg, cx).await,
                     "browser" => browser(&workspace, &dir, arg, cx).await,
+                    "artifacts" => artifacts(&workspace, &dir, cx).await,
                     "editor" if arg.starts_with("snap ") => editor_snap(&workspace, &dir, arg["snap ".len()..].trim(), cx).await,
                     "hittest" | "realclick" | "realmove" | "realleave" => hittest(&workspace, &dir, verb, arg, cx).await,
                     "legacy-pointer" => cx.update(|cx| match arg {
@@ -359,6 +363,39 @@ async fn editor_snap(ws: &Entity<Workspace>, dir: &Path, name: &str, cx: &mut As
         let dest = dir.join(format!("{name}.png"));
         cx.background_executor().spawn(async move { capture(&dest) }).await.map_err(|e| anyhow::anyhow!("editor snap: {e}"))
     }
+}
+
+/// `artifacts`: the interactive artifacts in the main window, to `artifacts.json`: each card's
+/// title, whether it has a web view and shows it live, its height, its frame and the transcript's
+/// visible area (window px), plus the window's frame on screen (for `screencapture -R`: the views
+/// are native, so `shot` doesn't show them).
+async fn artifacts(ws: &Entity<Workspace>, dir: &Path, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    // A beat for the last command's layout to reach the native views.
+    cx.background_executor().timer(Duration::from_millis(400)).await;
+    let main = cx.update(|cx| ws.read(cx).main_window).ok_or_else(|| anyhow::anyhow!("no main window"))?;
+    let state = main.update(cx, |_, window, cx| {
+        let rect = |b: Bounds<Pixels>| serde_json::json!({ "x": f32::from(b.origin.x), "y": f32::from(b.origin.y), "w": f32::from(b.size.width), "h": f32::from(b.size.height) });
+        let cards: Vec<serde_json::Value> = crate::artifact::placements(window, cx)
+            .into_iter()
+            .map(|a| {
+                serde_json::json!({
+                    "title": a.title,
+                    "expanded": a.expanded,
+                    "has_view": a.has_view,
+                    "live": a.live,
+                    "loaded": a.loaded,
+                    "height": a.height,
+                    "has_snapshot": a.has_snapshot,
+                    "has_keys": a.has_keys,
+                    "body": a.body.map(rect),
+                    "visible": a.body.zip(a.mask).map(|(b, m)| rect(b.intersect(&m))),
+                })
+            })
+            .collect();
+        serde_json::json!({ "window": rect(window.bounds()), "scale": window.scale_factor(), "artifacts": cards })
+    })?;
+    std::fs::write(dir.join("artifacts.json"), serde_json::to_string_pretty(&state)?)?;
+    Ok(())
 }
 
 async fn browser(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {

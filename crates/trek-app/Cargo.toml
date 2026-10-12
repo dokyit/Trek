@@ -26,6 +26,8 @@ gpui-kit.workspace = true
 anyhow.workspace = true
 async-channel.workspace = true
 chrono.workspace = true
+# Interactive artifacts: each web view's secret (`artifact::nonce`).
+uuid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 semver.workspace = true
@@ -42,7 +44,8 @@ image = { version = "0.25", default-features = false, features = ["png", "tiff",
 portable-pty = "0.9"
 vt100 = "0.16"
 gpui-wry = "=0.7.0"
-wry = { version = "0.53.3", package = "lb-wry", features = ["devtools"] }
+# `transparent`: an interactive artifact's page shows the card through it (macOS).
+wry = { version = "0.53.3", package = "lb-wry", features = ["devtools", "transparent"] }
 raw-window-handle = "0.6.2"
 # flock on the data folder (one Trek per folder closes the turns it left open).
 libc = "0.2"
@@ -65,8 +68,10 @@ tree-sitter-swift = "0.7.3"
 [target.'cfg(target_os = "macos")'.dependencies]
 # Same versions tray-icon already pulls in; used for the Dock badge.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSFileManager", "NSURL", "NSError", "NSBundle", "NSData"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSDockTile", "NSWorkspace", "NSAccessibility", "NSImage"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSFileManager", "NSURL", "NSError", "NSBundle", "NSData", "NSGeometry", "objc2-core-foundation"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSDockTile", "NSWorkspace", "NSAccessibility", "NSImage", "NSView", "NSWindow", "objc2-core-foundation"] }
+# Interactive artifacts: a snapshot of the page stands in while it's covered (`takeSnapshot`).
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKWebView", "WKSnapshotConfiguration"] }
 # Dictation: AVAudioRecorder takes the mic, Speech transcribes the take (src/dictate.rs).
 objc2-avf-audio = "0.3"
 objc2-speech = "0.3"

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>Interactive artifacts: rollout plan</title>
+<style>
+  .tabs { display: flex; gap: 2px; padding: 3px; border-radius: 9px; background: var(--trek-surface); border: 1px solid var(--trek-border); width: max-content; max-width: 100%; overflow-x: auto; }
+  .tabs button { font: 500 12.5px var(--trek-font); color: var(--trek-muted); background: none; border: 0; border-radius: 6px; padding: 5px 12px; cursor: pointer; white-space: nowrap; }
+  .tabs button:hover { color: var(--trek-fg); }
+  .tabs button[aria-selected="true"] { color: var(--trek-fg); background: var(--trek-bg); box-shadow: 0 1px 2px rgba(0,0,0,.18); }
+  section { display: none; padding-top: 14px; }
+  section.on { display: block; }
+  h2 { font-size: 13px; font-weight: 600; margin: 0 0 8px; }
+  p { margin: 0 0 10px; color: var(--trek-muted); font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { text-align: left; font-weight: 500; color: var(--trek-muted); padding: 6px 8px; border-bottom: 1px solid var(--trek-border); }
+  td { padding: 7px 8px; border-bottom: 1px solid var(--trek-border); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  td.num { font-variant-numeric: tabular-nums; text-align: right; }
+  .badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; }
+  .done { color: var(--trek-positive); background: color-mix(in srgb, var(--trek-positive) 14%, transparent); }
+  .now { color: var(--trek-accent); background: color-mix(in srgb, var(--trek-accent) 14%, transparent); }
+  .next { color: var(--trek-muted); background: var(--trek-surface); }
+  svg { width: 100%; height: auto; display: block; }
+  svg text { font: 12px var(--trek-font); fill: var(--trek-fg); }
+  svg .sub { fill: var(--trek-muted); font-size: 10.5px; }
+  .node rect { fill: var(--trek-surface); stroke: var(--trek-border); }
+  .node.hot rect { stroke: var(--trek-accent); }
+  .node { cursor: pointer; }
+  .node:hover rect { stroke: var(--trek-fg); }
+  .edge { stroke: var(--trek-muted); stroke-width: 1.2; fill: none; marker-end: url(#arrow); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+  .card { border: 1px solid var(--trek-border); border-radius: var(--trek-radius); padding: 10px 12px; background: var(--trek-surface); border-left: 3px solid var(--tone); }
+  .card b { display: block; font-size: 12.5px; margin-bottom: 4px; }
+  .card span { color: var(--trek-muted); font-size: 12px; }
+  #detail { min-height: 18px; color: var(--trek-muted); font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="tabs" role="tablist">
+  <button role="tab" aria-selected="true" data-tab="plan">Plan</button>
+  <button role="tab" aria-selected="false" data-tab="flow">How it fits</button>
+  <button role="tab" aria-selected="false" data-tab="risks">Risks</button>
+</div>
+
+<section id="plan" class="on">
+  <h2>Milestones</h2>
+  <p>Three steps, each shippable on its own.</p>
+  <table>
+    <thead><tr><th>Milestone</th><th>Owner</th><th>Status</th><th class="num">Days</th></tr></thead>
+    <tbody>
+      <tr><td>Fence, title and placeholder card</td><td>Core</td><td><span class="badge done">Done</span></td><td class="num">2</td></tr>
+      <tr><td>Clipped web view in the transcript</td><td>App</td><td><span class="badge now">In progress</span></td><td class="num">5</td></tr>
+      <tr><td>Snapshots under menus and dialogs</td><td>App</td><td><span class="badge now">In progress</span></td><td class="num">3</td></tr>
+      <tr><td>Phone card and settings toggle</td><td>Remote</td><td><span class="badge next">Next</span></td><td class="num">1</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="flow">
+  <h2>From the agent's answer to a live view</h2>
+  <svg viewBox="0 0 640 170" role="img" aria-label="Agent answer, Markdown, artifact card, web view, sandbox">
+    <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor" style="color: var(--trek-muted)"/></marker></defs>
+    <path class="edge" d="M120 45 H160"/>
+    <path class="edge" d="M280 45 H320"/>
+    <path class="edge" d="M440 45 H480"/>
+    <path class="edge" d="M540 70 V100"/>
+    <path class="edge" d="M380 70 C380 110 470 125 478 125"/>
+    <g class="node" data-info="The agent writes one fenced trek-html block with a whole document."><rect x="10" y="20" width="110" height="50" rx="8"/><text x="22" y="42">Agent answer</text><text class="sub" x="22" y="58">a trek-html block</text></g>
+    <g class="node" data-info="Trek's Markdown claims the fence; while it streams the card says Building."><rect x="160" y="20" width="120" height="50" rx="8"/><text x="172" y="42">Markdown</text><text class="sub" x="172" y="58">fence closed?</text></g>
+    <g class="node hot" data-info="The card: title, Reload, Copy source, Expand, and the page's height."><rect x="320" y="20" width="120" height="50" rx="8"/><text x="332" y="42">Artifact card</text><text class="sub" x="332" y="58">160–720 px tall</text></g>
+    <g class="node" data-info="A native web view, clipped to the transcript, hidden under Trek's overlays."><rect x="480" y="20" width="120" height="50" rx="8"/><text x="492" y="42">Web view</text><text class="sub" x="492" y="58">clipped, live</text></g>
+    <g class="node" data-info="Its own origin and data store; https loads only; it can't navigate away."><rect x="480" y="100" width="120" height="50" rx="8"/><text x="492" y="122">Sandbox</text><text class="sub" x="492" y="138">CSP · no file:</text></g>
+  </svg>
+  <div id="detail">Hover a step for what it does.</div>
+</section>
+
+<section id="risks">
+  <h2>What could go wrong</h2>
+  <div class="cards">
+    <div class="card" style="--tone: var(--trek-warning)"><b>Heavy pages</b><span>A big scene costs memory: only cards near the screen get a view.</span></div>
+    <div class="card" style="--tone: var(--trek-negative)"><b>Covering Trek</b><span>A native view can't sit under a menu: a snapshot stands in.</span></div>
+    <div class="card" style="--tone: var(--trek-info)"><b>Offline</b><span>CDN scripts need the network; this report needs nothing.</span></div>
+    <div class="card" style="--tone: var(--trek-positive)"><b>Untrusted code</b><span>It runs fenced in: no Trek, no files, https only.</span></div>
+  </div>
+</section>
+
+<script>
+  const tabs = document.querySelectorAll('[role=tab]');
+  tabs.forEach((tab) => tab.addEventListener('click', () => {
+    tabs.forEach((t) => t.setAttribute('aria-selected', String(t === tab)));
+    document.querySelectorAll('section').forEach((s) => s.classList.toggle('on', s.id === tab.dataset.tab));
+  }));
+  const detail = document.getElementById('detail');
+  document.querySelectorAll('.node').forEach((n) => {
+    n.addEventListener('mouseenter', () => { detail.textContent = n.dataset.info; });
+    n.addEventListener('click', () => { detail.textContent = n.dataset.info; });
+  });
+</script>
+</body>
+</html>

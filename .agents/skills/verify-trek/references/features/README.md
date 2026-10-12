@@ -11,6 +11,7 @@ Start the isolated app before using a CLI route. Each page below describes the u
 - [Consulting, delegation, started threads and handoffs](consulting-and-delegation.md) — ask other agents to advise, discuss, or implement as child threads; let an agent start threads of the user's own or hand its work to a fresh thread.
 - [Inline visualizations](inline-visualizations.md) — render safe, themed charts, heatmaps, treemaps, and UI treatment previews inside an agent answer.
 - [Math rendering](math-rendering.md) — typeset the TeX math in answers, inline and display, while money, shell and code dollars stay as written.
+- [Interactive artifacts](interactive-artifacts.md) — run an agent's self-contained HTML (3D models, simulations, tabbed reports) live in a sandboxed, themed web view inside its answer.
 
 ## Tools
 
