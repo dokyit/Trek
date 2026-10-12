@@ -33,7 +33,7 @@ pub struct TrekWindow {
     settings: Entity<SettingsView>,
     settings_nav: Entity<SettingsNav>,
     pub(crate) basecamp: Entity<Basecamp>,
-    notes: Entity<crate::notes::NotesView>,
+    pub(crate) notes: Entity<crate::notes::NotesView>,
     pub(crate) right_panel: Entity<RightPanel>,
     pub(crate) working_bar: Entity<WorkingBar>,
     /// What the thread's agent runs in the background, above the composer.
