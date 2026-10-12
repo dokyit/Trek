@@ -31,6 +31,9 @@ serde_json.workspace = true
 semver.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# GPUI logs through `log`; `logging.rs` hands its records to tracing with where they came from.
+log = { version = "0.4", features = ["std"] }
+tracing-log = "0.2"
 rust-embed = "8"
 tray-icon = "0.26"
 png = "0.18"
