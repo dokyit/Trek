@@ -140,8 +140,10 @@ fn scripts_hang_on_the_atom_before_them() {
     assert_eq!(one("x_i^2"), scripts(italic("x"), Some(number("2")), Some(italic("i"))));
     assert_eq!(one("x^{2}_{i}"), scripts(italic("x"), Some(number("2")), Some(italic("i"))));
     assert_eq!(one("e^{-x}"), scripts(italic("e"), Some(Node::Group(vec![upright("−", Class::Bin), italic("x")])), None));
-    assert_eq!(one("f'"), scripts(italic("f"), Some(upright("′", Class::Ord)), None));
-    assert_eq!(one("f''"), scripts(italic("f"), Some(upright("′′", Class::Ord)), None));
+    // The prime glyph is already raised, so a run of `'` is an ordinary atom, not a script.
+    assert_eq!(atoms("f'"), vec![italic("f"), upright("′", Class::Ord)]);
+    assert_eq!(atoms("f''"), vec![italic("f"), upright("′′", Class::Ord)]);
+    assert_eq!(atoms("f'^2"), vec![italic("f"), scripts(upright("′", Class::Ord), Some(number("2")), None)]);
     assert_eq!(one("^2"), scripts(Node::Group(vec![]), Some(number("2")), None));
     let sum = Node::Op { text: "∑".into(), glyph: true, limits: true };
     assert_eq!(
