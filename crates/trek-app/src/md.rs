@@ -222,10 +222,13 @@ fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixel
         .plugin(crate::math::InlineMath)
         .plugin(crate::math::DisplayMath { size, ink })
         .on_link_click(move |url, _, window, cx| {
-            // A link to an image on disk previews it here; to another file or folder, opens it
+            // A trek:// link is Trek's own to open (a thread an agent handed work to, a file);
+            // a link to an image on disk previews it here; to another file or folder, opens it
             // with the system; a scheme (https:, mailto:) stays a URL; anything else can't open —
             // open_url's -50 says so bluntly.
-            if let Some(path) = link_path(url, link_cwd.as_deref()) {
+            if url.starts_with("trek://") {
+                crate::deep_link::open(url, cx);
+            } else if let Some(path) = link_path(url, link_cwd.as_deref()) {
                 if crate::image_preview::showable(&path) {
                     crate::image_preview::open(vec![path], 0, window, cx);
                 } else {

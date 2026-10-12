@@ -376,6 +376,8 @@ impl Workspace {
         let state = self.thread_state(id);
         let mut v = json!({
             "id": id,
+            // Opens the thread in Trek (`deep_link`): an agent can show it to the user.
+            "link": format!("trek://thread/{id}"),
             "title": t.title,
             "status": state.key(),
             "agent": t.agent.key(),

@@ -2103,6 +2103,7 @@ mod tests {
         assert_eq!(Script::parse("the rate limit", false), Script::Answer, "bare `limit` is just a word");
         assert_eq!(Script::parse("mock:consult mock:long 2s", false), Script::Delegate { wait: true }, "the first keyword is the parent's");
         assert_eq!(Script::parse("mock:delegate", false), Script::Delegate { wait: false });
+        assert_eq!(Script::parse("mock:handoff mock:long 2s", false), Script::Handoff);
         assert_eq!(Script::parse("consult a friend", false), Script::Answer);
         assert_eq!(Script::parse("[Trek] Sub-agent “x” failed: error", false), Script::Wake);
         assert_eq!(Script::parse("mock:verify the notes", false), Script::Verify { broken: false });
