@@ -9,9 +9,10 @@ use super::diff_view::{DiffSource, DiffView};
 use super::preview::{Kind, NotText, PreviewEvent, PreviewView};
 use crate::editor::EditorView;
 use crate::keys::{self, Id};
+use crate::workspace::Route;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::button::Button;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::{Path, PathBuf};
@@ -336,6 +337,13 @@ impl IdeWorkbench {
         }
     }
 
+    /// Close the tab of the file at `path`, if it has one.
+    pub fn close_file(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.tabs.iter().find(|t| t.file(cx).as_deref() == Some(path)).map(|t| t.id()) {
+            self.close(id, window, cx);
+        }
+    }
+
     /// Close the tab of `id`. With unsaved edits it asks: Save (closing once the save lands),
     /// Don't Save, or Cancel.
     pub fn close(&mut self, id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
@@ -389,6 +397,8 @@ impl IdeWorkbench {
     pub(super) fn remove(&mut self, id: EntityId, cx: &mut Context<Self>) {
         let Some(ix) = self.tabs.iter().position(|t| t.id() == id) else { return };
         let tab = self.tabs.remove(ix);
+        // An editor's file or a preview's: either can be the file shown on its own.
+        let file = tab.file(cx);
         self.forget_file(&tab, cx);
         self.mru.retain(|m| *m != id);
         let front = self.mru.last().and_then(|m| self.tabs.iter().position(|t| t.id() == *m));
@@ -403,6 +413,15 @@ impl IdeWorkbench {
                 });
                 self.sync_previews(cx);
             }
+        }
+        // A file shown on its own (Agents mode) that was closed: back to where it was opened
+        // from. Its route would make a tab again as soon as it's drawn.
+        if let Some(file) = file {
+            self.workspace.update(cx, |ws, cx| {
+                if !ws.ide() && matches!(&ws.route, Route::Editor { path } if *path == file) {
+                    ws.leave_editor(cx);
+                }
+            });
         }
         cx.notify();
     }
@@ -496,9 +515,10 @@ impl IdeWorkbench {
                             .child(
                                 div()
                                     .when(dirty, |el| el.absolute())
-                                    .when(!on || dirty, |el| el.invisible().group_hover(group.clone(), |s| s.visible()))
+                                    .when(close_waits_for_hover(on, dirty), |el| el.invisible().group_hover(group.clone(), |s| s.visible()))
                                     .child(Icon::new(IconName::Close).size(px(12.)).text_color(theme.muted_foreground)),
                             )
+                            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(format!("Close ({})", keys::hint(Id::CloseTab))).build(window, cx))
                             // The × closes only: the tab under it isn't brought forward first.
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -661,6 +681,16 @@ impl IdeWorkbench {
             .child(row("Show Terminal", keys::hint(Id::ToggleRightPanel)))
             .child(row("Toggle AI Side Bar", keys::hint(Id::ToggleAiBar)))
             .child(row("Switch to Agents", keys::hint(Id::SwitchMode)))
+            // The way out for someone who closed the last file to get back to their threads.
+            .child(
+                div().pt(px(14.)).child(
+                    Button::new("ide-back-to-agents")
+                        .outline()
+                        .small()
+                        .label("Back to Agents")
+                        .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.set_mode(crate::workspace::Mode::Agents, cx)))),
+                ),
+            )
     }
 
     /// No folder open: what to do, then recent folders and loose files.
@@ -752,4 +782,25 @@ impl IdeWorkbench {
 
 fn file_name(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+/// Whether a tab's × shows only while the pointer is over the tab: the tabs behind do, and one
+/// with unsaved edits (its dot is where the × goes). The tab in front always has its ×, so the
+/// way out is on screen without hovering.
+fn close_waits_for_hover(in_front: bool, dirty: bool) -> bool {
+    !in_front || dirty
+}
+
+#[cfg(test)]
+mod tests {
+    use super::close_waits_for_hover;
+
+    #[test]
+    fn the_tab_in_front_always_shows_its_x_and_the_ones_behind_show_it_on_hover() {
+        assert!(!close_waits_for_hover(true, false));
+        assert!(close_waits_for_hover(false, false));
+        // An unsaved tab shows its dot until the pointer is over it.
+        assert!(close_waits_for_hover(true, true));
+        assert!(close_waits_for_hover(false, true));
+    }
 }

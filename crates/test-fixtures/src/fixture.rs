@@ -7,6 +7,8 @@
 //!   print <text…>          the same without the newline
 //!   stderr <text…>         the same on stderr
 //!   exit [<code>]          exit with `code` (0 when absent or not a number); later args ignored
+//!   upper                  stdin, upper-cased, on stdout (a formatter for tests)
+//!   fail <code> <line>…    each line on stderr, then exit with `code` (a formatter that rejects its input)
 //!   fake-acp               run the stand-in ACP agent
 //!   fake-mcp [<mode>]      run the stand-in MCP server
 //!   serve <dir> [<port>]   the files in `dir` over HTTP on 127.0.0.1 (see `serve`)
@@ -61,6 +63,23 @@ pub fn run() -> i32 {
             eprintln!("{}", args.collect::<Vec<_>>().join(" "));
             0
         }
+        Some("upper") => {
+            // A formatter in miniature: stdin, upper-cased, on stdout.
+            let mut text = String::new();
+            std::io::stdin().lock().read_to_string(&mut text).unwrap();
+            let mut out = std::io::stdout().lock();
+            out.write_all(text.to_uppercase().as_bytes()).unwrap();
+            out.flush().unwrap();
+            0
+        }
+        Some("fail") => {
+            // A formatter that rejects its input: the lines after the code on stderr, then that code.
+            let code = args.next().and_then(|c| c.parse().ok()).unwrap_or(1);
+            for line in args {
+                eprintln!("{line}");
+            }
+            code
+        }
         Some("exit") => args.next().and_then(|c| c.parse().ok()).unwrap_or(0),
         Some("fake-acp") => {
             crate::fake_acp::run();
@@ -106,7 +125,7 @@ pub fn run() -> i32 {
             }
         }
         other => {
-            eprintln!("fixture: expected sleep, cat, ready-then-eof, echo, print, stderr, exit, fake-acp, fake-mcp, serve, minisign-keygen or minisign-sign, not {other:?}");
+            eprintln!("fixture: expected sleep, cat, ready-then-eof, echo, print, stderr, exit, upper, fail, fake-acp, fake-mcp, serve, minisign-keygen or minisign-sign, not {other:?}");
             2
         }
     }

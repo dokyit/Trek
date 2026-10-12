@@ -10,7 +10,7 @@ use crate::settings_view::{SettingsNav, SettingsView};
 use crate::sidebar::Sidebar;
 use crate::thread_view::ThreadView;
 use crate::working_bar::WorkingBar;
-use crate::workspace::{Route, Scope, SettingsPage, UndoAction, Workspace, WorkspaceEvent};
+use crate::workspace::{EditorCommand, Route, Scope, SettingsPage, UndoAction, Workspace, WorkspaceEvent};
 use crate::*;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, TitleBar, h_flex, v_flex};
@@ -205,6 +205,16 @@ impl TrekWindow {
                     }
                 }
                 WorkspaceEvent::OpenEditor { .. } => {}
+                WorkspaceEvent::Editor(command) if this.workspace.read(cx).main_window == Some(window.window_handle()) => match command {
+                    EditorCommand::Close => {
+                        this.close_editor(window, cx);
+                    }
+                    EditorCommand::Format => match this.editor(cx) {
+                        Some(editor) => editor.update(cx, |e, cx| e.format(window, cx)),
+                        None => this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message: "Open a file to format it".into(), undo: None })),
+                    },
+                },
+                WorkspaceEvent::Editor(_) => {}
                 WorkspaceEvent::AttachImage(path) => {
                     let path = path.clone();
                     this.composer.update(cx, |c, cx| c.attach_image(path, cx));
@@ -356,6 +366,21 @@ impl TrekWindow {
     /// The editor tab in front (the workbench's; a lone `Route::Editor` shows it too).
     pub fn editor(&self, cx: &App) -> Option<Entity<crate::editor::EditorView>> {
         self.ide.read(cx).active_editor()
+    }
+
+    /// Close the file in front: the editor's tab, or the file shown on its own in Agents mode
+    /// (which goes back to the screen it came from). `false` when no file is in front.
+    pub fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let route = self.workspace.read(cx).route.clone();
+        if self.workspace.read(cx).ide() {
+            self.ide.update(cx, |ide, cx| ide.close_active(window, cx));
+            true
+        } else if let Route::Editor { path } = route {
+            self.ide.update(cx, |ide, cx| ide.close_file(&path, window, cx));
+            true
+        } else {
+            false
+        }
     }
 
     /// Open a file in the in-app editor, optionally on a line: a tab in the editor, the center
@@ -1290,9 +1315,9 @@ impl Render for TrekWindow {
             .on_action(cx.listener(|this, _: &OpenBasecamp, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx))))
             .on_action(cx.listener(|this, _: &crate::OpenNotes, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Notes, cx))))
             .on_action(cx.listener(|this, _: &crate::CloseTab, window, cx| {
-                // ⌘W: the editor tab in front (asking first if it has unsaved edits).
-                if this.workspace.read(cx).ide() {
-                    this.ide.update(cx, |ide, cx| ide.close_active(window, cx));
+                // ⌘W: the editor tab in front, or the file shown on its own (asking first if it
+                // has unsaved edits), else the thread's tab.
+                if this.close_editor(window, cx) {
                     return;
                 }
                 this.workspace.update(cx, |ws, cx| {
@@ -1352,10 +1377,33 @@ impl TrekWindow {
             Route::Notes => self.notes.clone().into_any_element(),
             Route::Editor { path } => {
                 let ev = self.ide.update(cx, |ide, cx| ide.view_for(&path, window, cx));
+                // An editor draws its own header here, with its ×; a preview (an image, a PDF)
+                // has none, so the way out is drawn over it.
+                let header = self.editor(cx).is_none().then(|| {
+                    let theme = cx.theme().clone();
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let dir = path.parent().map(trek_core::paths::tildify).unwrap_or_default();
+                    h_flex()
+                        .px_3()
+                        .h(px(40.))
+                        .flex_none()
+                        .gap_2()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .text_sm()
+                        .child(Icon::new(IconName::File).small().text_color(theme.muted_foreground))
+                        .child(div().min_w_0().truncate().font_medium().child(name))
+                        .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(dir))
+                        .child(
+                            crate::ui::icon_button("editor-close", IconName::Close, format!("Close ({})", crate::keys::hint(crate::keys::Id::CloseTab)))
+                                .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Editor(EditorCommand::Close))))),
+                        )
+                });
                 v_flex()
                     .size_full()
                     .min_w_0()
                     .children(tabs)
+                    .children(header)
                     .child(div().flex_1().min_h_0().child(ev.cached(fill())))
                     .into_any_element()
             }
