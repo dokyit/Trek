@@ -219,7 +219,7 @@ fn every_symbol_the_answers_use_is_known() {
         let tree = parse(&src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
         assert!(!contains_unknown(&tree), "{src}: {tree:?}");
     }
-    assert_eq!(one("\\mid"), upright("∣", Class::Rel));
+    assert_eq!(one("\\mid"), upright("|", Class::Rel));
     assert_eq!(one("\\approx"), upright("≈", Class::Rel));
     assert_eq!(one("\\{"), upright("{", Class::Open));
     assert_eq!(one("\\,"), Node::Space(3. / 18.));
