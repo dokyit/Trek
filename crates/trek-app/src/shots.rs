@@ -326,7 +326,8 @@ async fn hittest(_: &Entity<Workspace>, _: &Path, verb: &str, _: &str, _: &mut A
 }
 
 /// `editor snap <name>`: the editor's preview in front (a PDF, a video), its web view as WebView2
-/// draws it, to `<name>.png` (a native view: `shot` doesn't show it). Windows only.
+/// draws it on Windows, or cropped out of a capture of the window on a Mac (Screen Recording
+/// needed), to `<name>.png` (a native view: `shot` doesn't show it).
 async fn editor_snap(ws: &Entity<Workspace>, dir: &Path, name: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
     anyhow::ensure!(!name.is_empty(), "editor snap needs a name");
     #[cfg(windows)]
@@ -345,8 +346,18 @@ async fn editor_snap(ws: &Entity<Workspace>, dir: &Path, name: &str, cx: &mut As
     }
     #[cfg(not(windows))]
     {
-        let _ = (ws, dir, cx);
-        anyhow::bail!("editor snap: Windows only (WebView2's CapturePreview)")
+        let main = cx.update(|cx| ws.read(cx).main_window).ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        // A beat for the last command's layout to reach the native view.
+        cx.background_executor().timer(Duration::from_millis(400)).await;
+        let capture = main.update(cx, |root, window, cx| {
+            let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
+            let trek = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok())?;
+            let web = trek.read(cx).ide.read(cx).active_preview()?.read(cx).web_view()?;
+            crate::panels::browser::view_capture(web.read(cx), window)
+        })?;
+        let capture = capture.ok_or_else(|| anyhow::anyhow!("editor snap: no web view in front (open a PDF or a video)"))?;
+        let dest = dir.join(format!("{name}.png"));
+        cx.background_executor().spawn(async move { capture(&dest) }).await.map_err(|e| anyhow::anyhow!("editor snap: {e}"))
     }
 }
 

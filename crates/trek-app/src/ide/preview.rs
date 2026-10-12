@@ -228,8 +228,8 @@ pub trait WebSurface {
     /// On screen or not: a native view floats over GPUI, so it's hidden whenever its tab isn't
     /// what the window shows (another tab, Agents mode, a menu over it).
     fn set_shown(&self, shown: bool, cx: &mut App);
-    /// The native view, for `shots` to capture (WebView2's CapturePreview).
-    #[cfg(all(feature = "shots", windows))]
+    /// The native view, for `shots` to capture (`editor snap`).
+    #[cfg(feature = "shots")]
     fn native(&self) -> Option<Entity<gpui_wry::WebView>> {
         None
     }
@@ -375,7 +375,7 @@ impl PreviewView {
     }
 
     /// Its native web view, for `shots` to capture.
-    #[cfg(all(feature = "shots", windows))]
+    #[cfg(feature = "shots")]
     pub fn web_view(&self) -> Option<Entity<gpui_wry::WebView>> {
         match &self.web {
             Web::Made(web) => web.native(),
@@ -854,7 +854,7 @@ impl WebSurface for NativeWeb {
         });
     }
 
-    #[cfg(all(feature = "shots", windows))]
+    #[cfg(feature = "shots")]
     fn native(&self) -> Option<Entity<gpui_wry::WebView>> {
         Some(self.0.clone())
     }
