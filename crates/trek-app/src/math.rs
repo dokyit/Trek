@@ -316,12 +316,14 @@ impl Parser {
                     attach(&mut items, tok == Tok::Sup, script);
                 }
                 Tok::Char('\'') => {
+                    // A run of `'` is an ordinary atom: the prime glyph is already raised, so a
+                    // superscript slot would double-raise it, and `f'^2` should still read `f′²`.
                     let mut primes = String::from("′");
                     while self.peek() == Some(&Tok::Char('\'')) {
                         self.at += 1;
                         primes.push('′');
                     }
-                    attach(&mut items, true, Node::Sym { text: primes, face: Face::Upright, class: Class::Ord });
+                    items.push(Node::Sym { text: primes, face: Face::Upright, class: Class::Ord });
                 }
                 Tok::Cmd(name) if name == "limits" || name == "nolimits" => {
                     if let Some(Node::Op { limits, .. }) = items.last_mut() {
@@ -741,7 +743,7 @@ fn attach(items: &mut Vec<Node>, sup: bool, script: Node) {
     };
     let slot = if sup { &mut old_sup } else { &mut old_sub };
     match slot.as_deref_mut() {
-        // `f'^2` and `x''`: primes and a superscript share the one slot, side by side.
+        // `x^a^b` and more: scripts after the first join the slot's group, side by side.
         Some(Node::Group(items)) => items.push(script),
         Some(existing) => {
             let first = std::mem::replace(existing, Node::Group(Vec::new()));
