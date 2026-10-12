@@ -66,6 +66,7 @@ final class MockHost: Backend {
     func start() {
         onState?(.connecting)
         seed()
+        seedReach()
         // What the Mac's composer shows for each: efforts per model, each thread's effort and access.
         let efforts = ["low", "medium", "high", "xhigh", "max"]
         agents = agents.map { a in
@@ -81,8 +82,10 @@ final class MockHost: Backend {
             DemoMac.details(&t)
             return t
         }
-        deliver(.welcome(re: "auth", host: host), after: 0.15)
-        deliver(.snapshot(Snapshot(threads: threads, projects: projects, agents: agents, fullAccess: true)), after: 0.2)
+        deliver(.welcome(re: "auth", host: host, features: Self.features), after: 0.15)
+        // Sub-agents' threads aren't listed: they come as unlisted rows.
+        deliver(.snapshot(Snapshot(threads: threads.filter { $0.parentId == nil }, projects: projects, agents: agents, fullAccess: true,
+                                   unlisted: threads.filter { $0.parentId != nil })), after: 0.2)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in self?.onState?(.connected) }
         timer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.advanceWorkingThread() }
@@ -151,6 +154,7 @@ final class MockHost: Backend {
             }
             append(tid, .error("Interrupted"))
             update(tid) { $0.runState = .idle; $0.activity = nil; $0.workingSince = nil }
+            subAgentChanged(tid, to: .stopped)
         case .send(let tid, let text, _, let images):
             // Trek's own commands: `/new` opens the phone's sheet, the rest get the Mac's answer.
             let command = text.hasPrefix("/") ? text.dropFirst().split(separator: " ").first.map(String.init) : nil
@@ -185,6 +189,7 @@ final class MockHost: Backend {
                 if let plan { t.plan = plan }
             }
         case .threadAction(let tid, let action):
+            if moreThreadAction(tid, action, id: id) { return }
             ack(id)
             update(tid) { t in
                 switch action {
@@ -192,6 +197,7 @@ final class MockHost: Backend {
                 case .unpin, .unsettle: t.pinned = false; t.section = .inbox
                 case .settle, .archive: t.pinned = false; t.section = .settled
                 case .rename(let title): t.title = title
+                default: break
                 }
             }
         case .newThread(let pid, let agentKey, let model, let text, let worktree, _, _, _, let images):
@@ -218,7 +224,7 @@ final class MockHost: Backend {
         case .usage:
             deliver(.usage(re: id, DemoMac.usage()), after: 0.4)
         case .basecamp(let range):
-            deliver(.basecamp(re: id, DemoMac.basecamp(range, threads: threads, projects: projects)), after: 0.3)
+            deliver(.basecamp(re: id, DemoMac.basecamp(range, threads: threads.filter { $0.parentId == nil }, projects: projects)), after: 0.3)
         case .notes:
             deliver(.notes(re: id, notes.sorted { $0.modified > $1.modified }.map(DemoMac.summary)))
         case .note(let nid):
@@ -289,6 +295,8 @@ final class MockHost: Backend {
             }
             (settings.push.topicUrl, settings.push.subscribeUrl) = DemoMac.ntfyLinks(server: settings.push.server, topic: settings.push.topic)
             deliver(.settings(re: id, settings))
+        case .search(let query, let limit):
+            search(query, limit: limit ?? 50, id: id)
         }
     }
 
@@ -424,6 +432,7 @@ final class MockHost: Backend {
             break
         }
         update(tid) { $0.needs = nil; $0.runState = .working; $0.workingSince = Self.now; $0.activity = allowed ? "Running" : "Thinking" }
+        subAgentChanged(tid, to: .running)
         if case .approval(let a) = item.body, allowed {
             let tool = TItem(id: newID(tid, .notice("")), seq: 0, body: .tool(ToolCall(callId: "c\(Self.nowMs)", tool: .command, title: "Run", detail: a.detail, status: .running, output: "", added: nil, removed: nil)))
             put(tid, tool)
@@ -626,7 +635,7 @@ final class MockHost: Backend {
     private func update(_ tid: String, push: Bool = true, _ f: (inout ThreadSummary) -> Void) {
         guard let i = threads.firstIndex(where: { $0.id == tid }) else { return }
         f(&threads[i])
-        if push { deliver(.thread(threads[i])) }
+        if push { deliver(threads[i].parentId == nil ? .thread(threads[i]) : .unlisted(threads[i])) }
     }
 
     // MARK: Sample data
@@ -837,5 +846,188 @@ final class MockHost: Backend {
                 for (body, at) in DemoMac.bigThread(big, endingAt: now) { add(id, body, at: at) }
             }
         }
+    }
+}
+
+// MARK: Sub-agents, the thread menu and search
+
+extension MockHost {
+    /// What this Mac serves besides the first phones' requests.
+    static let features = [MacFeature.search, MacFeature.subAgents, MacFeature.snooze, MacFeature.markUnread, MacFeature.delete,
+                           MacFeature.regenerateTitle]
+
+    /// Sub-agents with threads of their own (at work, waiting on an approval, done) and a snoozed
+    /// thread.
+    private func seedReach() {
+        let now = Self.now
+        let m: Int64 = 60_000
+        func child(_ id: String, of parent: String, _ title: String, agent key: String, model: String, _ state: RunState,
+                   needs: Needs? = nil, activity: String? = nil, ago: Int64) -> ThreadSummary? {
+            guard let p = thread(parent), let a = agents.first(where: { $0.key == key }) else { return nil }
+            var t = ThreadSummary(id: id, title: title, project: p.project, agent: a.ref, model: model,
+                                  modelLabel: a.models.first { $0.id == model }?.label, runState: state, needs: needs,
+                                  section: state == .working ? .working : .inbox, unseen: false, pinned: false, branch: p.branch,
+                                  worktree: p.worktree, activity: activity, workingSince: state == .idle ? nil : now - ago * m,
+                                  updatedAt: now - (state == .idle ? ago : 0) * m, additions: 0, deletions: 0)
+            t.parentId = parent
+            return t
+        }
+        let kids = [
+            child("t-inbox-review", of: "t-inbox", "Review the inbox section rules", agent: "codex", model: "gpt-5.6-sol", .working,
+                  activity: "Reading sidebar.rs", ago: 2),
+            child("t-profile-bench", of: "t-profile", "Benchmark the scroll path", agent: "claude-code", model: "claude-sonnet-5-5",
+                  .needsYou, needs: Needs(kind: .approval, text: "Run cargo bench -p trek-app --bench transcript_scroll"), ago: 4),
+            child("t-tailscale-scout", of: "t-tailscale", "Check how pairing.rs picks its address", agent: "codex",
+                  model: "gpt-6-astra", .idle, ago: 26),
+        ].compactMap { $0 }
+        threads += kids
+        for k in kids { seq[k.id] = 0; items[k.id] = [] }
+        // The parent whose sub-agent waits on the user says so, in the inbox.
+        if let i = threads.firstIndex(where: { $0.id == "t-profile" }) {
+            threads[i].needs = Needs(kind: .approval, text: "Sub-agent needs you")
+            threads[i].needsThread = "t-profile-bench"
+            threads[i].section = .inbox
+        }
+        var snoozed = ThreadSummary(id: "t-glass", title: "Try the Liquid Glass tab bar", project: projects[3].ref,
+                                    agent: agents[0].ref, model: "claude-sonnet-5-5", modelLabel: "Sonnet 5.5", runState: .idle,
+                                    needs: nil, section: .snoozed, unseen: false, pinned: false, branch: "main", worktree: false,
+                                    activity: nil, workingSince: nil, updatedAt: now - 50 * m, additions: 12, deletions: 4)
+        snoozed.snoozedUntil = Int64(SnoozePicker.suggested.timeIntervalSince1970 * 1000)
+        threads.append(snoozed)
+        seq[snoozed.id] = 0
+        items[snoozed.id] = []
+
+        func add(_ tid: String, _ body: ItemBody, at: Int64? = nil) {
+            let n = nextSeq(tid)
+            items[tid, default: []].append(TItem(id: newID(tid, body), seq: n, at: at, body: body))
+        }
+        func tool(_ kind: ToolKind, _ title: String, _ detail: String, _ status: ToolStatus = .done) -> ItemBody {
+            .tool(ToolCall(callId: UUID().uuidString, tool: kind, title: title, detail: detail, status: status, output: "", added: nil, removed: nil))
+        }
+        add("t-inbox-review", .user(text: "Review how `own_section` orders snoozed, needs-you and settled threads. Advise only: list anything that looks wrong, with file and line.", images: 0), at: now - 2 * m)
+        add("t-inbox-review", tool(.read, "Read", "crates/trek-core/src/store.rs"))
+        add("t-inbox-review", tool(.search, "Search", "\"own_section(\" in crates/"))
+        add("t-inbox-review", tool(.read, "Read", "crates/trek-app/src/sidebar.rs", .running))
+
+        add("t-profile-bench", .user(text: "Benchmark scrolling a 3,000-item transcript before and after caching row heights. Report frames dropped per second.", images: 0), at: now - 4 * m)
+        add("t-profile-bench", tool(.read, "Read", "crates/trek-app/benches/transcript_scroll.rs"))
+        add("t-profile-bench", .assistant(text: "The bench exists already. I'll run it on the current build first, for the baseline.", streaming: false))
+        add("t-profile-bench", .approval(ApprovalRequest(requestId: "r-bench", title: "Run command", detail: "cargo bench -p trek-app --bench transcript_scroll", state: .pending)))
+
+        add("t-tailscale-scout", .user(text: "How does pairing.rs choose the address it puts in the QR code?", images: 0), at: now - 30 * m)
+        add("t-tailscale-scout", tool(.read, "Read", "crates/trek-remote/src/pairing.rs"))
+        add("t-tailscale-scout", .assistant(text: "`advertise_address()` takes the first private IPv4 address of an interface that's up. It never looks at Tailscale, so a phone on the tailnet gets the LAN address.", streaming: false))
+        add("t-tailscale-scout", .turnEnd(tookSecs: 48))
+
+        add("t-glass", .user(text: "Try the Liquid Glass tab bar on the main screen and tell me how it looks with the map behind it.", images: 0), at: now - 52 * m)
+        add("t-glass", .assistant(text: "It reads well over the map in light mode. In dark mode the labels lose contrast over the satellite layer; a slightly stronger tint fixes it.", streaming: false))
+        add("t-glass", .turnEnd(tookSecs: 95))
+    }
+
+    /// A sub-agent was answered or stopped: its parent's row says so.
+    private func subAgentChanged(_ tid: String, to state: SubAgentState) {
+        guard let parent = thread(tid)?.parentId else { return }
+        update(parent) { p in
+            if p.needsThread == tid {
+                p.needs = nil
+                p.needsThread = nil
+                if p.section == .inbox, p.runState == .working { p.section = .working }
+            }
+            p.subAgents = p.subAgents?.map { s in
+                var s = s
+                if s.threadId == tid { s.state = state }
+                return s
+            }
+        }
+    }
+
+    /// Snooze, wake, mark unread, regenerate the title and delete; false for the rest.
+    private func moreThreadAction(_ tid: String, _ action: ThreadAction, id: String?) -> Bool {
+        guard let t = thread(tid) else {
+            refuse(id, .notFound, "No such thread")
+            return true
+        }
+        switch action {
+        case .snooze(let until, let preset):
+            let calendar = Calendar.current
+            let morning = { (days: Int) in
+                calendar.date(bySettingHour: 9, minute: 0, second: 0, of: calendar.date(byAdding: .day, value: days, to: .now) ?? .now) ?? .now
+            }
+            let at: Date = switch preset {
+            case .hour: .now.addingTimeInterval(3600)
+            case .threeHours: .now.addingTimeInterval(3 * 3600)
+            case .tomorrow: morning(1)
+            case .nextWeek: morning(7)
+            case nil: Date(timeIntervalSince1970: Double(until ?? 0) / 1000)
+            }
+            guard at > .now else {
+                refuse(id, .badRequest, "That time has passed")
+                return true
+            }
+            ack(id)
+            update(tid) { $0.snoozedUntil = Int64(at.timeIntervalSince1970 * 1000); $0.section = .snoozed; $0.pinned = false }
+        case .wake:
+            ack(id)
+            update(tid) { $0.snoozedUntil = nil; if $0.section == .snoozed { $0.section = .inbox } }
+        case .markUnread:
+            ack(id)
+            update(tid) { $0.unseen = true }
+        case .regenerateTitle:
+            ack(id)
+            later(1.2) { [weak self] in
+                self?.update(tid) { $0.title = DemoMac.betterTitle(for: $0.id) ?? $0.title }
+            }
+        case .delete(let confirmed):
+            let kids = threads.filter { $0.parentId == tid }
+            guard confirmed else {
+                var words = t.worktree
+                    ? ["The thread and its transcript are deleted from Trek, and its worktree with them. This can't be undone."]
+                    : ["The thread and its transcript are deleted from Trek. This can't be undone."]
+                if !kids.isEmpty { words.append(kids.count == 1 ? "Its sub-agent is deleted with it." : "Its \(kids.count) sub-agents are deleted with it.") }
+                if t.worktree {
+                    words.append("2 uncommitted changes in the worktree would be lost.")
+                    words.append("\(t.branch ?? "Its branch") keeps its 2 commits that \(t.base ?? "main") doesn't have.")
+                }
+                refuse(id, .conflict, words.joined(separator: " "))
+                return true
+            }
+            ack(id, after: 0.3)
+            for gone in [tid] + kids.map(\.id) {
+                threads.removeAll { $0.id == gone }
+                items[gone] = nil
+                deliver(.threadRemoved(gone), after: 0.3)
+            }
+        default:
+            return false
+        }
+        return true
+    }
+
+    /// Titles first, then messages, as the Mac's search finds them.
+    private func search(_ query: String, limit: Int, id: String?) {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        var results: [SearchResult] = []
+        for t in threads where t.title.lowercased().contains(q) {
+            results.append(SearchResult(thread: t))
+        }
+        for t in threads where !results.contains(where: { $0.id == t.id }) {
+            for item in items[t.id] ?? [] {
+                let text: String
+                switch item.body {
+                case .user(let s, _), .assistant(let s, _): text = s
+                default: continue
+                }
+                guard let hit = text.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) else { continue }
+                // A few words either side, on one line.
+                let from = text.index(hit.lowerBound, offsetBy: -min(40, text.distance(from: text.startIndex, to: hit.lowerBound)))
+                let to = text.index(hit.upperBound, offsetBy: min(60, text.distance(from: hit.upperBound, to: text.endIndex)))
+                let lead = from > text.startIndex ? "…" : ""
+                let snippet = lead + text[from..<to].replacingOccurrences(of: "\n", with: " ") + (to < text.endIndex ? "…" : "")
+                let start = lead.unicodeScalars.count + text[from..<hit.lowerBound].unicodeScalars.count
+                results.append(SearchResult(thread: t, snippet: snippet, ranges: [[start, start + text[hit].unicodeScalars.count]]))
+                break
+            }
+        }
+        deliver(.searchResults(re: id, SearchResults(query: query, results: Array(results.prefix(limit)))), after: 0.35)
     }
 }

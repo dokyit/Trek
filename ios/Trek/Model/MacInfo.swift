@@ -39,8 +39,9 @@ nonisolated struct UsageLimit: Codable, Hashable, Identifiable {
 
 // MARK: Basecamp
 
-nonisolated enum BasecampRange: String, Codable, CaseIterable, Identifiable {
+nonisolated enum BasecampRange: String, LenientEnum, CaseIterable, Identifiable {
     case today, week, all
+    static var fallback: BasecampRange { .today }
     var id: String { rawValue }
     /// As the Mac's segmented control says it.
     var label: String {

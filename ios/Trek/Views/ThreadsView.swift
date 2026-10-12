@@ -6,8 +6,12 @@ struct ThreadsView: View {
     @Environment(AppModel.self) private var model
     @Binding var path: [String]
     @Binding var showNew: Bool
-    @State private var collapsed: Set<String> = []
+    @State private var collapsed: Set<String> = Launch.folded
     @State private var projectFilter: String?
+    @State private var deleteAsk: DeleteAsk?
+    /// A thread whose swipe asked for the snooze menu, or a time of one's own.
+    @State private var snoozeChoice: ThreadSummary?
+    @State private var snoozePicking: ThreadSummary?
     @Environment(\.compactRows) private var compact
 
     var body: some View {
@@ -28,6 +32,7 @@ struct ThreadsView: View {
                 section("Pinned", filtered(model.pinned))
                 section("Needs you", filtered(model.needsYou), tint: Trek.approval)
                 section("Working", filtered(model.working), tint: Trek.working)
+                section("Snoozed", filtered(model.snoozed))
                 section("Recent", filtered(model.recent))
                 if model.threads.isEmpty, model.connection == .connected {
                     ContentUnavailableView("No threads yet", systemImage: "bubble.left.and.text.bubble.right",
@@ -71,7 +76,19 @@ struct ThreadsView: View {
             .navigationDestination(for: String.self) { tid in
                 ThreadView(threadID: tid)
             }
+            .confirmationDialog("Snooze", isPresented: Binding(get: { snoozeChoice != nil }, set: { if !$0 { snoozeChoice = nil } }),
+                                titleVisibility: .visible, presenting: snoozeChoice) { t in
+                ForEach(SnoozePreset.allCases) { preset in
+                    Button(preset.label) { model.snooze(t.id, preset) }
+                }
+                Button("Pick a time…") { snoozePicking = t }
+            } message: { t in
+                Text(t.title)
+            }
+            .sheet(item: $snoozePicking) { SnoozePicker(thread: $0) }
+            .deleteConfirmation($deleteAsk, model: model)
         }
+        .environment(\.openThread, OpenThreadAction { path.append($0) })
     }
 
     private func filtered(_ list: [ThreadSummary]) -> [ThreadSummary] {
@@ -95,12 +112,38 @@ struct ThreadsView: View {
                         .swipeActions(edge: .leading) {
                             if t.unseen {
                                 Button("Read", systemImage: "checkmark") { model.markSeen(t.id) }.tint(Trek.done)
+                            } else if model.serves(MacFeature.markUnread) {
+                                Button("Unread", systemImage: "circlebadge.fill") { model.markUnread(t.id) }.tint(Trek.working)
+                            }
+                        }
+                        .swipeActions(edge: .trailing) {
+                            if model.serves(MacFeature.snooze) {
+                                if t.section == .snoozed {
+                                    Button("Wake", systemImage: "sun.max") { model.wake(t.id) }.tint(Trek.approval)
+                                } else {
+                                    Button("Snooze", systemImage: "moon.zzz") { snoozeChoice = t }.tint(.indigo)
+                                }
                             }
                         }
                         .contextMenu {
                             Button("Copy title", systemImage: "doc.on.doc") { UIPasteboard.general.string = t.title }
                             if t.runState == .working {
                                 Button("Stop", systemImage: "stop.fill", role: .destructive) { model.interrupt(t.id) }
+                            }
+                            if model.serves(MacFeature.snooze) {
+                                SnoozeMenu(thread: t) { snoozePicking = t }
+                            }
+                            if t.unseen {
+                                Button("Mark read", systemImage: "checkmark.circle") { model.markSeen(t.id) }
+                            } else if model.serves(MacFeature.markUnread) {
+                                Button("Mark unread", systemImage: "circlebadge") { model.markUnread(t.id) }
+                            }
+                            if model.serves(MacFeature.regenerateTitle) {
+                                Button("Regenerate title", systemImage: "text.badge.star") { model.regenerateTitle(t.id) }
+                            }
+                            if model.serves(MacFeature.delete) {
+                                Divider()
+                                Button("Delete…", systemImage: "trash", role: .destructive) { model.askToDelete(t, into: $deleteAsk) }
                             }
                         }
                     }
@@ -216,6 +259,8 @@ struct ThreadRow: View {
     private var secondary: some View {
         if let needs = thread.needs {
             Text(needs.text.replacingOccurrences(of: "`", with: "")).foregroundStyle(Trek.muted)
+        } else if thread.section == .snoozed, let until = SnoozeWords.until(thread.snoozedUntil) {
+            Label(until, systemImage: "moon.zzz").labelStyle(BranchLabelStyle()).foregroundStyle(Trek.muted.opacity(0.85))
         } else if thread.runState == .working, let activity = thread.activity {
             RichText(markdown: activity, size: 15, style: .subheadline, autoPaths: true)
                 .foregroundStyle(Trek.muted)

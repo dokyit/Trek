@@ -59,8 +59,9 @@ nonisolated enum PlanState: String, LenientEnum {
     static var fallback: PlanState { .resolved }
 }
 
-nonisolated enum SendMode: String, Codable, CaseIterable, Identifiable {
+nonisolated enum SendMode: String, LenientEnum, CaseIterable, Identifiable {
     case steer, queue
+    static var fallback: SendMode { .steer }
     var id: String { rawValue }
     var label: String { self == .steer ? "Steer" : "Queue" }
     var help: String {
@@ -117,10 +118,16 @@ nonisolated struct ImageUpload: Hashable {
     var json: [String: Any] { ["mime": mime, "data": data] }
 }
 
-/// Pin, settle, archive or rename a thread.
+/// Pin, settle, archive or rename a thread; snooze, wake, mark unread, regenerate its title or
+/// delete it (where the Mac lists those features).
 nonisolated enum ThreadAction: Hashable {
     case pin, unpin, settle, unsettle, archive
     case rename(String)
+    /// Until `until` (ms), or one of the Mac's presets.
+    case snooze(until: Int64?, preset: SnoozePreset?)
+    case wake, markUnread, regenerateTitle
+    /// Unconfirmed, the Mac answers `conflict` with what its confirmation says.
+    case delete(confirmed: Bool)
     var json: [String: Any] {
         switch self {
         case .pin: ["kind": "pin"]
@@ -129,6 +136,17 @@ nonisolated enum ThreadAction: Hashable {
         case .unsettle: ["kind": "unsettle"]
         case .archive: ["kind": "archive"]
         case .rename(let title): ["kind": "rename", "title": title]
+        case .snooze(let until, let preset):
+            { () -> [String: Any] in
+                var o: [String: Any] = ["kind": "snooze"]
+                if let until { o["until"] = until }
+                if let preset { o["preset"] = preset.rawValue }
+                return o
+            }()
+        case .wake: ["kind": "wake"]
+        case .markUnread: ["kind": "mark_unread"]
+        case .regenerateTitle: ["kind": "regenerate_title"]
+        case .delete(let confirmed): confirmed ? ["kind": "delete", "confirmed": true] : ["kind": "delete"]
         }
     }
 }
@@ -212,6 +230,12 @@ nonisolated struct ThreadSummary: Codable, Identifiable, Hashable {
     var base: String? = nil
     /// Its folder's git state, as last read.
     var git: GitSummary? = nil
+    /// A sub-agent's: the thread that started it.
+    var parentId: String? = nil
+    /// Snoozed: when it wakes (ms).
+    var snoozedUntil: Int64? = nil
+    /// `needs` is a sub-agent's: its thread, where it's answered.
+    var needsThread: String? = nil
 }
 
 nonisolated struct ContextUse: Codable, Hashable {
@@ -256,6 +280,8 @@ nonisolated struct SubAgent: Codable, Hashable {
     var state: SubAgentState
     /// When it started (ms): it's been at work for now minus this.
     var since: Int64? = nil
+    /// Its thread, for one Trek runs: it opens like any other.
+    var threadId: String? = nil
 }
 
 nonisolated struct GitSummary: Codable, Hashable {
@@ -293,6 +319,22 @@ nonisolated struct AgentOption: Codable, Identifiable, Hashable {
     var logo: String? = nil
     var id: String { key }
     var ref: AgentRef { AgentRef(key: key, name: name, logo: logo) }
+
+    private enum CodingKeys: String, CodingKey { case key, name, defaultModel, models, logo }
+
+    /// An agent whose models the Mac left out still reads (with none).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        key = try c.decode(String.self, forKey: .key)
+        name = try c.decode(String.self, forKey: .name)
+        defaultModel = try c.decodeIfPresent(String.self, forKey: .defaultModel)
+        models = (try c.decodeIfPresent(Lossy<ModelOption>.self, forKey: .models))?.elements ?? []
+        logo = try c.decodeIfPresent(String.self, forKey: .logo)
+    }
+
+    init(key: String, name: String, defaultModel: String?, models: [ModelOption], logo: String? = nil) {
+        (self.key, self.name, self.defaultModel, self.models, self.logo) = (key, name, defaultModel, models, logo)
+    }
 }
 
 nonisolated struct QuestionOption: Codable, Hashable {
@@ -515,6 +557,8 @@ nonisolated struct Snapshot: Decodable {
     var agents: [AgentOption]
     /// The Mac lets threads run with Full access.
     var fullAccess: Bool? = nil
+    /// Threads the list leaves out that the phone may open (sub-agents, ones open from a search).
+    var unlisted: [ThreadSummary] = []
 }
 
 nonisolated enum ErrorCode: String, LenientEnum {
@@ -525,8 +569,9 @@ nonisolated enum ErrorCode: String, LenientEnum {
 }
 
 nonisolated enum ServerMessage {
-    case paired(re: String?, token: String, host: HostInfo)
-    case welcome(re: String?, host: HostInfo)
+    /// `features`: the optional requests the Mac serves (`MacFeature`).
+    case paired(re: String?, token: String, host: HostInfo, features: [String] = [])
+    case welcome(re: String?, host: HostInfo, features: [String] = [])
     case snapshot(Snapshot)
     case thread(ThreadSummary)
     case threadRemoved(String)
@@ -550,6 +595,9 @@ nonisolated enum ServerMessage {
     case gitBranches(re: String?, GitBranches)
     case commands(re: String?, threadId: String, [CommandInfo])
     case settings(re: String?, MacSettings)
+    /// A thread the list leaves out (a sub-agent's, one open from a search).
+    case unlisted(ThreadSummary)
+    case searchResults(re: String?, SearchResults)
     case unknown(String)
 
     private struct Raw: Decodable {
@@ -557,14 +605,17 @@ nonisolated enum ServerMessage {
         var re: String?
         var token: String?
         var host: HostInfo?
-        var threads: [ThreadSummary]?
-        var projects: [ProjectSummary]?
-        var agents: [AgentOption]?
+        // Lists read item by item: one that doesn't decode is left out, not the message.
+        var threads: Lossy<ThreadSummary>?
+        var projects: Lossy<ProjectSummary>?
+        var agents: Lossy<AgentOption>?
+        var unlisted: Lossy<ThreadSummary>?
+        var features: [String]?
         var thread: ThreadSummary?
         var threadId: String?
         var reset: Bool?
         var seq: Int64?
-        var items: [TItem]?
+        var items: Lossy<TItem>?
         var item: TItem?
         var code: ErrorCode?
         var message: String?
@@ -588,22 +639,23 @@ nonisolated enum ServerMessage {
         switch r.type {
         case "paired":
             guard let token = r.token, let host = r.host else { throw ProtocolError.missing("paired") }
-            return .paired(re: r.re, token: token, host: host)
+            return .paired(re: r.re, token: token, host: host, features: r.features ?? [])
         case "welcome":
             guard let host = r.host else { throw ProtocolError.missing("welcome") }
-            return .welcome(re: r.re, host: host)
+            return .welcome(re: r.re, host: host, features: r.features ?? [])
         case "snapshot":
-            return .snapshot(Snapshot(threads: r.threads ?? [], projects: r.projects ?? [], agents: r.agents ?? [],
-                                      fullAccess: r.fullAccess))
+            return .snapshot(Snapshot(threads: r.threads?.elements ?? [], projects: r.projects?.elements ?? [],
+                                      agents: r.agents?.elements ?? [], fullAccess: r.fullAccess,
+                                      unlisted: r.unlisted?.elements ?? []))
         case "thread":
             guard let t = r.thread else { throw ProtocolError.missing("thread") }
             return .thread(t)
         case "thread_removed": return .threadRemoved(r.threadId ?? "")
         case "transcript":
-            return .transcript(re: r.re, threadId: r.threadId ?? "", reset: r.reset ?? true, seq: r.seq ?? 0, items: r.items ?? [],
-                               more: r.more ?? false)
+            return .transcript(re: r.re, threadId: r.threadId ?? "", reset: r.reset ?? true, seq: r.seq ?? 0,
+                               items: r.items?.elements ?? [], more: r.more ?? false)
         case "transcript_page":
-            return .transcriptPage(re: r.re, threadId: r.threadId ?? "", items: r.items ?? [], more: r.more ?? false)
+            return .transcriptPage(re: r.re, threadId: r.threadId ?? "", items: r.items?.elements ?? [], more: r.more ?? false)
         case "item":
             guard let item = r.item, let tid = r.threadId else { throw ProtocolError.missing("item") }
             return .item(threadId: tid, item: item)
@@ -623,6 +675,10 @@ nonisolated enum ServerMessage {
         case "git_branches": return .gitBranches(re: r.re, try decoder.decode(GitBranches.self, from: data))
         case "commands": return .commands(re: r.re, threadId: r.threadId ?? "", r.commands ?? [])
         case "settings": return .settings(re: r.re, try decoder.decode(MacSettings.self, from: data))
+        case "unlisted":
+            guard let t = r.thread else { throw ProtocolError.missing("unlisted") }
+            return .unlisted(t)
+        case "search_results": return .searchResults(re: r.re, try decoder.decode(SearchResults.self, from: data))
         default: return .unknown(r.type)
         }
     }
@@ -630,8 +686,14 @@ nonisolated enum ServerMessage {
 
 nonisolated extension ServerMessage {
     /// Decodes off the main actor: a long transcript takes a while to read, and the UI keeps going.
+    /// A message that doesn't decode is logged and left out.
     @concurrent static func decodeInBackground(_ data: Data) async -> ServerMessage? {
-        try? decode(data)
+        do {
+            return try decode(data)
+        } catch {
+            protocolLog.error("Left out a message from the Mac that didn't decode: \(String(describing: error), privacy: .public)")
+            return nil
+        }
     }
 }
 
@@ -697,6 +759,8 @@ nonisolated enum ClientMessage {
     case settings
     case setSettings(SettingsChange)
     case ping
+    /// Threads whose title or messages match, as the Mac's own search finds them.
+    case search(query: String, limit: Int?)
 
     static let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
 
@@ -787,6 +851,9 @@ nonisolated enum ClientMessage {
             o = change.json.merging(["type": "set_settings"]) { $1 }
         case .ping:
             o = ["type": "ping"]
+        case .search(let query, let limit):
+            o = ["type": "search", "query": query]
+            if let limit { o["limit"] = limit }
         }
         if let id { o["id"] = id }
         return o

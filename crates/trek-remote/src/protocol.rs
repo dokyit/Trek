@@ -149,6 +149,9 @@ pub enum ClientMessage {
     SetSettings(SettingsChange),
     /// Application-level ping (answered with `pong`).
     Ping,
+    /// Threads whose title or messages match, as the Mac's own search finds them (answered with
+    /// `search_results`).
+    Search(SearchRequest),
 }
 
 impl ClientMessage {
@@ -187,6 +190,7 @@ impl ClientMessage {
             Self::Settings => "settings",
             Self::SetSettings(_) => "set_settings",
             Self::Ping => "ping",
+            Self::Search(_) => "search",
         }
     }
 }
@@ -206,6 +210,7 @@ impl ClientMessage {
                 | Self::Commands { .. }
                 | Self::Settings
                 | Self::TranscriptBefore { .. }
+                | Self::Search(_)
         )
     }
 }
@@ -342,6 +347,69 @@ pub enum ThreadAction {
     Unsettle,
     Archive,
     Rename { title: String },
+    /// Out of the inbox until `until` (ms), or until one of the Mac's presets (worked out on the
+    /// Mac, in its time zone). Anything that needs the user wakes it early.
+    Snooze {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        until: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preset: Option<SnoozePreset>,
+    },
+    /// Back from its snooze now.
+    Wake,
+    MarkUnread,
+    /// Delete it from Trek, its sub-agents with it. Unconfirmed, the Mac refuses (`conflict`)
+    /// with what its own confirmation says; sent again `confirmed`, it's gone.
+    Delete {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        confirmed: bool,
+    },
+    /// A new title, written as the Mac's "Regenerate title" writes it.
+    RegenerateTitle,
+}
+
+/// The Mac's snooze menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnoozePreset {
+    /// For 1 hour.
+    Hour,
+    /// For 3 hours.
+    ThreeHours,
+    /// Until tomorrow morning (9:00; before 5:00, the morning of the same day).
+    Tomorrow,
+    /// Until next week (9:00 a week from the day).
+    NextWeek,
+}
+
+/// `search`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchRequest {
+    pub query: String,
+    /// At most this many threads (the Mac caps it at [`MAX_SEARCH`]; 50 when missing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// The most threads one `search` returns.
+pub const MAX_SEARCH: u32 = 200;
+
+/// Optional requests and actions a Mac serves, as `welcome` and `paired` list them in `features`.
+/// A phone hides what its Mac doesn't list: an older Mac simply doesn't show it.
+pub mod feature {
+    /// `search`.
+    pub const SEARCH: &str = "search";
+    /// Sub-agents' threads: `unlisted` rows, [`super::SubAgent::thread_id`] and
+    /// [`super::ThreadSummary::needs_thread`].
+    pub const SUB_AGENTS: &str = "sub_agents";
+    /// `thread_action` `snooze` and `wake`.
+    pub const SNOOZE: &str = "snooze";
+    /// `thread_action` `mark_unread`.
+    pub const MARK_UNREAD: &str = "mark_unread";
+    /// `thread_action` `delete`.
+    pub const DELETE: &str = "delete";
+    /// `thread_action` `regenerate_title`.
+    pub const REGENERATE_TITLE: &str = "regenerate_title";
 }
 
 /// `save_note`: a note's new text.
@@ -534,9 +602,17 @@ pub enum ServerMessage {
         protocol: u32,
         token: String,
         host: HostInfo,
+        /// The optional requests it serves (see [`feature`]).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
     },
     /// `hello` succeeded.
-    Welcome { protocol: u32, host: HostInfo },
+    Welcome {
+        protocol: u32,
+        host: HostInfo,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
+    },
     /// Everything the phone shows in its inbox (replaces its copy).
     Snapshot(Snapshot),
     /// Upsert of one thread.
@@ -601,6 +677,31 @@ pub enum ServerMessage {
     Settings(MacSettings),
     /// A request failed.
     Error { code: ErrorCode, message: String },
+    /// Upsert of a thread the list leaves out: a sub-agent's (its parent's row names it), or one a
+    /// phone has open from a search. Older phones ignore it.
+    Unlisted { thread: ThreadSummary },
+    /// The reply to `search`.
+    SearchResults(SearchResults),
+}
+
+/// The reply to `search`: title matches first (best first), then message matches.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct SearchResults {
+    pub query: String,
+    #[serde(default)]
+    pub results: Vec<SearchResult>,
+}
+
+/// A thread that matched, whole (it may not be in the snapshot: settled long ago, a sub-agent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchResult {
+    pub thread: ThreadSummary,
+    /// For a message match: an excerpt of the message, on one line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+    /// The matched words in `snippet`, as `[start, end)` in characters (Unicode scalar values).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ranges: Vec<[u32; 2]>,
 }
 
 /// Error codes.
@@ -674,6 +775,10 @@ pub struct Snapshot {
     /// The Mac lets threads run with Full access (it's unlocked in its settings).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub full_access: bool,
+    /// Threads the list leaves out that phones may open: the listed threads' sub-agents, and
+    /// threads phones have open (see `unlisted`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unlisted: Vec<ThreadSummary>,
 }
 
 /// One thread's row.
@@ -742,6 +847,15 @@ pub struct ThreadSummary {
     /// Its folder's git state, as last read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<GitSummary>,
+    /// For a sub-agent: the thread that started it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// For a snoozed thread: when it wakes (ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_until: Option<i64>,
+    /// `needs` is a sub-agent's (at any depth): its thread, opened to answer it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_thread: Option<String>,
 }
 
 /// A context window's use.
@@ -797,6 +911,10 @@ pub struct SubAgent {
     /// When it started (ms; working time so far is now minus this).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<i64>,
+    /// Its thread, for one Trek runs: opened like any other (`subscribe`); its row comes as
+    /// `unlisted`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -40,6 +40,9 @@ private struct ThreadScreen: View {
     @State private var archiving = false
     @State private var showingGit = false
     @State private var newThread: NewThreadRequest?
+    @State private var snoozePicking = false
+    @State private var deleteAsk: DeleteAsk?
+    @Environment(\.dismiss) private var dismiss
 
     private var threadID: String { store.id }
     private var thread: ThreadSummary? { store.summary }
@@ -80,6 +83,8 @@ private struct ThreadScreen: View {
                 Text("It leaves your threads on the Mac too.")
             }
             .sheet(isPresented: $showingGit) { GitSheet(threadID: threadID) }
+            .sheet(isPresented: $snoozePicking) { if let t = thread { SnoozePicker(thread: t) } }
+            .deleteConfirmation($deleteAsk, model: model) { _ in dismiss() }
             .sheet(item: $newThread) { request in
                 NewThreadSheet(project: request.project, prompt: request.prompt) { model.openRequest = $0 }
             }
@@ -97,6 +102,10 @@ private struct ThreadScreen: View {
                 switch Launch.sheet {
                 case "git": showingGit = true
                 case "commands": composer.draft = "/"
+                case "snooze": snoozePicking = true
+                case "delete":
+                    // Once the row is in.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if let t = thread { model.askToDelete(t, into: $deleteAsk) } }
                 default: break
                 }
             }
@@ -113,6 +122,7 @@ private struct ThreadScreen: View {
 
     private var subtitle: String {
         guard let t = thread else { return "" }
+        if t.parentId != nil { return ["Sub-agent", t.modelLabel].compactMap { $0 }.joined(separator: " · ") }
         return [t.project?.name, t.branch].compactMap { $0 }.joined(separator: " · ")
     }
 
@@ -132,28 +142,45 @@ private struct ThreadScreen: View {
                         if let b = t.branch { Label(b, systemImage: "arrow.triangle.branch") }
                         if t.additions + t.deletions > 0 { Label("+\(t.additions) −\(t.deletions)", systemImage: "plus.forwardslash.minus") }
                     }
-                    Section {
-                        if t.pinned {
-                            Button("Unpin", systemImage: "pin.slash") { model.threadAction(threadID, .unpin) }
-                        } else {
-                            Button("Pin", systemImage: "pin") { model.threadAction(threadID, .pin, done: "Pinned") }
-                        }
-                        if t.section == .settled {
-                            Button("Back to the inbox", systemImage: "tray.and.arrow.down") { model.threadAction(threadID, .unsettle) }
-                        } else {
-                            Button("Settle", systemImage: "checkmark.circle") { model.threadAction(threadID, .settle, done: "Settled") }
-                        }
-                        Button("Rename…", systemImage: "pencil") {
-                            newTitle = t.title
-                            renaming = true
+                    // A sub-agent isn't in the list: what moves rows around doesn't apply to it.
+                    if t.parentId == nil {
+                        Section {
+                            if t.pinned {
+                                Button("Unpin", systemImage: "pin.slash") { model.threadAction(threadID, .unpin) }
+                            } else {
+                                Button("Pin", systemImage: "pin") { model.threadAction(threadID, .pin, done: "Pinned") }
+                            }
+                            if t.section == .settled {
+                                Button("Back to the inbox", systemImage: "tray.and.arrow.down") { model.threadAction(threadID, .unsettle) }
+                            } else {
+                                Button("Settle", systemImage: "checkmark.circle") { model.threadAction(threadID, .settle, done: "Settled") }
+                            }
+                            if model.serves(MacFeature.snooze) {
+                                SnoozeMenu(thread: t) { snoozePicking = true }
+                            }
+                            Button("Rename…", systemImage: "pencil") {
+                                newTitle = t.title
+                                renaming = true
+                            }
+                            if model.serves(MacFeature.regenerateTitle) {
+                                Button("Regenerate title", systemImage: "text.badge.star") { model.regenerateTitle(threadID) }
+                            }
+                            if model.serves(MacFeature.markUnread) {
+                                Button("Mark unread", systemImage: "circlebadge") { model.markUnread(threadID) }
+                            }
                         }
                     }
                 }
                 Button("Copy title", systemImage: "doc.on.doc") { UIPasteboard.general.string = thread?.title }
                 if thread?.runState == .working {
-                    Button("Stop", systemImage: "stop.fill", role: .destructive) { model.interrupt(threadID) }
+                    Button(thread?.parentId == nil ? "Stop" : "Stop sub-agent", systemImage: "stop.fill", role: .destructive) { model.interrupt(threadID) }
                 }
-                Button("Archive", systemImage: "archivebox", role: .destructive) { archiving = true }
+                if thread?.parentId == nil {
+                    Button("Archive", systemImage: "archivebox", role: .destructive) { archiving = true }
+                    if model.serves(MacFeature.delete), let t = thread {
+                        Button("Delete…", systemImage: "trash", role: .destructive) { model.askToDelete(t, into: $deleteAsk) }
+                    }
+                }
             } label: {
                 Image(systemName: "ellipsis")
             }
@@ -507,6 +534,10 @@ private struct ComposerArea: View {
         let query = CommandPicker.query(composer.draft)
         let commands = query.map { CommandPicker.matches(model.commands[threadID] ?? [], $0) } ?? []
         VStack(spacing: 10) {
+            if let kid = thread?.needsThread, model.serves(MacFeature.subAgents) {
+                SubAgentNeedsCard(threadID: kid, needs: thread?.needs)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
             ForEach(store.pending) { item in
                 PendingRequestCard(item: item, agentName: thread?.agent.name ?? "The agent") { response in
                     if let rid = Self.requestId(item) { model.answer(threadID, requestId: rid, response) }
@@ -529,6 +560,7 @@ private struct ComposerArea: View {
         .padding(.bottom, 6)
         .padding(.top, 8)
         .animation(.smooth(duration: 0.3), value: store.pending.map(\.id))
+        .animation(.smooth(duration: 0.3), value: thread?.needsThread)
         .animation(.snappy(duration: 0.2), value: commands.isEmpty)
         .onChange(of: composer.draft) {
             // `/` typed at the start: the picker wants the thread's commands (asked again each

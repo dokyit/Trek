@@ -668,3 +668,59 @@ fn ntfy_links_for_a_topic() {
     assert_eq!(ntfy_links("http://pi.local:8080/", "t"), (Some("http://pi.local:8080/t".into()), Some("ntfy://pi.local:8080/t?secure=false".into())));
     assert_eq!(ntfy_links("https://ntfy.sh", ""), (None, None));
 }
+
+#[test]
+fn features_sub_agents_the_thread_menu_and_search() {
+    // The Mac's list of what it serves; an older Mac's welcome (none) still reads.
+    let welcome = server_round_trip(r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents"]}"#);
+    assert!(matches!(welcome.msg, ServerMessage::Welcome { ref features, .. } if features == &["search", "sub_agents"]));
+    let old: ServerEnvelope = serde_json::from_str(r#"{"type":"paired","re":"1","protocol":1,"token":"t","host":{"id":"h","name":"Mac","version":"0.3.2"}}"#).unwrap();
+    assert!(matches!(old.msg, ServerMessage::Paired { ref features, .. } if features.is_empty()));
+
+    // The thread menu's actions.
+    for line in [
+        r#"{"type":"thread_action","id":"1","thread_id":"t","action":{"kind":"snooze","preset":"three_hours"}}"#,
+        r#"{"type":"thread_action","id":"2","thread_id":"t","action":{"kind":"snooze","until":1791100800000}}"#,
+        r#"{"type":"thread_action","id":"3","thread_id":"t","action":{"kind":"wake"}}"#,
+        r#"{"type":"thread_action","id":"4","thread_id":"t","action":{"kind":"mark_unread"}}"#,
+        r#"{"type":"thread_action","id":"5","thread_id":"t","action":{"kind":"regenerate_title"}}"#,
+        r#"{"type":"thread_action","id":"6","thread_id":"t","action":{"kind":"delete"}}"#,
+        r#"{"type":"thread_action","id":"7","thread_id":"t","action":{"kind":"delete","confirmed":true}}"#,
+        r#"{"type":"search","id":"8","query":"refresh race","limit":20}"#,
+        r#"{"type":"search","id":"9","query":"x"}"#,
+    ] {
+        client_round_trip(line);
+    }
+    let snooze = client_round_trip(r#"{"type":"thread_action","thread_id":"t","action":{"kind":"snooze","preset":"next_week"}}"#);
+    assert!(matches!(snooze.msg, ClientMessage::ThreadAction(ThreadActionRequest { action: ThreadAction::Snooze { until: None, preset: Some(SnoozePreset::NextWeek) }, .. })));
+    let search = client_round_trip(r#"{"type":"search","query":"race"}"#);
+    assert!(search.msg.is_query());
+    assert_eq!(search.msg.kind(), "search");
+
+    // Sub-agents: the row's thread, the parent's pointer to the one waiting, unlisted rows.
+    let row = server_round_trip(
+        r#"{"type":"unlisted","thread":{"id":"kid","title":"Benchmark it","project":{"id":"p","name":"trek","hue":24,"monogram":"TR"},"agent":{"key":"codex","name":"Codex"},"model":null,"model_label":null,"run_state":"needs-you","needs":{"kind":"approval","text":"Run cargo bench"},"section":"inbox","unseen":false,"pinned":false,"branch":null,"worktree":false,"activity":null,"working_since":null,"updated_at":5,"additions":0,"deletions":0,"parent_id":"t"}}"#,
+    );
+    assert!(matches!(row.msg, ServerMessage::Unlisted { ref thread } if thread.parent_id.as_deref() == Some("t")));
+    let parent = ThreadSummary {
+        id: "t".into(),
+        needs: Some(Needs { kind: NeedsKind::Approval, text: "Sub-agent needs you".into() }),
+        needs_thread: Some("kid".into()),
+        snoozed_until: Some(9),
+        sub_agents: vec![SubAgent { agent: AgentRef::new("codex", "Codex", None), model: Some("Sol".into()), title: "Benchmark it".into(), state: SubAgentState::NeedsYou, since: None, thread_id: Some("kid".into()) }],
+        ..Default::default()
+    };
+    let v = serde_json::to_value(&parent).unwrap();
+    assert_eq!((&v["needs_thread"], &v["snoozed_until"], &v["sub_agents"][0]["thread_id"]), (&json!("kid"), &json!(9), &json!("kid")));
+    assert_eq!(v.get("parent_id"), None, "left out when there's nothing to say");
+    let back: ThreadSummary = serde_json::from_value(v).unwrap();
+    assert_eq!(back, parent);
+    // An older Mac's snapshot (no unlisted rows) still reads.
+    let snapshot: ServerEnvelope = serde_json::from_str(r#"{"type":"snapshot","threads":[],"projects":[],"agents":[]}"#).unwrap();
+    assert!(matches!(snapshot.msg, ServerMessage::Snapshot(ref s) if s.unlisted.is_empty()));
+
+    let results = server_round_trip(
+        r#"{"type":"search_results","re":"8","query":"race","results":[{"thread":{"id":"t","title":"Fix the race","project":{"id":"p","name":"trek","hue":24,"monogram":"TR"},"agent":{"key":"codex","name":"Codex"},"model":null,"model_label":null,"run_state":"idle","needs":null,"section":"settled","unseen":false,"pinned":false,"branch":null,"worktree":false,"activity":null,"working_since":null,"updated_at":5,"additions":0,"deletions":0},"snippet":"two refreshes race","ranges":[[14,18]]}]}"#,
+    );
+    assert!(matches!(results.msg, ServerMessage::SearchResults(ref r) if r.results[0].ranges == [[14, 18]]));
+}

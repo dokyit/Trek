@@ -82,7 +82,7 @@ impl FakeHost {
 
 impl RemoteHost for FakeHost {
     async fn snapshot(&self) -> HostResult<Snapshot> {
-        Ok(Snapshot { threads: vec![thread("t1"), thread("t2")], projects: vec![], agents: vec![], full_access: false })
+        Ok(Snapshot { threads: vec![thread("t1"), thread("t2")], ..Default::default() })
     }
 
     async fn transcript(&self, thread_id: &str) -> HostResult<Transcript> {
@@ -260,6 +260,24 @@ impl RemoteHost for FakeHost {
     async fn commands(&self, thread_id: &str) -> HostResult<Vec<CommandInfo>> {
         self.record(format!("commands {thread_id}"));
         Ok(vec![CommandInfo { name: "usage".into(), description: "Show plan usage".into(), kind: CommandKind::Command, trek: true }])
+    }
+
+    /// Only the newer kinds: the first ones are refused, as by a host that has none.
+    async fn thread_action(&self, req: ThreadActionRequest) -> HostResult<()> {
+        if matches!(req.action, ThreadAction::Pin | ThreadAction::Unpin | ThreadAction::Settle | ThreadAction::Unsettle | ThreadAction::Archive | ThreadAction::Rename { .. }) {
+            return Err(HostError::bad_request("This Mac can't do that to a thread"));
+        }
+        self.record(format!("thread_action {} {:?}", req.thread_id, req.action));
+        match req.action {
+            ThreadAction::Delete { confirmed: false } => Err(HostError::conflict("The thread and its transcript are deleted from Trek. This can't be undone.")),
+            _ => Ok(()),
+        }
+    }
+
+    async fn search(&self, req: SearchRequest) -> HostResult<SearchResults> {
+        self.record(format!("search {} {:?}", req.query, req.limit));
+        let hit = SearchResult { thread: ThreadSummary { parent_id: Some("t1".into()), ..thread("kid") }, snippet: Some("two refreshes race".into()), ranges: vec![[14, 18]] };
+        Ok(SearchResults { query: req.query, results: vec![SearchResult { thread: thread("t2"), snippet: None, ranges: vec![] }, hit] })
     }
 
     async fn settings(&self) -> HostResult<MacSettings> {
@@ -1215,4 +1233,55 @@ async fn serving_on_the_tailscale_address_only_answers_there() {
 
     // Nothing answers on the other interfaces: loopback refuses the same port.
     assert!(TcpStream::connect(("127.0.0.1", addr.port())).await.is_err());
+}
+
+#[tokio::test]
+async fn the_mac_lists_its_features_and_serves_search_sub_agents_and_the_thread_menu() {
+    // A Mac that lists nothing (an older one, as far as the phone can tell) sends no list.
+    let (plain, _) = start().await;
+    let (_, token) = pair(&plain, "dev-0").await;
+    let mut c = connect(&plain).await;
+    send(&mut c, json!({"type": "hello", "id": "h", "protocol": 1, "device_id": "dev-0", "token": token})).await;
+    let welcome = recv(&mut c).await;
+    assert_eq!((welcome["type"].as_str(), welcome.get("features")), (Some("welcome"), None), "{welcome}");
+
+    let (handle, host) = start_with(|config| config.features = vec![feature::SEARCH.into(), feature::SUB_AGENTS.into(), feature::DELETE.into()]).await;
+    let offer = handle.pairing_offer();
+    let mut c = connect(&handle).await;
+    send(&mut c, json!({"type": "pair", "id": "1", "protocol": 1, "code": offer.code, "device_id": "dev-1", "device_name": "Test iPhone"})).await;
+    let paired = recv(&mut c).await;
+    assert_eq!(paired["features"], json!(["search", "sub_agents", "delete"]), "{paired}");
+    let token = paired["token"].as_str().unwrap().to_string();
+    assert_eq!(recv(&mut c).await["type"], "snapshot");
+    drop(c);
+    let mut c = connect(&handle).await;
+    send(&mut c, json!({"type": "hello", "id": "h", "protocol": 1, "device_id": "dev-1", "token": token})).await;
+    assert_eq!(recv(&mut c).await["features"], json!(["search", "sub_agents", "delete"]));
+    assert_eq!(recv(&mut c).await["type"], "snapshot");
+
+    // Search: the host's results, whole.
+    send(&mut c, json!({"type": "search", "id": "s", "query": "race", "limit": 20})).await;
+    let found = recv(&mut c).await;
+    assert_eq!((found["type"].as_str(), found["re"].as_str(), found["query"].as_str()), (Some("search_results"), Some("s"), Some("race")), "{found}");
+    assert_eq!(found["results"][0]["thread"]["id"], "t2");
+    assert_eq!(found["results"][0].get("snippet"), None, "a title match has no excerpt");
+    assert_eq!((&found["results"][1]["thread"]["parent_id"], &found["results"][1]["ranges"]), (&json!("t1"), &json!([[14, 18]])));
+
+    // A sub-agent's row comes as `unlisted`.
+    handle.push(HostEvent::Unlisted(ThreadSummary { parent_id: Some("t1".into()), ..thread("kid") }));
+    let row = recv(&mut c).await;
+    assert_eq!((row["type"].as_str(), row["thread"]["id"].as_str(), row["thread"]["parent_id"].as_str()), (Some("unlisted"), Some("kid"), Some("t1")));
+
+    // The thread menu: a delete is asked about first, then done.
+    send(&mut c, json!({"type": "thread_action", "id": "d1", "thread_id": "t1", "action": {"kind": "delete"}})).await;
+    let asked = recv(&mut c).await;
+    assert_eq!((asked["type"].as_str(), asked["code"].as_str()), (Some("error"), Some("conflict")), "{asked}");
+    assert!(asked["message"].as_str().unwrap().contains("can't be undone"));
+    send(&mut c, json!({"type": "thread_action", "id": "d2", "thread_id": "t1", "action": {"kind": "delete", "confirmed": true}})).await;
+    assert_eq!(recv(&mut c).await["type"], "ack");
+    send(&mut c, json!({"type": "thread_action", "id": "z", "thread_id": "t1", "action": {"kind": "snooze", "preset": "tomorrow"}})).await;
+    assert_eq!(recv(&mut c).await["type"], "ack");
+    let calls = host.calls();
+    assert!(calls.contains(&"search race Some(20)".to_string()), "{calls:?}");
+    assert!(calls.contains(&"thread_action t1 Snooze { until: None, preset: Some(Tomorrow) }".to_string()), "{calls:?}");
 }

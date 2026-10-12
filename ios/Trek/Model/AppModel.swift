@@ -64,6 +64,10 @@ final class AppModel {
     var agents: [AgentOption] = []
     /// The Mac lets threads run with Full access (unlocked in its Permissions settings).
     var fullAccessAllowed = false
+    /// The optional requests the Mac serves (`MacFeature`): what it doesn't list isn't offered.
+    var features: Set<String> = []
+    /// Rows the list leaves out, by id: sub-agents' threads, and threads opened from a search.
+    var unlisted: [String: ThreadSummary] = [:]
     /// Each opened thread's own store (its row, transcript and paging), so an update to one
     /// thread redraws only what shows it. Not observed itself: views observe the stores.
     @ObservationIgnored private var stores: [String: ThreadStore] = [:]
@@ -257,6 +261,8 @@ final class AppModel {
         projects = []
         agents = []
         stores = [:]
+        features = []
+        unlisted = [:]
         cacheHost = nil
         replies = [:]
         host = nil
@@ -279,8 +285,9 @@ final class AppModel {
 
     func handle(_ message: ServerMessage) {
         switch message {
-        case .paired(_, _, let host), .welcome(_, let host):
+        case .paired(_, _, let host, let features), .welcome(_, let host, let features):
             self.host = host
+            self.features = Set(features)
             cacheHost = host.id
         case .snapshot(let s):
             withAnimation(.snappy) {
@@ -289,7 +296,9 @@ final class AppModel {
                 agents = s.agents
                 fullAccessAllowed = s.fullAccess ?? false
             }
+            for t in s.unlisted { setUnlisted(t) }
         case .thread(let t):
+            if unlisted[t.id] != nil { unlisted[t.id] = nil }
             if let i = threads.firstIndex(where: { $0.id == t.id }) {
                 let old = threads[i]
                 guard old != t else { break }
@@ -305,6 +314,7 @@ final class AppModel {
             }
         case .threadRemoved(let id):
             threads.removeAll { $0.id == id }
+            unlisted[id] = nil
             if let host = cacheHost ?? currentCacheHost { TranscriptCache.remove(host: host, thread: id) }
         case .transcript(let re, let tid, let reset, let seq, let items, let more):
             if let s = stores[tid] {
@@ -326,8 +336,11 @@ final class AppModel {
         case .ack(let re, _, _, _), .pong(let re):
             reply(re, message)
         case .usage(let re, _), .basecamp(let re, _), .notes(let re, _), .note(let re, _), .gitStatus(let re, _),
-             .gitDiff(let re, _), .gitBranches(let re, _), .commands(let re, _, _), .settings(let re, _):
+             .gitDiff(let re, _), .gitBranches(let re, _), .commands(let re, _, _), .settings(let re, _),
+             .searchResults(let re, _):
             reply(re, message)
+        case .unlisted(let t):
+            setUnlisted(t)
         case .error(let re, let code, let text):
             if let re, replies[re] != nil { reply(re, message) } else if code != .unauthorized { show(text, error: true) }
         case .unknown:
@@ -339,7 +352,7 @@ final class AppModel {
     private func threadsChanged() {
         if !stores.isEmpty {
             let byID = Dictionary(threads.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-            for (id, s) in stores { s.setSummary(byID[id]) }
+            for (id, s) in stores { s.setSummary(byID[id] ?? unlisted[id]) }
         }
         let working = threads.count { $0.runState == .working }
         let needs = threads.count { $0.waitsOnYou && $0.section != .snoozed }
@@ -355,7 +368,7 @@ final class AppModel {
     // MARK: Outgoing
 
     @discardableResult
-    private func request(_ message: ClientMessage, then: ((ServerMessage) -> Void)? = nil) -> String {
+    func request(_ message: ClientMessage, then: ((ServerMessage) -> Void)? = nil) -> String {
         let id = "\(nextRequest)"
         nextRequest += 1
         if let then { replies[id] = then }
@@ -375,7 +388,7 @@ final class AppModel {
     }
 
     /// Failures of an action become a toast; `ok` runs on success.
-    private func act(_ message: ClientMessage, ok: ((ServerMessage) -> Void)? = nil) {
+    func act(_ message: ClientMessage, ok: ((ServerMessage) -> Void)? = nil) {
         request(message) { [weak self] reply in
             if case .error(_, _, let text) = reply { self?.show(text, error: true) } else { ok?(reply) }
         }
@@ -391,6 +404,9 @@ final class AppModel {
         stores[tid] = s
         return s
     }
+
+    /// The thread's store, if it has one.
+    func existingStore(_ tid: String) -> ThreadStore? { stores[tid] }
 
     /// Opens a thread's transcript: what the cache has shows at once, and the Mac sends what's
     /// newer (or the last page, when it's the first time).
@@ -791,7 +807,7 @@ final class AppModel {
 
     // MARK: Derived
 
-    func thread(_ id: String) -> ThreadSummary? { threads.first { $0.id == id } }
+    func thread(_ id: String) -> ThreadSummary? { threads.first { $0.id == id } ?? unlisted[id] }
 
     func project(_ id: String?) -> ProjectSummary? { projects.first { $0.id == id } }
 

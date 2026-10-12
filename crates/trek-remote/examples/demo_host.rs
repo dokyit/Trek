@@ -460,7 +460,7 @@ impl RemoteHost for DemoHost {
         let st = self.lock();
         let mut threads = st.threads.clone();
         threads.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
-        Ok(Snapshot { threads, projects: st.projects.clone(), agents: st.agents.clone(), full_access: true })
+        Ok(Snapshot { threads, projects: st.projects.clone(), agents: st.agents.clone(), full_access: true, unlisted: vec![] })
     }
 
     async fn transcript(&self, thread_id: &str) -> HostResult<Transcript> {
@@ -722,9 +722,33 @@ impl RemoteHost for DemoHost {
         Ok(())
     }
 
+    async fn search(&self, req: SearchRequest) -> HostResult<SearchResults> {
+        let q = req.query.trim().to_lowercase();
+        let st = self.lock();
+        let results = st
+            .threads
+            .iter()
+            .filter(|t| !q.is_empty() && t.title.to_lowercase().contains(&q))
+            .map(|t| SearchResult { thread: t.clone(), snippet: None, ranges: vec![] })
+            .take(req.limit.unwrap_or(50).min(MAX_SEARCH) as usize)
+            .collect();
+        Ok(SearchResults { query: req.query, results })
+    }
+
     async fn thread_action(&self, req: ThreadActionRequest) -> HostResult<()> {
-        if self.thread(&req.thread_id).is_none() {
+        let Some(thread) = self.thread(&req.thread_id) else {
             return Err(HostError::not_found(format!("No thread {}", req.thread_id)));
+        };
+        match req.action {
+            ThreadAction::Delete { confirmed: false } => {
+                return Err(HostError::conflict("The thread and its transcript are deleted from Trek. This can't be undone."));
+            }
+            ThreadAction::Delete { confirmed: true } => {
+                self.lock().threads.retain(|t| t.id != thread.id);
+                self.push(HostEvent::ThreadRemoved(thread.id));
+                return Ok(());
+            }
+            _ => {}
         }
         self.update(&req.thread_id, |t| match &req.action {
             ThreadAction::Pin => {
@@ -741,6 +765,22 @@ impl RemoteHost for DemoHost {
             }
             ThreadAction::Archive => t.section = Section::Settled,
             ThreadAction::Rename { title } => t.title = title.clone(),
+            ThreadAction::Snooze { until, preset } => {
+                let hours = match preset {
+                    Some(SnoozePreset::Hour) => 1,
+                    Some(SnoozePreset::ThreeHours) => 3,
+                    Some(SnoozePreset::NextWeek) => 24 * 7,
+                    _ => 16,
+                };
+                t.snoozed_until = Some(until.unwrap_or(now_ms() + hours * 3_600_000));
+                t.section = Section::Snoozed;
+            }
+            ThreadAction::Wake => {
+                t.snoozed_until = None;
+                t.section = Section::Inbox;
+            }
+            ThreadAction::MarkUnread => t.unseen = true,
+            ThreadAction::RegenerateTitle | ThreadAction::Delete { .. } => {}
         });
         Ok(())
     }
@@ -1209,8 +1249,8 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
     t.deletions = 8;
     t.context = Some(ContextUse { used: 171_000, window: 200_000, percent: 85 });
     t.sub_agents = vec![
-        SubAgent { agent: AgentRef::new("codex", "Codex", Some("codex")), model: Some("Sol".into()), title: "Review the theme tokens".into(), state: SubAgentState::Running, since: Some(now_ms() - 95_000) },
-        SubAgent { agent: AgentRef::new("claude-code", "Claude Code", Some("claude-code")), model: None, title: "Find every hard-coded colour".into(), state: SubAgentState::Running, since: Some(now_ms() - 40_000) },
+        SubAgent { agent: AgentRef::new("codex", "Codex", Some("codex")), model: Some("Sol".into()), title: "Review the theme tokens".into(), state: SubAgentState::Running, since: Some(now_ms() - 95_000), thread_id: None },
+        SubAgent { agent: AgentRef::new("claude-code", "Claude Code", Some("claude-code")), model: None, title: "Find every hard-coded colour".into(), state: SubAgentState::Running, since: Some(now_ms() - 40_000), thread_id: None },
     ];
     t.background = vec!["pnpm dev".into()];
     t.git = Some(GitSummary { changed: 5, ahead: 0, behind: 2, default_branch: Some("main".into()) });
@@ -1514,6 +1554,7 @@ async fn main() -> std::io::Result<()> {
     config.bind = bind;
     config.advertise = Some(advertise.clone());
     config.devices_path = Some(devices_path.clone());
+    config.features = [feature::SEARCH, feature::SNOOZE, feature::MARK_UNREAD, feature::DELETE].map(String::from).to_vec();
     if std::env::var_os("TREK_REMOTE_PLAIN").is_none() {
         let dir = devices_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(std::env::temp_dir);
         config.tls = Some(TlsIdentity::load_or_create(&dir, "Trek Demo Mac").expect("TLS identity"));
