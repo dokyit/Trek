@@ -207,11 +207,7 @@ impl Tray {
                 let _ = cx.update(|cx| {
                     let Some(ws) = ws.upgrade() else { return };
                     if id == ids.0 {
-                        cx.activate(true);
-                        // The main window may have been closed; bring it back.
-                        if ws.read(cx).main_window.is_none() {
-                            crate::root::show_main(ws.clone(), cx);
-                        }
+                        open_trek(&ws, cx);
                     } else if id == ids.1 {
                         cx.activate(true);
                         ws.update(cx, |ws, cx| {
@@ -298,6 +294,17 @@ impl Tray {
                 })
             });
         }
+    }
+}
+
+/// "Open Trek", and on Windows a left click on the icon: Trek comes forward, its main window
+/// reopened if it was closed. macOS activates the app, which brings its windows; Windows has no
+/// app to activate (GPUI's `activate` does nothing there), so the main window is brought forward
+/// itself.
+pub(crate) fn open_trek(ws: &Entity<Workspace>, cx: &mut App) {
+    cx.activate(true);
+    if cfg!(windows) || ws.read(cx).main_window.is_none() {
+        crate::root::show_main(ws.clone(), cx);
     }
 }
 
