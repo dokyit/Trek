@@ -103,6 +103,24 @@ pub enum ServerNotice {
     Disconnected { device_id: String },
 }
 
+/// `addr`, listening. An IPv6 address takes IPv4 too (`[::]` serves `127.0.0.1`): macOS and
+/// Linux do that by default, Windows only when asked, so it's asked for everywhere. The rest is
+/// what `TcpListener::bind` does (its backlog, and its SO_REUSEADDR where that only lets a restart
+/// rebind at once rather than letting another program take the port).
+fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
+    let socket = match addr {
+        SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
+        SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
+    };
+    if addr.is_ipv6() {
+        socket2::SockRef::from(&socket).set_only_v6(false)?;
+    }
+    #[cfg(not(windows))]
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(1024)
+}
+
 /// Starts servers.
 pub struct RemoteServer;
 
@@ -115,7 +133,7 @@ impl RemoteServer {
             None => DeviceRegistry::in_memory(),
         };
         let tls = config.tls.as_ref().map(|t| t.acceptor()).transpose()?;
-        let listener = TcpListener::bind(config.bind).await?;
+        let listener = bind(config.bind)?;
         let local_addr = listener.local_addr()?;
         let (events, _) = broadcast::channel(1024);
         let (notices, _) = broadcast::channel(64);

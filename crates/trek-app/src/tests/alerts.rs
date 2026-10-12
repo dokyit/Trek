@@ -238,13 +238,67 @@ fn the_dock_badge_counts_threads_waiting_on_the_user() {
 }
 
 #[test]
+fn the_taskbar_badge_follows_the_main_window_where_the_button_is_the_windows() {
+    use crate::system::BADGE_ON;
+    run(async |cx| {
+        let trek = open_with(cx, |s| s.notifications.dock_badge = true);
+        // The app-wide handling `main` installs: the main window's closing and reopening.
+        cx.update(|cx| {
+            crate::root::init(trek.ws.clone(), cx);
+            crate::system::init(trek.ws.clone(), cx);
+        });
+        let first = trek.read(cx, |ws, _| ws.main_window).expect("a main window");
+        let asking = trek.quiet_thread(cx);
+        // Another thread on screen: the one asking is waiting off to the side.
+        trek.quiet_thread(cx);
+        ask(&trek, cx, &asking);
+        assert_eq!((badge(), BADGE_ON.with(|w| w.get())), (1, Some(first)));
+
+        // Close the main window and open another: a taskbar button belongs to its window, so the
+        // new one gets the badge; the Dock tile is the app's, and nothing is asked again.
+        trek.window(cx, |window, _| window.remove_window());
+        cx.run_until_parked();
+        cx.update(|cx| crate::root::show_main(trek.ws.clone(), cx));
+        cx.run_until_parked();
+        let second = trek.read(cx, |ws, _| ws.main_window).expect("a new main window");
+        assert_ne!(first, second);
+        assert_eq!(BADGE_ON.with(|w| w.get()), Some(if cfg!(windows) { second } else { first }));
+        assert_eq!(badge(), 1);
+
+        // Answered: cleared, on the window it's on.
+        trek.update(cx, |ws, cx| ws.respond(&asking, &format!("{asking}-ask"), Decision::Allow, cx));
+        assert_eq!((badge(), BADGE_ON.with(|w| w.get())), (0, Some(second)));
+    });
+}
+
+#[test]
+fn a_banner_is_the_message_alone_and_clicking_it_needs_no_button() {
+    run(async |cx| {
+        let trek = alerting(cx, NotifyMode::Banner);
+        let id = titled(&trek, cx, "Fix the login bug");
+        blur(&trek, cx);
+        finish(&trek, cx, &id, None);
+        let shown = cx.shown_system_notifications();
+        let [banner] = shown.as_slice() else { panic!("one banner, got {}", shown.len()) };
+        // What Windows (and macOS) show: the title, and nothing to press but the banner itself.
+        assert_eq!(banner.title.as_ref(), "Finished: Fix the login bug");
+        assert!(banner.body.is_empty() && banner.actions.is_empty());
+        // Windows reports a click on the toast body with no action.
+        cx.simulate_system_notification_response(SystemNotificationResponse { tag: banner.tag.clone(), action_id: None });
+        cx.run_until_parked();
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Thread(id));
+    });
+}
+
+#[test]
 fn the_mac_stays_awake_exactly_while_agents_work() {
     run(async |cx| {
         let trek = open_with(cx, |s| s.general.prevent_sleep_while_running = true);
         cx.update(|cx| crate::system::init(trek.ws.clone(), cx));
         assert_eq!(cx.active_idle_sleep_preventions(), 0);
 
-        let id = trek.send(cx, "mock:long 2s");
+        // Working through the checks below: a loaded runner can take seconds to reach them.
+        let id = trek.send(cx, "mock:long 8s");
         let tid = id.clone();
         trek.wait(cx, "the build to start", |ws| ws.any_turn_running() && ws.live[&tid].items.iter().any(|i| matches!(i, trek_core::store::Item::Tool { .. }))).await;
         assert_eq!(cx.active_idle_sleep_preventions(), 1, "held while the turn runs");
@@ -254,7 +308,7 @@ fn the_mac_stays_awake_exactly_while_agents_work() {
             ws.route.clone()
         });
         assert!(matches!(other, Route::Draft { .. }));
-        let second = trek.send(cx, "mock:long 1s");
+        let second = trek.send(cx, "mock:long 5s");
         let sid = second.clone();
         trek.wait(cx, "the second build", |ws| ws.live.get(&sid).is_some_and(|l| l.turn_started.is_some())).await;
         assert_eq!(cx.active_idle_sleep_preventions(), 1);

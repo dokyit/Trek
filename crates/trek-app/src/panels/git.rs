@@ -16,7 +16,6 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use trek_core::worktree::{self, Change, MergeBlock, Review, Worktree};
 
 #[derive(Clone, Debug)]
@@ -47,7 +46,7 @@ enum LineKind {
 
 pub(crate) fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     // No optional locks: a status refresh mustn't hold index.lock while a switch or commit runs.
-    let out = Command::new("git").args(args).current_dir(cwd).env("PATH", trek_core::detect::login_path()).env("GIT_OPTIONAL_LOCKS", "0").output().map_err(|e| e.to_string())?;
+    let out = trek_core::procs::command("git").args(args).current_dir(cwd).env("PATH", trek_core::detect::login_path()).env("GIT_OPTIONAL_LOCKS", "0").output().map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     } else {
@@ -1110,7 +1109,7 @@ impl GitPanel {
             .child(
                 h_flex()
                     .gap_1()
-                    .child(Button::new("git-reveal").small().ghost().icon(IconName::FolderOpen).label("Show in Finder").on_click({
+                    .child(Button::new("git-reveal").small().ghost().icon(IconName::FolderOpen).label(crate::words::words().show_in_file_manager).on_click({
                         let path = t.wt.path.clone();
                         move |_, _, cx| cx.reveal_path(&path)
                     }))

@@ -104,6 +104,10 @@ fn private_permissions(path: &Path) -> io::Result<()> {
 }
 
 fn private_file_permissions(file: &std::fs::File) -> io::Result<()> {
+    // Windows: the key file inherits its folder's ACL (the user's profile); narrowing it to the
+    // user alone is left to the phone server work.
+    #[cfg(not(unix))]
+    let _ = file;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;

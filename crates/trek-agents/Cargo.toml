@@ -16,12 +16,26 @@ async-channel.workspace = true
 reqwest.workspace = true
 tracing.workspace = true
 chrono.workspace = true
+# Named zones in usage-limit messages ("resets 7:40pm (America/New_York)"): the bundled IANA database,
+# and the machine's own zone name (the registry on Windows).
+chrono-tz = "0.10"
+iana-time-zone = "0.1"
 base64 = "0.22"
-libc = "0.2"
 # Devin shows its quota only in its terminal UI (`status::devin_status`).
 portable-pty = "0.9"
 vt100 = "0.16"
 
+[target.'cfg(unix)'.dependencies]
+# Process groups and their signals (`spawn_group`).
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Job objects, in place of process groups (`spawn_group`).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
 [dev-dependencies]
 # Isolates the test binary before any test runs (see `tests::isolate_process` in lib.rs).
 ctor = "1"
+# Trek's side of the IPC socket (a pipe on Windows) in the mock agent's tests.
+trek-ipc = { workspace = true, features = ["server"] }
+trek-test-fixtures.workspace = true

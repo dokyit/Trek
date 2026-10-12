@@ -3,7 +3,7 @@
 //! and the agents' background tasks.
 
 use super::IdeWorkbench;
-use crate::panels::terminal::TerminalPanel;
+use crate::panels::terminal::{Job, TerminalPanel};
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
@@ -85,11 +85,12 @@ impl IdeWorkbench {
 
     /// Run a command (an agent install or sign-in, a project action) in a terminal of its own
     /// in the panel; agents are looked for again when it exits.
-    pub fn run_command(&mut self, command: String, cwd: Option<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn run_command(&mut self, job: Job, cwd: Option<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let cwd = cwd.or_else(|| self.workspace.read(cx).ide_root.clone());
+        let shell = self.workspace.read(cx).settings.terminal.shell.clone();
         let ws = self.workspace.downgrade();
         let term = cx.new(|cx| {
-            let mut t = TerminalPanel::with_command(cwd, Some(command), cx);
+            let mut t = TerminalPanel::with_command(cwd, job, shell, cx);
             t.on_exit(move |cx| {
                 let _ = ws.update(cx, |ws, cx| ws.detect_agents(cx));
             });
@@ -135,7 +136,8 @@ impl IdeWorkbench {
 
     fn new_terminal(&mut self, cx: &mut Context<Self>) {
         let cwd = self.workspace.read(cx).ide_root.clone();
-        self.terminals.push(cx.new(|cx| TerminalPanel::new(cwd, cx)));
+        let shell = self.workspace.read(cx).settings.terminal.shell.clone();
+        self.terminals.push(cx.new(|cx| TerminalPanel::new(cwd, shell, cx)));
         self.terminal = self.terminals.len() - 1;
         cx.notify();
     }

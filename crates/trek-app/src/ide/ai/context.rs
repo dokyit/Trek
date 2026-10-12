@@ -125,7 +125,7 @@ pub fn split(text: &str) -> Sent<'_> {
     let mut sent = split_context(rest);
     sent.ask = ask;
     if inline {
-        sent.context.insert(0, "⌘K edit".into());
+        sent.context.insert(0, crate::keys::localize("⌘K edit").into_owned());
     }
     sent
 }
@@ -214,7 +214,7 @@ mod tests {
         assert!(text.contains("\nTerminal output:\n```\n$ cargo test\ntest result: FAILED\n```\n"), "{text}");
         assert_eq!(split(&text).context, ["⚠ a.rs:4", "Terminal"]);
         let inline = trek_core::inline_edit::with_block(&with_context("make it loud", &[ContextChip::Selection { path: "/p/a.rs".into(), lines: (2, 3), text: "x".into() }], Some(root)), "a.rs", (2, 3));
-        assert_eq!(split(&inline), Sent { said: "make it loud", ask: false, context: vec!["⌘K edit".into(), "a.rs:2–3".into()] });
+        assert_eq!(split(&inline), Sent { said: "make it loud", ask: false, context: vec![crate::keys::localize("⌘K edit").into_owned(), "a.rs:2–3".into()] });
         assert_eq!(chips[0].label(), "⚠ a.rs:4");
         assert_eq!(chips[1].label(), "Terminal");
     }

@@ -97,9 +97,21 @@ fn new_id(kind: &str) -> String {
 /// Sessions at their usage limit: session id → when it resets (unix ms).
 static LIMITS: LazyLock<Mutex<HashMap<String, i64>>> = LazyLock::new(Default::default);
 
+/// Sessions whose limit holds until `lift_limit`, whatever the real time: the reset it reports
+/// stays what it was, but the mock doesn't let a message through once that time has passed.
+static HELD: LazyLock<Mutex<std::collections::HashSet<String>>> = LazyLock::new(Default::default);
+
 /// Lift session `id`'s usage limit now, as if it had reset (tests run on a clock of their own).
 pub fn lift_limit(id: &str) {
     LIMITS.lock().unwrap().remove(id);
+    HELD.lock().unwrap().remove(id);
+}
+
+/// Keep session `id`'s limit in force until `lift_limit`, however long a loaded machine takes
+/// (the limit's reset is on the real clock; a test's app clock is its own, so on a slow machine
+/// the real reset could pass before the test got to the message it sends into the limit).
+pub fn hold_limit(id: &str) {
+    HELD.lock().unwrap().insert(id.to_string());
 }
 
 /// The messages the mock remembers in session `id`, oldest first.
@@ -294,7 +306,8 @@ impl Script {
 
 /// `path` is relative and stays in the session's folder: no `..`, not absolute.
 fn in_folder(path: &str) -> bool {
-    !path.contains("..") && std::path::Path::new(path).is_relative() && !path.starts_with('~')
+    // No root or drive either: `/etc/hosts` and `C:x` both leave the folder on Windows.
+    !path.contains("..") && std::path::Path::new(path).components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)) && !path.starts_with('~')
 }
 
 /// What follows the first of `keys` found in `text` (in any case), when there's something.
@@ -447,8 +460,13 @@ impl Jobs {
 
     /// Add one that writes its whole output to a file, as well: where.
     fn add_logged(&self, task: BackgroundTask) -> std::path::PathBuf {
+        // Task ids count up from 1 in every session, so the name carries the process and a
+        // count too: two sessions (tests in a process, or two processes) must not share a file,
+        // or one's end removes the other's.
+        static LOGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join("trek-mock-output");
-        let file = dir.join(format!("{}.output", task.id));
+        let n = LOGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let file = dir.join(format!("{}-{n}-{}.output", std::process::id(), task.id));
         let _ = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, ""));
         self.0.lock().unwrap().push(Job { task, output: String::new(), file: Some(file.clone()) });
         file
@@ -646,8 +664,10 @@ impl Session {
         self.emit(AgentEvent::Context { used: self.context, window: WINDOW }).await?;
         let mut script = Script::parse(text, self.plan);
         // Until the limit resets, every prompt meets it.
-        if let Some(until) = LIMITS.lock().unwrap().get(&self.native_id).copied().filter(|u| *u > trek_core::store::now_ms()) {
-            script = Script::Limit(Duration::from_millis((until - trek_core::store::now_ms()) as u64));
+        let held = HELD.lock().unwrap().contains(&self.native_id);
+        if let Some(until) = LIMITS.lock().unwrap().get(&self.native_id).copied().filter(|u| held || *u > trek_core::store::now_ms()) {
+            // (A held limit past its reset keeps the reset it first reported: `limit` finds it.)
+            script = Script::Limit(Duration::from_millis((until - trek_core::store::now_ms()).max(0) as u64));
         }
         match self.play(script, text).await {
             Ok(()) => {}
@@ -1051,7 +1071,7 @@ impl Session {
                 cmd = self.commands.recv() => {
                     if let Err(stop) = self.handle_midturn(cmd) {
                         if let Ok(h) = handle_rx.try_recv() {
-                            let _ = h.shutdown(std::net::Shutdown::Both);
+                            let _ = h.shutdown();
                         }
                         return Err(stop);
                     }
@@ -1195,10 +1215,14 @@ impl Session {
             let full = dir.join(path);
             self.tool_start(&id, "Write", &full.display().to_string()).await?;
             let wrote = full.parent().map(|p| std::fs::create_dir_all(p)).transpose().and_then(|_| std::fs::write(&full, &body));
+            // Windows has no execute bit: nothing to set.
+            #[cfg(unix)]
             if exec && wrote.is_ok() {
                 use std::os::unix::fs::PermissionsExt as _;
                 let _ = std::fs::set_permissions(&full, std::fs::Permissions::from_mode(0o755));
             }
+            #[cfg(not(unix))]
+            let _ = exec;
             self.emit(AgentEvent::ToolLines { id: id.clone(), added: body.lines().count() as u32, removed: 0 }).await?;
             let (output, ok) = match wrote {
                 Ok(()) => (format!("Wrote {path}"), true),
@@ -2212,6 +2236,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "the mock's verification CLI is a /bin/sh script; a Windows one comes with the Phase 2 verification work")]
     fn it_sets_up_a_verification_skill_then_verifies_with_its_cli() {
         let dir = std::env::temp_dir().join(format!("trek-mock-verify-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2397,6 +2422,22 @@ mod tests {
     }
 
     #[test]
+    fn two_sessions_servers_never_share_an_output_file() {
+        // Both are task "mock-shell-1" in their own session; one ending mustn't take the other's file.
+        let task = || BackgroundTask { id: "mock-shell-1".into(), kind: BackgroundKind::Shell, title: "npm run dev".into(), call: None, readable: true, stoppable: true };
+        let (a, b) = (Jobs::default(), Jobs::default());
+        let (fa, fb) = (a.add_logged(task()), b.add_logged(task()));
+        assert_ne!(fa, fb);
+        a.print("mock-shell-1", "one");
+        b.print("mock-shell-1", "two");
+        drop(EndJobs(a));
+        assert!(!fa.exists());
+        assert_eq!(std::fs::read_to_string(&fb).unwrap(), "two\n");
+        drop(EndJobs(b));
+        assert!(!fb.exists());
+    }
+
+    #[test]
     fn a_session_s_background_work_ends_with_it() {
         let jobs = Jobs::default();
         jobs.add(BackgroundTask { id: "shell-1".into(), kind: BackgroundKind::Shell, title: "npm run dev".into(), call: None, readable: true, stoppable: true });
@@ -2424,7 +2465,8 @@ mod tests {
     fn a_watcher_that_catches_something_starts_a_turn_of_its_own() {
         trek_core::runtime().block_on(async {
             let m = Live::start(HandHolding::Auto, false);
-            m.prompt("mock:watch 50ms").await;
+            // Long enough that a loaded runner ends the first turn before it catches anything.
+            m.prompt("mock:watch 5s").await;
             let turn = m.turn().await;
             assert!(turn.iter().any(|e| matches!(e, AgentEvent::Background(b) if b.len() == 1 && b[0].kind == BackgroundKind::Monitor)));
             // No message from anyone: the watcher's report starts the next turn.
@@ -2440,7 +2482,8 @@ mod tests {
     fn long_turns_stop_on_interrupt_and_take_steering() {
         trek_core::runtime().block_on(async {
             let m = Live::start(HandHolding::Auto, false);
-            m.prompt("mock:long 300ms").await;
+            // Long enough that a loaded runner still finds the turn running when it steers.
+            m.prompt("mock:long 5s").await;
             m.prompt("use tabs").await;
             let events = m.turn().await;
             assert!(text(&events).contains("Noted — use tabs"));
@@ -2459,9 +2502,11 @@ mod tests {
         trek_core::runtime().block_on(async {
             let m = Live::start(HandHolding::Auto, false);
             let start = std::time::Instant::now();
-            m.prompt("mock:stream 300ms").await;
+            // Long enough for more than ten 14 ms steps even when a loaded machine stretches each
+            // pause several times over (300 ms gave 10 or fewer deltas on one).
+            m.prompt("mock:stream 2s").await;
             let events = m.turn().await;
-            assert!(start.elapsed() >= Duration::from_millis(300));
+            assert!(start.elapsed() >= Duration::from_secs(2));
             let streamed: String = events.iter().filter_map(|e| if let AgentEvent::TextDelta(t) = e { Some(t.as_str()) } else { None }).collect();
             assert!(streamed.starts_with("## Part 1\n\n## How the app starts"), "{streamed}");
             assert_eq!(text(&events), streamed, "one message, sent whole at the end");
@@ -2490,9 +2535,9 @@ mod tests {
         trek_core::runtime().block_on(async {
             let m = Live::start(HandHolding::Auto, false);
             let start = std::time::Instant::now();
-            m.prompt("mock:explore 300ms").await;
+            m.prompt("mock:explore 2s").await;
             let events = m.turn().await;
-            assert!(start.elapsed() >= Duration::from_millis(300));
+            assert!(start.elapsed() >= Duration::from_secs(2));
             let tools: Vec<&str> = events.iter().filter_map(|e| if let AgentEvent::ToolStarted { title, .. } = e { Some(title.as_str()) } else { None }).collect();
             assert!(tools.len() >= 8, "{tools:?}");
             assert_eq!(tools.len(), events.iter().filter(|e| matches!(e, AgentEvent::ToolFinished { ok: true, .. })).count());
@@ -2508,24 +2553,37 @@ mod tests {
 
     #[test]
     fn consults_a_sub_agent_through_trek() {
-        use std::io::{BufReader, Write as _};
-        let dir = std::env::temp_dir().join(format!("trek-mock-ipc-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("t.sock");
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+        // A socket on Unix, a pipe on Windows (named as Trek's are: clients refuse others),
+        // listened on as Trek does.
+        #[cfg(unix)]
+        let path = std::env::temp_dir().join(format!("trek-mock-ipc-{}.sock", std::process::id()));
+        #[cfg(windows)]
+        let path = trek_ipc::pipe_name(0).unwrap();
+        #[cfg(unix)]
         let _ = std::fs::remove_file(&path);
-        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut listener = {
+            let _enter = rt.enter();
+            trek_ipc::server::Listener::bind(&path).unwrap()
+        };
         // Trek's side: one delegate_task, answered as a finished sub-agent.
         let trek = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut r = BufReader::new(stream.try_clone().unwrap());
-            let mut w = stream;
-            let hello: serde_json::Value = serde_json::from_str(&trek_ipc::read_frame(&mut r, trek_ipc::MAX_FRAME).unwrap().unwrap()).unwrap();
-            assert_eq!(trek_ipc::parse_hello(&hello).map(|h| (h.1.to_string(), h.2.to_string())), Some(("tok".into(), "ses".into())));
-            w.write_all(trek_ipc::encode(&serde_json::json!({"ok": true})).as_bytes()).unwrap();
-            let req: serde_json::Value = serde_json::from_str(&trek_ipc::read_frame(&mut r, trek_ipc::MAX_FRAME).unwrap().unwrap()).unwrap();
-            let answer = serde_json::json!({"id": "child-1", "status": "done", "result": "Use a cache."});
-            w.write_all(trek_ipc::encode(&trek_ipc::reply(&req["id"], Ok(answer))).as_bytes()).unwrap();
-            req
+            rt.block_on(async {
+                let (rd, mut w) = tokio::io::split(listener.accept().await.unwrap());
+                let mut r = tokio::io::BufReader::new(rd);
+                let mut line = String::new();
+                r.read_line(&mut line).await.unwrap();
+                let hello: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(trek_ipc::parse_hello(&hello).map(|h| (h.1.to_string(), h.2.to_string())), Some(("tok".into(), "ses".into())));
+                w.write_all(trek_ipc::encode(&serde_json::json!({"ok": true})).as_bytes()).await.unwrap();
+                line.clear();
+                r.read_line(&mut line).await.unwrap();
+                let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let answer = serde_json::json!({"id": "child-1", "status": "done", "result": "Use a cache."});
+                w.write_all(trek_ipc::encode(&trek_ipc::reply(&req["id"], Ok(answer))).as_bytes()).await.unwrap();
+                req
+            })
         });
         trek_core::runtime().block_on(async {
             set_pace(0.);
@@ -2553,7 +2611,8 @@ mod tests {
         assert_eq!(req["params"]["prompt"], "check the cache");
         assert_eq!(req["params"]["wait"], true);
         assert_eq!(req["params"]["mode"], "advise");
-        let _ = std::fs::remove_dir_all(dir);
+        #[cfg(unix)]
+        let _ = std::fs::remove_file(path);
 
         // Without Trek's tools the call fails, and the turn says so.
         trek_core::runtime().block_on(async {
@@ -2593,6 +2652,27 @@ mod tests {
             m.prompt("explain the startup").await;
             let again = m.turn().await;
             assert!(again.contains(&AgentEvent::LimitReached { message: message.clone(), resets_at: Some(*at), scope: crate::LimitScope::Session }));
+            lift_limit(native_id);
+            m.prompt("explain the startup").await;
+            assert!(matches!(m.turn().await.last(), Some(AgentEvent::TurnComplete { error: None, .. })));
+        });
+    }
+
+    #[test]
+    fn a_held_limit_outlasts_its_reset_with_the_reset_it_first_gave() {
+        trek_core::runtime().block_on(async {
+            let m = Live::start(HandHolding::Auto, false);
+            let started = m.until(|e| matches!(e, AgentEvent::Started { .. })).await;
+            let Some(AgentEvent::Started { native_id, .. }) = started.last() else { panic!() };
+            m.prompt("mock:limit 100ms").await;
+            let first = m.turn().await;
+            let Some(AgentEvent::LimitReached { resets_at: Some(at), .. }) = first.iter().find(|e| matches!(e, AgentEvent::LimitReached { .. })) else { panic!("{first:?}") };
+            hold_limit(native_id);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(trek_core::store::now_ms() > *at, "the real reset has passed");
+            m.prompt("explain the startup").await;
+            let again = m.turn().await;
+            assert!(matches!(again.iter().find(|e| matches!(e, AgentEvent::LimitReached { .. })), Some(AgentEvent::LimitReached { resets_at: Some(r), .. }) if r == at), "{again:?}");
             lift_limit(native_id);
             m.prompt("explain the startup").await;
             assert!(matches!(m.turn().await.last(), Some(AgentEvent::TurnComplete { error: None, .. })));

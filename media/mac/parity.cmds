@@ -71,6 +71,9 @@ shot p23-settings-shortcuts-night
 route settings:agents-&-subscriptions
 shot p24-settings-agents-night
 route settings:tools-&-mcp
+# The Figma row asks a local port whether the desktop app answers. Closed, that takes a beat
+# (Windows takes about two seconds to refuse), and a frame taken sooner says "Checking…".
+wait 3500
 shot p25-settings-tools-night
 route settings:phone
 shot p26-settings-phone-night

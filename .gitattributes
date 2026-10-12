@@ -1,0 +1,27 @@
+# Trek is developed on macOS and Windows. Everything text is LF in the working tree on both,
+# so include_str! fixtures, snapshot comparisons and scripts the tests write behave the same
+# on either platform whatever core.autocrlf says. Binary assets are never touched.
+* text=auto eol=lf
+
+# Images, media, archives, fonts and packages
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.mp4 binary
+*.mov binary
+*.vsix binary
+*.zip binary
+*.gz binary
+*.tar binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.sqlite binary
+*.db binary
+
+# Test fixtures that are hashed or signed byte for byte
+*.bin binary

@@ -11,6 +11,9 @@ script/capture.sh mac/readme              # macOS suite → dist/media/readme/
 script/capture.sh ios/store               # iOS suite   → dist/media/store/
 ```
 
+On Windows the same driver is `script/capture.ps1` (`pwsh script/capture.ps1 mac/readme` and
+`mac/parity` run there too); iOS suites stay macOS-only.
+
 Knobs (env): `BUILD=0` skip the build · `SIZE=1280x820` window points · `FPS=15` video frame
 rate · `OUT=dist/media` · `KEEP=1` keep the scratch dir · `TREK_SHOT_UNDER=<png>` backdrop under
 glass · `SIM="iPhone 17 Pro Max"` for App Store-sized iOS shots (the default iPhone 18 Pro is
@@ -30,6 +33,16 @@ Literally the `shots.rs` command file (`crates/trek-app/src/shots.rs` documents 
   gets filmed; `record wait` finishes it (`<name>.ffconcat` + `<name>.frames/`).
 - `pace 0` plays scripts instantly (still shots), `pace 1` is demo speed (clips).
 - `shot <name>` writes a PNG; `quit` exits cleanly.
+
+## windows/`*.cmds`
+
+Windows-only suites (`pwsh script/capture.ps1 windows/hittest`; `capture.sh` doesn't know them).
+`hittest.cmds` asks the real window what Windows' `WM_NCHITTEST` gets as an answer where the
+title bar's controls, its empty strip and its caption buttons are, and sends the window the
+move, press and release of a real click (to its own handle, never the desktop), so a control
+that takes a press for a window move fails the run. The answers go to `hittest.txt`.
+`hittest-beta1.cmds` turns the title bar into 0.4.1-beta.1's (`legacy-pointer on`) and expects
+that failure, to show the first suite would catch it.
 
 ## ios/`*.list`
 

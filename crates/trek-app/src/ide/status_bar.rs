@@ -18,41 +18,31 @@ pub struct IdeStatus {
     editor: Option<Entity<EditorView>>,
     /// Watches the editor in front (dirty, read-only) and its text (the caret).
     _editor_watch: Vec<Subscription>,
+    /// The preview in front (an image, a PDF…): its kind and size where a file's language goes.
+    preview: Option<Entity<super::preview::PreviewView>>,
+    _preview_watch: Option<Subscription>,
     _subscription: Subscription,
 }
 
 /// The language a file is in, by its extension, as the status bar names it.
 pub fn language(path: &std::path::Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).unwrap_or_default() {
-        "rs" => "Rust",
-        "swift" => "Swift",
-        "ts" | "mts" | "cts" => "TypeScript",
-        "tsx" => "TypeScript JSX",
-        "js" | "mjs" | "cjs" => "JavaScript",
-        "jsx" => "JavaScript JSX",
-        "py" => "Python",
-        "go" => "Go",
-        "c" | "h" => "C",
-        "cc" | "cpp" | "hpp" | "cxx" => "C++",
-        "java" => "Java",
-        "kt" | "kts" => "Kotlin",
-        "rb" => "Ruby",
-        "lua" => "Lua",
-        "json" => "JSON",
-        "toml" => "TOML",
-        "yaml" | "yml" => "YAML",
-        "md" | "markdown" => "Markdown",
-        "html" | "htm" => "HTML",
-        "css" => "CSS",
-        "sh" | "bash" | "zsh" => "Shell Script",
-        _ => "Plain Text",
-    }
+    crate::languages::of(path).name
 }
 
 impl IdeStatus {
     pub fn new(workspace: Entity<Workspace>, workbench: WeakEntity<IdeWorkbench>, cx: &mut Context<Self>) -> Self {
         let _subscription = cx.observe(&workspace, |_, _, cx| cx.notify());
-        Self { workspace, workbench, editor: None, _editor_watch: vec![], _subscription }
+        Self { workspace, workbench, editor: None, _editor_watch: vec![], preview: None, _preview_watch: None, _subscription }
+    }
+
+    /// The preview in front changed (or none is).
+    pub fn set_preview(&mut self, preview: Option<Entity<super::preview::PreviewView>>, cx: &mut Context<Self>) {
+        if self.preview == preview {
+            return;
+        }
+        self._preview_watch = preview.as_ref().map(|p| cx.observe(p, |_, _, cx| cx.notify()));
+        self.preview = preview;
+        cx.notify();
     }
 
     /// The editor in front changed (or none is open).
@@ -103,8 +93,9 @@ impl Render for IdeStatus {
         };
         let editor = self.editor.as_ref().map(|e| {
             let e = e.read(cx);
-            (e.caret(cx), language(&e.path), e.lsp_name, e.problem().is_some())
+            (e.caret(cx), language(&e.path), e.lsp_name, e.problem().is_some(), crate::languages::of(&e.path).hard_tabs)
         });
+        let preview = self.preview.as_ref().map(|p| p.read(cx).status_items());
         let muted = theme.muted_foreground;
         h_flex()
             .id("ide-status")
@@ -144,14 +135,19 @@ impl Render for IdeStatus {
                 )
             })
             .child(div().flex_1())
-            .when_some(editor, |el, ((line, col), lang, lsp, read_only)| {
+            .when_some(editor, |el, ((line, col), lang, lsp, read_only, hard_tabs)| {
                 el.child(Self::item("ide-status-caret", cx).child(format!("Ln {line}, Col {col}")))
                     .when(read_only, |el| el.child(Self::item("ide-status-readonly", cx).child("Read-only")))
-                    .child(Self::item("ide-status-indent", cx).child("Spaces: 4"))
+                    .child(Self::item("ide-status-indent", cx).child(if hard_tabs { "Tab Size: 4" } else { "Spaces: 4" }))
                     .child(Self::item("ide-status-encoding", cx).child("UTF-8"))
                     .child(Self::item("ide-status-eol", cx).child("LF"))
                     .child(Self::item("ide-status-language", cx).child(lang))
                     .when_some(lsp, |el, name| el.child(Self::item("ide-status-lsp", cx).child(div().text_color(crate::palette::emerald(cx)).child("●")).child(name)))
+            })
+            .when_some(preview, |el, (kind, pixels, size)| {
+                el.when_some(pixels, |el, p| el.child(Self::item("ide-status-pixels", cx).test_support().child(p)))
+                    .when_some(size, |el, s| el.child(Self::item("ide-status-size", cx).test_support().child(s)))
+                    .child(Self::item("ide-status-kind", cx).test_support().child(kind))
             })
             .child(
                 Self::item("ide-status-ai", cx)

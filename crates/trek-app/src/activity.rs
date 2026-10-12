@@ -473,7 +473,8 @@ mod tests {
         // Outside the project: from home.
         let home = trek_core::paths::home();
         let elsewhere = home.join("notes/todo.md");
-        assert_eq!(op("Read", &elsewhere.display().to_string(), Some(cwd)).text, "~/notes/todo.md");
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(op("Read", &elsewhere.display().to_string(), Some(cwd)).text, format!("~{sep}notes{sep}todo.md"));
     }
 
     #[test]

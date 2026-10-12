@@ -5,11 +5,12 @@ use crate::command_palette::CommandPalette;
 use crate::composer::Composer;
 use crate::onboarding::Onboarding;
 use crate::panels::RightPanel;
+use crate::panels::terminal::Job;
 use crate::settings_view::{SettingsNav, SettingsView};
 use crate::sidebar::Sidebar;
 use crate::thread_view::ThreadView;
 use crate::working_bar::WorkingBar;
-use crate::workspace::{Route, Scope, SettingsPage, UndoAction, Workspace, WorkspaceEvent};
+use crate::workspace::{EditorCommand, Route, Scope, SettingsPage, UndoAction, Workspace, WorkspaceEvent};
 use crate::*;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, TitleBar, h_flex, v_flex};
@@ -53,8 +54,8 @@ pub struct TrekWindow {
     composer_changed: bool,
     /// Right-panel resize in progress: (pointer x at grab, width at grab).
     panel_drag: Option<(Pixels, f32)>,
-    /// Whether the window was last told to blur what's behind it (liquid glass).
-    glass_applied: Option<bool>,
+    /// What the window was last told about its glass (`ui::apply_glass`).
+    pub(crate) glass_applied: Option<crate::ui::GlassState>,
     /// How far the sidebar is out (1) or folded away (0), on a spring the title bar shares: a
     /// second ⌘B mid-way turns it round where it is.
     pub(crate) sidebar_motion: SharedSpring,
@@ -118,7 +119,20 @@ impl TrekWindow {
         let working_bar = cx.new(|cx| WorkingBar::new(workspace.clone(), Scope::Main, window, cx));
         let background_strip = cx.new(|cx| crate::background_strip::BackgroundStrip::new(workspace.clone(), Scope::Main, window, cx));
         let handle = window.window_handle();
-        workspace.update(cx, |ws, _| ws.main_window = Some(handle));
+        // Notified: what follows a window (the taskbar badge) is put on the new one.
+        workspace.update(cx, |ws, cx| {
+            ws.main_window = Some(handle);
+            cx.notify();
+        });
+        // The next launch opens the main window where this one is left.
+        let mut scale = window.scale_factor();
+        cx.observe_window_bounds(window, move |_, window, cx| {
+            crate::window_place::remember(window, cx);
+            if window.scale_factor() != std::mem::replace(&mut scale, window.scale_factor()) {
+                crate::system::scale_changed(window, cx);
+            }
+        })
+        .detach();
         let settings = cx.new(|cx| SettingsView::new(workspace.clone(), window, cx));
         let onboarding = cx.new(|cx| Onboarding::new(workspace.clone(), window, cx));
         let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
@@ -169,13 +183,17 @@ impl TrekWindow {
                     this.workspace.update(cx, |ws, cx| ws.set_mode(crate::workspace::Mode::Agents, cx));
                     this.right_panel.update(cx, |p, cx| p.open_tool(tool, window, cx));
                 }
-                WorkspaceEvent::RunInTerminal { command, cwd } if this.workspace.read(cx).ide() => {
-                    let (command, cwd) = (command.clone(), cwd.clone());
-                    this.ide.update(cx, |ide, cx| ide.run_command(command, cwd, window, cx));
-                }
-                WorkspaceEvent::RunInTerminal { command, cwd } => {
-                    let (command, cwd) = (command.clone(), cwd.clone());
-                    this.right_panel.update(cx, |p, cx| p.run_command(command, cwd, window, cx));
+                WorkspaceEvent::RunInTerminal { command, cwd } | WorkspaceEvent::RunProjectAction { command, cwd } => {
+                    let job = match event {
+                        WorkspaceEvent::RunProjectAction { .. } => Job::Action(command.clone()),
+                        _ => Job::Setup(command.clone()),
+                    };
+                    let cwd = cwd.clone();
+                    if this.workspace.read(cx).ide() {
+                        this.ide.update(cx, |ide, cx| ide.run_command(job, cwd, window, cx));
+                    } else {
+                        this.right_panel.update(cx, |p, cx| p.run_command(job, cwd, window, cx));
+                    }
                 }
                 WorkspaceEvent::InsertIntoComposer(text) => this.composer.update(cx, |c, cx| c.insert_text(text, window, cx)),
                 WorkspaceEvent::OpenEditor { path, line, preview } if this.workspace.read(cx).main_window == Some(window.window_handle()) => {
@@ -187,6 +205,16 @@ impl TrekWindow {
                     }
                 }
                 WorkspaceEvent::OpenEditor { .. } => {}
+                WorkspaceEvent::Editor(command) if this.workspace.read(cx).main_window == Some(window.window_handle()) => match command {
+                    EditorCommand::Close => {
+                        this.close_editor(window, cx);
+                    }
+                    EditorCommand::Format => match this.editor(cx) {
+                        Some(editor) => editor.update(cx, |e, cx| e.format(window, cx)),
+                        None => this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message: "Open a file to format it".into(), undo: None })),
+                    },
+                },
+                WorkspaceEvent::Editor(_) => {}
                 WorkspaceEvent::AttachImage(path) => {
                     let path = path.clone();
                     this.composer.update(cx, |c, cx| c.attach_image(path, cx));
@@ -228,12 +256,14 @@ impl TrekWindow {
                 if this.workspace.read(cx).settings.appearance.theme == trek_core::settings::ThemeChoice::System {
                     crate::set_theme(trek_core::settings::ThemeChoice::System, window, cx);
                 }
+                crate::ui::colours_changed(&mut this.glass_applied);
+                this.workspace.update(cx, |_, cx| cx.notify());
             }),
         ];
         // TREK_OPEN_TOOL=browser (or terminal, explorer, git, side-chat) opens that tool at launch.
         if let Ok(name) = std::env::var("TREK_OPEN_TOOL") {
             let name = name.trim().to_lowercase();
-            if let Some(tool) = crate::workspace::PanelTool::ALL.into_iter().find(|t| t.label().to_lowercase().replace(' ', "-") == name) {
+            if let Some(tool) = crate::workspace::PanelTool::offered().into_iter().find(|t| t.label().to_lowercase().replace(' ', "-") == name) {
                 let panel = right_panel.clone();
                 window.defer(cx, move |window, cx| panel.update(cx, |p, cx| p.open_tool(tool, window, cx)));
             }
@@ -338,6 +368,21 @@ impl TrekWindow {
         self.ide.read(cx).active_editor()
     }
 
+    /// Close the file in front: the editor's tab, or the file shown on its own in Agents mode
+    /// (which goes back to the screen it came from). `false` when no file is in front.
+    pub fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let route = self.workspace.read(cx).route.clone();
+        if self.workspace.read(cx).ide() {
+            self.ide.update(cx, |ide, cx| ide.close_active(window, cx));
+            true
+        } else if let Route::Editor { path } = route {
+            self.ide.update(cx, |ide, cx| ide.close_file(&path, window, cx));
+            true
+        } else {
+            false
+        }
+    }
+
     /// Open a file in the in-app editor, optionally on a line: a tab in the editor, the center
     /// surface in the harness. Deep links (`trek://edit?path=…&line=…`) and file-tree clicks
     /// land here.
@@ -346,12 +391,13 @@ impl TrekWindow {
             self.ide.update(cx, |ide, cx| ide.open(path, line, false, window, cx));
             return;
         }
-        let view = self.ide.update(cx, |ide, cx| ide.editor_for(&path, window, cx));
+        self.ide.update(cx, |ide, cx| ide.view_for(&path, window, cx));
         self.workspace.update(cx, |ws, cx| {
             ws.ide_file_seen(&path);
             ws.navigate(Route::Editor { path }, cx);
         });
-        if let Some(line) = line {
+        // A preview (an image, a PDF) has no lines to go to.
+        if let Some((line, view)) = line.zip(self.editor(cx)) {
             view.update(cx, |e, cx| e.goto_line(line, window, cx));
         }
         cx.notify();
@@ -374,6 +420,22 @@ impl WindowTitle {
         let _subscription = vec![cx.observe(&workspace, |_, _, cx| cx.notify()), cx.observe(&right_panel, |_, _, cx| cx.notify())];
         Self { workspace, right_panel, sidebar_motion, _subscription }
     }
+
+    /// The title bar's left end: the sidebar's toggle (Agents), Trek's mark and its wordmark.
+    /// `shown` is how far out the sidebar under it is (1 out): the cluster is as wide as the
+    /// sidebar, as far as that's out.
+    fn left_cluster(&self, toggle: Option<AnyElement>, wordmark: bool, shown: f32, cx: &App) -> Div {
+        let theme = cx.theme();
+        let width = crate::chrome::left_cluster(SIDEBAR_WIDTH);
+        h_flex()
+            .gap_2()
+            .when(shown > 0., |el| el.min_w(px(width * shown)))
+            .when(shown >= 1., |el| el.w(px(width)))
+            .flex_none()
+            .children(toggle.map(|toggle| crate::chrome::no_drag("toggle-sidebar", toggle)))
+            .child(crate::brand::logo_mark(px(15.)))
+            .when(wordmark, |el| el.child(div().text_sm().font_semibold().text_color(theme.foreground.opacity(0.9)).child("Trek")))
+    }
 }
 
 /// The title bar's switch between the two layouts: `[💬 Agents | </> Editor]` (⌥⌘E).
@@ -382,6 +444,7 @@ fn mode_switch(mode: crate::workspace::Mode, cx: &App) -> impl IntoElement {
     let theme = cx.theme().clone();
     h_flex()
         .id("mode-switch")
+        .test_support()
         .flex_none()
         .h(px(26.))
         .p(px(2.))
@@ -438,23 +501,19 @@ impl WindowTitle {
                     .items_center()
                     .gap_2()
                     .pr_2()
+                    // The layout toggles are on the right, as VS Code and Cursor have them.
+                    .child(self.left_cluster(None, true, if layout.primary_open { 1. } else { 0. }, cx))
+                    .child(crate::chrome::no_drag("mode-switch", mode_switch(crate::workspace::Mode::Editor, cx)))
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .when(layout.primary_open, |el| el.w(px(SIDEBAR_WIDTH - 80.)))
-                            .flex_none()
-                            // The layout toggles are on the right, as VS Code and Cursor have them.
-                            .child(crate::brand::logo_mark(px(15.)))
-                            .child(div().text_sm().font_semibold().text_color(theme.foreground.opacity(0.9)).child("Trek")),
-                    )
-                    .child(mode_switch(crate::workspace::Mode::Editor, cx))
-                    .child(
-                        h_flex().flex_1().min_w_0().justify_center().child(
+                        // The pill is laid over the room left (absolute): `TitleBar` keeps its row
+                        // at least as wide as what's in it, so a 420 px pill counted in it would
+                        // push the toggles and Windows's caption buttons off a narrow window.
+                        div().flex_1().min_w_0().h_full().relative().child(h_flex().absolute().top_0().bottom_0().left_0().right_0().justify_center().items_center().child(crate::chrome::no_drag(
+                            "command-center",
                             h_flex()
                                 .id("command-center")
                                 .test_support()
-                                .w(px(420.))
-                                .max_w(relative(1.))
+                                .w_full()
                                 .h(px(26.))
                                 .px(px(10.))
                                 .gap(px(8.))
@@ -471,19 +530,27 @@ impl WindowTitle {
                                 .child(Icon::new(IconName::Search).size(px(13.)))
                                 .when_some(folder, |el, f| el.child(div().text_color(theme.foreground).font_weight(FontWeight::MEDIUM).child(f)).child("—"))
                                 .child(div().min_w_0().truncate().child("Go to file, command…"))
-                                .child(div().text_color(theme.muted_foreground.opacity(0.7)).child("⌘P"))
+                                .child(div().text_color(theme.muted_foreground.opacity(0.7)).child(crate::keys::shared("⌘P")))
                                 .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::QuickOpen), cx)),
-                        ),
-                    )
-                    .child(
+                        )
+                        // Unlike the buttons, the pill gives way (the area is `flex_none` otherwise).
+                        .flex_shrink(1.)
+                        .min_w_0()
+                        .w(px(420.))
+                        .max_w(relative(1.)),
+                    )))
+                    .child(crate::chrome::no_drag(
+                        "layout-toggles",
                         h_flex()
+                            .id("layout-toggles")
+                            .test_support()
                             .flex_none()
                             .gap(px(2.))
                             .child(toggle("toggle-primary", IconName::PanelLeft, "Primary side bar (⌘B)", layout.primary_open, Box::new(ToggleSidebar)))
                             .child(toggle("toggle-panel", IconName::PanelBottom, "Panel (⌘J)", layout.panel_open, Box::new(ToggleRightPanel)))
                             .child(toggle("toggle-ai", IconName::PanelRight, "AI side bar (⌥⌘B)", layout.ai_open, Box::new(crate::ToggleAiBar)))
                             .child(crate::ui::icon_button("ide-settings", IconName::Settings, "Settings (⌘,)").on_click(|_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx))),
-                    ),
+                    )),
             )
             .into_any_element()
     }
@@ -554,23 +621,14 @@ impl Render for WindowTitle {
                 .items_center()
                 .gap_2()
                 .pr_2()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        // As wide as the sidebar under it, as far as that's out.
-                        .when(shown > 0., |el| el.min_w(px((SIDEBAR_WIDTH - 80.) * shown)))
-                        .when(shown >= 1., |el| el.w(px(SIDEBAR_WIDTH - 80.)))
-                        .flex_none()
-                        .child(
-                            crate::ui::icon_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar (⌘B)").on_click(cx.listener(|this, _, window, cx| {
-                                let (ws, panel) = (this.workspace.clone(), this.right_panel.clone());
-                                toggle_sidebar(&ws, &panel, window, cx)
-                            })),
-                        )
-                        .child(crate::brand::logo_mark(px(15.)))
-                        .when(!narrow, |el| el.child(div().text_sm().font_semibold().text_color(theme.foreground.opacity(0.9)).child("Trek"))),
-                )
-                .child(mode_switch(crate::workspace::Mode::Agents, cx))
+                .child({
+                    let toggle = crate::ui::icon_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar (⌘B)").on_click(cx.listener(|this, _, window, cx| {
+                        let (ws, panel) = (this.workspace.clone(), this.right_panel.clone());
+                        toggle_sidebar(&ws, &panel, window, cx)
+                    }));
+                    self.left_cluster(Some(toggle.into_any_element()), !narrow, shown, cx)
+                })
+                .child(crate::chrome::no_drag("mode-switch", mode_switch(crate::workspace::Mode::Agents, cx)))
                 .child(
                     h_flex()
                         .flex_1()
@@ -580,13 +638,13 @@ impl Render for WindowTitle {
                         .gap_2()
                         .text_sm()
                         .when_some(project.clone(), |el, p| {
-                            el.child(div().flex_none().child(crate::ui::project_badge(&p, &look, cx)))
+                            el.child(div().id("title-project").test_support().flex_none().child(crate::ui::project_badge(&p, &look, cx)))
                                 .when(!narrow, |el| {
                                     el.child(div().flex_shrink_1().min_w(px(24.)).truncate().text_color(theme.muted_foreground).child(p))
                                         .child(div().flex_none().text_color(theme.muted_foreground.opacity(0.6)).child("/"))
                                 })
                         })
-                        .child(div().min_w_0().font_medium().child(crate::ui::title_text(
+                        .child(div().id("title-text").test_support().min_w_0().font_medium().child(crate::ui::title_text(
                             "window-title",
                             &title,
                             reveal.as_ref().map(|(p, old)| (*p, old.as_str())),
@@ -595,23 +653,26 @@ impl Render for WindowTitle {
                         )))
                         .when_some(worktree, |el, wt| el.child(crate::worktree_ui::branch_chip("title-branch", &wt, cx))),
                 )
-                .when_some(run_dir, |el, dir| el.child(run_button(actions, dir, project_id, self.workspace.clone())))
-                .when_some(folder, |el, dir| el.child(open_in_button(dir, narrow)))
+                .when_some(run_dir, |el, dir| el.child(crate::chrome::no_drag("run-actions", run_button(actions, dir, project_id, self.workspace.clone()))))
+                .when_some(folder, |el, dir| el.child(crate::chrome::no_drag("open-in", open_in_button(dir, narrow))))
                 .when(thread.is_some(), |el| {
-                    el.child(
-                        crate::ui::icon_button("pop-out", crate::assets::Lucide::SquareArrowOutUpRight, "Open in new window (⌘⇧↩)")
-                            .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenInNewWindow), cx)),
-                    )
+                    el.child(crate::chrome::no_drag(
+                        "pop-out",
+                        crate::ui::icon_button("pop-out", crate::assets::Lucide::SquareArrowOutUpRight, "Open in new window (⌘⇧↩)").on_click(|_, window, cx| window.dispatch_action(Box::new(OpenInNewWindow), cx)),
+                    ))
                 })
-                .child(
-                    crate::ui::icon_button("toggle-tools", IconName::PanelRight, "Tools panel (⌘J)")
-                        .on_click(cx.listener(|this, _, _, cx| this.right_panel.update(cx, |p, cx| p.toggle(cx)))),
-                )
+                .child(crate::chrome::no_drag(
+                    "toggle-tools",
+                    crate::ui::icon_button("toggle-tools", IconName::PanelRight, "Tools panel (⌘J)").on_click(cx.listener(|this, _, _, cx| this.right_panel.update(cx, |p, cx| p.toggle(cx)))),
+                ))
                 .when_some(settle_id, |el, id| {
-                    el.child(crate::ui::icon_button("settle", IconName::Check, "Settle (⌘E)").on_click(cx.listener(move |this, _, _, cx| {
-                        let id = id.clone();
-                        this.workspace.update(cx, |ws, cx| ws.settle(&id, cx))
-                    })))
+                    el.child(crate::chrome::no_drag(
+                        "settle",
+                        crate::ui::icon_button("settle", IconName::Check, "Settle (⌘E)").on_click(cx.listener(move |this, _, _, cx| {
+                            let id = id.clone();
+                            this.workspace.update(cx, |ws, cx| ws.settle(&id, cx))
+                        })),
+                    ))
                 }),
         )
         .into_any_element()
@@ -630,20 +691,45 @@ fn launch_size() -> Option<Size<Pixels>> {
 /// `focus: false` opens it behind other apps' windows and leaves keyboard focus where it is (a
 /// launch in the background).
 pub fn open_main(workspace: Entity<Workspace>, focus: bool, cx: &mut App) -> anyhow::Result<()> {
+    let min = size(px(760.), px(520.));
+    // Where it was left, unless a size is asked for (or it's a capture run, which wants the same
+    // window every time).
+    let (display_id, window_bounds) = match launch_size() {
+        Some(asked) => (None, WindowBounds::centered(asked, cx)),
+        None if std::env::var_os("TREK_SHOT_DIR").is_some() => (None, WindowBounds::centered(size(px(1280.), px(820.)), cx)),
+        None => crate::window_place::initial(size(px(1280.), px(820.)), min, focus, cx),
+    };
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::centered(launch_size().unwrap_or(size(px(1280.), px(820.))), cx)),
-        window_min_size: Some(size(px(760.), px(520.))),
+        window_bounds: Some(window_bounds),
+        display_id,
+        window_min_size: Some(min),
         app_id: Some("dev.trek.Trek".into()),
         focus,
-        show: focus,
+        show: focus || crate::system::SHOW_BEHIND,
         ..TitleBar::window_options()
     };
     gpui_kit::open_window(options, cx, |window, cx| {
         if !focus {
             crate::system::order_back(window);
         }
+        // The window Windows' permission prompt (an agent's update that needs an administrator)
+        // is put in front of.
+        if cfg!(windows)
+            && let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(&*window)
+            && let raw_window_handle::RawWindowHandle::Win32(win) = handle.as_raw()
+        {
+            trek_core::elevated::set_owner_window(win.hwnd.get());
+        }
         if let Some(error) = workspace.update(cx, |ws, _| ws.store_error.take()) {
             window.on_next_frame(move |window, cx| database_error(&error, window, cx));
+        }
+        // Where the app ends with its main window, its close button is the Quit command, the
+        // same way out as the menu's: `quit` closes the windows itself and ends the app after.
+        if cx.has_global::<QuitWithMainWindow>() {
+            window.on_window_should_close(cx, |_, cx| {
+                quit(cx);
+                false
+            });
         }
         cx.new(|cx| TrekWindow::new(workspace, window, cx))
     })?;
@@ -666,7 +752,7 @@ fn database_error(error: &str, window: &mut Window, cx: &mut App) {
 /// Bring the main window forward, reopening it if it was closed.
 pub fn show_main(workspace: Entity<Workspace>, cx: &mut App) {
     let main = workspace.read(cx).main_window;
-    if main.is_some_and(|m| m.update(cx, |_, window, _| window.activate_window()).is_ok()) {
+    if main.is_some_and(|m| m.update(cx, |_, window, cx| crate::system::activate_window(window, cx)).is_ok()) {
         return;
     }
     if let Err(e) = open_main(workspace, true, cx) {
@@ -718,13 +804,61 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     .detach();
     let ws = workspace.downgrade();
     cx.on_window_closed(move |cx, id| {
-        let _ = ws.update(cx, |ws, cx| {
-            if let Some(main) = ws.main_window.filter(|m| m.window_id() == id) {
-                ws.main_window_closed(main, cx);
-            }
-        });
+        let closed_main = ws
+            .update(cx, |ws, cx| match ws.main_window.filter(|m| m.window_id() == id) {
+                Some(main) => {
+                    ws.main_window_closed(main, cx);
+                    true
+                }
+                None => false,
+            })
+            .unwrap_or(false);
+        if closed_main && cx.has_global::<QuitWithMainWindow>() {
+            cx.dispatch_action(&crate::Quit);
+        }
     })
     .detach();
+}
+
+/// Set on an app that ends with its main window: Windows has no Dock to keep Trek alive with no
+/// window open, and the thread windows left would be a Trek with nothing to bring the main
+/// window back. (On macOS the app stays, and the Dock icon reopens the main window.)
+struct QuitWithMainWindow;
+
+impl Global for QuitWithMainWindow {}
+
+/// The quit is Trek's own (`quit`), not GPUI's, which quits the moment the last window is gone,
+/// with no time for what `quit` waits for.
+pub fn quit_with_main_window(cx: &mut App) {
+    cx.set_global(QuitWithMainWindow);
+    cx.set_quit_mode(QuitMode::Explicit);
+}
+
+/// End the app: the agents' sessions first.
+///
+/// On Windows the windows go first too, and the quit follows them after a moment. A window's
+/// native state is let go by a task its drop queues, and one still queued as the loop ends never
+/// runs: a text field in focus has handed the window the handle it takes the keys by, which is
+/// then left holding the field's state when GPUI drops its entities (a `shots` build, or a test,
+/// panics with "Exited with leaked handles" there). A window being updated can't be removed from
+/// inside that update, so the work waits for the current one to finish; and a window closed by its
+/// own close button has its task queued already, which the moment lets run.
+pub fn quit(cx: &mut App) {
+    crate::workspace::workspace_global(cx).update(cx, |ws, _| ws.shutdown_sessions());
+    if cfg!(windows) {
+        cx.defer(|cx| {
+            for window in cx.windows() {
+                let _ = window.update(cx, |_, window, _| window.remove_window());
+            }
+            cx.spawn(async |cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+    } else {
+        cx.quit();
+    }
 }
 
 /// The Trek window with keyboard focus; `None` when another app is in front.
@@ -748,6 +882,8 @@ fn attention(workspace: &Entity<Workspace>, message: String, thread: &str, cx: &
         crate::system::play_alert_sound();
     }
     if alert.banner {
+        #[cfg(all(windows, not(test)))]
+        register_toast_identity();
         // Posted by Trek rather than through a toast's system delivery, so it goes out with no
         // window open too, and its tag says which thread to open when it's clicked.
         cx.show_system_notification(SystemNotification { tag: attention_tag(thread), title: message.clone().into(), body: SharedString::default(), actions: Vec::new() });
@@ -758,6 +894,18 @@ fn attention(workspace: &Entity<Workspace>, message: String, thread: &str, cx: &
         let note = crate::toast::Toast::new(message).on_click(move |_, _, cx| reveal_thread(&ws, &thread, cx));
         let _ = target.update(cx, |_, window, cx| crate::toast::push(window, note, cx));
     }
+}
+
+/// Windows shows a toast under its AppUserModelID's name and icon, which Trek, being no installed
+/// app, registers itself: once a run, before the first toast.
+#[cfg(all(windows, not(test)))]
+fn register_toast_identity() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if let Some(png) = crate::assets::brand_bytes("brand/icon.png") {
+            crate::winsys::register_toast_identity(crate::winsys::APP_ID, crate::winsys::APP_NAME, &png);
+        }
+    });
 }
 
 const ATTENTION_TAG: &str = "trek-attention-";
@@ -785,7 +933,7 @@ fn reveal_now(workspace: &Entity<Workspace>, thread: &str, cx: &mut App) {
         return show_main(workspace.clone(), cx);
     }
     let own = workspace.read(cx).thread_windows.get(thread).copied();
-    if own.is_some_and(|w| w.update(cx, |_, window, _| window.activate_window()).is_ok()) {
+    if own.is_some_and(|w| w.update(cx, |_, window, cx| crate::system::activate_window(window, cx)).is_ok()) {
         return;
     }
     // In the editor it opens in the AI side bar.
@@ -812,14 +960,11 @@ fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction
     let front = key_window(cx);
     let Some(target) = notice_window(workspace, front, cx) else { return };
     // Putting files back can be taken back for a while: long enough to see what moved.
-    let restore = matches!(undo, Some(UndoAction::Unrestore { .. }));
+    // (So is moving Trek and clearing the old copy: a button that isn't missed in ten seconds.)
+    let restore = matches!(undo, Some(UndoAction::Unrestore { .. } | UndoAction::MoveTrek | UndoAction::RemoveOldCopy(_)));
     let lifetime = if restore { UNDO_RESTORE_TOAST } else { toast_lifetime(&message, undo.is_some()) };
     let action = undo.map(|action| {
-        let label = match action {
-            UndoAction::CancelRestart => "Not now",
-            UndoAction::MaintainVerification(_) => "Maintain",
-            _ => "Undo",
-        };
+        let label = toast_button_label(&action);
         (action, label)
     });
     // Spent once used: on its way out the toast takes no clicks, and this keeps a second press
@@ -851,6 +996,17 @@ fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction
     let _ = target.update(cx, |_, window, cx| crate::toast::push(window, note, cx));
 }
 
+/// What the button on a toast says.
+pub(crate) fn toast_button_label(action: &UndoAction) -> &'static str {
+    match action {
+        UndoAction::CancelRestart | UndoAction::CancelMove => "Not now",
+        UndoAction::MaintainVerification(_) => "Maintain",
+        UndoAction::MoveTrek => "Move Trek",
+        UndoAction::RemoveOldCopy(_) => "Remove old copy",
+        _ => "Undo",
+    }
+}
+
 /// How long a toast whose Undo puts files back stays up.
 pub const UNDO_RESTORE_TOAST: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -878,7 +1034,9 @@ fn run_button(actions: Vec<trek_core::settings::ProjectAction>, dir: std::path::
     })
 }
 
-/// "Open in" menu for the project folder: Finder, Terminal, and editors that are installed.
+/// "Open in" menu for the project folder: the file manager, the terminal, and editors that are
+/// installed. On a Mac the apps are launched through `open -a`; on Windows each is found through
+/// the registry and PATH (`trek_core::open_in`) and started with the folder as its argument.
 pub(crate) fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl IntoElement {
     use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
     gpui_kit::component::button::Button::new("open-in")
@@ -890,8 +1048,22 @@ pub(crate) fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl Int
         .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
             let mut menu = menu.min_w(px(180.));
             // Checked when the menu opens, not on every frame of the title bar.
+            if cfg!(windows) {
+                let folder = dir.clone();
+                menu = menu.item(PopupMenuItem::new(crate::words::words().file_manager).on_click(move |_, _, cx| cx.open_with_system(&folder)));
+                for target in trek_core::open_in::windows_targets() {
+                    let (label, dir) = (target.label, dir.clone());
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, _| {
+                        let Some(launch) = target.launch(&dir) else { return tracing::warn!("open in {label}: {} isn't an absolute path", dir.display()) };
+                        if let Err(e) = trek_core::open_in::spawn(&launch) {
+                            tracing::warn!("open in {label}: {e}");
+                        }
+                    }));
+                }
+                return menu;
+            }
             let apps = [
-                ("Finder", "Finder"),
+                (crate::words::words().file_manager, "Finder"), // words: ok, the app's own name for `open -a`
                 ("Terminal", "Terminal"),
                 ("Ghostty", "Ghostty"),
                 ("Zed", "Zed"),
@@ -900,7 +1072,7 @@ pub(crate) fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl Int
                 ("Xcode", "Xcode"),
             ]
             .into_iter()
-            .filter(|(_, app)| matches!(*app, "Finder" | "Terminal") || std::path::Path::new(&format!("/Applications/{app}.app")).exists());
+            .filter(|(_, app)| matches!(*app, "Finder" | "Terminal") || std::path::Path::new(&format!("/Applications/{app}.app")).exists()); // words: ok
             for (label, app) in apps {
                 let dir = dir.clone();
                 menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, _| {
@@ -930,6 +1102,8 @@ impl Render for TrekWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         crate::tests::rendered("TrekWindow");
+        crate::perf::frame_begins();
+        crate::chrome::let_go_of_hover(window, cx);
         let route = self.workspace.read(cx).route.clone();
         // A window too narrow for the sidebar, the chat and the tools panel: the sidebar steps aside.
         let in_settings = matches!(route, Route::Settings(_));
@@ -954,7 +1128,7 @@ impl Render for TrekWindow {
         place_toasts(toast_bottom, window, cx);
         let backdrop = self.workspace.read(cx).backdrop();
         let glass = self.workspace.read(cx).glass();
-        crate::ui::apply_glass(window, glass.is_some(), &mut self.glass_applied, cx);
+        crate::ui::apply_glass(window, glass.is_some(), cx.theme().mode.is_dark(), &mut self.glass_applied, cx);
         let ide = self.workspace.read(cx).ide();
         let (now, motion) = (crate::motion::now(cx), self.workspace.read(cx).motion(cx));
         let shown = sidebar_shown(&self.sidebar_motion, collapsed, motion, now, window);
@@ -1141,9 +1315,9 @@ impl Render for TrekWindow {
             .on_action(cx.listener(|this, _: &OpenBasecamp, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx))))
             .on_action(cx.listener(|this, _: &crate::OpenNotes, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Notes, cx))))
             .on_action(cx.listener(|this, _: &crate::CloseTab, window, cx| {
-                // ⌘W: the editor tab in front (asking first if it has unsaved edits).
-                if this.workspace.read(cx).ide() {
-                    this.ide.update(cx, |ide, cx| ide.close_active(window, cx));
+                // ⌘W: the editor tab in front, or the file shown on its own (asking first if it
+                // has unsaved edits), else the thread's tab.
+                if this.close_editor(window, cx) {
                     return;
                 }
                 this.workspace.update(cx, |ws, cx| {
@@ -1180,6 +1354,10 @@ impl Render for TrekWindow {
             .child(self.palette.clone())
             .child(self.preview.clone())
             .children(crate::motion::leaving_sheet(window, cx))
+            // Windows: the caption buttons stay reachable over what covers the title bar.
+            .children((self.palette.read(cx).open || self.preview.read(cx).is_open()).then(|| crate::chrome::caption_over_overlays(window, cx)).flatten())
+            // TREK_PERF: painted last, it times the frame.
+            .children(crate::perf::probe())
             .into_any_element()
     }
 }
@@ -1198,11 +1376,34 @@ impl TrekWindow {
             Route::Basecamp => self.basecamp.clone().cached(fill()).into_any_element(),
             Route::Notes => self.notes.clone().into_any_element(),
             Route::Editor { path } => {
-                let ev = self.ide.update(cx, |ide, cx| ide.editor_for(&path, window, cx));
+                let ev = self.ide.update(cx, |ide, cx| ide.view_for(&path, window, cx));
+                // An editor draws its own header here, with its ×; a preview (an image, a PDF)
+                // has none, so the way out is drawn over it.
+                let header = self.editor(cx).is_none().then(|| {
+                    let theme = cx.theme().clone();
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let dir = path.parent().map(trek_core::paths::tildify).unwrap_or_default();
+                    h_flex()
+                        .px_3()
+                        .h(px(40.))
+                        .flex_none()
+                        .gap_2()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .text_sm()
+                        .child(Icon::new(IconName::File).small().text_color(theme.muted_foreground))
+                        .child(div().min_w_0().truncate().font_medium().child(name))
+                        .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(dir))
+                        .child(
+                            crate::ui::icon_button("editor-close", IconName::Close, format!("Close ({})", crate::keys::hint(crate::keys::Id::CloseTab)))
+                                .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Editor(EditorCommand::Close))))),
+                        )
+                });
                 v_flex()
                     .size_full()
                     .min_w_0()
                     .children(tabs)
+                    .children(header)
                     .child(div().flex_1().min_h_0().child(ev.cached(fill())))
                     .into_any_element()
             }

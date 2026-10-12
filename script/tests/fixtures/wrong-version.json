@@ -1,0 +1,12 @@
+{
+  "version": "0.3.9",
+  "notes": "- Maintenance release.",
+  "pub_date": "2026-09-30T01:02:03Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "url": "https://github.com/dokyit/Trek/releases/download/v0.3.9/Trek-0.3.9-darwin-aarch64.app.tar.gz",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "signature": "untrusted comment: signature from minisign secret key\nRUOtherVersionSignature==\ntrusted comment: Trek 0.3.9 darwin-aarch64\nT3RoZXI="
+    }
+  }
+}

@@ -33,6 +33,7 @@ impl SettingsView {
     /// Notifications on the phone, through the ntfy app: on its own switch, as it works without
     /// the phone server.
     fn push_section(&mut self, s: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let this = crate::words::words().this_computer;
         let theme = cx.theme().clone();
         let m = &s.mobile;
         let ws = self.workspace.clone();
@@ -41,7 +42,7 @@ impl SettingsView {
             ui::group(
                 vec![Self::row(
                     "Tell my phone when a thread needs me",
-                    "Also when one finishes or fails: what this Mac would alert you for, sent through the free ntfy app. Tapping one opens the thread in Trek on iPhone.",
+                    format!("Also when one finishes or fails: what {this} would alert you for, sent through the free ntfy app. Tapping one opens the thread in Trek on iPhone."),
                     gpui_kit::component::switch::Switch::new("push-on").checked(m.push).on_click(move |v: &bool, _, cx| ws.update(cx, |ws, cx| ws.set_push(*v, cx))),
                     cx,
                 )],
@@ -59,13 +60,13 @@ impl SettingsView {
             vec![
                 Self::row(
                     "Send them",
-                    "Away means no keyboard or mouse on this Mac for two minutes, or the screen locked.",
+                    format!("Away means no keyboard or mouse on {this} for two minutes, or the screen locked."),
                     ui::segmented("push-when", vec![(trek_core::settings::PushWhen::Away, "When I'm away"), (trek_core::settings::PushWhen::Always, "Always")], m.push_when, self.setter(|s, v| s.mobile.push_when = v), cx),
                     cx,
                 ),
                 Self::row(
                     "Name the thread and its project",
-                    "Off, a notification says only that a thread needs you, finished or failed. On, it says which and what for, as this Mac's own alerts do; the ntfy server it goes through can read that.",
+                    format!("Off, a notification says only that a thread needs you, finished or failed. On, it says which and what for, as {this}'s own alerts do; the ntfy server it goes through can read that."),
                     names,
                     cx,
                 ),
@@ -128,6 +129,8 @@ impl SettingsView {
     }
 
     pub(super) fn mobile_page(&mut self, s: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let words = crate::words::words();
+        let this = words.this_computer;
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
         let enabled = s.mobile.enabled;
@@ -143,12 +146,18 @@ impl SettingsView {
         if enabled {
             rows.push(Self::row(
                 "Let it allow for a whole session",
-                "Off, the phone can allow or deny what an agent asks, one request at a time. On, it can also allow that kind of request for the rest of the session. Only this Mac changes this: Trek can't check from here who is holding the phone.",
+                format!("Off, the phone can allow or deny what an agent asks, one request at a time. On, it can also allow that kind of request for the rest of the session. Only {this} changes this: Trek can't check from here who is holding the phone."),
                 session_approvals,
                 cx,
             ));
         }
         let mut out = vec![ui::group(rows, cx)];
+        // Before the server runs, so it's read before the system asks (and still there if the
+        // question went unanswered or the answer was no).
+        if let (Some(firewall), None) = (words.firewall_note, &running) {
+            out.push(div().h(px(8.)).into_any_element());
+            out.push(Self::note(firewall, cx));
+        }
         if starting {
             out.push(Self::note("Starting…", cx));
         }
@@ -165,14 +174,14 @@ impl SettingsView {
         // Where phones reach this Mac.
         let reach_row = match addresses.tailscale {
             Some(ts) => Self::row(
-                "Reach this Mac over",
+                format!("Reach {this} over"),
                 format!("Phones dial {advertise}. Wi-Fi works on the same network; Tailscale ({ts}) works anywhere your phone is on your tailnet."),
                 ui::segmented("mobile-reach", vec![(Reach::Wifi, "Wi-Fi"), (Reach::Tailscale, "Tailscale")], s.mobile.reach, self.setter(|s, v| s.mobile.reach = v), cx),
                 cx,
             ),
             None => Self::row(
                 "Reached at",
-                "Phones on this Wi-Fi network dial this address. With Tailscale on this Mac and your phone, you can choose your tailnet address here to reach it from anywhere.",
+                format!("Phones on this Wi-Fi network dial this address. With Tailscale on {this} and your phone, you can choose your tailnet address here to reach it from anywhere."),
                 div().text_size(px(12.5)).font_family(theme.mono_font_family.clone()).child(advertise.clone()),
                 cx,
             ),
@@ -218,7 +227,7 @@ impl SettingsView {
                                             el.child(
                                                 v_flex()
                                                     .gap(px(2.))
-                                                    .child(div().text_xs().text_color(theme.muted_foreground).child("This Mac's fingerprint"))
+                                                    .child(div().text_xs().text_color(theme.muted_foreground).child(words.computer_fingerprint))
                                                     .child(div().text_size(px(20.)).font_semibold().font_family(theme.mono_font_family.clone()).child(fp)),
                                             )
                                         }),
@@ -285,7 +294,7 @@ impl SettingsView {
         }
         out.push(div().h(px(16.)).into_any_element());
         out.push(Self::note(
-            "Connections are encrypted, and each phone checks it's talking to this Mac (its certificate is in the pairing code). A phone can answer and steer threads but can't change how much agents may do or run Trek's own commands, and nothing is ever answered for you.",
+            &format!("Connections are encrypted, and each phone checks it's talking to {this} (its certificate is in the pairing code). A phone can answer and steer threads but can't change how much agents may do or run Trek's own commands, and nothing is ever answered for you."),
             cx,
         ));
         out

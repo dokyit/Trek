@@ -5,6 +5,7 @@
 //! ⌘P in the editor opens the same palette on the IDE folder's files only (Quick Open); `>`
 //! there lists the commands.
 
+use crate::keys::{self, Id};
 use crate::panels::RightPanel;
 use crate::ui;
 use crate::workspace::{ItemRef, PanelTool, Route, SettingsPage, Workspace, WorkspaceEvent};
@@ -59,6 +60,26 @@ enum Action {
     SwitchMode(crate::workspace::Mode),
     /// The editor's layout toggles, as their shortcuts do.
     Dispatch(IdeCommand),
+    /// Something done to the file in front.
+    Editor(crate::workspace::EditorCommand),
+    /// The thread and window commands a menu bar has (`WindowCommand`).
+    Window(WindowCommand),
+}
+
+/// What a Mac's menus offer that nothing else in the palette did. Windows draws no menu bar, so
+/// the palette is where they are, beside their shortcuts. Not Close Window: the palette is the
+/// main window's (a thread window's ⌘K opens it there), where the menu's Close Window is off, and
+/// closing the main window on Windows ends Trek.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowCommand {
+    /// The thread on screen, in a window of its own.
+    OpenInNewWindow,
+    /// Interrupt the thread on screen's running turn.
+    StopAgent,
+    /// The composer's plan mode, for the thread on screen or the next one.
+    TogglePlan,
+    Minimize,
+    Quit,
 }
 
 /// The editor's commands that are window actions.
@@ -108,7 +129,7 @@ pub(crate) struct Entry {
     /// A second line: the matching excerpt of a message.
     snippet: Option<(SharedString, Vec<Range<usize>>)>,
     /// Quiet text on the right: a shortcut, a project, a folder.
-    hint: Option<SharedString>,
+    pub(crate) hint: Option<SharedString>,
     checked: bool,
     /// A thread's project on the right: name, look, and the worktree branch it runs on.
     project: Option<(String, ui::ProjectLook, Option<String>)>,
@@ -224,13 +245,13 @@ pub(crate) fn age(ms: i64, now: i64) -> String {
 }
 
 /// The footer's keys and what they do; ⌘1–9 only while the recent threads are listed.
-fn footer_keys(jump: bool) -> Vec<(&'static str, &'static str)> {
-    let mut keys = vec![("↑↓", "Navigate"), ("↵", "Open")];
+fn footer_keys(jump: bool) -> Vec<(String, &'static str)> {
+    let mut out = vec![("↑↓".to_string(), "Navigate"), (keys::localize("↵").into_owned(), "Open")];
     if jump {
-        keys.push(("⌘1–9", "Jump"));
+        out.push((keys::localize("⌘1–9").into_owned(), "Jump"));
     }
-    keys.push(("Esc", "Close"));
-    keys
+    out.push(("Esc".to_string(), "Close"));
+    out
 }
 
 /// A key as the footer and the rows show it: small, in a hairline box.
@@ -257,14 +278,16 @@ fn keycap(text: impl Into<SharedString>, cx: &App) -> Div {
 const FOLDER_HINT: usize = 30;
 
 /// `path` cut to its last folders, to fit in about `max` characters: projects side by side in one
-/// parent differ only at the end. A last folder that's too long on its own is kept whole.
+/// parent differ only at the end. A last folder that's too long on its own is kept whole. Cut
+/// at `/` or, in a Windows path (`~\Code\trek`), at `\`, and joined with the one it has.
 fn path_tail(path: &str, max: usize) -> String {
     if path.chars().count() <= max {
         return path.to_string();
     }
+    let sep = if path.contains('\\') { "\\" } else { "/" };
     let mut tail: Vec<&str> = vec![];
     let mut len = 2;
-    for part in path.rsplit('/').filter(|p| !p.is_empty()) {
+    for part in path.rsplit(['/', '\\']).filter(|p| !p.is_empty()) {
         let n = part.chars().count() + 1;
         if !tail.is_empty() && len + n > max {
             break;
@@ -273,7 +296,7 @@ fn path_tail(path: &str, max: usize) -> String {
         tail.push(part);
     }
     tail.reverse();
-    format!("…/{}", tail.join("/"))
+    format!("…{sep}{}", tail.join(sep))
 }
 
 /// The search results the Threads group shows: title matches, then message matches (one per
@@ -637,7 +660,7 @@ impl CommandPalette {
         }
         let Some(root) = &self.file_root else { return vec![] };
         let ws = self.workspace.read(cx);
-        let recent = ws.settings.ide.recent_files.iter().map(PathBuf::from).filter(|p| p.starts_with(root)).filter_map(|p| p.strip_prefix(root).ok().map(|r| r.display().to_string()));
+        let recent = ws.settings.ide.recent_files.iter().map(PathBuf::from).filter(|p| p.starts_with(root)).filter_map(|p| p.strip_prefix(root).ok().map(crate::mentions::rel_string));
         let mut seen = std::collections::HashSet::new();
         recent
             .chain(self.file_index.iter().filter(|f| !f.ends_with('/')).cloned())
@@ -665,19 +688,25 @@ impl CommandPalette {
         };
         let icon = |i: Icon| Glyph::Icon(i);
         let c = Group::Commands;
-        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::SquarePen)), "New thread", Action::NewThread).hint(if ws.ide() { "" } else { "⌘N" }), "create start chat compose");
+        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::SquarePen)), "New thread", Action::NewThread).hint(if ws.ide() { String::new() } else { keys::hint(Id::NewThread) }), "create start chat compose");
         // Agents ⇄ Editor, and the editor's layout.
         if ws.ide() {
-            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::MessageSquare)), "Switch to Agents", Action::SwitchMode(crate::workspace::Mode::Agents)).hint("⌥⌘E"), "harness inbox chat threads mode layout");
-            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::MessageSquarePlus)), "New chat", Action::Dispatch(IdeCommand::NewChat)).hint("⌘N"), "agent ai side bar conversation");
-            add(Entry::new(c, icon(Icon::new(IconName::PanelLeft)), "Toggle primary side bar", Action::Dispatch(IdeCommand::PrimaryBar)).hint("⌘B"), "explorer files hide show layout");
-            add(Entry::new(c, icon(Icon::new(IconName::PanelRight)), "Toggle AI side bar", Action::Dispatch(IdeCommand::AiBar)).hint("⌥⌘B"), "agent chat hide show layout");
-            add(Entry::new(c, icon(Icon::new(IconName::PanelBottom)), "Toggle panel", Action::Dispatch(IdeCommand::Panel)).hint("⌘J"), "terminal problems output bottom hide show layout");
+            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::MessageSquare)), "Switch to Agents", Action::SwitchMode(crate::workspace::Mode::Agents)).hint(keys::hint(Id::SwitchMode)), "harness inbox chat threads mode layout");
+            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::MessageSquarePlus)), "New chat", Action::Dispatch(IdeCommand::NewChat)).hint(keys::hint(Id::NewThread)), "agent ai side bar conversation");
+            add(Entry::new(c, icon(Icon::new(IconName::PanelLeft)), "Toggle primary side bar", Action::Dispatch(IdeCommand::PrimaryBar)).hint(keys::hint(Id::ToggleSidebar)), "explorer files hide show layout");
+            add(Entry::new(c, icon(Icon::new(IconName::PanelRight)), "Toggle AI side bar", Action::Dispatch(IdeCommand::AiBar)).hint(keys::hint(Id::ToggleAiBar)), "agent chat hide show layout");
+            add(Entry::new(c, icon(Icon::new(IconName::PanelBottom)), "Toggle panel", Action::Dispatch(IdeCommand::Panel)).hint(keys::hint(Id::ToggleRightPanel)), "terminal problems output bottom hide show layout");
         } else {
-            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::CodeXml)), "Switch to Editor", Action::SwitchMode(crate::workspace::Mode::Editor)).hint("⌥⌘E"), "ide code files workbench mode layout");
+            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::CodeXml)), "Switch to Editor", Action::SwitchMode(crate::workspace::Mode::Editor)).hint(keys::hint(Id::SwitchMode)), "ide code files workbench mode layout");
         }
-        add(Entry::new(c, icon(Icon::new(IconName::FolderOpen)), "Open folder…", Action::OpenFolder).hint("⌘O"), "project add repository");
-        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Tent)), "Basecamp", Action::Basecamp).hint("⌘⇧H"), "recap today week all time summary inbox review usage tokens stats");
+        // The file in front: in the editor, or on its own in Agents mode.
+        if ws.ide() || matches!(ws.route, Route::Editor { .. }) {
+            use crate::workspace::EditorCommand;
+            add(Entry::new(c, icon(Icon::new(IconName::Close)), "Close file", Action::Editor(EditorCommand::Close)).hint(keys::hint(Id::CloseTab)), "editor tab exit leave back");
+            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::CodeXml)), "Format document", Action::Editor(EditorCommand::Format)).hint(keys::hint(Id::FormatDocument)), "editor prettier rustfmt black gofmt indent tidy");
+        }
+        add(Entry::new(c, icon(Icon::new(IconName::FolderOpen)), "Open folder…", Action::OpenFolder).hint(keys::hint(Id::OpenFolder)), "project add repository");
+        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Tent)), "Basecamp", Action::Basecamp).hint(keys::hint(Id::OpenBasecamp)), "recap today week all time summary inbox review usage tokens stats");
         // On Basecamp, the span its recap covers.
         if ws.route == Route::Basecamp {
             let current = self.basecamp.read(cx).range();
@@ -686,7 +715,7 @@ impl CommandPalette {
                 add(e, "recap range span today week all time ever history");
             }
         }
-        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::NotebookPen)), "Notes", Action::Notes).hint("⌘⇧J"), "jot write todo checklist scratch pad memo");
+        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::NotebookPen)), "Notes", Action::Notes).hint(keys::hint(Id::OpenNotes)), "jot write todo checklist scratch pad memo");
         add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::MessageSquarePlus)), "New thread without a project", Action::NewChat), "chat scratch no project question");
         let glass = ws.settings.appearance.glass;
         add(
@@ -696,7 +725,7 @@ impl CommandPalette {
         // The thread on screen: the harness's, or the editor's AI side bar chat.
         let thread = ws.focused_thread().and_then(|id| ws.thread(id)).cloned();
         if let Some(t) = thread.as_ref().filter(|t| t.settled_at.is_none()) {
-            add(Entry::new(c, icon(Icon::new(IconName::Check)), "Settle thread", Action::Settle(t.id.clone())).hint("⌘E"), "done finish inbox archive");
+            add(Entry::new(c, icon(Icon::new(IconName::Check)), "Settle thread", Action::Settle(t.id.clone())).hint(keys::hint(Id::SettleThread)), "done finish inbox archive");
         }
         if let Some(t) = thread.as_ref() {
             add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::GitFork)), "Fork thread", Action::Fork(t.id.clone())), "branch copy duplicate conversation");
@@ -713,27 +742,44 @@ impl CommandPalette {
                 add(e, "permissions access mode approval supervise autonomy");
             }
         }
-        add(Entry::new(c, icon(Icon::new(IconName::PanelLeft)), "Toggle sidebar", Action::ToggleSidebar).hint("⌘B"), "hide show inbox");
-        add(Entry::new(c, icon(Icon::new(IconName::PanelRight)), "Toggle tools panel", Action::ToggleTools).hint("⌘J"), "right panel hide show");
-        for tool in PanelTool::ALL {
+        add(Entry::new(c, icon(Icon::new(IconName::PanelLeft)), "Toggle sidebar", Action::ToggleSidebar).hint(keys::hint(Id::ToggleSidebar)), "hide show inbox");
+        add(Entry::new(c, icon(Icon::new(IconName::PanelRight)), "Toggle tools panel", Action::ToggleTools).hint(keys::hint(Id::ToggleRightPanel)), "right panel hide show");
+        for tool in PanelTool::offered() {
             add(Entry::new(c, icon(crate::panels::tool_icon(tool)), format!("Open {}", tool.label()), Action::OpenTool(tool)), "tools panel");
         }
         let theme = ws.settings.appearance.theme;
         for (choice, label, glyph) in [
-            (ThemeChoice::Night, "Theme: Night", Icon::new(crate::assets::Lucide::Moon)),
-            (ThemeChoice::Paper, "Theme: Paper", Icon::new(crate::assets::Lucide::Sun)),
-            (ThemeChoice::System, "Theme: Match macOS", Icon::new(crate::assets::Lucide::Monitor)),
+            (ThemeChoice::Night, "Theme: Night".to_string(), Icon::new(crate::assets::Lucide::Moon)),
+            (ThemeChoice::Paper, "Theme: Paper".to_string(), Icon::new(crate::assets::Lucide::Sun)),
+            (ThemeChoice::System, format!("Theme: {}", crate::words::words().match_system_theme), Icon::new(crate::assets::Lucide::Monitor)),
         ] {
             add(Entry::new(c, icon(glyph), label, Action::Theme(choice)).checked(choice == theme), "appearance dark light system mode colors");
         }
         for page in crate::settings_view::pages() {
             let mut e = Entry::new(c, icon(crate::settings_view::page_icon(page)), format!("Settings: {}", page.label()), Action::Settings(page));
             if page == SettingsPage::General {
-                e = e.hint("⌘,");
+                e = e.hint(keys::hint(Id::OpenSettings));
             }
-            add(e, crate::settings_view::page_blurb(page));
+            add(e, &crate::settings_view::page_blurb(page));
         }
         add(Entry::new(c, icon(Icon::new(IconName::RefreshCw)), "Check for updates", Action::CheckForUpdates), "update version release upgrade");
+        // The thread and window commands a Mac's menus have and Windows, with no menu bar, finds here.
+        let running = thread.as_ref().is_some_and(|t| ws.live.get(&t.id).is_some_and(|l| l.turn_started.is_some()));
+        if thread.is_some() {
+            add(
+                Entry::new(c, icon(Icon::new(crate::assets::Lucide::SquareArrowOutUpRight)), "Open thread in new window", Action::Window(WindowCommand::OpenInNewWindow)).hint(keys::hint(Id::OpenInNewWindow)),
+                "pop out separate window detach",
+            );
+        }
+        if running {
+            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Square)), "Stop agent", Action::Window(WindowCommand::StopAgent)).hint(keys::hint(Id::Interrupt)), "interrupt cancel halt abort turn");
+        }
+        if ws.ide() || matches!(ws.route, Route::Thread(_) | Route::Draft { .. }) {
+            let plan = ws.prefs_in(&ws.focused_scope()).plan;
+            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Map)), "Plan mode", Action::Window(WindowCommand::TogglePlan)).hint(keys::hint(Id::TogglePlan)).checked(plan), "toggle plan before acting read only");
+        }
+        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Minus)), "Minimize window", Action::Window(WindowCommand::Minimize)).hint(keys::hint(Id::Minimize)), "hide taskbar");
+        add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::Power)), crate::words::words().quit_app, Action::Window(WindowCommand::Quit)).hint(keys::hint(Id::Quit)), "quit exit close app");
         out
     }
 
@@ -803,6 +849,7 @@ impl CommandPalette {
             }),
             Action::OpenFile(path) => ws.update(cx, |ws, cx| ws.open_editor(path, None, cx)),
             Action::SwitchMode(mode) => ws.update(cx, |ws, cx| ws.set_mode(mode, cx)),
+            Action::Editor(command) => ws.update(cx, |_, cx| cx.emit(WorkspaceEvent::Editor(command))),
             Action::Dispatch(command) => window.dispatch_action(
                 match command {
                     IdeCommand::PrimaryBar => Box::new(crate::ToggleSidebar),
@@ -816,6 +863,18 @@ impl CommandPalette {
                 ws.check_for_updates(true, cx);
                 ws.navigate(Route::Settings(SettingsPage::Updates), cx);
             }),
+            Action::Window(command) => match command {
+                WindowCommand::OpenInNewWindow => window.dispatch_action(Box::new(crate::OpenInNewWindow), cx),
+                WindowCommand::StopAgent => window.dispatch_action(Box::new(crate::Interrupt), cx),
+                WindowCommand::TogglePlan => ws.update(cx, |ws, cx| {
+                    let scope = ws.focused_scope();
+                    let mut prefs = ws.prefs_in(&scope);
+                    prefs.plan = !prefs.plan;
+                    ws.set_prefs_in(&scope, prefs, cx);
+                }),
+                WindowCommand::Minimize => window.minimize_window(),
+                WindowCommand::Quit => window.dispatch_action(Box::new(crate::Quit), cx),
+            },
         }
     }
 
@@ -885,7 +944,7 @@ impl CommandPalette {
             .children(project)
             // A message match has its excerpt under the title: the age sits on the right.
             .when_some(e.age.filter(|_| age_in_text), |el, age| el.child(div().flex_none().text_size(px(11.5)).text_color(theme.muted_foreground.opacity(0.8)).child(age)))
-            .when_some(e.jump, |el, n| el.child(keycap(format!("⌘{n}"), cx)))
+            .when_some(e.jump, |el, n| el.child(keycap(keys::label(&format!("secondary-{n}")), cx)))
             .when(e.checked, |el| el.child(Icon::new(IconName::Check).size(px(14.)).text_color(theme.muted_foreground)))
             .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
                 if this.selected != ix {
@@ -969,7 +1028,8 @@ impl Render for CommandPalette {
                     // ⌘1–⌘9: the recent thread with that number.
                     .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                         let m = ev.keystroke.modifiers;
-                        if !m.platform || m.control || m.alt || m.shift || m.function {
+                        // ⌘ (Ctrl on Windows) alone: with the other of the two held it's not this key.
+                        if !m.secondary() || (m.platform && m.control) || m.alt || m.shift || m.function {
                             return;
                         }
                         let Some(n) = ev.keystroke.key.parse::<usize>().ok().filter(|n| (1..=9).contains(n)) else { return };
@@ -1089,6 +1149,10 @@ mod tests {
         assert_eq!(path_tail("~/Documents/Documents - Toby's MacBook Air/Direct", 30), "…/Direct");
         assert_eq!(path_tail("~/Documents/Projects/Clients/acme/web", 30), "…/Projects/Clients/acme/web");
         assert_eq!(path_tail("~/a/an-uncommonly-long-project-folder-name", 30), "…/an-uncommonly-long-project-folder-name");
+        // A Windows path is cut at its own separator, and keeps it.
+        assert_eq!(path_tail("~\\Code\\trek", 30), "~\\Code\\trek");
+        assert_eq!(path_tail("~\\Documents\\Projects\\Clients\\acme\\web", 30), "…\\Projects\\Clients\\acme\\web");
+        assert_eq!(path_tail("C:\\Users\\me\\OneDrive\\Documents\\FC 24 LE v24.1.1.0", 30), "…\\FC 24 LE v24.1.1.0");
     }
 
     #[test]
@@ -1129,8 +1193,12 @@ mod tests {
 
     #[test]
     fn the_footer_names_the_keys_and_jumping_only_with_recents() {
-        assert_eq!(footer_keys(true), [("↑↓", "Navigate"), ("↵", "Open"), ("⌘1–9", "Jump"), ("Esc", "Close")]);
-        assert!(!footer_keys(false).iter().any(|(k, _)| *k == "⌘1–9"));
+        use crate::keys;
+        let on_a_mac = |jump| keys::with_mac(true, || footer_keys(jump));
+        assert_eq!(on_a_mac(true), [("↑↓".to_string(), "Navigate"), ("↵".to_string(), "Open"), ("⌘1–9".to_string(), "Jump"), ("Esc".to_string(), "Close")]);
+        assert!(!on_a_mac(false).iter().any(|(k, _)| k == "⌘1–9"));
+        let on_windows = keys::with_mac(false, || footer_keys(true));
+        assert_eq!(on_windows.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["↑↓", "Enter", "Ctrl+1–9", "Esc"]);
     }
 
     #[test]

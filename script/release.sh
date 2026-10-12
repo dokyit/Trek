@@ -24,6 +24,7 @@
 # Environment:
 #   TREK_MINISIGN_KEY          secret key (default ~/.trek-signing/minisign.key); one with a
 #                              password is asked for it at the signing step
+#   TREK_MINISIGN_PASSWORD     that password, for a run with no terminal (the release workflow)
 #   TREK_RELEASE_REPO          GitHub repository (default dokyit/Trek)
 #   TREK_RELEASE_DOWNLOAD_URL  where the manifest says the archive lives (default: the GitHub
 #                              release); for testing against a local server
@@ -74,6 +75,10 @@ command -v minisign >/dev/null || die "minisign isn't installed (brew install mi
 [[ -f $KEY ]] || die "no minisign secret key at $KEY (docs/RELEASING.md)"
 # Whether the key has a password: minisign's key names its KDF ("Sc", scrypt) or none (zeros).
 KEY_LOCKED=$(python3 -c 'import base64,sys; l=open(sys.argv[1]).read().splitlines(); print(int(base64.b64decode(l[1])[2:4] == b"Sc"))' "$KEY" 2>/dev/null || echo 0)
+# A CI runner has no terminal to ask at: fail now, not after the build.
+if (( KEY_LOCKED )) && [[ -z ${TREK_MINISIGN_PASSWORD:-} && -n ${CI:-} ]]; then
+  die "$KEY has a password and there's no terminal to ask for it: set TREK_MINISIGN_PASSWORD"
+fi
 if (( ! KEY_LOCKED )); then
   echo "! $KEY has no password: anything running as you (an agent with full access, say) can read it" >&2
   echo "  and sign updates every installed Trek accepts. Give it one: docs/RELEASING.md, \"Update signing key\"." >&2
@@ -145,7 +150,12 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -czf "$OUT/$NAME" -C dist Trek.app
 SHA=$(shasum -a 256 "$OUT/$NAME" | cut -d' ' -f1)
 # The trusted comment is signed too; the updater requires it to name this version.
-if (( KEY_LOCKED )); then
+if (( KEY_LOCKED )) && [[ -n ${TREK_MINISIGN_PASSWORD:-} ]]; then
+  # No terminal on a CI runner: minisign reads the password from stdin. print is a builtin, so
+  # the password never shows in a process list.
+  echo "• signing with $KEY (password from TREK_MINISIGN_PASSWORD)"
+  print -r -- "$TREK_MINISIGN_PASSWORD" | minisign -S -s "$KEY" -m "$OUT/$NAME" -x "$OUT/$NAME.minisig" -t "Trek $VERSION $PLATFORM" >/dev/null
+elif (( KEY_LOCKED )); then
   echo "• signing with $KEY (its password, please)"
   minisign -S -s "$KEY" -m "$OUT/$NAME" -x "$OUT/$NAME.minisig" -t "Trek $VERSION $PLATFORM" >/dev/null
 else

@@ -5,6 +5,8 @@
   {
    "name": "Trek Night",
    "mode": "dark",
+   "font.family": "Inter",
+   "mono_font.family": "JetBrains Mono NL",
    "font.size": 14.0,
    "radius": 8,
    "radius.lg": 14,
@@ -108,6 +110,8 @@
   {
    "name": "Trek Paper",
    "mode": "light",
+   "font.family": "Inter",
+   "mono_font.family": "JetBrains Mono NL",
    "font.size": 14.0,
    "radius": 8,
    "radius.lg": 14,

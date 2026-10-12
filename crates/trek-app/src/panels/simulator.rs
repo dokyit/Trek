@@ -78,7 +78,7 @@ fn simctl() -> Command {
         (out.status.success() && p.is_file()).then_some(p)
     });
     let mut cmd = match path {
-        Some(p) => Command::new(p),
+        Some(p) => trek_core::procs::command(p),
         None => {
             let mut c = Command::new("/usr/bin/xcrun");
             c.arg("simctl");
@@ -226,7 +226,7 @@ struct AxeJob {
 
 fn run_axe(job: &AxeJob) -> Result<(), String> {
     use std::io::Write as _;
-    let mut child = Command::new(&job.bin)
+    let mut child = trek_core::procs::command(&job.bin)
         .args(&job.args)
         .stdin(if job.stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::null())
@@ -1013,7 +1013,7 @@ impl SimulatorPanel {
         if (self.axe.is_none() && self.ready_link().is_none()) || self.live().is_none() {
             return;
         }
-        if m.platform {
+        if m.secondary() {
             if k.key == "v" {
                 if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
                     self.queue_text(&text, cx);

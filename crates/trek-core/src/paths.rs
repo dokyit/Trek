@@ -52,7 +52,15 @@ pub fn data_dir() -> PathBuf {
     dir
 }
 
+/// The user's home folder. `HOME` wins when it's set, on every platform: the Unix resolver reads it
+/// anyway, and it lets a test or a capture run point Trek at a throwaway home on Windows too, where
+/// the profile folder would otherwise be used whatever the environment says.
 pub fn home() -> PathBuf {
+    // Only a real, absolute folder: a POSIX-style `/c/Users/x` from an MSYS shell is left to the
+    // resolver, as is a value that names nothing.
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute() && h.is_dir()) {
+        return home;
+    }
     directories::BaseDirs::new()
         .map(|b| b.home_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("/"))
@@ -79,7 +87,7 @@ pub fn chats_dir() -> PathBuf {
 pub fn new_chat_dir() -> std::io::Result<PathBuf> {
     let dir = chats_dir().join(chrono::Local::now().format("%Y-%m-%d-%H%M%S-%3f").to_string());
     std::fs::create_dir_all(&dir)?;
-    let _ = std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    let _ = crate::procs::command(crate::git::git_program()).args(["init", "-q"]).current_dir(&dir).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
     Ok(dir)
 }
 
@@ -102,18 +110,127 @@ pub fn updates_dir() -> PathBuf {
     dir
 }
 
-/// Shorten a path for display: `/Users/me/Documents/x` → `~/Documents/x`.
+/// Shorten a path for display: `/Users/me/Documents/x` → `~/Documents/x`, and on Windows
+/// `C:\Users\me\Documents\x` → `~\Documents\x` (PowerShell's own `~`): the folders under `~` are
+/// joined with the platform's separator, never the half-and-half `~/Documents\x` that `~/` plus
+/// the native path would make, and never the Unix form on a PC.
 pub fn tildify(path: &std::path::Path) -> String {
+    tildify_with(path, std::path::MAIN_SEPARATOR_STR)
+}
+
+/// [`tildify`] with `/` on every platform (`~/Documents/x`), for a path put in a message to an
+/// agent: its shell may be Git Bash, where `~\Documents` is no path, and `~/` is one in every
+/// shell Windows has.
+pub fn tildify_for_agents(path: &std::path::Path) -> String {
+    tildify_with(path, "/")
+}
+
+fn tildify_with(path: &std::path::Path, sep: &str) -> String {
     let home = home();
     match path.strip_prefix(&home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Ok(rest) => format!("~/{}", rest.display()),
+        Ok(rest) => {
+            let parts: Vec<_> = rest.components().map(|c| c.as_os_str().to_string_lossy()).collect();
+            format!("~{sep}{}", parts.join(sep))
+        }
         Err(_) => path.display().to_string(),
     }
 }
 
+/// Move `path` to the Trash (the Recycle Bin on Windows), where the user can still get it back.
+pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
+    let path = path.to_path_buf();
+    // The crate initialises COM on the calling thread, and panics if that thread already holds
+    // it in another mode. A thread of its own always starts clean.
+    #[cfg(windows)]
+    let result = std::thread::spawn(move || move_to_trash(&path)).join().map_err(|_| anyhow::anyhow!("The Recycle Bin wouldn't open"))?;
+    #[cfg(not(windows))]
+    let result = move_to_trash(&path);
+    result
+}
+
+fn move_to_trash(path: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        // NSFileManager, as the app has always done, not the Finder (an AppleScript round trip).
+        use trash::macos::{DeleteMethod, TrashContextExtMacos as _};
+        let mut ctx = trash::TrashContext::default();
+        ctx.set_delete_method(DeleteMethod::NsFileManager);
+        ctx.delete(path)?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    trash::delete(path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn trashing_a_file_or_folder_takes_it_out_of_its_folder() {
+        let dir = std::env::temp_dir().join(format!("trek-trash-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("folder/inner")).unwrap();
+        let file = dir.join("note.txt");
+        std::fs::write(&file, "x").unwrap();
+        std::fs::write(dir.join("folder/inner/a.txt"), "y").unwrap();
+        super::trash(&file).unwrap();
+        super::trash(&dir.join("folder")).unwrap();
+        assert!(!file.exists() && !dir.join("folder").exists());
+        assert!(super::trash(&dir.join("never-was")).is_err());
+        // These two now sit in the user's Recycle Bin (their own temp files, nothing else); take
+        // just them out again where the crate can list and purge.
+        #[cfg(windows)]
+        {
+            // The bin's enumeration trails IFileOperation on change notifications: on a loaded
+            // machine the second item hasn't shown yet when the first is already listed. Wait for
+            // both rather than read once (CI run 38048787332 saw exactly one).
+            //
+            // The bin lists an item by its display name, which leaves the extension off where
+            // Explorer's "Hide extensions for known file types" is on (the default of a fresh
+            // profile, as on GitHub's runners; off on a developer's machine): "note", not
+            // "note.txt". Matching by that name is why those runs found exactly one item even after
+            // waiting 30 s. The folder is this process's own, so its parent alone picks the two out.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let items = loop {
+                let all = trash::os_limited::list().unwrap();
+                let total = all.len();
+                let items: Vec<_> = all.into_iter().filter(|i| i.original_parent.file_name() == dir.file_name()).collect();
+                if items.len() == 2 {
+                    break items;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "both went into the Recycle Bin; found {:?} of {total} items there",
+                    items.iter().map(|i| (&i.name, &i.original_parent)).collect::<Vec<_>>()
+                );
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            };
+            trash::os_limited::purge_all(items).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_home_relative_path_is_written_with_the_platforms_separator() {
+        let home = super::home();
+        let (sep, written) = if cfg!(windows) { ('\\', "~\\Documents\\Trek") } else { ('/', "~/Documents/Trek") };
+        // Built piece by piece, so on Windows it's `C:\Users\…\Documents\Trek` with backslashes,
+        // and what's shown has them too, not the Unix form (nor `~/Documents\Trek`).
+        assert_eq!(super::tildify(&home.join("Documents").join("Trek")), written);
+        assert_eq!(super::tildify(&home.join("a").join("b").join("c.toml")), format!("~{sep}a{sep}b{sep}c.toml"));
+        assert_eq!(super::tildify(&home), "~");
+        // What an agent is told is the same on both: `~/…` works in every shell.
+        assert_eq!(super::tildify_for_agents(&home.join("Documents").join("Trek")), "~/Documents/Trek");
+        assert_eq!(super::tildify_for_agents(&home), "~");
+        // A name with a space (OneDrive's folders have them) stays whole.
+        assert_eq!(super::tildify(&home.join("OneDrive").join("FC 24 LE v24.1.1.0")), format!("~{sep}OneDrive{sep}FC 24 LE v24.1.1.0"));
+        // And a path that merely shares a prefix with the home folder isn't taken for one under it.
+        let mut sibling = home.clone().into_os_string();
+        sibling.push("-other");
+        let sibling = std::path::PathBuf::from(sibling);
+        assert_eq!(super::tildify(&sibling), sibling.display().to_string());
+    }
+
     #[test]
     fn tests_never_reach_the_users_data() {
         // Isolated before any test asked, and staying where it was put.

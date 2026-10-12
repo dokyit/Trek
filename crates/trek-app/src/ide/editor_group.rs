@@ -6,10 +6,13 @@
 
 use super::IdeWorkbench;
 use super::diff_view::{DiffSource, DiffView};
+use super::preview::{Kind, NotText, PreviewEvent, PreviewView};
 use crate::editor::EditorView;
+use crate::keys::{self, Id};
+use crate::workspace::Route;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::button::Button;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::{Path, PathBuf};
@@ -25,10 +28,12 @@ pub struct EditorTab {
     _watch: std::rc::Rc<Subscription>,
 }
 
-/// What a tab shows: a file in the editor, or a diff (a Review, Source Control's changes).
+/// What a tab shows: a file in the editor, a file that isn't text in a preview (an image, a PDF,
+/// video, a note saying what it is), or a diff (a Review, Source Control's changes).
 #[derive(Clone, PartialEq)]
 pub enum TabView {
     Editor(Entity<EditorView>),
+    Preview(Entity<PreviewView>),
     Diff(Entity<DiffView>),
 }
 
@@ -37,21 +42,39 @@ impl EditorTab {
     pub fn editor(&self) -> Option<&Entity<EditorView>> {
         match &self.view {
             TabView::Editor(e) => Some(e),
-            TabView::Diff(_) => None,
+            _ => None,
         }
     }
 
     pub fn diff(&self) -> Option<&Entity<DiffView>> {
         match &self.view {
             TabView::Diff(d) => Some(d),
-            TabView::Editor(_) => None,
+            _ => None,
+        }
+    }
+
+    /// The file's preview, when this tab is one.
+    pub fn preview_view(&self) -> Option<&Entity<PreviewView>> {
+        match &self.view {
+            TabView::Preview(p) => Some(p),
+            _ => None,
         }
     }
 
     pub fn id(&self) -> EntityId {
         match &self.view {
             TabView::Editor(e) => e.entity_id(),
+            TabView::Preview(p) => p.entity_id(),
             TabView::Diff(d) => d.entity_id(),
+        }
+    }
+
+    /// The file the tab shows, in an editor or a preview. (`path` is an editor's only: what the
+    /// AI side bar and an agent's changes go by.)
+    pub fn file(&self, cx: &App) -> Option<PathBuf> {
+        match &self.view {
+            TabView::Preview(p) => Some(p.read(cx).path.clone()),
+            _ => self.path(cx),
         }
     }
 
@@ -69,6 +92,7 @@ impl EditorTab {
     fn title(&self, cx: &App) -> String {
         match &self.view {
             TabView::Editor(e) => file_name(&e.read(cx).path),
+            TabView::Preview(p) => file_name(&p.read(cx).path),
             TabView::Diff(d) => d.read(cx).title(cx),
         }
     }
@@ -76,6 +100,10 @@ impl EditorTab {
     fn focus(&self, window: &mut Window, cx: &mut App) {
         match &self.view {
             TabView::Editor(e) => e.update(cx, |e, cx| e.focus(window, cx)),
+            TabView::Preview(p) => {
+                let handle = p.read(cx).focus_handle(cx);
+                handle.focus(window, cx);
+            }
             TabView::Diff(d) => {
                 let handle = d.read(cx).focus_handle(cx);
                 handle.focus(window, cx);
@@ -88,15 +116,31 @@ impl IdeWorkbench {
     /// The tab for `path`, made if there's none: in place of the preview tab when `preview`,
     /// else after the one in front. Returns its index.
     pub(super) fn open_tab(&mut self, path: PathBuf, preview: bool, window: &mut Window, cx: &mut Context<Self>) -> usize {
-        if let Some(ix) = self.tabs.iter().position(|t| t.editor().is_some_and(|e| e.read(cx).path == path)) {
+        if let Some(ix) = self.tabs.iter().position(|t| t.file(cx).as_ref() == Some(&path)) {
             // Opened on purpose (double click, ⌘P, a link): it stays.
             if !preview {
                 self.tabs[ix].preview = false;
             }
             return ix;
         }
+        let tab = self.file_tab(path, preview, false, window, cx);
+        self.place(tab, preview, cx)
+    }
+
+    /// A tab for the file at `path`: an editor, or a preview when its name says it's an image, a
+    /// PDF, video or audio, or when it's kept online and has to be fetched first (unless it just
+    /// was, `fetched`). An editor whose file turns out not to be text gives way to a preview.
+    fn file_tab(&mut self, path: PathBuf, preview: bool, fetched: bool, window: &mut Window, cx: &mut Context<Self>) -> EditorTab {
+        let kind = super::preview::kind_by_name(&path).or_else(|| (!fetched && super::preview::online_only(&path)).then_some(Kind::Text));
+        if let Some(kind) = kind {
+            return self.preview_tab(path, kind, None, preview, window, cx);
+        }
         let view = cx.new(|cx| EditorView::new(self.workspace.clone(), path, window, cx));
-        let watch = cx.observe(&view, |this, view, cx| {
+        let watch = cx.observe_in(&view, window, |this, view, window, cx| {
+            if let Some(instead) = view.update(cx, |v, _| v.not_text.take()) {
+                this.show_instead(&view, instead, window, cx);
+                return;
+            }
             if view.read(cx).dirty {
                 if let Some(t) = this.tabs.iter_mut().find(|t| t.editor() == Some(&view) && t.preview) {
                     t.preview = false;
@@ -104,8 +148,79 @@ impl IdeWorkbench {
             }
             cx.notify();
         });
-        let tab = EditorTab { view: TabView::Editor(view), preview, _watch: std::rc::Rc::new(watch) };
-        self.place(tab, preview, cx)
+        EditorTab { view: TabView::Editor(view), preview, _watch: std::rc::Rc::new(watch) }
+    }
+
+    fn preview_tab(&mut self, path: PathBuf, kind: Kind, error: Option<std::io::Error>, preview: bool, window: &mut Window, cx: &mut Context<Self>) -> EditorTab {
+        let view = cx.new(|cx| PreviewView::new(path, kind, error, window, cx));
+        let watch = cx.subscribe_in(&view, window, |this, view, event: &PreviewEvent, window, cx| match event {
+            PreviewEvent::Reopen { fetched } => this.reopen(view.entity_id(), *fetched, window, cx),
+        });
+        EditorTab { view: TabView::Preview(view), preview, _watch: std::rc::Rc::new(watch) }
+    }
+
+    /// The editor of `view` found its file isn't text, or can't be read: a preview takes its place.
+    fn show_instead(&mut self, view: &Entity<EditorView>, instead: NotText, window: &mut Window, cx: &mut Context<Self>) {
+        let path = view.read(cx).path.clone();
+        let (kind, error) = match instead {
+            NotText::Binary => (Kind::Binary, None),
+            NotText::Unreadable(e) => (Kind::Text, Some(e)),
+        };
+        self.replace_tab(view.entity_id(), |this, preview, window, cx| this.preview_tab(path, kind, error, preview, window, cx), window, cx);
+    }
+
+    /// The file of the preview `id` again (Retry, or it was fetched): an editor if it reads as text
+    /// now, else a new preview.
+    fn reopen(&mut self, id: EntityId, fetched: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.tabs.iter().find(|t| t.id() == id).and_then(|t| t.file(cx)) else { return };
+        self.replace_tab(id, |this, preview, window, cx| this.file_tab(path, preview, fetched, window, cx), window, cx);
+    }
+
+    /// Put the tab `make` makes (given the old one's preview mark) where the tab of `id` is, in
+    /// front (with the keys, if it isn't a preview) if that was.
+    fn replace_tab(&mut self, id: EntityId, make: impl FnOnce(&mut Self, bool, &mut Window, &mut Context<Self>) -> EditorTab, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.tabs.iter().position(|t| t.id() == id) else { return };
+        let preview = self.tabs[ix].preview;
+        // A preview had the keys if they're in it; an editor is replaced as its file is first
+        // read, so it has them if it was opened on purpose (`open` gave them to it).
+        let had_focus = match &self.tabs[ix].view {
+            TabView::Preview(p) => p.read(cx).focus_handle(cx).contains_focused(window, cx),
+            _ => !preview,
+        };
+        let tab = make(self, preview, window, cx);
+        let new = tab.id();
+        self.tabs[ix] = tab;
+        for m in self.mru.iter_mut().filter(|m| **m == id) {
+            *m = new;
+        }
+        if ix == self.active {
+            self.activate(ix, cx);
+            if had_focus {
+                self.tabs[ix].clone().focus(window, cx);
+            }
+        } else {
+            self.sync_previews(cx);
+        }
+        cx.notify();
+    }
+
+    /// A preview's web view is a native view over the window: it shows only for the tab in front,
+    /// while the window shows the editor and nothing Trek draws (a palette, a menu) is over it.
+    pub(super) fn sync_previews(&mut self, cx: &mut Context<Self>) {
+        let ws = self.workspace.read(cx);
+        let on_screen = !ws.overlay_open && self.menus_open == 0 && (ws.ide() || matches!(ws.route, crate::workspace::Route::Editor { .. }));
+        let front = self.tabs.get(self.active).map(EditorTab::id);
+        let previews: Vec<(bool, Entity<PreviewView>)> = self.tabs.iter().filter_map(|t| t.preview_view().map(|p| (Some(t.id()) == front, p.clone()))).collect();
+        for (in_front, p) in previews {
+            p.update(cx, |p, cx| p.set_shown(on_screen && in_front, cx));
+        }
+    }
+
+    /// A tab's menu opened or closed. It hangs over the editor, where a native web view would
+    /// draw over it.
+    fn tab_menu(&mut self, opened: bool, cx: &mut Context<Self>) {
+        self.menus_open = if opened { self.menus_open + 1 } else { self.menus_open.saturating_sub(1) };
+        self.sync_previews(cx);
     }
 
     /// Put `tab` in place of the preview tab when `preview` (and there's a clean one), else
@@ -134,9 +249,14 @@ impl IdeWorkbench {
         self.mru.retain(|m| *m != id);
         self.mru.push(id);
         let editor = tab.editor().cloned();
+        let preview = tab.preview_view().cloned();
         let file = tab.path(cx);
         self.ai.update(cx, |a, cx| a.set_current_file(file, cx));
-        self.status.update(cx, |s, cx| s.set_editor(editor, cx));
+        self.status.update(cx, |s, cx| {
+            s.set_editor(editor, cx);
+            s.set_preview(preview, cx);
+        });
+        self.sync_previews(cx);
         cx.notify();
     }
 
@@ -217,6 +337,13 @@ impl IdeWorkbench {
         }
     }
 
+    /// Close the tab of the file at `path`, if it has one.
+    pub fn close_file(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.tabs.iter().find(|t| t.file(cx).as_deref() == Some(path)).map(|t| t.id()) {
+            self.close(id, window, cx);
+        }
+    }
+
     /// Close the tab of `id`. With unsaved edits it asks: Save (closing once the save lands),
     /// Don't Save, or Cancel.
     pub fn close(&mut self, id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
@@ -270,6 +397,8 @@ impl IdeWorkbench {
     pub(super) fn remove(&mut self, id: EntityId, cx: &mut Context<Self>) {
         let Some(ix) = self.tabs.iter().position(|t| t.id() == id) else { return };
         let tab = self.tabs.remove(ix);
+        // An editor's file or a preview's: either can be the file shown on its own.
+        let file = tab.file(cx);
         self.forget_file(&tab, cx);
         self.mru.retain(|m| *m != id);
         let front = self.mru.last().and_then(|m| self.tabs.iter().position(|t| t.id() == *m));
@@ -278,8 +407,21 @@ impl IdeWorkbench {
             None => {
                 self.active = 0;
                 self.ai.update(cx, |a, cx| a.set_current_file(None, cx));
-                self.status.update(cx, |s, cx| s.set_editor(None, cx));
+                self.status.update(cx, |s, cx| {
+                    s.set_editor(None, cx);
+                    s.set_preview(None, cx);
+                });
+                self.sync_previews(cx);
             }
+        }
+        // A file shown on its own (Agents mode) that was closed: back to where it was opened
+        // from. Its route would make a tab again as soon as it's drawn.
+        if let Some(file) = file {
+            self.workspace.update(cx, |ws, cx| {
+                if !ws.ide() && matches!(&ws.route, Route::Editor { path } if *path == file) {
+                    ws.leave_editor(cx);
+                }
+            });
         }
         cx.notify();
     }
@@ -312,7 +454,7 @@ impl IdeWorkbench {
             .border_color(line)
             .overflow_x_scroll()
             .children(self.tabs.iter().enumerate().map(|(ix, tab)| {
-                let path = tab.path(cx);
+                let path = tab.file(cx);
                 let name = tab.title(cx);
                 let on = ix == self.active;
                 let dirty = tab.dirty(cx);
@@ -373,9 +515,10 @@ impl IdeWorkbench {
                             .child(
                                 div()
                                     .when(dirty, |el| el.absolute())
-                                    .when(!on || dirty, |el| el.invisible().group_hover(group.clone(), |s| s.visible()))
+                                    .when(close_waits_for_hover(on, dirty), |el| el.invisible().group_hover(group.clone(), |s| s.visible()))
                                     .child(Icon::new(IconName::Close).size(px(12.)).text_color(theme.muted_foreground)),
                             )
+                            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(format!("Close ({})", keys::hint(Id::CloseTab))).build(window, cx))
                             // The × closes only: the tab under it isn't brought forward first.
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -396,8 +539,25 @@ impl IdeWorkbench {
                         }
                     }))
                     .on_mouse_up(MouseButton::Middle, cx.listener(move |this, _, window, cx| this.close(id, window, cx)))
-                    .context_menu(move |menu, _, _| {
-                        let act = |label: &'static str, f: fn(&mut IdeWorkbench, EntityId, &mut Window, &mut Context<IdeWorkbench>)| {
+                    .context_menu(move |menu, _, cx| {
+                        // Counted once, whether it's dismissed, replaced by another or dropped.
+                        let open = std::rc::Rc::new(std::cell::Cell::new(true));
+                        let _ = me.update(cx, |this, cx| this.tab_menu(true, cx));
+                        let (on_dismiss, on_release) = (me.clone(), me.clone());
+                        let (dismissed, released) = (open.clone(), open);
+                        cx.subscribe(&cx.entity(), move |_, _, _: &DismissEvent, cx| {
+                            if dismissed.replace(false) {
+                                let _ = on_dismiss.update(cx, |this, cx| this.tab_menu(false, cx));
+                            }
+                        })
+                        .detach();
+                        cx.on_release(move |_, cx| {
+                            if released.replace(false) {
+                                let _ = on_release.update(cx, |this, cx| this.tab_menu(false, cx));
+                            }
+                        })
+                        .detach();
+                        let act =|label: &'static str, f: fn(&mut IdeWorkbench, EntityId, &mut Window, &mut Context<IdeWorkbench>)| {
                             let me = me.clone();
                             PopupMenuItem::new(label).on_click(move |_, window, cx| {
                                 let _ = me.update(cx, |this, cx| f(this, id, window, cx));
@@ -423,16 +583,15 @@ impl IdeWorkbench {
                             .item(copy("Copy Path", path.display().to_string()))
                             .item(copy("Copy Relative Path", relative))
                             .separator()
-                            .item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, cx| cx.reveal_path(&reveal)))
+                            .item(PopupMenuItem::new(crate::words::words().reveal_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&reveal)))
                             .item(PopupMenuItem::new("Open in Default App").on_click(move |_, _, cx| cx.open_with_system(&open)))
                     })
             }))
     }
 
     /// `crates › trek-app › src › editor.rs`: where the file in front is, under the IDE folder.
-    fn breadcrumbs(&self, view: &Entity<EditorView>, cx: &mut Context<Self>) -> impl IntoElement {
+    fn breadcrumbs(&self, path: &Path, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let path = view.read(cx).path.clone();
         let root = self.workspace.read(cx).ide_root.clone();
         let rel = root.as_ref().and_then(|r| path.strip_prefix(r).ok()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(trek_core::paths::tildify(&path)));
         let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().to_string()).filter(|p| !p.is_empty() && p != "/").collect();
@@ -462,14 +621,29 @@ impl IdeWorkbench {
     pub(super) fn editor_area(&self, glass: Option<f32>, cx: &mut Context<Self>) -> AnyElement {
         let fill = || StyleRefinement::default().size_full();
         match self.tabs.get(self.active).map(|t| t.view.clone()) {
-            Some(TabView::Editor(view)) => v_flex()
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .child(self.tab_bar(glass, cx))
-                .child(self.breadcrumbs(&view, cx))
-                .child(div().flex_1().min_h_0().child(view.cached(fill())))
-                .into_any_element(),
+            Some(TabView::Editor(view)) => {
+                let path = view.read(cx).path.clone();
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(self.tab_bar(glass, cx))
+                    .child(self.breadcrumbs(&path, cx))
+                    .child(div().flex_1().min_h_0().child(view.cached(fill())))
+                    .into_any_element()
+            }
+            // Not cached: a web view's native view takes its place from the element's layout.
+            Some(TabView::Preview(view)) => {
+                let path = view.read(cx).path.clone();
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(self.tab_bar(glass, cx))
+                    .child(self.breadcrumbs(&path, cx))
+                    .child(div().flex_1().min_h_0().child(view))
+                    .into_any_element()
+            }
             Some(TabView::Diff(view)) => v_flex()
                 .flex_1()
                 .min_h_0()
@@ -485,11 +659,11 @@ impl IdeWorkbench {
     /// No file open: the shortcuts worth knowing, quietly, as Cursor and VS Code show them.
     fn watermark(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let row = |label: &'static str, keys: &'static str| {
+        let row = |label: &'static str, keys: String| {
             h_flex()
                 .gap(px(18.))
                 .child(div().w(px(150.)).text_right().child(label))
-                .child(div().w(px(110.)).text_color(theme.muted_foreground.opacity(0.75)).child(keys))
+                .child(div().min_w(px(110.)).text_color(theme.muted_foreground.opacity(0.75)).child(keys))
         };
         v_flex()
             .id("ide-watermark")
@@ -501,12 +675,22 @@ impl IdeWorkbench {
             .text_size(px(12.5))
             .text_color(theme.muted_foreground)
             .child(div().pb(px(14.)).opacity(0.5).child(crate::brand::logo_mark(px(56.))))
-            .child(row("Go to File", "⌘P"))
-            .child(row("New Chat", "⌘N"))
-            .child(row("Keep / Undo a Change", "⌘Y / ⌥⌘⌫"))
-            .child(row("Show Terminal", "⌘J"))
-            .child(row("Toggle AI Side Bar", "⌥⌘B"))
-            .child(row("Switch to Agents", "⌥⌘E"))
+            .child(row("Go to File", keys::hint(Id::QuickOpen)))
+            .child(row("New Chat", keys::hint(Id::NewThread)))
+            .child(row("Keep / Undo a Change", format!("{} / {}", keys::hint(Id::KeepHunk), keys::hint(Id::UndoHunk))))
+            .child(row("Show Terminal", keys::hint(Id::ToggleRightPanel)))
+            .child(row("Toggle AI Side Bar", keys::hint(Id::ToggleAiBar)))
+            .child(row("Switch to Agents", keys::hint(Id::SwitchMode)))
+            // The way out for someone who closed the last file to get back to their threads.
+            .child(
+                div().pt(px(14.)).child(
+                    Button::new("ide-back-to-agents")
+                        .outline()
+                        .small()
+                        .label("Back to Agents")
+                        .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.set_mode(crate::workspace::Mode::Agents, cx)))),
+                ),
+            )
     }
 
     /// No folder open: what to do, then recent folders and loose files.
@@ -598,4 +782,25 @@ impl IdeWorkbench {
 
 fn file_name(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+/// Whether a tab's × shows only while the pointer is over the tab: the tabs behind do, and one
+/// with unsaved edits (its dot is where the × goes). The tab in front always has its ×, so the
+/// way out is on screen without hovering.
+fn close_waits_for_hover(in_front: bool, dirty: bool) -> bool {
+    !in_front || dirty
+}
+
+#[cfg(test)]
+mod tests {
+    use super::close_waits_for_hover;
+
+    #[test]
+    fn the_tab_in_front_always_shows_its_x_and_the_ones_behind_show_it_on_hover() {
+        assert!(!close_waits_for_hover(true, false));
+        assert!(close_waits_for_hover(false, false));
+        // An unsaved tab shows its dot until the pointer is over it.
+        assert!(close_waits_for_hover(true, true));
+        assert!(close_waits_for_hover(false, true));
+    }
 }
