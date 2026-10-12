@@ -1,5 +1,5 @@
 // Not `super::*`: that brings GPUI's `test` attribute in over the standard one.
-use super::{AXIS, Accent, Class, Columns, Face, Laid, MAX_SOURCE, Measure, Node, Paint, Segment, Setter, Style, Unparsed, X_HEIGHT, claims, classes, displayed, explicit, parse};
+use super::{AXIS, Accent, Class, Columns, Face, Laid, MAX_SOURCE, Measure, Node, Paint, Segment, Setter, Style, Unparsed, X_HEIGHT, claims, classes, displayed, explicit, extent, parse};
 
 /// Every character a fixed advance (half an em, mono a little wider), so layout is exact.
 struct Fixed;
@@ -360,12 +360,16 @@ fn scripts_are_smaller_and_stack_only_on_large_operators_in_display() {
     assert!(near(sx, bx + 0.06 * size) && sy < 0. && by > 0., "beside, one above and one below");
 
     let laid = lay("\\sum_{i=1}^{n}", Style::Display, size);
-    let (ox, _, osize) = text_at(&laid, "∑");
+    let (ox, oy, osize) = text_at(&laid, "∑");
     let op_centre = ox + 0.5 * osize / 2.;
     let (nx, ny, _) = text_at(&laid, "n");
     assert!(near(nx + 0.5 * 14. / 2., op_centre), "n centred over ∑");
     assert!(ny < -osize * 0.5, "above it");
     assert!(near(osize, 1.5 * size), "a display sum is larger");
+    // The under-limit clears the operator's painted bottom: its baseline less its ascent
+    // sits below the operator's baseline plus its descent.
+    let under_top = text_at(&laid, "i").1 - extent('i').0 * 14.;
+    assert!(under_top > oy + extent('∑').1 * osize, "{under_top} overlaps the ∑ at {}", oy + extent('∑').1 * osize);
     let laid = lay("\\sum_{i=1}^{n}", Style::Text, size);
     let (nx, _, _) = text_at(&laid, "n");
     assert!(nx >= text_at(&laid, "∑").0 + 0.5 * 1.1 * size - 0.5, "inline, beside it");
