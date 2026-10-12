@@ -255,6 +255,9 @@ private struct TranscriptList: View, Equatable {
     /// Far enough above the latest that the jump-down button is out.
     @State private var awayFromBottom = false
 
+    /// How many of the latest rows are laid out outside the lazy stack.
+    private static let laidOut = 3
+
     private struct ScrollEdges: Equatable {
         /// Within a couple of screens of the top.
         var nearTop: Bool
@@ -278,27 +281,37 @@ private struct TranscriptList: View, Equatable {
         let lastTurn = blocks.last { ends.contains($0.id) }?.id
         let lastUser = blocks.last(where: \.isUser)?.id
         ScrollViewReader { proxy in
+        let row = { (block: Block) in
+            let open = groupOpen[block.id] ?? ((block.id == lastGroup && working) || Launch.expandAll)
+            return BlockRow(block: block, threadID: store.id, projectName: projectName,
+                            expanded: open,
+                            folded: folded[block.id] ?? [],
+                            endsTurn: ends.contains(block.id),
+                            latest: block.id == lastTurn || block.id == lastUser,
+                            busy: working, retryModels: retryModels,
+                            toggle: { groupOpen[block.id] = !open },
+                            fold: { folded[block.id] = $0 },
+                            act: perform)
+                .equatable()
+                .id(block.id)
+        }
+        let earlier = blocks.dropLast(Self.laidOut)
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 18) {
-                if !store.loaded {
-                    ProgressView().frame(maxWidth: .infinity).padding(.top, 80)
-                } else if store.more {
-                    EarlierMarker(loading: store.loadingEarlier)
+            VStack(alignment: .leading, spacing: 18) {
+                if !store.loaded || store.more || !earlier.isEmpty {
+                    LazyVStack(alignment: .leading, spacing: 18) {
+                        if !store.loaded {
+                            ProgressView().frame(maxWidth: .infinity).padding(.top, 80)
+                        } else if store.more {
+                            EarlierMarker(loading: store.loadingEarlier)
+                        }
+                        ForEach(earlier) { row($0) }
+                    }
                 }
-                ForEach(blocks) { block in
-                    let open = groupOpen[block.id] ?? ((block.id == lastGroup && working) || Launch.expandAll)
-                    BlockRow(block: block, threadID: store.id, projectName: projectName,
-                             expanded: open,
-                             folded: folded[block.id] ?? [],
-                             endsTurn: ends.contains(block.id),
-                             latest: block.id == lastTurn || block.id == lastUser,
-                             busy: working, retryModels: retryModels,
-                             toggle: { groupOpen[block.id] = !open },
-                             fold: { folded[block.id] = $0 },
-                             act: perform)
-                        .equatable()
-                        .id(block.id)
-                }
+                // The latest rows are laid out in full, not lazily: an answer still being written
+                // (a chart drawing in) grows many times a second, and a lazy stack loses its place
+                // then, showing blank space where the transcript is.
+                ForEach(blocks.suffix(Self.laidOut)) { row($0) }
                 WorkingFooter(store: store)
                 Color.clear.frame(height: 4).id("end")
             }
