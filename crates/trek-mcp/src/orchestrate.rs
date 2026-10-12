@@ -28,7 +28,7 @@ impl ToolSet for Orchestrate {
     }
 
     fn instructions(&self) -> &'static str {
-        "Trek runs other agents and models as sub-agents of this thread. Use list_models to see what's available, delegate_task to start one (advise: read-only review; implement: may change files), and task_status / task_result / cancel_task to follow it. Sub-agents see only the prompt you give them."
+        "Trek runs other agents and models for this thread. Use list_models to see what's available. Pick by what you need back: delegate_task starts a sub-agent for a scoped task whose answer comes back to you (advise: read-only review; implement: may change files); follow it with task_status / task_result / cancel_task. start_thread starts a separate thread of the user's own, in their sidebar, for work they'll follow by itself (optionally in another project or a new git worktree); follow it with list_threads / thread_status / read_thread and steer it with send_to_thread. handoff moves this work to a fresh thread when your context is running out: write a complete brief, then end your turn. Sub-agents and new threads see only the prompt or brief you give them."
     }
 
     fn tools(&self) -> Vec<ToolDef> {
@@ -148,7 +148,10 @@ mod tests {
     fn lists_the_shared_tools() {
         let tools = Orchestrate { client: None };
         let names: Vec<&str> = tools.tools().iter().map(|t| t.name).collect();
-        assert_eq!(names, ["list_models", "delegate_task", "task_status", "task_result", "cancel_task"]);
+        assert_eq!(names, trek_ipc::TOOL_NAMES);
+        for word in ["delegate_task", "start_thread", "handoff", "read_thread", "send_to_thread"] {
+            assert!(tools.instructions().contains(word), "the instructions say when to use {word}");
+        }
         assert!(tools.tools().iter().all(|t| t.to_json()["inputSchema"]["type"] == "object"));
     }
 

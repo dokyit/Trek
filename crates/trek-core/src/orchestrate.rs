@@ -214,13 +214,33 @@ pub const SERVER: &str = "trek-orchestrate";
 /// Whether tool row `title` is Trek's own `tool`, named however the agent names MCP tools:
 /// `mcp__trek-orchestrate__delegate_task` (Claude, and Codex as Trek reports it),
 /// `trek-orchestrate_delegate_task` (OpenCode). Another server's tool of the same name isn't.
-fn is_ours(title: &str, tool: &str) -> bool {
+pub(crate) fn is_ours(title: &str, tool: &str) -> bool {
     title.strip_suffix(tool).is_some_and(|server| server.trim_end_matches(['_', '.', '/', ':', '-']).ends_with(SERVER))
 }
 
 /// Whether an agent's tool row is a call to Trek's `delegate_task`.
 pub fn is_delegate_call(title: &str) -> bool {
     is_ours(title, "delegate_task")
+}
+
+/// Whether an agent's tool row is a call that starts work Trek shows with a row of its own: a
+/// sub-agent (`delegate_task`), a thread (`start_thread`) or a handoff (`handoff`). The row
+/// stands for the call, which has none of its own (unless it failed).
+pub fn is_spawn_call(title: &str) -> bool {
+    is_delegate_call(title) || crate::lineage::is_thread_call(title)
+}
+
+/// What a spawning call that failed reads as (it says why when opened).
+pub fn spawn_failed_label(title: &str) -> Option<&'static str> {
+    if is_delegate_call(title) {
+        Some("Couldn't start a sub-agent")
+    } else if is_ours(title, "start_thread") {
+        Some("Couldn't start a thread")
+    } else if is_ours(title, "handoff") {
+        Some("Couldn't hand off")
+    } else {
+        None
+    }
 }
 
 /// A readable title for a row of one of Trek's other orchestration tools.
@@ -230,6 +250,10 @@ pub fn tool_label(title: &str) -> Option<&'static str> {
         ("task_status", "Checked on a sub-agent"),
         ("task_result", "Read a sub-agent's answer"),
         ("cancel_task", "Stopped a sub-agent"),
+        ("list_threads", "Listed its threads"),
+        ("thread_status", "Checked on a thread"),
+        ("read_thread", "Read a thread's answer"),
+        ("send_to_thread", "Sent a thread a message"),
     ]
     .into_iter()
     .find(|(tool, _)| is_ours(title, tool))
@@ -627,6 +651,12 @@ mod tests {
         assert_eq!(tool_label("trek-orchestrate_cancel_task"), Some("Stopped a sub-agent"));
         assert_eq!(tool_label("cancel_task"), None);
         assert_eq!(tool_label("mcp__other__list_models"), None, "another server's tool keeps its name");
+        assert_eq!(tool_label("mcp__trek-orchestrate__read_thread"), Some("Read a thread's answer"));
+        assert!(is_spawn_call("mcp__trek-orchestrate__start_thread") && is_spawn_call("mcp__trek-orchestrate__handoff") && is_spawn_call("mcp__trek-orchestrate__delegate_task"));
+        assert!(!is_spawn_call("mcp__trek-orchestrate__read_thread") && !is_spawn_call("mcp__other__handoff"));
+        assert_eq!(spawn_failed_label("mcp__trek-orchestrate__handoff"), Some("Couldn't hand off"));
+        assert_eq!(spawn_failed_label("mcp__trek-orchestrate__start_thread"), Some("Couldn't start a thread"));
+        assert_eq!(spawn_failed_label("mcp__trek-orchestrate__list_threads"), None);
     }
 
     #[test]

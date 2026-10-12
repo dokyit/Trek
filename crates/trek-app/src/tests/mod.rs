@@ -24,6 +24,7 @@ mod inbox;
 mod keys;
 mod lifecycle;
 mod limits;
+mod lineage;
 mod long_answers;
 mod look;
 mod mcp;
