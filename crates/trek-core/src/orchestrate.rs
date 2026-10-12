@@ -15,6 +15,9 @@ pub const MAX_RUNNING: usize = 4;
 /// consultants over every round of a discussion, and a stop to an agent that keeps on starting
 /// them.
 pub const MAX_PER_REQUEST: usize = MAX_RUNNING * DISCUSS_ROUNDS;
+/// Top-level threads one thread may start (`start_thread`) between two messages from the user:
+/// a stop to an agent that keeps on handing work off. Counted apart from sub-agents.
+pub const MAX_THREADS_PER_REQUEST: usize = 4;
 /// What a sub-agent's row says when Trek quit while it ran.
 pub const CUT_OFF: &str = "Trek quit before it finished.";
 /// The longest answer `task_result` returns (and `delegate_task` with `wait`).
@@ -34,6 +37,25 @@ pub fn task_row(child: &str) -> String {
 /// The sub-agent a transcript row stands for.
 pub fn task_of_row(id: &str) -> Option<&str> {
     id.strip_prefix(TASK_ROW).filter(|c| !c.is_empty())
+}
+
+/// Transcript rows for threads an agent handed work to (`start_thread`) carry ids of this form,
+/// with the new thread's id after it. They're not sub-agent rows: the thread is top-level.
+pub const THREAD_ROW: &str = "trek-thread:";
+
+pub fn thread_row(thread: &str) -> String {
+    format!("{THREAD_ROW}{thread}")
+}
+
+/// The thread a hand-off row stands for.
+pub fn thread_of_row(id: &str) -> Option<&str> {
+    id.strip_prefix(THREAD_ROW).filter(|c| !c.is_empty())
+}
+
+/// The `trek://` link that opens thread `id` (`deep_link` handles it): what `start_thread`
+/// returns, and a hand-off row's output holds.
+pub fn thread_link(thread: &str) -> String {
+    format!("trek://thread/{thread}")
 }
 
 /// What a sub-agent may do.
@@ -71,6 +93,17 @@ pub fn child_prompt(mode: Mode, prompt: &str) -> String {
         Mode::Implement => "You're a sub-agent started by another coding agent, through Trek, to do one task in this folder. Do it, check it works, and keep to the task. Your final message goes back to that agent as your report, so make it complete on its own: what you changed (with file paths), how you checked it, and anything left open.",
     };
     format!("{frame}\n\n<task>\n{}\n</task>", prompt.trim())
+}
+
+/// The first message of a thread an agent handed work to (`start_thread`): its task, framed so
+/// it knows it answers the user — the agent that wrote the brief isn't watching and gets no
+/// report. Advising, it works read-only, as a consulting sub-agent does.
+pub fn handoff_prompt(mode: Mode, from: &str, prompt: &str) -> String {
+    let read_only = match mode {
+        Mode::Advise => " Work read-only: read the code, search and reason, but don't edit files or run anything that changes them (any such request is declined).",
+        Mode::Implement => "",
+    };
+    format!("The user handed this to you from the thread “{from}”; it isn't watching this one, so finish the job and report here.{read_only}\n\n<task>\n{}\n</task>", prompt.trim())
 }
 
 /// A sub-agent's answer: its last message in its last turn, after the plan it offered (advising
@@ -223,10 +256,16 @@ pub fn is_delegate_call(title: &str) -> bool {
     is_ours(title, "delegate_task")
 }
 
+/// Whether an agent's tool row is a call to Trek's `start_thread`.
+pub fn is_start_thread_call(title: &str) -> bool {
+    is_ours(title, "start_thread")
+}
+
 /// A readable title for a row of one of Trek's other orchestration tools.
 pub fn tool_label(title: &str) -> Option<&'static str> {
     [
         ("list_models", "Listed the models"),
+        ("start_thread", "Started a thread"),
         ("task_status", "Checked on a sub-agent"),
         ("task_result", "Read a sub-agent's answer"),
         ("cancel_task", "Stopped a sub-agent"),
@@ -583,6 +622,11 @@ mod tests {
         assert_eq!(task_of_row(&task_row("abc")), Some("abc"));
         assert_eq!(task_of_row("toolu_1"), None);
         assert_eq!(task_of_row(TASK_ROW), None);
+        assert_eq!(thread_of_row(&thread_row("abc")), Some("abc"));
+        assert_eq!(thread_of_row(&task_row("abc")), None, "a sub-agent's row isn't a thread's");
+        assert_eq!(task_of_row(&thread_row("abc")), None, "nor the other way");
+        assert_eq!(thread_of_row(THREAD_ROW), None);
+        assert_eq!(thread_link("abc"), "trek://thread/abc");
     }
 
     #[test]
@@ -623,6 +667,13 @@ mod tests {
         assert!(!is_delegate_call("delegate_task"), "a bare name could be any server's");
         assert!(!is_delegate_call("mcp__t3-code__delegate_task"), "another server's tool of the same name");
         assert!(!is_delegate_call("Subagent"));
+        assert!(is_start_thread_call("mcp__trek-orchestrate__start_thread"));
+        assert!(is_start_thread_call("trek-orchestrate_start_thread"), "OpenCode's naming");
+        assert!(!is_start_thread_call("start_thread"), "a bare name could be any server's");
+        assert!(!is_start_thread_call("mcp__t3-code__start_thread"), "another server's tool of the same name");
+        assert!(!is_delegate_call("mcp__trek-orchestrate__start_thread"));
+        assert!(!is_start_thread_call("mcp__trek-orchestrate__delegate_task"));
+        assert_eq!(tool_label("mcp__trek-orchestrate__start_thread"), Some("Started a thread"));
         assert_eq!(tool_label("mcp__trek-orchestrate__task_status"), Some("Checked on a sub-agent"));
         assert_eq!(tool_label("trek-orchestrate_cancel_task"), Some("Stopped a sub-agent"));
         assert_eq!(tool_label("cancel_task"), None);
