@@ -18,6 +18,11 @@ const SETTLE: Duration = Duration::from_millis(500);
 /// How much of the window must be on its display, and its top edge on it, for it to go back
 /// there: enough of the title bar to grab it by.
 const MIN_ON_SCREEN: (f32, f32) = (120., 40.);
+/// The smallest the main window can be made. The height fits a 1366×768 laptop at 150 % scaling
+/// with the taskbar showing: the screen is 512 logical pixels high, the 48 px taskbar takes 32 of
+/// them, 480 are left (520 hung 8 px off the bottom there).
+pub const MAIN_MIN_WIDTH_PX: f32 = 760.;
+pub const MAIN_MIN_HEIGHT_PX: f32 = 480.;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Placement {
@@ -148,7 +153,7 @@ pub fn remember(window: &Window, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's prelude has a `test` attribute of its own.
-    use super::{Placement, file, load, restore, save};
+    use super::{MAIN_MIN_HEIGHT_PX, MAIN_MIN_WIDTH_PX, Placement, file, load, restore, save};
     use gpui_kit::{Bounds, DisplayId, Pixels, Size, WindowBounds, point, px, size};
 
     fn displays() -> Vec<(String, DisplayId, Bounds<Pixels>)> {
@@ -164,7 +169,16 @@ mod tests {
     }
 
     fn min_size() -> Size<Pixels> {
-        size(px(760.), px(520.))
+        size(px(MAIN_MIN_WIDTH_PX), px(MAIN_MIN_HEIGHT_PX))
+    }
+
+    /// 1366×768 at 150 % with Windows's 48 px taskbar: 512 logical pixels high, 32 of them the
+    /// taskbar. The smallest window must fit what's left, or its bottom edge is off the screen.
+    #[test]
+    fn the_smallest_window_fits_a_small_laptop_screen_at_150_percent() {
+        let usable_height = (768. - 48.) / 1.5;
+        assert!(MAIN_MIN_HEIGHT_PX <= usable_height, "{MAIN_MIN_HEIGHT_PX} is taller than the {usable_height} available");
+        assert!(MAIN_MIN_WIDTH_PX <= 1366. / 1.5);
     }
 
     #[test]

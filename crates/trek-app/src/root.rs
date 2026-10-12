@@ -691,7 +691,7 @@ fn launch_size() -> Option<Size<Pixels>> {
 /// `focus: false` opens it behind other apps' windows and leaves keyboard focus where it is (a
 /// launch in the background).
 pub fn open_main(workspace: Entity<Workspace>, focus: bool, cx: &mut App) -> anyhow::Result<()> {
-    let min = size(px(760.), px(520.));
+    let min = size(px(crate::window_place::MAIN_MIN_WIDTH_PX), px(crate::window_place::MAIN_MIN_HEIGHT_PX));
     // Where it was left, unless a size is asked for (or it's a capture run, which wants the same
     // window every time).
     let (display_id, window_bounds) = match launch_size() {
