@@ -866,7 +866,8 @@ fn symbol(name: &str) -> Option<(&'static str, Class, bool)> {
         "mapsto" => upright("↦", Rel),
         "uparrow" => upright("↑", Rel),
         "downarrow" => upright("↓", Rel),
-        "mid" => upright("∣", Rel),
+        // Inter has no U+2223; the ASCII bar is the same mark and doesn't fall back.
+        "mid" => upright("|", Rel),
         "nmid" => upright("∤", Rel),
         "parallel" => upright("∥", Rel),
         "perp" => upright("⊥", Rel),
