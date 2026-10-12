@@ -4,6 +4,9 @@
 //! the phone matches against the Mac it paired with; the connection is still TLS pinned to this
 //! Mac's certificate, so a record that lies gets nowhere.
 
+// Only a Mac announces itself (DNSServiceRegister); elsewhere the record is built for the tests.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
 /// The service type phones browse for.
 pub const SERVICE: &str = "_trek._tcp";
 
