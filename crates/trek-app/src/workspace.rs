@@ -3447,11 +3447,12 @@ impl Workspace {
     }
 
     /// What a new session is told besides its messages (`SessionConfig::instructions`): Trek's
-    /// native visualization capability, the project's notes, and the recap Trek asks for at the
-    /// end of work while that's on and the session `recaps` (it can change things).
+    /// native visualization and live page capabilities, the project's notes, and the recap Trek
+    /// asks for at the end of work while that's on and the session `recaps` (it can change things).
     pub(crate) fn session_notes(&self, project: Option<&std::path::Path>, cwd: &std::path::Path, recaps: bool) -> Option<String> {
         let recap = (recaps && self.settings.general.ask_recap).then(|| trek_core::changes::RECAP.to_string());
-        let notes: Vec<String> = std::iter::once(trek_core::visualization::AGENT_INSTRUCTIONS.to_string()).chain(self.project_notes(project, cwd)).chain(recap).collect();
+        let capabilities = [trek_core::visualization::AGENT_INSTRUCTIONS, trek_core::page::AGENT_INSTRUCTIONS].map(str::to_string);
+        let notes: Vec<String> = capabilities.into_iter().chain(self.project_notes(project, cwd)).chain(recap).collect();
         (!notes.is_empty()).then(|| notes.join("\n\n"))
     }
 
