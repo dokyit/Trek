@@ -33,6 +33,17 @@ fn task_row(trek: &Trek, cx: &TestAppContext, parent: &str, child: &str) -> (Too
         .expect("a row for the sub-agent")
 }
 
+/// The hand-off row in `caller`'s transcript: the thread it stands for, (status, output).
+fn thread_row(trek: &Trek, cx: &TestAppContext, caller: &str) -> (String, ToolStatus, String) {
+    trek.items(cx, caller)
+        .into_iter()
+        .find_map(|i| match i {
+            Item::Tool { id, status, output, .. } => trek_core::orchestrate::thread_of_row(&id).map(|t| (t.to_string(), status, output)),
+            _ => None,
+        })
+        .expect("a row for the handed-off thread")
+}
+
 async fn wait_task(trek: &Trek, cx: &mut TestAppContext, child: &str, want: TaskState) {
     let c = child.to_string();
     trek.wait(cx, &format!("the sub-agent to be {want:?}"), move |ws| ws.task_state(&c) == want).await;
@@ -708,5 +719,105 @@ fn a_sub_agent_waiting_on_an_approval_shows_on_its_parent_everywhere() {
         assert_eq!(trek.read(cx, |ws, _| ws.needs_you_count()), 0);
         trek.render(cx);
         assert!(!trek.visible(cx, format!("review-needs-{id}")));
+    });
+}
+
+#[test]
+fn an_agent_can_hand_work_to_a_thread_of_its_own() {
+    run(async |cx| {
+        let trek = open(cx);
+        // A titled caller: the thread's name goes in the hand-off note, and a name made of the
+        // script's words ("mock:handoff …") would itself read as a script to the new thread.
+        let id = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| ws.send_to(&id, "mock:handoff mock:long 5s".into(), vec![], cx));
+        trek.wait(cx, "the new thread's row in the caller", |ws| {
+            ws.live.get(&id).is_some_and(|l| l.items.iter().any(|i| matches!(i, Item::Tool { id, .. } if trek_core::orchestrate::thread_of_row(id).is_some())))
+        })
+        .await;
+        // It ran at once: still on its first turn when the caller's call answered.
+        let (handed, status, output) = thread_row(&trek, cx, &id);
+        assert_eq!(trek.run_state(cx, &handed), RunState::Working);
+        assert_eq!(status, ToolStatus::Done, "the call has done its work already");
+        assert!(output.contains(&format!("trek://thread/{handed}")), "its output is the link: {output}");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // A new top-level thread: no parent, the caller's folder, worktree, project and agent.
+        let caller = trek.read(cx, |ws, _| ws.thread(&id).cloned()).unwrap();
+        let t = trek.read(cx, |ws, _| ws.thread(&handed).cloned()).expect("the new thread");
+        assert_eq!(t.parent_id, None, "it's the user's own, no sub-agent");
+        assert_eq!(t.title, "Handed off");
+        assert_eq!((t.agent.clone(), t.project_id.clone(), t.cwd.clone(), t.worktree.clone()), (caller.agent.clone(), caller.project_id.clone(), caller.cwd.clone(), caller.worktree.clone()));
+        // The sidebar lists it like a thread the user made.
+        assert!(trek.read(cx, |ws, _| ws.sections().iter().any(|(_, ts)| ts.iter().any(|t| t.id == handed))), "a row of its own, in the sidebar");
+        assert_eq!(children(&trek, cx, &id), Vec::<String>::new(), "it isn't a sub-agent of the caller");
+        // Its first message is the task, framed as a hand-off: it reports to the user, not back.
+        let asked = trek.items(cx, &handed).into_iter().find_map(|i| if let Item::User { text, .. } = i { Some(text) } else { None }).unwrap();
+        assert!(asked.contains("isn't watching this one") && asked.contains("<task>\nmock:long 5s\n</task>"), "{asked}");
+        // The caller's transcript shows the thread's row, and its call folded away; the answer
+        // has the link.
+        let rows = trek.rows(cx);
+        assert!(rows.iter().any(|r| r.contains("subagent:") && r.contains("Handed off")), "{rows:?}");
+        assert!(!rows.iter().any(|r| r.contains("group:")), "{rows:?}");
+        assert!(trek.answers(cx, &id).contains(&format!("Started: trek://thread/{handed}")), "{}", trek.answers(cx, &id));
+        // It ends, and the caller isn't woken: it reports to nobody.
+        trek.wait_done(cx, &handed, RunState::Idle).await;
+        assert!(!trek.items(cx, &id).iter().any(|i| matches!(i, Item::User { text, .. } if trek_core::orchestrate::is_wake(text))), "the caller wasn't woken");
+        assert!(trek.answers(cx, &handed).contains("The full suite passed"), "it ran the task: {}", trek.answers(cx, &handed));
+    });
+}
+
+#[test]
+fn a_fifth_thread_in_one_request_is_refused() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        let params = || json!({ "title": "One more", "prompt": "mock:long 30s" });
+        let mut started = vec![];
+        for _ in 0..trek_core::orchestrate::MAX_THREADS_PER_REQUEST {
+            started.push(trek.update(cx, |ws, cx| ws.start_handoff(&id, &params(), cx)).unwrap());
+        }
+        let err = trek.update(cx, |ws, cx| ws.start_handoff(&id, &params(), cx)).unwrap_err();
+        assert!(err.contains("4"), "{err}");
+        // A new message from the user lifts it: the count is per request.
+        trek.update(cx, |ws, _cx| {
+            ws.live.get_mut(&id).unwrap().items.push(Item::User { text: "go on".into(), images: vec![], at: None, resume: None, aside: false });
+        });
+        started.push(trek.update(cx, |ws, cx| ws.start_handoff(&id, &params(), cx)).unwrap());
+        for t in &started {
+            trek.update(cx, |ws, cx| ws.interrupt(t, cx));
+        }
+    });
+}
+
+#[test]
+fn an_advising_caller_starts_only_advising_threads() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        let advisor = trek.update(cx, |ws, cx| ws.delegate(&id, &json!({ "title": "Look it over", "prompt": "mock:long 30s" }), cx)).unwrap();
+        assert!(trek.read(cx, |ws, _| ws.advising(&advisor)), "advising by default, still on its task");
+        let err = trek.update(cx, |ws, cx| ws.start_handoff(&advisor, &json!({ "title": "Do it", "prompt": "x", "mode": "implement" }), cx)).unwrap_err();
+        assert!(err.contains("read-only") && err.contains("\"advise\""), "{err}");
+        let started = trek.update(cx, |ws, cx| ws.start_handoff(&advisor, &json!({ "title": "Read", "prompt": "mock:long 30s", "mode": "advise" }), cx)).unwrap();
+        assert!(trek.read(cx, |ws, _| ws.advising(&started)), "it works read-only, as an advising sub-agent");
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+        trek.update(cx, |ws, cx| ws.interrupt(&started, cx));
+    });
+}
+
+#[test]
+fn a_handed_off_thread_can_run_in_a_worktree() {
+    run(async |cx| {
+        let trek = open(cx);
+        crate::tests::worktrees::make_repo(&trek, cx);
+        let id = trek.quiet_thread(cx);
+        let handed = trek.update(cx, |ws, cx| ws.start_handoff(&id, &json!({ "title": "In a worktree", "prompt": "mock:long 2s", "worktree": true }), cx)).unwrap();
+        trek.wait_done(cx, &handed, RunState::Idle).await;
+        let t = trek.read(cx, |ws, _| ws.thread(&handed).cloned()).unwrap();
+        let caller = trek.read(cx, |ws, _| ws.thread(&id).cloned()).unwrap();
+        let wt = t.worktree.expect("a worktree");
+        assert_eq!(t.cwd.as_ref(), Some(&wt.path));
+        assert_eq!(t.project_id, caller.project_id, "the caller's project, in its own worktree");
+        assert!(wt.path.join(".git").exists(), "the worktree was made");
+        assert!(wt.path.join(".env").exists(), "files it copies");
     });
 }

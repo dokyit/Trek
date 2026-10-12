@@ -274,7 +274,7 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "delegate_task",
-            "Start a sub-agent: a child thread in Trek that does one task with the agent, model and effort you choose (any that list_models offers, from any provider), in this thread's folder. It sees only the prompt you give it, not this conversation, so make the prompt self-contained: the goal, the files that matter, what you already know and what you want back. mode \"advise\" (the default) runs it read-only, to review, research or recommend; it can't change files. mode \"implement\" lets it change files, with this thread's access level. wait=true blocks until it finishes and returns its final answer (after timeout_seconds it returns its id with status \"running\" instead). wait=false returns its id at once; when it finishes Trek sends you its result in a message, so end your turn rather than polling, or collect it in this turn with task_result wait=true. Each call starts a new sub-agent: for another round with the same model, call delegate_task again with the brief, the findings so far and any open objections. The user sees every sub-agent inline with its model and status, and can open it.",
+            "Start a sub-agent: a child thread in Trek that does one task with the agent, model and effort you choose (any that list_models offers, from any provider), in this thread's folder. It sees only the prompt you give it, not this conversation, so make the prompt self-contained: the goal, the files that matter, what you already know and what you want back. mode \"advise\" (the default) runs it read-only, to review, research or recommend; it can't change files. mode \"implement\" lets it change files, with this thread's access level. wait=true blocks until it finishes and returns its final answer (after timeout_seconds it returns its id with status \"running\" instead). wait=false returns its id at once; when it finishes Trek sends you its result in a message, so end your turn rather than polling, or collect it in this turn with task_result wait=true. Each call starts a new sub-agent: for another round with the same model, call delegate_task again with the brief, the findings so far and any open objections. The user sees every sub-agent inline with its model and status, and can open it. For work the user should own in a thread of its own, or that should outlive this turn, use start_thread instead: it reports to nobody.",
             json!({
                 "type": "object",
                 "properties": {
@@ -286,6 +286,23 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
                     "mode": { "type": "string", "enum": ["advise", "implement"], "description": "advise: read-only review or research (default). implement: may change files." },
                     "wait": { "type": "boolean", "description": "Wait for the result (true) or return at once and be woken with it (false, the default)." },
                     "timeout_seconds": { "type": "integer", "minimum": 10, "maximum": 1800, "description": "With wait=true, how long to wait before returning \"running\" (default 600; some agents' tool calls can't wait that long, and get \"running\" sooner). The sub-agent keeps going either way." }
+                },
+                "required": ["title", "prompt"]
+            }),
+        ),
+        (
+            "start_thread",
+            "Start a new top-level thread of the user's: a hand-off — work the user should own in a thread of its own, a follow-up, or something that outlives this turn. It isn't a sub-agent: it reports to nobody, you are not woken with its result, and the user watches it like any thread they made. It runs its first message at once, in this thread's folder and worktree (or a fresh worktree of the project with worktree=true). It sees only the prompt you give it, not this conversation, so make the prompt self-contained: the goal, the files that matter, what you already know. mode \"implement\" (the default) lets it change files, with this thread's access level; mode \"advise\" runs it read-only. Returns the thread's id, title and trek:// link. At most 4 between two messages from the user. For a result that comes back to you, use delegate_task.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "A few words naming the thread, shown to the user, e.g. \"Write the migration guide\"." },
+                    "prompt": { "type": "string", "description": "The thread's complete first message." },
+                    "agent": { "type": "string", "description": "Agent key from list_models, e.g. \"codex\" or \"claude-code\". Defaults to this thread's agent." },
+                    "model": { "type": "string", "description": "Model id or name from list_models. Defaults to this thread's model (the agent's own default when the thread is another agent)." },
+                    "effort": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "Reasoning effort; clamped to what the model supports. Defaults to this thread's effort." },
+                    "mode": { "type": "string", "enum": ["advise", "implement"], "description": "advise: read-only review or research. implement: may change files (default; it's the user's thread now)." },
+                    "worktree": { "type": "boolean", "description": "Start it in a new worktree of the project (true), or in this thread's folder and worktree (false, the default)." }
                 },
                 "required": ["title", "prompt"]
             }),
@@ -360,7 +377,7 @@ mod tests {
     fn tool_schemas_are_objects_with_their_required_fields() {
         let tools = tools();
         let names: Vec<&str> = tools.iter().map(|t| t.0).collect();
-        assert_eq!(names, ["list_models", "delegate_task", "task_status", "task_result", "cancel_task"]);
+        assert_eq!(names, ["list_models", "delegate_task", "start_thread", "task_status", "task_result", "cancel_task"]);
         for (name, description, schema) in &tools {
             assert_eq!(schema["type"], "object", "{name}");
             assert!(description.len() > 40, "{name} says what it does");

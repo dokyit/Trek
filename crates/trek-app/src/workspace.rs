@@ -599,13 +599,24 @@ impl LiveThread {
         ended
     }
 
-    /// Append the rows of sub-agents started since, each after the agent's own call to
-    /// `delegate_task` (transcripts only grow at the end, and the call may reach Trek before the
-    /// agent's report of it does). `flush`: the turn is over; whatever waits goes in now.
+    /// Append the rows of sub-agents and handed-off threads started since, each after the
+    /// agent's own call to `delegate_task`/`start_thread` (transcripts only grow at the end, and
+    /// the call may reach Trek before the agent's report of it does). `flush`: the turn is over;
+    /// whatever waits goes in now.
     pub(crate) fn place_task_rows(&mut self, flush: bool) {
         while !self.pending_rows.is_empty() {
-            let calls = self.items.iter().filter(|i| matches!(i, Item::Tool { title, status, .. } if trek_core::orchestrate::is_delegate_call(title) && *status != ToolStatus::Failed)).count();
-            let rows = self.items.iter().filter(|i| matches!(i, Item::Tool { id, .. } if trek_core::orchestrate::task_of_row(id).is_some())).count();
+            let calls = self
+                .items
+                .iter()
+                .filter(|i| {
+                    matches!(i, Item::Tool { title, status, .. } if (trek_core::orchestrate::is_delegate_call(title) || trek_core::orchestrate::is_start_thread_call(title)) && *status != ToolStatus::Failed)
+                })
+                .count();
+            let rows = self
+                .items
+                .iter()
+                .filter(|i| matches!(i, Item::Tool { id, .. } if trek_core::orchestrate::task_of_row(id).is_some() || trek_core::orchestrate::thread_of_row(id).is_some()))
+                .count();
             if !flush && calls <= rows {
                 return;
             }
@@ -1203,6 +1214,10 @@ pub struct Workspace {
     _ipc_calls: Option<Task<()>>,
     /// Sub-agents started this run, by thread id (`workspace::orchestrate`).
     pub delegations: HashMap<String, orchestrate::Delegation>,
+    /// Threads an agent started advising (`start_thread` mode "advise"), by thread id: they
+    /// work read-only while their first task runs. Entries go at its end — the user carrying on
+    /// in the thread isn't bound by how it was started.
+    advising_handoffs: HashSet<String>,
     /// Sub-agents' reports for parents that haven't heard them yet (kept in the store too).
     wakes: HashMap<String, Vec<trek_core::orchestrate::Report>>,
     /// Reports for parents whose own turn the last quit cut off: the user picks those threads
@@ -1513,6 +1528,7 @@ impl Workspace {
             ipc: None,
             _ipc_calls: None,
             delegations: HashMap::new(),
+            advising_handoffs: HashSet::new(),
             wakes: HashMap::new(),
             parked: HashMap::new(),
             gathering: HashMap::new(),
@@ -4079,6 +4095,9 @@ impl Workspace {
             }
             // A sub-agent reports how its turn ended; a parent stopped by the user isn't woken.
             self.task_turn_ended(id, interrupted, cx);
+            // A thread an agent started advising is bound by that for its first task only: what
+            // the user asks of it next is the user's own.
+            self.advising_handoffs.remove(id);
             self.verification_turn_ended(id, !interrupted && !paused, cx);
             if interrupted {
                 self.forget_wakes(id);

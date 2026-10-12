@@ -1609,7 +1609,10 @@ impl ThreadView {
                 let has_output = !output.is_empty();
                 let subagent = title == "Subagent";
                 // Trek's own orchestration tools read as what they did; their arguments are noise.
-                let ours = orch::tool_label(&title).or_else(|| orch::is_delegate_call(&title).then_some("Couldn't start a sub-agent"));
+                let ours = (status == ToolStatus::Failed && orch::is_start_thread_call(&title))
+                    .then_some("Couldn't start a thread")
+                    .or_else(|| orch::tool_label(&title))
+                    .or_else(|| orch::is_delegate_call(&title).then_some("Couldn't start a sub-agent"));
                 let label = SharedString::from(match ours {
                     Some(l) => l.to_string(),
                     None if subagent => detail.clone(),
@@ -1705,7 +1708,7 @@ impl ThreadView {
                         .ghost()
                         .xsmall()
                         .icon(Icon::new(crate::assets::Lucide::SquareArrowOutUpRight).text_color(muted))
-                        .tooltip("Open the sub-agent's thread in a window")
+                        .tooltip("Open the thread in a window")
                         .on_click(move |_, _, cx| {
                             cx.stop_propagation();
                             crate::thread_window::open(ws.clone(), &child, cx);
@@ -2387,7 +2390,10 @@ impl SubAgentRow {
             TaskState::Failed if !output.trim().is_empty() => format!("{} · {}", state.label(), orch::preview(output, 140)),
             _ => state.label().to_string(),
         };
-        if let Some(child) = orch::task_of_row(row_id) {
+        // A thread one of Trek's orchestration tools started: a sub-agent (`delegate_task`), or
+        // one of the user's own an agent handed work to (`start_thread`).
+        let child = orch::task_of_row(row_id).map(|c| (c, false)).or_else(|| orch::thread_of_row(row_id).map(|c| (c, true)));
+        if let Some((child, handed_off)) = child {
             let Some(t) = ws.thread(child) else {
                 // Its thread is gone (deleted, or archived on its own): what the row kept.
                 let state = if by_status == TaskState::Running { TaskState::Cancelled } else { by_status };
@@ -2411,6 +2417,8 @@ impl SubAgentRow {
                 }
                 other => with_error(other),
             };
+            // A handed-off thread is no sub-agent: the row says it's a thread of the user's.
+            let detail = if handed_off { format!("New thread · {detail}") } else { detail };
             return SubAgentRow {
                 agent: Some(t.agent.clone()),
                 label: format!("{}: {}", ws.model_label(t), t.title),
