@@ -197,7 +197,8 @@ pub fn streaming() -> TextViewMotion {
     TextViewMotion::default().with_stream_fade(Duration::from_millis(280)).with_stream_fade_stagger(Duration::from_millis(10)).with_stream_fade_easing(Easing::EaseOut)
 }
 
-/// `visualizations`: draw `trek-viz` blocks, and whether the text is still streaming in.
+/// `visualizations`: draw `trek-viz` blocks and run `trek-html` ones, and whether the text is
+/// still streaming in.
 fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, tone: Tone, visualizations: Option<bool>, cx: &App) -> TextView {
     let link_cwd = cwd.clone();
     let view = view.selectable(true)
@@ -223,8 +224,9 @@ fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixel
             }
         });
     // Liveness is read only when rendering, so the answer finishing doesn't reparse it.
+    // Interactive artifacts (`trek-html`) go where visualizations do.
     let view = match visualizations {
-        Some(live) => view.plugin(crate::visualization::VisualizationPlugin { live, size }),
+        Some(live) => view.plugin(crate::visualization::VisualizationPlugin { live, size }).plugin(crate::artifact::ArtifactPlugin { live, size }),
         None => view,
     };
     view

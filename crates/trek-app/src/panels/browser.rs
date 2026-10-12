@@ -721,8 +721,9 @@ fn extract_title(html: &str) -> Option<String> {
     (!title.is_empty()).then_some(title)
 }
 
-/// A web view's page as a PNG, WebView2 drawing it (the editor's previews, for `shots`).
-#[cfg(all(windows, feature = "shots"))]
+/// A web view's page as a PNG, WebView2 drawing it (the editor's previews for `shots`, and the
+/// snapshots interactive artifacts stand in with).
+#[cfg(windows)]
 pub(crate) fn capture_png(wv: &wry::WebView) -> async_channel::Receiver<Result<Vec<u8>, String>> {
     native::capture_png(wv)
 }
