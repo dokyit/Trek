@@ -21,6 +21,8 @@ final class MockHost: Backend {
     private var tick = 0
     private var notes = DemoMac.notes()
     private var settings = DemoMac.settings()
+    /// The visualizations thread's answer still being written: its item, and the text to come.
+    private var vizStream: (tid: String, id: String, text: String, rest: [String])?
     private let host = HostInfo(id: "demo-mac", name: "Tobias’s MacBook Pro", version: "0.3.2")
 
     let projects: [ProjectSummary] = [
@@ -106,6 +108,7 @@ final class MockHost: Backend {
             break
         case .subscribe(let tid, let afterSeq, let limit):
             subscribed.insert(tid)
+            if vizStream?.tid == tid { later(0.8) { [weak self] in self?.streamViz() } }
             let all = items[tid] ?? []
             let current = seq[tid] ?? 0
             if let after = afterSeq, after <= current, after >= (rewritten[tid] ?? 0) {
@@ -467,6 +470,23 @@ final class MockHost: Backend {
         }
     }
 
+    /// The visualizations thread's last answer arrives a few characters at a time, its chart
+    /// drawing in as it comes (and stopping part-way with `-TrekVizHold`).
+    private func streamViz() {
+        guard var s = vizStream, !s.rest.isEmpty else { return }
+        if let hold = DemoMac.vizHold, s.text.components(separatedBy: "```trek-viz\n").last?.count ?? 0 >= hold { return }
+        s.text += s.rest.removeFirst()
+        let done = s.rest.isEmpty
+        vizStream = done ? nil : s
+        put(s.tid, TItem(id: s.id, seq: 0, body: .assistant(text: s.text, streaming: !done)), keepID: true)
+        if done {
+            append(s.tid, .turnEnd(tookSecs: 9))
+            update(s.tid) { $0.runState = .idle; $0.activity = nil; $0.workingSince = nil }
+        } else {
+            later(0.09) { [weak self] in self?.streamViz() }
+        }
+    }
+
     /// The pinned thread keeps working: a step every few seconds, then it starts over.
     private func advanceWorkingThread() {
         let tid = "t-inbox"
@@ -782,6 +802,27 @@ final class MockHost: Backend {
             add(tid, .assistant(text: "Done, and the build is clean.", streaming: false))
             add(tid, .turnEnd(tookSecs: 64))
         }
+
+        // Native visualizations: one of each, one that won't draw, and one being written.
+        // (`-TrekVizKind line` makes it `t-viz-line`: the phone keeps each transcript it has seen.)
+        id = DemoMac.vizKind.map { "t-viz-\($0)" } ?? "t-viz"
+        let viz = DemoMac.vizThread()
+        threads.insert(t(id, "Draw this week's numbers", "p-trek", "claude-code", "claude-opus-5-5", viz.streamed == nil ? .idle : .working,
+                         section: .inbox, branch: "main", activity: viz.streamed == nil ? nil : "Writing the answer",
+                         since: viz.streamed == nil ? nil : 0, ago: 0), at: 2)
+        seq[id] = 0
+        items[id] = []
+        add(id, .user(text: "Show me one of each native visualization, so I can check how they draw on the phone.", images: 0), at: now - 2 * m)
+        if let gallery = viz.gallery { add(id, .assistant(text: gallery, streaming: false)) }
+        if let invalid = viz.invalid { add(id, .assistant(text: invalid, streaming: false)) }
+        add(id, .turnEnd(tookSecs: 38))
+        if let streamed = viz.streamed {
+            add(id, .user(text: "And one more, drawn as you write it.", images: 0), at: now - 10_000)
+            add(id, .assistant(text: streamed.seed, streaming: true))
+            vizStream = (id, items[id]!.last!.id, streamed.seed, DemoMac.tokens(streamed.rest))
+        }
+        // Its stream moves the seqs on each launch: a copy the phone kept from another is redrawn whole.
+        rewritten[id] = seq[id]
 
         // `-TrekBigThread 3000`: a thread as long as a real day's work, to measure with.
         let big = DemoMac.bigThreadSize
