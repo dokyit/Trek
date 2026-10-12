@@ -29,6 +29,7 @@ mod look;
 mod mcp;
 mod motion;
 mod orchestrate;
+mod page;
 mod palette;
 mod placement;
 mod preview;
