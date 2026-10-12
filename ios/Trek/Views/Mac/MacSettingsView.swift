@@ -20,7 +20,7 @@ struct MacSettingsView: View {
             }
         }
         .scrollContentBackground(.hidden)
-        .background(Trek.background)
+        .background(Trek.grouped)
         .navigationTitle("Mac settings")
         .navigationSubtitle(model.host?.name ?? "")
         .task { model.loadSettings() }
@@ -58,6 +58,7 @@ private struct MacSettingsForm: View {
             Text("New threads")
         } footer: {
             Text("New threads on the Mac and here start with this agent and model. Leave the model on the agent's default to follow whatever it recommends.")
+                .font(.ui(.footnote))
         }
 
         Section {
@@ -74,6 +75,7 @@ private struct MacSettingsForm: View {
             Text("Composer")
         } footer: {
             Text("Steer slips your message in at the agent's next step. Queue holds it until the turn ends. For messages sent on the Mac; this iPhone has its own under Follow-ups.")
+                .font(.ui(.footnote))
         }
 
         Section {
@@ -87,6 +89,7 @@ private struct MacSettingsForm: View {
             Text("Inbox")
         } footer: {
             Text("Read threads leave the inbox after this long. Threads waiting on you never settle on their own.")
+                .font(.ui(.footnote))
         }
 
         Section {
@@ -101,6 +104,7 @@ private struct MacSettingsForm: View {
             Text(s.fullAccess == true
                  ? "What new threads start with. Change it for any thread from its settings bar."
                  : "What new threads start with. Full access is locked: only your Mac can unlock it, in Settings › Permissions.")
+                .font(.ui(.footnote))
         }
 
         Section {
@@ -111,6 +115,7 @@ private struct MacSettingsForm: View {
             Text("Notifications on the Mac")
         } footer: {
             Text("When a turn finishes or an agent is waiting for your approval.")
+                .font(.ui(.footnote))
         }
 
         Section {
@@ -123,6 +128,7 @@ private struct MacSettingsForm: View {
             Text("Appearance on the Mac")
         } footer: {
             Text("This iPhone's own theme is under Appearance.")
+                .font(.ui(.footnote))
         }
     }
 
@@ -148,7 +154,7 @@ private struct AccessPicker: View {
                         HStack(spacing: 12) {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(a.label).foregroundStyle(Trek.foreground)
-                                Text(a.help).font(.footnote).foregroundStyle(Trek.muted)
+                                Text(a.help).font(.ui(.footnote)).foregroundStyle(Trek.muted)
                             }
                             Spacer()
                             if a == current {
@@ -162,10 +168,11 @@ private struct AccessPicker: View {
                 }
             } footer: {
                 Text("Change it for any thread from its settings bar.")
+                    .font(.ui(.footnote))
             }
         }
         .scrollContentBackground(.hidden)
-        .background(Trek.background)
+        .background(Trek.grouped)
         .navigationTitle("Hand-holding")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -200,7 +207,7 @@ struct PhoneNotificationsSection: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Tell my phone when a thread needs me")
                     Text("Also when one finishes or fails, through the free ntfy app")
-                        .font(.footnote)
+                        .font(.ui(.footnote))
                         .foregroundStyle(Trek.muted)
                 }
             }
@@ -213,17 +220,20 @@ struct PhoneNotificationsSection: View {
         } header: {
             Text("Notifications")
         } footer: {
-            if push.enabled {
-                Text("Away means no keyboard or mouse on your Mac for two minutes, or its screen locked. Tapping a notification opens the thread here.")
+            Group {
+                if push.enabled {
+                    Text("Away means no keyboard or mouse on your Mac for two minutes, or its screen locked. Tapping a notification opens the thread here.")
+                }
             }
+            .font(.ui(.footnote))
         }
 
         if push.enabled, !push.topic.isEmpty {
             Section {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Topic").font(.footnote).foregroundStyle(Trek.muted)
+                    Text("Topic").font(.ui(.footnote)).foregroundStyle(Trek.muted)
                     Text(push.topic)
-                        .font(.system(.subheadline, design: .monospaced))
+                        .font(.code(.subheadline))
                         .textSelection(.enabled)
                         .lineLimit(1)
                         .minimumScaleFactor(0.6)
@@ -255,6 +265,7 @@ struct PhoneNotificationsSection: View {
                 Text("Set up ntfy")
             } footer: {
                 Text("Keep the topic to yourself: anyone who has it can read what's sent.")
+                    .font(.ui(.footnote))
             }
 
             Section {
@@ -272,6 +283,7 @@ struct PhoneNotificationsSection: View {
                 Text("ntfy server")
             } footer: {
                 Text("The free ntfy.sh, or your own server.")
+                    .font(.ui(.footnote))
             }
             .onAppear { server = push.server }
             .onChange(of: push.server) { server = push.server }
@@ -286,11 +298,11 @@ struct PhoneNotificationsSection: View {
     private func step(_ n: Int, _ text: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text("\(n)")
-                .font(.caption.weight(.bold).monospacedDigit())
+                .font(.ui(.caption).weight(.bold).monospacedDigit())
                 .foregroundStyle(Trek.foreground)
                 .frame(width: 20, height: 20)
                 .background(Trek.foreground.opacity(0.08), in: Circle())
-            Text(text).font(.subheadline)
+            Text(text).font(.ui(.subheadline))
         }
     }
 

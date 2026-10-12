@@ -57,7 +57,7 @@ struct ChangesCard: View {
                     LineCounts(added: changes.added, removed: changes.removed, quiet: false)
                 }
             }
-            .font(.caption.weight(.medium))
+            .font(.ui(.caption).weight(.medium))
             .foregroundStyle(Trek.muted)
             .lineLimit(1)
             .layoutPriority(1)
@@ -97,7 +97,7 @@ struct ChangesCard: View {
     private func headerLabel(_ title: String, symbol: String, labelled: Bool) -> some View {
         HStack(spacing: 4) {
             Image(systemName: symbol).font(.system(size: 11, weight: .semibold))
-            if labelled { Text(title).font(.caption.weight(.semibold)) }
+            if labelled { Text(title).font(.ui(.caption).weight(.semibold)) }
         }
         .foregroundStyle(Trek.foreground.opacity(0.85))
         .fixedSize()
@@ -127,7 +127,7 @@ struct ChangesCard: View {
                 }
                 Spacer(minLength: 0)
             }
-            .font(.footnote)
+            .font(.ui(.footnote))
             .foregroundStyle(Trek.muted)
             .padding(.horizontal, 8)
             .frame(minHeight: 32)
@@ -144,7 +144,7 @@ struct ChangesCard: View {
             HStack(spacing: 8) {
                 FileBadge(path: f.path, size: 16)
                 Text(f.name)
-                    .font(.subheadline)
+                    .font(.ui(.subheadline))
                     .strikethrough(f.status == .deleted)
                     .foregroundStyle(f.status == .deleted ? Trek.muted : Trek.foreground.opacity(0.92))
                     .lineLimit(1)
@@ -184,7 +184,7 @@ struct LineCounts: View {
             Text("/").foregroundStyle(Trek.muted.opacity(0.6))
             Text("−\(removed)").foregroundStyle(quiet && removed == 0 ? Trek.muted.opacity(0.6) : Trek.deletions)
         }
-        .font(.system(.caption, design: .monospaced))
+        .font(.code(.caption))
         .monospacedDigit()
         .fixedSize()
     }
@@ -196,7 +196,7 @@ struct FileLines: View {
 
     var body: some View {
         if file.binary == true {
-            Text("binary").font(.system(.caption, design: .monospaced)).foregroundStyle(Trek.muted).fixedSize()
+            Text("binary").font(.code(.caption)).foregroundStyle(Trek.muted).fixedSize()
         } else {
             LineCounts(added: file.added, removed: file.removed)
         }
@@ -231,7 +231,7 @@ struct FileTag: View {
 
     private func tag(_ text: String, _ color: Color) -> some View {
         Text(text)
-            .font(.caption2.weight(.medium))
+            .font(.ui(.caption2).weight(.medium))
             .foregroundStyle(color)
             .lineLimit(1)
             .truncationMode(.middle)

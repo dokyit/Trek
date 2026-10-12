@@ -83,10 +83,10 @@ private struct NoteRow: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(note.title).scaledFont(17, weight: .semibold).lineLimit(1)
                 Spacer(minLength: 8)
-                Text(When.short(note.modified)).font(.subheadline.monospacedDigit()).foregroundStyle(Trek.muted.opacity(0.8))
+                Text(When.short(note.modified)).font(.ui(.subheadline).monospacedDigit()).foregroundStyle(Trek.muted.opacity(0.8))
             }
             Text(note.preview.isEmpty ? "No more text" : note.preview)
-                .font(.subheadline)
+                .font(.ui(.subheadline))
                 .foregroundStyle(Trek.muted)
                 .lineLimit(2)
         }
@@ -448,9 +448,9 @@ private struct ConflictSheet: View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 6) {
                 Label("Changed on your Mac", systemImage: "exclamationmark.arrow.trianglehead.2.clockwise.rotate.90")
-                    .font(.title3.weight(.semibold))
+                    .font(.ui(.title3).weight(.semibold))
                 Text("This note was edited on your Mac after you opened it here. Here's the Mac's version, \(Resets.clock(theirs.modified)):")
-                    .font(.subheadline)
+                    .font(.ui(.subheadline))
                     .foregroundStyle(Trek.muted)
             }
             ScrollView {
@@ -472,7 +472,7 @@ private struct ConflictSheet: View {
             }
             .controlSize(.large)
             Text("Keep mine saves this iPhone's version over the Mac's.")
-                .font(.footnote)
+                .font(.ui(.footnote))
                 .foregroundStyle(Trek.muted)
                 .frame(maxWidth: .infinity)
         }

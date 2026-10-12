@@ -1,12 +1,14 @@
 import SwiftUI
 
 /// The phone's own appearance settings (Settings › Appearance), kept on the phone: theme, text
-/// size, motion and row density. `RootView` applies them app-wide.
+/// size, background art, motion and row density. `RootView` applies them app-wide.
 enum AppearanceKey {
     static let theme = "appearance"
     static let textSize = "textSize"
     static let calm = "reduceMotion"
     static let compact = "compactRows"
+    /// The ridge art behind the lists and the new-thread screen: off unless chosen, as on the Mac.
+    static let backgroundArt = "backgroundArt"
 }
 
 /// Theme names as the Mac has them: Night is dark, Paper is light.
@@ -15,7 +17,7 @@ enum ThemeChoice: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .system: "System"
+        case .system: "Match iPhone"
         case .dark: "Night"
         case .light: "Paper"
         }
@@ -56,6 +58,40 @@ enum TextSizeChoice: String, CaseIterable, Identifiable {
     }
 }
 
+/// The app icons, as the Mac offers them (its Settings › Appearance › App icon): the alternatives
+/// are `AppIcon-Night` and `AppIcon-Glass` in the asset catalog (ios/scripts/app-icons.sh).
+enum AppIconChoice: String, CaseIterable, Identifiable {
+    case ember, night, glass
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .ember: "Ember"
+        case .night: "Night"
+        case .glass: "Glass"
+        }
+    }
+    /// The name `setAlternateIconName` takes; nil for the primary icon.
+    var iconName: String? {
+        switch self {
+        case .ember: nil
+        case .night: "AppIcon-Night"
+        case .glass: "AppIcon-Glass"
+        }
+    }
+    /// A small copy of it to pick from.
+    var preview: String {
+        switch self {
+        case .ember: "IconEmber"
+        case .night: "IconNight"
+        case .glass: "IconGlass"
+        }
+    }
+
+    static func of(_ iconName: String?) -> AppIconChoice {
+        allCases.first { $0.iconName == iconName } ?? .ember
+    }
+}
+
 extension EnvironmentValues {
     /// Trek's own "Reduce motion": the hiker stands still, nothing shimmers or breathes. The
     /// system setting does the same; this one is for Trek alone.
@@ -90,7 +126,8 @@ private struct ScaledFont: ViewModifier {
     @Environment(\.dynamicTypeSize) private var dynamicType
 
     func body(content: Content) -> some View {
-        content.font(.system(size: TextScale.factor(dynamicType, style: style) * size, weight: weight, design: design))
+        let s = TextScale.factor(dynamicType, style: style) * size
+        content.font(design == .monospaced ? .code(size: s, weight: weight) : .ui(size: s, weight: weight))
     }
 }
 

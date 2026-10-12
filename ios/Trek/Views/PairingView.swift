@@ -23,11 +23,11 @@ struct PairingView: View {
                             .frame(width: 84, height: 72)
                             .shadow(color: Color(hex: 0xFF8A3D).opacity(0.5), radius: 24)
                         Text("Trek")
-                            .font(.system(size: 40, weight: .bold))
+                            .font(.ui(size: 40, weight: .bold))
                             .tracking(-0.8)
                         Text("Every agent. One trail.\nKeep your agents moving from anywhere.")
                             .multilineTextAlignment(.center)
-                            .font(.body)
+                            .font(.ui(.body))
                             .foregroundStyle(Trek.muted)
                     }
                     .padding(.top, 70)
@@ -39,7 +39,7 @@ struct PairingView: View {
                             scanning = true
                         } label: {
                             Label("Scan pairing code", systemImage: "qrcode.viewfinder")
-                                .font(.body.weight(.semibold))
+                                .font(.ui(.body).weight(.semibold))
                                 .foregroundStyle(Trek.background)
                                 .frame(maxWidth: .infinity)
                         }
@@ -49,7 +49,7 @@ struct PairingView: View {
 
                         if let error = model.pairingError {
                             Label(error, systemImage: "exclamationmark.circle.fill")
-                                .font(.footnote)
+                                .font(.ui(.footnote))
                                 .foregroundStyle(Trek.failed)
                                 .multilineTextAlignment(.leading)
                         }
@@ -67,7 +67,7 @@ struct PairingView: View {
                         }
 
                         Button("Explore the demo") { model.startDemo() }
-                            .font(.subheadline.weight(.medium))
+                            .font(.ui(.subheadline).weight(.medium))
                             .foregroundStyle(Trek.muted)
                             .padding(.top, 6)
                     }
@@ -76,7 +76,7 @@ struct PairingView: View {
                 .padding(.bottom, 40)
             }
             .scrollBounceBehavior(.basedOnSize)
-            .background { RidgeBackdrop(height: 560) }
+            .background { RidgeBackdrop(height: 560, always: true) }
 
             if model.pairing {
                 Color.black.opacity(0.2).ignoresSafeArea()
@@ -115,13 +115,13 @@ struct PairingView: View {
     private func step(_ n: Int, _ title: String, _ detail: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Text("\(n)")
-                .font(.footnote.weight(.bold).monospacedDigit())
+                .font(.ui(.footnote).weight(.bold).monospacedDigit())
                 .foregroundStyle(Trek.ember)
                 .frame(width: 24, height: 24)
                 .background(Trek.ember.opacity(0.14), in: Circle())
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.subheadline.weight(.semibold))
-                Text(detail).font(.footnote).foregroundStyle(Trek.muted)
+                Text(title).font(.ui(.subheadline).weight(.semibold))
+                Text(detail).font(.ui(.footnote)).foregroundStyle(Trek.muted)
             }
         }
     }
@@ -137,17 +137,17 @@ struct PairingView: View {
             TextField("Pairing code, e.g. K7Q2-9XMV", text: $code)
                 .textInputAutocapitalization(.characters)
                 .autocorrectionDisabled()
-                .font(.body.monospaced())
+                .font(.code(.body))
             Divider()
             HStack(spacing: 8) {
                 TextField("Fingerprint, e.g. ABCD-1234-EF56-7890", text: $fingerprint)
                     .textInputAutocapitalization(.characters)
                     .autocorrectionDisabled()
-                    .font(.body.monospaced())
-                Image(systemName: "lock.fill").font(.footnote).foregroundStyle(Trek.muted)
+                    .font(.code(.body))
+                Image(systemName: "lock.fill").font(.ui(.footnote)).foregroundStyle(Trek.muted)
             }
             Text(fingerprintHint)
-                .font(.caption)
+                .font(.ui(.caption))
                 .foregroundStyle(fingerprintInvalid ? Trek.failed : Trek.muted)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Button {
@@ -212,23 +212,23 @@ struct PairingConfirmSheet: View {
                 .padding(.top, 30)
             VStack(spacing: 6) {
                 Text("Pair with \(macName)?")
-                    .font(.title2.weight(.semibold))
+                    .font(.ui(.title2).weight(.semibold))
                     .multilineTextAlignment(.center)
                 Text(link.address)
-                    .font(.subheadline.monospaced())
+                    .font(.code(.subheadline))
                     .foregroundStyle(Trek.muted)
             }
 
             if let fp = link.fingerprint {
                 VStack(spacing: 6) {
                     HStack(spacing: 8) {
-                        Image(systemName: "lock.fill").font(.subheadline).foregroundStyle(Trek.done)
+                        Image(systemName: "lock.fill").font(.ui(.subheadline)).foregroundStyle(Trek.done)
                         Text(Fingerprint.short(fp))
-                            .font(.system(.title2, design: .monospaced).weight(.semibold))
+                            .font(.code(.title2).weight(.semibold))
                             .tracking(1)
                     }
                     Text("Check that your Mac shows this fingerprint beside the code.")
-                        .font(.footnote)
+                        .font(.ui(.footnote))
                         .foregroundStyle(Trek.muted)
                         .multilineTextAlignment(.center)
                 }
@@ -238,10 +238,10 @@ struct PairingConfirmSheet: View {
             } else {
                 VStack(alignment: .leading, spacing: 6) {
                     Label("Unencrypted connection", systemImage: "lock.open.fill")
-                        .font(.subheadline.weight(.semibold))
+                        .font(.ui(.subheadline).weight(.semibold))
                         .foregroundStyle(Trek.approval)
                     Text(PairingView.plainWarning)
-                        .font(.footnote)
+                        .font(.ui(.footnote))
                         .foregroundStyle(Trek.foreground.opacity(0.8))
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -253,7 +253,7 @@ struct PairingConfirmSheet: View {
 
             if let replacing {
                 Text("This replaces the pairing with \(replacing).")
-                    .font(.footnote)
+                    .font(.ui(.footnote))
                     .foregroundStyle(Trek.muted)
             }
 

@@ -1,12 +1,18 @@
 import SwiftUI
 
+enum SettingsRoute: Hashable {
+    case appearance
+}
+
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @State private var confirmUnpair = false
+    @State private var path: [SettingsRoute] = Launch.tab == "appearance" ? [.appearance] : []
+    @AppStorage(AppearanceKey.theme) private var theme = ThemeChoice.system.rawValue
 
     var body: some View {
         @Bindable var model = model
-        NavigationStack {
+        NavigationStack(path: $path) {
             Form {
                 Section {
                     HStack(spacing: 14) {
@@ -16,11 +22,11 @@ struct SettingsView: View {
                             .frame(width: 46, height: 46)
                             .background(Trek.foreground.opacity(0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(model.host?.name ?? PairedMac.load()?.hostName ?? "Your Mac").font(.headline)
+                            Text(model.host?.name ?? PairedMac.load()?.hostName ?? "Your Mac").font(.ui(.headline))
                             HStack(spacing: 6) {
                                 Circle().fill(statusColor).frame(width: 7, height: 7)
                                 Text(model.mode == .demo ? "Demo · sample data" : model.connection.label)
-                                    .font(.subheadline).foregroundStyle(Trek.muted)
+                                    .font(.ui(.subheadline)).foregroundStyle(Trek.muted)
                             }
                         }
                     }
@@ -34,7 +40,7 @@ struct SettingsView: View {
                         LabeledContent("Address", value: paired.address)
                         SecurityRow(transport: model.transport ?? paired.transport)
                         if case .tls(let pin) = model.transport ?? paired.transport {
-                            LabeledContent("Fingerprint") { Text(pin.short).monospaced() }
+                            LabeledContent("Fingerprint") { Text(pin.short).font(.code(.body)) }
                         }
                     }
                     if let host = model.host {
@@ -57,11 +63,23 @@ struct SettingsView: View {
                     Text("Follow-ups")
                 } footer: {
                     Text("Steer adds your message to the running turn at its next step. Queue waits until the turn ends. You can switch per message from the composer.")
+                        .font(.ui(.footnote))
                 }
 
                 PhoneNotificationsSection()
 
-                AppearanceSection()
+                Section {
+                    NavigationLink(value: SettingsRoute.appearance) {
+                        LabeledContent {
+                            Text((ThemeChoice(rawValue: theme) ?? .system).label)
+                        } label: {
+                            Label("Appearance", systemImage: "circle.lefthalf.filled")
+                        }
+                    }
+                } footer: {
+                    Text("Theme, app icon, text size, background art and motion, kept on this iPhone.")
+                        .font(.ui(.footnote))
+                }
 
                 Section {
                     LabeledContent("“Allow for session”", value: "Needs \(DeviceOwner.methodName)")
@@ -70,6 +88,7 @@ struct SettingsView: View {
                     Text("Approvals")
                 } footer: {
                     Text("Trek never answers for you. An approval or question waits on the Mac and here until someone decides.")
+                        .font(.ui(.footnote))
                 }
 
                 Section {
@@ -82,12 +101,17 @@ struct SettingsView: View {
                     Text("About")
                 } footer: {
                     Text("Trek is not affiliated with or endorsed by the makers of the agents it connects. Agent and provider names and logos are trademarks of their respective owners, shown only to identify the agent a thread uses.")
-                        .font(.footnote)
+                        .font(.ui(.footnote))
                 }
             }
             .scrollContentBackground(.hidden)
-            .background(Trek.background)
+            .background(Trek.grouped)
             .navigationTitle("Settings")
+            .navigationDestination(for: SettingsRoute.self) { route in
+                switch route {
+                case .appearance: AppearanceView()
+                }
+            }
             .task { model.loadSettings() }
             .onChange(of: model.connection) { if model.connection == .connected { model.loadSettings() } }
             .confirmationDialog("Unpair this iPhone?", isPresented: $confirmUnpair, titleVisibility: .visible) {
@@ -130,7 +154,7 @@ struct SecurityRow: View {
 private struct SecurityLabelStyle: LabelStyle {
     func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 5) {
-            configuration.icon.font(.footnote.weight(.semibold))
+            configuration.icon.font(.ui(.footnote).weight(.semibold))
             configuration.title.fontWeight(.medium)
         }
     }

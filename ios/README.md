@@ -37,7 +37,7 @@ plan, a failed build, threads that keep working, and replies to whatever you sen
 same protocol messages a Mac does, so everything in the app works without one.
 
 Launch arguments for screenshots: `-TrekOpen <thread id>` (e.g. `t-flaky`, `t-inbox`,
-`t-ratelimit`, `t-settings`), `-TrekTab settings|search`, `-TrekSheet new` (or `model`, with
+`t-ratelimit`, `t-settings`), `-TrekTab basecamp|usage|notes|settings|appearance|search`, `-TrekSheet new` (or `model`, with
 `-TrekOpen`: the model picker), `-TrekAppearance light|dark`, `-TrekTextSize small|large|xxLarge`,
 `-TrekGallery YES` (debug builds: chips, tables, status pills, the hiker and the effort picker on
 one page), `-TrekExpand YES` (open all tool groups), `-TrekReset YES` (forget
@@ -92,7 +92,10 @@ Trek/Model      Protocol.swift (wire types, mirrors trek-remote/src/protocol.rs)
 Trek/Net        TrekClient: URLSessionWebSocketTask over pinned TLS (PinningDelegate), pair/hello,
                 reconnect with backoff, pings; PairingLink
 Trek/Demo       MockHost: the in-process demo Mac
-Trek/Design     Trek palette (design spec), status colours, project hues, file-type chips, agent logos
+Trek/Design     Trek palette (the Mac's trek.json and palette.rs), Inter and JetBrains Mono NL (Resources/Fonts,
+                OFL), status colours, project hues, file-type chips, agent logos
+Trek/Assets     App icons: Ember (with iOS 18 dark and tinted variants), Night and Glass, rendered from
+                assets/brand/trek-icon-*-ios.svg by scripts/app-icons.sh
 Trek/Views      Threads, Thread (transcript grouping, tool rows, request cards, composer),
                 New thread sheet, Pairing (QR scanner, typed pairing, confirmation sheet), Settings, Search
 ```

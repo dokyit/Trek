@@ -20,8 +20,10 @@ struct RichText: View {
     var body: some View {
         let s = size * TextScale.factor(dynamicType, style: style)
         Inline.cachedText(markdown, size: s, weight: weight, dark: scheme == .dark, projectHue: projectHue, autoPaths: autoPaths)
-            .font(.system(size: s, weight: weight))
+            .font(.ui(size: s, weight: weight))
             .textRenderer(ChipRenderer())
+            // Links in ember, a shade darker on Paper (the Mac's `link`).
+            .tint(Trek.link)
     }
 }
 
@@ -132,7 +134,7 @@ enum Inline {
 
     /// `code`, or a file or folder in its type's chip.
     static func chip(_ code: String, size: CGFloat, dark: Bool, projectHue: Int?) -> Text {
-        let mono = Font.system(size: size * 0.86, weight: .medium, design: .monospaced)
+        let mono = Font.code(size: size * 0.86, weight: .medium)
         guard FileType.looksLikePath(code) else {
             let n = FileTint.neutral
             let body = Text(verbatim: code).font(mono).foregroundStyle(Trek.foreground.opacity(0.92))

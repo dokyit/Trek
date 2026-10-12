@@ -8,7 +8,7 @@ enum BasecampRoute: Hashable {
 
 /// Basecamp, the Mac's activity dashboard: what's ready for review, the trek in sentences, the
 /// elevation profile and the stat tiles, for today, this week or all time. Worded as the Mac
-/// words it (the Mac sends the sentences); drawn here on glass.
+/// words it (the Mac sends the sentences), in the Mac's flat panels.
 struct BasecampView: View {
     @Environment(AppModel.self) private var model
     @Binding var path: [BasecampRoute]
@@ -37,7 +37,7 @@ struct BasecampView: View {
                             TileGrid(tiles: recap.tiles)
                             if recap.review.isEmpty {
                                 Label("Nothing waiting on you. Every thread is read.", systemImage: "checkmark.circle")
-                                    .font(.subheadline)
+                                    .font(.ui(.subheadline))
                                     .foregroundStyle(Trek.muted)
                                     .padding(.horizontal, 4)
                             }
@@ -47,7 +47,7 @@ struct BasecampView: View {
                             ProgressView().controlSize(.small)
                             Text("Reading the trail…").foregroundStyle(Trek.muted)
                         }
-                        .font(.subheadline)
+                        .font(.ui(.subheadline))
                         .frame(maxWidth: .infinity)
                         .padding(.top, 60)
                     }
@@ -100,8 +100,8 @@ private struct ReviewCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 7) {
-                Text("Ready for review").font(.subheadline.weight(.semibold))
-                Text("\(rows.count)").font(.subheadline.monospacedDigit()).foregroundStyle(Trek.muted)
+                Text("Ready for review").font(.ui(.subheadline).weight(.semibold))
+                Text("\(rows.count)").font(.ui(.subheadline).monospacedDigit()).foregroundStyle(Trek.muted)
             }
             .padding(.bottom, 6)
             ForEach(Array(rows.enumerated()), id: \.element.id) { i, row in
@@ -112,7 +112,7 @@ private struct ReviewCard: View {
                 .buttonStyle(.plain)
             }
         }
-        .glassCard(padding: 14)
+        .card(padding: 14)
     }
 }
 
@@ -124,29 +124,29 @@ private struct ReviewRowView: View {
         switch row.status {
         case .needsYou:
             switch row.label {
-            case "Question": ("questionmark.bubble.fill", Trek.approval)
-            case "Plan to review": ("list.bullet.clipboard.fill", Trek.approval)
-            default: ("hand.raised.fill", Trek.approval)
+            case "Question": ("questionmark.bubble", Trek.approval)
+            case "Plan to review": ("list.bullet.clipboard", Trek.approval)
+            default: ("hand.raised", Trek.approval)
             }
-        case .failed: ("xmark.circle.fill", Trek.failed)
-        case .paused: ("clock.fill", Trek.approval)
-        case .done: ("checkmark.circle.fill", Trek.done)
+        case .failed: ("xmark.circle", Trek.failed)
+        case .paused: ("clock", Trek.approval)
+        case .done: ("checkmark.circle", Trek.done)
         }
     }
 
     var body: some View {
         HStack(alignment: .top, spacing: 11) {
             Image(systemName: look.symbol)
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 16, weight: .regular))
                 .foregroundStyle(look.color)
                 .frame(width: 20)
                 .padding(.top, 1)
             VStack(alignment: .leading, spacing: 4) {
                 Text(row.title)
-                    .font(.body.weight(row.unseen == true ? .semibold : .regular))
+                    .font(.ui(.body).weight(row.unseen == true ? .semibold : .regular))
                     .lineLimit(1)
                 HStack(spacing: 6) {
-                    AgentGlyph(key: row.agent.key, size: 14)
+                    AgentGlyph(row.agent, size: 14)
                     if row.additions + row.deletions > 0 {
                         DiffStat(additions: row.additions, deletions: row.deletions)
                     }
@@ -155,18 +155,18 @@ private struct ReviewRowView: View {
                         Text(p.name).lineLimit(1)
                     }
                 }
-                .font(.footnote)
+                .font(.ui(.footnote))
                 .foregroundStyle(Trek.muted)
             }
             Spacer(minLength: 6)
             Group {
                 if let label = row.label {
-                    Text(label).fontWeight(.semibold).foregroundStyle(look.color)
+                    Text(label).fontWeight(.medium).foregroundStyle(look.color)
                 } else {
                     Text(When.short(row.updatedAt)).monospacedDigit().foregroundStyle(Trek.muted)
                 }
             }
-            .font(.footnote)
+            .font(.ui(.footnote))
             .lineLimit(1)
             .fixedSize()
             .padding(.top, 2)
@@ -196,10 +196,10 @@ private struct TrekCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline) {
-                Text(recap.title).font(.subheadline.weight(.semibold))
+                Text(recap.title).font(.ui(.subheadline).weight(.semibold))
                 Spacer()
                 Text(loading ? "Updating…" : "Updated \(Resets.clock(recap.updatedAt))")
-                    .font(.caption)
+                    .font(.ui(.caption))
                     .foregroundStyle(Trek.muted)
             }
             Narrative(spans: recap.narrative)
@@ -210,13 +210,13 @@ private struct TrekCard: View {
                     Spacer(minLength: 8)
                     Text(profile.total).monospacedDigit()
                 }
-                .font(.footnote)
+                .font(.ui(.footnote))
                 .foregroundStyle(Trek.muted)
                 ElevationChart(profile: profile, progress: risen, selected: $selected)
                     .frame(height: 150)
             }
         }
-        .glassCard(padding: 18)
+        .card(padding: 18)
         .onAppear {
             guard motion else { risen = 1; return }
             risen = 0
@@ -292,7 +292,7 @@ private struct Narrative: View {
             }
         case .model(let agent, let label):
             HStack(spacing: 5) {
-                if let agent { AgentGlyph(key: agent.key, size: 17) }
+                if let agent { AgentGlyph(agent, size: 17) }
                 Text(label).fontWeight(.semibold).foregroundStyle(Trek.foreground)
             }
         }
@@ -318,7 +318,7 @@ private struct EmptyTrekCard: View {
             .buttonStyle(.glassProminent)
             .tint(Trek.foreground)
         }
-        .glassCard(padding: 18)
+        .card(padding: 18)
     }
 }
 
@@ -350,25 +350,25 @@ private struct TileView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(tile.label)
-                .font(.footnote)
+                .font(.ui(.footnote))
                 .foregroundStyle(Trek.muted)
                 .lineLimit(1)
             figure
             Spacer(minLength: 0)
             Text(tile.note)
-                .font(.caption)
+                .font(.ui(.caption))
                 .foregroundStyle(Trek.muted)
                 .lineLimit(2, reservesSpace: true)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, minHeight: 104, alignment: .topLeading)
-        .glassCard(radius: 20, padding: 14)
+        .card(radius: 14, padding: 14)
         .accessibilityElement(children: .combine)
     }
 
     private var figureText: some View {
         Text(tile.figure)
-            .scaledFont(19, weight: .semibold)
+            .scaledFont(21)
             .lineLimit(1)
             .minimumScaleFactor(0.7)
             .monospacedDigit()
@@ -379,7 +379,7 @@ private struct TileView: View {
         switch tile.kind {
         case .bestModel:
             HStack(spacing: 7) {
-                if let agent = tile.agent { AgentGlyph(key: agent.key, size: 18) }
+                if let agent = tile.agent { AgentGlyph(agent, size: 18) }
                 figureText
             }
         case .workedMostOn:
@@ -397,7 +397,7 @@ private struct TileView: View {
         case .planLeft:
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 7) {
-                    if let agent = tile.agent { AgentGlyph(key: agent.key, size: 18) }
+                    if let agent = tile.agent { AgentGlyph(agent, size: 18) }
                     figureText
                 }
                 UsageBar(percent: tile.percent ?? 0, left: true, height: 4)

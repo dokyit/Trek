@@ -10,36 +10,51 @@ struct PendingRequestCard: View {
     var body: some View {
         switch item.body {
         case .approval(let a): ApprovalCard(request: a, agentName: agentName, answer: answer)
-        case .question(let q): QuestionCard(request: q, answer: answer)
-        case .plan(let p): PlanCard(request: p, answer: answer)
+        case .question(let q): QuestionCard(request: q, agentName: agentName, answer: answer)
+        case .plan(let p): PlanCard(request: p, agentName: agentName, answer: answer)
         default: EmptyView()
         }
     }
 }
 
+/// A request card as the Mac draws it: the icon in the card's colour (muted when it has none), the
+/// title in semibold, on the panel colour with a rim of the tint; an approval also gets a wash of it.
 private struct CardChrome<Content: View>: View {
-    var tint: Color
+    var tint: Color?
+    var wash = false
     var symbol: String
     var title: String
     @ViewBuilder var content: Content
 
+    private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 16, style: .continuous) }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: symbol)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(tint)
-                    .frame(width: 26, height: 26)
-                    .background(tint.opacity(0.15), in: Circle())
-                Text(title).font(.subheadline.weight(.semibold))
+                    .font(.ui(size: 14, weight: .medium, relativeTo: .subheadline))
+                    .foregroundStyle(tint ?? Trek.muted)
+                Text(title).font(.ui(.subheadline).weight(.semibold))
                 Spacer()
             }
             content
         }
         .padding(14)
-        .background(Trek.elevated.opacity(0.92), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(tint.opacity(0.45), lineWidth: 1))
-        .shadow(color: .black.opacity(0.12), radius: 18, y: 6)
+        .background {
+            shape.fill(Trek.surface)
+            if wash, let tint { shape.fill(tint.opacity(0.07)) }
+        }
+        .overlay(shape.strokeBorder(tint.map { $0.opacity(wash ? 0.6 : 0.45) } ?? Trek.foreground.opacity(0.12), lineWidth: 1))
+        .shadow(color: .black.opacity(0.1), radius: 16, y: 6)
+    }
+}
+
+/// The Mac's primary button: ember, its label in the theme's ink for it.
+private struct PrimaryLabel: View {
+    var title: String
+
+    var body: some View {
+        Text(title).fontWeight(.semibold).lineLimit(1).foregroundStyle(Trek.onEmber).frame(maxWidth: .infinity)
     }
 }
 
@@ -73,7 +88,7 @@ struct ApprovalCard: View {
     private var isLong: Bool { estimatedLines > 7 }
 
     var body: some View {
-        CardChrome(tint: Trek.approval, symbol: "hand.raised.fill", title: "\(agentName) wants to \(Self.phrase(request.title))") {
+        CardChrome(tint: Trek.approval, wash: true, symbol: "checkmark.shield", title: "\(agentName) wants to \(Self.phrase(request.title))") {
             detail
 
             if let warning {
@@ -82,7 +97,7 @@ struct ApprovalCard: View {
                 } icon: {
                     Image(systemName: "exclamationmark.triangle.fill")
                 }
-                .font(.footnote.weight(.medium))
+                .font(.ui(.footnote).weight(.medium))
                 .foregroundStyle(Trek.failed)
                 .fixedSize(horizontal: false, vertical: true)
             }
@@ -101,10 +116,10 @@ struct ApprovalCard: View {
                     Button {
                         answer(.approval(.allow))
                     } label: {
-                        Text("Allow").fontWeight(.semibold).frame(maxWidth: .infinity)
+                        PrimaryLabel(title: "Allow")
                     }
                     .buttonStyle(.glassProminent)
-                    .tint(Trek.approval)
+                    .tint(Trek.ember)
                     .controlSize(.large)
                 } else {
                     Button {
@@ -138,7 +153,7 @@ struct ApprovalCard: View {
     @ViewBuilder
     private var detail: some View {
         let text = Text(request.detail)
-            .font(.system(.footnote, design: .monospaced))
+            .font(.code(.footnote))
             .foregroundStyle(Trek.foreground)
             .frame(maxWidth: .infinity, alignment: .leading)
             .fixedSize(horizontal: false, vertical: true)
@@ -160,12 +175,12 @@ struct ApprovalCard: View {
                                          startPoint: .top, endPoint: .bottom))
                 }
             }
-            .background(Trek.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(Trek.foreground.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             if isLong {
                 Button(expanded ? "Show less" : "Show all \(estimatedLines) lines") {
                     withAnimation(.snappy) { expanded.toggle() }
                 }
-                .font(.footnote.weight(.medium))
+                .font(.ui(.footnote).weight(.medium))
                 .foregroundStyle(Trek.approval)
             }
         }
@@ -188,15 +203,16 @@ struct ApprovalCard: View {
 
 struct QuestionCard: View {
     var request: QuestionRequest
+    var agentName: String
     var answer: (AnswerResponse) -> Void
     @State private var picks: [Int: Set<String>] = [:]
     @State private var other: [Int: String] = [:]
 
     var body: some View {
-        CardChrome(tint: Trek.question, symbol: "questionmark.bubble.fill", title: request.questions.first?.header ?? "Question") {
+        CardChrome(tint: nil, symbol: "bubble.left", title: "\(agentName) has a question") {
             ForEach(Array(request.questions.enumerated()), id: \.offset) { qi, q in
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(q.question).font(.body.weight(.medium))
+                    Text(q.question).font(.ui(.body).weight(.medium))
                     ForEach(q.options, id: \.label) { option in
                         let on = picks[qi]?.contains(option.label) == true
                         Button {
@@ -204,37 +220,37 @@ struct QuestionCard: View {
                         } label: {
                             HStack(alignment: .top, spacing: 10) {
                                 Image(systemName: on ? (q.multi ? "checkmark.square.fill" : "largecircle.fill.circle") : (q.multi ? "square" : "circle"))
-                                    .foregroundStyle(on ? Trek.question : Trek.muted)
+                                    .foregroundStyle(on ? Trek.ember : Trek.muted)
                                     .font(.system(size: 17))
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(option.label).font(.subheadline.weight(.semibold)).foregroundStyle(Trek.foreground)
+                                    Text(option.label).font(.ui(.subheadline).weight(.semibold)).foregroundStyle(Trek.foreground)
                                     if !option.description.isEmpty {
-                                        Text(option.description).font(.caption).foregroundStyle(Trek.muted)
+                                        Text(option.description).font(.ui(.caption)).foregroundStyle(Trek.muted)
                                     }
                                 }
                                 Spacer(minLength: 0)
                             }
                             .padding(10)
-                            .background(on ? Trek.question.opacity(0.1) : Color.clear, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(on ? Trek.question.opacity(0.5) : Trek.border, lineWidth: 0.8))
+                            .background(on ? Trek.ember.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(on ? Trek.ember.opacity(0.7) : Trek.foreground.opacity(0.1), lineWidth: 1))
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                     }
                     TextField(q.secret ? "Type a secret answer" : "Or type an answer", text: Binding(get: { other[qi] ?? "" }, set: { other[qi] = $0 }))
-                        .font(.subheadline)
+                        .font(.ui(.subheadline))
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
-                        .background(Trek.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .background(Trek.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
             }
             Button {
                 answer(.questions(answers))
             } label: {
-                Text("Send answer").fontWeight(.semibold).frame(maxWidth: .infinity)
+                PrimaryLabel(title: "Answer")
             }
             .buttonStyle(.glassProminent)
-            .tint(Trek.question)
+            .tint(Trek.ember)
             .controlSize(.large)
             .disabled(answers.count < request.questions.count)
         }
@@ -262,13 +278,14 @@ struct QuestionCard: View {
 
 struct PlanCard: View {
     var request: PlanRequest
+    var agentName: String
     var answer: (AnswerResponse) -> Void
     @State private var showAll = false
     @State private var feedback = ""
     @State private var revising = false
 
     var body: some View {
-        CardChrome(tint: Trek.plan, symbol: "list.bullet.clipboard.fill", title: "Plan ready for review") {
+        CardChrome(tint: Trek.plan, symbol: "checklist", title: "\(agentName)'s plan") {
             ScrollView {
                 MarkdownText(text: request.markdown, size: 15)
             }
@@ -277,31 +294,34 @@ struct PlanCard: View {
             .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: showAll ? 1 : 0.72),
                                          .init(color: showAll ? .black : .clear, location: 1)], startPoint: .top, endPoint: .bottom))
             Button(showAll ? "Show less" : "Show the whole plan") { withAnimation(.snappy) { showAll.toggle() } }
-                .font(.footnote.weight(.medium))
+                .font(.ui(.footnote).weight(.medium))
                 .foregroundStyle(Trek.plan)
 
             if revising {
                 TextField("What should change?", text: $feedback, axis: .vertical)
                     .lineLimit(1...4)
-                    .font(.subheadline)
+                    .font(.ui(.subheadline))
                     .padding(10)
-                    .background(Trek.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .background(Trek.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            } else {
+                Text("Nothing has been changed yet.").font(.ui(.footnote)).foregroundStyle(Trek.muted)
             }
             HStack(spacing: 10) {
                 Button {
                     if revising { answer(.plan(approve: false, feedback: feedback)) } else { withAnimation(.snappy) { revising = true } }
                 } label: {
-                    Text(revising ? "Send back" : "Keep planning").frame(maxWidth: .infinity)
+                    Text(revising ? "Send back" : "Keep planning").lineLimit(1)
                 }
                 .buttonStyle(.glass)
                 .controlSize(.large)
+                .fixedSize()
                 Button {
                     answer(.plan(approve: true, feedback: nil))
                 } label: {
-                    Text("Approve plan").fontWeight(.semibold).frame(maxWidth: .infinity)
+                    PrimaryLabel(title: "Approve and start")
                 }
                 .buttonStyle(.glassProminent)
-                .tint(Trek.plan)
+                .tint(Trek.ember)
                 .controlSize(.large)
             }
         }
