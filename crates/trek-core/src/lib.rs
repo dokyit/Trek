@@ -19,6 +19,7 @@ pub mod mcp;
 pub mod notes;
 pub mod open_in;
 pub mod orchestrate;
+pub mod page;
 pub mod paths;
 pub mod procs;
 pub mod registry;
