@@ -1,0 +1,2 @@
+- Speed up the Basecamp ranges
+- Fix the Windows tray menu

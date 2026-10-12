@@ -33,6 +33,7 @@ set -euo pipefail
 SELF=${0:A}
 cd "${SELF:h}/.."
 source script/lib/sign.sh
+source script/lib/notes.sh
 source "$HOME/.cargo/env" 2>/dev/null || true
 
 die() { echo "release: $*" >&2; exit 1; }
@@ -166,19 +167,8 @@ minisign -V -q -p assets/update/minisign.pub -m "$OUT/$NAME" -x "$OUT/$NAME.mini
 echo "• $NAME  sha256 $SHA  (signature verified with assets/update/minisign.pub)"
 
 # ---------- notes ----------
-if [[ -n $NOTES_FILE ]]; then
-  cp "$NOTES_FILE" "$OUT/notes.md"
-else
-  # The most recent tag, by when it was made: git's version sort puts 0.3.0-beta.1 after 0.3.0.
-  case $CHANNEL in
-    stable) SINCE=$(git tag --list 'v[0-9]*' --sort=-creatordate | grep -v -- - | head -1 || true) ;;
-    nightly) SINCE=$(git rev-parse -q --verify refs/tags/nightly >/dev/null && echo nightly || git tag --list 'v[0-9]*' --sort=-creatordate | head -1 || true) ;;
-    *) SINCE=$(git tag --list 'v[0-9]*' --sort=-creatordate | head -1 || true) ;;
-  esac
-  RANGE=HEAD; [[ -n $SINCE ]] && RANGE="$SINCE..HEAD"
-  git log --no-merges --invert-grep --grep='^Release v' --format='- %s' "$RANGE" > "$OUT/notes.md"
-  [[ -s $OUT/notes.md ]] || echo "- Maintenance release." > "$OUT/notes.md"
-fi
+# script/lib/notes.sh: notes.md (the changes, for the manifest) from --notes or the git log.
+trek_write_notes "$NOTES_FILE" "$VERSION" "$CHANNEL" "$OUT"
 
 # ---------- manifest ----------
 BASE=${TREK_RELEASE_DOWNLOAD_URL:-https://github.com/$REPO/releases/download/$RELEASE_TAG}
