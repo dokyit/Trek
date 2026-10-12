@@ -1421,6 +1421,19 @@ fn item_body(live: &LiveThread, cwd: Option<&std::path::Path>, ix: usize) -> tr:
         Item::User { text, images, .. } => tr::ItemBody::User { text: clip_text(text), images: images.len() as u32 },
         Item::Assistant { text } => tr::ItemBody::Assistant { text: clip_text(text), streaming: live.streaming == Some(ix) },
         Item::Reasoning { text } => tr::ItemBody::Reasoning { text: clip_text(text) },
+        // A link to another thread (`trek_core::lineage`): the phone has no rows that open
+        // threads, so it reads as a handover ("Handed over from this thread to “Fix the cache”")
+        // or a note.
+        Item::Tool { id, detail, .. } if trek_core::lineage::of_row(id).is_some() => {
+            use trek_core::lineage::Link;
+            let quoted = format!("“{}”", clip_text_to(detail, 1 << 10));
+            match trek_core::lineage::of_row(id).map(|(link, _)| link) {
+                Some(Link::ContinuedIn) => tr::ItemBody::Handoff { from: "this thread".into(), to: quoted },
+                Some(Link::ContinuedFrom) => tr::ItemBody::Handoff { from: quoted, to: "this thread".into() },
+                Some(Link::Started) => tr::ItemBody::Notice { text: format!("Started a thread: {quoted}") },
+                _ => tr::ItemBody::Notice { text: format!("Started by the agent in {quoted}") },
+            }
+        }
         Item::Tool { id: call, title, detail, output, status } => {
             let op = crate::activity::op(title, detail, cwd);
             let lines = live.lines.get(call).copied();
@@ -1744,5 +1757,20 @@ pub(crate) mod tests {
         assert!(!is_trek_command("/compact"), "the agent's own commands go through");
         assert!(!is_trek_command("fix the /permissions page"));
         assert!(!is_trek_command("plain words"));
+    }
+
+    #[test]
+    fn links_between_threads_read_as_handovers_and_notes_on_the_phone() {
+        use trek_core::lineage::{Link, row};
+        use trek_remote as tr;
+        let mut live = super::LiveThread::default();
+        for link in [Link::ContinuedIn, Link::ContinuedFrom, Link::Started, Link::StartedBy] {
+            live.items.push(row(link, "t1", "Fix the cache"));
+        }
+        let bodies: Vec<tr::ItemBody> = (0..4).map(|ix| super::item_body(&live, None, ix)).collect();
+        assert_eq!(bodies[0], tr::ItemBody::Handoff { from: "this thread".into(), to: "“Fix the cache”".into() });
+        assert_eq!(bodies[1], tr::ItemBody::Handoff { from: "“Fix the cache”".into(), to: "this thread".into() });
+        assert_eq!(bodies[2], tr::ItemBody::Notice { text: "Started a thread: “Fix the cache”".into() });
+        assert_eq!(bodies[3], tr::ItemBody::Notice { text: "Started by the agent in “Fix the cache”".into() });
     }
 }

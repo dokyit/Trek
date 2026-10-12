@@ -38,6 +38,9 @@ pub enum Reply {
     /// The caller waits for a sub-agent's answer (one it started, or asked for), for as long as given:
     /// another reply follows when it ends, unless the wait runs out first.
     Waiting(String, Duration),
+    /// The same, for a thread an agent started (`read_thread` with `wait`): it finishes, or
+    /// needs the user, or the wait runs out.
+    WaitingOnThread(String, Duration),
     Done(Result<Value, String>),
 }
 
@@ -253,7 +256,12 @@ async fn serve(stream: trek_ipc::server::Stream, token: Arc<str>, sessions: Sess
         }
         let answer = match replies.recv().await {
             Ok(Reply::Done(result)) => result,
-            Ok(Reply::Waiting(child, wait)) => {
+            Ok(waiting @ (Reply::Waiting(..) | Reply::WaitingOnThread(..))) => {
+                let (child, wait, thread) = match waiting {
+                    Reply::Waiting(c, w) => (c, w, false),
+                    Reply::WaitingOnThread(c, w) => (c, w, true),
+                    Reply::Done(_) => unreachable!(),
+                };
                 // Wait for the sub-agent, for as long as asked, and for as long as the caller
                 // stays (a cancelled call drops its connection).
                 let deadline = tokio::time::sleep(wait);
@@ -262,13 +270,22 @@ async fn serve(stream: trek_ipc::server::Stream, token: Arc<str>, sessions: Sess
                     tokio::select! {
                         done = replies.recv() => break match done {
                             Ok(Reply::Done(result)) => result,
+                            _ if thread => Err("Trek stopped waiting for the thread.".into()),
                             _ => Err("Trek stopped waiting for the sub-agent.".into()),
                         },
-                        _ = &mut deadline => break Ok(json!({
-                            "id": child,
-                            "status": "running",
-                            "note": format!("Still running after {} s. It carries on: Trek will send you its answer in a message when it finishes, or call task_status / task_result later.", wait.as_secs()),
-                        })),
+                        _ = &mut deadline => break Ok(if thread {
+                            json!({
+                                "id": child,
+                                "status": "working",
+                                "note": format!("Still working after {} s. It carries on: call thread_status or read_thread again later.", wait.as_secs()),
+                            })
+                        } else {
+                            json!({
+                                "id": child,
+                                "status": "running",
+                                "note": format!("Still running after {} s. It carries on: Trek will send you its answer in a message when it finishes, or call task_status / task_result later.", wait.as_secs()),
+                            })
+                        }),
                         gone = r.fill_buf() => match gone {
                             Ok([]) | Err(_) => return,
                             // Nothing should arrive mid-call; whatever does is dropped.
@@ -428,6 +445,26 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "the workspace still waits on the caller's behalf");
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn a_call_waiting_on_a_thread_says_it_is_still_working_when_time_is_up() {
+        let (server, calls) = IpcServer::start(&dir()).unwrap();
+        let key = server.open_session(Some("t"));
+        let held: Arc<Mutex<Vec<async_channel::Sender<Reply>>>> = Default::default();
+        let keep = held.clone();
+        let _answers = answer_with(calls, move |c| match c.params["case"].as_str() {
+            Some("quick") => vec![Reply::WaitingOnThread("t-1".into(), WAIT_DEFAULT), Reply::Done(Ok(json!({"id": "t-1", "status": "finished"})))],
+            _ => {
+                keep.lock().unwrap().push(c.reply.clone());
+                vec![Reply::WaitingOnThread("t-2".into(), wait_for(&c.params))]
+            }
+        });
+        let client = server.client(&key);
+        assert_eq!(client.call("read_thread", &json!({"case": "quick", "wait": true})).unwrap()["status"], "finished");
+        let out = client.call("read_thread", &json!({"case": "slow", "wait": true, "timeout_seconds": 1})).unwrap();
+        assert_eq!((out["id"].as_str(), out["status"].as_str()), (Some("t-2"), Some("working")));
+        assert!(out["note"].as_str().unwrap().contains("read_thread"), "{out}");
     }
 
     #[test]

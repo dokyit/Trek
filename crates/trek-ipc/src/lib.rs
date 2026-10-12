@@ -305,8 +305,79 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
             }),
         ),
         ("cancel_task", "Stop a sub-agent you started. Its thread stays, for the user to read.", id),
+        (
+            "start_thread",
+            "Start a new thread of the user's own in Trek: it shows in their sidebar like one they started, runs on its own, and is theirs to read, steer and finish. Use it for separate work the user will want to follow by itself (another feature, a long investigation, work in another project), not for a quick answer you need back (use delegate_task for that). It sees only the prompt you give it, so make it self-contained. It runs with this thread's access level at most. Returns its id. With notify (the default) Trek sends you a message when it finishes, fails or needs the user's approval, so end your turn rather than polling; thread_status / read_thread follow it meanwhile, and send_to_thread sends it more. The user is told when it finishes too.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "The thread's first message: the whole task, complete on its own." },
+                    "title": { "type": "string", "description": "A few words naming it in the sidebar, e.g. \"Migrate the billing tests\". Defaults to one written from the prompt." },
+                    "agent": { "type": "string", "description": "Agent key from list_models. Defaults to this thread's agent." },
+                    "model": { "type": "string", "description": "Model id or name from list_models. Defaults to this thread's model (the agent's own default when it's another agent)." },
+                    "effort": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "Reasoning effort; clamped to what the model supports. Defaults to this thread's effort." },
+                    "project": { "type": "string", "description": "Another project Trek knows, by name or folder path (list_threads lists them). Defaults to this thread's project." },
+                    "worktree": { "type": "boolean", "description": "Run it in a new git worktree of its own (on a new branch), so its changes stay apart from this checkout's. Default false: it works in the project's folder." },
+                    "notify": { "type": "boolean", "description": "Wake you with a message when it finishes, fails or needs the user (true, the default), and again after each send_to_thread. false: follow it yourself with thread_status / read_thread." }
+                },
+                "required": ["prompt"]
+            }),
+        ),
+        (
+            "handoff",
+            "Hand this work over to a fresh thread when this conversation's context is running out (or the rest is better done by another agent or model). Write a brief that is complete on its own, since the new thread sees nothing else: the goal, what's done and how you checked it, decisions made and why, the files that matter, what's left, and the next step. Trek starts the new thread in this thread's folder with the brief as its first message, links the two, and shows the user the new one. After a successful handoff, end your turn: don't carry on with the work here.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "brief": { "type": "string", "description": "Everything the next agent needs: goal, state, decisions, files, next steps." },
+                    "title": { "type": "string", "description": "A few words naming the new thread. Defaults to this thread's title." },
+                    "agent": { "type": "string", "description": "Agent key from list_models, to continue with another agent. Defaults to this thread's agent." },
+                    "model": { "type": "string", "description": "Model id or name from list_models. Defaults to this thread's model." },
+                    "effort": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "Reasoning effort. Defaults to this thread's effort." }
+                },
+                "required": ["brief"]
+            }),
+        ),
+        (
+            "list_threads",
+            "The threads you started (start_thread) or handed off to (handoff), with how each is doing, and the projects Trek knows (for start_thread's project).",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        (
+            "thread_status",
+            "How a thread you started is doing: working, waiting_for_approval (on the user), paused (at a usage limit), finished or failed; and a preview of its last answer.",
+            json!({ "type": "object", "properties": { "id": { "type": "string", "description": "The thread's id, as start_thread or handoff returned it." } }, "required": ["id"] }),
+        ),
+        (
+            "read_thread",
+            "A thread's last answer in full (very long answers are cut short), for a thread you started or handed off to. wait=true blocks until it has finished or needs the user (after timeout_seconds it returns its status \"working\" instead).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "The thread's id, as start_thread or handoff returned it." },
+                    "wait": { "type": "boolean", "description": "Wait for it to finish (true) or answer at once (false, the default)." },
+                    "timeout_seconds": { "type": "integer", "minimum": 10, "maximum": 1800, "description": "With wait=true, how long to wait (default 600). The thread keeps going either way." }
+                },
+                "required": ["id"]
+            }),
+        ),
+        (
+            "send_to_thread",
+            "Send a follow-up message to a thread you started, as if the user typed it there: if it's working, the message waits for its turn to end. Only threads you started take one; not while it waits on the user's approval.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "The thread's id, as start_thread returned it." },
+                    "prompt": { "type": "string", "description": "The message." }
+                },
+                "required": ["id", "prompt"]
+            }),
+        ),
     ]
 }
+
+/// The tools' names, as `tools` lists them.
+pub const TOOL_NAMES: [&str; 11] = ["list_models", "delegate_task", "task_status", "task_result", "cancel_task", "start_thread", "handoff", "list_threads", "thread_status", "read_thread", "send_to_thread"];
 
 #[cfg(test)]
 mod tests {
@@ -360,7 +431,7 @@ mod tests {
     fn tool_schemas_are_objects_with_their_required_fields() {
         let tools = tools();
         let names: Vec<&str> = tools.iter().map(|t| t.0).collect();
-        assert_eq!(names, ["list_models", "delegate_task", "task_status", "task_result", "cancel_task"]);
+        assert_eq!(names, TOOL_NAMES);
         for (name, description, schema) in &tools {
             assert_eq!(schema["type"], "object", "{name}");
             assert!(description.len() > 40, "{name} says what it does");
@@ -371,6 +442,17 @@ mod tests {
         let delegate = &tools[1].2;
         assert_eq!(delegate["required"], json!(["title", "prompt"]));
         assert_eq!(delegate["properties"]["mode"]["enum"], json!(["advise", "implement"]));
+        let schema = |name: &str| tools.iter().find(|t| t.0 == name).map(|t| t.2.clone()).unwrap();
+        assert_eq!(schema("start_thread")["required"], json!(["prompt"]));
+        assert_eq!(schema("start_thread")["properties"]["worktree"]["type"], "boolean");
+        assert_eq!(schema("start_thread")["properties"]["notify"]["type"], "boolean");
+        assert!(schema("start_thread")["properties"].get("project").is_some());
+        assert_eq!(schema("handoff")["required"], json!(["brief"]));
+        for name in ["thread_status", "read_thread"] {
+            assert_eq!(schema(name)["required"], json!(["id"]), "{name}");
+        }
+        assert_eq!(schema("send_to_thread")["required"], json!(["id", "prompt"]));
+        assert_eq!(schema("read_thread")["properties"]["wait"]["type"], "boolean");
     }
 
     #[cfg(windows)]
