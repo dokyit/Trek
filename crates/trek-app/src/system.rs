@@ -435,10 +435,11 @@ pub fn order_back(_: &Window) {}
 /// tray icon or a banner, or a second launch passed its right on, see `single_instance`); when
 /// it may not, Windows flashes Trek's taskbar button instead, which is the polite outcome.
 ///
-/// Deferred until the update that asked is over, as GPUI's own `activate_window` is (it spawns):
-/// restoring and activating a window send it `WM_SIZE`, `WM_ACTIVATE` and the like at once, and
-/// its callbacks can't reach the app (or this window) while they're being updated, so they'd be
-/// dropped.
+/// Done once the update that asked is over (`after_update`), as GPUI's own `activate_window` is
+/// (it spawns): restoring and activating a window send it `WM_SIZE`, `WM_MOVE`, `WM_ACTIVATE` and
+/// the like at once, and its callbacks can't reach the app (or this window) while they're being
+/// updated, so they'd be dropped: a restored window that didn't hear its new size, a press of
+/// the keys held as it came forward.
 #[cfg(windows)]
 pub fn activate_window(window: &mut Window, cx: &mut App) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -452,7 +453,7 @@ pub fn activate_window(window: &mut Window, cx: &mut App) {
         #[cfg(not(test))]
         _ => return,
     };
-    cx.defer(move |_| {
+    after_update(cx, move |_| {
         // SAFETY: `hwnd` is the window GPUI created for the `window` above, and this is its thread;
         // if it has closed since, both calls fail harmlessly.
         unsafe {
@@ -467,6 +468,16 @@ pub fn activate_window(window: &mut Window, cx: &mut App) {
 #[cfg(not(windows))]
 pub fn activate_window(window: &mut Window, _: &mut App) {
     window.activate_window();
+}
+
+/// Run `f` once the update in progress is over, outside any update: for a Win32 call that sends
+/// a window messages there and then (`ShowWindow`, `SetForegroundWindow`, `WindowFromPoint`),
+/// which GPUI hears by updating the window, and can't while the app is being updated (the
+/// callback is dropped, and GPUI logs "RefCell already borrowed"). Not `cx.defer`, which runs at
+/// the end of the update, still inside it, nor a window's `on_next_frame`, inside the next frame's.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+pub fn after_update(cx: &App, f: impl FnOnce(&mut AsyncApp) + 'static) {
+    cx.spawn(async move |cx| f(cx)).detach();
 }
 
 /// Liquid glass from the system (macOS 26 and later): an `NSGlassEffectView` under the window's
