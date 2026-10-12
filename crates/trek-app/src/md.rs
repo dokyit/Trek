@@ -172,8 +172,9 @@ pub fn view(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<
     dress(TextView::new(state), cwd, folder, size, Tone::Prose, None, cx)
 }
 
-/// `view`, with Trek's native visualization blocks enabled. Assistant answers use this; tool
-/// output, reasoning and secondary previews keep treating the same fence as ordinary code.
+/// `view`, with Trek's native visualization blocks and live pages enabled. Assistant answers use
+/// this; tool output, reasoning and secondary previews keep treating the same fences as ordinary
+/// code.
 /// `live`: the answer is still streaming in, so a visualization block it hasn't closed yet is
 /// drawn as far as it's written (in a finished answer one left open can't be drawn).
 pub fn answer(state: &Entity<TextViewState>, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, live: bool, cx: &App) -> TextView {
