@@ -32,6 +32,7 @@ use trek_core::{AgentId, RunState};
 use trek_remote as tr;
 
 mod basecamp;
+pub(crate) mod bonjour;
 mod commands;
 mod git;
 mod notes;
@@ -40,6 +41,11 @@ mod usage;
 
 /// How often changes go out to phones.
 const TICK: Duration = Duration::from_millis(250);
+/// A phone server that couldn't start is tried again after this long.
+pub(crate) const RETRY: Duration = Duration::from_secs(10);
+/// How often this Mac's network interfaces are looked at while the server runs, so a new address
+/// (another network, DHCP, Wi-Fi back after sleep) gets a server listening on it.
+const ADDRESSES_EVERY: Duration = Duration::from_secs(5);
 /// Settled threads beyond this many (newest first) stay off the phone.
 const SETTLED_ON_PHONE: usize = 150;
 
@@ -69,6 +75,8 @@ pub struct Remote {
     pub(crate) dormant: HashMap<String, Watched>,
     /// What the thread rows were last built from (`push_remote_changes`).
     rows_key: Option<(u64, u64, i64)>,
+    /// The server announced on the local network, on Wi-Fi (`bonjour`).
+    _advert: Option<bonjour::Advert>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -338,6 +346,10 @@ impl Workspace {
     pub fn sync_remote(&mut self, cx: &mut Context<Self>) {
         let want = self.settings.mobile.enabled;
         let wanted_with = (self.settings.mobile.port, self.settings.mobile.reach);
+        if !want {
+            self.remote_error = None;
+            self.remote_retry = None;
+        }
         match (&self.remote, want) {
             (None, true) if !self.remote_starting => self.start_remote(cx),
             (Some(_), false) => self.stop_remote(cx),
@@ -355,6 +367,7 @@ impl Workspace {
             return;
         }
         self.remote_starting = true;
+        self.remote_retry = None;
         let port = self.settings.mobile.port;
         let reach = self.settings.mobile.reach;
         cx.spawn(async move |this, cx| {
@@ -362,6 +375,7 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     let host = host_info();
+                    let announce = (host.name.clone(), host.id.clone());
                     let identity = tr::TlsIdentity::load_or_create(&mobile_dir(), &host.name)?;
                     let addresses = Addresses::find();
                     let (bind, advertise) = remote_endpoint(&addresses, reach, port)?;
@@ -389,24 +403,47 @@ impl Workspace {
                         })
                         .await
                         .map_err(std::io::Error::other)??;
-                    anyhow::Ok((handle, requests, addresses, advertise))
+                    anyhow::Ok((handle, requests, addresses, advertise, announce))
                 })
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 ws.remote_starting = false;
                 match started {
-                    Ok((handle, requests, addresses, advertise)) if ws.settings.mobile.enabled => {
-                        let tasks = vec![serve_requests(cx.weak_entity(), requests, cx), push_changes(cx.weak_entity(), cx), hear_notices(cx.weak_entity(), handle.notices(), cx)];
+                    Ok((handle, requests, addresses, advertise, (name, id))) if ws.settings.mobile.enabled => {
+                        ws.remote_error = None;
+                        // Only where phones on this network can reach it: not this Mac alone,
+                        // and not the tailnet (a phone there dials the address it paired with).
+                        let on_lan = reach == trek_core::settings::Reach::Wifi && addresses.lan.is_some();
+                        let advert = on_lan.then(|| bonjour::Advert::new(&name, &id, port)).flatten();
+                        let tasks = vec![
+                            serve_requests(cx.weak_entity(), requests, cx),
+                            push_changes(cx.weak_entity(), cx),
+                            hear_notices(cx.weak_entity(), handle.notices(), cx),
+                            follow_addresses(cx.weak_entity(), advertise.clone(), (port, reach), cx),
+                        ];
                         let devices = handle.devices();
-                        ws.remote = Some(Remote { handle, offer: None, addresses, advertise, started_with: (port, reach), devices, connected: HashSet::new(), sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _tasks: tasks });
+                        ws.remote = Some(Remote { handle, offer: None, addresses, advertise, started_with: (port, reach), devices, connected: HashSet::new(), sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _advert: advert, _tasks: tasks });
                     }
                     // Turned off while it started.
                     Ok((handle, ..)) => handle.shutdown(),
-                    Err(e) => {
-                        ws.settings.mobile.enabled = false;
-                        ws.save_settings(cx);
-                        cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't start the phone server: {e:#}"), undo: None });
+                    // The switch stays on and it's tried again: a Mac that just woke, or hasn't
+                    // joined Wi-Fi or Tailscale yet, gets there in a moment, and a switch that
+                    // turned itself off left phones out until someone looked.
+                    Err(e) if ws.settings.mobile.enabled => {
+                        let message = format!("{e:#}");
+                        if ws.remote_error.as_deref() != Some(message.as_str()) {
+                            cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't start the phone server: {message}. Trying again."), undo: None });
+                        }
+                        ws.remote_error = Some(message);
+                        ws.remote_retry = Some(cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(RETRY).await;
+                            let _ = this.update(cx, |ws, cx| {
+                                ws.remote_retry = None;
+                                ws.sync_remote(cx);
+                            });
+                        }));
                     }
+                    Err(_) => {}
                 }
                 cx.notify();
             });
@@ -424,7 +461,7 @@ impl Workspace {
         let handle = trek_core::runtime().block_on(tr::RemoteServer::start(config, Arc::new(host))).expect("a test server");
         let connected = HashSet::from(["phone".to_string()]);
         let started_with = (0, trek_core::settings::Reach::Wifi);
-        self.remote = Some(Remote { handle, offer: None, addresses: Addresses::default(), advertise: String::new(), started_with, devices: vec![], connected, sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _tasks: vec![] });
+        self.remote = Some(Remote { handle, offer: None, addresses: Addresses::default(), advertise: String::new(), started_with, devices: vec![], connected, sent: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _advert: None, _tasks: vec![] });
     }
 
     fn stop_remote(&mut self, cx: &mut Context<Self>) {
@@ -1679,6 +1716,34 @@ fn serve_requests(ws: WeakEntity<Workspace>, requests: async_channel::Receiver<t
             if ws.update(cx, |ws, cx| ws.remote_request(req, cx)).is_err() {
                 break;
             }
+        }
+    })
+}
+
+/// Start the server again when the address it should listen on isn't the one it does: Trek
+/// started before Wi-Fi was up (it listened on this Mac only), the network handed out another
+/// address, Tailscale came or went. The interface list is cheap to read and is what changes
+/// first; Tailscale is asked only when it does.
+fn follow_addresses(ws: WeakEntity<Workspace>, advertise: String, (port, reach): (u16, trek_core::settings::Reach), cx: &mut Context<Workspace>) -> Task<()> {
+    cx.spawn(async move |_, cx: &mut AsyncApp| {
+        let mut seen = interface_addresses();
+        loop {
+            cx.background_executor().timer(ADDRESSES_EVERY).await;
+            let now = cx.background_executor().spawn(async { interface_addresses() }).await;
+            if now == seen {
+                continue;
+            }
+            seen = now;
+            let wanted = cx.background_executor().spawn(async move { remote_endpoint(&Addresses::find(), reach, port).map(|(_, a)| a).ok() }).await;
+            if wanted.as_deref() == Some(advertise.as_str()) {
+                continue;
+            }
+            tracing::info!("phone server: this Mac's address is now {wanted:?}, was {advertise}; starting again");
+            let _ = ws.update(cx, |ws, cx| {
+                ws.stop_remote(cx);
+                ws.sync_remote(cx);
+            });
+            break;
         }
     })
 }

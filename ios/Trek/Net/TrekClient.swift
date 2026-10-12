@@ -121,8 +121,15 @@ final class TrekClient: Backend {
     /// Called once when pairing succeeds, with the device token to keep and the transport to keep
     /// using (for TLS, pinned to the full fingerprint seen while pairing).
     var onPaired: ((String, HostInfo, Transport) -> Void)?
+    /// Called when the paired Mac was found on this network at another address (`MacFinder`),
+    /// with that address; the connection goes on there.
+    var onMoved: ((String) -> Void)?
 
-    private let address: String
+    private(set) var address: String
+    /// The paired Mac's lasting id, which its Bonjour record carries: with it, a Mac that stopped
+    /// answering at `address` is looked for on this network.
+    private let hostId: String?
+    private var finder: MacFinder?
     private var auth: Auth
     private(set) var transport: Transport
     private var task: URLSessionWebSocketTask?
@@ -140,10 +147,11 @@ final class TrekClient: Backend {
     private static let pingEvery: TimeInterval = 25
     private var generation = 0
 
-    init(address: String, auth: Auth, transport: Transport) {
+    init(address: String, auth: Auth, transport: Transport, hostId: String? = nil) {
         self.address = address
         self.auth = auth
         self.transport = transport
+        self.hostId = hostId
     }
 
     /// `host:port` (any scheme the user typed is dropped) as a `wss://` or `ws://` URL.
@@ -164,6 +172,8 @@ final class TrekClient: Backend {
 
     func stop() {
         stopped = true
+        finder?.cancel()
+        finder = nil
         generation += 1
         pingTimer?.invalidate()
         task?.cancel(with: .goingAway, reason: nil)
@@ -332,11 +342,48 @@ final class TrekClient: Backend {
         attempt += 1
         let delay = min(30, pow(2, Double(min(attempt, 5))) / 2)
         onState?(.offline("Mac unreachable — retrying"))
+        // Straight away, then every few tries: the Mac may be on this network at another address.
+        if attempt == 1 || attempt % 4 == 0 { look() }
         // Unless something connected meanwhile (`wake`): this retry is then one too many.
         let planned = generation
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, !self.stopped, self.generation == planned else { return }
             self.connect()
+        }
+    }
+
+    /// Look for the paired Mac on this network (Bonjour); found at another address, connect
+    /// there now. Only a Mac paired at a local address is looked for: one paired at its tailnet
+    /// address or a name keeps it (it isn't announced on the tailnet, and a phone away from home
+    /// must not swap its tailnet address for a home one).
+    private func look() {
+        guard finder == nil, let hostId, Self.isLocal(address) else { return }
+        let finder = MacFinder(hostId: hostId)
+        self.finder = finder
+        finder.find { [weak self] found in
+            guard let self else { return }
+            self.finder = nil
+            guard !self.stopped, !self.authenticated, let found, found != self.address else { return }
+            self.address = found
+            self.onMoved?(found)
+            if !self.connecting {
+                self.attempt = 0
+                self.connect()
+            }
+        }
+    }
+
+    /// A private IPv4 address on this network (not Tailscale's 100.64/10), or a `.local` name.
+    static func isLocal(_ address: String) -> Bool {
+        let host = address.split(separator: ":").first.map(String.init) ?? address
+        if host.lowercased().hasSuffix(".local") { return true }
+        let octets = host.split(separator: ".").compactMap { UInt8($0) }
+        guard octets.count == 4 else { return false }
+        switch (octets[0], octets[1]) {
+        case (10, _), (192, 168): return true
+        case (172, 16...31): return true
+        case (169, 254): return true
+        default: return false
         }
     }
 

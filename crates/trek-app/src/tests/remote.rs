@@ -1074,3 +1074,31 @@ fn thread_rows_are_built_only_when_something_of_the_threads_changed() {
         assert_eq!(row(&trek, cx).as_deref(), Some("Renamed on the Mac"));
     });
 }
+
+#[test]
+fn a_phone_server_that_cant_start_stays_on_and_says_why() {
+    use crate::settings_view::shown;
+    use crate::workspace::SettingsPage;
+    super::harness::run(async |cx| {
+        let trek = super::harness::open(cx);
+        trek.update(cx, |ws, cx| {
+            ws.settings.mobile.enabled = true;
+            // What start_remote leaves when binding failed: the switch as it was, and why.
+            ws.remote_error = Some("Tailscale isn't connected; choose Wi-Fi or connect Tailscale".into());
+            ws.navigate(Route::Settings(SettingsPage::Mobile), cx);
+        });
+        shown::take();
+        trek.render(cx);
+        let said = shown::take();
+        let why = format!("Couldn't start: Tailscale isn't connected; choose Wi-Fi or connect Tailscale. Trying again every {} seconds.", crate::remote::RETRY.as_secs());
+        assert!(said.iter().any(|s| *s == why), "{said:?}");
+        assert!(!said.iter().any(|s| s == "Starting…"), "{said:?}");
+        assert!(trek.read(cx, |ws, _| ws.settings.mobile.enabled));
+        // Turned off, the failure is forgotten.
+        trek.update(cx, |ws, cx| {
+            ws.settings.mobile.enabled = false;
+            ws.sync_remote(cx);
+        });
+        assert!(trek.read(cx, |ws, _| ws.remote_error.is_none()));
+    });
+}

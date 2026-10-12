@@ -1039,6 +1039,9 @@ pub struct Workspace {
     /// The phone server, while Settings › Phone has it on (see `remote`).
     pub remote: Option<crate::remote::Remote>,
     pub(crate) remote_starting: bool,
+    /// Why the phone server last failed to start; it's tried again shortly (`remote::RETRY`).
+    pub(crate) remote_error: Option<String>,
+    pub(crate) remote_retry: Option<Task<()>>,
     pub settled_open: bool,
     /// The sidebar's search text. Change it with `set_search`, which also searches messages.
     pub search: String,
@@ -1434,6 +1437,8 @@ impl Workspace {
             tabs: if cfg!(test) { vec![] } else { tabs::load_tabs() },
             remote: None,
             remote_starting: false,
+            remote_error: None,
+            remote_retry: None,
             settled_open: false,
             search: String::new(),
             search_results: SearchResults::default(),
