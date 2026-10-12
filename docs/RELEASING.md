@@ -118,11 +118,21 @@ What it does:
        "sha256": "…", "signature": "<the .minisig file>" } } }
    ```
 
+   `release-notes.md` is the GitHub release's body: `notes.md`, a blank line and an **Install** block with
+   one bullet per platform. The Mac bullet says how to unpack and open Trek.app; the Windows one gives the
+   zip, the folder rule (see "Windows" below) and the SmartScreen step. The wording lives in one place,
+   `trek_install_block` in `script/lib/notes.sh`; `README.md`'s Install sections say the same things, so
+   change them together. A `--notes` file that already has an install block (a `## Install` heading, or a
+   `**Windows**:` line) keeps its own, and the log says so. Each publish replaces the body whole, so a
+   beta's moving release never carries two.
+
 6. Without `--dry-run`:
    - stable: commits `Release v<version>` on the current branch, tags `v<version>`, pushes both and
-     creates the GitHub release (marked latest) with the archive, its `.minisig` and `stable.json`;
+     creates the GitHub release (marked latest) with the archive, its `.minisig`, `stable.json`, and
+     `release-notes.md` as its body;
    - beta / nightly: records the build as a commit off the branch, tags it (`v<version>` for a beta),
-     moves the channel tag to it, pushes the tags only, and refreshes the channel's prerelease: archive
+     moves the channel tag to it, pushes the tags only, and refreshes the channel's prerelease (its body
+     too): archive
      first, manifest last, then older archives are deleted. The branch doesn't move and the version
      bump is undone.
 
@@ -153,7 +163,8 @@ default branch, `--ref` can go for a release from there, and the **Run workflow*
 is the sure way to start it (GitHub documents `workflow_dispatch` as a default-branch feature).
 
 Inputs: `version`, `channel` (stable, beta or nightly; stable by default), optional `notes` (Markdown, used
-as `--notes`; empty means the commit subjects as usual) and `dry_run`. Run it on the branch you release
+as `--notes`; empty means the commit subjects as usual; the install block is added to the release body
+either way) and `dry_run`. Run it on the branch you release
 from: a stable release commits `Release v<version>` to that branch and pushes it (as the runner's
 `github-actions[bot]`, so CI doesn't run on that commit, and a protected branch would refuse the push
 before anything is published), and a beta or nightly is built from its head. The macOS job takes about 15
@@ -253,9 +264,11 @@ user-writable. Documents and Desktop look like folders the user owns, but Defend
 access (ransomware protection), when it's on, lets only programs it trusts write there, and judges the
 `trek-update.exe` each update brings on its own.
 
-`release.sh` writes no install line into the notes; a hand-written `--notes` file that has one should
-say the same, e.g. "Unzip it into a folder of its own that Windows doesn't guard, such as
-C:\Users\<you>\Trek (not Documents, Desktop, Downloads or Program Files), and run trek.exe."
+The install line comes from `release.sh`, not from whoever writes the notes. Before that, each release's
+body depended on its `--notes` file: beta.3's said "Unzip it into a folder you own (not Program Files)",
+which put Tobias's own install under `OneDrive\Documents`, where Controlled folder access blocked the
+updater. Now every body carries the block from `trek_install_block`, and a `--notes` file that has its own
+keeps it.
 
 ## How an update installs
 

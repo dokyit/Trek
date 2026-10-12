@@ -33,6 +33,7 @@ set -euo pipefail
 SELF=${0:A}
 cd "${SELF:h}/.."
 source script/lib/sign.sh
+source script/lib/notes.sh
 source "$HOME/.cargo/env" 2>/dev/null || true
 
 die() { echo "release: $*" >&2; exit 1; }
@@ -166,19 +167,9 @@ minisign -V -q -p assets/update/minisign.pub -m "$OUT/$NAME" -x "$OUT/$NAME.mini
 echo "• $NAME  sha256 $SHA  (signature verified with assets/update/minisign.pub)"
 
 # ---------- notes ----------
-if [[ -n $NOTES_FILE ]]; then
-  cp "$NOTES_FILE" "$OUT/notes.md"
-else
-  # The most recent tag, by when it was made: git's version sort puts 0.3.0-beta.1 after 0.3.0.
-  case $CHANNEL in
-    stable) SINCE=$(git tag --list 'v[0-9]*' --sort=-creatordate | grep -v -- - | head -1 || true) ;;
-    nightly) SINCE=$(git rev-parse -q --verify refs/tags/nightly >/dev/null && echo nightly || git tag --list 'v[0-9]*' --sort=-creatordate | head -1 || true) ;;
-    *) SINCE=$(git tag --list 'v[0-9]*' --sort=-creatordate | head -1 || true) ;;
-  esac
-  RANGE=HEAD; [[ -n $SINCE ]] && RANGE="$SINCE..HEAD"
-  git log --no-merges --invert-grep --grep='^Release v' --format='- %s' "$RANGE" > "$OUT/notes.md"
-  [[ -s $OUT/notes.md ]] || echo "- Maintenance release." > "$OUT/notes.md"
-fi
+# script/lib/notes.sh: notes.md (the changes: the manifest's notes) and release-notes.md (those, plus
+# the install block: the GitHub release's body).
+trek_write_notes "$NOTES_FILE" "$VERSION" "$CHANNEL" "$OUT"
 
 # ---------- manifest ----------
 BASE=${TREK_RELEASE_DOWNLOAD_URL:-https://github.com/$REPO/releases/download/$RELEASE_TAG}
@@ -213,7 +204,7 @@ if [[ $CHANNEL == stable ]]; then
   git push origin HEAD
   git push origin "refs/tags/$VERSION_TAG"
   gh release create "$RELEASE_TAG" --repo "$REPO" --verify-tag --latest \
-    --title "Trek $VERSION" --notes-file "$OUT/notes.md" "${ASSETS[@]}"
+    --title "Trek $VERSION" --notes-file "$OUT/release-notes.md" "${ASSETS[@]}"
 else
   # What was built, as a commit off the branch: HEAD's tree with the bumped Cargo.toml and
   # Cargo.lock. Its tags keep it; the branch and the working tree stay at the workspace version.
@@ -236,7 +227,9 @@ else
   if gh release view "$CHANNEL" --repo "$REPO" >/dev/null 2>&1; then
     gh release upload "$CHANNEL" --repo "$REPO" --clobber "$OUT/$NAME" "$OUT/$NAME.minisig"
     gh release upload "$CHANNEL" --repo "$REPO" --clobber "$OUT/$CHANNEL.json"
-    gh release edit "$CHANNEL" --repo "$REPO" --prerelease --title "Trek $VERSION ($CHANNEL)" --notes-file "$OUT/notes.md"
+    # The body is replaced whole from release-notes.md, never appended to: the install block is
+    # there once, whatever the earlier builds' bodies said.
+    gh release edit "$CHANNEL" --repo "$REPO" --prerelease --title "Trek $VERSION ($CHANNEL)" --notes-file "$OUT/release-notes.md"
     for asset in ${(f)"$(gh release view "$CHANNEL" --repo "$REPO" --json assets --jq '.assets[].name')"}; do
       if [[ $asset == Trek-*.app.tar.gz* && $asset != "$NAME" && $asset != "$NAME.minisig" ]]; then
         gh release delete-asset "$CHANNEL" "$asset" --repo "$REPO" -y
@@ -244,7 +237,7 @@ else
     done
   else
     gh release create "$CHANNEL" --repo "$REPO" --verify-tag --prerelease \
-      --title "Trek $VERSION ($CHANNEL)" --notes-file "$OUT/notes.md" "${ASSETS[@]}"
+      --title "Trek $VERSION ($CHANNEL)" --notes-file "$OUT/release-notes.md" "${ASSETS[@]}"
   fi
 fi
 echo "• published Trek $VERSION on $CHANNEL: https://github.com/$REPO/releases/tag/$RELEASE_TAG"
