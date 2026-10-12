@@ -193,6 +193,8 @@ enum Script {
     Deaf(Duration),
     /// Start a sub-agent through Trek's orchestration tools: waiting for its answer, or not.
     Delegate { wait: bool },
+    /// Hand work to a new top-level thread through Trek's `start_thread` (`mock:handoff`).
+    Handoff,
     /// Start two sub-agents on the same task, and end the turn.
     Pair,
     /// Leave a dev server running in the background, for a while or until stopped.
@@ -275,6 +277,7 @@ impl Script {
                 "deaf" if w.starts_with("mock:") => Script::Deaf(duration_after(i).unwrap_or(Duration::from_secs(60))),
                 "consult" if w.starts_with("mock:") => Script::Delegate { wait: true },
                 "delegate" if w.starts_with("mock:") => Script::Delegate { wait: false },
+                "handoff" if w.starts_with("mock:") => Script::Handoff,
                 "pair" if w.starts_with("mock:") => Script::Pair,
                 "task" if w.starts_with("mock:") => Script::Task(duration_after(i).unwrap_or(Duration::from_secs(6))),
                 "server" if w.starts_with("mock:") => Script::Server(duration_after(i)),
@@ -343,6 +346,7 @@ pub fn title(request: &str) -> String {
         Script::Limit(_) | Script::NearLimit(_) => "Refactor the parser",
         Script::Deaf(_) => "Run the long migration",
         Script::Delegate { .. } => "Get a second opinion",
+        Script::Handoff => "Hand the survey to a new thread",
         Script::Pair => "Get two opinions",
         Script::Server(_) => "Start the dev server",
         Script::Watch(_) => "Watch the tests",
@@ -683,6 +687,7 @@ impl Session {
     async fn play(&mut self, script: Script, text: &str) -> Step {
         match script {
             Script::Delegate { wait } => self.delegate(text, wait).await?,
+            Script::Handoff => self.handoff(text).await?,
             Script::Pair => self.pair(text).await?,
             Script::Server(until) => self.server(until).await?,
             Script::Watch(after) => self.watch(after).await?,
@@ -1049,6 +1054,17 @@ impl Session {
                 self.emit(AgentEvent::ToolFinished { id, output: e.clone(), ok: false }).await?;
                 self.say(&format!("I couldn't get a second opinion: {e}")).await
             }
+        }
+    }
+
+    /// Hand whatever follows the keyword to a new top-level thread through Trek's `start_thread`:
+    /// it reports to nobody, so the answer is only the link to it.
+    async fn handoff(&mut self, text: &str) -> Step {
+        let prompt = after_keyword(text, &["mock:handoff"]).unwrap_or("Say hello and stop.").to_string();
+        self.say("This belongs in a thread of its own.").await?;
+        match self.orchestrate_call("start_thread", "Handed off", serde_json::json!({ "title": "Handed off", "prompt": prompt })).await? {
+            Ok(answer) => self.say(&format!("Started: {}", answer["link"].as_str().unwrap_or_default())).await,
+            Err(e) => self.say(&format!("I couldn't start the thread: {e}")).await,
         }
     }
 
@@ -1949,6 +1965,7 @@ mod tests {
         assert_eq!(Script::parse("the rate limit", false), Script::Answer, "bare `limit` is just a word");
         assert_eq!(Script::parse("mock:consult mock:long 2s", false), Script::Delegate { wait: true }, "the first keyword is the parent's");
         assert_eq!(Script::parse("mock:delegate", false), Script::Delegate { wait: false });
+        assert_eq!(Script::parse("mock:handoff mock:long 2s", false), Script::Handoff);
         assert_eq!(Script::parse("consult a friend", false), Script::Answer);
         assert_eq!(Script::parse("[Trek] Sub-agent “x” failed: error", false), Script::Wake);
         assert_eq!(Script::parse("mock:verify the notes", false), Script::Verify { broken: false });

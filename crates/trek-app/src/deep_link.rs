@@ -3,6 +3,7 @@
 //! - `trek://edit?path=…&line=…` — open the file in the in-app editor, caret on `line`.
 //! - `trek://ask?path=…&line=…&end=…&selection=…` — draft a thread on the file's project
 //!   with the selection quoted into the composer.
+//! - `trek://thread/<id>` — open one of this Trek's threads (a hand-off row links to it).
 
 use std::path::{Component, Path, PathBuf};
 
@@ -25,6 +26,10 @@ pub fn open_file(path: PathBuf, cx: &mut App) {
 }
 
 fn open_link(link: Link, cx: &mut App) {
+    // A thread link opens what's already Trek's own: the file checks below don't apply.
+    if let Link::Thread(id) = &link {
+        return open_thread(id, cx);
+    }
     // Relative to what? Trek's own working folder isn't anything the user meant.
     if !link.path().is_absolute() {
         return;
@@ -53,10 +58,25 @@ fn open_link(link: Link, cx: &mut App) {
     .detach();
 }
 
+/// A `trek://thread/<id>` link: bring the window up and show the thread in it.
+fn open_thread(id: &str, cx: &mut App) {
+    if !cx.has_global::<workspace::GlobalWorkspace>() {
+        return;
+    }
+    let ws = workspace::workspace_global(cx);
+    crate::root::show_main(ws.clone(), cx);
+    ws.update(cx, |ws, cx| {
+        ws.open_thread_here(id, cx);
+        cx.emit(WorkspaceEvent::ActivateMain);
+    });
+}
+
 /// Act on a link the user trusts.
 fn follow(link: Link, cx: &mut App) {
     let ws = workspace::workspace_global(cx);
     match link {
+        // Answered before `follow` runs (`open_link`); it needs no file checks.
+        Link::Thread(id) => open_thread(&id, cx),
         Link::Edit { path, line } => {
             // The window has to exist before the event it hears goes out.
             crate::root::show_main(ws.clone(), cx);
@@ -123,18 +143,26 @@ fn within(roots: &[PathBuf], path: &Path, real: impl Fn(&Path) -> Option<PathBuf
 enum Link {
     Edit { path: PathBuf, line: Option<u32> },
     Ask { path: PathBuf, line: Option<u32>, end: Option<u32>, selection: String },
+    /// A thread in this Trek: `trek://thread/<id>`.
+    Thread(String),
 }
 
 impl Link {
     fn path(&self) -> &Path {
         match self {
             Link::Edit { path, .. } | Link::Ask { path, .. } => path,
+            // Checked before it's asked: it carries no path.
+            Link::Thread(_) => unreachable!(),
         }
     }
 }
 
 fn parse(url: &str) -> Option<Link> {
     let rest = url.strip_prefix("trek://")?;
+    if let Some(id) = rest.strip_prefix("thread/") {
+        let id = decode(id.split(['?', '&']).next().unwrap_or(id));
+        return (!id.is_empty()).then(|| Link::Thread(id));
+    }
     let (verb, query) = rest.split_once('?').unwrap_or((rest, ""));
     let mut path = None;
     let mut line = None;
@@ -221,6 +249,13 @@ mod tests {
         assert!(asked.borrow().contains(&root.join("a.rs")));
         let leads_out = |p: &Path| Some(if p == root.join("link.rs") { far.clone() } else { p.to_path_buf() });
         assert!(!within(std::slice::from_ref(&root), &root.join("link.rs"), leads_out));
+    }
+
+    #[test]
+    fn a_thread_link_names_a_thread() {
+        let Link::Thread(id) = parse("trek://thread/0197c2b4-3e5a-7b1c-8d2e-4f6a8b0c1d2e").unwrap() else { panic!() };
+        assert_eq!(id, "0197c2b4-3e5a-7b1c-8d2e-4f6a8b0c1d2e");
+        assert!(parse("trek://thread/").is_none());
     }
 
     #[test]
