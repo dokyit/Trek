@@ -129,8 +129,8 @@ fn reset_in(message: &str, now: i64, offset: &dyn Fn(Option<&str>, i64) -> Optio
     }
     // ASCII lowercase keeps byte offsets, so a match points into `message` too.
     let lower = message.to_ascii_lowercase();
+    const IN: &[&str] = &["try again in ", "retry in ", "resets in ", "reset in ", "available in ", "retry after "];
     const AT: &[&str] = &["resets at ", "reset at ", "try again at ", "retry after ", "available again at ", "resets on ", "resets "];
-    const IN: &[&str] = &["try again in ", "retry in ", "resets in ", "reset in ", "available in "];
     for lead in IN {
         if let Some(i) = lower.find(lead)
             && let Some(at) = parse_span(&lower[i + lead.len()..]).and_then(|ms| now.checked_add(ms))
@@ -186,19 +186,22 @@ const MONTHS: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "au
 /// "9:10am (UTC)", "tomorrow at 2:10 AM", "Oct 3rd, 2026 2:10 AM", "Oct 9, 3pm". The next such
 /// moment after `now` when there's no date.
 fn parse_when(s: &str, now: i64, offset: &dyn Fn(Option<&str>, i64) -> Option<i32>) -> Option<i64> {
-    // The zone, in parentheses after the time.
-    let (body, zone) = match s.find('(') {
-        Some(open) => {
-            let close = s[open..].find(')').map(|c| open + c)?;
-            (&s[..open], Some(s[open + 1..close].trim()))
-        }
-        None => (s, None),
-    };
     // One sentence: "… at 2:10 AM. Upgrade to Pro" ends at the full stop.
-    let body = body.split(['\n', ';']).next().unwrap_or_default();
-    let body = match body.find(". ") {
-        Some(i) => &body[..i],
-        None => body,
+    let sentence = s.split(['\n', ';']).next().unwrap_or_default();
+    let sentence = match sentence.find(". ") {
+        Some(i) => &sentence[..i],
+        None => sentence,
+    };
+    // The zone, in parentheses after the time within this sentence.
+    let (body, zone) = match sentence.find('(') {
+        Some(open) => {
+            let close = sentence[open..].find(')').map(|c| open + c);
+            match close {
+                Some(c) => (&sentence[..open], Some(sentence[open + 1..c].trim())),
+                None => (sentence, None),
+            }
+        }
+        None => (sentence, None),
     };
     let words: Vec<String> = body.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty()).map(|w| w.trim_end_matches('.').to_lowercase()).collect();
     let (mut month, mut day, mut year, mut tomorrow, mut time) = (None, None, None, false, None::<NaiveTime>);
@@ -230,7 +233,8 @@ fn parse_when(s: &str, now: i64, offset: &dyn Fn(Option<&str>, i64) -> Option<i3
     }
     let time = time?;
     let zone = zone.filter(|z| !z.is_empty());
-    let fixed = chrono::FixedOffset::east_opt(offset(zone, now)?)?;
+    let off_now = zone.and_then(|z| offset(Some(z), now)).or_else(|| offset(None, now))?;
+    let fixed = chrono::FixedOffset::east_opt(off_now)?;
     let local_now = chrono::DateTime::from_timestamp_millis(now)?.with_timezone(&fixed).naive_local();
     let at = match (month, day) {
         (Some(m), Some(d)) => {
@@ -254,7 +258,8 @@ fn parse_when(s: &str, now: i64, offset: &dyn Fn(Option<&str>, i64) -> Option<i3
     };
     // The zone's offset then, not now: a reset on the far side of a daylight-saving change.
     let guess = fixed.from_local_datetime(&at).single()?.timestamp_millis();
-    let then = chrono::FixedOffset::east_opt(offset(zone, guess)?)?;
+    let off_then = zone.and_then(|z| offset(Some(z), guess)).or_else(|| offset(None, guess))?;
+    let then = chrono::FixedOffset::east_opt(off_then)?;
     Some(then.from_local_datetime(&at).single()?.timestamp_millis())
 }
 
@@ -465,6 +470,9 @@ mod tests {
         let later = "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Oct 3rd, 2026 2:10 AM.";
         assert_eq!(reset_in(later, now, &zones), Some(ms("2026-10-03T06:10:00Z")));
         assert_eq!(reset_in("Usage limit reached. Retry after tomorrow at 2:10 AM.", now, &zones), Some(ms("2026-10-03T06:10:00Z")));
+        assert_eq!(reset_in("Retry after 20 seconds", now, &zones), Some(now + 20_000));
+        assert_eq!(reset_in("resets at 9:41 PM. Upgrade to Pro (https://chatgpt.com/pro)", now, &zones), Some(ms("2026-10-03T01:41:00Z")));
+        assert_eq!(reset_in("resets at 9:41 PM (estimated)", now, &zones), Some(ms("2026-10-03T01:41:00Z")));
         // OpenAI's rate-limit wording, and plain spans.
         assert_eq!(reset_in("Rate limit reached for gpt-6 on tokens per min. Please try again in 6m0s.", now, &zones), Some(now + 360_000));
         assert_eq!(reset_in("rate limited, retry in 1.5s", now, &zones), Some(now + 1_500));

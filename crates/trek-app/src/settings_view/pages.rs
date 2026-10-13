@@ -653,6 +653,7 @@ impl SettingsView {
                         this.saved_keys.insert(id, false);
                         this.workspace.update(cx, |ws, cx| {
                             ws.settings.api_providers.retain(|p| p != id);
+                            ws.direct_models.remove(id);
                             ws.save_settings(cx);
                         });
                     })))
@@ -677,6 +678,7 @@ impl SettingsView {
                                         ws.settings.api_providers.push(id.to_string());
                                     }
                                     ws.save_settings(cx);
+                                    ws.fetch_direct_models(id, cx);
                                 });
                                 crate::toast::push(window, format!("Saved to {}", crate::words::words().your_credential_store), cx);
                             }

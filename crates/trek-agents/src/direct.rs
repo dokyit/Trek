@@ -2,13 +2,13 @@
 //! Trek's own tool loop (read/edit/bash with the hand-holding gates) lands in phase 2.
 
 use crate::{AgentEvent, Billing, Command, SessionConfig, load_image};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use futures::StreamExt;
 use serde_json::{Value, json};
-use trek_core::catalog::{Wire, direct_provider};
+use trek_core::catalog::{ModelInfo, Wire, direct_provider};
 use trek_core::settings::secrets;
 use trek_core::{AgentId, Effort, TokenUsage, UsageCost};
 
@@ -21,7 +21,7 @@ fn request_error(status: reqwest::StatusCode, headers: &reqwest::header::HeaderM
     anyhow::anyhow!(message)
 }
 
-const SYSTEM: &str = "You are Trek, a coding assistant. Be direct and concise. Use Markdown with fenced code blocks.";
+const SYSTEM: &str = "You are Trek, a coding assistant. Be direct and concise. Use Markdown with fenced code blocks. Note: Tools and command execution (bash) are not available in this direct session; do not generate <tool_call> tags or attempt function calling. Provide complete responses, code, and explanations directly in text.";
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 
 pub async fn run(
@@ -399,8 +399,12 @@ async fn anthropic_turn(
 }
 
 fn append(blocks: &mut [Value], index: usize, field: &str, s: &str) {
-    if let Some(Value::String(text)) = blocks.get_mut(index).and_then(|b| b.get_mut(field)) {
-        text.push_str(s);
+    if let Some(b) = blocks.get_mut(index) {
+        if let Some(Value::String(text)) = b.get_mut(field) {
+            text.push_str(s);
+        } else if let Value::Object(map) = b {
+            map.insert(field.to_string(), Value::String(s.to_string()));
+        }
     }
 }
 
@@ -488,6 +492,128 @@ async fn openai_turn(
     Ok(json!({ "role": "assistant", "content": text }))
 }
 
+/// Query live models from a direct provider (OpenRouter, DeepSeek, Ollama, etc.).
+pub async fn direct_provider_models(provider_id: &str, api_key: Option<String>) -> Result<Vec<ModelInfo>> {
+    let provider = direct_provider(provider_id).with_context(|| format!("unknown provider {provider_id}"))?;
+    let key = api_key.or_else(|| secrets::api_key(provider.id));
+
+    // Non-local providers (except openrouter) require an API key to list models.
+    if !provider.local && provider.id != "openrouter" && key.is_none() {
+        return Ok(vec![]);
+    }
+
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).build()?;
+
+    if provider.id == "ollama" {
+        let url = provider.base_url.trim_end_matches("/v1").to_string() + "/api/tags";
+        let res = client.get(url).send().await?;
+        if !res.status().is_success() {
+            bail!("ollama returned {}", res.status());
+        }
+        let v: Value = res.json().await?;
+        let models = v["models"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|m| m["name"].as_str().map(|name| ModelInfo {
+                id: name.to_string(),
+                name: name.to_string(),
+                efforts: vec![],
+                tier: 0,
+                fast: None,
+            }))
+            .collect();
+        return Ok(models);
+    }
+
+    if provider.wire == Wire::Anthropic {
+        let mut req = client.get("https://api.anthropic.com/v1/models");
+        if let Some(ref k) = key {
+            req = req.header("x-api-key", k);
+        }
+        req = req.header("anthropic-version", "2023-06-01");
+        let res = req.send().await?;
+        if !res.status().is_success() {
+            bail!("{} returned {}", provider.name, res.status());
+        }
+        let v: Value = res.json().await?;
+        return Ok(parse_direct_models(&v));
+    }
+
+    let mut req = client.get(format!("{}/models", provider.base_url));
+    if let Some(ref k) = key {
+        req = req.bearer_auth(k);
+    }
+    let res = req.send().await?;
+    if !res.status().is_success() {
+        bail!("{} returned {}", provider.name, res.status());
+    }
+    let v: Value = res.json().await?;
+    Ok(parse_direct_models(&v))
+}
+
+pub(crate) fn parse_direct_models(v: &Value) -> Vec<ModelInfo> {
+    let mut models = Vec::new();
+    let items = v["data"].as_array().or_else(|| v["models"].as_array());
+    for m in items.into_iter().flatten() {
+        if let Some(raw_id) = m["id"].as_str().or_else(|| m["name"].as_str()) {
+            let id = raw_id.strip_prefix("models/").unwrap_or(raw_id).to_string();
+            let name = m["display_name"]
+                .as_str()
+                .or_else(|| m["name"].as_str())
+                .map(|n| n.strip_prefix("models/").unwrap_or(n))
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or(&id)
+                .to_string();
+            models.push(ModelInfo {
+                id,
+                name,
+                efforts: vec![],
+                tier: models.len().min(255) as u8,
+                fast: None,
+            });
+        }
+    }
+    models
+}
+
+pub fn cache_direct_models(provider_id: &str, models: &[ModelInfo]) {
+    if trek_core::paths::isolated() {
+        return;
+    }
+    let cache_dir = trek_core::paths::data_dir().join("direct-models");
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let file = cache_dir.join(format!("{provider_id}.json"));
+    let tmp = cache_dir.join(format!("{provider_id}.json.tmp"));
+    if let Ok(json) = serde_json::to_string(models) {
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, &file);
+        }
+    }
+}
+
+pub fn cached_direct_models(provider_id: &str) -> Vec<ModelInfo> {
+    if trek_core::paths::isolated() {
+        return vec![];
+    }
+    let file = trek_core::paths::data_dir().join("direct-models").join(format!("{provider_id}.json"));
+    std::fs::read_to_string(file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn load_all_cached_direct_models() -> HashMap<String, Vec<ModelInfo>> {
+    let mut map = HashMap::new();
+    for provider in trek_core::catalog::DIRECT_PROVIDERS {
+        let models = cached_direct_models(provider.id);
+        if !models.is_empty() {
+            map.insert(provider.id.to_string(), models);
+        }
+    }
+    map
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,6 +675,12 @@ mod tests {
         append(&mut blocks, 0, "text", " two");
         append(&mut blocks, 0, "text", " three");
         assert_eq!(blocks[0]["text"], "one two three");
+
+        // Inserts missing field (e.g. signature on thinking block)
+        append(&mut blocks, 0, "signature", "sig_xyz");
+        assert_eq!(blocks[0]["signature"], "sig_xyz");
+        append(&mut blocks, 0, "signature", "_more");
+        assert_eq!(blocks[0]["signature"], "sig_xyz_more");
     }
 
     #[test]
@@ -689,5 +821,39 @@ mod tests {
         let h = anthropic_body("claude-haiku-4-5", Effort::Medium, &[]);
         assert_eq!(h["thinking"]["budget_tokens"], 8192);
         assert!(h.get("output_config").is_none());
+    }
+
+    #[test]
+    fn parse_openrouter_and_direct_models() {
+        let json = json!({
+            "data": [
+                {
+                    "id": "xiaomi/mimo-v2.6-pro",
+                    "name": "Xiaomi: MiMo-V2.6-Pro"
+                },
+                {
+                    "id": "openai/gpt-4o",
+                    "name": "OpenAI: GPT-4o"
+                },
+                {
+                    "id": "models/gemini-2.0-flash",
+                    "name": "models/gemini-2.0-flash"
+                },
+                {
+                    "id": "claude-3-7-sonnet-20250219",
+                    "display_name": "Claude 3.7 Sonnet"
+                }
+            ]
+        });
+        let models = parse_direct_models(&json);
+        assert_eq!(models.len(), 4);
+        assert_eq!(models[0].id, "xiaomi/mimo-v2.6-pro");
+        assert_eq!(models[0].name, "Xiaomi: MiMo-V2.6-Pro");
+        assert_eq!(models[1].id, "openai/gpt-4o");
+        assert_eq!(models[1].name, "OpenAI: GPT-4o");
+        assert_eq!(models[2].id, "gemini-2.0-flash");
+        assert_eq!(models[2].name, "gemini-2.0-flash");
+        assert_eq!(models[3].id, "claude-3-7-sonnet-20250219");
+        assert_eq!(models[3].name, "Claude 3.7 Sonnet");
     }
 }
