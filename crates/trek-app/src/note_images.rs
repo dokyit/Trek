@@ -255,22 +255,138 @@ struct Parsed {
     alt: String,
 }
 
+/// A file attached to the note (a video, a PDF) that its preview shows as a chip.
+struct ParsedFile {
+    path: PathBuf,
+    name: String,
+}
+
+/// The attached file (not an image) a note's `link` names: in the notes' own `attachments/`
+/// and there on disk.
+fn attached_file(link: &str, dir: &Path) -> Option<PathBuf> {
+    let shown = link.trim().strip_prefix("./").unwrap_or(link.trim());
+    let kind = shown.rsplit_once('.').map(|(_, k)| k.to_ascii_lowercase()).unwrap_or_default();
+    if !shown.starts_with(&format!("{}/", trek_core::notes::ATTACHMENTS)) || trek_core::notes::IMAGE_KINDS.contains(&kind.as_str()) {
+        return None;
+    }
+    path_of(shown, dir).filter(|p| p.is_file())
+}
+
+/// A video attached to a note, on a line of its own: it plays in place, in a card under the
+/// paragraph's place (`artifact::video_card`), where any other file is a chip.
+pub struct NoteVideos {
+    /// The notes folder: `attachments/…` is relative to it.
+    pub dir: PathBuf,
+}
+
+/// The video a paragraph is, if that's all it holds: one link to one.
+struct ParsedVideo {
+    doc: Arc<crate::artifact::Doc>,
+}
+
+impl MarkdownPlugin for NoteVideos {
+    fn is_block(&self) -> bool {
+        true
+    }
+
+    fn name(&self) -> &str {
+        "trek-note-video"
+    }
+
+    fn parse(&self, node: &markdown_ast::Node, _: &MarkdownParseContext<'_>) -> Option<MarkdownNode> {
+        let markdown_ast::Node::Paragraph(paragraph) = node else { return None };
+        let [markdown_ast::Node::Link(link)] = paragraph.children.as_slice() else { return None };
+        let path = attached_file(&link.url, &self.dir).filter(|p| trek_core::notes::is_video(&p.to_string_lossy()))?;
+        let name = markdown_ast::Node::Link(link.clone()).to_string();
+        let name = if name.trim().is_empty() { path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default() } else { name };
+        let doc = crate::artifact::Doc {
+            html: trek_core::artifact::VIDEO_HTML.into(),
+            hash: trek_core::artifact::content_hash(&path.to_string_lossy()),
+            title: Some(name.clone()),
+            hosts: Vec::new(),
+            source: link.url.as_str().into(),
+            media: Some(path),
+        };
+        Some(MarkdownNode::new("trek-note-video", ParsedVideo { doc: Arc::new(doc) }).text(name))
+    }
+
+    fn render(&self, node: &MarkdownNode, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let Some(video) = node.data::<ParsedVideo>() else { return div().into_any_element() };
+        let key = (video.doc.hash as usize).wrapping_add(node.source_range().map(|r| r.start).unwrap_or(0));
+        // Artifacts off: the file's chip, which opens it in Quick Look.
+        let shown = crate::artifact::video_card(&video.doc, key, window, cx).unwrap_or_else(|| {
+            let file = ParsedFile { path: video.doc.media.clone().unwrap_or_default(), name: video.doc.title.clone().unwrap_or_default() };
+            chip(&file, px(14.), px(22.), cx)
+        });
+        div().py_2().child(shown).into_any_element()
+    }
+}
+
 impl MarkdownPlugin for NoteImages {
     fn name(&self) -> &str {
         "trek-note-image"
     }
 
     fn parse(&self, node: &markdown_ast::Node, _: &MarkdownParseContext<'_>) -> Option<MarkdownNode> {
-        let markdown_ast::Node::Image(image) = node else { return None };
-        let source = Source::of(&image.url, &self.dir)?;
-        Some(MarkdownNode::new("trek-note-image", Parsed { source, alt: image.alt.clone() }).text(image.alt.clone()))
+        match node {
+            markdown_ast::Node::Image(image) => {
+                let source = Source::of(&image.url, &self.dir)?;
+                Some(MarkdownNode::new("trek-note-image", Parsed { source, alt: image.alt.clone() }).text(image.alt.clone()))
+            }
+            markdown_ast::Node::Link(link) => {
+                let path = attached_file(&link.url, &self.dir)?;
+                let written = node.to_string();
+                let name = if written.trim().is_empty() { path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default() } else { written };
+                Some(MarkdownNode::new("trek-note-image", ParsedFile { path, name: name.clone() }).text(name))
+            }
+            _ => None,
+        }
     }
 
-    fn render_inline(&self, node: &MarkdownNode, _: &InlineRenderContext, window: &mut Window, cx: &mut App) -> Option<InlineElement> {
+    fn render_inline(&self, node: &MarkdownNode, context: &InlineRenderContext, window: &mut Window, cx: &mut App) -> Option<InlineElement> {
+        if let Some(file) = node.data::<ParsedFile>() {
+            return Some(file_chip(file, context, cx));
+        }
         let data = node.data::<Parsed>()?;
         let picture = picture(&data.source, &data.alt, self.widest.min(self.line), &self.gallery, window, cx);
         Some(InlineElement::new(div().w(self.line).child(picture)))
     }
+}
+
+/// An attached file in a note's preview: its type's icon and its name; a click shows it (Quick
+/// Look plays a video).
+fn file_chip(file: &ParsedFile, context: &InlineRenderContext, cx: &App) -> InlineElement {
+    let size = context.font_size() * 0.92;
+    let height = context.line_height().min(context.font_size() * 1.6);
+    let baseline = (height + context.font_size() * 0.7) / 2.;
+    InlineElement::new(chip(file, size, height, cx)).with_baseline(baseline)
+}
+
+/// The chip itself: `size` the text's, `height` the chip's.
+fn chip(file: &ParsedFile, size: Pixels, height: Pixels, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let name = file.path.to_string_lossy().to_string();
+    let tint = crate::file_icon::tint(&name, cx);
+    let hover = Hsla { a: (tint.fill.a * 1.8).min(1.), ..tint.fill };
+    let path = file.path.clone();
+    h_flex()
+        .id(SharedString::from(format!("note-file-{}", file.path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default())))
+        .test_support()
+        .h(height)
+        .px(px(7.))
+        .gap(px(5.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(tint.edge)
+        .bg(tint.fill)
+        .text_size(size)
+        .text_color(theme.foreground)
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .child(crate::file_icon::badge(&name, size * 1.1, cx))
+        .child(file.name.clone())
+        .on_click(move |_, window, cx| crate::image_preview::open(vec![path.clone()], 0, window, cx))
+        .into_any_element()
 }
 
 /// `source` drawn in a note at most `widest` across; a click shows it in the viewer.
@@ -416,7 +532,10 @@ pub fn for_reading(body: &str) -> std::borrow::Cow<'_, str> {
                 fenced = !fenced;
                 return false;
             }
-            !fenced && t.starts_with("![") && trek_core::notes::images(t).first().is_some_and(|i| i.range == (0..t.len()))
+            !fenced
+                && (t.starts_with("![") && trek_core::notes::images(t).first().is_some_and(|i| i.range == (0..t.len()))
+                    // A video plays in a card of its own.
+                    || t.starts_with('[') && trek_core::notes::files(t).first().is_some_and(|f| f.range == (0..t.len()) && trek_core::notes::is_video(&f.link)))
         })
         .collect();
     if !alone.contains(&true) {
@@ -453,17 +572,52 @@ pub fn gallery(body: &str, dir: &Path) -> Vec<PathBuf> {
 /// Height of the tiles under the text in Write.
 const TILE: f32 = 72.;
 
+/// An attached file as a tile in Write: its type's icon, name and size; a click shows it (Quick
+/// Look plays a video). One that's gone is a dashed tile saying so.
+fn file_tile(i: usize, file: &trek_core::notes::FileRef, dir: &Path, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let path = path_of(&file.link, dir).filter(|p| p.is_file());
+    let tile = div().id(("note-file", i)).test_support().flex_none().flex().items_center().gap(px(10.)).w(px(190.)).h(px(TILE)).px(px(12.)).rounded(px(8.)).border_1().overflow_hidden();
+    let Some(path) = path else {
+        return tile
+            .border_dashed()
+            .border_color(theme.foreground.opacity(0.2))
+            .bg(theme.foreground.opacity(0.03))
+            .child(Icon::new(crate::assets::Lucide::Paperclip).small().text_color(theme.muted_foreground))
+            .child(v_flex().min_w_0().child(div().text_size(px(12.5)).text_color(theme.foreground.opacity(0.8)).child("File not found")).child(div().truncate().text_size(px(11.5)).text_color(theme.muted_foreground).child(file.name.clone())))
+            .into_any_element();
+    };
+    let on_disk = path.to_string_lossy().to_string();
+    let kind = path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
+    let meta = [Some(kind).filter(|k| !k.is_empty()), std::fs::metadata(&path).ok().map(|m| crate::image_preview::file_size(m.len()))].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+    let name = if file.name.trim().is_empty() { on_disk.rsplit('/').next().unwrap_or_default().to_string() } else { file.name.clone() };
+    tile.border_color(theme.border)
+        .bg(theme.foreground.opacity(0.03))
+        .cursor_pointer()
+        .hover(|s| s.border_color(theme.foreground.opacity(0.35)))
+        .child(crate::file_icon::badge(&on_disk, px(28.), cx))
+        .child(v_flex().min_w_0().child(div().truncate().text_size(px(12.5)).text_color(theme.foreground).child(name)).child(div().truncate().text_size(px(11.5)).text_color(theme.muted_foreground).child(meta)))
+        .on_click(move |_, window, cx| crate::image_preview::open(vec![path.clone()], 0, window, cx))
+        .into_any_element()
+}
+
 /// The note's pictures as small tiles, for Write (where the text shows only their links). A
 /// click opens one in the viewer (no tooltip: it would stay up over the viewer); one that can't
 /// be shown is a tile saying so.
 pub fn strip(body: &str, dir: &Path, cx: &App) -> Option<AnyElement> {
-    let images = trek_core::notes::images(body);
-    if images.is_empty() {
+    let mut pieces: Vec<(usize, Result<trek_core::notes::ImageRef, trek_core::notes::FileRef>)> = trek_core::notes::images(body).into_iter().map(|i| (i.range.start, Ok(i))).collect();
+    pieces.extend(trek_core::notes::files(body).into_iter().map(|f| (f.range.start, Err(f))));
+    if pieces.is_empty() {
         return None;
     }
+    pieces.sort_by_key(|(at, _)| *at);
     let theme = cx.theme().clone();
     let gallery = Arc::new(gallery(body, dir));
-    let tiles = images.into_iter().enumerate().filter_map(|(i, image)| {
+    let tiles = pieces.into_iter().enumerate().filter_map(|(i, (_, piece))| {
+        let image = match piece {
+            Ok(image) => image,
+            Err(file) => return Some(file_tile(i, &file, dir, cx)),
+        };
         let source = Source::of(&image.link, dir)?;
         let (width, picture): (Pixels, Option<ImageSource>) = match &source {
             Source::File { path, pixels, .. } => {
@@ -509,7 +663,8 @@ pub fn strip(body: &str, dir: &Path, cx: &App) -> Option<AnyElement> {
                 })
                 .when(broken, |el| el.flex().items_center().justify_center().border_dashed().child(missing_icon()))
                 .when_some(source.path().filter(|_| !broken).map(Path::to_path_buf), |el, path| el.child(crate::image_preview::thumb(path)))
-                .on_click(move |_, window, cx| open(&source2, &gallery, window, cx)),
+                .on_click(move |_, window, cx| open(&source2, &gallery, window, cx))
+                .into_any_element(),
         )
     });
     Some(

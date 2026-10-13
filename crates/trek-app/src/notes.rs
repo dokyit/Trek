@@ -4,11 +4,12 @@
 //! quotes, code, text colour and highlights. Write, Split (writing beside how it reads) or
 //! Preview. Saved as you type, as markdown files (see `trek_core::notes`).
 //!
-//! Pictures go in by pasting one (a screenshot on the clipboard, or image files copied in
-//! Finder), dropping image files on the note, or the toolbar's Add image: each is kept in the
+//! Photos, videos and files go in by pasting them (a screenshot on the clipboard, or files
+//! copied in Finder), dropping them on the note, or the toolbar's Attach: each is kept in the
 //! notes folder's `attachments/` (HEIC, TIFF and BMP as a PNG copy) and linked as markdown where
-//! the cursor is. The preview draws them, Write shows them as tiles under the text, and a click
-//! opens the image viewer (see `note_images`).
+//! the cursor is. Pictures are drawn by the preview, anything else is a file chip; Write shows
+//! them as tiles under the text, and a click opens the image viewer or Quick Look (see
+//! `note_images`).
 
 use crate::workspace::Workspace;
 use gpui_kit::component::input::{InputEvent, Redo, Textarea, TextareaState, Undo};
@@ -467,19 +468,14 @@ impl NotesView {
         .detach();
     }
 
-    /// Add these files to the note: the pictures among them. Anything else is named in a toast.
+    /// Attach these files to the note: pictures show in it, anything else (a video, a PDF) is a
+    /// link to its copy.
     pub(crate) fn add_files(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        let (pictures, others): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(|p| is_picture(p));
-        if let Some(other) = others.first() {
-            let name = other.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let message = if others.len() == 1 { format!("{name} isn't an image a note can show") } else { format!("{name} and {} more aren't images a note can show", others.len() - 1) };
-            self.workspace.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::Toast { message, undo: None }));
-        }
-        self.add_images(pictures.into_iter().map(Picture::File).collect(), window, cx);
+        self.add_images(paths.into_iter().map(|p| if is_picture(&p) { Picture::File(p) } else { Picture::Attached(p) }).collect(), window, cx);
     }
 
-    /// Add image: pick pictures to put in the note.
-    fn pick_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Attach: pick photos, videos or files to put in the note.
+    fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Add".into()) });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = rx.await else { return };
@@ -488,21 +484,14 @@ impl NotesView {
         .detach();
     }
 
-    /// A paste the text box hands over: pictures (image data, or image files copied in Finder)
-    /// go in as images. Returns whether it was taken; anything else pastes as text.
+    /// A paste the text box hands over: image data, or files copied in Finder, are attached
+    /// (pictures show, other files are linked). Returns whether it was taken; anything else
+    /// pastes as text.
     pub(crate) fn paste(&mut self, item: &ClipboardItem, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        // Files copied in Finder: a note takes SVGs too, which the composer's paste doesn't.
+        // A note takes SVGs too, which the composer's paste doesn't.
         let files: Vec<PathBuf> = item.entries().iter().filter_map(|e| if let ClipboardEntry::ExternalPaths(p) = e { Some(p.paths().to_vec()) } else { None }).flatten().collect();
         if !files.is_empty() {
-            let (pictures, others): (Vec<PathBuf>, Vec<PathBuf>) = files.into_iter().partition(|p| is_picture(p));
-            if pictures.is_empty() {
-                return false;
-            }
-            self.add_images(pictures.into_iter().map(Picture::File).collect(), window, cx);
-            if !others.is_empty() {
-                let names: Vec<String> = others.iter().map(|p| p.display().to_string()).collect();
-                self.editor.update(cx, |s, cx| s.insert(names.join(" "), window, cx));
-            }
+            self.add_files(files, window, cx);
             return true;
         }
         match crate::attachments::pasted(item) {
@@ -627,7 +616,7 @@ impl NotesView {
             })
             .child(Self::divider(cx))
             .child(colors)
-            .child(self.tool("note-image", crate::assets::Lucide::ImagePlus, "Add image… (or paste or drop one on the note)", cx, |t, w, cx| t.pick_images(w, cx)))
+            .child(self.tool("note-attach", crate::assets::Lucide::Paperclip, "Attach photos, videos or files… (or paste or drop them on the note)", cx, |t, w, cx| t.pick_files(w, cx)))
             .when(self.adding > 0, |el| el.child(div().id("note-adding").test_support().px(px(4.)).child(gpui_kit::component::spinner::Spinner::new().small().color(theme.muted_foreground))))
             .child(div().flex_1().min_w(px(6.)))
             .child(self.modes(mode, width > 0. && width < TOOLBAR_FULL, cx))
@@ -901,13 +890,15 @@ enum Picture {
     File(PathBuf),
     /// Image data off the clipboard (a screenshot).
     Data(Image),
+    /// Any other file (a video, a PDF): kept as it is and linked by its name.
+    Attached(PathBuf),
 }
 
 impl Picture {
     /// How a toast names it.
     fn label(&self) -> String {
         match self {
-            Picture::File(p) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.display().to_string()),
+            Picture::File(p) | Picture::Attached(p) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.display().to_string()),
             Picture::Data(_) => "the pasted image".into(),
         }
     }
@@ -918,6 +909,10 @@ impl Picture {
             Picture::Data(image) => {
                 let (kind, bytes) = crate::attachments::image_bytes(&image)?;
                 Ok(notes::image_markdown("Pasted image", &notes::add_image(dir, &bytes, kind)?))
+            }
+            Picture::Attached(path) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                Ok(notes::file_markdown(&name, &notes::add_file(dir, &path)?))
             }
             Picture::File(path) => {
                 let alt = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();

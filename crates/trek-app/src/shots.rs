@@ -733,7 +733,7 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     }
     if verb == "note" {
         // Notes without a pointer: `note text <markdown>` (the note on screen's whole text, `\n`
-        // for a new line; one is started when there's none), `note image <path>…` (image files
+        // for a new line; one is started when there's none), `note image <path>…` / `note attach <path>…` (files
         // put in at the cursor, as dropping them does) and `note mode write|split|preview`.
         let (sub, rest) = arg.split_once(' ').unwrap_or((arg, ""));
         let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
@@ -745,8 +745,8 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
             let notes = trek.read(cx).notes.clone();
             match sub {
                 "text" => notes.update(cx, |n, cx| n.set_text(rest.replace("\\n", "\n"), window, cx)),
-                "image" => {
-                    anyhow::ensure!(!rest.is_empty(), "note image <path>…");
+                "image" | "attach" => {
+                    anyhow::ensure!(!rest.is_empty(), "note image|attach <path>…");
                     let paths: Vec<PathBuf> = rest.split_whitespace().map(PathBuf::from).collect();
                     notes.update(cx, |n, cx| n.add_files(paths, window, cx));
                 }
