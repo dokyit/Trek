@@ -70,8 +70,10 @@ impl NativeSurface {
         let Spec { origin, document, bootstrap, background, events } = spec;
         let (t1, t2, t3) = (events.clone(), events.clone(), events);
         let nav_origin = origin.clone();
+        // A profile of the artifacts' own, beside the Browser panel's and not in it: a page an
+        // agent wrote shares no cookies, logins or storage with the user's own browsing.
         #[cfg(windows)]
-        let mut context = wry::WebContext::new(Some(crate::panels::browser::webview_data_dir()));
+        let mut context = wry::WebContext::new(Some(crate::panels::browser::webview_data_dir().with_file_name("WebView2-pages")));
         // It mustn't take the keys from Trek: a click on it does.
         #[cfg(windows)]
         let builder = wry::WebViewBuilder::new_with_web_context(&mut context).with_focused(false).with_background_color((background.0, background.1, background.2, 255));

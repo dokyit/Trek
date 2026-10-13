@@ -148,7 +148,7 @@ fn enabled(cx: &App) -> bool {
 }
 
 fn as_code(source: &str, key: usize, size: Pixels, cx: &App) -> AnyElement {
-    crate::md::keyed(SharedString::from(format!("artifact-code-{key}")), source.to_string(), None, None, size, false, false, cx).into_any_element()
+    crate::md::keyed(SharedString::from(format!("artifact-code-{key}")), source.to_string(), None, None, size, false, false, None, cx).into_any_element()
 }
 
 /// A block that can't run: a short note saying why, over it as written.

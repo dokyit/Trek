@@ -782,7 +782,7 @@ fn invalid(reason: &str, source: &str, key: usize, size: Pixels, cx: &App) -> An
                 .child(div().flex_none().h(px(12. * 1.45)).flex().items_center().child(Icon::new(IconName::TriangleAlert).size(px(13.)).text_color(crate::palette::amber(cx))))
                 .child(div().flex_1().min_w_0().text_color(look.muted).child(note)),
         )
-        .child(crate::md::keyed(SharedString::from(format!("viz-raw-{key}")), source.to_string(), None, None, size, false, false, cx))
+        .child(crate::md::keyed(SharedString::from(format!("viz-raw-{key}")), source.to_string(), None, None, size, false, false, None, cx))
         .into_any_element()
 }
 
