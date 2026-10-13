@@ -1049,6 +1049,10 @@ pub struct Workspace {
     pub agents: Vec<DetectedAgent>,
     /// Live models from the user's Codex setup (custom providers included).
     pub codex_models: Vec<ModelInfo>,
+    /// Live models from direct providers (OpenRouter, DeepSeek, etc.).
+    pub direct_models: HashMap<String, Vec<ModelInfo>>,
+    /// Direct model fetches currently in flight, by provider id.
+    pub direct_inflight: HashSet<String>,
     /// What checking each of the user's MCP servers found, by name (`check_mcp_server`).
     pub mcp_checks: HashMap<String, McpCheck>,
     pub detecting: bool,
@@ -1455,6 +1459,8 @@ impl Workspace {
             projects: vec![],
             agents: vec![],
             codex_models: vec![],
+            direct_models: trek_agents::load_all_cached_direct_models(),
+            direct_inflight: HashSet::new(),
             mcp_checks: HashMap::new(),
             detecting: false,
             importing: false,
@@ -2840,6 +2846,11 @@ impl Workspace {
     /// Models for an agent: live data for local servers, catalog otherwise.
     pub fn models_for(&self, agent: &AgentId) -> Vec<ModelInfo> {
         if let AgentId::Direct(p) = agent {
+            if let Some(models) = self.direct_models.get(p) {
+                if !models.is_empty() {
+                    return models.clone();
+                }
+            }
             if let Some(found) = self.agents.iter().find(|a| &a.agent == agent) {
                 if !found.models.is_empty() {
                     return found.models.iter().map(|m| ModelInfo { id: m.clone(), name: m.clone(), efforts: vec![], tier: 0, fast: None }).collect();
@@ -3061,6 +3072,14 @@ impl Workspace {
             let id = AgentId::Direct(p.clone());
             if !out.contains(&id) {
                 out.push(id);
+            }
+        }
+        for p in catalog::DIRECT_PROVIDERS {
+            if !p.local && trek_core::settings::secrets::api_key(p.id).is_some() {
+                let id = AgentId::Direct(p.id.to_string());
+                if !out.contains(&id) {
+                    out.push(id);
+                }
             }
         }
         if self.mock_agent {
@@ -5592,6 +5611,14 @@ impl Workspace {
                     if this.agents.iter().any(|a| a.agent == AgentId::Codex && a.availability == Availability::Ready) {
                         this.fetch_codex_models(cx);
                     }
+                    for p in this.settings.api_providers.clone() {
+                        this.fetch_direct_models(&p, cx);
+                    }
+                    for p in catalog::DIRECT_PROVIDERS {
+                        if !p.local && trek_core::settings::secrets::api_key(p.id).is_some() {
+                            this.fetch_direct_models(p.id, cx);
+                        }
+                    }
                     // Not again for the agents read since launch (`refresh_usage` at launch).
                     this.refresh_usage(cx);
                     // Opened on something that shows Devin's plan before Devin was found.
@@ -5945,6 +5972,36 @@ impl Workspace {
         }
         out.extend(tools.mcp_servers.iter().filter(|s| s.enabled).map(mcp_server_of));
         out
+    }
+
+    pub fn fetch_direct_models(&mut self, provider_id: &str, cx: &mut Context<Self>) {
+        if trek_core::paths::isolated() || self.direct_inflight.contains(provider_id) {
+            return;
+        }
+        self.direct_inflight.insert(provider_id.to_string());
+        let pid = provider_id.to_string();
+        let (tx, rx) = async_channel::bounded(1);
+        let pid_clone = pid.clone();
+        trek_core::runtime().spawn(async move {
+            let models = trek_agents::direct_provider_models(&pid_clone, None).await.unwrap_or_default();
+            if !models.is_empty() {
+                trek_agents::cache_direct_models(&pid_clone, &models);
+            }
+            let _ = tx.send((pid_clone, models)).await;
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let res = rx.recv().await;
+            let _ = this.update(cx, |this, cx| {
+                this.direct_inflight.remove(&pid);
+                if let Ok((pid, models)) = res {
+                    if !models.is_empty() {
+                        this.direct_models.insert(pid, models);
+                        cx.notify();
+                    }
+                }
+            });
+        });
+        self.keep(task);
     }
 
     fn fetch_codex_models(&mut self, cx: &mut Context<Self>) {

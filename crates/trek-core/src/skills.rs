@@ -129,24 +129,28 @@ pub fn read_front_matter(skill_md: &Path) -> Option<(String, String)> {
     let folder = skill_md.parent()?.file_name()?.to_string_lossy().to_string();
     let mut name = None;
     let mut desc = None;
+    let mut body = text.as_str();
     if let Some(rest) = text.strip_prefix("---") {
-        for line in rest.lines().skip(1) {
-            if line.trim() == "---" {
-                break;
-            }
-            if let Some((k, v)) = line.split_once(':') {
-                let v = v.trim().trim_matches('"').trim_matches('\'').to_string();
-                match k.trim() {
-                    "name" if !v.is_empty() => name = Some(v),
-                    "description" if !v.is_empty() => desc = Some(v),
-                    _ => {}
+        let close_pos = rest.find("\n---").or_else(|| rest.find("\r\n---"));
+        if let Some(pos) = close_pos {
+            let front = &rest[..pos];
+            let after_dash = rest[pos..].trim_start_matches(|c| c == '\r' || c == '\n').strip_prefix("---").unwrap_or_default();
+            body = after_dash;
+            for line in front.lines() {
+                if let Some((k, v)) = line.split_once(':') {
+                    let v = v.trim().trim_matches('"').trim_matches('\'').to_string();
+                    match k.trim() {
+                        "name" if !v.is_empty() => name = Some(v),
+                        "description" if !v.is_empty() => desc = Some(v),
+                        _ => {}
+                    }
                 }
             }
         }
     }
     let desc = desc.or_else(|| {
-        // No front matter: the first prose line.
-        text.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("---")).map(str::to_string)
+        // Fallback: the first prose line in the body.
+        body.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("---")).map(str::to_string)
     });
     Some((name.unwrap_or(folder), desc.unwrap_or_default()))
 }
@@ -211,7 +215,9 @@ pub fn discover(project: Option<&Path>) -> Vec<Skill> {
 
 fn source_for(origin: &Path, project: Option<&Path>) -> SkillSource {
     let home = paths::agents_home();
-    if origin.starts_with(home.join(".claude/skills")) {
+    if origin.starts_with(home.join(".claude/skills/synced")) {
+        SkillSource::Synced
+    } else if origin.starts_with(home.join(".claude/skills")) {
         SkillSource::ClaudeCode
     } else if origin.starts_with(codex_skills_dir(&codex_home_for(&home))) {
         SkillSource::Codex
@@ -220,7 +226,7 @@ fn source_for(origin: &Path, project: Option<&Path>) -> SkillSource {
     } else if project.is_some_and(|p| origin.starts_with(p)) {
         SkillSource::Project
     } else {
-        SkillSource::Project
+        SkillSource::Shared
     }
 }
 
@@ -252,8 +258,8 @@ pub fn set_enabled(skill: &Skill, on: bool) -> anyhow::Result<PathBuf> {
         if let Some(parent) = origin.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let _ = std::fs::remove_file(skill.dir.join(ORIGIN_FILE));
         move_dir(&skill.dir, &origin)?;
+        let _ = std::fs::remove_file(origin.join(ORIGIN_FILE));
         Ok(origin)
     } else {
         let root = disabled_root();
@@ -388,6 +394,14 @@ mod tests {
         assert_eq!(read_front_matter(&s.join("SKILL.md")), Some(("grill-me".into(), "Ask hard questions.".into())));
         std::fs::write(s.join("SKILL.md"), "# Title\n\nDoes a thing.").unwrap();
         assert_eq!(read_front_matter(&s.join("SKILL.md")), Some(("my-skill".into(), "Does a thing.".into())));
+        // Front matter with name but no description does not use 'name:' as fallback description.
+        std::fs::write(s.join("SKILL.md"), "---\nname: no-desc\n---\n# Heading\n\nBody description line.").unwrap();
+        assert_eq!(read_front_matter(&s.join("SKILL.md")), Some(("no-desc".into(), "Body description line.".into())));
+        // Synced skill source classification
+        let home = paths::agents_home();
+        assert_eq!(source_for(&home.join(".claude/skills/synced/bucket/my-skill"), None), SkillSource::Synced);
+        assert_eq!(source_for(&home.join(".claude/skills/local-skill"), None), SkillSource::ClaudeCode);
+        assert_eq!(source_for(Path::new("/somewhere/else/my-skill"), None), SkillSource::Shared);
         let _ = std::fs::remove_dir_all(dir);
     }
 
