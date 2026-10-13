@@ -1,6 +1,7 @@
 //! What the phone gained to keep up with the Mac: Codex's rate-limit resets, the follow-ups
-//! queued while a turn runs, a message's images, what an agent runs in the background, and the
-//! icons of added agents and projects. A Mac that does these lists their names in
+//! queued while a turn runs, a message's images, what an agent runs in the background, the
+//! icons of added agents and projects, links between threads, and notes' pictures. A Mac that
+//! does these (requests, not the links, which are items) lists their names in
 //! `welcome`/`paired` `features` ([`super::feature`]); a phone hides them on a Mac that doesn't.
 
 use serde::{Deserialize, Serialize};
@@ -165,4 +166,90 @@ pub struct Icon {
     /// text colour for an agent, the project's ink for a project. Otherwise a picture as it is.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub template: bool,
+}
+
+/// How a `thread_link` item's thread is related to the thread whose transcript it's in (the
+/// Mac's `trek_core::lineage::Link`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadLinkKind {
+    /// This thread's agent started it (`start_thread`).
+    Started,
+    /// This thread's work went on there (`handoff`).
+    ContinuedIn,
+    /// It started this thread.
+    StartedBy,
+    /// This thread took its work over.
+    ContinuedFrom,
+}
+
+impl ThreadLinkKind {
+    /// What the row says before the other thread's title, as the Mac's does.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Started => "Started thread",
+            Self::ContinuedIn => "Continued in",
+            Self::StartedBy => "Started by",
+            Self::ContinuedFrom => "Continued from",
+        }
+    }
+}
+
+/// Where a thread an agent started stands, as its row in the starter's transcript says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkedThreadState {
+    Working,
+    /// Waiting on the user: an approval, a question or a plan.
+    NeedsApproval,
+    /// Stopped at a usage limit until it resets.
+    Paused,
+    Finished,
+    Failed,
+}
+
+/// `note_asset`: one of a note's pictures (a link in it, `attachments/<name>`), as a JPEG that
+/// fits in `max_px` (the Mac caps it at [`MAX_ATTACHMENT_PX`]). Only files in the notes'
+/// `attachments/` folder are sent: never an absolute path, nor one with `..` in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoteAssetRequest {
+    pub note_id: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_px: Option<u32>,
+}
+
+/// The reply to `note_asset`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoteAsset {
+    pub note_id: String,
+    pub path: String,
+    /// `image/jpeg`.
+    pub mime: String,
+    /// Base64.
+    pub data: String,
+    /// As sent (after scaling down).
+    pub width: u32,
+    pub height: u32,
+}
+
+/// `add_note_image`: a photo (JPEG or PNG, base64) to keep with the notes, for note `note_id`.
+/// The Mac answers with the link to put in the note; it doesn't change the note itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddNoteImageRequest {
+    pub note_id: String,
+    pub data: String,
+    /// What it shows, for the alt text (`![name](…)`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// The reply to `add_note_image`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoteImage {
+    pub note_id: String,
+    /// `attachments/<name>`: what `note_asset` takes.
+    pub path: String,
+    /// The line to put in the note: `![name](attachments/<name>)`.
+    pub markdown: String,
 }

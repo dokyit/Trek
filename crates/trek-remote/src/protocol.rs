@@ -166,6 +166,10 @@ pub enum ClientMessage {
     StopBackground { thread_id: String, task_id: String },
     /// An added agent's or a project's icon (answered with `icon`).
     Icon(IconRequest),
+    /// One of a note's pictures (answered with `note_asset`).
+    NoteAsset(NoteAssetRequest),
+    /// Keep a photo with the notes (answered with `note_image`, its link).
+    AddNoteImage(AddNoteImageRequest),
 }
 
 impl ClientMessage {
@@ -211,6 +215,8 @@ impl ClientMessage {
             Self::BackgroundOutput { .. } => "background_output",
             Self::StopBackground { .. } => "stop_background",
             Self::Icon(_) => "icon",
+            Self::NoteAsset(_) => "note_asset",
+            Self::AddNoteImage(_) => "add_note_image",
         }
     }
 }
@@ -234,6 +240,7 @@ impl ClientMessage {
                 | Self::Attachment(_)
                 | Self::BackgroundOutput { .. }
                 | Self::Icon(_)
+                | Self::NoteAsset(_)
         )
     }
 }
@@ -443,6 +450,11 @@ pub mod feature {
     pub const BACKGROUND: &str = "background";
     /// `icon`: an added agent's or a project's icon.
     pub const ICON: &str = "icon";
+    /// Basecamp as the Mac draws it now: `basecamp` carries [`super::Basecamp::totals`],
+    /// `chart`, `projects` and `models`, and review rows say which are [`super::ReviewRow::needs_you`].
+    pub const BASECAMP_V2: &str = "basecamp_v2";
+    /// `note_asset` and `add_note_image`: a note's pictures, and adding one.
+    pub const NOTE_IMAGES: &str = "note_images";
 
     /// Every feature above, for a Mac that serves them all.
     pub const ALL: &[&str] = &[
@@ -457,6 +469,8 @@ pub mod feature {
         ATTACHMENT,
         BACKGROUND,
         ICON,
+        BASECAMP_V2,
+        NOTE_IMAGES,
     ];
 }
 
@@ -653,6 +667,11 @@ pub enum ServerMessage {
         /// The optional requests it serves (see [`feature`]).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         features: Vec<String>,
+        /// Every `host:port` the Mac answers on, the one its pairing code names first (its Wi-Fi
+        /// and tailnet addresses): the phone keeps them and tries the next when one doesn't
+        /// answer, so pairing at home still reaches the Mac over Tailscale.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        routes: Vec<String>,
     },
     /// `hello` succeeded.
     Welcome {
@@ -660,6 +679,9 @@ pub enum ServerMessage {
         host: HostInfo,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         features: Vec<String>,
+        /// As in `Paired`, as they are now (an address may have changed since).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        routes: Vec<String>,
     },
     /// Everything the phone shows in its inbox (replaces its copy).
     Snapshot(Snapshot),
@@ -729,6 +751,10 @@ pub enum ServerMessage {
     BackgroundOutput(BackgroundOutput),
     /// The reply to `icon`.
     Icon(Icon),
+    /// The reply to `note_asset`.
+    NoteAsset(NoteAsset),
+    /// The reply to `add_note_image`.
+    NoteImage(NoteImage),
     /// A request failed.
     Error { code: ErrorCode, message: String },
     /// Upsert of a thread the list leaves out: a sub-agent's (its parent's row names it), or one a
@@ -904,6 +930,12 @@ pub struct ThreadSummary {
     /// For a sub-agent: the thread that started it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
+    /// For a thread another thread's agent started (`start_thread`): that thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_by: Option<String>,
+    /// For a thread that took another's work over (`handoff`): that thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continued_from: Option<String>,
     /// For a snoozed thread: when it wakes (ms).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snoozed_until: Option<i64>,
@@ -1282,6 +1314,24 @@ pub enum ItemBody {
         from: String,
         to: String,
     },
+    /// A link to another thread (an agent started it or handed its work over to it, or it
+    /// started or handed over to this one): a row that opens that thread. Older phones leave it
+    /// out, as any kind they don't know.
+    ThreadLink {
+        link: ThreadLinkKind,
+        thread_id: String,
+        /// Its title (now, or as it was when it went from Trek).
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentRef>,
+        /// For a thread this one started or handed over to: how it's doing, as last sent (the
+        /// thread's own row is fresher, when the phone has it).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<LinkedThreadState>,
+        /// It's still in Trek (not archived or deleted): the row opens it.
+        #[serde(default = "yes")]
+        open: bool,
+    },
     /// The files a turn changed, after its `turn_end`.
     Changes {
         files: Vec<ChangedFile>,
@@ -1338,6 +1388,7 @@ impl ItemBody {
             Self::Error { .. } => "error",
             Self::Limit { .. } => "limit",
             Self::Handoff { .. } => "handoff",
+            Self::ThreadLink { .. } => "thread_link",
             Self::Changes { .. } => "changes",
         }
     }
@@ -1534,6 +1585,19 @@ pub struct Basecamp {
     pub profile: Option<Profile>,
     #[serde(default)]
     pub tiles: Vec<Tile>,
+    /// The range's totals, as the row of figures over the Mac's chart (`basecamp_v2`; missing when
+    /// nothing happened in the range, as the rest of it below).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totals: Option<BasecampTotals>,
+    /// Turns over the range, a bar an hour, day or few weeks (`basecamp_v2`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chart: Option<BasecampChart>,
+    /// The range by project, most tokens first (`basecamp_v2`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<BasecampRow>,
+    /// The range by model, most tokens first (`basecamp_v2`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<BasecampRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1554,6 +1618,10 @@ pub struct ReviewRow {
     pub updated_at: i64,
     #[serde(default)]
     pub unseen: bool,
+    /// Listed under "Needs you" (a request, a failure, a sub-agent waiting), else under "Needs
+    /// review" (`basecamp_v2`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_you: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1704,6 +1772,82 @@ pub enum TileKind {
     /// Agent time, with failed turns in its note.
     AgentTime,
     PlanLeft,
+}
+
+/// The range's totals, figures and the words the Mac shows for them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BasecampTotals {
+    /// The user's threads that worked in the range.
+    pub threads: u32,
+    pub turns: u32,
+    pub tokens: u64,
+    /// "182K".
+    pub tokens_label: String,
+    /// What it cost at API prices: "$1.28", "—" when none of it has a price.
+    pub cost: String,
+    /// Turns that failed (the Mac draws them red when there are any).
+    #[serde(default)]
+    pub failed: u32,
+    pub agent_secs: u64,
+    /// "<1m", "42m", "1h 2m".
+    pub agent_time: String,
+}
+
+/// Turns over the range: hours for today, days for the week, days (weeks past three months) for
+/// all time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BasecampChart {
+    /// What a bar covers: "hour", "day", "week", "4 weeks" (the Mac's "Turns per hour").
+    pub step: String,
+    /// Left to right.
+    pub bars: Vec<BasecampBar>,
+    /// Axis labels, each under its bar.
+    #[serde(default)]
+    pub ticks: Vec<BasecampTick>,
+    /// Every bar's turns, and as the Mac says it top right: "18 turns".
+    pub turns: u32,
+    pub total: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BasecampBar {
+    /// "2 PM–3 PM", "Tue, Oct 7", "Week of Oct 6".
+    pub label: String,
+    pub turns: u32,
+    #[serde(default)]
+    pub tokens: u64,
+    /// What the Mac says over it when it's hovered: "2 PM–3 PM · 4 turns · 12K tokens".
+    pub line: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BasecampTick {
+    /// The bar it sits under.
+    pub bar: u32,
+    /// "6 AM", "Tue", "Oct 7".
+    pub label: String,
+}
+
+/// A row of the tables by project and by model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BasecampRow {
+    /// The project's name ("No project"), or the model's ("Claude Opus 5.5").
+    pub label: String,
+    /// A project's badge (none: threads in no project).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectRef>,
+    /// A model's agent, for its logo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentRef>,
+    pub threads: u32,
+    pub turns: u32,
+    pub tokens: u64,
+    /// "182K".
+    pub tokens_label: String,
+    /// "$1.28", "—".
+    pub cost: String,
+    #[serde(default)]
+    pub failed: u32,
 }
 
 // ---------------------------------------------------------------------------------------------

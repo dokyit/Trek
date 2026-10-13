@@ -12,6 +12,7 @@ use crate::protocol::{
     QueueActionRequest, SaveNoteRequest, SearchRequest, SearchResults, SendRequest, SettingsChange, Snapshot, ThreadActionRequest, ThreadSummary, Transcript, TranscriptPage,
     TurnActionDone, TurnActionRequest, Usage, WorktreeRemoveRequest,
 };
+use crate::protocol::{AddNoteImageRequest, NoteAsset, NoteAssetRequest, NoteImage};
 
 pub type HostResult<T> = Result<T, HostError>;
 
@@ -213,6 +214,16 @@ pub trait RemoteHost: Send + Sync + 'static {
         let _ = req;
         unsupported("send icons")
     }
+    /// One of a note's pictures, scaled down.
+    fn note_asset(&self, req: NoteAssetRequest) -> impl Future<Output = HostResult<NoteAsset>> + Send {
+        let _ = req;
+        unsupported("send notes' pictures")
+    }
+    /// Keep a photo with the notes; its link comes back.
+    fn add_note_image(&self, req: AddNoteImageRequest) -> impl Future<Output = HostResult<NoteImage>> + Send {
+        let _ = req;
+        unsupported("add pictures to notes")
+    }
     /// No phone has `thread_id` open any more (its last subscriber unsubscribed or went away):
     /// the host can stop following its transcript. A `transcript` call for it after this starts
     /// following it again. Called as it happens, in order with the calls that follow.
@@ -294,6 +305,8 @@ pub enum HostRequest {
     BackgroundOutput { thread_id: String, task_id: String, reply: Reply<BackgroundOutput> },
     StopBackground { thread_id: String, task_id: String, reply: Reply<()> },
     Icon { req: IconRequest, reply: Reply<Icon> },
+    NoteAsset { req: NoteAssetRequest, reply: Reply<NoteAsset> },
+    AddNoteImage { req: AddNoteImageRequest, reply: Reply<NoteImage> },
 }
 
 /// A [`RemoteHost`] that forwards every call as a [`HostRequest`] over an `async_channel`.
@@ -488,5 +501,13 @@ impl RemoteHost for ChannelHost {
 
     async fn icon(&self, req: IconRequest) -> HostResult<Icon> {
         self.call(|reply| HostRequest::Icon { req, reply }).await
+    }
+
+    async fn note_asset(&self, req: NoteAssetRequest) -> HostResult<NoteAsset> {
+        self.call(|reply| HostRequest::NoteAsset { req, reply }).await
+    }
+
+    async fn add_note_image(&self, req: AddNoteImageRequest) -> HostResult<NoteImage> {
+        self.call(|reply| HostRequest::AddNoteImage { req, reply }).await
     }
 }

@@ -26,7 +26,7 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
 use crate::host::{HostError, HostEvent, HostResult, RemoteHost};
 use crate::pairing::{
     DeviceInfo, DeviceRegistry, MAX_DEVICE_FIELD, Pairing, PairingOffer, generate_code, now_ms,
-    pairing_url, source,
+    pairing_url_with_routes, source,
 };
 use crate::protocol::{
     ClientEnvelope, ClientMessage, ErrorCode, HostInfo, Item, MAX_PAGE, PROTOCOL_VERSION, ServerEnvelope, ServerMessage,
@@ -43,6 +43,12 @@ pub struct ServerConfig {
     /// `host:port` phones should dial, for the pairing QR code (e.g. the LAN or tailnet address).
     /// `None` uses the bound address, which is useless when bound to `0.0.0.0`.
     pub advertise: Option<String>,
+    /// More addresses to listen on besides `bind` (the tailnet's, beside the Wi-Fi's). One that
+    /// can't be bound is left out, with a warning: `bind` alone decides whether the server starts.
+    pub also_bind: Vec<SocketAddr>,
+    /// Every `host:port` phones may dial, `advertise` first: in the pairing code (`alt`) and in
+    /// `welcome`/`paired`, so a phone tries the next when one doesn't answer. Empty: `advertise` only.
+    pub routes: Vec<String>,
     /// Where paired devices are saved (`devices.json`); `None` keeps them in memory.
     pub devices_path: Option<PathBuf>,
     /// How long a new connection has to authenticate.
@@ -84,6 +90,8 @@ impl ServerConfig {
             bind: SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
             host,
             advertise: None,
+            also_bind: Vec::new(),
+            routes: Vec::new(),
             devices_path: None,
             auth_timeout: Duration::from_secs(10),
             pairing_ttl: Duration::from_secs(10 * 60),
@@ -139,6 +147,14 @@ impl RemoteServer {
         let tls = config.tls.as_ref().map(|t| t.acceptor()).transpose()?;
         let listener = bind(config.bind)?;
         let local_addr = listener.local_addr()?;
+        let mut more = Vec::new();
+        for &addr in &config.also_bind {
+            match bind(addr).and_then(|l| Ok((l.local_addr()?, l))) {
+                Ok(bound) => more.push(bound),
+                Err(err) => tracing::warn!(%addr, %err, "trek-remote couldn't listen there too"),
+            }
+        }
+        let also = more.iter().map(|(addr, _)| *addr).collect();
         let (events, _) = broadcast::channel(1024);
         let (notices, _) = broadcast::channel(64);
         let (shutdown, _) = watch::channel(false);
@@ -150,6 +166,7 @@ impl RemoteServer {
             config,
             tls,
             local_addr,
+            also,
             events,
             notices,
             shutdown,
@@ -158,6 +175,10 @@ impl RemoteServer {
             state: Mutex::new(State { registry, pairing: Pairing::default(), connections: HashMap::new(), next_conn: 0 }),
         });
         tracing::info!(%local_addr, "trek-remote listening");
+        for (addr, l) in more {
+            tracing::info!(local_addr = %addr, "trek-remote listening there too");
+            tokio::spawn(accept_loop(l, inner.clone(), host.clone()));
+        }
         tokio::spawn(accept_loop(listener, inner.clone(), host));
         Ok(RemoteHandle { inner })
     }
@@ -181,6 +202,11 @@ impl RemoteHandle {
         self.inner.local_addr
     }
 
+    /// Every address it listens on: `local_addr`, then those of `also_bind` it could bind.
+    pub fn listening(&self) -> Vec<SocketAddr> {
+        std::iter::once(self.inner.local_addr).chain(self.inner.also.iter().copied()).collect()
+    }
+
     /// Push a change to connected phones: snapshots and thread changes to every authenticated
     /// phone, items and transcript resets to phones subscribed to that thread.
     pub fn push(&self, event: HostEvent) {
@@ -202,8 +228,9 @@ impl RemoteHandle {
         self.inner.lock().pairing.activate(&code, ttl).expect("normalized codes are valid");
         let config = &self.inner.config;
         let advertise = config.advertise.clone().unwrap_or_else(|| self.inner.local_addr.to_string());
+        let routes = if config.routes.is_empty() { vec![advertise] } else { config.routes.clone() };
         PairingOffer {
-            url: pairing_url(&advertise, &code, &config.host.name, &config.host.id, config.tls.as_ref().map(|t| t.fingerprint.as_str())),
+            url: pairing_url_with_routes(&routes, &code, &config.host.name, &config.host.id, config.tls.as_ref().map(|t| t.fingerprint.as_str())),
             expires_at: now_ms() + ttl.as_millis() as i64,
             fingerprint: config.tls.as_ref().map(|t| t.short_fingerprint()),
             code,
@@ -260,6 +287,8 @@ struct Inner {
     /// Made from `config.tls`.
     tls: Option<tokio_rustls::TlsAcceptor>,
     local_addr: SocketAddr,
+    /// The `also_bind` addresses it listens on too.
+    also: Vec<SocketAddr>,
     events: broadcast::Sender<HostEvent>,
     notices: broadcast::Sender<ServerNotice>,
     shutdown: watch::Sender<bool>,
@@ -638,7 +667,7 @@ async fn authenticate(
         }
 
         let (kick_tx, kick) = oneshot::channel();
-        let (host, features) = (inner.config.host.clone(), inner.config.features.clone());
+        let (host, features, routes) = (inner.config.host.clone(), inner.config.features.clone(), inner.config.routes.clone());
         return match msg {
             ClientMessage::Pair { code, device_name, .. } => {
                 let name = clean_name(&device_name);
@@ -654,7 +683,7 @@ async fn authenticate(
                     Ok((token, conn_id)) => {
                         tracing::info!(%peer, device_id, name, "device paired");
                         inner.notice(ServerNotice::Paired { device_id: device_id.clone(), name });
-                        let paired = ServerMessage::Paired { protocol: PROTOCOL_VERSION, token, host, features };
+                        let paired = ServerMessage::Paired { protocol: PROTOCOL_VERSION, token, host, features, routes };
                         let _ = send(ws, ServerEnvelope::reply(re, paired)).await;
                         Some(Authenticated { device_id, conn_id, kick })
                     }
@@ -677,7 +706,7 @@ async fn authenticate(
                 };
                 match conn_id {
                     Some(conn_id) => {
-                        let welcome = ServerMessage::Welcome { protocol: PROTOCOL_VERSION, host, features };
+                        let welcome = ServerMessage::Welcome { protocol: PROTOCOL_VERSION, host, features, routes };
                         let _ = send(ws, ServerEnvelope::reply(re, welcome)).await;
                         Some(Authenticated { device_id, conn_id, kick })
                     }
@@ -769,6 +798,8 @@ const CLIENT_TYPES: &[&str] = &[
     "background_output",
     "stop_background",
     "icon",
+    "note_asset",
+    "add_note_image",
 ];
 
 /// Parse a text frame: its `id` (for the reply's `re`, even when the rest is bad) and message.
@@ -928,6 +959,8 @@ async fn call<H: RemoteHost>(host: &H, re: Option<String>, msg: ClientMessage) -
         ClientMessage::BackgroundOutput { thread_id, task_id } => host.background_output(&thread_id, &task_id).await.map(ServerMessage::BackgroundOutput),
         ClientMessage::StopBackground { thread_id, task_id } => host.stop_background(&thread_id, &task_id).await.map(|()| ack(None)),
         ClientMessage::Icon(req) => host.icon(req).await.map(ServerMessage::Icon),
+        ClientMessage::NoteAsset(req) => host.note_asset(req).await.map(ServerMessage::NoteAsset),
+        ClientMessage::AddNoteImage(req) => host.add_note_image(req).await.map(ServerMessage::NoteImage),
         other => Err(HostError::bad_request(format!("Unexpected \"{}\"", other.kind()))),
     };
     match result {

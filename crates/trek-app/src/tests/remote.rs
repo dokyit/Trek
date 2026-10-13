@@ -30,11 +30,42 @@ async fn ask_later<T>(trek: &super::harness::Trek, cx: &mut gpui_kit::TestAppCon
 
 #[test]
 fn tailscale_reach_requires_and_binds_its_address() {
-    let none = crate::remote::Addresses { lan: Some("192.168.1.2".parse().unwrap()), tailscale: None };
+    let none = crate::remote::Addresses { lan: Some("192.168.1.2".parse().unwrap()), tailscale: None, tailnet: None };
     assert_eq!(crate::remote::remote_endpoint(&none, trek_core::settings::Reach::Tailscale, 7420).unwrap_err().kind(), std::io::ErrorKind::AddrNotAvailable);
-    let addresses = crate::remote::Addresses { lan: none.lan, tailscale: Some("100.64.1.2".parse().unwrap()) };
+    let addresses = crate::remote::Addresses { lan: none.lan, tailscale: Some("100.64.1.2".parse().unwrap()), tailnet: None };
     let (bind, advertise) = crate::remote::remote_endpoint(&addresses, trek_core::settings::Reach::Tailscale, 7420).unwrap();
     assert_eq!((bind.to_string(), advertise.as_str()), ("100.64.1.2:7420".into(), "100.64.1.2:7420"));
+    // Chosen, the tailnet is all it listens on: not the Wi-Fi it's on as well.
+    assert_eq!(crate::remote::other_endpoint(&addresses, trek_core::settings::Reach::Tailscale, 7420), None);
+    assert_eq!(crate::remote::remote_routes(&addresses, trek_core::settings::Reach::Tailscale, 7420).unwrap(), ["100.64.1.2:7420"]);
+}
+
+#[test]
+fn on_wifi_the_tailnet_is_a_second_way_in() {
+    use crate::remote::{Addresses, other_endpoint, remote_routes};
+    use trek_core::settings::Reach;
+    let lan = Some("192.168.1.2".parse().unwrap());
+    let tailscale = Some("100.101.1.2".parse().unwrap());
+    // Both up: phones are told both, the Wi-Fi first, and it listens on both.
+    let both = Addresses { lan, tailscale, tailnet: None };
+    assert_eq!(other_endpoint(&both, Reach::Wifi, 7420).map(|a| a.to_string()).as_deref(), Some("100.101.1.2:7420"));
+    assert_eq!(remote_routes(&both, Reach::Wifi, 7420).unwrap(), ["192.168.1.2:7420", "100.101.1.2:7420"]);
+    // One of them: just that one, never the same address twice.
+    assert_eq!(remote_routes(&Addresses { lan: None, tailscale, tailnet: None }, Reach::Wifi, 7420).unwrap(), ["100.101.1.2:7420"]);
+    assert_eq!(remote_routes(&Addresses { lan, tailscale: None, tailnet: None }, Reach::Wifi, 7420).unwrap(), ["192.168.1.2:7420"]);
+}
+
+#[test]
+fn the_tailnet_says_whether_an_iphone_is_in_it() {
+    use crate::remote::Tailnet;
+    let status = |peers: &str| format!(r#"{{"Self":{{"UserID":7,"OS":"macOS"}},"User":{{"7":{{"LoginName":"dokyit@"}}}},"Peer":{{{peers}}}}}"#);
+    let alone = Tailnet::parse(&status("")).unwrap();
+    assert_eq!(alone, Tailnet { account: Some("dokyit@".into()), phones: 0, phones_online: 0 });
+    let asleep = Tailnet::parse(&status(r#""a":{"OS":"iOS","Online":false},"b":{"OS":"linux","Online":true}"#)).unwrap();
+    assert_eq!((asleep.phones, asleep.phones_online), (1, 0));
+    let on = Tailnet::parse(&status(r#""a":{"OS":"iOS","Online":true}"#)).unwrap();
+    assert_eq!((on.phones, on.phones_online), (1, 1));
+    assert_eq!(Tailnet::parse("not json"), None);
 }
 
 #[test]
@@ -47,9 +78,9 @@ fn the_server_listens_only_where_phones_are_told_to_dial() {
     };
     let lan = Some("192.168.1.2".parse().unwrap());
     let tailscale = Some("100.101.1.2".parse().unwrap());
-    assert_eq!(wifi(&Addresses { lan, tailscale }), "192.168.1.2:7420");
+    assert_eq!(wifi(&Addresses { lan, tailscale, tailnet: None }), "192.168.1.2:7420");
     // Without Wi-Fi, the tailnet address; with neither, only this Mac.
-    assert_eq!(wifi(&Addresses { lan: None, tailscale }), "100.101.1.2:7420");
+    assert_eq!(wifi(&Addresses { lan: None, tailscale, tailnet: None }), "100.101.1.2:7420");
     assert_eq!(wifi(&Addresses::default()), "127.0.0.1:7420");
 }
 
@@ -565,7 +596,21 @@ fn basecamp_and_usage_for_the_phone() {
         let profile = b.profile.expect("a profile");
         assert_eq!(profile.buckets.len(), 24, "an hour a stretch");
         assert!(profile.summit.is_some() && profile.total == "1 prompt");
-        assert!(b.review.iter().any(|r| r.thread_id == id), "unread, so ready for review");
+        assert!(b.review.iter().any(|r| r.thread_id == id && !r.needs_you), "unread, so in Needs review");
+        // As the Mac's Basecamp draws it now: totals, turns by the hour, and the tables.
+        let totals = b.totals.as_ref().expect("totals");
+        assert_eq!((totals.threads, totals.turns, totals.failed), (1, 1, 0));
+        assert!(!totals.cost.is_empty() && !totals.agent_time.is_empty() && !totals.tokens_label.is_empty());
+        let chart = b.chart.as_ref().expect("a chart");
+        assert_eq!((chart.step.as_str(), chart.bars.len(), chart.turns, chart.total.as_str()), ("hour", 24, 1, "1 turn"));
+        assert_eq!(chart.ticks.iter().map(|t| t.label.as_str()).collect::<Vec<_>>(), ["12 AM", "6 AM", "Noon", "6 PM"]);
+        let busy = chart.bars.iter().find(|b| b.turns == 1).expect("the hour it ran in");
+        assert_eq!(busy.line, format!("{} · 1 turn · {} tokens", busy.label, totals.tokens_label));
+        assert_eq!(busy.tokens, totals.tokens);
+        assert_eq!((b.projects.len(), b.projects[0].threads, b.projects[0].turns), (1, 1, 1));
+        assert!(b.projects[0].project.is_some(), "{:?}", b.projects);
+        assert_eq!((b.models.len(), b.models[0].turns), (1, 1));
+        assert!(b.models[0].agent.is_some());
         // The mock's turn took no time and reported no tokens: the tiles say what's known.
         assert!(b.tiles.iter().all(|t| !t.label.is_empty() && !t.figure.is_empty()), "{:?}", b.tiles);
         let all = ask_later(&trek, cx, |reply| tr::HostRequest::Basecamp { range: tr::BasecampRange::All, reply }).await.unwrap();
@@ -574,6 +619,63 @@ fn basecamp_and_usage_for_the_phone() {
         // No agent here reports a plan: nothing to show, nothing pending.
         let usage = ask_later(&trek, cx, |reply| tr::HostRequest::Usage { reply }).await.unwrap();
         assert!(!usage.loading);
+    });
+}
+
+#[test]
+fn a_note_s_pictures_go_to_the_phone_and_its_photos_come_back() {
+    run(async |cx| {
+        let trek = open(cx);
+        let note = ask(&trek, cx, |reply| tr::HostRequest::CreateNote { body: "Whiteboard".into(), reply }).unwrap();
+        // A photo from the phone is kept with the notes, and the phone is told how to link it.
+        let mut png = vec![];
+        image::RgbImage::from_pixel(40, 20, image::Rgb([200, 80, 30])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let add = |data: String, note_id: String| move |reply| tr::HostRequest::AddNoteImage { req: tr::AddNoteImageRequest { note_id, data, name: Some("The [board]".into()) }, reply };
+        let added = ask(&trek, cx, add(tr::base64(&png), note.id.clone())).unwrap();
+        assert!(added.path.starts_with("attachments/") && added.path.ends_with(".png"), "{}", added.path);
+        assert_eq!(added.markdown, format!("![The board]({})", added.path));
+        assert!(trek_core::notes::notes_dir().join(&added.path).is_file());
+        assert_eq!(ask(&trek, cx, add("aGVsbG8=".into(), note.id.clone())).unwrap_err().code, tr::ErrorCode::BadRequest, "not a photo");
+        assert_eq!(ask(&trek, cx, add(tr::base64(&png), "nope".into())).unwrap_err().code, tr::ErrorCode::NotFound);
+
+        // The phone draws it from there, scaled as asked.
+        let asset = |path: &str, note_id: &str| {
+            let req = tr::NoteAssetRequest { note_id: note_id.into(), path: path.into(), max_px: Some(64) };
+            move |reply| tr::HostRequest::NoteAsset { req, reply }
+        };
+        let got = ask_later(&trek, cx, asset(&added.path, &note.id)).await.unwrap();
+        assert_eq!((got.mime.as_str(), got.width, got.height, got.path.as_str()), ("image/jpeg", 40, 20, added.path.as_str()));
+        // Nothing but the notes' own pictures.
+        std::fs::write(trek_core::notes::notes_dir().join("private.png"), &png).unwrap();
+        for path in ["attachments/../private.png", "/etc/hosts", "../notes/private.png", "private.png"] {
+            assert_eq!(ask_later(&trek, cx, asset(path, &note.id)).await.unwrap_err().code, tr::ErrorCode::BadRequest, "{path}");
+        }
+        assert_eq!(ask_later(&trek, cx, asset(&added.path, "../settings")).await.unwrap_err().code, tr::ErrorCode::NotFound);
+    });
+}
+
+#[test]
+fn links_between_threads_open_on_the_phone_with_how_they_re_doing() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:start-thread explain the startup");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let new = trek.read(cx, |ws, _| ws.started_threads(&id)[0].id.clone());
+        let done = new.clone();
+        trek.wait(cx, "the new thread to finish", move |ws| ws.thread_state(&done) == crate::workspace::ThreadState::Finished).await;
+        trek.update(cx, |ws, _| ws.start_test_remote());
+        let links = |t: tr::Transcript| t.items.into_iter().filter(|i| i.body.kind() == "thread_link").map(|i| i.body).collect::<Vec<_>>();
+        let starter = links(ask_later(&trek, cx, transcript_req(&id, None, None)).await.unwrap());
+        let [tr::ItemBody::ThreadLink { link, thread_id, title, agent, state, open }] = &starter[..] else { panic!("{starter:?}") };
+        assert_eq!((*link, thread_id, title.as_str(), *state, *open), (tr::ThreadLinkKind::Started, &new, "Speed up the slow tests", Some(tr::LinkedThreadState::Finished), true));
+        assert_eq!(agent.as_ref().map(|a| a.key.clone()), Some(super::harness::mock().key()));
+        // The started thread's row says where it came from, with no state of its own.
+        let title_of_id = trek.read(cx, |ws, _| ws.thread(&id).unwrap().title.clone());
+        let kid = links(ask_later(&trek, cx, transcript_req(&new, None, None)).await.unwrap());
+        assert!(matches!(&kid[..], [tr::ItemBody::ThreadLink { link: tr::ThreadLinkKind::StartedBy, thread_id, title, state: None, open: true, .. }] if *thread_id == id && *title == title_of_id), "{kid:?}");
+        let snapshot = ask(&trek, cx, |reply| tr::HostRequest::Snapshot { reply }).unwrap();
+        let row = snapshot.threads.iter().find(|t| t.id == new).expect("listed");
+        assert_eq!((row.started_by.as_deref(), row.continued_from.as_deref()), (Some(id.as_str()), None));
     });
 }
 

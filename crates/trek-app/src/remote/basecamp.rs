@@ -1,10 +1,11 @@
-//! Basecamp for the phone: the recap the Mac's Basecamp shows, worded the same, with the numbers
-//! behind it so the phone can draw the profile and the tiles. Worked out off the main thread, as
-//! the Mac's is.
+//! Basecamp for the phone: what the Mac's Basecamp shows, worded the same: what needs the user,
+//! the range's totals, its chart of turns and the tables by project and by model (`basecamp_v2`),
+//! and for older phones the recap's sentences, profile and tiles. Worked out off the main thread,
+//! as the Mac's is, by the same `Summary`.
 
 use super::agent_ref;
-use crate::basecamp::{self as screen, TileKind, Waiting};
-use crate::workspace::Workspace;
+use crate::basecamp::{self as screen, Summary, TileKind, Waiting};
+use crate::workspace::{Workspace, fmt_tokens};
 use gpui_kit::Context;
 use trek_core::RunState;
 use trek_core::basecamp::{self, Range, Recap, Span};
@@ -26,24 +27,53 @@ impl Workspace {
         let (store, cache) = (self.store.clone(), self.basecamp_cache.clone());
         let work = cx.background_executor().spawn(async move {
             let now = chrono::Local::now();
-            cache.with(&store, |g| g.recap(range, &now)).unwrap_or_else(|e| {
+            cache.with(&store, |g| screen::summary(g, range, &now)).unwrap_or_else(|e| {
                 tracing::warn!("basecamp: {e:#}");
-                Recap::compute(range.window(&now), now.timestamp_millis(), &[])
+                Summary::compute(range, &now, range.window(&now), &[])
             })
         });
         cx.spawn(async move |this, cx| {
-            let recap = work.await;
-            let out = this.read_with(cx, |ws, _| ws.basecamp_for_phone(range, &recap)).map_err(|_| tr::HostError::other("Trek is closing"));
+            let summary = work.await;
+            let out = this.read_with(cx, |ws, _| ws.basecamp_for_phone(range, &summary)).map_err(|_| tr::HostError::other("Trek is closing"));
             let _ = reply.send(out);
         })
         .detach();
     }
 
-    fn basecamp_for_phone(&self, range: Range, recap: &Recap) -> tr::Basecamp {
+    fn basecamp_for_phone(&self, range: Range, summary: &Summary) -> tr::Basecamp {
+        let recap = &summary.recap;
         let project_ref = |id: &str| self.project(id).map(|p| tr::ProjectRef { id: p.id.clone(), name: p.name.clone(), hue: tr::project_hue(&p.name, self.project_prefs(&p.path).color), monogram: tr::monogram(&p.name), icon: super::icons::project_icon(self.project_prefs(&p.path).icon.as_deref()) });
         let by_name = |name: &str| self.projects.iter().find(|p| p.name == name).and_then(|p| project_ref(&p.id));
         let empty = recap.is_empty();
+        let rows = |rows: &[screen::Row]| -> Vec<tr::BasecampRow> {
+            rows.iter()
+                .map(|r| tr::BasecampRow {
+                    label: r.label.clone(),
+                    project: r.project.as_deref().and_then(project_ref),
+                    agent: r.agent.as_ref().map(agent_ref),
+                    threads: r.threads as u32,
+                    turns: r.turns as u32,
+                    tokens: r.tokens,
+                    tokens_label: fmt_tokens(r.tokens),
+                    cost: screen::cost(&r.spend),
+                    failed: r.failed as u32,
+                })
+                .collect()
+        };
         tr::Basecamp {
+            totals: (!empty).then(|| tr::BasecampTotals {
+                threads: recap.threads as u32,
+                turns: recap.turns as u32,
+                tokens: recap.tokens.total(),
+                tokens_label: fmt_tokens(recap.tokens.total()),
+                cost: screen::cost(&summary.spend),
+                failed: recap.failed as u32,
+                agent_secs: recap.agent_secs,
+                agent_time: screen::agent_time(recap.agent_secs),
+            }),
+            chart: (!empty).then(|| chart(&summary.chart)),
+            projects: if empty { vec![] } else { rows(&summary.projects) },
+            models: if empty { vec![] } else { rows(&summary.models) },
             range: match range {
                 Range::Today => tr::BasecampRange::Today,
                 Range::Week => tr::BasecampRange::Week,
@@ -128,6 +158,8 @@ impl Workspace {
                     deletions: t.deletions.max(0) as u32,
                     updated_at: t.updated_at,
                     unseen: t.is_unseen(),
+                    // Split where the Mac's Basecamp splits them.
+                    needs_you: t.needs_you() || waiting.is_some(),
                 }
             })
             .collect()
@@ -154,6 +186,18 @@ impl Workspace {
                 resets_at: t.resets_at,
             })
             .collect()
+    }
+}
+
+/// The chart of turns, with the words the Mac shows over it.
+fn chart(chart: &screen::Chart) -> tr::BasecampChart {
+    let turns: usize = chart.bars.iter().map(|b| b.turns).sum();
+    tr::BasecampChart {
+        step: chart.step.noun(),
+        bars: chart.bars.iter().map(|b| tr::BasecampBar { label: b.label.clone(), turns: b.turns as u32, tokens: b.tokens, line: b.line() }).collect(),
+        ticks: chart.ticks.iter().map(|(bar, label)| tr::BasecampTick { bar: *bar as u32, label: label.clone() }).collect(),
+        turns: turns as u32,
+        total: basecamp::count(turns, "turn", "turns"),
     }
 }
 

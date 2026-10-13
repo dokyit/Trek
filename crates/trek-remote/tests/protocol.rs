@@ -565,6 +565,43 @@ fn thread_details_ride_on_the_row_and_older_rows_still_read() {
 }
 
 #[test]
+fn links_between_threads() {
+    let item = item_round_trip(
+        r#"{"id":"i7","seq":12,"at":null,"kind":"thread_link","link":"started","thread_id":"t2","title":"Fix the cache","agent":{"key":"codex","name":"Codex","logo":"codex"},"state":"needs_approval","open":true}"#,
+    );
+    let ItemBody::ThreadLink { link, thread_id, state, open, .. } = &item.body else { panic!("{:?}", item.body) };
+    assert_eq!((*link, thread_id.as_str(), *state, *open), (ThreadLinkKind::Started, "t2", Some(LinkedThreadState::NeedsApproval), true));
+    assert_eq!(item.body.kind(), "thread_link");
+    // Where a thread came from: no state, and one archived since doesn't open.
+    let item = item_round_trip(r#"{"id":"i0","seq":1,"at":null,"kind":"thread_link","link":"continued_from","thread_id":"t1","title":"Old work","open":false}"#);
+    assert!(matches!(item.body, ItemBody::ThreadLink { link: ThreadLinkKind::ContinuedFrom, state: None, agent: None, open: false, .. }));
+    let item: Item = serde_json::from_str(r#"{"id":"i0","seq":1,"kind":"thread_link","link":"started_by","thread_id":"t1","title":"x"}"#).unwrap();
+    assert!(matches!(item.body, ItemBody::ThreadLink { open: true, .. }), "open unless it says otherwise");
+
+    // Rows say where an agent-started thread came from, and leave it out when it didn't.
+    let row = ThreadSummary { id: "t2".into(), started_by: Some("t1".into()), ..Default::default() };
+    let v = serde_json::to_value(&row).unwrap();
+    assert_eq!((&v["started_by"], v.get("continued_from")), (&json!("t1"), None));
+    let back: ThreadSummary = serde_json::from_value(v).unwrap();
+    assert_eq!(back, row);
+}
+
+#[test]
+fn notes_pictures() {
+    for line in [
+        r#"{"type":"note_asset","id":"1","note_id":"0192abc","path":"attachments/3f2a.png","max_px":960}"#,
+        r#"{"type":"add_note_image","id":"2","note_id":"0192abc","data":"/9j/","name":"Whiteboard"}"#,
+    ] {
+        let env = client_round_trip(line);
+        assert_eq!(env.msg.kind(), value(line)["type"].as_str().unwrap());
+    }
+    assert!(client_round_trip(r#"{"type":"note_asset","note_id":"n","path":"attachments/a.png"}"#).msg.is_query());
+    assert!(!client_round_trip(r#"{"type":"add_note_image","note_id":"n","data":""}"#).msg.is_query(), "it writes");
+    server_round_trip(r#"{"type":"note_asset","re":"1","note_id":"0192abc","path":"attachments/3f2a.png","mime":"image/jpeg","data":"/9j/","width":960,"height":540}"#);
+    server_round_trip(r#"{"type":"note_image","re":"2","note_id":"0192abc","path":"attachments/3f2a.jpg","markdown":"![Whiteboard](attachments/3f2a.jpg)"}"#);
+}
+
+#[test]
 fn a_turn_s_changed_files() {
     let item = item_round_trip(
         r#"{"id":"c12","seq":40,"at":null,"kind":"changes","files":[
@@ -660,6 +697,32 @@ fn a_basecamp_recap() {
     assert_eq!(b.profile.unwrap().summit, Some(1));
     assert_eq!(b.tiles[1].kind, TileKind::PlanLeft);
     assert!(!b.empty);
+    // An older Mac's: none of `basecamp_v2`.
+    assert!(b.totals.is_none() && b.chart.is_none() && b.projects.is_empty() && !b.review[0].needs_you);
+}
+
+#[test]
+fn basecamp_as_the_mac_draws_it_now() {
+    let line = r#"{"type":"basecamp","re":"1","range":"today","greeting":"Good evening, Monday 5 October","title":"Today's trek","updated_at":1791020400000,
+        "review":[{"thread_id":"t","title":"Fix the flaky test","status":"needs_you","label":"Approval","agent":{"key":"codex","name":"Codex"},"additions":0,"deletions":0,"updated_at":1791020000000,"unseen":false,"needs_you":true},
+                  {"thread_id":"u","title":"Bump deps","status":"paused","label":"Paused until 3 PM","agent":{"key":"codex","name":"Codex"},"additions":0,"deletions":0,"updated_at":1791020000000,"unseen":true}],
+        "narrative":[],"tiles":[],
+        "totals":{"threads":4,"turns":20,"tokens":182000,"tokens_label":"182K","cost":"$1.28","failed":1,"agent_secs":3720,"agent_time":"1h 2m"},
+        "chart":{"step":"hour","bars":[{"label":"12–1 AM","turns":0,"tokens":0,"line":"12–1 AM · 0 turns"},{"label":"2–3 PM","turns":4,"tokens":12000,"line":"2–3 PM · 4 turns · 12K tokens"}],
+                 "ticks":[{"bar":0,"label":"12 AM"}],"turns":4,"total":"4 turns"},
+        "projects":[{"label":"api","project":{"id":"p","name":"api","hue":212,"monogram":"AP"},"threads":3,"turns":16,"tokens":150000,"tokens_label":"150K","cost":"$1.02","failed":1},
+                    {"label":"No project","threads":1,"turns":4,"tokens":32000,"tokens_label":"32K","cost":"—","failed":0}],
+        "models":[{"label":"GPT-6","agent":{"key":"codex","name":"Codex"},"threads":4,"turns":20,"tokens":182000,"tokens_label":"182K","cost":"$1.28","failed":1}]}"#;
+    let env = server_round_trip(line);
+    let ServerMessage::Basecamp(b) = env.msg else { panic!() };
+    assert_eq!((b.review[0].needs_you, b.review[1].needs_you), (true, false));
+    assert_eq!(b.totals.unwrap().cost, "$1.28");
+    let chart = b.chart.unwrap();
+    assert_eq!((chart.step.as_str(), chart.bars[1].turns, chart.ticks[0].bar), ("hour", 4, 0));
+    assert_eq!((b.projects.len(), b.projects[1].project.is_none(), b.projects[1].failed), (2, true, 0));
+    assert_eq!(b.models[0].agent.as_ref().unwrap().key, "codex");
+    // Old fields the Mac now leaves empty still read.
+    assert!(b.narrative.is_empty() && b.tiles.is_empty());
 }
 
 #[test]
@@ -750,7 +813,7 @@ fn parity_requests_and_replies() {
         r#"{"type":"background_output","re":"5","thread_id":"t","task_id":"b1"}"#,
         r#"{"type":"icon","re":"7","agent":"acp:mistral-vibe","hash":"0f3a","png":"iVBORw0K","template":true}"#,
         r#"{"type":"ack","re":"2","text":"and open a PR"}"#,
-        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon"]}"#,
+        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images"]}"#,
         r#"{"type":"usage","re":"9","providers":[{"agent":{"key":"codex","name":"Codex","logo":"codex"},"plan":"ChatGPT Pro","limits":[],
             "resets":[{"id":"rc-1","title":"Full reset (Weekly + 5 hr)","expires_at":1791030000000}]},
             {"agent":{"key":"acp:devin","name":"Devin"},"limits":[],"no_limits":true,"as_of":1791020000000,"today":"Today in Trek: 12K tokens"}],"picked":true}"#,

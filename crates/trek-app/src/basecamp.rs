@@ -5,7 +5,8 @@
 //! `trek_core::basecamp`'s cache, which reads only the threads that moved on since the last
 //! pass), when Basecamp opens, soon after launch, and whenever threads change while it's open;
 //! switching range only draws another range's. Frames only draw them. The phone's
-//! Basecamp reads the same recap through the helpers at the end of this file.
+//! Basecamp reads the same `Summary` (`summary`); older phones, the recap through the helpers at
+//! the end of this file.
 
 use crate::palette;
 use crate::ui;
@@ -412,13 +413,7 @@ impl Basecamp {
         let max = chart.bars.iter().map(|b| b.turns).max().unwrap_or(0);
         let total: usize = chart.bars.iter().map(|b| b.turns).sum();
         let line = match self.hovered.and_then(|i| chart.bars.get(i)) {
-            Some(b) => {
-                let mut parts = vec![b.label.clone(), basecamp::count(b.turns, "turn", "turns")];
-                if b.tokens > 0 {
-                    parts.push(format!("{} tokens", fmt_tokens(b.tokens)));
-                }
-                parts.join(" · ")
-            }
+            Some(b) => b.line(),
             None => format!("Turns per {}", chart.step.noun()),
         };
         let n = chart.bars.len();
@@ -669,12 +664,12 @@ fn needs_row(t: &Thread, project: Option<String>, waiting: Option<Waiting>, now:
 }
 
 /// "$1.28", or "—" when none of it has a price.
-fn cost(spend: &Spend) -> String {
+pub(crate) fn cost(spend: &Spend) -> String {
     if spend.priced() { crate::cost::usd(spend.usd()) } else { "—".to_string() }
 }
 
 /// "<1m", "42m", "1h 2m".
-fn agent_time(secs: u64) -> String {
+pub(crate) fn agent_time(secs: u64) -> String {
     if secs < 60 { "<1m".to_string() } else { basecamp::duration(secs) }
 }
 
@@ -720,7 +715,7 @@ pub enum Step {
 
 impl Step {
     /// "hour", "day", "week", "4 weeks".
-    fn noun(self) -> String {
+    pub(crate) fn noun(self) -> String {
         match self {
             Step::Hour => "hour".into(),
             Step::Day => "day".into(),
@@ -736,6 +731,17 @@ pub struct Bar {
     pub label: String,
     pub turns: usize,
     pub tokens: u64,
+}
+
+impl Bar {
+    /// What's said over it when it's hovered: "2 PM–3 PM · 4 turns · 12K tokens".
+    pub(crate) fn line(&self) -> String {
+        let mut parts = vec![self.label.clone(), basecamp::count(self.turns, "turn", "turns")];
+        if self.tokens > 0 {
+            parts.push(format!("{} tokens", fmt_tokens(self.tokens)));
+        }
+        parts.join(" · ")
+    }
 }
 
 /// Turns and tokens over the range: hours for today, days for the week, days (weeks past three
@@ -771,12 +777,13 @@ const RANGES: [Range; 3] = [Range::Today, Range::Week, Range::All];
 
 /// Basecamp's numbers for every range at `now`, from what was gathered: nothing is read.
 pub fn summaries<Tz: TimeZone>(g: &basecamp::Gathered, now: &DateTime<Tz>) -> Vec<(Range, Summary)> {
-    RANGES
-        .map(|range| {
-            let window = g.window(range, now);
-            (range, Summary::compute(range, now, window, g.threads_in(&window)))
-        })
-        .to_vec()
+    RANGES.map(|range| (range, summary(g, range, now))).to_vec()
+}
+
+/// Basecamp's numbers for `range` at `now`, from what was gathered (the phone's, a range at a time).
+pub fn summary<Tz: TimeZone>(g: &basecamp::Gathered, range: Range, now: &DateTime<Tz>) -> Summary {
+    let window = g.window(range, now);
+    Summary::compute(range, now, window, g.threads_in(&window))
 }
 
 /// The tables by project and by model. A thread's turns and failures go to its model (the one it
@@ -1000,8 +1007,8 @@ fn hour_name(h: u32) -> String {
     format!("{twelve} {}", if h < 12 { "AM" } else { "PM" })
 }
 
-// The phone's Basecamp (`remote/basecamp.rs`) draws the recap as tiles and a profile, worded
-// here so both read alike.
+// Phones from before `basecamp_v2` (`remote/basecamp.rs`) draw the recap as tiles and a profile,
+// worded here as the Mac's Basecamp once did.
 
 /// What a stat tile shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

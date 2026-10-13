@@ -134,7 +134,7 @@ impl SettingsView {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
         let enabled = s.mobile.enabled;
-        let running = ws.remote.as_ref().map(|r| (r.offer.clone(), r.addresses.clone(), r.advertise.clone(), r.devices.clone(), r.connected.clone()));
+        let running = ws.remote.as_ref().map(|r| (r.offer.clone(), r.addresses.clone(), r.advertise.clone(), r.routes.clone(), r.devices.clone(), r.connected.clone()));
         let starting = enabled && running.is_none();
         let failed = ws.remote_error.clone().filter(|_| starting);
         let session_approvals = self.switch("mobile-session-approvals", s.mobile.session_approvals, |s, v| s.mobile.session_approvals = v);
@@ -165,7 +165,7 @@ impl SettingsView {
             out.push(Self::note("Starting…", cx));
         }
         out.extend(self.push_section(s, cx));
-        let Some((offer, addresses, advertise, devices, connected)) = running else {
+        let Some((offer, addresses, advertise, routes, devices, connected)) = running else {
             out.push(div().h(px(16.)).into_any_element());
             out.push(Self::note(
                 "Trek on iPhone shows every thread and what it needs from you, and lets you answer approvals and questions, review plans, send follow-ups and start threads, while the agents keep running here. Build it from ios/ in Trek's repository; it isn't on the App Store yet.",
@@ -178,7 +178,11 @@ impl SettingsView {
         let reach_row = match addresses.tailscale {
             Some(ts) => Self::row(
                 format!("Reach {this} over"),
-                format!("Phones dial {advertise}. Wi-Fi works on the same network; Tailscale ({ts}) works anywhere your phone is on your tailnet."),
+                match (s.mobile.reach, routes.get(1)) {
+                    (Reach::Wifi, Some(tailnet)) => format!("Phones dial {advertise} on this Wi-Fi, and {tailnet} over Tailscale from anywhere: a phone paired here keeps both, and uses whichever answers."),
+                    (Reach::Wifi, None) => format!("Phones dial {advertise}. Wi-Fi works on the same network; Tailscale ({ts}) works anywhere your phone is on your tailnet."),
+                    (Reach::Tailscale, _) => format!("Phones dial {advertise}, from anywhere your phone is on your tailnet. Nothing listens on the Wi-Fi."),
+                },
                 ui::segmented("mobile-reach", vec![(Reach::Wifi, "Wi-Fi"), (Reach::Tailscale, "Tailscale")], s.mobile.reach, self.setter(|s, v| s.mobile.reach = v), cx),
                 cx,
             ),
@@ -190,6 +194,21 @@ impl SettingsView {
             ),
         };
         out.push(ui::group(vec![reach_row], cx));
+        // Tailscale is up here, but a phone can only use it if it's in the same tailnet.
+        if let Some(tailnet) = addresses.tailnet.as_ref().filter(|_| addresses.tailscale.is_some()) {
+            let account = tailnet.account.as_deref().map(|a| format!(" ({a})")).unwrap_or_default();
+            let note = if tailnet.phones == 0 {
+                Some(format!("No iPhone is in your tailnet{account} yet, so phones reach {this} only on this Wi-Fi. Install Tailscale on your iPhone and sign in with the same account, then pair again here (or just reconnect: a paired phone learns the tailnet address)."))
+            } else if tailnet.phones_online == 0 {
+                Some(format!("Your iPhone is in your tailnet{account}, but Tailscale isn't on on it right now. Turn it on in the Tailscale app to reach {this} away from this Wi-Fi."))
+            } else {
+                None
+            };
+            if let Some(note) = note {
+                out.push(div().h(px(8.)).into_any_element());
+                out.push(Self::note(&note, cx));
+            }
+        }
 
         // Pairing.
         out.push(Self::heading("Pair an iPhone", cx));
