@@ -323,6 +323,15 @@ nonisolated enum HSL {
 enum AgentLogo {
     /// The asset for an `AgentId::key()`: `claude-code`, `acp:cursor`, `direct:openai`…
     static func asset(_ key: String) -> String? {
+        name(key).map { "logo-\($0)" }
+    }
+
+    /// Its one-colour glyph, drawn as a template like an SF Symbol: for menus and labels.
+    static func glyph(_ key: String) -> String? {
+        name(key).map { "glyph-\($0)" }
+    }
+
+    private static func name(_ key: String) -> String? {
         let id: String
         if key.hasPrefix("acp:") { id = String(key.dropFirst(4)) } else if key.hasPrefix("direct:") { id = String(key.dropFirst(7)) } else { id = key }
         let known: Set<String> = ["amp", "anthropic", "claude-code", "codex", "cursor", "deepseek", "devin", "droid", "figma", "gemini",
@@ -330,7 +339,7 @@ enum AgentLogo {
                                   "openai", "opencode", "openrouter", "pi", "qwen-code", "xai"]
         let aliases = ["gemini-cli": "gemini", "copilot": "github-copilot", "qwen": "qwen-code", "factory": "droid"]
         let name = aliases[id] ?? id
-        return known.contains(name) ? "logo-\(name)" : nil
+        return known.contains(name) ? name : nil
     }
 }
 

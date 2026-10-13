@@ -59,6 +59,51 @@ struct UsageView: View {
     }
 }
 
+/// Usage on its own, over the Threads list or a thread, with Done.
+struct UsageSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            UsageView()
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Done", systemImage: "xmark") { dismiss() }
+                    }
+                }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+/// Usage's toolbar button: a gauge whose needle and tint follow the limit closest to running out
+/// (amber from 80% used, red from 95%, as the Mac's Usage button).
+struct UsageButton: View {
+    @Environment(AppModel.self) private var model
+    var action: () -> Void
+
+    private var peak: Double { model.usage?.peak ?? 0 }
+
+    private var symbol: String {
+        switch peak {
+        case 95...: "gauge.with.dots.needle.100percent"
+        case 60..<95: "gauge.with.dots.needle.67percent"
+        case 40..<60: "gauge.with.dots.needle.50percent"
+        case 15..<40: "gauge.with.dots.needle.33percent"
+        default: "gauge.with.dots.needle.0percent"
+        }
+    }
+
+    var body: some View {
+        Button(action: action) {
+            Label("Usage", systemImage: symbol)
+                .foregroundStyle(peak >= 95 ? Trek.failed : peak >= 80 ? Trek.approval : Trek.foreground)
+        }
+        .accessibilityValue(model.usage.map { _ in "\(Int(max(0, 100 - peak).rounded())) percent left on the tightest limit" } ?? "")
+    }
+}
+
 /// One agent's plan: its logo and name, the plan, then each limit as a bar, and its resets.
 private struct ProviderCard: View {
     var provider: ProviderUsage

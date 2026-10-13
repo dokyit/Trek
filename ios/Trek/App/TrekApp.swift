@@ -20,7 +20,7 @@ struct TrekApp: App {
                     // Scripted live screenshots only (ios/scripts/live-screenshots.sh): pair
                     // without the sheet. Debug builds, launch arguments: never from a link.
                     if let s = Launch.pairNow, let link = PairingLink(s) {
-                        model.pair(address: link.address, code: link.code, transport: link.transport)
+                        model.pair(address: link.address, alternates: link.alternates, code: link.code, transport: link.transport)
                     }
                     #endif
                 }
@@ -55,8 +55,11 @@ enum Launch {
     static var sheet: String? { UserDefaults.standard.string(forKey: "TrekSheet") }
     /// Text typed in Search, for screenshots.
     static var search: String? { UserDefaults.standard.string(forKey: "TrekSearch") }
-    /// Sections of the thread list to start folded, comma-separated ("Pinned,Needs you").
+    /// Sections of the thread list to start folded, comma-separated ("Pinned,Needs you",
+    /// "project:p1"); "-Settled" starts Settled open.
     static var folded: Set<String> { Set((UserDefaults.standard.string(forKey: "TrekFolded") ?? "").split(separator: ",").map(String.init)) }
+    /// The thread list's grouping for screenshots: `project` or `status`.
+    static var grouping: String? { UserDefaults.standard.string(forKey: "TrekGrouping") }
     static var appearance: String? { UserDefaults.standard.string(forKey: "TrekAppearance") }
     /// A text size for screenshots: `small`, `large`, `xxLarge`…
     static var textSize: String? { UserDefaults.standard.string(forKey: "TrekTextSize") }
@@ -259,42 +262,80 @@ struct NewThreadAccessoryModifier<Accessory: View>: ViewModifier {
     }
 }
 
-/// The glass pill above the tab bar: start a new thread, and how many agents are at work.
+/// The glass pill above the tab bar: start a new thread, how many agents are at work, and a hand
+/// for the threads waiting on you that takes you to them.
 struct NewThreadAccessory: View {
     var working: Int
     var needsYou: Int
     var action: () -> Void
+    @Environment(AppModel.self) private var model
     @Environment(\.tabViewBottomAccessoryPlacement) private var placement
+    /// More than one waits: which to open.
+    @State private var choosing: [ThreadSummary] = []
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: "plus")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Trek.foreground)
-                Text("New thread")
-                    .font(.ui(.body).weight(.medium))
-                    .foregroundStyle(Trek.foreground)
-                Spacer(minLength: 8)
-                if placement != .inline {
-                    if needsYou > 0 {
+        HStack(spacing: 10) {
+            Button(action: action) {
+                HStack(spacing: 10) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Trek.foreground)
+                    Text("New thread")
+                        .font(.ui(.body).weight(.medium))
+                        .foregroundStyle(Trek.foreground)
+                    Spacer(minLength: 8)
+                }
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("New thread")
+            if placement != .inline {
+                if needsYou > 0 {
+                    Button(action: openWaiting) {
                         Label("\(needsYou)", systemImage: "hand.raised.fill")
                             .font(.ui(.footnote).weight(.semibold))
                             .foregroundStyle(Trek.approval)
                             .labelStyle(.titleAndIcon)
+                            .padding(.horizontal, 8)
+                            .frame(maxHeight: .infinity)
+                            .contentShape(Rectangle())
                     }
-                    if working > 0 {
-                        HStack(spacing: 6) {
-                            BeaconDot(color: Trek.working, pulses: true, size: 6)
-                            Text("\(working) working").font(.ui(.footnote).weight(.medium)).foregroundStyle(Trek.muted)
-                        }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(needsYou) waiting on you")
+                    .accessibilityHint(needsYou == 1 ? "Opens it" : "Lists them")
+                }
+                if working > 0 {
+                    HStack(spacing: 6) {
+                        BeaconDot(color: Trek.working, pulses: true, size: 6)
+                        Text("\(working) working").font(.ui(.footnote).weight(.medium)).foregroundStyle(Trek.muted)
                     }
+                    .accessibilityElement(children: .combine)
                 }
             }
-            .padding(.horizontal, 18)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("New thread. \(working) working, \(needsYou) need you.")
+        .padding(.leading, 18)
+        .padding(.trailing, 14)
+        .confirmationDialog("Waiting on you", isPresented: Binding(get: { !choosing.isEmpty }, set: { if !$0 { choosing = [] } }),
+                            titleVisibility: .visible) {
+            ForEach(choosing.prefix(8)) { t in
+                Button("\(t.title) · \(Self.why(t))") { model.openRequest = t.id }
+            }
+        }
+    }
+
+    /// One thread waiting: open it. More: say which.
+    private func openWaiting() {
+        let waiting = model.waitingOnYou
+        if waiting.count == 1, let t = waiting.first {
+            model.openRequest = t.id
+        } else {
+            choosing = waiting
+        }
+    }
+
+    /// "Approval", "Failed"…: what it waits on, as its row says.
+    private static func why(_ t: ThreadSummary) -> String {
+        StatusLook.of(t)?.label ?? "Needs you"
     }
 }

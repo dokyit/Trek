@@ -55,6 +55,19 @@ extension MockHost {
                 return deliver(.error(re: id, code: .notFound, message: "No icon for that"))
             }
             deliver(.icon(re: id, IconReply(agent: agent, projectId: projectId, hash: hash, png: png.base64EncodedString(), template: template)))
+        case .noteAsset(let noteId, let path, let maxPx):
+            guard let (data, w, h) = DemoMac.noteAsset(path, maxPx: min(maxPx ?? 2048, 2048)) else {
+                return deliver(.error(re: id, code: .notFound, message: "That picture isn't on the Mac any more"))
+            }
+            deliver(.noteAsset(re: id, NoteAsset(noteId: noteId, path: path, mime: "image/jpeg", data: data.base64EncodedString(), width: w, height: h)),
+                    after: 0.25)
+        case .addNoteImage(let noteId, let data, let name):
+            guard let bytes = Data(base64Encoded: data) else {
+                return deliver(.error(re: id, code: .badRequest, message: "That photo couldn't be read"))
+            }
+            let path = DemoMac.addNoteImage(bytes)
+            let alt = (name ?? "").filter { !"[]\\".contains($0) }
+            deliver(.noteImage(re: id, NoteImage(noteId: noteId, path: path, markdown: "![\(alt)](\(path))")), after: 0.4)
         default:
             break
         }

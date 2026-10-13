@@ -39,6 +39,7 @@ private struct ThreadScreen: View {
     @State private var newTitle = ""
     @State private var archiving = false
     @State private var showingGit = false
+    @State private var showingUsage = false
     @State private var newThread: NewThreadRequest?
     @State private var snoozePicking = false
     @State private var deleteAsk: DeleteAsk?
@@ -83,6 +84,7 @@ private struct ThreadScreen: View {
                 Text("It leaves your threads on the Mac too.")
             }
             .sheet(isPresented: $showingGit) { GitSheet(threadID: threadID) }
+            .sheet(isPresented: $showingUsage) { UsageSheet() }
             .sheet(isPresented: $snoozePicking) { if let t = thread { SnoozePicker(thread: t) } }
             .deleteConfirmation($deleteAsk, model: model) { _ in dismiss() }
             .sheet(item: $newThread) { request in
@@ -99,6 +101,7 @@ private struct ThreadScreen: View {
                 composer.mode = model.followUpMode
                 if let draft = model.takeDraft(threadID) { composer.draft = draft }
                 model.subscribe(threadID)
+                if model.usage == nil { model.loadUsage(quiet: true) }
                 switch Launch.sheet {
                 case "git": showingGit = true
                 case "commands": composer.draft = "/"
@@ -138,7 +141,19 @@ private struct ThreadScreen: View {
             Menu {
                 if let t = thread {
                     Section {
-                        Label(t.agent.name + (t.modelLabel.map { " · \($0)" } ?? ""), systemImage: "cpu")
+                        // The agent and model; with its plan's usage under it when the Mac shows
+                        // that plan, and Usage behind it.
+                        let name = t.agent.name + (t.modelLabel.map { " · \($0)" } ?? "")
+                        if let plan = model.usage?.providers.first(where: { $0.agent.key == t.agent.key }) {
+                            // A menu reads its title, subtitle and icon straight from these.
+                            Button { showingUsage = true } label: {
+                                AgentMenuIcon(agent: t.agent)
+                                Text(name)
+                                if let summary = plan.summary { Text(summary) }
+                            }
+                        } else {
+                            Label { Text(name) } icon: { AgentMenuIcon(agent: t.agent) }
+                        }
                         if let b = t.branch { Label(b, systemImage: "arrow.triangle.branch") }
                         if t.additions + t.deletions > 0 { Label("+\(t.additions) −\(t.deletions)", systemImage: "plus.forwardslash.minus") }
                     }
@@ -298,6 +313,7 @@ private struct TranscriptList: View, Equatable {
         let earlier = blocks.dropLast(Self.laidOut)
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                LineageHeader(store: store)
                 if !store.loaded || store.more || !earlier.isEmpty {
                     LazyVStack(alignment: .leading, spacing: 18) {
                         if !store.loaded {
@@ -423,16 +439,29 @@ private struct EarlierMarker: View {
     }
 }
 
-/// Under the transcript while the agent works. Observes the thread's row itself, so its ticking
-/// activity doesn't redraw the transcript.
+/// Under the transcript while the agent works, or its sub-agents do. Observes the thread's row
+/// itself, so its ticking activity doesn't redraw the transcript.
 private struct WorkingFooter: View {
     let store: ThreadStore
 
     var body: some View {
-        if let t = store.summary, t.runState == .working {
-            WorkingLine(threadID: t.id, agentKey: t.agent.logo ?? t.agent.key, since: t.workingSince, activity: t.activity)
-                .padding(.top, 2)
-                .transaction { $0.animation = nil }
+        if let t = store.summary {
+            let agents = t.subAgents ?? []
+            let out = !t.runningSubAgents.isEmpty
+            VStack(alignment: .leading, spacing: 12) {
+                // While the turn runs, or while what it started is still at it.
+                if !agents.isEmpty, t.runState == .working || out {
+                    SubAgentsCard(agents: agents)
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                }
+                if t.runState == .working {
+                    WorkingLine(threadID: t.id, agentKey: t.agent.logo ?? t.agent.key, since: t.workingSince, activity: t.activity,
+                                model: t.modelLabel, subAgents: (t.runningSubAgents.count, agents.count))
+                        .padding(.top, 2)
+                        .transaction { $0.animation = nil }
+                }
+            }
+            .animation(.snappy(duration: 0.25), value: agents.isEmpty)
         }
     }
 }
@@ -521,6 +550,8 @@ private struct BlockRow: View, Equatable {
         case .handoff(let from, let to):
             Label("Handed over from \(from) to \(to)", systemImage: "arrow.left.arrow.right")
                 .font(.ui(.subheadline)).foregroundStyle(Trek.muted)
+        case .threadLink(let link):
+            ThreadLinkRow(link: link)
         case .changes(let changes):
             ChangesCard(changes: changes, threadID: threadID, rootName: projectName,
                         folded: Binding(get: { folded }, set: { fold($0) }))

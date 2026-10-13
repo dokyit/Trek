@@ -54,6 +54,20 @@ nonisolated enum NoteEditing {
         return Edit(text: String(chars), selection: (lo + o.count)..<(hi + o.count))
     }
 
+    /// Put `block` (whole lines: a picture's) in place of the selection, on lines of its own, as
+    /// the Mac's Write does (`notes::insert_lines`): the text around it keeps its lines, and the
+    /// cursor goes to the start of the line after it.
+    static func insertLines(_ text: String, _ sel: Range<Int>, _ block: String) -> Edit {
+        let chars = Array(text)
+        let lo = min(sel.lowerBound, chars.count), hi = min(max(sel.upperBound, lo), chars.count)
+        let before = chars[..<lo], after = chars[hi...]
+        let lead = before.isEmpty || before.last == "\n" ? "" : "\n"
+        let tail = after.first == "\n" ? "" : "\n"
+        let new = String(before) + lead + block + tail + String(after)
+        let cursor = before.count + lead.count + block.count + 1
+        return Edit(text: new, selection: cursor..<cursor)
+    }
+
     static func color(_ text: String, _ sel: Range<Int>, css: String, highlight: Bool) -> Edit {
         highlight ? wrap(text, sel, open: "<mark style=\"background: \(css)\">", close: "</mark>")
             : wrap(text, sel, open: "<span style=\"color: \(css)\">", close: "</span>")

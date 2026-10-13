@@ -2,23 +2,50 @@ import SwiftUI
 
 /// A note as it reads, line by line as the Mac's preview draws it: headings, bullets, numbered
 /// and check lists, quotes, code, and inline bold, italics, underline, strikethrough, `code`,
-/// text colour and highlights (`<span style="color: …">`, `<mark>`, `<u>`). Ticking a box
-/// changes that line in the note.
+/// text colour and highlights (`<span style="color: …">`, `<mark>`, `<u>`), and pictures on lines
+/// of their own (`NoteImageView`; a tap shows them full screen, stepping through the note's
+/// others). Ticking a box changes that line in the note.
 struct NoteMarkdown: View {
     var text: String
     var size: CGFloat = 17
+    /// The note's id, for its pictures kept on the Mac.
+    var noteID: String? = nil
     /// A check box was tapped: the line it's on (0-based).
     var toggle: ((Int) -> Void)? = nil
     @Environment(\.dynamicTypeSize) private var dynamicType
+    @State private var viewing: Viewing?
 
     var body: some View {
         let s = size * TextScale.factor(dynamicType)
+        let lines = NoteLine.parse(text)
+        let gallery = lines.flatMap { line -> [NoteImageRef] in if case .images(let i) = line.kind { i } else { [] } }
+        let shown = gallery.compactMap { $0.viewer(noteID) }
         VStack(alignment: .leading, spacing: 7) {
-            ForEach(NoteLine.parse(text)) { line in
-                view(line, s)
+            ForEach(lines) { line in
+                if case .images(let images) = line.kind {
+                    ForEach(Array(images.enumerated()), id: \.offset) { _, image in
+                        NoteImageView(image: image, noteID: noteID) {
+                            guard let at = image.viewer(noteID), let start = shown.firstIndex(of: at) else { return }
+                            viewing = Viewing(images: shown, start: start)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                } else {
+                    view(line, s)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear { if Launch.sheet == "image", viewing == nil, !shown.isEmpty { viewing = Viewing(images: shown, start: 0) } }
+        .fullScreenCover(item: $viewing) { v in
+            ImageViewer(images: v.images, start: v.start)
+        }
+    }
+
+    private struct Viewing: Identifiable {
+        var images: [ViewerImage]
+        var start: Int
+        var id: Int { start }
     }
 
     @ViewBuilder
@@ -75,6 +102,8 @@ struct NoteMarkdown: View {
             .background(Trek.foreground.opacity(0.05), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         case .rule:
             Divider().padding(.vertical, 4)
+        case .images:
+            EmptyView()
         }
     }
 
@@ -94,6 +123,8 @@ struct NoteLine: Identifiable {
         case bullet(indent: Int)
         case numbered(Int, indent: Int)
         case check(Bool, indent: Int)
+        /// A line of nothing but pictures.
+        case images([NoteImageRef])
     }
 
     /// The first line it came from (0-based), for ticking boxes.
@@ -128,6 +159,7 @@ struct NoteLine: Identifiable {
     private static func line(_ i: Int, _ s: String, indent: Int) -> NoteLine {
         if s.isEmpty { return NoteLine(index: i, kind: .blank, text: "") }
         if s == "---" || s == "***" { return NoteLine(index: i, kind: .rule, text: "") }
+        if s.hasPrefix("!["), let images = NoteImageRef.only(s) { return NoteLine(index: i, kind: .images(images), text: s) }
         if let m = s.wholeMatch(of: /(#{1,6})\s+(.*)/) { return NoteLine(index: i, kind: .heading(m.1.count), text: String(m.2)) }
         if let m = s.wholeMatch(of: /[-*+]\s+\[([ xX])\]\s?(.*)/) {
             return NoteLine(index: i, kind: .check(m.1 != " ", indent: indent), text: String(m.2))

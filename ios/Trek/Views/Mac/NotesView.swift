@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 import UIKit
 
@@ -121,12 +122,16 @@ struct NoteEditor: View {
     @State private var theirs: Note?
     @State private var confirmDelete = false
     @State private var deleted = false
+    /// A photo picked to put in the note, and whether it's on its way to the Mac.
+    @State private var photo: PhotosPickerItem?
+    @State private var adding = false
     @FocusState private var focused: Bool
     #if DEBUG
     @State private var fakedConflict = false
     #endif
 
     private var status: String {
+        if adding { return "Adding photo…" }
         if saving { return "Saving…" }
         if text != saved { return "Edited" }
         if let modified = model.openNotes[noteID]?.modified { return "Saved · \(Resets.clock(modified))" }
@@ -150,7 +155,7 @@ struct NoteEditor: View {
                         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             Text("Empty note. Tap to write.").foregroundStyle(Trek.muted)
                         } else {
-                            NoteMarkdown(text: text, toggle: tick)
+                            NoteMarkdown(text: text, noteID: noteID, toggle: tick)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -164,7 +169,7 @@ struct NoteEditor: View {
         .safeAreaInset(edge: .bottom) {
             // Over the keyboard while writing (and at the foot of the screen with a hardware one).
             if writing {
-                FormatBar(apply: format)
+                FormatBar(apply: format, photo: model.serves(.noteImages) ? $photo : nil)
                     .padding(.vertical, 4)
                     .glassEffect(.regular, in: .capsule)
                     .padding(.horizontal, 12)
@@ -214,6 +219,7 @@ struct NoteEditor: View {
         }
         .task { open() }
         .onChange(of: text) { old, new in changed(old, new) }
+        .onChange(of: photo) { _, item in if let item { addPhoto(item) } }
         .onDisappear(perform: leave)
     }
 
@@ -343,6 +349,26 @@ struct NoteEditor: View {
         apply(edit)
     }
 
+    /// Send the picked photo to the Mac, to keep with the notes, and put the line that shows it
+    /// where the cursor was, as the Mac's Write does with a picture dropped in.
+    private func addPhoto(_ item: PhotosPickerItem) {
+        let at = selected
+        adding = true
+        Task {
+            let picked = await PickedPhoto.load([item]).first
+            photo = nil
+            guard let picked else {
+                adding = false
+                return model.show("That photo couldn't be read", error: true)
+            }
+            model.addNoteImage(noteID, photo: picked) { image in
+                adding = false
+                guard let image else { return }
+                apply(NoteEditing.insertLines(text, at, image.markdown))
+            }
+        }
+    }
+
     private func apply(_ edit: NoteEditing.Edit) {
         text = edit.text
         let lo = text.index(text.startIndex, offsetBy: min(edit.selection.lowerBound, text.count))
@@ -360,8 +386,9 @@ struct NoteEditor: View {
     }
 }
 
-/// The Mac's formatting, on a glass bar over the keyboard: bold, italics, underline, strikethrough, headings,
-/// lists, quote, code, and text colour and highlights.
+/// The Mac's formatting, on a glass bar over the keyboard: a photo (where the Mac keeps notes'
+/// pictures), bold, italics, underline, strikethrough, headings, lists, quote, code, and text
+/// colour and highlights.
 private struct FormatBar: View {
     enum Action {
         case wrap(String, String)
@@ -370,10 +397,24 @@ private struct FormatBar: View {
     }
 
     var apply: (Action) -> Void
+    /// Where a picked photo goes; nil on a Mac that can't keep one.
+    var photo: Binding<PhotosPickerItem?>? = nil
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 2) {
+                if let photo {
+                    // Its label is made off the main actor: drawn here, not by `icon`.
+                    PhotosPicker(selection: photo, matching: .images) {
+                        Image(systemName: "photo.badge.plus")
+                            .font(.system(size: 16, weight: .medium))
+                            .frame(width: 38, height: 34)
+                            .contentShape(Rectangle())
+                    }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Add a photo")
+                    divider
+                }
                 tool("bold", "Bold") { apply(.wrap("**", "**")) }
                 tool("italic", "Italic") { apply(.wrap("*", "*")) }
                 tool("underline", "Underline") { apply(.wrap("<u>", "</u>")) }
@@ -454,7 +495,7 @@ private struct ConflictSheet: View {
                     .foregroundStyle(Trek.muted)
             }
             ScrollView {
-                NoteMarkdown(text: theirs.body, size: 15)
+                NoteMarkdown(text: theirs.body, size: 15, noteID: theirs.id)
                     .padding(14)
             }
             .frame(maxHeight: .infinity)

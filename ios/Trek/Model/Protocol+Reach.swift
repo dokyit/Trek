@@ -26,6 +26,11 @@ nonisolated enum MacFeature: String, CaseIterable {
     case background
     /// Added agents' and projects' icons.
     case icon
+    /// Basecamp as the Mac draws it now: totals, the chart of turns, the tables by project and by
+    /// model, and review rows split into "Needs you" and "Needs review".
+    case basecampV2 = "basecamp_v2"
+    /// A note's pictures, and adding one from the phone.
+    case noteImages = "note_images"
 }
 
 /// The Mac's snooze menu.

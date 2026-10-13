@@ -236,6 +236,10 @@ nonisolated struct ThreadSummary: Codable, Identifiable, Hashable {
     var git: GitSummary? = nil
     /// A sub-agent's: the thread that started it.
     var parentId: String? = nil
+    /// Started by another thread's agent (`start_thread`): that thread.
+    var startedBy: String? = nil
+    /// Took another thread's work over (`handoff`): that thread.
+    var continuedFrom: String? = nil
     /// Snoozed: when it wakes (ms).
     var snoozedUntil: Int64? = nil
     /// `needs` is a sub-agent's: its thread, where it's answered.
@@ -416,6 +420,9 @@ nonisolated enum ItemBody: Hashable {
     case error(String)
     case limit(text: String, resetsAt: Int64?)
     case handoff(from: String, to: String)
+    /// A row that opens another thread: one this thread's agent started or handed over to, or
+    /// the one that started it or that it continues.
+    case threadLink(ThreadLink)
     /// The files a turn changed, after its `turnEnd`.
     case changes(TurnChanges)
     case unknown(String)
@@ -490,6 +497,10 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
         var from: String? = nil
         var to: String? = nil
         var files: [ChangedFile]? = nil
+        var link: ThreadLinkKind? = nil
+        var threadId: String? = nil
+        var agent: AgentRef? = nil
+        var open: Bool? = nil
     }
 
     init(from decoder: Decoder) throws {
@@ -521,6 +532,10 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
         case "error": body = .error(text)
         case "limit": body = .limit(text: text, resetsAt: r.resetsAt)
         case "handoff": body = .handoff(from: r.from ?? "", to: r.to ?? "")
+        case "thread_link":
+            body = .threadLink(ThreadLink(link: r.link ?? .startedBy, threadId: r.threadId ?? "", title: r.title ?? "",
+                                          agent: r.agent, state: r.state.flatMap(LinkedThreadState.init(rawValue:)),
+                                          open: r.open ?? true))
         case "changes":
             let files = r.files ?? []
             body = .changes(TurnChanges(files: files, added: r.added ?? files.reduce(0) { $0 + $1.added },
@@ -548,6 +563,9 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
         case .error(let s): r.kind = "error"; r.text = s
         case .limit(let s, let at): r.kind = "limit"; r.text = s; r.resetsAt = at
         case .handoff(let a, let b): r.kind = "handoff"; r.from = a; r.to = b
+        case .threadLink(let l):
+            r.kind = "thread_link"; r.link = l.link; r.threadId = l.threadId; r.title = l.title; r.agent = l.agent
+            r.state = l.state?.rawValue; r.open = l.open
         case .changes(let c): r.kind = "changes"; r.files = c.files; r.added = c.added; r.removed = c.removed
         case .unknown(let kind): r.kind = kind
         }
@@ -585,9 +603,10 @@ nonisolated enum ErrorCode: String, LenientEnum {
 }
 
 nonisolated enum ServerMessage {
-    /// `features`: the optional requests the Mac serves (`MacFeature`).
-    case paired(re: String?, token: String, host: HostInfo, features: [String] = [])
-    case welcome(re: String?, host: HostInfo, features: [String] = [])
+    /// `features`: the optional requests the Mac serves (`MacFeature`). `routes`: every
+    /// `host:port` it answers on (Wi-Fi, tailnet), to try in turn; none from older Macs.
+    case paired(re: String?, token: String, host: HostInfo, features: [String] = [], routes: [String] = [])
+    case welcome(re: String?, host: HostInfo, features: [String] = [], routes: [String] = [])
     case snapshot(Snapshot)
     case thread(ThreadSummary)
     case threadRemoved(String)
@@ -617,6 +636,8 @@ nonisolated enum ServerMessage {
     case attachment(re: String?, Attachment)
     case backgroundOutput(re: String?, BackgroundOutput)
     case icon(re: String?, IconReply)
+    case noteAsset(re: String?, NoteAsset)
+    case noteImage(re: String?, NoteImage)
     case unknown(String)
 
     private struct Raw: Decodable {
@@ -630,6 +651,7 @@ nonisolated enum ServerMessage {
         var agents: Lossy<AgentOption>?
         var unlisted: Lossy<ThreadSummary>?
         var features: [String]?
+        var routes: [String]?
         var thread: ThreadSummary?
         var threadId: String?
         var reset: Bool?
@@ -658,10 +680,10 @@ nonisolated enum ServerMessage {
         switch r.type {
         case "paired":
             guard let token = r.token, let host = r.host else { throw ProtocolError.missing("paired") }
-            return .paired(re: r.re, token: token, host: host, features: r.features ?? [])
+            return .paired(re: r.re, token: token, host: host, features: r.features ?? [], routes: r.routes ?? [])
         case "welcome":
             guard let host = r.host else { throw ProtocolError.missing("welcome") }
-            return .welcome(re: r.re, host: host, features: r.features ?? [])
+            return .welcome(re: r.re, host: host, features: r.features ?? [], routes: r.routes ?? [])
         case "snapshot":
             return .snapshot(Snapshot(threads: r.threads?.elements ?? [], projects: r.projects?.elements ?? [],
                                       agents: r.agents?.elements ?? [], fullAccess: r.fullAccess,
@@ -701,6 +723,8 @@ nonisolated enum ServerMessage {
         case "attachment": return .attachment(re: r.re, try decoder.decode(Attachment.self, from: data))
         case "background_output": return .backgroundOutput(re: r.re, try decoder.decode(BackgroundOutput.self, from: data))
         case "icon": return .icon(re: r.re, try decoder.decode(IconReply.self, from: data))
+        case "note_asset": return .noteAsset(re: r.re, try decoder.decode(NoteAsset.self, from: data))
+        case "note_image": return .noteImage(re: r.re, try decoder.decode(NoteImage.self, from: data))
         default: return .unknown(r.type)
         }
     }
@@ -791,6 +815,10 @@ nonisolated enum ClientMessage {
     case backgroundOutput(threadId: String, taskId: String)
     case stopBackground(threadId: String, taskId: String)
     case icon(agent: String?, projectId: String?)
+    /// One of a note's pictures (`attachments/…`), fitting `maxPx` a side.
+    case noteAsset(noteId: String, path: String, maxPx: Int?)
+    /// Keep a photo (a base64 JPEG) with the notes; the Mac answers with its link.
+    case addNoteImage(noteId: String, data: String, name: String?)
 
     static let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
 
@@ -884,7 +912,7 @@ nonisolated enum ClientMessage {
         case .search(let query, let limit):
             o = ["type": "search", "query": query]
             if let limit { o["limit"] = limit }
-        case .useReset, .queueAction, .attachment, .backgroundOutput, .stopBackground, .icon:
+        case .useReset, .queueAction, .attachment, .backgroundOutput, .stopBackground, .icon, .noteAsset, .addNoteImage:
             o = parityJSON
         }
         if let id { o["id"] = id }
