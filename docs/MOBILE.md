@@ -73,6 +73,9 @@ pipe, not the messages. LAN/Tailscale is what power users already run.
    ```
    trek://pair?host=192.168.1.20:7420&code=K7Q2-9XMV&name=Tobias%E2%80%99s%20MacBook%20Pro&hid=7f3c…&fp=b1380087…
    ```
+   A Mac that answers at more than one address (its Wi-Fi and its tailnet) names the others in
+   `alt`, comma-separated: `…&alt=100.101.1.2:7420&fp=…`. The phone tries `host` first, then each
+   of them.
    `code` is 8 Crockford base32 characters (40 bits) shown as `XXXX-XXXX`: one use, valid 10
    minutes. After a wrong code, that address (an IPv6 one by its /64) waits 1 s before its next
    try, doubling with each wrong one up to 5 minutes (forgotten after 15 quiet minutes), so one
@@ -204,11 +207,19 @@ Mac → phone:
 `paired` authenticates the connection too (no second `hello` needed). Right after `welcome` or
 `paired` the Mac sends a `snapshot`.
 
+Both may carry `routes`, every `host:port` the Mac answers on as it is now, the pairing code's
+first: `"routes":["192.168.1.20:7420","100.101.1.2:7420"]`. The phone keeps them with the paired
+Mac and, when the one it dials doesn't answer, tries the next at once (it waits and goes round
+again only once none has): paired on the Wi-Fi, it reaches the Mac over Tailscale away from home
+without pairing again. A certificate that doesn't match the pin on one route is never trusted;
+with other routes left it's taken for another machine at that address, and "This Mac's identity
+changed" shows only when every route answers like that. Older Macs send no `routes`.
+
 Both may carry `features`, the optional requests this Mac serves; a phone offers only what's
 listed, so an older Mac (no list) simply doesn't show them. The protocol version stays 1:
 
 ```json
-{"type":"welcome","re":"1","protocol":1,"host":{…},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon"]}
+{"type":"welcome","re":"1","protocol":1,"host":{…},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images"]}
 ```
 
 | Feature | What it adds |
@@ -224,8 +235,11 @@ listed, so an older Mac (no list) simply doesn't show them. The protocol version
 | `attachment` | `attachment`: a message's images |
 | `background` | `background_output` and `stop_background` (rows carry `background_tasks`) |
 | `icon` | `icon`: an added agent's or a project's icon |
+| `basecamp_v2` | `basecamp` carries `totals`, `chart`, `projects`, `models` and `review[].needs_you` |
+| `note_images` | `note_asset` and `add_note_image`: a note's pictures, and adding one |
 
-The last five are described under "Keeping up with the Mac" below.
+`use_reset` to `icon` are described under "Keeping up with the Mac" below, `basecamp_v2` under
+Basecamp, `note_images` under Notes.
 
 Names are added as features are (`trek_remote::feature`, `MacFeature` on the phone); a phone
 ignores names it doesn't know. Failures: `error` with code `unauthorized` (bad or revoked
@@ -294,6 +308,9 @@ Thread details, each optional and left out when there's nothing to say (older Ma
 - `base`: for a worktree thread, the branch it merges into (`branch` is the worktree's own).
 - `git`: the folder's state as the Mac last read it (it reads it again on `git_status`).
 - `snoozed_until`: when a snoozed thread wakes (ms).
+- `started_by` / `continued_from`: for a thread another thread's agent started (`start_thread`),
+  or that took another's work over (`handoff`), that thread's id. The phone shows "Started by …"
+  over the transcript while the `thread_link` that says so isn't loaded.
 - Sub-agents (`sub_agents` feature): a Trek sub-agent's entry carries its `thread_id`, which opens
   like any thread (`subscribe`, `answer`, `send`, `interrupt`: stopping it is what its Stop on the
   Mac does, and its parent hears it was stopped). Sub-agents' threads aren't in `threads` (on the
@@ -384,6 +401,7 @@ higher seq), `at` (ms or null) and `kind`:
 {"id":"b3","seq":12,"at":null,"kind":"error","text":"Interrupted"}
 {"id":"b4","seq":13,"at":null,"kind":"limit","text":"5-hour limit reached","resets_at":1791030000000}
 {"id":"b5","seq":14,"at":null,"kind":"handoff","from":"Claude Opus 5.5","to":"Codex GPT-6"}
+{"id":"b6","seq":15,"at":null,"kind":"thread_link","link":"started","thread_id":"01K…","title":"Fix the cache","agent":{"key":"codex","name":"Codex","logo":"codex"},"state":"working","open":true}
 {"id":"c10","seq":15,"at":1791020400000,"kind":"changes","files":[
    {"path":"README.md","status":"modified","added":31,"removed":54},
    {"path":"docs/quick-start.md","status":"renamed","from":"docs/getting-started.md","added":4,"removed":2},
@@ -402,6 +420,15 @@ higher seq), `at` (ms or null) and `kind`:
   moved on by itself). `question.state`: `pending` · `answered` · `resolved`, with `answers` once
   answered. `plan.state`: `pending` · `approved` · `rejected` · `resolved`.
 - `user.images`: the number of attached images (phase 2 sends thumbnails).
+- `thread_link`: a row that opens another thread, as the Mac's lineage rows (`trek_core::lineage`).
+  `link`: `started` (this thread's agent started it, `start_thread`) · `continued_in` (this
+  thread's work went on there, `handoff`) · `started_by` · `continued_from` (where this thread
+  came from; first in its transcript). `title` and `agent` are the thread's now (its title when
+  it was made, once it's gone); `state` (`working` · `needs_approval` · `paused` · `finished` ·
+  `failed`) only for `started` and `continued_in`, as it was when the item was sent: the phone
+  reads the thread's own row when it has it, which is live. `open: false`: it was archived or
+  deleted. Macs before this sent these as a `handoff` or `notice` with the title quoted; older
+  phones leave `thread_link` out, as any kind they don't know (that text couldn't open anything).
 
 ### Actions (phone → Mac)
 
@@ -521,6 +548,31 @@ shows over a hovered stretch. Tile kinds: `best_model` · `worked_most_on` · `t
 `sparkline`, tokens so far 0–1 a stretch) · `agent_time` (failed turns in its note) · `plan_left`
 (one per agent reporting limits, `percent` left).
 
+With `basecamp_v2`, the reply also carries Basecamp as the Mac draws it now, from the same
+`Summary` its screen computes (`basecamp::summary`): the totals row, the chart of turns, and the
+tables by project and by model, most tokens first (none of them when `empty`). Review rows say
+which are listed under **Needs you** (`needs_you`: a request, a failure, a sub-agent waiting); the
+rest are **Needs review**, their `label` saying what holds a paused one ("Paused until 3 PM"). The
+older fields stay for phones from before it; a phone that knows `basecamp_v2` draws the new ones
+(the Mac's own Basecamp no longer shows the narrative, profile or tiles).
+
+```json
+{"type":"basecamp","re":"2","range":"today",…,
+ "review":[{"thread_id":"t",…,"status":"needs_you","label":"Approval","needs_you":true},{"thread_id":"u",…,"status":"paused","label":"Paused until 3 PM"}],
+ "totals":{"threads":4,"turns":20,"tokens":182000,"tokens_label":"182K","cost":"$1.28","failed":1,"agent_secs":3720,"agent_time":"1h 2m"},
+ "chart":{"step":"hour","bars":[{"label":"2 PM–3 PM","turns":4,"tokens":12000,"line":"2 PM–3 PM · 4 turns · 12K tokens"},…],
+          "ticks":[{"bar":0,"label":"12 AM"},{"bar":6,"label":"6 AM"},{"bar":12,"label":"Noon"},{"bar":18,"label":"6 PM"}],"turns":20,"total":"20 turns"},
+ "projects":[{"label":"trek-api","project":{…},"threads":3,"turns":16,"tokens":150000,"tokens_label":"150K","cost":"$1.02","failed":1},
+             {"label":"No project","threads":1,"turns":4,"tokens":32000,"tokens_label":"32K","cost":"—","failed":0}],
+ "models":[{"label":"Claude Opus 5.5","agent":{…},"threads":4,"turns":20,"tokens":182000,"tokens_label":"182K","cost":"$1.28","failed":1}]}
+```
+
+`cost` is what the range cost at API prices, "—" when none of it has a price; `agent_time` "<1m",
+"42m", "1h 2m". `chart.step` is what a bar covers (`hour` today, `day` this week, `day`, `week` or
+`4 weeks` for all time: "Turns per hour"); `line` is what the Mac shows over a hovered bar, `ticks` the axis
+labels under their bars, `total` the turns top right. A model row's threads count a thread under
+each model it used, so they may add up to more than `totals.threads`.
+
 **Notes**, the Mac's markdown files (`notes/` in Trek's data folder; deleting moves one to
 `notes/Deleted/`). The Mac's Notes screen reads them again when a phone changes one.
 
@@ -531,6 +583,24 @@ shows over a hovered stretch. Tile kinds: `best_model` · `worked_most_on` · `t
 {"type":"save_note","id":"6","note_id":"0192…","body":"…","modified":1791020400000} → note (conflict: it changed on the Mac since)
 {"type":"delete_note","id":"7","note_id":"0192…"} → ack
 ```
+
+A note's pictures are files in `notes/attachments/`, linked as `![alt](attachments/<name>)`
+(`trek_core::notes::add_image`). With `note_images`, `note_asset` sends one as a JPEG fitting
+`max_px` (2048 at most), as `attachment` does a message's; only `attachments/<name>` (or
+`./attachments/<name>`) is served: an absolute path, `..`, a subfolder or a symlink out of the
+folder is `bad_request`. `add_note_image` keeps a photo (JPEG or PNG, base64, 10 MB at most) there
+and answers with its link and the line to put in the note; the note itself is the phone's to save.
+
+```json
+{"type":"note_asset","id":"8","note_id":"0192…","path":"attachments/3f2a….png","max_px":1024}
+  → {"type":"note_asset","re":"8","note_id":"0192…","path":"attachments/3f2a….png","mime":"image/jpeg","data":"/9j/…","width":1024,"height":640}
+{"type":"add_note_image","id":"9","note_id":"0192…","data":"/9j/…","name":"Whiteboard"}
+  → {"type":"note_image","re":"9","note_id":"0192…","path":"attachments/8c1e….jpg","markdown":"![Whiteboard](attachments/8c1e….jpg)"}
+```
+
+The phone draws a line that's only pictures as the pictures (a tap shows them full screen,
+stepping through the note's others), fetches `https:` ones itself, and names a file elsewhere on
+the Mac in a placeholder; Write's format bar has a photo button that puts the line at the cursor.
 
 **Git** for a thread's folder (its worktree, for one in a worktree) or a project, as the Mac's Git
 panel does it; git runs off the Mac's main thread.
@@ -799,7 +869,10 @@ instead and queue).
 
 - **Settings › Phone** turns the server on (off by default; `[mobile]` in settings.toml: `enabled`,
   `port` 7420, `reach` wifi or tailscale). It advertises the Wi-Fi or Tailscale address in the
-  pairing code and binds only that address, with TLS from `mobile/identity.{der,key}` in Trek's
+  pairing code and binds that address; on Wi-Fi it listens on the tailnet address too when
+  Tailscale is up (the user's own network) and names both in `alt` and `routes`, while
+  "Tailscale" is the tailnet alone. It asks `tailscale status --json` whether an iPhone is in the
+  tailnet, and says so when none is (or none is online). TLS comes from `mobile/identity.{der,key}` in Trek's
   data folder (the key 0600), and keeps paired devices in `mobile/devices.json`. The Tailscale
   address is the one `tailscale ip -4` names, else a 100.64/10 address on a `utun` tunnel (that
   range alone is also carrier-grade NAT). The page
@@ -840,7 +913,8 @@ instead and queue).
   the folder's git state. Times come from `Instant`s through a fixed anchor, so an unchanged row
   isn't sent again every tick.
 - **Usage** (`remote/usage.rs`), **Basecamp** (`remote/basecamp.rs`, sharing `basecamp.rs`'s
-  wording: `greeting_line`, `tile_data`, `profile_line`…), **notes** (`remote/notes.rs`, bumping
+  `Summary` and wording: `summary`, `cost`, `Bar::line`, and for older phones `greeting_line`,
+  `tile_data`, `profile_line`…), **notes** (`remote/notes.rs`, bumping
   `Workspace::notes_epoch` so the Notes screen reloads), **git** (`remote/git.rs`, the Git panel's
   `snapshot`/`git` and `trek_core::worktree`'s review, merge and removal, the confirmations'
   wording from `worktree_ui::losses`), **settings** (`remote/settings.rs`).

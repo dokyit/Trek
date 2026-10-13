@@ -218,13 +218,25 @@ impl Pairing {
 /// The QR code's URL: `trek://pair?host=<host:port>&code=<code>&name=<host name>&hid=<host id>`,
 /// and `&fp=<SHA-256 of the server's certificate>` when it speaks TLS (the phone pins it).
 pub fn pairing_url(advertise: &str, code: &str, host_name: &str, host_id: &str, fingerprint: Option<&str>) -> String {
+    pairing_url_with_routes(&[advertise.to_string()], code, host_name, host_id, fingerprint)
+}
+
+/// [`pairing_url`] for a Mac that answers at more than one address: the first is `host`, the
+/// others follow in `alt`, comma-separated, for a phone that can't reach the first (one off the
+/// Wi-Fi, on the tailnet; one on the Wi-Fi without Tailscale).
+pub fn pairing_url_with_routes(routes: &[String], code: &str, host_name: &str, host_id: &str, fingerprint: Option<&str>) -> String {
+    let first = routes.first().map(String::as_str).unwrap_or_default();
     let mut url = format!(
         "trek://pair?host={}&code={}&name={}&hid={}",
-        percent_encode(advertise, b":[]"),
+        percent_encode(first, b":[]"),
         percent_encode(code, b""),
         percent_encode(host_name, b""),
         percent_encode(host_id, b""),
     );
+    if routes.len() > 1 {
+        let alt: Vec<String> = routes[1..].iter().map(|r| percent_encode(r, b":[]")).collect();
+        url.push_str(&format!("&alt={}", alt.join(",")));
+    }
     if let Some(fp) = fingerprint {
         url.push_str(&format!("&fp={}", percent_encode(fp, b"")));
     }
@@ -614,6 +626,14 @@ mod tests {
         let r = DeviceRegistry::load(&path).unwrap();
         assert!(r.list().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn more_routes_go_in_alt() {
+        let routes = ["192.168.1.20:7420".to_string(), "100.101.1.2:7420".to_string(), "[fd7a::1]:7420".to_string()];
+        let url = pairing_url_with_routes(&routes, "K7Q2-9XMV", "Mac", "7f3c", Some("ab12"));
+        assert_eq!(url, "trek://pair?host=192.168.1.20:7420&code=K7Q2-9XMV&name=Mac&hid=7f3c&alt=100.101.1.2:7420,[fd7a%3A%3A1]:7420&fp=ab12".replace("%3A%3A", "::"));
+        assert_eq!(pairing_url_with_routes(&routes[..1], "K7Q2-9XMV", "Mac", "7f3c", None), pairing_url("192.168.1.20:7420", "K7Q2-9XMV", "Mac", "7f3c", None));
     }
 
     #[test]

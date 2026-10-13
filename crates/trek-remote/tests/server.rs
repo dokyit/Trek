@@ -179,6 +179,10 @@ impl RemoteHost for FakeHost {
             summary: None,
             profile: None,
             tiles: vec![],
+            totals: None,
+            chart: None,
+            projects: vec![],
+            models: vec![],
         })
     }
 
@@ -452,6 +456,41 @@ async fn browsers_are_refused() {
         Err(tungstenite::Error::Http(resp)) => assert_eq!(resp.status(), 403),
         other => panic!("expected a 403, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn a_second_address_and_the_routes_phones_keep() {
+    let routes = vec!["192.168.1.2:7420".to_string(), "100.101.1.2:7420".to_string()];
+    let (handle, _) = start_with(|c| {
+        c.also_bind = vec!["127.0.0.1:0".parse().unwrap()];
+        c.advertise = Some(routes[0].clone());
+        c.routes = routes.clone();
+    })
+    .await;
+    let listening = handle.listening();
+    assert_eq!(listening.len(), 2);
+    assert_ne!(listening[0], listening[1]);
+    // The pairing code names the first; the rest follow.
+    let offer = handle.pairing_offer();
+    assert!(offer.url.contains("host=192.168.1.2:7420&") && offer.url.contains("&alt=100.101.1.2:7420"), "{}", offer.url);
+
+    // Paired on the second address, the phone hears every route; and again with each hello.
+    let (mut c, _) = tokio_tungstenite::connect_async(format!("ws://{}", listening[1])).await.unwrap();
+    send(&mut c, json!({"type": "pair", "id": "1", "protocol": 1, "code": offer.code, "device_id": "dev-1", "device_name": "Phone"})).await;
+    let paired = recv(&mut c).await;
+    assert_eq!(paired["type"], "paired");
+    assert_eq!(paired["routes"], json!(routes));
+    let token = paired["token"].as_str().unwrap().to_string();
+    drop(c);
+    let mut c = connect(&handle).await;
+    send(&mut c, json!({"type": "hello", "id": "2", "protocol": 1, "device_id": "dev-1", "token": token})).await;
+    let welcome = recv(&mut c).await;
+    assert_eq!((welcome["type"].as_str(), &welcome["routes"]), (Some("welcome"), &json!(routes)));
+
+    // A Mac that names no routes sends none, as before.
+    let (plain, _) = start().await;
+    let offer = plain.pairing_offer();
+    assert!(!offer.url.contains("alt="));
 }
 
 #[tokio::test]
@@ -1303,6 +1342,8 @@ async fn welcome_lists_the_features_and_a_host_without_them_says_so() {
         json!({"type": "queue_action", "thread_id": "t", "index": 0, "text": "x", "action": {"kind": "remove"}}),
         json!({"type": "background_output", "thread_id": "t", "task_id": "b"}),
         json!({"type": "stop_background", "thread_id": "t", "task_id": "b"}),
+        json!({"type": "note_asset", "note_id": "n", "path": "attachments/a.png", "max_px": 960}),
+        json!({"type": "add_note_image", "note_id": "n", "data": "/9j/", "name": "Whiteboard"}),
     ]
     .into_iter()
     .enumerate()

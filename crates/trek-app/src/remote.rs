@@ -19,7 +19,7 @@
 //! their end (`subscribe` with a `limit`) and are paged in (`transcript_before`); items no phone
 //! has been sent aren't followed either.
 
-use crate::workspace::{ForkAt, LiveThread, Route, Workspace, WorkspaceEvent};
+use crate::workspace::{ForkAt, LineageRow, LiveThread, Route, ThreadState, Workspace, WorkspaceEvent};
 use gpui_kit::{AsyncApp, Context, Task, WeakEntity};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash as _, Hasher as _};
@@ -65,6 +65,8 @@ pub struct Remote {
     pub addresses: Addresses,
     /// Where the pairing code points phones (`host:port`).
     pub advertise: String,
+    /// Every address phones may dial, `advertise` first (it listens on each).
+    pub routes: Vec<String>,
     /// The port and reach it started with: a change restarts it.
     started_with: (u16, trek_core::settings::Reach),
     /// Paired devices and which are connected, refreshed from the server's notices.
@@ -173,6 +175,35 @@ impl Watched {
 pub struct Addresses {
     pub lan: Option<Ipv4Addr>,
     pub tailscale: Option<Ipv4Addr>,
+    /// What Tailscale says of the tailnet, when it's up: whether a phone could reach this Mac
+    /// over it at all.
+    pub tailnet: Option<Tailnet>,
+}
+
+/// The tailnet as Tailscale reports it (`tailscale status --json`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Tailnet {
+    /// The account this Mac is signed in with ("dokyit@").
+    pub account: Option<String>,
+    /// iPhones and iPads in it, and how many of them are online now.
+    pub phones: usize,
+    pub phones_online: usize,
+}
+
+impl Tailnet {
+    /// Read from `tailscale status --json`.
+    pub(crate) fn parse(json: &str) -> Option<Self> {
+        let v: serde_json::Value = serde_json::from_str(json).ok()?;
+        let user = v.get("Self")?.get("UserID")?.as_i64()?;
+        let account = v.get("User").and_then(|u| u.get(user.to_string())).and_then(|u| u.get("LoginName")).and_then(|n| n.as_str()).map(str::to_string);
+        let phones: Vec<&serde_json::Value> = v
+            .get("Peer")
+            .and_then(|p| p.as_object())
+            .map(|peers| peers.values().filter(|p| p.get("OS").and_then(|o| o.as_str()) == Some("iOS")).collect())
+            .unwrap_or_default();
+        let phones_online = phones.iter().filter(|p| p.get("Online").and_then(|o| o.as_bool()) == Some(true)).count();
+        Some(Self { account, phones: phones.len(), phones_online })
+    }
 }
 
 impl Addresses {
@@ -180,6 +211,9 @@ impl Addresses {
     pub fn find() -> Self {
         let interfaces = interface_addresses();
         let mut out = Self::from_interfaces(&interfaces, tailscale_ip());
+        if out.tailscale.is_some() {
+            out.tailnet = tailscale(&["status", "--json"]).as_deref().and_then(Tailnet::parse);
+        }
         // The address the default route leaves from, when the interface list didn't say.
         if out.lan.is_none() {
             out.lan = std::net::UdpSocket::bind("0.0.0.0:0")
@@ -208,13 +242,18 @@ impl Addresses {
             .filter(|ip| interfaces.iter().any(|(_, a)| a == ip))
             .or_else(|| interfaces.iter().find(|(name, ip)| tunnel(name) && shared(ip)).map(|(_, ip)| *ip));
         let lan = interfaces.iter().find(|(name, ip)| !tunnel(name) && ip.is_private()).map(|(_, ip)| *ip);
-        Self { lan, tailscale }
+        Self { lan, tailscale, tailnet: None }
     }
 }
 
 /// This Mac's tailnet address as Tailscale gives it (`tailscale ip -4`), when it's running.
 /// Waits two seconds at most.
 fn tailscale_ip() -> Option<Ipv4Addr> {
+    first_ipv4(&tailscale(&["ip", "-4"])?)
+}
+
+/// What Tailscale's CLI prints for `args`, when it's installed and answers within two seconds.
+fn tailscale(args: &[&str]) -> Option<String> {
     use std::io::Read as _;
     use std::process::Stdio;
     #[cfg(windows)]
@@ -226,8 +265,15 @@ fn tailscale_ip() -> Option<Ipv4Addr> {
     let installed = app.is_file().then_some(app);
     let cli = if cfg!(windows) { installed.or_else(|| trek_core::detect::which(name)) } else { trek_core::detect::which(name).or(installed) }?;
     let mut command = trek_core::procs::command(cli);
-    command.args(["ip", "-4"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    command.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     let mut child = command.spawn().ok()?;
+    // Read as it comes: a whole tailnet's status is more than a pipe holds, and the CLI would
+    // wait on us to read it while we waited on it to finish.
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        stdout.read_to_string(&mut out).ok().map(|_| out)
+    });
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         match child.try_wait() {
@@ -241,9 +287,7 @@ fn tailscale_ip() -> Option<Ipv4Addr> {
             }
         }
     }
-    let mut out = String::new();
-    child.stdout.take()?.read_to_string(&mut out).ok()?;
-    first_ipv4(&out)
+    reader.join().ok().flatten()
 }
 
 /// The first IPv4 address on a line of `tailscale ip -4`'s output (one per line, CRLF on Windows).
@@ -259,6 +303,23 @@ pub(crate) fn remote_endpoint(addresses: &Addresses, reach: trek_core::settings:
         trek_core::settings::Reach::Wifi => addresses.lan.or(addresses.tailscale).unwrap_or(Ipv4Addr::LOCALHOST),
     };
     Ok((SocketAddr::from((ip, port)), format!("{ip}:{port}")))
+}
+
+/// Where else phones reach the server, besides `remote_endpoint`'s: on Wi-Fi, the tailnet too
+/// when Tailscale is up, so a phone paired at home still finds this Mac away from it (the
+/// tailnet is the user's own network). "Tailscale" is the tailnet alone: whoever chose it may
+/// not want Trek answering on the Wi-Fi it's on.
+pub(crate) fn other_endpoint(addresses: &Addresses, reach: trek_core::settings::Reach, port: u16) -> Option<SocketAddr> {
+    match reach {
+        trek_core::settings::Reach::Wifi => addresses.lan.and(addresses.tailscale).map(|ip| SocketAddr::from((ip, port))),
+        trek_core::settings::Reach::Tailscale => None,
+    }
+}
+
+/// Every `host:port` phones may dial, the pairing code's first.
+pub(crate) fn remote_routes(addresses: &Addresses, reach: trek_core::settings::Reach, port: u16) -> std::io::Result<Vec<String>> {
+    let (_, first) = remote_endpoint(addresses, reach, port)?;
+    Ok(std::iter::once(first).chain(other_endpoint(addresses, reach, port).map(|a| a.to_string())).collect())
 }
 
 /// The IPv4 addresses of the interfaces that are up (not loopback), with the interfaces' names.
@@ -391,6 +452,9 @@ impl Workspace {
                     let mut config = tr::ServerConfig::new(host);
                     config.bind = bind;
                     config.advertise = Some(advertise.clone());
+                    config.also_bind = other_endpoint(&addresses, reach, port).into_iter().collect();
+                    config.routes = remote_routes(&addresses, reach, port)?;
+                    let routes = config.routes.clone();
                     config.devices_path = Some(mobile_dir().join("devices.json"));
                     config.tls = Some(identity);
                     config.features = tr::feature::ALL.iter().map(|f| f.to_string()).collect();
@@ -413,26 +477,26 @@ impl Workspace {
                         })
                         .await
                         .map_err(std::io::Error::other)??;
-                    anyhow::Ok((handle, requests, addresses, advertise, announce))
+                    anyhow::Ok((handle, requests, addresses, advertise, routes, announce))
                 })
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 ws.remote_starting = false;
                 match started {
-                    Ok((handle, requests, addresses, advertise, (name, id))) if ws.settings.mobile.enabled => {
+                    Ok((handle, requests, addresses, advertise, routes, (name, id))) if ws.settings.mobile.enabled => {
                         ws.remote_error = None;
                         // Only where phones on this network can reach it: not this Mac alone,
-                        // and not the tailnet (a phone there dials the address it paired with).
+                        // and not the tailnet (a phone there dials the addresses it was given).
                         let on_lan = reach == trek_core::settings::Reach::Wifi && addresses.lan.is_some();
                         let advert = on_lan.then(|| bonjour::Advert::new(&name, &id, port)).flatten();
                         let tasks = vec![
                             serve_requests(cx.weak_entity(), requests, cx),
                             push_changes(cx.weak_entity(), cx),
                             hear_notices(cx.weak_entity(), handle.notices(), cx),
-                            follow_addresses(cx.weak_entity(), advertise.clone(), (port, reach), cx),
+                            follow_addresses(cx.weak_entity(), routes.clone(), (port, reach), cx),
                         ];
                         let devices = handle.devices();
-                        ws.remote = Some(Remote { handle, offer: None, addresses, advertise, started_with: (port, reach), devices, connected: HashSet::new(), sent: HashMap::new(), unlisted: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _advert: advert, _tasks: tasks });
+                        ws.remote = Some(Remote { handle, offer: None, addresses, advertise, routes, started_with: (port, reach), devices, connected: HashSet::new(), sent: HashMap::new(), unlisted: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _advert: advert, _tasks: tasks });
                     }
                     // Turned off while it started.
                     Ok((handle, ..)) => handle.shutdown(),
@@ -471,7 +535,7 @@ impl Workspace {
         let handle = trek_core::runtime().block_on(tr::RemoteServer::start(config, Arc::new(host))).expect("a test server");
         let connected = HashSet::from(["phone".to_string()]);
         let started_with = (0, trek_core::settings::Reach::Wifi);
-        self.remote = Some(Remote { handle, offer: None, addresses: Addresses::default(), advertise: String::new(), started_with, devices: vec![], connected, sent: HashMap::new(), unlisted: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _advert: None, _tasks: vec![] });
+        self.remote = Some(Remote { handle, offer: None, addresses: Addresses::default(), advertise: String::new(), routes: vec![], started_with, devices: vec![], connected, sent: HashMap::new(), unlisted: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _advert: None, _tasks: vec![] });
     }
 
     fn stop_remote(&mut self, cx: &mut Context<Self>) {
@@ -606,6 +670,10 @@ impl Workspace {
                 let _ = reply.send(self.remote_stop_background(&thread_id, &task_id, cx));
             }
             tr::HostRequest::Icon { req, reply } => self.remote_icon(req, reply, cx),
+            tr::HostRequest::NoteAsset { req, reply } => notes::asset(req, reply, cx),
+            tr::HostRequest::AddNoteImage { req, reply } => {
+                let _ = reply.send(notes::add_image(req));
+            }
         }
     }
 
@@ -1020,6 +1088,8 @@ impl Workspace {
             base: t.worktree.as_ref().map(|w| w.base.clone()),
             git,
             parent_id: t.parent_id.clone(),
+            started_by: t.started_by.clone(),
+            continued_from: t.continued_from.clone(),
             snoozed_until: t.snoozed_until.filter(|at| *at > now),
             needs_thread: None,
             queued: self.remote_queued(t),
@@ -1176,7 +1246,7 @@ impl Workspace {
                     continue;
                 }
             }
-            let body = item_body(live, cwd.as_deref(), ix);
+            let body = item_body(self, live, cwd.as_deref(), ix);
             let h = hash(&body);
             if w.items[ix].hash == Some(h) {
                 continue;
@@ -1260,7 +1330,7 @@ impl Workspace {
         let Some(live) = self.live.get(id) else { return out };
         let old = w.from.min(live.items.len()).min(w.items.len());
         for ix in start..old {
-            let body = item_body(live, cwd.as_deref(), ix);
+            let body = item_body(self, live, cwd.as_deref(), ix);
             w.items[ix].hash = Some(hash(&body));
             out.items.insert(ix, body);
         }
@@ -1312,7 +1382,7 @@ impl Workspace {
             for ix in first..len.min(live.items.len()) {
                 let at = item_time(&live.items[ix]);
                 if newer(w.items[ix].seq) {
-                    let body = converted.items.remove(&ix).unwrap_or_else(|| item_body(live, cwd.as_deref(), ix));
+                    let body = converted.items.remove(&ix).unwrap_or_else(|| item_body(self, live, cwd.as_deref(), ix));
                     items.push(tr::Item { id: format!("i{ix}"), seq: w.items[ix].seq, at, body });
                 }
                 if let Some(c) = w.changes.get(&ix).filter(|c| newer(c.seq))
@@ -1364,7 +1434,7 @@ impl Workspace {
             let seq = |ix: usize| w.as_ref().and_then(|w| w.items.get(ix)).map_or(0, |s| s.seq);
             for ix in start..end.min(live.items.len()) {
                 let at = item_time(&live.items[ix]);
-                let body = converted.items.remove(&ix).unwrap_or_else(|| item_body(live, cwd.as_deref(), ix));
+                let body = converted.items.remove(&ix).unwrap_or_else(|| item_body(self, live, cwd.as_deref(), ix));
                 items.push(tr::Item { id: format!("i{ix}"), seq: seq(ix), at, body });
                 // A turn's changed files follow its end (not the files asked to come before).
                 if !matches!(live.items[ix], Item::TurnEnd { .. }) || (ix + 1 == end && before.starts_with('c')) {
@@ -1505,24 +1575,13 @@ fn clip_text_to(text: &str, limit: usize) -> String {
 }
 
 /// Item `ix` of `live` as the phone shows it (`cwd`: its thread's folder).
-fn item_body(live: &LiveThread, cwd: Option<&std::path::Path>, ix: usize) -> tr::ItemBody {
+fn item_body(ws: &Workspace, live: &LiveThread, cwd: Option<&std::path::Path>, ix: usize) -> tr::ItemBody {
     match &live.items[ix] {
         Item::User { text, images, aside, .. } => tr::ItemBody::User { text: clip_text(text), images: images.len() as u32, aside: *aside },
         Item::Assistant { text } => tr::ItemBody::Assistant { text: clip_text(text), streaming: live.streaming == Some(ix) },
         Item::Reasoning { text } => tr::ItemBody::Reasoning { text: clip_text(text) },
-        // A link to another thread (`trek_core::lineage`): the phone has no rows that open
-        // threads, so it reads as a handover ("Handed over from this thread to “Fix the cache”")
-        // or a note.
-        Item::Tool { id, detail, .. } if trek_core::lineage::of_row(id).is_some() => {
-            use trek_core::lineage::Link;
-            let quoted = format!("“{}”", clip_text_to(detail, 1 << 10));
-            match trek_core::lineage::of_row(id).map(|(link, _)| link) {
-                Some(Link::ContinuedIn) => tr::ItemBody::Handoff { from: "this thread".into(), to: quoted },
-                Some(Link::ContinuedFrom) => tr::ItemBody::Handoff { from: quoted, to: "this thread".into() },
-                Some(Link::Started) => tr::ItemBody::Notice { text: format!("Started a thread: {quoted}") },
-                _ => tr::ItemBody::Notice { text: format!("Started by the agent in {quoted}") },
-            }
-        }
+        // A link to another thread (`trek_core::lineage`): a row that opens it, as on the Mac.
+        Item::Tool { id, detail, .. } if trek_core::lineage::of_row(id).is_some() => thread_link(ws, id, detail),
         Item::Tool { id: call, title, detail, output, status } => {
             let op = crate::activity::op(title, detail, cwd);
             let lines = live.lines.get(call).copied();
@@ -1550,6 +1609,33 @@ fn item_body(live: &LiveThread, cwd: Option<&std::path::Path>, ix: usize) -> tr:
             from: from_name.clone().unwrap_or_else(|| AgentId::from_key(from).display_name()),
             to: to_name.clone().unwrap_or_else(|| AgentId::from_key(to).display_name()),
         },
+    }
+}
+
+/// The lineage row `row_id` (titled `detail` when it was made) as the phone's row for it: the
+/// other thread as it is now, while it's in Trek, and how it's doing when this thread started it
+/// or handed over to it.
+fn thread_link(ws: &Workspace, row_id: &str, detail: &str) -> tr::ItemBody {
+    use trek_core::lineage::Link;
+    let Some(row) = LineageRow::read(ws, row_id, detail) else { return tr::ItemBody::Notice { text: clip_text(detail) } };
+    tr::ItemBody::ThreadLink {
+        link: match row.link {
+            Link::Started => tr::ThreadLinkKind::Started,
+            Link::ContinuedIn => tr::ThreadLinkKind::ContinuedIn,
+            Link::StartedBy => tr::ThreadLinkKind::StartedBy,
+            Link::ContinuedFrom => tr::ThreadLinkKind::ContinuedFrom,
+        },
+        thread_id: row.thread,
+        title: clip_text_to(&row.title, 1 << 10),
+        agent: row.agent.as_ref().map(agent_ref),
+        state: row.state.map(|s| match s {
+            ThreadState::Working => tr::LinkedThreadState::Working,
+            ThreadState::NeedsApproval => tr::LinkedThreadState::NeedsApproval,
+            ThreadState::Paused => tr::LinkedThreadState::Paused,
+            ThreadState::Finished => tr::LinkedThreadState::Finished,
+            ThreadState::Failed => tr::LinkedThreadState::Failed,
+        }),
+        open: row.open,
     }
 }
 
@@ -1789,7 +1875,7 @@ fn serve_requests(ws: WeakEntity<Workspace>, requests: async_channel::Receiver<t
 /// started before Wi-Fi was up (it listened on this Mac only), the network handed out another
 /// address, Tailscale came or went. The interface list is cheap to read and is what changes
 /// first; Tailscale is asked only when it does.
-fn follow_addresses(ws: WeakEntity<Workspace>, advertise: String, (port, reach): (u16, trek_core::settings::Reach), cx: &mut Context<Workspace>) -> Task<()> {
+fn follow_addresses(ws: WeakEntity<Workspace>, routes: Vec<String>, (port, reach): (u16, trek_core::settings::Reach), cx: &mut Context<Workspace>) -> Task<()> {
     cx.spawn(async move |_, cx: &mut AsyncApp| {
         let mut seen = interface_addresses();
         loop {
@@ -1799,11 +1885,11 @@ fn follow_addresses(ws: WeakEntity<Workspace>, advertise: String, (port, reach):
                 continue;
             }
             seen = now;
-            let wanted = cx.background_executor().spawn(async move { remote_endpoint(&Addresses::find(), reach, port).map(|(_, a)| a).ok() }).await;
-            if wanted.as_deref() == Some(advertise.as_str()) {
+            let wanted = cx.background_executor().spawn(async move { remote_routes(&Addresses::find(), reach, port).ok() }).await;
+            if wanted.as_ref() == Some(&routes) {
                 continue;
             }
-            tracing::info!("phone server: this Mac's address is now {wanted:?}, was {advertise}; starting again");
+            tracing::info!("phone server: this Mac's addresses are now {wanted:?}, were {routes:?}; starting again");
             let _ = ws.update(cx, |ws, cx| {
                 ws.stop_remote(cx);
                 ws.sync_remote(cx);
@@ -1874,20 +1960,5 @@ pub(crate) mod tests {
         assert!(!is_trek_command("/compact"), "the agent's own commands go through");
         assert!(!is_trek_command("fix the /permissions page"));
         assert!(!is_trek_command("plain words"));
-    }
-
-    #[test]
-    fn links_between_threads_read_as_handovers_and_notes_on_the_phone() {
-        use trek_core::lineage::{Link, row};
-        use trek_remote as tr;
-        let mut live = super::LiveThread::default();
-        for link in [Link::ContinuedIn, Link::ContinuedFrom, Link::Started, Link::StartedBy] {
-            live.items.push(row(link, "t1", "Fix the cache"));
-        }
-        let bodies: Vec<tr::ItemBody> = (0..4).map(|ix| super::item_body(&live, None, ix)).collect();
-        assert_eq!(bodies[0], tr::ItemBody::Handoff { from: "this thread".into(), to: "“Fix the cache”".into() });
-        assert_eq!(bodies[1], tr::ItemBody::Handoff { from: "“Fix the cache”".into(), to: "this thread".into() });
-        assert_eq!(bodies[2], tr::ItemBody::Notice { text: "Started a thread: “Fix the cache”".into() });
-        assert_eq!(bodies[3], tr::ItemBody::Notice { text: "Started by the agent in “Fix the cache”".into() });
     }
 }

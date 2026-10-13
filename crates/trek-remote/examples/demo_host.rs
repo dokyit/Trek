@@ -1428,7 +1428,7 @@ fn demo_basecamp(range: BasecampRange, threads: &[ThreadSummary]) -> Basecamp {
                 }.to_string())),
                 _ => (ReviewStatus::Done, None),
             };
-            ReviewRow { thread_id: t.id.clone(), title: t.title.clone(), status, label, agent: t.agent.clone(), project: Some(t.project.clone()), additions: t.additions, deletions: t.deletions, updated_at: t.updated_at, unseen: t.unseen }
+            ReviewRow { thread_id: t.id.clone(), title: t.title.clone(), status, label, agent: t.agent.clone(), project: Some(t.project.clone()), additions: t.additions, deletions: t.deletions, updated_at: t.updated_at, unseen: t.unseen, needs_you: matches!(status, ReviewStatus::NeedsYou | ReviewStatus::Failed) }
         })
         .collect();
     Basecamp {
@@ -1493,6 +1493,11 @@ fn demo_basecamp(range: BasecampRange, threads: &[ThreadSummary]) -> Basecamp {
             Tile { kind: TileKind::AgentTime, label: "Your agents worked for".into(), figure: format!("{}h {}m", agent_secs / 3600, agent_secs % 3600 / 60), note: "1 turn failed today".into(), agent: None, project: None, sparkline: vec![], percent: None, resets_at: None },
             Tile { kind: TileKind::PlanLeft, label: "Left on Claude Max".into(), figure: "36%".into(), note: "Weekly · Opus · resets in 4d".into(), agent: Some(opus), project: None, sparkline: vec![], percent: Some(36.0), resets_at: Some(now_ms() + 96 * 3_600_000) },
         ],
+        // This host doesn't list `basecamp_v2`: the phone draws the recap above.
+        totals: None,
+        chart: None,
+        projects: vec![],
+        models: vec![],
     }
 }
 
