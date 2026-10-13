@@ -110,11 +110,20 @@ enum Inline {
     static func text(_ markdown: String, size: CGFloat, weight: Font.Weight = .regular, dark: Bool,
                      projectHue: Int? = nil, autoPaths: Bool = false) -> Text {
         let attributed = parsed(markdown)
-        var out = Text(verbatim: "")
-        var empty = true
-        func append(_ t: Text) {
-            out = empty ? t : Text("\(out)\(t)")
-            empty = false
+        // Text between chips goes in as one attributed string, and the pieces are joined as a
+        // balanced tree: each `Text("\(a)\(b)")` is a level SwiftUI resolves recursively, and a
+        // long line joined one piece at a time (every word of an error, with `autoPaths`)
+        // overflowed the main thread's stack.
+        var parts: [Text] = []
+        var plain = AttributedString()
+        func flushPlain() {
+            guard !plain.characters.isEmpty else { return }
+            parts.append(Text(plain))
+            plain = AttributedString()
+        }
+        func append(_ chip: Text) {
+            flushPlain()
+            parts.append(chip)
         }
         for run in attributed.runs {
             let slice = attributed[run.range]
@@ -123,13 +132,25 @@ enum Inline {
                 append(chip(string, size: size, dark: dark, projectHue: projectHue))
             } else if autoPaths {
                 for (word, isPath) in words(string) {
-                    if isPath { append(chip(word, size: size, dark: dark, projectHue: projectHue)) } else { append(Text(verbatim: word)) }
+                    if isPath { append(chip(word, size: size, dark: dark, projectHue: projectHue)) } else { plain += AttributedString(word) }
                 }
             } else {
-                append(Text(AttributedString(slice)))
+                plain += AttributedString(slice)
             }
         }
-        return out
+        flushPlain()
+        return joined(parts[...])
+    }
+
+    /// `parts` as one `Text`, nested about log₂(n) deep rather than n.
+    static func joined(_ parts: ArraySlice<Text>) -> Text {
+        switch parts.count {
+        case 0: return Text(verbatim: "")
+        case 1: return parts[parts.startIndex]
+        default:
+            let mid = parts.startIndex + parts.count / 2
+            return Text("\(joined(parts[..<mid]))\(joined(parts[mid...]))")
+        }
     }
 
     /// `code`, or a file or folder in its type's chip.

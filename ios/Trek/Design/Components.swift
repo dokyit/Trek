@@ -33,6 +33,20 @@ struct AgentGlyph: View {
     }
 }
 
+/// The agent's mark for a menu row: its one-colour glyph, tinted like the SF Symbols beside it,
+/// or the chip for agents without one.
+struct AgentMenuIcon: View {
+    var agent: AgentRef
+
+    var body: some View {
+        if let glyph = AgentLogo.glyph(agent.logo ?? agent.key) {
+            Image(glyph)
+        } else {
+            Image(systemName: "cpu")
+        }
+    }
+}
+
 /// Two-letter project badge in the project's hue (desktop `monogram_in`): a little wider than
 /// tall, square-cornered, bold letters.
 struct ProjectBadge: View {

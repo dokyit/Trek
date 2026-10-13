@@ -2,7 +2,8 @@ import Synchronization
 import SwiftUI
 
 /// Agent Markdown, block by block: headings, paragraphs, bullet and numbered lists, quotes, fenced
-/// code and tables. Inline styling (bold, italics, links, `code` and file chips) is `RichText`.
+/// code, tables and display maths. Inline styling (bold, italics, links, `code` and file chips) is
+/// `RichText`, with maths typeset in the line by `RichMathText`.
 /// The text is parsed once (and may already be, in the background, as the transcript arrived).
 struct MarkdownText: View, Equatable {
     var text: String
@@ -27,16 +28,16 @@ struct MarkdownText: View, Equatable {
     private func view(for block: Block) -> some View {
         switch block {
         case .heading(let level, let s):
-            RichText(markdown: s, size: level <= 1 ? size * 1.3 : size * 1.12, weight: .semibold)
+            RichMathText(markdown: s, size: level <= 1 ? size * 1.3 : size * 1.12, weight: .semibold)
                 .padding(.top, 4)
         case .paragraph(let s):
-            RichText(markdown: s, size: size).lineSpacing(3)
+            RichMathText(markdown: s, size: size).lineSpacing(3)
         case .bullet(let items):
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                     HStack(alignment: .firstTextBaseline, spacing: 9) {
                         Circle().fill(Trek.muted.opacity(0.8)).frame(width: 4.5, height: 4.5).alignmentGuide(.firstTextBaseline) { $0[.bottom] + 4 }
-                        RichText(markdown: item, size: size).lineSpacing(3)
+                        RichMathText(markdown: item, size: size).lineSpacing(3)
                     }
                 }
             }
@@ -45,17 +46,19 @@ struct MarkdownText: View, Equatable {
                 ForEach(Array(items.enumerated()), id: \.offset) { i, item in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text("\(i + 1).").scaledFont(size).monospacedDigit().foregroundStyle(Trek.muted)
-                        RichText(markdown: item, size: size).lineSpacing(3)
+                        RichMathText(markdown: item, size: size).lineSpacing(3)
                     }
                 }
             }
         case .quote(let s):
             HStack(spacing: 10) {
                 RoundedRectangle(cornerRadius: 1).fill(Trek.border).frame(width: 3)
-                RichText(markdown: s, size: size).foregroundStyle(Trek.muted)
+                RichMathText(markdown: s, size: size).foregroundStyle(Trek.muted)
             }
+        case .math(let tex, let source):
+            MathBlock(tex: tex, source: source, size: size)
         case .code(let lang, let code) where Markdown.isArtifact(lang):
-            InteractiveArtifactCard(title: Markdown.artifactTitle(code), size: size)
+            LivePageCard(title: Markdown.artifactTitle(code), html: code, size: size)
         case .code(_, let code):
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code)
@@ -72,37 +75,6 @@ struct MarkdownText: View, Equatable {
         }
     }
 
-}
-
-/// An interactive artifact (a `trek-html` block): live HTML the Mac runs in the answer. The phone
-/// doesn't run it; it says what it is and where to see it.
-struct InteractiveArtifactCard: View {
-    var title: String?
-    var size: CGFloat
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Image(systemName: "cube.transparent")
-                .font(.system(size: size * 1.05, weight: .medium))
-                .foregroundStyle(Trek.ember)
-                .frame(width: 34, height: 34)
-                .background(Trek.foreground.opacity(0.05), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title ?? "Interactive artifact")
-                    .scaledFont(size * 0.95, weight: .semibold)
-                    .foregroundStyle(Trek.foreground)
-                    .lineLimit(2)
-                Text("Interactive — open on your Mac")
-                    .scaledFont(size * 0.8)
-                    .foregroundStyle(Trek.muted)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(12)
-        .background(Trek.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Trek.border, lineWidth: 0.5))
-        .accessibilityElement(children: .combine)
-    }
 }
 
 /// The Markdown parser behind `MarkdownText`, with a cache: safe off the main thread, so a
@@ -144,13 +116,15 @@ nonisolated enum Markdown {
         case table(header: [String], align: [Align], rows: [[String]])
         /// A ```trek-viz fence: drawn natively.
         case viz(VizBlock)
+        /// Display maths (`$$…$$`, `\[…\]`): its TeX, and its source as written.
+        case math(tex: String, source: String)
 
         /// The inline Markdown in it, for `RichText` (code isn't).
         var inlines: [String] {
             switch self {
             case .heading(_, let s), .paragraph(let s), .quote(let s): [s]
             case .bullet(let items), .numbered(let items): items
-            case .code, .viz: []
+            case .code, .viz, .math: []
             case .table(let header, _, let rows): header + rows.flatMap { $0 }
             }
         }
@@ -220,13 +194,28 @@ nonisolated enum Markdown {
         }
 
         func flush() {
-            if !para.isEmpty { out.append(.paragraph(para.joined(separator: " "))); para = [] }
+            if !para.isEmpty {
+                let text = para.joined(separator: " ")
+                // Display maths in a paragraph is set on its own, between the text around it.
+                if let parts = MathDetect.splitDisplay(text) {
+                    for part in parts {
+                        switch part {
+                        case .text(let t): out.append(.paragraph(t))
+                        case .formula(let tex, let source): out.append(.math(tex: tex, source: source))
+                        }
+                    }
+                } else {
+                    out.append(.paragraph(text))
+                }
+                para = []
+            }
             if !bullets.isEmpty { out.append(.bullet(bullets)); bullets = [] }
             if !numbers.isEmpty { out.append(.numbered(numbers)); numbers = [] }
             flushTable()
         }
 
-        for raw in text.components(separatedBy: "\n") {
+        // A formula over several lines is read as one line: `$$`, the formula, `$$` stays whole.
+        for raw in MathDetect.joinLines(text).components(separatedBy: "\n") {
             let line = raw.trimmingCharacters(in: .whitespaces)
             if var c = code {
                 if line.hasPrefix("```") {
@@ -349,7 +338,7 @@ struct MarkdownTable: View {
 
     private func cell(_ text: String, column c: Int, row r: Int) -> some View {
         CapWidth(cap: 260) {
-            RichText(markdown: text, size: size * 0.88, weight: r < 0 ? .semibold : .regular, style: .subheadline)
+            RichMathText(markdown: text, size: size * 0.88, weight: r < 0 ? .semibold : .regular, style: .subheadline)
                 .multilineTextAlignment(textAlignment(align[c]))
                 .lineSpacing(2)
         }

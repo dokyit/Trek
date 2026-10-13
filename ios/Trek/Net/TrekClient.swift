@@ -121,11 +121,24 @@ final class TrekClient: Backend {
     /// Called once when pairing succeeds, with the device token to keep and the transport to keep
     /// using (for TLS, pinned to the full fingerprint seen while pairing).
     var onPaired: ((String, HostInfo, Transport) -> Void)?
-    /// Called when the paired Mac was found on this network at another address (`MacFinder`),
-    /// with that address; the connection goes on there.
+    /// Called when the paired Mac answered at another address than the one dialled first (another
+    /// of its routes, or found on this network by `MacFinder`), with that address: the next launch
+    /// dials it first.
     var onMoved: ((String) -> Void)?
+    /// Called when the Mac names the addresses it answers on (`welcome`, `paired`), to keep.
+    var onRoutes: (([String]) -> Void)?
 
+    /// The address being dialled.
     private(set) var address: String
+    /// Every address the Mac answers on (its Wi-Fi and its tailnet), tried in turn: one that
+    /// doesn't answer moves the next connection on to the next.
+    private(set) var routes: [String]
+    /// Routes that failed since one last answered, and how many of those answered with a
+    /// certificate other than the pinned one.
+    private var failedRoutes = 0
+    private var mismatchedRoutes = 0
+    /// The address dialled first: the paired Mac's kept one, until it answers elsewhere.
+    private var home: String
     /// The paired Mac's lasting id, which its Bonjour record carries: with it, a Mac that stopped
     /// answering at `address` is looked for on this network.
     private let hostId: String?
@@ -147,8 +160,10 @@ final class TrekClient: Backend {
     private static let pingEvery: TimeInterval = 25
     private var generation = 0
 
-    init(address: String, auth: Auth, transport: Transport, hostId: String? = nil) {
+    init(address: String, routes: [String] = [], auth: Auth, transport: Transport, hostId: String? = nil) {
         self.address = address
+        self.routes = Self.merged(address, routes)
+        self.home = address
         self.auth = auth
         self.transport = transport
         self.hostId = hostId
@@ -284,20 +299,22 @@ final class TrekClient: Backend {
 
     private func handle(_ message: ServerMessage) {
         switch message {
-        case .paired(_, let token, let host, _):
+        case .paired(_, let token, let host, _, let routes):
             authenticated = true
             connecting = false
             attempt = 0
+            answered(routes: routes)
             auth = .hello(deviceId: Device.id, token: token)
             // Typed pairing pinned only 16 hex characters; from now on, the whole certificate.
             if case .tls = transport, let seen = pinning?.seen { transport = .tls(.full(seen)) }
             onPaired?(token, host, transport)
             onState?(.connected)
             startPings()
-        case .welcome:
+        case .welcome(_, _, _, let routes):
             authenticated = true
             connecting = false
             attempt = 0
+            answered(routes: routes)
             onState?(.connected)
             startPings()
         case .error(_, let code, let text) where !authenticated:
@@ -320,28 +337,91 @@ final class TrekClient: Backend {
         onMessage?(message)
     }
 
+    /// The Mac answered at `address`: it's the one to dial first from now on, and the routes it
+    /// names are kept.
+    private func answered(routes named: [String]) {
+        failedRoutes = 0
+        mismatchedRoutes = 0
+        if !named.isEmpty {
+            if Set(named + [address]) != Set(routes) { onRoutes?(named) }
+            routes = Self.merged(address, named)
+        }
+        if address != home {
+            home = address
+            onMoved?(address)
+        }
+    }
+
+    /// `first` and then the rest of `routes`, each once.
+    private static func merged(_ first: String, _ routes: [String]) -> [String] {
+        var out = [first]
+        for r in routes where !out.contains(r) { out.append(r) }
+        return out
+    }
+
+    /// Dial the route after this one next.
+    private func nextRoute() {
+        guard routes.count > 1, let i = routes.firstIndex(of: address) else { return }
+        address = routes[(i + 1) % routes.count]
+    }
+
+    /// What the banner says while no route answers.
+    static let unreachable = "Mac unreachable — retrying"
+    static let tailnetUnreachable = "Can't reach your Mac over Tailscale — retrying. Is Tailscale on, on this iPhone?"
+
+    /// The Mac's tailnet address, or its MagicDNS name.
+    static func isTailnet(_ address: String) -> Bool {
+        let host = address.split(separator: ":").first.map(String.init) ?? address
+        if host.lowercased().hasSuffix(".ts.net") { return true }
+        let octets = host.split(separator: ".").compactMap { UInt8($0) }
+        return octets.count == 4 && octets[0] == 100 && (64..<128).contains(octets[1])
+    }
+
     private func dropped(_ error: Error) {
         pingTimer?.invalidate()
         authenticated = false
         connecting = false
         guard !stopped else { return }
+        let several = routes.count > 1
         if case .tls(let pin) = transport, let rejected = pinning?.rejected {
-            // Not a network problem: something answered with a different certificate. Never retry
-            // into it and never fall back to plain.
-            stopped = true
-            onState?(.identityChanged(expected: pin.short, seen: rejected.isEmpty ? nil : Fingerprint.short(rejected)))
-            return
-        }
-        if case .tls = transport, Self.isTLSFailure(error) {
+            // Not a network problem: something answered with a different certificate. Never
+            // trust it and never fall back to plain. With one address that's the Mac's, it has
+            // changed (or something poses as it): stop. With more, another machine may simply
+            // have that address on this network now: try the others, and stop only if every
+            // one of them answers like this.
+            mismatchedRoutes += 1
+            if !several || mismatchedRoutes >= routes.count {
+                stopped = true
+                onState?(.identityChanged(expected: pin.short, seen: rejected.isEmpty ? nil : Fingerprint.short(rejected)))
+                return
+            }
+        } else if case .tls = transport, Self.isTLSFailure(error), !several {
             // The Mac answered, but not with TLS (an older Trek, or TREK_REMOTE_PLAIN): don't
             // hammer it, and don't downgrade by ourselves either.
             stopped = true
             onState?(.offline("Couldn't open an encrypted connection to that Mac. Use its IP address, and check that Trek on the Mac is up to date."))
             return
         }
+        failedRoutes += 1
+        if failedRoutes < routes.count {
+            // Another way to the Mac (its tailnet address off the Wi-Fi, its Wi-Fi address
+            // without Tailscale): try it now rather than wait out a retry.
+            nextRoute()
+            onState?(.connecting)
+            let planned = generation
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                guard let self, !self.stopped, self.generation == planned else { return }
+                self.connect()
+            }
+            return
+        }
+        // None of them answered: wait, then go round again.
+        failedRoutes = 0
+        mismatchedRoutes = 0
+        nextRoute()
         attempt += 1
         let delay = min(30, pow(2, Double(min(attempt, 5))) / 2)
-        onState?(.offline("Mac unreachable — retrying"))
+        onState?(.offline(routes.allSatisfy(Self.isTailnet) ? Self.tailnetUnreachable : Self.unreachable))
         // Straight away, then every few tries: the Mac may be on this network at another address.
         if attempt == 1 || attempt % 4 == 0 { look() }
         // Unless something connected meanwhile (`wake`): this retry is then one too many.
@@ -365,6 +445,8 @@ final class TrekClient: Backend {
             self.finder = nil
             guard !self.stopped, !self.authenticated, let found, found != self.address else { return }
             self.address = found
+            self.routes = Self.merged(found, self.routes)
+            self.failedRoutes = 0
             self.onMoved?(found)
             if !self.connecting {
                 self.attempt = 0
@@ -422,6 +504,8 @@ final class TrekClient: Backend {
 /// A `trek://pair?host=…&code=…&name=…&hid=…&fp=…` link from the Mac's QR code.
 struct PairingLink: Equatable, Identifiable {
     var address: String
+    /// The Mac's other addresses (`alt`): its tailnet one beside its Wi-Fi one.
+    var alternates: [String] = []
     var code: String
     var name: String?
     var hostId: String?
@@ -446,6 +530,7 @@ struct PairingLink: Equatable, Identifiable {
         let q = Dictionary((comps.queryItems ?? []).map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { a, _ in a })
         guard let host = q["host"], !host.isEmpty, let code = q["code"], !code.isEmpty else { return nil }
         address = host
+        alternates = (q["alt"] ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && $0 != host }
         self.code = code
         name = q["name"].flatMap { $0.isEmpty ? nil : $0 }
         hostId = q["hid"].flatMap { $0.isEmpty ? nil : $0 }

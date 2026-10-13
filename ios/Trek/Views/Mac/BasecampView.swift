@@ -6,9 +6,10 @@ enum BasecampRoute: Hashable {
     case usage
 }
 
-/// Basecamp, the Mac's activity dashboard: what's ready for review, the trek in sentences, the
-/// elevation profile and the stat tiles, for today, this week or all time. Worded as the Mac
-/// words it (the Mac sends the sentences), in the Mac's flat panels.
+/// Basecamp, the Mac's activity dashboard, for today, this week or all time: what needs the user
+/// and what's ready for review, then the range's totals, its turns over time and the tables by
+/// project and by model (`BasecampSections`). From a Mac before `basecamp_v2`, the older recap:
+/// the trek in sentences, the elevation profile and the stat tiles. Worded as the Mac words it.
 struct BasecampView: View {
     @Environment(AppModel.self) private var model
     @Binding var path: [BasecampRoute]
@@ -27,7 +28,10 @@ struct BasecampView: View {
                     .pickerStyle(.segmented)
                     .padding(.bottom, 2)
 
-                    if let recap {
+                    if let recap, model.serves(.basecampV2) {
+                        BasecampSections(recap: recap) { showNew = true }
+                    } else if let recap {
+                        // A Mac from before `basecamp_v2`: its recap, profile and tiles.
                         if recap.empty == true {
                             if !recap.review.isEmpty { ReviewCard(rows: recap.review) }
                             EmptyTrekCard(recap: recap) { showNew = true }
@@ -60,16 +64,19 @@ struct BasecampView: View {
             .scrollEdgeEffectStyle(.hard, for: .bottom)
             .background(RidgeBackdrop(height: 300))
             .navigationTitle("Basecamp")
-            .navigationSubtitle(recap?.greeting ?? "")
+            .navigationSubtitle(model.serves(.basecampV2) ? "" : recap?.greeting ?? "")
             .refreshable { await reload() }
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button("Plan usage", systemImage: "gauge.with.dots.needle.67percent") { path.append(.usage) }
-                    Button("Mark all read", systemImage: "checkmark.circle") {
-                        for row in recap?.review ?? [] where row.unseen == true { model.markSeen(row.threadId) }
-                        model.loadBasecamp(range)
+                    // Spelled out, and only while there's something unread: as a lone checkmark it
+                    // read as Settle.
+                    if recap?.review.contains(where: { $0.unseen == true }) == true {
+                        Button("Mark all read") {
+                            for row in recap?.review ?? [] where row.unseen == true { model.markSeen(row.threadId) }
+                            model.loadBasecamp(range)
+                        }
                     }
-                    .disabled(!(recap?.review.contains { $0.unseen == true } ?? false))
+                    UsageButton { path.append(.usage) }
                 }
             }
             .task(id: range) { model.loadBasecamp(range) }
@@ -117,9 +124,12 @@ private struct ReviewCard: View {
     }
 }
 
-/// A row of "Ready for review": status, title, then agent, diff stat and project.
-private struct ReviewRowView: View {
+/// A row of "Ready for review" (or the Mac's "Needs you" and "Needs review"): status, title, then
+/// agent, diff stat and project, and what it waits on or how long ago it finished.
+struct ReviewRowView: View {
     var row: ReviewRow
+    /// The agent's logo on the second line (the Mac's newer rows leave it out).
+    var showsAgent = true
 
     private var look: (symbol: String, color: Color) {
         switch row.status {
@@ -127,7 +137,8 @@ private struct ReviewRowView: View {
             switch row.label {
             case "Question": ("questionmark.bubble", Trek.approval)
             case "Plan to review": ("list.bullet.clipboard", Trek.approval)
-            default: ("hand.raised", Trek.approval)
+            case "Approval", "Sub-agent needs you": ("checkmark.shield", Trek.approval)
+            default: ("exclamationmark.circle", Trek.approval)
             }
         case .failed: ("xmark.circle", Trek.failed)
         case .paused: ("clock", Trek.approval)
@@ -146,18 +157,20 @@ private struct ReviewRowView: View {
                 Text(row.title)
                     .font(.ui(.body).weight(row.unseen == true ? .semibold : .regular))
                     .lineLimit(1)
-                HStack(spacing: 6) {
-                    AgentGlyph(row.agent, size: 14)
-                    if row.additions + row.deletions > 0 {
-                        DiffStat(additions: row.additions, deletions: row.deletions)
+                if showsAgent || row.project != nil || row.additions + row.deletions > 0 {
+                    HStack(spacing: 6) {
+                        if showsAgent { AgentGlyph(row.agent, size: 14) }
+                        if let p = row.project {
+                            ProjectBadge(project: p, size: 14)
+                            Text(p.name).lineLimit(1)
+                        }
+                        if row.additions + row.deletions > 0 {
+                            DiffStat(additions: row.additions, deletions: row.deletions)
+                        }
                     }
-                    if let p = row.project {
-                        ProjectBadge(project: p, size: 14)
-                        Text(p.name).lineLimit(1)
-                    }
+                    .font(.ui(.footnote))
+                    .foregroundStyle(Trek.muted)
                 }
-                .font(.ui(.footnote))
-                .foregroundStyle(Trek.muted)
             }
             Spacer(minLength: 6)
             Group {

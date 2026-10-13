@@ -34,6 +34,20 @@ nonisolated struct ProviderUsage: Codable, Hashable, Identifiable {
     /// Resets Codex granted and the user hasn't spent.
     var resets: [ResetCredit]? = nil
     var id: String { agent.key }
+
+    /// The limit closest to running out.
+    var tightest: UsageLimit? { limits.max { $0.percent < $1.percent } }
+
+    /// "79% left · 5-hour limit", for a line under the agent's name.
+    var summary: String? {
+        guard let t = tightest else { return nil }
+        return "\(Int(max(0, 100 - t.percent).rounded()))% left · \(t.label)"
+    }
+}
+
+extension Usage {
+    /// The most used of any limit shown, 0–100.
+    var peak: Double { providers.flatMap(\.limits).map(\.percent).max() ?? 0 }
 }
 
 nonisolated struct UsageLimit: Codable, Hashable, Identifiable {
@@ -81,6 +95,70 @@ nonisolated struct Basecamp: Codable, Hashable {
     var summary: RecapSummary? = nil
     var profile: ElevationProfile? = nil
     var tiles: [StatTile] = []
+    /// What the Mac's Basecamp shows now (`basecamp_v2`; none when nothing happened in the
+    /// range): the totals, turns over time, and the range by project and by model.
+    var totals: BasecampTotals? = nil
+    var chart: BasecampChart? = nil
+    var projects: [BasecampRow]? = nil
+    var models: [BasecampRow]? = nil
+}
+
+/// The range's totals: figures, and the words the Mac shows for them.
+nonisolated struct BasecampTotals: Codable, Hashable {
+    var threads: Int
+    var turns: Int
+    var tokens: Int64
+    /// "182K".
+    var tokensLabel: String
+    /// "$1.28", "—" when none of it has a price.
+    var cost: String
+    var failed: Int? = nil
+    var agentSecs: Int
+    /// "<1m", "42m", "1h 2m".
+    var agentTime: String
+}
+
+/// Turns over the range: hours for today, days for the week, days or weeks for all time.
+nonisolated struct BasecampChart: Codable, Hashable {
+    /// What a bar covers: "hour", "day", "week", "4 weeks".
+    var step: String
+    var bars: [BasecampBar]
+    var ticks: [BasecampTick] = []
+    var turns: Int
+    /// "18 turns".
+    var total: String
+}
+
+nonisolated struct BasecampBar: Codable, Hashable {
+    /// "2 PM–3 PM", "Tue, Oct 7", "Week of Oct 6".
+    var label: String
+    var turns: Int
+    var tokens: Int64? = nil
+    /// What the Mac says over it when it's hovered: "2 PM–3 PM · 4 turns · 12K tokens".
+    var line: String
+}
+
+nonisolated struct BasecampTick: Codable, Hashable {
+    /// The bar it sits under.
+    var bar: Int
+    var label: String
+}
+
+/// A row of the tables by project and by model.
+nonisolated struct BasecampRow: Codable, Hashable, Identifiable {
+    /// The project's name ("No project"), or the model's.
+    var label: String
+    var project: ProjectRef? = nil
+    var agent: AgentRef? = nil
+    var threads: Int
+    var turns: Int
+    var tokens: Int64
+    /// "182K".
+    var tokensLabel: String
+    /// "$1.28", "—".
+    var cost: String
+    var failed: Int? = nil
+    var id: String { (agent?.key ?? project?.id ?? "") + "\u{0}" + label }
 }
 
 nonisolated enum ReviewStatus: String, LenientEnum {
@@ -100,6 +178,9 @@ nonisolated struct ReviewRow: Codable, Hashable, Identifiable {
     var deletions: Int = 0
     var updatedAt: Int64
     var unseen: Bool? = nil
+    /// Listed under "Needs you" (a request, a failure, a sub-agent waiting), else under "Needs
+    /// review" (`basecamp_v2`).
+    var needsYou: Bool? = nil
     var id: String { threadId }
 }
 

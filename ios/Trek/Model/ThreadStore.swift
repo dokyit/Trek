@@ -21,6 +21,8 @@ nonisolated struct Block: Identifiable, Equatable {
         case error(String)
         case limit(String, resetsAt: Int64?)
         case handoff(from: String, to: String)
+        /// A row that opens another thread.
+        case threadLink(ThreadLink)
         /// The files a turn changed, under its end.
         case changes(TurnChanges)
     }
@@ -51,6 +53,7 @@ nonisolated struct Block: Identifiable, Equatable {
         case .error(let s): kind = .error(s)
         case .limit(let s, let at): kind = .limit(s, resetsAt: at)
         case .handoff(let a, let b): kind = .handoff(from: a, to: b)
+        case .threadLink(let l): kind = .threadLink(l)
         case .changes(let c):
             guard !c.files.isEmpty else { return nil }
             kind = .changes(c)
@@ -84,7 +87,7 @@ nonisolated struct Block: Identifiable, Equatable {
             case .group, .assistant, .resolved: worked = true; stop = nil
             case .error, .limit: stop = b.id
             case .notice: if worked { stop = b.id }
-            case .changes, .handoff: break
+            case .changes, .handoff, .threadLink: break
             }
         }
         if !open { close() }

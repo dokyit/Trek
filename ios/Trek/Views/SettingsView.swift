@@ -37,7 +37,18 @@ struct SettingsView: View {
                         Label("Mac settings", systemImage: "slider.horizontal.3")
                     }
                     if model.mode == .live, let paired = PairedMac.load() {
-                        LabeledContent("Address", value: paired.address)
+                        // Each way to the Mac, the one in use ticked: Wi-Fi at home, the tailnet
+                        // anywhere Tailscale is on.
+                        ForEach(([paired.address] + paired.routes).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }, id: \.self) { route in
+                            LabeledContent(TrekClient.isTailnet(route) ? "Tailscale" : "Wi-Fi") {
+                                HStack(spacing: 6) {
+                                    Text(route).font(.code(.subheadline))
+                                    if route == paired.address, model.connection == .connected {
+                                        Image(systemName: "checkmark").font(.ui(.caption).weight(.semibold)).foregroundStyle(Trek.done)
+                                    }
+                                }
+                            }
+                        }
                         SecurityRow(transport: model.transport ?? paired.transport)
                         if case .tls(let pin) = model.transport ?? paired.transport {
                             LabeledContent("Fingerprint") { Text(pin.short).font(.code(.body)) }

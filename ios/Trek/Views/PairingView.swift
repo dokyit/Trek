@@ -102,7 +102,7 @@ struct PairingView: View {
 
     private var steps: some View {
         VStack(alignment: .leading, spacing: 14) {
-            step(1, "Open Trek on your Mac", "Settings › Mobile › Pair iPhone")
+            step(1, "Open Trek on your Mac", "Settings › Phone › Pair an iPhone")
             step(2, "Scan the code it shows", "Same Wi-Fi, or anywhere over Tailscale")
             step(3, "Approve, steer and start work", "Agents keep running on the Mac")
         }
@@ -260,7 +260,7 @@ struct PairingConfirmSheet: View {
             VStack(spacing: 10) {
                 if link.fingerprint != nil {
                     Button {
-                        model.pair(address: link.address, code: link.code, transport: link.transport)
+                        model.pair(address: link.address, alternates: link.alternates, code: link.code, transport: link.transport)
                     } label: {
                         Text("Pair").fontWeight(.semibold).foregroundStyle(Trek.background).frame(maxWidth: .infinity)
                     }
@@ -269,7 +269,7 @@ struct PairingConfirmSheet: View {
                     .controlSize(.extraLarge)
                 } else {
                     Button {
-                        model.pair(address: link.address, code: link.code, transport: .plain)
+                        model.pair(address: link.address, alternates: link.alternates, code: link.code, transport: .plain)
                     } label: {
                         Text("Pair without encryption").fontWeight(.medium).foregroundStyle(Trek.approval).frame(maxWidth: .infinity)
                     }

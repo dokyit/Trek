@@ -77,6 +77,121 @@ nonisolated struct BackgroundOutput: Decodable {
     var output: String? = nil
 }
 
+// MARK: Links between threads
+
+/// How a link row's thread is related to the thread whose transcript it's in (the Mac's
+/// `lineage::Link`).
+nonisolated enum ThreadLinkKind: String, LenientEnum {
+    case started
+    case continuedIn = "continued_in"
+    case startedBy = "started_by"
+    case continuedFrom = "continued_from"
+    static var fallback: ThreadLinkKind { .startedBy }
+
+    /// What the row says before the other thread's title, as on the Mac.
+    var label: String {
+        switch self {
+        case .started: "Started thread"
+        case .continuedIn: "Continued in"
+        case .startedBy: "Started by"
+        case .continuedFrom: "Continued from"
+        }
+    }
+
+    /// The row stands for this thread's agent's own call (`start_thread`, `handoff`): it says
+    /// how that thread is doing. The other two say where this one came from.
+    var isOutgoing: Bool { self == .started || self == .continuedIn }
+
+    var symbol: String {
+        switch self {
+        case .started: "plus.bubble"
+        case .startedBy: "arrow.turn.down.right"
+        case .continuedIn, .continuedFrom: "arrow.left.arrow.right"
+        }
+    }
+}
+
+/// Where a thread an agent started stands, as the Mac's row says it.
+nonisolated enum LinkedThreadState: String, LenientEnum {
+    case working
+    case needsApproval = "needs_approval"
+    case paused, finished, failed
+    static var fallback: LinkedThreadState { .finished }
+
+    /// As its thread's row says it now.
+    init(_ t: ThreadSummary) {
+        if let needs = t.needs {
+            switch needs.kind {
+            case .failed: self = .failed
+            case .limit: self = .paused
+            default: self = .needsApproval
+            }
+        } else {
+            switch t.runState {
+            case .working: self = .working
+            case .needsYou: self = .needsApproval
+            case .failed: self = .failed
+            case .idle: self = .finished
+            }
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .working: "Working"
+        case .needsApproval: "Needs your approval"
+        case .paused: "Paused at a usage limit"
+        case .finished: "Finished"
+        case .failed: "Failed"
+        }
+    }
+}
+
+extension LinkedThreadState {
+    var color: Color {
+        switch self {
+        case .working: Trek.working
+        case .needsApproval, .paused: Trek.approval
+        case .finished: Trek.done
+        case .failed: Trek.failed
+        }
+    }
+}
+
+/// A transcript row that opens another thread.
+nonisolated struct ThreadLink: Hashable {
+    var link: ThreadLinkKind
+    var threadId: String
+    /// Its title when the Mac sent the row (its own row's is fresher).
+    var title: String
+    var agent: AgentRef? = nil
+    /// For a thread this one started or handed over to: how it was doing then.
+    var state: LinkedThreadState? = nil
+    /// Still in Trek (not archived or deleted): the row opens it.
+    var open: Bool = true
+}
+
+// MARK: Notes' pictures
+
+/// The reply to `note_asset`: one of a note's pictures, as a JPEG.
+nonisolated struct NoteAsset: Decodable {
+    var noteId: String
+    var path: String
+    var mime: String
+    var data: String
+    var width: Int
+    var height: Int
+}
+
+/// The reply to `add_note_image`: where the Mac keeps the photo, and the line that shows it.
+nonisolated struct NoteImage: Decodable {
+    var noteId: String
+    /// `attachments/<name>`.
+    var path: String
+    /// `![name](attachments/<name>)`.
+    var markdown: String
+}
+
 /// The reply to `icon`: a 96 px PNG.
 nonisolated struct IconReply: Decodable {
     var agent: String? = nil
@@ -110,6 +225,14 @@ nonisolated extension ClientMessage {
             var o: [String: Any] = ["type": "icon"]
             if let agent { o["agent"] = agent }
             if let projectId { o["project_id"] = projectId }
+            return o
+        case .noteAsset(let noteId, let path, let maxPx):
+            var o: [String: Any] = ["type": "note_asset", "note_id": noteId, "path": path]
+            if let maxPx { o["max_px"] = maxPx }
+            return o
+        case .addNoteImage(let noteId, let data, let name):
+            var o: [String: Any] = ["type": "add_note_image", "note_id": noteId, "data": data]
+            if let name { o["name"] = name }
             return o
         default:
             return [:]
@@ -159,6 +282,43 @@ extension AppModel {
         guard let data, let image = await Attachments.decode(data) else { return nil }
         Attachments.cache.setObject(image, forKey: key, cost: data.count)
         return image
+    }
+
+    /// A note's picture (`attachments/…`), fitting `maxPx` a side; kept a while in memory.
+    func noteAsset(_ noteID: String, path: String, maxPx: Int) async -> UIImage? {
+        let key = "note:\(noteID)/\(path)@\(maxPx)" as NSString
+        if let image = Attachments.cache.object(forKey: key) ?? Attachments.cache.object(forKey: "note:\(noteID)/\(path)@full" as NSString) {
+            return image
+        }
+        let data: Data? = await withCheckedContinuation { c in
+            request(.noteAsset(noteId: noteID, path: path, maxPx: maxPx)) { reply in
+                if case .noteAsset(_, let a) = reply { c.resume(returning: Data(base64Encoded: a.data)) } else { c.resume(returning: nil) }
+            }
+        }
+        guard let data, let image = await Attachments.decode(data) else { return nil }
+        Attachments.cache.setObject(image, forKey: key, cost: data.count)
+        return image
+    }
+
+    /// Keep `photo` with the Mac's notes, for note `noteID`; `done` gets the line that shows it
+    /// (nil when it couldn't be kept, which a toast says).
+    func addNoteImage(_ noteID: String, photo: PickedPhoto, name: String? = nil, done: @escaping (NoteImage?) -> Void) {
+        guard let upload = photo.upload else {
+            show("That photo couldn't be read", error: true)
+            return done(nil)
+        }
+        request(.addNoteImage(noteId: noteID, data: upload.data, name: name)) { [weak self] reply in
+            switch reply {
+            case .noteImage(_, let image):
+                // What the phone just sent: drawn at once, without asking for it back.
+                Attachments.cache.setObject(photo.image, forKey: "note:\(noteID)/\(image.path)@full" as NSString)
+                done(image)
+            case .error(_, _, let text):
+                self?.show(text, error: true)
+                done(nil)
+            default: done(nil)
+            }
+        }
     }
 
     /// The end of a background task's output; nil when it couldn't be read.

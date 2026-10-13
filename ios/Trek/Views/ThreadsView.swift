@@ -1,99 +1,239 @@
 import SwiftUI
 
-/// Home: every thread on the Mac, grouped like the desktop sidebar (Pinned · Needs you · Working ·
-/// Recent). Colour only where something wants action, is moving or broke; the rest recedes.
+/// Home: every thread on the Mac. By project, as the Mac's sidebar has them (Pinned, then each
+/// project with what wants you or is at work on top, Snoozed, and Settled folded away), or by
+/// status (Pinned · Needs you · Working · Snoozed · Recent). Colour only where something wants
+/// action, is moving or broke; the rest recedes.
 struct ThreadsView: View {
     @Environment(AppModel.self) private var model
     @Binding var path: [String]
     @Binding var showNew: Bool
+    @AppStorage(ThreadGrouping.key) private var groupingRaw = ThreadGrouping.project.rawValue
     @State private var collapsed: Set<String> = Launch.folded
+    /// Project groups showing all their quiet threads, not just the first few.
+    @State private var showingAll: Set<String> = []
+    @State private var settledOpen = Launch.folded.contains("-Settled")
     @State private var projectFilter: String?
     @State private var deleteAsk: DeleteAsk?
     /// A thread whose swipe asked for the snooze menu, or a time of one's own.
     @State private var snoozeChoice: ThreadSummary?
     @State private var snoozePicking: ThreadSummary?
+    @State private var showingUsage = false
     @Environment(\.compactRows) private var compact
+
+    /// Quiet threads a project shows before "Show more" (the Mac's sidebar: 3, and 5 settled).
+    private static let quietShown = 3
+    private static let settledShown = 5
+
+    private var grouping: ThreadGrouping { ThreadGrouping(rawValue: Launch.grouping ?? groupingRaw) ?? .project }
 
     var body: some View {
         NavigationStack(path: $path.onSet { if Perf.enabled { Perf.navigated = Perf.now } }) {
-            List {
-                if model.mode == .live, model.connection != .connected {
-                    Group {
-                        if case .identityChanged(let expected, let seen) = model.connection {
-                            IdentityChangedCard(host: PairedMac.load()?.hostName, expected: expected, seen: seen) { model.leave() }
-                        } else {
-                            ConnectionBanner(state: model.connection, host: model.host?.name ?? PairedMac.load()?.hostName) { model.leave() }
+            ScrollViewReader { proxy in
+                List {
+                    if model.mode == .live, model.connection != .connected {
+                        Group {
+                            if case .identityChanged(let expected, let seen) = model.connection {
+                                IdentityChangedCard(host: PairedMac.load()?.hostName, expected: expected, seen: seen) { model.leave() }
+                            } else {
+                                ConnectionBanner(state: model.connection, host: model.host?.name ?? PairedMac.load()?.hostName) { model.leave() }
+                            }
                         }
-                    }
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 8, trailing: 16))
-                }
-                section("Pinned", filtered(model.pinned))
-                section("Needs you", filtered(model.needsYou), tint: Trek.approval)
-                section("Working", filtered(model.working), tint: Trek.working)
-                section("Snoozed", filtered(model.snoozed))
-                section("Recent", filtered(model.recent))
-                if model.threads.isEmpty, model.connection == .connected {
-                    ContentUnavailableView("No threads yet", systemImage: "bubble.left.and.text.bubble.right",
-                                           description: Text("Start one here or on your Mac."))
                         .listRowBackground(Color.clear)
-                }
-            }
-            .listStyle(.plain)
-            .listSectionSpacing(6)
-            .environment(\.defaultMinListHeaderHeight, 0)
-            .scrollContentBackground(.hidden)
-            .background(RidgeBackdrop(height: 300))
-            // Rows pass cleanly under the "New thread" pill and the tab bar (one hard edge for both
-            // bars), and the last row clears them.
-            .scrollEdgeEffectStyle(.hard, for: .bottom)
-            .contentMargins(.bottom, 14, for: .scrollContent)
-            .navigationTitle("Threads")
-            .refreshable { await model.refresh() }
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Section("Project") {
-                            Picker("Project", selection: $projectFilter) {
-                                Text("All projects").tag(String?.none)
-                                ForEach(model.projects) { p in
-                                    Text(p.name).tag(Optional(p.id))
-                                }
-                            }
-                        }
-                        Section {
-                            Button("Mark all read", systemImage: "checkmark.circle") {
-                                for t in model.threads where t.unseen { model.markSeen(t.id) }
-                            }
-                            Button("New thread", systemImage: "plus") { showNew = true }
-                        }
-                    } label: {
-                        Image(systemName: projectFilter == nil ? "ellipsis" : "line.3.horizontal.decrease")
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 8, trailing: 16))
+                    }
+                    switch grouping {
+                    case .project: byProject
+                    case .status: byStatus
+                    }
+                    if model.threads.isEmpty, model.connection == .connected {
+                        ContentUnavailableView("No threads yet", systemImage: "bubble.left.and.text.bubble.right",
+                                               description: Text("Start one here or on your Mac."))
+                            .listRowBackground(Color.clear)
                     }
                 }
-            }
-            .navigationDestination(for: String.self) { tid in
-                ThreadView(threadID: tid)
-            }
-            .confirmationDialog("Snooze", isPresented: Binding(get: { snoozeChoice != nil }, set: { if !$0 { snoozeChoice = nil } }),
-                                titleVisibility: .visible, presenting: snoozeChoice) { t in
-                ForEach(SnoozePreset.allCases) { preset in
-                    Button(preset.label) { model.snooze(t.id, preset) }
+                .listStyle(.plain)
+                .listSectionSpacing(6)
+                .environment(\.defaultMinListHeaderHeight, 0)
+                .scrollContentBackground(.hidden)
+                .background(RidgeBackdrop(height: 300))
+                // Rows pass cleanly under the "New thread" pill and the tab bar (one hard edge for both
+                // bars), and the last row clears them.
+                .scrollEdgeEffectStyle(.hard, for: .bottom)
+                .contentMargins(.bottom, 14, for: .scrollContent)
+                .navigationTitle("Threads")
+                .refreshable { await model.refresh() }
+                .toolbar { toolbar }
+                .navigationDestination(for: String.self) { tid in
+                    ThreadView(threadID: tid)
                 }
-                Button("Pick a time…") { snoozePicking = t }
-            } message: { t in
-                Text(t.title)
+                .confirmationDialog("Snooze", isPresented: Binding(get: { snoozeChoice != nil }, set: { if !$0 { snoozeChoice = nil } }),
+                                    titleVisibility: .visible, presenting: snoozeChoice) { t in
+                    ForEach(SnoozePreset.allCases) { preset in
+                        Button(preset.label) { model.snooze(t.id, preset) }
+                    }
+                    Button("Pick a time…") { snoozePicking = t }
+                } message: { t in
+                    Text(t.title)
+                }
+                .sheet(item: $snoozePicking) { SnoozePicker(thread: $0) }
+                .sheet(isPresented: $showingUsage) { UsageSheet() }
+                .task(id: model.connection == .connected || model.mode == .demo) {
+                    if model.connection == .connected || model.mode == .demo { model.loadUsage(quiet: true) }
+                }
+                .deleteConfirmation($deleteAsk, model: model)
+                .onChange(of: model.revealRequest) {
+                    // The hand on the "New thread" pill: bring the thread that waits into view.
+                    guard let id = model.revealRequest else { return }
+                    model.revealRequest = nil
+                    reveal(id, proxy: proxy)
+                }
             }
-            .sheet(item: $snoozePicking) { SnoozePicker(thread: $0) }
-            .deleteConfirmation($deleteAsk, model: model)
         }
         .environment(\.openThread, OpenThreadAction { path.append($0) })
     }
 
-    private func filtered(_ list: [ThreadSummary]) -> [ThreadSummary] {
-        guard let projectFilter else { return list }
-        return list.filter { $0.project?.id == projectFilter }
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        // Plan usage, always in reach, as the Usage button in the Mac's sidebar.
+        ToolbarItem(placement: .topBarTrailing) {
+            UsageButton { showingUsage = true }
+        }
+        ToolbarSpacer(.fixed, placement: .topBarTrailing)
+        ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+                Section("Group by") {
+                    Picker("Group by", selection: $groupingRaw) {
+                        ForEach(ThreadGrouping.allCases) { g in
+                            Label(g.label, systemImage: g == .project ? "folder" : "circle.grid.2x1").tag(g.rawValue)
+                        }
+                    }
+                }
+                Section("Project") {
+                    Picker("Project", selection: $projectFilter) {
+                        Text("All projects").tag(String?.none)
+                        ForEach(model.projects) { p in
+                            Text(p.name).tag(Optional(p.id))
+                        }
+                    }
+                }
+                Section {
+                    Button("Mark all read", systemImage: "checkmark.circle") {
+                        for t in model.threads where t.unseen { model.markSeen(t.id) }
+                    }
+                    Button("New thread", systemImage: "plus") { showNew = true }
+                }
+            } label: {
+                Image(systemName: projectFilter == nil ? "ellipsis" : "line.3.horizontal.decrease")
+            }
+        }
+    }
+
+    // MARK: By project
+
+    @ViewBuilder
+    private var byProject: some View {
+        section("Pinned", filtered(model.pinned))
+        let live = filtered(model.liveGroups)
+        ForEach(live) { group in
+            projectSection(group)
+        }
+        if live.isEmpty, model.pinned.isEmpty, !model.threads.isEmpty, model.connection == .connected || model.mode == .demo {
+            // The Mac's words for an empty inbox.
+            ContentUnavailableView("Inbox zero", systemImage: "checkmark.circle",
+                                   description: Text("Running agents and anything that needs you will show up here."))
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+        }
+        section("Snoozed", filtered(model.snoozed))
+        settledSection(filtered(model.settledGroups))
+    }
+
+    /// A project's live threads under its badge: what wants you and what's at work always out,
+    /// then the first few quiet ones and "Show more".
+    @ViewBuilder
+    private func projectSection(_ g: ProjectGroup) -> some View {
+        let key = "project:\(g.id)"
+        let folded = collapsed.contains(key)
+        let all = showingAll.contains(g.id)
+        let quiet = all ? g.quiet : Array(g.quiet.prefix(Self.quietShown))
+        Section {
+            if !folded {
+                ForEach(g.active + quiet) { t in row(t, showsProject: false) }
+                if g.quiet.count > Self.quietShown {
+                    moreRow(hidden: g.quiet.count - quiet.count) {
+                        if all { showingAll.remove(g.id) } else { showingAll.insert(g.id) }
+                    }
+                }
+            }
+        } header: {
+            ProjectHeader(group: g, folded: folded) {
+                withAnimation(.snappy) { if folded { collapsed.remove(key) } else { collapsed.insert(key) } }
+            }
+            .id(key)
+        }
+        .listSectionSeparator(.hidden)
+    }
+
+    /// History, folded away: by project, the first few of each.
+    @ViewBuilder
+    private func settledSection(_ groups: [ProjectGroup]) -> some View {
+        let total = groups.reduce(0) { $0 + $1.count }
+        if total > 0 {
+            Section {
+                if settledOpen {
+                    ForEach(groups) { g in
+                        let key = "settled:\(g.id)"
+                        let all = showingAll.contains(key)
+                        let shown = all ? g.active + g.quiet : Array((g.active + g.quiet).prefix(Self.settledShown))
+                        SettledProjectLabel(group: g)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 10, leading: 20, bottom: 2, trailing: 18))
+                        ForEach(shown) { t in row(t, showsProject: false) }
+                        if g.count > Self.settledShown {
+                            moreRow(hidden: g.count - shown.count) {
+                                if all { showingAll.remove(key) } else { showingAll.insert(key) }
+                            }
+                        }
+                    }
+                }
+            } header: {
+                SectionHeader(title: "Settled", count: total, folded: !settledOpen) {
+                    withAnimation(.snappy) { settledOpen.toggle() }
+                }
+            }
+            .listSectionSeparator(.hidden)
+        }
+    }
+
+    private func moreRow(hidden: Int, toggle: @escaping () -> Void) -> some View {
+        Button {
+            withAnimation(.snappy) { toggle() }
+        } label: {
+            Text(hidden > 0 ? "Show \(hidden) more" : "Show less")
+                .font(.ui(.subheadline).weight(.medium))
+                .foregroundStyle(Trek.muted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, compact ? 28 : 37)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 2, leading: 20, bottom: 6, trailing: 18))
+    }
+
+    // MARK: By status
+
+    @ViewBuilder
+    private var byStatus: some View {
+        section("Pinned", filtered(model.pinned))
+        section("Needs you", filtered(model.needsYou), tint: Trek.approval)
+        section("Working", filtered(model.working), tint: Trek.working)
+        section("Snoozed", filtered(model.snoozed))
+        section("Recent", filtered(model.recent))
     }
 
     @ViewBuilder
@@ -101,100 +241,237 @@ struct ThreadsView: View {
         if !threads.isEmpty {
             Section {
                 if !collapsed.contains(title) {
-                    ForEach(threads) { t in
-                        NavigationLink(value: t.id) {
-                            ThreadRow(thread: t)
-                        }
-                        .navigationLinkIndicatorVisibility(.hidden)
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: compact ? 7 : 9, leading: 20, bottom: compact ? 7 : 9, trailing: 18))
-                        .swipeActions(edge: .leading) {
-                            if t.unseen {
-                                Button("Read", systemImage: "checkmark") { model.markSeen(t.id) }.tint(Trek.done)
-                            } else if model.serves(.markUnread) {
-                                Button("Unread", systemImage: "circlebadge.fill") { model.markUnread(t.id) }.tint(Trek.working)
-                            }
-                        }
-                        .swipeActions(edge: .trailing) {
-                            if model.serves(.snooze) {
-                                if t.section == .snoozed {
-                                    Button("Wake", systemImage: "sun.max") { model.wake(t.id) }.tint(Trek.approval)
-                                } else {
-                                    Button("Snooze", systemImage: "moon.zzz") { snoozeChoice = t }.tint(.indigo)
-                                }
-                            }
-                        }
-                        .contextMenu {
-                            Button("Copy title", systemImage: "doc.on.doc") { UIPasteboard.general.string = t.title }
-                            if t.runState == .working {
-                                Button("Stop", systemImage: "stop.fill", role: .destructive) { model.interrupt(t.id) }
-                            }
-                            if model.serves(.snooze) {
-                                SnoozeMenu(thread: t) { snoozePicking = t }
-                            }
-                            if t.unseen {
-                                Button("Mark read", systemImage: "checkmark.circle") { model.markSeen(t.id) }
-                            } else if model.serves(.markUnread) {
-                                Button("Mark unread", systemImage: "circlebadge") { model.markUnread(t.id) }
-                            }
-                            if model.serves(.regenerateTitle) {
-                                Button("Regenerate title", systemImage: "text.badge.star") { model.regenerateTitle(t.id) }
-                            }
-                            if model.serves(.delete) {
-                                Divider()
-                                Button("Delete…", systemImage: "trash", role: .destructive) { model.askToDelete(t, into: $deleteAsk) }
-                            }
-                        }
-                    }
+                    ForEach(threads) { t in row(t, showsProject: true) }
                 }
             } header: {
-                Button {
+                SectionHeader(title: title, count: threads.count, tint: tint, folded: collapsed.contains(title)) {
                     withAnimation(.snappy) {
                         if collapsed.contains(title) { collapsed.remove(title) } else { collapsed.insert(title) }
                     }
-                } label: {
-                    HStack(spacing: 7) {
-                        Text(title).font(.ui(.subheadline).weight(.semibold)).foregroundStyle(Trek.muted)
-                        Text("\(threads.count)").font(.ui(.subheadline).monospacedDigit()).foregroundStyle(tint ?? Trek.muted.opacity(0.7))
-                        Spacer()
-                        Image(systemName: "chevron.down")
-                            .font(.ui(.caption).weight(.semibold))
-                            .foregroundStyle(Trek.muted.opacity(0.8))
-                            .rotationEffect(.degrees(collapsed.contains(title) ? -90 : 0))
-                    }
-                    .padding(.horizontal, 4)
-                    .padding(.top, 10)
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
             }
             .listSectionSeparator(.hidden)
+        }
+    }
+
+    // MARK: Rows
+
+    private func filtered(_ list: [ThreadSummary]) -> [ThreadSummary] {
+        guard let projectFilter else { return list }
+        return list.filter { $0.project?.id == projectFilter }
+    }
+
+    private func filtered(_ groups: [ProjectGroup]) -> [ProjectGroup] {
+        guard let projectFilter else { return groups }
+        return groups.filter { $0.id == projectFilter }
+    }
+
+    private func row(_ t: ThreadSummary, showsProject: Bool) -> some View {
+        NavigationLink(value: t.id) {
+            ThreadRow(thread: t, showsProject: showsProject)
+        }
+        .id(t.id)
+        .navigationLinkIndicatorVisibility(.hidden)
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: compact ? 7 : 9, leading: 20, bottom: compact ? 7 : 9, trailing: 18))
+        .swipeActions(edge: .leading) {
+            if t.unseen {
+                Button("Read", systemImage: "checkmark") { model.markSeen(t.id) }.tint(Trek.done)
+            } else if model.serves(.markUnread) {
+                Button("Unread", systemImage: "circlebadge.fill") { model.markUnread(t.id) }.tint(Trek.working)
+            }
+        }
+        .swipeActions(edge: .trailing) {
+            if model.serves(.snooze) {
+                if t.section == .snoozed {
+                    Button("Wake", systemImage: "sun.max") { model.wake(t.id) }.tint(Trek.approval)
+                } else {
+                    Button("Snooze", systemImage: "moon.zzz") { snoozeChoice = t }.tint(.indigo)
+                }
+            }
+        }
+        .contextMenu {
+            Button("Copy title", systemImage: "doc.on.doc") { UIPasteboard.general.string = t.title }
+            if t.runState == .working {
+                Button("Stop", systemImage: "stop.fill", role: .destructive) { model.interrupt(t.id) }
+            }
+            if t.section == .settled {
+                Button("Back to the inbox", systemImage: "tray.and.arrow.down") { model.threadAction(t.id, .unsettle) }
+            } else if t.section != .pinned {
+                Button("Settle", systemImage: "checkmark.circle") { model.threadAction(t.id, .settle, done: "Settled") }
+            }
+            if model.serves(.snooze) {
+                SnoozeMenu(thread: t) { snoozePicking = t }
+            }
+            if t.unseen {
+                Button("Mark read", systemImage: "checkmark.circle") { model.markSeen(t.id) }
+            } else if model.serves(.markUnread) {
+                Button("Mark unread", systemImage: "circlebadge") { model.markUnread(t.id) }
+            }
+            if model.serves(.regenerateTitle) {
+                Button("Regenerate title", systemImage: "text.badge.star") { model.regenerateTitle(t.id) }
+            }
+            if model.serves(.delete) {
+                Divider()
+                Button("Delete…", systemImage: "trash", role: .destructive) { model.askToDelete(t, into: $deleteAsk) }
+            }
+        }
+    }
+
+    /// Unfold whatever hides `id` and scroll to it.
+    private func reveal(_ id: String, proxy: ScrollViewProxy) {
+        guard let t = model.thread(id) else { return }
+        projectFilter = nil
+        withAnimation(.snappy) {
+            collapsed.remove("project:\(t.project?.id ?? "")")
+            for title in ["Pinned", "Needs you", "Working", "Snoozed", "Recent"] { collapsed.remove(title) }
+            if t.section == .settled { settledOpen = true }
+        }
+        DispatchQueue.main.async {
+            withAnimation(.snappy) { proxy.scrollTo(id, anchor: .center) }
+        }
+    }
+}
+
+/// A section's title, how many it holds, and its fold chevron.
+private struct SectionHeader: View {
+    var title: String
+    var count: Int
+    var tint: Color? = nil
+    var folded: Bool
+    var toggle: () -> Void
+
+    var body: some View {
+        Button(action: toggle) {
+            HStack(spacing: 7) {
+                Text(title).font(.ui(.subheadline).weight(.semibold)).foregroundStyle(Trek.muted)
+                Text("\(count)").font(.ui(.subheadline).monospacedDigit()).foregroundStyle(tint ?? Trek.muted.opacity(0.7))
+                Spacer()
+                FoldChevron(folded: folded)
+            }
+            .padding(.horizontal, 4)
+            .padding(.top, 10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(title), \(count)")
+        .accessibilityHint(folded ? "Shows them" : "Folds them away")
+    }
+}
+
+/// A project's header, as the Mac's sidebar draws it: its badge and name, then what's in it (what
+/// waits and what works only while folded: unfolded, the rows say so), and the fold chevron.
+private struct ProjectHeader: View {
+    var group: ProjectGroup
+    var folded: Bool
+    var toggle: () -> Void
+
+    var body: some View {
+        Button(action: toggle) {
+            HStack(spacing: 8) {
+                if let p = group.project {
+                    ProjectBadge(project: p, size: 18)
+                } else {
+                    Image(systemName: "bubble.left")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Trek.muted)
+                        .frame(width: 22, height: 18)
+                        .background(Trek.foreground.opacity(0.08), in: RoundedRectangle(cornerRadius: 4.5))
+                }
+                Text(group.name)
+                    .font(.ui(.subheadline).weight(.semibold))
+                    .foregroundStyle(Trek.foreground.opacity(0.88))
+                    .lineLimit(1)
+                if folded, group.needs > 0 {
+                    Label("\(group.needs)", systemImage: "hand.raised.fill")
+                        .labelStyle(TightLabelStyle())
+                        .foregroundStyle(Trek.approval)
+                }
+                if folded, group.working > 0 {
+                    HStack(spacing: 4) {
+                        BeaconDot(color: Trek.working, pulses: true, size: 6)
+                        Text("\(group.working)")
+                    }
+                    .foregroundStyle(Trek.working)
+                }
+                if group.unread > 0 {
+                    Text("\(group.unread) new").foregroundStyle(Trek.done)
+                }
+                Spacer(minLength: 4)
+                Text("\(group.count)").foregroundStyle(Trek.muted.opacity(0.7))
+                FoldChevron(folded: folded)
+            }
+            .font(.ui(.footnote).weight(.medium).monospacedDigit())
+            .padding(.horizontal, 4)
+            .padding(.top, 14)
+            .padding(.bottom, 2)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityHint(folded ? "Shows its threads" : "Folds its threads away")
+    }
+}
+
+/// Inside Settled: the project the threads under it are in.
+private struct SettledProjectLabel: View {
+    var group: ProjectGroup
+
+    var body: some View {
+        HStack(spacing: 7) {
+            if let p = group.project { ProjectBadge(project: p, size: 15) }
+            Text(group.name).font(.ui(.footnote).weight(.semibold)).foregroundStyle(Trek.muted)
+            Text("\(group.count)").font(.ui(.footnote).monospacedDigit()).foregroundStyle(Trek.muted.opacity(0.7))
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct FoldChevron: View {
+    var folded: Bool
+
+    var body: some View {
+        Image(systemName: "chevron.down")
+            .font(.ui(.caption).weight(.semibold))
+            .foregroundStyle(Trek.muted.opacity(0.8))
+            .rotationEffect(.degrees(folded ? -90 : 0))
+    }
+}
+
+private struct TightLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 3) {
+            configuration.icon.font(.system(size: 10, weight: .semibold))
+            configuration.title
         }
     }
 }
 
 struct ThreadRow: View {
     var thread: ThreadSummary
+    /// Its project's badge and name: left out under the project's own header.
+    var showsProject = true
     @Environment(\.compactRows) private var compact
 
-    private var recedes: Bool { thread.runState == .idle && !thread.unseen && thread.needs == nil }
+    private var recedes: Bool { thread.runState == .idle && !thread.unseen && thread.needs == nil && thread.runningSubAgents.isEmpty }
 
     var body: some View {
         if compact { compactBody } else { fullBody }
     }
 
-    /// One line: logo, project badge, title, status.
+    /// One line: logo, project badge, title, sub-agents, status.
     private var compactBody: some View {
         HStack(alignment: .center, spacing: 10) {
             AgentGlyph(thread.agent, size: 18)
                 .opacity(recedes ? 0.7 : 1)
-            if let p = thread.project { ProjectBadge(project: p, size: 15) }
+            if showsProject, let p = thread.project { ProjectBadge(project: p, size: 15) }
             Text(thread.title)
                 .scaledFont(16, weight: thread.unseen ? .semibold : .regular)
                 .foregroundStyle(recedes ? Trek.foreground.opacity(0.72) : Trek.foreground)
                 .lineLimit(1)
             Spacer(minLength: 4)
+            SubAgentsPill(agents: thread.runningSubAgents)
             trailing
         }
         .accessibilityElement(children: .combine)
@@ -215,15 +492,21 @@ struct ThreadRow: View {
                     trailing
                 }
                 HStack(spacing: 6) {
-                    if let p = thread.project {
+                    if showsProject, let p = thread.project {
                         ProjectBadge(project: p, size: 16)
-                        Text(p.name).foregroundStyle(Trek.muted)
+                        // At work, the model and what it's doing need the room: the badge says
+                        // which project.
+                        if thread.runState != .working {
+                            Text(p.name).foregroundStyle(Trek.muted).lineLimit(1).layoutPriority(-1)
+                        }
                     }
                     secondary
                         .lineLimit(1)
                         .transaction { $0.animation = nil }
                     Spacer(minLength: 0)
-                    if thread.additions + thread.deletions > 0, thread.needs == nil {
+                    if !thread.runningSubAgents.isEmpty {
+                        SubAgentsPill(agents: thread.runningSubAgents)
+                    } else if thread.additions + thread.deletions > 0, thread.needs == nil {
                         DiffStat(additions: thread.additions, deletions: thread.deletions, font: .ui(.caption).monospacedDigit())
                             .opacity(recedes ? 0.6 : 0.9)
                     }
@@ -236,8 +519,14 @@ struct ThreadRow: View {
 
     @ViewBuilder
     private var trailing: some View {
-        if let look = StatusLook.of(thread) {
+        if thread.runState == .working, thread.needs == nil {
+            // Working, and for how long, as the Mac's sidebar card says it.
+            WorkingPill(since: thread.workingSince)
+        } else if let look = StatusLook.of(thread) {
             StatusPill(look: look)
+        } else if !thread.runningSubAgents.isEmpty {
+            // Its turn is over, but sub-agents it started are still at it.
+            StatusPill(look: StatusLook(label: "Waiting", color: Trek.working.opacity(0.8), symbol: nil, pulses: true))
         } else if thread.unseen {
             // Done and not read yet: an emerald dot by the time, as in the Mac's sidebar.
             HStack(spacing: 6) {
@@ -254,9 +543,27 @@ struct ThreadRow: View {
         }
     }
 
-    /// What follows the project: the request waiting on you, what the agent is doing, else the branch.
+    /// The model at work, then the request waiting on you, what the agent is doing, or the branch.
     @ViewBuilder
     private var secondary: some View {
+        HStack(spacing: 5) {
+            if !showsProject || thread.runState == .working {
+                Text(thread.modelLabel ?? thread.agent.name)
+                    .foregroundStyle(thread.runState == .working ? Trek.foreground.opacity(0.8) : Trek.muted)
+                    .fixedSize()
+                if hasDetail { Text("·").foregroundStyle(Trek.muted.opacity(0.6)) }
+            }
+            detail
+        }
+    }
+
+    private var hasDetail: Bool {
+        thread.needs != nil || (thread.section == .snoozed && thread.snoozedUntil != nil)
+            || (thread.runState == .working && thread.activity != nil) || thread.branch != nil
+    }
+
+    @ViewBuilder
+    private var detail: some View {
         if let needs = thread.needs {
             Text(needs.text.replacingOccurrences(of: "`", with: "")).foregroundStyle(Trek.muted)
         } else if thread.section == .snoozed, let until = SnoozeWords.until(thread.snoozedUntil) {
@@ -269,11 +576,67 @@ struct ThreadRow: View {
             Label {
                 Text(branch)
             } icon: {
-                Image(systemName: thread.worktree ? "arrow.triangle.branch" : "arrow.triangle.branch")
+                Image(systemName: "arrow.triangle.branch")
                     .font(.ui(.caption2))
             }
             .labelStyle(BranchLabelStyle())
             .foregroundStyle(Trek.muted.opacity(0.85))
+        }
+    }
+}
+
+/// "Working 3m 05s": the beacon and how long the turn has run, ticking.
+struct WorkingPill: View {
+    var since: Int64?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            BeaconDot(color: Trek.working, pulses: true, size: 7)
+            if let since {
+                TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                    Text("Working \(When.duration(max(0, Int(ctx.date.timeIntervalSince1970 - Double(since) / 1000))))")
+                        .monospacedDigit()
+                }
+            } else {
+                Text("Working")
+            }
+        }
+        .font(.ui(.footnote).weight(.medium))
+        .foregroundStyle(Trek.working)
+        .fixedSize()
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// The sub-agents at work for a thread, as the Mac's sidebar pill shows them: their agents' logos,
+/// overlapping (three at most), and how many there are.
+struct SubAgentsPill: View {
+    var agents: [SubAgent]
+    var size: CGFloat = 15
+
+    var body: some View {
+        if !agents.isEmpty {
+            let logos = AtWorkLabel.byAgent(agents).prefix(3)
+            HStack(spacing: 4) {
+                HStack(spacing: -size * 0.3) {
+                    ForEach(Array(logos.enumerated()), id: \.offset) { _, entry in
+                        AgentGlyph(entry.agent, size: size)
+                            .padding(1)
+                            .background(Trek.background, in: RoundedRectangle(cornerRadius: size * 0.3))
+                    }
+                }
+                Text("\(agents.count)")
+                    .font(.ui(.caption).weight(.semibold).monospacedDigit())
+                    .foregroundStyle(Trek.foreground.opacity(0.85))
+            }
+            .padding(.leading, 3)
+            .padding(.trailing, 7)
+            .padding(.vertical, 2)
+            .background(Trek.working.opacity(0.12), in: Capsule())
+            .overlay(Capsule().strokeBorder(Trek.working.opacity(0.28), lineWidth: 0.5))
+            .fixedSize()
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(agents.count) sub-agent\(agents.count == 1 ? "" : "s") at work")
         }
     }
 }

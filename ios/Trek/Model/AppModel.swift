@@ -53,6 +53,8 @@ struct Toast: Identifiable, Equatable {
 final class AppModel {
     /// A thread to bring up, from a notification's `trek://open?thread=…` link.
     var openRequest: String?
+    /// A thread to scroll the list to (and unfold whatever hides it), without opening it.
+    var revealRequest: String?
 
     var mode: AppMode = .unpaired
     var connection: ConnectionState = .idle
@@ -150,13 +152,19 @@ final class AppModel {
     func startLive(_ paired: PairedMac) {
         UserDefaults.standard.set(false, forKey: "demoMode")
         let transport = paired.transport
-        let client = TrekClient(address: paired.address, auth: .hello(deviceId: Device.id, token: paired.token), transport: transport,
-                                hostId: paired.hostId)
-        // Found on this network at another address: kept, so the next launch dials it first.
+        let client = TrekClient(address: paired.address, routes: paired.routes, auth: .hello(deviceId: Device.id, token: paired.token),
+                                transport: transport, hostId: paired.hostId)
+        // Answered at another address: kept, so the next launch dials it first.
         client.onMoved = { address in
             guard var moved = PairedMac.load(), moved.hostId == paired.hostId else { return }
             moved.address = address
             moved.save()
+        }
+        // The addresses the Mac answers on now (Wi-Fi, tailnet): kept, to try when one doesn't.
+        client.onRoutes = { routes in
+            guard var kept = PairedMac.load(), kept.hostId == paired.hostId else { return }
+            kept.routes = routes
+            kept.save()
         }
         attach(client, mode: .live)
         self.transport = transport
@@ -172,14 +180,17 @@ final class AppModel {
     /// Pairs with a Mac from its QR code or typed details; on success the token and the
     /// certificate fingerprint are kept and the connection stays up as the live one. If pairing
     /// fails, a Mac this phone was already paired with is reconnected.
-    func pair(address: String, code: String, transport: Transport) {
+    func pair(address: String, alternates: [String] = [], code: String, transport: Transport) {
         pendingLink = nil
         pairing = true
         pairingError = nil
-        let client = TrekClient(address: address, auth: .pair(code: code, deviceId: Device.id, deviceName: Device.name),
-                                transport: transport)
-        client.onPaired = { [weak self] token, host, kept in
-            PairedMac(address: address, token: token, hostName: host.name, hostId: host.id, transport: kept).save()
+        let client = TrekClient(address: address, routes: [address] + alternates,
+                                auth: .pair(code: code, deviceId: Device.id, deviceName: Device.name), transport: transport)
+        client.onPaired = { [weak self, weak client] token, host, kept in
+            // Where it answered, and every address it says it answers on.
+            let at = client?.address ?? address
+            PairedMac(address: at, token: token, hostName: host.name, hostId: host.id, transport: kept,
+                      routes: client?.routes ?? [address] + alternates).save()
             UserDefaults.standard.set(false, forKey: "demoMode")
             self?.transport = kept
             self?.pairing = false
@@ -249,8 +260,10 @@ final class AppModel {
             } else {
                 "That Mac's certificate doesn't match the pairing code. Nothing was sent to it. Show a new code on your Mac and try again."
             }
-        case .offline(let why) where why == "Mac unreachable — retrying":
+        case .offline(let why) where why == TrekClient.unreachable:
             "Couldn't reach that Mac. Check the address, and that this iPhone is on the same network or tailnet."
+        case .offline(let why) where why == TrekClient.tailnetUnreachable:
+            "Couldn't reach that Mac over Tailscale. Install Tailscale on this iPhone, sign in with the account your Mac uses and turn it on, or pair on the Mac's Wi-Fi instead: Trek on your Mac then gives this iPhone its tailnet address too."
         case .offline(let why): why
         default: nil
         }
@@ -285,7 +298,7 @@ final class AppModel {
 
     func handle(_ message: ServerMessage) {
         switch message {
-        case .paired(_, _, let host, let features), .welcome(_, let host, let features):
+        case .paired(_, _, let host, let features, _), .welcome(_, let host, let features, _):
             self.host = host
             self.features = Set(features)
             cacheHost = host.id
@@ -338,7 +351,8 @@ final class AppModel {
             reply(re, message)
         case .usage(let re, _), .basecamp(let re, _), .notes(let re, _), .note(let re, _), .gitStatus(let re, _),
              .gitDiff(let re, _), .gitBranches(let re, _), .commands(let re, _, _), .settings(let re, _),
-             .searchResults(let re, _), .attachment(let re, _), .backgroundOutput(let re, _), .icon(let re, _):
+             .searchResults(let re, _), .attachment(let re, _), .backgroundOutput(let re, _), .icon(let re, _),
+             .noteAsset(let re, _), .noteImage(let re, _):
             reply(re, message)
         case .unlisted(let t):
             setUnlisted(t)
@@ -590,8 +604,9 @@ final class AppModel {
 
     // MARK: Usage and Basecamp
 
-    /// Ask for plan usage (the Mac asks its agents, at most every 30 seconds).
-    func loadUsage() {
+    /// Ask for plan usage (the Mac asks its agents, at most every 30 seconds). Quiet: in the
+    /// background, for the Threads toolbar, so a failure isn't worth a toast.
+    func loadUsage(quiet: Bool = false) {
         usageLoading = true
         request(.usage) { [weak self] reply in
             guard let self else { return }
@@ -600,8 +615,8 @@ final class AppModel {
             case .usage(_, let u):
                 self.usage = u
                 // Some agent was still answering: ask again shortly for the rest.
-                if u.loading == true { DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.loadUsage() } }
-            case .error(_, _, let text): self.show(text, error: true)
+                if u.loading == true { DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.loadUsage(quiet: quiet) } }
+            case .error(_, _, let text): if !quiet { self.show(text, error: true) }
             default: break
             }
         }
@@ -832,7 +847,11 @@ final class AppModel {
 }
 
 extension ThreadSummary {
-    var waitsOnYou: Bool { needs != nil || runState == .needsYou || runState == .failed }
+    /// Waits on the user as the Mac's badge counts it (`needs_you`): a request, or a failure not
+    /// settled yet. A settled failure is history, as on the Mac (whose row still says "Failed"):
+    /// counted, it raised a hand on the tab bar that no row under "Needs you" answered for. Only a
+    /// failure can be settled with `needs`: a thread that asks for something is in the inbox.
+    var waitsOnYou: Bool { section != .settled && (needs != nil || runState == .needsYou || runState == .failed) }
 }
 
 // MARK: Pairing storage
@@ -844,16 +863,20 @@ struct PairedMac: Codable {
     var hostId: String
     /// Pinned TLS (the full fingerprint) or plain `ws://` (chosen by the user when pairing).
     var transport: Transport
+    /// Every address the Mac answers on, as it last said (its Wi-Fi and its tailnet); `address`
+    /// is dialled first, then these.
+    var routes: [String] = []
 
-    init(address: String, token: String, hostName: String, hostId: String, transport: Transport) {
+    init(address: String, token: String, hostName: String, hostId: String, transport: Transport, routes: [String] = []) {
         self.address = address
         self.token = token
         self.hostName = hostName
         self.hostId = hostId
         self.transport = transport
+        self.routes = routes
     }
 
-    private enum CodingKeys: String, CodingKey { case address, token, hostName, hostId, transport }
+    private enum CodingKeys: String, CodingKey { case address, token, hostName, hostId, transport, routes }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -864,6 +887,7 @@ struct PairedMac: Codable {
         // Records from before TLS were paired over plain ws:// and stay that way (Settings says
         // "Unencrypted") until paired again.
         transport = try c.decodeIfPresent(Transport.self, forKey: .transport) ?? .plain
+        routes = try c.decodeIfPresent([String].self, forKey: .routes) ?? []
     }
 
     /// The Keychain read once: views ask for it as they draw (the Settings tab, the connection

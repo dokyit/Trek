@@ -26,6 +26,9 @@ enum DemoMac {
                 SubAgent(agent: codex, model: "Sol", title: "Review the inbox section rules", state: .running, since: now - 95_000,
                          threadId: "t-inbox-review"),
                 SubAgent(agent: claude, title: "Find every place that reads snoozed_until", state: .running, since: now - 40_000),
+                SubAgent(agent: AgentRef(key: "acp:devin", name: "Devin", logo: "devin"), model: "SWE-2",
+                         title: "Write the migration for settled_at", state: .running, since: now - 25_000),
+                SubAgent(agent: claude, model: "Sonnet 5.5", title: "Check the sidebar's empty state copy", state: .done, since: now - 300_000),
             ]
             t.background = ["cargo watch -x 'test -p trek-core'"]
             t.backgroundTasks = [BackgroundTask(id: "bg-watch", kind: .shell, title: "cargo watch -x 'test -p trek-core'",
@@ -160,8 +163,10 @@ enum DemoMac {
             default: (.done, nil)
             }
             return ReviewRow(threadId: t.id, title: t.title, status: status, label: text, agent: t.agent, project: t.project,
-                             additions: t.additions, deletions: t.deletions, updatedAt: t.updatedAt, unseen: t.unseen)
+                             additions: t.additions, deletions: t.deletions, updatedAt: t.updatedAt, unseen: t.unseen,
+                             needsYou: status == .needsYou || status == .failed)
         }
+        let numbers = activity(range, projects: projects)
         let opening = switch range {
         case .today: "You sent "
         case .week: "This week you sent "
@@ -200,7 +205,96 @@ enum DemoMac {
                 StatTile(kind: .agentTime, label: "Your agents worked for", figure: time, note: "1 turn failed \(range == .today ? "today" : range == .week ? "this week" : "so far")"),
                 StatTile(kind: .planLeft, label: "Left on Claude Max", figure: "36%", note: "Weekly · Opus · resets in 4d", agent: claude, percent: 36, resetsAt: now + 96 * 3_600_000),
                 StatTile(kind: .planLeft, label: "Left on ChatGPT Pro", figure: "9%", note: "5-hour limit · resets in 58m", agent: codex, percent: 9, resetsAt: now + 3_500_000),
-            ])
+            ],
+            totals: numbers.totals, chart: numbers.chart, projects: numbers.projects, models: numbers.models)
+    }
+
+    /// The range in numbers, as the Mac's Basecamp draws it now: turns a bar an hour (today), a day
+    /// (this week) or a week (all time, since early June), the totals, and the tables.
+    private static func activity(_ range: BasecampRange, projects: [ProjectSummary])
+        -> (totals: BasecampTotals, chart: BasecampChart, projects: [BasecampRow], models: [BasecampRow]) {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+        let date = Date.FormatStyle().month(.abbreviated).day()
+        var bars: [BasecampBar] = []
+        var ticks: [BasecampTick] = []
+        var step = "hour"
+        func bar(_ label: String, _ turns: Int) -> BasecampBar {
+            let tokens = Int64(turns) * 41_300
+            let line = [label, "\(turns) \(turns == 1 ? "turn" : "turns")"] + (tokens > 0 ? ["\(tokensLabel(tokens)) tokens"] : [])
+            return BasecampBar(label: label, turns: turns, tokens: tokens, line: line.joined(separator: " · "))
+        }
+        switch range {
+        case .today:
+            let hour = { (h: Int) in "\(h % 12 == 0 ? 12 : h % 12) \(h % 24 < 12 ? "AM" : "PM")" }
+            let shape = [0, 0, 0, 0, 0, 0, 0, 1, 3, 7, 9, 6, 2, 5, 11, 8, 6, 9, 4, 2, 3, 1, 0, 0]
+            bars = (0..<24).map { bar("\(hour($0))–\(hour($0 + 1))", shape[$0]) }
+            ticks = [(0, "12 AM"), (6, "6 AM"), (12, "Noon"), (18, "6 PM")].map { BasecampTick(bar: $0.0, label: $0.1) }
+        case .week:
+            step = "day"
+            let weekday = (cal.component(.weekday, from: today) + 5) % 7
+            let monday = cal.date(byAdding: .day, value: -weekday, to: today)!
+            let shape = [34, 52, 41, 63, 47, 12, 8]
+            bars = (0..<7).map { i in
+                let d = cal.date(byAdding: .day, value: i, to: monday)!
+                return bar("\(d.formatted(.dateTime.weekday(.abbreviated))), \(d.formatted(date))", i <= weekday ? shape[i] : 0)
+            }
+            ticks = (0..<7).map { BasecampTick(bar: $0, label: cal.date(byAdding: .day, value: $0, to: monday)!.formatted(.dateTime.weekday(.abbreviated))) }
+        case .all:
+            step = "week"
+            let weekday = (cal.component(.weekday, from: today) + 5) % 7
+            let monday = cal.date(byAdding: .day, value: -weekday, to: today)!
+            let n = 19
+            let start = cal.date(byAdding: .day, value: -7 * (n - 1), to: monday)!
+            let week = { (i: Int) in cal.date(byAdding: .day, value: 7 * i, to: start)! }
+            bars = (0..<n).map { i in bar("Week of \(week(i).formatted(date))", Int(110 + 90 * sin(Double(i) * 0.55) + Double(i) * 9)) }
+            ticks = (0..<6).map { k in (k * (n - 1) + 2) / 5 }.map { BasecampTick(bar: $0, label: week($0).formatted(date)) }
+        }
+        let turns = bars.reduce(0) { $0 + $1.turns }
+        let tokens = bars.reduce(Int64(0)) { $0 + ($1.tokens ?? 0) }
+        let (threads, failed) = switch range {
+        case .today: (6, 1)
+        case .week: (17, 3)
+        case .all: (142, 21)
+        }
+        let secs = turns * 74
+        let cost = { (t: Int64) in String(format: "$%.2f", Double(t) / 1e6 * 4.6) }
+        let totals = BasecampTotals(threads: threads, turns: turns, tokens: tokens, tokensLabel: tokensLabel(tokens), cost: cost(tokens),
+                                    failed: failed, agentSecs: secs, agentTime: secs < 3600 ? "\(secs / 60)m" : "\(secs / 3600)h \(secs % 3600 / 60)m")
+        // Each row's share of the range: threads, turns, tokens and failures alike.
+        func row(_ label: String, _ share: Double, project: ProjectRef? = nil, agent: AgentRef? = nil, failed f: Int = 0, priced: Bool = true) -> BasecampRow {
+            let t = Int64(Double(tokens) * share)
+            return BasecampRow(label: label, project: project, agent: agent, threads: max(1, Int((Double(threads) * share).rounded())),
+                               turns: Int(Double(turns) * share), tokens: t, tokensLabel: tokensLabel(t), cost: priced ? cost(t) : "—",
+                               failed: min(f, failed))
+        }
+        let named = projects.prefix(3).map(\.ref)
+        var byProject: [BasecampRow] = zip(named, [0.48, 0.27, 0.17]).map { p, share in
+            row(p.name, share, project: p, failed: p.id == named.first?.id ? failed : 0)
+        }
+        byProject.append(row("No project", 0.08))
+        let models = [
+            row("Claude Opus 5.5", 0.55, agent: claude, failed: 1),
+            row("GPT-6 Astra", 0.28, agent: codex, failed: failed - 1),
+            row("Claude Sonnet 5.5", 0.11, agent: claude),
+            row("Kimi K3", 0.06, agent: AgentRef(key: "opencode", name: "OpenCode", logo: "opencode"), priced: false),
+        ]
+        let chart = BasecampChart(step: step, bars: bars, ticks: ticks, turns: turns, total: "\(turns) \(turns == 1 ? "turn" : "turns")")
+        return (totals, chart, byProject, models)
+    }
+
+    /// "12K", "1.4M", as the Mac words tokens.
+    private static func tokensLabel(_ n: Int64) -> String {
+        switch n {
+        case ..<1_000: return "\(n)"
+        case ..<1_000_000: return "\(Int((Double(n) / 1e3).rounded()))K"
+        case ..<1_000_000_000:
+            let m = Double(n) / 1e6
+            return m.truncatingRemainder(dividingBy: 1) < 0.05 ? "\(Int(m))M" : String(format: "%.1fM", m)
+        default:
+            let b = Double(n) / 1e9
+            return b.truncatingRemainder(dividingBy: 1) < 0.05 ? "\(Int(b))B" : String(format: "%.1fB", b)
+        }
     }
 
     // MARK: Notes

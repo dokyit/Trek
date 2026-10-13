@@ -67,6 +67,7 @@ final class MockHost: Backend {
         onState?(.connecting)
         seed()
         seedReach()
+        seedLinks()
         // What the Mac's composer shows for each: efforts per model, each thread's effort and access.
         let efforts = ["low", "medium", "high", "xhigh", "max"]
         agents = (agents + DemoMac.addedAgents).map { a in
@@ -144,7 +145,7 @@ final class MockHost: Backend {
             update(tid, push: false) { $0.unseen = false }
         case .ping:
             deliver(.pong(re: id))
-        case .useReset, .queueAction, .attachment, .backgroundOutput, .stopBackground, .icon:
+        case .useReset, .queueAction, .attachment, .backgroundOutput, .stopBackground, .icon, .noteAsset, .addNoteImage:
             takeParity(message, id: id)
         case .interrupt(let tid):
             ack(id)
@@ -688,6 +689,10 @@ final class MockHost: Backend {
               branch: "main", ago: 60 * 30, add: 18, del: 22),
             t("t-onboarding", "Onboarding copy pass", "p-field", "acp:gemini", "gemini-3-pro", .idle, section: .settled,
               branch: "main", ago: 60 * 24 * 4, add: 40, del: 37),
+            // Failed, then settled: history, not something waiting on you.
+            t("t-crash", "Trek crashed after using a reset", "p-trek", "codex", "gpt-6-astra", .failed,
+              needs: Needs(kind: .failed, text: "Client error: Protocol error (invalid_argument)"), section: .settled,
+              branch: "main", ago: 60 * 20),
         ]
         for th in threads { seq[th.id] = 0; items[th.id] = [] }
 
@@ -704,6 +709,14 @@ final class MockHost: Backend {
                   add: Int? = nil, del: Int? = nil) -> ItemBody {
             .tool(ToolCall(callId: UUID().uuidString, tool: kind, title: title, detail: detail, status: status, output: out, added: add, removed: del))
         }
+
+        // A crash report pasted whole: a message of a megabyte and more, with the underscores and
+        // backticks that make Markdown cut it into thousands of runs.
+        let report = (0..<14_000).map { i in
+            "\(i % 60)   Trek  0x00000001\(String(format: "%08lx", i * 2654435761 % 0xFFFF_FFFF)) __CFRUNLOOP_IS_CALLING_OUT_TO_AN_OBSERVER_CALLBACK_FUNCTION__ + \(i % 97) `crates/trek-app/src/remote/usage.rs:\(i % 400)` _dispatch_main_queue_drain"
+        }.joined(separator: "\n")
+        add("t-crash", .user(text: "I tried using a reset and clicking to use it. Trek crashed and struggled to reopen.\n-------------------------------------\nTranslated Report\n\n" + report, images: 0), at: now - 21 * 60 * m)
+        add("t-crash", .error("Client error: Protocol error (invalid_argument): the request was too large"))
 
         // Needs approval
         var id = "t-flaky"
@@ -834,6 +847,16 @@ final class MockHost: Backend {
         }
         // Its stream moves the seqs on each launch: a copy the phone kept from another is redrawn whole.
         rewritten[id] = seq[id]
+
+        // Maths typeset inline and on its own, and a live `trek-html` page.
+        id = "t-math"
+        threads.insert(t(id, "Bayes’ rule, with numbers", "p-trek", "claude-code", "claude-opus-5-5", .idle, section: .inbox,
+                         branch: "main", ago: 1), at: 3)
+        seq[id] = 0
+        items[id] = []
+        add(id, .user(text: DemoMac.mathAsk, images: 0), at: now - 4 * m)
+        add(id, .assistant(text: DemoMac.mathAnswer, streaming: false))
+        add(id, .turnEnd(tookSecs: 52))
 
         // `-TrekBigThread 3000`: a thread as long as a real day's work, to measure with.
         let big = DemoMac.bigThreadSize
@@ -1030,5 +1053,67 @@ extension MockHost {
             }
         }
         deliver(.searchResults(re: id, SearchResults(query: query, results: Array(results.prefix(limit)))), after: 0.35)
+    }
+}
+
+// MARK: Links between threads, and a note with a picture
+
+extension MockHost {
+    /// A thread whose agent started two threads and then handed its work to a fresh one, those
+    /// threads (each with its row back), and a note with a picture in it.
+    private func seedLinks() {
+        let now = Self.now
+        let m: Int64 = 60_000
+        let atlas = projects[2].ref
+        func row(_ id: String, _ title: String, agent key: String, model: String, _ state: RunState, needs: Needs? = nil,
+                 activity: String? = nil, ago: Int64) -> ThreadSummary {
+            let a = agents.first { $0.key == key }!
+            return ThreadSummary(id: id, title: title, project: atlas, agent: a.ref, model: model,
+                                 modelLabel: a.models.first { $0.id == model }?.label, runState: state, needs: needs,
+                                 section: needs != nil ? .inbox : state == .working ? .working : .inbox, unseen: false, pinned: false,
+                                 branch: "develop", worktree: false, activity: activity,
+                                 workingSince: state == .working ? now - ago * m : nil, updatedAt: now - ago * m, additions: 0, deletions: 0)
+        }
+        let lead = "t-split"
+        var docs = row("t-split-docs", "Document the v2 settings schema", agent: "codex", model: "gpt-6-astra", .working,
+                       activity: "Editing docs/settings.md", ago: 3)
+        docs.startedBy = lead
+        var tests = row("t-split-tests", "Migration tests for old settings files", agent: "claude-code", model: "claude-sonnet-5-5",
+                        .needsYou, needs: Needs(kind: .approval, text: "Run pnpm test settings"), ago: 5)
+        tests.startedBy = lead
+        var next = row("t-split-next", "Finish the settings migration", agent: "claude-code", model: "claude-opus-5-5", .idle, ago: 1)
+        next.continuedFrom = lead
+        let first = row(lead, "Split up the settings migration", agent: "claude-code", model: "claude-opus-5-5", .idle, ago: 2)
+        threads.insert(contentsOf: [first, next, docs, tests], at: 4)
+        for t in [first, next, docs, tests] { seq[t.id] = 0; items[t.id] = [] }
+
+        func add(_ tid: String, _ body: ItemBody, at: Int64? = nil) {
+            let n = nextSeq(tid)
+            items[tid, default: []].append(TItem(id: newID(tid, body), seq: n, at: at, body: body))
+        }
+        func link(_ kind: ThreadLinkKind, _ t: ThreadSummary, _ state: LinkedThreadState? = nil) -> ItemBody {
+            .threadLink(ThreadLink(link: kind, threadId: t.id, title: t.title, agent: t.agent, state: state))
+        }
+        add(lead, .user(text: "The settings migration is too big for one go. Split it: docs and tests in threads of their own, and carry on with the code.", images: 0), at: now - 40 * m)
+        add(lead, .assistant(text: "I'll start a thread for the schema docs and one for the migration tests, so they run alongside, then do the loader myself.", streaming: false))
+        add(lead, link(.started, docs, .working))
+        add(lead, link(.started, tests, .working))
+        add(lead, .assistant(text: "Both are running. The loader now reads v1 files and writes v2; my context is nearly full, so I'm handing the rest to a fresh thread with a brief.", streaming: false))
+        add(lead, link(.continuedIn, next, .working))
+        add(lead, .turnEnd(tookSecs: 214))
+
+        add(next.id, link(.continuedFrom, first))
+        add(next.id, .user(text: "You're taking over from another thread. Goal: migrate settings to v2. Done: the loader reads v1 and writes v2. Next: drop the v1 writer, then run the suite.", images: 0), at: now - 6 * m)
+        add(next.id, .assistant(text: "The v1 writer is gone and the suite passes. The docs and tests threads are still yours to check.", streaming: false))
+        add(next.id, .turnEnd(tookSecs: 260))
+
+        for kid in [docs, tests] {
+            add(kid.id, link(.startedBy, first))
+            add(kid.id, .user(text: kid.id == docs.id ? "Write docs/settings.md for the v2 schema: every key, its type and default." : "Add tests that load every v1 settings file in fixtures/ and check the v2 result.", images: 0), at: now - 30 * m)
+        }
+        add(docs.id, .tool(ToolCall(callId: "c-docs", tool: .edit, title: "Edit", detail: "docs/settings.md", status: .running, output: "", added: nil, removed: nil)))
+        add(tests.id, .approval(ApprovalRequest(requestId: "r-split", title: "Run command", detail: "pnpm test settings", state: .pending)))
+
+        notes.append(Note(id: "n-sketch", title: "Sync flow", body: "# Sync flow\n\nFrom the whiteboard after standup:\n\n![Whiteboard](\(DemoMac.whiteboard))\n\n- [ ] Queue sends while offline\n- [x] Retry with backoff", modified: now - 12 * m))
     }
 }

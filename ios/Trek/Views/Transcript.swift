@@ -6,8 +6,12 @@ struct UserBubble: View {
     var threadID = ""
     var itemID = ""
     @Environment(AppModel.self) private var model
+    @State private var showingAll = false
 
     var body: some View {
+        // A pasted log or crash report can run to megabytes: the bubble shows its start, and the
+        // whole of it opens in a sheet that lays it out a stretch at a time.
+        let preview = LongText.preview(text)
         HStack {
             Spacer(minLength: 48)
             VStack(alignment: .trailing, spacing: 6) {
@@ -17,8 +21,17 @@ struct UserBubble: View {
                     Label("\(images) image\(images == 1 ? "" : "s")", systemImage: "photo")
                         .font(.ui(.caption)).foregroundStyle(Trek.muted)
                 }
-                RichText(markdown: text, size: 16)
+                RichText(markdown: preview ?? text, size: 16)
                     .lineSpacing(2)
+                if preview != nil {
+                    Button { showingAll = true } label: {
+                        Label("Show all · \(LongText.size(text))", systemImage: "text.alignleft")
+                            .font(.ui(.footnote).weight(.medium))
+                            .foregroundStyle(Trek.link)
+                    }
+                    .buttonStyle(.plain)
+                    .sheet(isPresented: $showingAll) { LongTextSheet(title: "Your message", text: text) }
+                }
             }
             .padding(.horizontal, 15)
             .padding(.vertical, 11)
@@ -319,11 +332,32 @@ struct WorkingLine: View {
     var agentKey: String
     var since: Int64?
     var activity: String?
+    /// The model at work ("Opus 5.5"), named beside the agent's logo.
+    var model: String? = nil
+    /// Sub-agents at work, of how many it has.
+    var subAgents: (running: Int, total: Int) = (0, 0)
     @MotionAllowed private var motion
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             TrailView(id: threadID, still: !motion)
+            if model != nil || subAgents.total > 0 {
+                // Who's at it: the model, and the sub-agents out of how many.
+                HStack(spacing: 6) {
+                    if let model {
+                        AgentGlyph(key: agentKey, size: 13)
+                        Text(model).foregroundStyle(Trek.foreground.opacity(0.8))
+                    }
+                    if subAgents.total > 0 {
+                        if model != nil { Text("·").foregroundStyle(Trek.muted.opacity(0.6)) }
+                        Image(systemName: "person.2.fill").font(.system(size: 10, weight: .semibold))
+                        Text("\(subAgents.running)/\(subAgents.total) sub-agents").monospacedDigit()
+                    }
+                }
+                .font(.ui(.footnote).weight(.medium))
+                .foregroundStyle(Trek.muted)
+                .lineLimit(1)
+            }
             TimelineView(.periodic(from: .now, by: 1)) { ctx in
                 HStack(spacing: 7) {
                     AgentGlyph(key: agentKey, size: 15)
