@@ -91,6 +91,8 @@ fn tailscale_is_the_tunnel_it_names_not_any_shared_address() {
     // Carrier-grade NAT on Wi-Fi (a hotspot) is neither the LAN nor Tailscale.
     let hotspot = ifs(&[("en0", "100.72.3.4")]);
     assert_eq!(Addresses::from_interfaces(&hotspot, None), Addresses::default());
+    // An IPv6-only hotspot leaves the Mac only macOS's own 192.0.0.2: nothing a phone can dial.
+    assert_eq!(Addresses::from_interfaces(&ifs(&[("en0", "192.0.0.2")]), None), Addresses::default());
     // A tunnel in that range is; a VPN's private tunnel address isn't the LAN.
     let tailnet = ifs(&[("utun3", "10.8.0.2"), ("en0", "192.168.1.2"), ("utun4", "100.101.1.2")]);
     let found = Addresses::from_interfaces(&tailnet, None);
