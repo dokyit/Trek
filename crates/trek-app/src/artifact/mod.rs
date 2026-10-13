@@ -61,6 +61,15 @@ pub(crate) struct Doc {
     pub hosts: Vec<String>,
     /// The block as written, fences and all (shown as code when artifacts are off).
     pub source: Arc<str>,
+    /// A video file from a note this plays (`html` is the player's page, `core::VIDEO_HTML`).
+    pub media: Option<std::path::PathBuf>,
+}
+
+impl Doc {
+    /// The policy it's served under.
+    fn csp(&self) -> &'static str {
+        if self.media.is_some() { core::VIDEO_CSP } else { core::CSP }
+    }
 }
 
 #[derive(Clone)]
@@ -104,7 +113,7 @@ impl MarkdownPlugin for ArtifactPlugin {
         } else if html.len() > core::MAX_BYTES {
             Block::TooBig { bytes: html.len(), source: source.into() }
         } else {
-            Block::Ready(Arc::new(Doc { html: html.into(), hash: core::content_hash(html), title: title.clone(), hosts: core::hosts(html, 3), source: source.into() }))
+            Block::Ready(Arc::new(Doc { html: html.into(), hash: core::content_hash(html), title: title.clone(), hosts: core::hosts(html, 3), source: source.into(), media: None }))
         };
         let text = format!("Interactive artifact{}", title.map(|t| format!(": {t}")).unwrap_or_default());
         Some(MarkdownNode::new(PLUGIN, block).text(text.clone()).markdown(source.to_string()).accessibility_label(text))
@@ -217,10 +226,21 @@ fn building(title: Option<&str>, bytes: usize, key: usize, window: &mut Window, 
 
 /// What the header says under the title: that it's live, and where it reaches.
 fn summary_of(doc: &Doc) -> String {
+    if let Some(file) = &doc.media {
+        let kind = file.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
+        let size = std::fs::metadata(file).ok().map(|m| crate::image_preview::file_size(m.len()));
+        return ["Video".to_string(), kind].into_iter().filter(|p| !p.is_empty()).chain(size).collect::<Vec<_>>().join(" · ");
+    }
     match doc.hosts.as_slice() {
         [] => "Interactive · self-contained, in a sandbox".to_string(),
         hosts => format!("Interactive · loads from {}", hosts.join(", ")),
     }
+}
+
+/// A video in a note, played in place in a card; `None` when interactive artifacts are off (the
+/// note shows its file chip instead).
+pub(crate) fn video_card(doc: &Arc<Doc>, key: usize, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
+    enabled(cx).then(|| card(doc, key, window, cx))
 }
 
 fn card(doc: &Arc<Doc>, key: usize, window: &mut Window, cx: &mut App) -> AnyElement {
@@ -233,22 +253,28 @@ fn card(doc: &Arc<Doc>, key: usize, window: &mut Window, cx: &mut App) -> AnyEle
     let height = s.height;
     let status = s.status();
     let focus = s.focus.clone();
-    let title = doc.title.clone().unwrap_or_else(|| "Interactive artifact".to_string());
+    let video = doc.media.clone();
+    let title = doc.title.clone().unwrap_or_else(|| if video.is_some() { "Video" } else { "Interactive artifact" }.to_string());
     let group = SharedString::from(format!("artifact-group-{key}"));
     let actions = {
         let (reload, expand, html) = (state.clone(), doc.clone(), doc.html.to_string());
-        h_flex()
-            .flex_none()
-            .gap(px(2.))
-            .opacity(0.72)
-            .group_hover(group.clone(), |s| s.opacity(1.))
-            .child(action(SharedString::from(format!("artifact-reload-{key}")), Lucide::RefreshCw, "Reload", &look, move |_, cx| reload.update(cx, |s, cx| s.reload(cx))))
-            .child(action(SharedString::from(format!("artifact-copy-{key}")), Lucide::Copy, "Copy source", &look, move |window, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(html.clone()));
-                crate::toast::push(window, "Artifact source copied", cx);
-            }))
-            .child(action(SharedString::from(format!("artifact-expand-{key}")), Lucide::Maximize2, "Expand", &look, move |window, cx| expand_artifact(&expand, window, cx)))
-            .into_any_element()
+        let bar = h_flex().flex_none().gap(px(2.)).opacity(0.72).group_hover(group.clone(), |s| s.opacity(1.));
+        let expand_button = action(SharedString::from(format!("artifact-expand-{key}")), Lucide::Maximize2, "Expand", &look, move |window, cx| expand_artifact(&expand, window, cx));
+        match video {
+            // A video: open it in its own app, or expand it. No reload or source to copy.
+            Some(file) => bar
+                .child(action(SharedString::from(format!("artifact-open-{key}")), Lucide::SquareArrowOutUpRight, "Open in the default app", &look, move |_, cx| cx.open_with_system(&file)))
+                .child(expand_button)
+                .into_any_element(),
+            None => bar
+                .child(action(SharedString::from(format!("artifact-reload-{key}")), Lucide::RefreshCw, "Reload", &look, move |_, cx| reload.update(cx, |s, cx| s.reload(cx))))
+                .child(action(SharedString::from(format!("artifact-copy-{key}")), Lucide::Copy, "Copy source", &look, move |window, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(html.clone()));
+                    crate::toast::push(window, "Artifact source copied", cx);
+                }))
+                .child(expand_button)
+                .into_any_element(),
+        }
     };
     let body = div()
         .id(("artifact-body", key))
@@ -264,10 +290,10 @@ fn card(doc: &Arc<Doc>, key: usize, window: &mut Window, cx: &mut App) -> AnyEle
         .child(status_layer(status, &look))
         .child(SurfaceElement { state: state.clone() });
     shell(SharedString::from(format!("trek-artifact-{key}")), &look, cx)
-        .aria_label(format!("Interactive artifact: {title}"))
+        .aria_label(if doc.media.is_some() { format!("Video: {title}") } else { format!("Interactive artifact: {title}") })
         .test_support()
         .group(group)
-        .child(header(Lucide::Box, title_text(title, &look), actions, summary_text(summary_of(doc), &look), &look))
+        .child(header(if doc.media.is_some() { Lucide::Play } else { Lucide::Box }, title_text(title, &look), actions, summary_text(summary_of(doc), &look), &look))
         .child(body)
         .into_any_element()
 }
@@ -550,7 +576,7 @@ impl ArtifactState {
         }
         let restyle = !new_doc && !self.css.is_empty();
         self.css = css;
-        *self.served.borrow_mut() = core::document(&self.doc.html, &self.css);
+        *self.served.borrow_mut() = core::document_with(&self.doc.html, &self.css, self.doc.csp());
         if let Some(surface) = &self.surface {
             if new_doc {
                 self.loaded = false;
@@ -582,6 +608,8 @@ impl ArtifactState {
         let spec = native::Spec {
             origin: core::origin(self.doc.hash, cfg!(windows)),
             document: self.served.clone(),
+            csp: self.doc.csp(),
+            media: self.doc.media.clone(),
             bootstrap: core::bootstrap(&self.nonce),
             background: self.background,
             events: tx,

@@ -33,6 +33,10 @@ pub struct Spec {
     pub origin: String,
     /// The document as served; replaced in place (a theme switch), it's what a reload gets.
     pub document: Rc<RefCell<String>>,
+    /// The policy it's served under.
+    pub csp: &'static str,
+    /// A video file a note plays: served, in pieces as the player asks, at `MEDIA_PATH`.
+    pub media: Option<std::path::PathBuf>,
     /// The bootstrap script, with the view's secret.
     pub bootstrap: String,
     /// The card's colour: what shows where the page draws nothing (Windows; macOS is see-through).
@@ -41,13 +45,15 @@ pub struct Spec {
 }
 
 /// Serve the document at `/` and nothing anywhere else, with the CSP, never cached.
-fn respond(document: &str, path: &str) -> wry::http::Response<Cow<'static, [u8]>> {
+fn respond(document: &str, csp: &str, media: Option<&std::path::Path>, path: &str, range: Option<&str>) -> wry::http::Response<Cow<'static, [u8]>> {
     let base = wry::http::Response::builder().header("Cache-Control", "no-store").header("X-Content-Type-Options", "nosniff");
     if path == "/" || path.is_empty() {
         base.header("Content-Type", "text/html; charset=utf-8")
-            .header("Content-Security-Policy", trek_core::artifact::CSP)
+            .header("Content-Security-Policy", csp)
             .body(Cow::Owned(document.as_bytes().to_vec()))
             .unwrap_or_default()
+    } else if let (Some(file), true) = (media, path == trek_core::artifact::MEDIA_PATH) {
+        crate::ide::preview::serve(file, range).map(Cow::Owned)
     } else {
         base.status(404).body(Cow::Borrowed(&[][..])).unwrap_or_default()
     }
@@ -67,7 +73,7 @@ impl NativeSurface {
         let handle = raw_window_handle::HasWindowHandle::window_handle(window).map_err(|e| e.to_string())?.as_raw();
         let clip = platform::Clip::new(handle).ok_or("Couldn't make the web view's container.")?;
         let parent = clip.handle();
-        let Spec { origin, document, bootstrap, background, events } = spec;
+        let Spec { origin, document, csp, media, bootstrap, background, events } = spec;
         let (t1, t2, t3) = (events.clone(), events.clone(), events);
         let nav_origin = origin.clone();
         // A profile of the artifacts' own, beside the Browser panel's and not in it: a page an
@@ -92,7 +98,7 @@ impl NativeSurface {
             .with_autoplay(false)
             .with_hotkeys_zoom(false)
             .with_initialization_script_for_main_only(bootstrap, true)
-            .with_custom_protocol(trek_core::artifact::SCHEME.into(), move |_, request| respond(&document.borrow(), request.uri().path()))
+            .with_custom_protocol(trek_core::artifact::SCHEME.into(), move |_, request| respond(&document.borrow(), csp, media.as_deref(), request.uri().path(), request.headers().get("range").and_then(|r| r.to_str().ok())))
             .with_ipc_handler(move |request| {
                 let _ = t1.try_send(Event::Message(request.into_body()));
             })
@@ -408,17 +414,36 @@ mod tests {
 
     #[test]
     fn the_document_is_served_at_its_root_with_the_csp_and_nothing_else_is() {
-        let page = respond("<p>hi</p>", "/");
+        let page = respond("<p>hi</p>", trek_core::artifact::CSP, None, "/", None);
         assert_eq!(page.status(), 200);
         assert_eq!(page.headers()["content-security-policy"], trek_core::artifact::CSP);
         assert_eq!(page.headers()["content-type"], "text/html; charset=utf-8");
         assert_eq!(page.headers()["cache-control"], "no-store");
         assert_eq!(&page.body()[..], b"<p>hi</p>");
         for other in ["/favicon.ico", "/../../etc/passwd", "/x.js"] {
-            let r = respond("<p>hi</p>", other);
+            let r = respond("<p>hi</p>", trek_core::artifact::CSP, None, other, None);
             assert_eq!(r.status(), 404, "{other}");
             assert!(r.body().is_empty());
         }
+    }
+
+    #[test]
+    fn a_notes_video_is_served_in_pieces_at_its_path_and_nothing_else() {
+        let file = std::env::temp_dir().join(format!("trek-media-{}.mp4", std::process::id()));
+        std::fs::write(&file, (0..=255u8).collect::<Vec<u8>>()).unwrap();
+        let csp = trek_core::artifact::VIDEO_CSP;
+        let media = trek_core::artifact::MEDIA_PATH;
+        let part = respond("<video>", csp, Some(&file), media, Some("bytes=10-19"));
+        assert_eq!(part.status(), 206);
+        assert_eq!(&part.body()[..], &(10..20u8).collect::<Vec<u8>>()[..]);
+        assert_eq!(part.headers()["content-range"], "bytes 10-19/256");
+        assert_eq!(part.headers()["content-type"], "video/mp4");
+        assert_eq!(respond("<video>", csp, Some(&file), media, None).status(), 200);
+        // The page carries the video policy; another path, or a document with no file, is a 404.
+        assert_eq!(respond("<video>", csp, Some(&file), "/", None).headers()["content-security-policy"], csp);
+        assert_eq!(respond("<video>", csp, Some(&file), "/other.mp4", None).status(), 404);
+        assert_eq!(respond("<p>hi</p>", trek_core::artifact::CSP, None, media, Some("bytes=0-1")).status(), 404);
+        let _ = std::fs::remove_file(file);
     }
 
     #[test]

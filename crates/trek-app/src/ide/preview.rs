@@ -802,7 +802,7 @@ fn parse_range(range: Option<&str>, len: u64) -> Result<Option<(u64, u64)>, ()> 
 }
 
 /// The answer to a request for the file: all of it, or the range asked for.
-fn serve(path: &Path, range: Option<&str>) -> wry::http::Response<Vec<u8>> {
+pub(crate) fn serve(path: &Path, range: Option<&str>) -> wry::http::Response<Vec<u8>> {
     use std::io::{Read as _, Seek as _};
     let mime = mime(path);
     let fail = |status: u16| wry::http::Response::builder().status(status).body(Vec::new()).unwrap_or_default();

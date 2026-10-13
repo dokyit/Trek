@@ -69,7 +69,7 @@ fn pictures_go_into_a_note_and_show_in_every_mode() {
         let trek = open(cx);
         trek.click(cx, "open-notes");
         trek.render(cx);
-        assert!(trek.visible(cx, "note-image"), "Add image is on the toolbar");
+        assert!(trek.visible(cx, "note-attach"), "Attach is on the toolbar");
         let notes = notes_view(&trek, cx);
         let outside = trek_core::paths::data_dir().join("from-finder");
         std::fs::create_dir_all(&outside).unwrap();
@@ -87,7 +87,12 @@ fn pictures_go_into_a_note_and_show_in_every_mode() {
         assert!(body.starts_with("Trip\n![Whiteboard](attachments/"), "{body:?}");
         let kept = trek_core::notes::notes_dir().join(&image.link);
         assert_eq!(std::fs::read(&kept).unwrap(), std::fs::read(&shot).unwrap(), "a copy kept with the notes");
-        assert!(!body.contains("README"), "only pictures go in");
+        // A file that isn't a picture is attached too: a link to its copy, by its name.
+        let files = trek_core::notes::files(&body);
+        assert_eq!(files.len(), 1, "{body:?}");
+        assert_eq!(files[0].name, "README.txt");
+        assert!(files[0].link.ends_with(".txt"), "{}", files[0].link);
+        assert_eq!(std::fs::read(trek_core::notes::notes_dir().join(&files[0].link)).unwrap(), b"not a picture");
 
         // Split (the default): the preview draws it, fit to its width in its own proportions.
         trek.render(cx);
@@ -103,6 +108,7 @@ fn pictures_go_into_a_note_and_show_in_every_mode() {
         notes.update(cx, |n, cx| n.set_mode(Mode::Write, cx));
         trek.render(cx);
         assert!(trek.visible(cx, "note-images") && trek.visible(cx, ("note-thumb", 0usize)));
+        assert!(trek.visible(cx, ("note-file", 1usize)), "the attached file is a tile beside the picture");
         assert!(!trek.visible(cx, "note-preview"));
 
         // A picture that isn't there: a placeholder that says so, nothing worse.
@@ -118,5 +124,62 @@ fn pictures_go_into_a_note_and_show_in_every_mode() {
         assert!(!kept.exists(), "out of the notes' own attachments");
         let bin: PathBuf = trek_core::notes::notes_dir().join("Deleted").join(&image.link);
         assert!(bin.exists(), "kept beside the deleted note");
+    });
+}
+
+/// A note holding `clip` attached from a made-up `.mp4`, shown as it reads.
+async fn note_with_video(trek: &Trek, cx: &mut TestAppContext) -> String {
+    trek.click(cx, "open-notes");
+    trek.render(cx);
+    let notes = notes_view(trek, cx);
+    let clip = trek_core::paths::data_dir().join("Trip-clip.mp4");
+    std::fs::write(&clip, b"not really a movie").unwrap();
+    trek.window(cx, |window, cx| notes.update(cx, |n, cx| n.set_text("Trip\n".into(), window, cx)));
+    trek.window(cx, |window, cx| notes.update(cx, |n, cx| n.add_files(vec![clip.clone()], window, cx)));
+    let body = landed(cx, "](attachments/");
+    assert!(body.contains("[Trip-clip.mp4](attachments/") && body.trim_end().ends_with(".mp4)"), "{body:?}");
+    notes.update(cx, |n, cx| n.set_mode(Mode::Preview, cx));
+    trek.window(cx, |window, _| window.activate_window());
+    for _ in 0..3 {
+        trek.render(cx);
+    }
+    body
+}
+
+#[test]
+fn a_video_plays_in_place_in_a_card_of_the_notes_preview() {
+    run(async |cx| {
+        let log = crate::artifact::fake_web(true).unwrap();
+        let trek = open(cx);
+        let body = note_with_video(&trek, cx).await;
+        let cards = trek.window(cx, |window, cx| crate::artifact::placements(window, cx));
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(cards[0].title.as_deref(), Some("Trip-clip.mp4"));
+        assert!(cards[0].has_view && log.borrow().made == 1, "a web view plays it");
+        // The view is the player's page for the file, which is the only thing it loads.
+        assert!(body.contains("attachments/"));
+        let link = trek_core::notes::files(&body).pop().unwrap().link;
+        assert!(trek_core::notes::notes_dir().join(link).is_file());
+        // Another kind of file stays a chip.
+        let notes = notes_view(&trek, cx);
+        let pdf = trek_core::paths::data_dir().join("Itinerary.pdf");
+        std::fs::write(&pdf, b"%PDF-1.4").unwrap();
+        trek.window(cx, |window, cx| notes.update(cx, |n, cx| n.add_files(vec![pdf], window, cx)));
+        landed(cx, ".pdf)");
+        for _ in 0..3 {
+            trek.render(cx);
+        }
+        assert_eq!(trek.window(cx, |window, cx| crate::artifact::placements(window, cx)).len(), 1, "only the video is a card");
+    });
+}
+
+#[test]
+fn with_artifacts_off_a_video_is_a_chip_that_opens_in_quick_look() {
+    run(async |cx| {
+        let log = crate::artifact::fake_web(true).unwrap();
+        let trek = super::harness::open_with(cx, |s| s.general.interactive_artifacts = false);
+        note_with_video(&trek, cx).await;
+        assert!(trek.window(cx, |window, cx| crate::artifact::placements(window, cx)).is_empty());
+        assert_eq!(log.borrow().made, 0);
     });
 }

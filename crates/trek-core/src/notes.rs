@@ -153,14 +153,85 @@ pub fn add_image_file(notes_dir: &Path, src: &Path) -> std::io::Result<String> {
     add_image(notes_dir, &std::fs::read(src)?, kind)
 }
 
+/// The kinds of video a note plays in place (the engine's own player: what it can't play opens
+/// in Quick Look from the file's chip).
+pub const VIDEO_KINDS: &[&str] = &["mp4", "m4v", "mov", "webm"];
+
+/// Whether `link` (or a file name) is a video a note plays.
+pub fn is_video(link: &str) -> bool {
+    link.rsplit_once('.').is_some_and(|(_, kind)| VIDEO_KINDS.contains(&kind.to_ascii_lowercase().as_str()))
+}
+
+/// The longest extension an attached file keeps in its name.
+const EXTENSION_MAX: usize = 12;
+
+/// Keep a copy of any file `src` (a video, a PDF, a photo) with the notes, named by its content
+/// like an image, so the same file twice is one. Read once, in pieces, so a long video isn't
+/// held in memory. Returns its link from a note (`attachments/<hash>.<ext>`).
+pub fn add_file(notes_dir: &Path, src: &Path) -> std::io::Result<String> {
+    use sha2::Digest as _;
+    use std::io::{Read as _, Write as _};
+    let mut from = std::fs::File::open(src)?;
+    if !from.metadata()?.is_file() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "it isn't a file"));
+    }
+    let dir = attachments_dir(notes_dir);
+    std::fs::create_dir_all(&dir)?;
+    let tmp = dir.join(format!(".{}-{}.tmp", std::process::id(), crate::store::now_ms()));
+    let kept = (|| {
+        let (mut hasher, mut to, mut buf, mut len) = (sha2::Sha256::new(), std::fs::File::create(&tmp)?, vec![0u8; 1 << 20], 0u64);
+        loop {
+            let n = from.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            to.write_all(&buf[..n])?;
+            len += n as u64;
+        }
+        if len == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "the file is empty"));
+        }
+        Ok(hex::encode(hasher.finalize()))
+    })();
+    let hash = match kept {
+        Ok(hash) => hash,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
+    let kind: String = src.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let kind = if !kind.is_empty() && kind.len() <= EXTENSION_MAX && kind.chars().all(|c| c.is_ascii_alphanumeric()) { format!(".{kind}") } else { String::new() };
+    let name = format!("{}{kind}", &hash[..32]);
+    let path = dir.join(&name);
+    if path.is_file() {
+        let _ = std::fs::remove_file(&tmp);
+    } else {
+        std::fs::rename(&tmp, &path)?;
+    }
+    Ok(format!("{ATTACHMENTS}/{name}"))
+}
+
+/// `text` as it can stand in a markdown link's brackets: no brackets or backslashes, no
+/// control characters.
+fn bracketed(text: &str) -> String {
+    text.chars().filter(|c| !matches!(c, '[' | ']' | '\\')).map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().trim().to_string()
+}
+
+/// `link` as a markdown destination: in `<>` when it has spaces or brackets.
+fn destination(link: &str) -> String {
+    if link.contains([' ', '(', ')', '<', '>']) { format!("<{link}>") } else { link.to_string() }
+}
+
 /// The markdown that shows the image at `link`, described by `alt`.
 pub fn image_markdown(alt: &str, link: &str) -> String {
-    let alt: String = alt.chars().filter(|c| !matches!(c, '[' | ']' | '\\')).map(|c| if c.is_control() { ' ' } else { c }).collect();
-    if link.contains([' ', '(', ')', '<', '>']) {
-        format!("![{}](<{link}>)", alt.trim())
-    } else {
-        format!("![{}]({link})", alt.trim())
-    }
+    format!("![{}]({})", bracketed(alt), destination(link))
+}
+
+/// The markdown that links the file at `link` (not an image), named `name`.
+pub fn file_markdown(name: &str, link: &str) -> String {
+    format!("[{}]({})", bracketed(name), destination(link))
 }
 
 /// Put `block` (whole lines, an image or several) in place of the selection, on lines of its
@@ -198,9 +269,45 @@ pub fn images(body: &str) -> Vec<ImageRef> {
     out
 }
 
+/// A file a note links from its `attachments/` (`[name](attachments/…)`, not an image), and
+/// where that is in the note.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileRef {
+    pub name: String,
+    pub link: String,
+    pub range: Range<usize>,
+}
+
+/// The files a note links from its `attachments/` that aren't images, in order.
+pub fn files(body: &str) -> Vec<FileRef> {
+    let prefix = format!("{ATTACHMENTS}/");
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(i) = body[from..].find('[') {
+        let open = from + i;
+        from = open + 1;
+        if body[..open].ends_with('!') {
+            continue;
+        }
+        let Some((name, link, end)) = link_at(body, open) else { continue };
+        let shown = link.strip_prefix("./").unwrap_or(&link);
+        let kind = shown.rsplit_once('.').map(|(_, k)| k.to_ascii_lowercase()).unwrap_or_default();
+        if shown.starts_with(&prefix) && !IMAGE_KINDS.contains(&kind.as_str()) {
+            out.push(FileRef { name, link, range: open..end });
+            from = end;
+        }
+    }
+    out
+}
+
 /// The image whose markdown starts at `start` (on its `!`): its alt text, link and where it ends.
 fn image_at(body: &str, start: usize) -> Option<(String, String, usize)> {
-    let rest = &body[start + 2..];
+    link_at(body, start + 1)
+}
+
+/// The link whose markdown starts at `open` (on its `[`): its text, destination and where it ends.
+fn link_at(body: &str, open: usize) -> Option<(String, String, usize)> {
+    let rest = &body[open + 1..];
     let close = rest.find(']')?;
     let alt = &rest[..close];
     if alt.contains('\n') {
@@ -216,7 +323,7 @@ fn image_at(body: &str, start: usize) -> Option<(String, String, usize)> {
         (link.clone(), line.len() - line.trim_start().len() + link.len())
     };
     let paren = line[used..].find(')')?;
-    let end = start + 2 + close + 2 + used + paren + 1;
+    let end = open + 1 + close + 2 + used + paren + 1;
     Some((alt.to_string(), link, end))
 }
 
@@ -245,18 +352,24 @@ fn title_of(body: &str) -> String {
     body.lines().map(plain).find(|l| !l.is_empty()).map(|l| l.chars().take(80).collect()).unwrap_or_else(|| "Untitled".into())
 }
 
-/// `![alt](link)` as its alt text, for a line read as text.
+/// `![alt](link)` as its alt text and `[name](attachments/…)` as its name, for a line read as
+/// text.
 fn images_as_alt(line: &str) -> std::borrow::Cow<'_, str> {
-    let found = images(line);
+    let mut found: Vec<(Range<usize>, String)> = images(line).into_iter().map(|i| (i.range, i.alt)).collect();
+    found.extend(files(line).into_iter().map(|f| (f.range, f.name)));
     if found.is_empty() {
         return line.into();
     }
+    found.sort_by_key(|(range, _)| range.start);
     let mut out = String::with_capacity(line.len());
     let mut at = 0;
-    for image in found {
-        out.push_str(&line[at..image.range.start]);
-        out.push_str(&image.alt);
-        at = image.range.end;
+    for (range, text) in found {
+        if range.start < at {
+            continue;
+        }
+        out.push_str(&line[at..range.start]);
+        out.push_str(&text);
+        at = range.end;
     }
     out.push_str(&line[at..]);
     out.into()
@@ -628,6 +741,41 @@ mod tests {
         assert!(add_image(&dir, b"", "png").is_err());
         let names: Vec<_> = std::fs::read_dir(attachments_dir(&dir)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
         assert!(names.iter().all(|n| !n.ends_with(".tmp")), "nothing half-written left: {names:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn any_file_is_kept_with_the_notes_and_linked_by_name() {
+        let dir = temp_notes("files");
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("Trip Clip.MOV");
+        std::fs::write(&clip, b"movie bytes").unwrap();
+        let link = add_file(&dir, &clip).unwrap();
+        assert!(link.starts_with("attachments/") && link.ends_with(".mov"), "{link}");
+        assert_eq!(std::fs::read(dir.join(&link)).unwrap(), b"movie bytes");
+        assert_eq!(add_file(&dir, &clip).unwrap(), link, "the same content is the same file");
+        // No extension: just the hash. A strange one isn't carried into the name.
+        let bare = dir.join("LICENSE");
+        std::fs::write(&bare, b"words").unwrap();
+        assert!(!add_file(&dir, &bare).unwrap().contains('.'));
+        // Empty files and folders are refused, leaving nothing half-written.
+        let empty = dir.join("empty.pdf");
+        std::fs::write(&empty, b"").unwrap();
+        assert!(add_file(&dir, &empty).is_err() && add_file(&dir, &dir).is_err());
+        let names: Vec<_> = std::fs::read_dir(attachments_dir(&dir)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+        // Linked by name, found again in the note, and its copy goes with the note's attachments.
+        let md = file_markdown("Trip [Clip].MOV", &link);
+        assert_eq!(md, format!("[Trip Clip.MOV]({link})"));
+        let body = format!("Notes\n{md}\n![pic](attachments/a.png)\n[web](https://example.com) [other](docs/x.pdf)\n");
+        let found = files(&body);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!((found[0].name.as_str(), found[0].link.as_str()), ("Trip Clip.MOV", link.as_str()));
+        assert_eq!(&body[found[0].range.clone()], md);
+        assert_eq!(attachment_names(&body).len(), 2);
+        assert_eq!(images(&body).len(), 1);
+        assert!(is_video(&link) && !is_video("attachments/a.pdf") && !is_video("mov"));
+        assert_eq!(plain(&format!("see {md} and ![pic](attachments/a.png)")), "see Trip Clip.MOV and pic", "the list reads names, not links");
         let _ = std::fs::remove_dir_all(dir);
     }
 

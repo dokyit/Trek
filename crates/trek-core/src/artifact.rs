@@ -253,8 +253,23 @@ pub fn theme_update_script(css: &str) -> String {
 /// own styles come after and win. A fragment (no
 /// `<html>` or `<head>`) is made a whole document with it as the body.
 pub fn document(html: &str, theme_css: &str) -> String {
+    document_with(html, theme_css, CSP)
+}
+
+/// What a note's video plays under: nothing runs, nothing loads but the file Trek serves it.
+pub const VIDEO_CSP: &str = "default-src 'none'; media-src 'self'; style-src 'unsafe-inline'; form-action 'none'; object-src 'none'; base-uri 'none'";
+
+/// Where a video's file is served from, in its own document.
+pub const MEDIA_PATH: &str = "/media";
+
+/// The page a note's video plays in: the engine's own player, still until played, as wide as
+/// the card and as tall as the video (`MAX_HEIGHT` at most; it fits inside that).
+pub const VIDEO_HTML: &str = "<style>html,body{margin:0;background:transparent}video{display:block;width:100%;height:auto;max-height:720px;background:#000;object-fit:contain}</style><video src=\"/media#t=0.001\" controls controlslist=\"nodownload\" disablepictureinpicture preload=\"metadata\" playsinline></video>";
+
+/// `document` under another policy (`csp`).
+pub fn document_with(html: &str, theme_css: &str, csp: &str) -> String {
     let ours = format!(
-        "<meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style id=\"{THEME_STYLE_ID}\">{}</style>",
+        "<meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style id=\"{THEME_STYLE_ID}\">{}</style>",
         theme_css.replace("</", "<\\/")
     );
     let lower = html.to_ascii_lowercase();
@@ -455,6 +470,15 @@ mod tests {
             font_size: 14.5,
             radius: 8.,
         }
+    }
+
+    #[test]
+    fn a_notes_video_plays_under_a_policy_that_allows_its_own_file_and_nothing_else() {
+        assert!(VIDEO_CSP.contains("media-src 'self'") && VIDEO_CSP.starts_with("default-src 'none'"));
+        assert!(!VIDEO_CSP.contains("script-src") && !VIDEO_CSP.contains("https:") && !VIDEO_CSP.contains("connect-src"));
+        let doc = document_with(VIDEO_HTML, "", VIDEO_CSP);
+        assert!(doc.contains(&format!("content=\"{VIDEO_CSP}\"")) && !doc.contains(&format!("content=\"{CSP}\"")));
+        assert!(VIDEO_HTML.contains(&format!("src=\"{MEDIA_PATH}")));
     }
 
     #[test]

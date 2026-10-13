@@ -217,7 +217,7 @@ fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixel
     let ink = Ink::new(theme.foreground, theme.muted_foreground, theme.mode.is_dark(), tone).body;
     let view = view.selectable(true).style(style(size, tone, cx)).text_size(size).line_height(relative(LINE_HEIGHT));
     let view = match note_images {
-        Some(images) => view.plugin(images),
+        Some(images) => view.plugin(crate::note_images::NoteVideos { dir: images.dir.clone() }).plugin(images),
         None => view.plugin(LocalImages { cwd: cwd.clone(), within: images_within }),
     };
     let view = view
