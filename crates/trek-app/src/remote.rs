@@ -214,14 +214,16 @@ impl Addresses {
         if out.tailscale.is_some() {
             out.tailnet = tailscale(&["status", "--json"]).as_deref().and_then(Tailnet::parse);
         }
-        // The address the default route leaves from, when the interface list didn't say.
+        // The address the default route leaves from, when the interface list didn't say: a private
+        // one only. An IPv6-only hotspot gives the Mac 192.0.0.2 (macOS's own translation), which
+        // no phone can dial.
         if out.lan.is_none() {
             out.lan = std::net::UdpSocket::bind("0.0.0.0:0")
                 .and_then(|s| s.connect("192.168.0.1:9").map(|_| s))
                 .and_then(|s| s.local_addr())
                 .ok()
                 .and_then(|a| match a.ip() {
-                    IpAddr::V4(v4) if !v4.is_unspecified() && !v4.is_loopback() && Some(v4) != out.tailscale => Some(v4),
+                    IpAddr::V4(v4) if Some(v4) != out.tailscale => Some(v4).filter(|ip| ip.is_private()),
                     _ => None,
                 });
         }
