@@ -327,11 +327,33 @@ fn effort_panel<H: PickerHost>(prefs: &Prefs, model: Option<&ModelInfo>, cx: &mu
 }
 
 fn model_panel<H: PickerHost>(host: &mut H, prefs: &Prefs, current: Option<&str>, cx: &mut Context<H>) -> AnyElement {
+    let rail = host.pickers_ref().rail.clone().unwrap_or_else(|| Rail::Agent(prefs.agent.clone()));
+    if let Rail::Agent(AgentId::Direct(ref p)) = rail {
+        let should_fetch = {
+            let ws = host.workspace().read(cx);
+            ws.models_for(&AgentId::Direct(p.clone())).is_empty() && !ws.direct_inflight.contains(p)
+        };
+        if should_fetch {
+            let pid = p.clone();
+            host.workspace().update(cx, |ws, cx| {
+                ws.fetch_direct_models(&pid, cx);
+            });
+        }
+    }
+
+    let is_inflight = if let Rail::Agent(AgentId::Direct(ref p)) = rail {
+        let ws = host.workspace().read(cx);
+        ws.direct_inflight.contains(p)
+    } else {
+        false
+    };
+
     let ws = host.workspace().read(cx);
     let agents = ws.ready_agents();
     let favorites = ws.settings.general.favorite_models.clone();
-    let rail = host.pickers_ref().rail.clone().unwrap_or_else(|| Rail::Agent(prefs.agent.clone()));
-    let query = host.pickers_ref().model_search.read(cx).value().to_lowercase();
+    let query_raw = host.pickers_ref().model_search.read(cx).value();
+    let query_clean = query_raw.trim().to_string();
+    let query = query_clean.to_lowercase();
     let theme = cx.theme().clone();
 
     // (agent, model) pairs for the selected rail entry.
@@ -345,10 +367,41 @@ fn model_panel<H: PickerHost>(host: &mut H, prefs: &Prefs, current: Option<&str>
     };
     let list: Vec<(AgentId, ModelInfo)> =
         list.into_iter().filter(|(_, m)| query.is_empty() || m.name.to_lowercase().contains(&query) || m.id.to_lowercase().contains(&query)).collect();
-    let empty = match &rail {
-        Rail::Agent(a) => ws.models_for(a).is_empty(),
-        Rail::Favorites => favorites.is_empty(),
+
+    let has_exact_match = list.iter().any(|(_, m)| m.id.eq_ignore_ascii_case(&query_clean));
+    let custom_target = if let Rail::Agent(ref a) = rail {
+        if !query_clean.is_empty() && !has_exact_match {
+            Some((a.clone(), query_clean.clone()))
+        } else {
+            None
+        }
+    } else {
+        None
     };
+
+    let custom_row = custom_target.map(|(agent, custom_id)| {
+        let agent2 = agent.clone();
+        let id2 = custom_id.clone();
+        ui::menu_row(SharedString::from(format!("m-custom-{}", custom_id)), false, cx)
+            .group("model-row")
+            .child(
+                h_flex()
+                    .gap(px(6.))
+                    .items_center()
+                    .child(Icon::new(IconName::Plus).xsmall().text_color(theme.muted_foreground))
+                    .child(div().flex_1().min_w_0().truncate().child(format!("Use \"{}\"", custom_id))),
+            )
+            .on_click(cx.listener(move |this: &mut H, _, _, cx| {
+                let (agent, id) = (agent2.clone(), id2.clone());
+                update_prefs(this, cx, |p| {
+                    p.agent = agent;
+                    p.model = Some(id);
+                });
+                close_model_menu(this, cx);
+            }))
+    });
+
+    let empty = list.is_empty() && custom_row.is_none();
 
     let rail_button = |id: SharedString, active: bool, icon: AnyElement, tip: SharedString, target: Rail, cx: &mut Context<H>| {
         div()
@@ -448,10 +501,15 @@ fn model_panel<H: PickerHost>(host: &mut H, prefs: &Prefs, current: Option<&str>
                                 .max_h(px(360.))
                                 .overflow_y_scroll()
                                 .children(rows)
+                                .when_some(custom_row, |el, row| el.child(row))
                                 .when(empty, |el| {
-                                    el.child(div().p_3().text_sm().text_color(theme.muted_foreground).child(match rail {
-                                        Rail::Favorites => "Hover a model and press the star to keep it here.",
-                                        _ => "No models match.",
+                                    el.child(div().p_3().text_sm().text_color(theme.muted_foreground).child(if is_inflight {
+                                        "Loading models…"
+                                    } else {
+                                        match rail {
+                                            Rail::Favorites => "Hover a model and press the star to keep it here.",
+                                            _ => "No models match.",
+                                        }
                                     }))
                                 }),
                         ),
