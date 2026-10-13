@@ -234,7 +234,11 @@ fn a_thread_window_redraws_its_folders_in_a_new_colour() {
         trek.render(cx);
         super::take_renders();
         let project = trek.project.clone();
-        trek.update(cx, |ws, cx| ws.update_project_prefs(&project, |p| p.color = Some(135), cx));
+        // A colour across the wheel from the one it has: a project's own comes from its name's
+        // hash, and a fixed pick (135) is already the colour of "project-912" and a few others.
+        let name = project.file_name().unwrap().to_string_lossy().into_owned();
+        let now = (crate::ui::project_hue(&name, None) * 360.).round() as u16;
+        trek.update(cx, |ws, cx| ws.update_project_prefs(&project, |p| p.color = Some((now + 180) % 360), cx));
         cx.run_until_parked();
         assert!(super::take_renders().get("ThreadView").is_some_and(|n| *n > 0), "its transcript redrew for the colour");
     });

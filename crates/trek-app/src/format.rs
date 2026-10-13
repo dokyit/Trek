@@ -259,8 +259,11 @@ pub(crate) mod tests {
 
     #[test]
     fn a_formatter_that_hangs_is_given_up_on() {
+        // The fixture first: the first test to ask for it builds it, which a busy runner can
+        // take longer than the limit to do.
+        let (program, args) = fixture(&["sleep", "30"]);
         let started = std::time::Instant::now();
-        let err = run_it(&["sleep", "30"], "x", Duration::from_millis(500)).unwrap_err();
+        let err = trek_core::runtime().block_on(run(&program, &args, &std::env::temp_dir(), "x".to_string(), Duration::from_millis(500))).unwrap_err();
         assert_eq!(err, "fixture took too long, so the file was left as it is");
         assert!(started.elapsed() < Duration::from_secs(20), "the wait ended with the limit");
     }
