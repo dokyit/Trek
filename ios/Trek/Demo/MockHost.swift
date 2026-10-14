@@ -43,8 +43,6 @@ final class MockHost: Backend {
             ModelOption(id: "kimi-k3", label: "Kimi K3"), ModelOption(id: "glm-5", label: "GLM 5")], logo: "opencode"),
         AgentOption(key: "acp:cursor", name: "Cursor", defaultModel: "composer-2", models: [
             ModelOption(id: "composer-2", label: "Composer 2")], logo: "cursor"),
-        AgentOption(key: "acp:gemini", name: "Gemini CLI", defaultModel: "gemini-3-pro", models: [
-            ModelOption(id: "gemini-3-pro", label: "Gemini 3 Pro")], logo: "gemini"),
     ]
 
     static func project(_ id: String, _ name: String, hue: Int, branch: String) -> ProjectSummary {
@@ -687,7 +685,7 @@ final class MockHost: Backend {
               branch: "main", ago: 60 * 3),
             t("t-tokio", "Bump tokio and fix deprecations", "p-trek", "opencode", "kimi-k3", .idle, section: .settled,
               branch: "main", ago: 60 * 30, add: 18, del: 22),
-            t("t-onboarding", "Onboarding copy pass", "p-field", "acp:gemini", "gemini-3-pro", .idle, section: .settled,
+            t("t-onboarding", "Onboarding copy pass", "p-field", "acp:cursor", "composer-2", .idle, section: .settled,
               branch: "main", ago: 60 * 24 * 4, add: 40, del: 37),
             // Failed, then settled: history, not something waiting on you.
             t("t-crash", "Trek crashed after using a reset", "p-trek", "codex", "gpt-6-astra", .failed,

@@ -18,7 +18,7 @@ mod tests_stop;
 #[cfg(all(test, windows))]
 mod tests_cmd_args;
 
-pub use acp::{AcpInfo, acp_probe};
+pub use acp::{AcpInfo, acp_authenticate, acp_probe};
 pub use codex::list_models as codex_models;
 pub use direct::{cache_direct_models, cached_direct_models, direct_provider_models, load_all_cached_direct_models};
 pub use limits::{Limit, LimitScope};

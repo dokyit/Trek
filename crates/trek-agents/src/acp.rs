@@ -1030,8 +1030,24 @@ pub async fn run(
         None => match agent.call("session/new", json!({ "cwd": cwd, "mcpServers": mcp }), &fs, &mut backlog, setup).await? {
             Ok(r) => (r["sessionId"].as_str().context("session/new returned no sessionId")?.to_string(), r),
             Err(e) if is_auth_error(&e) => {
-                ProbeCache::signed_out(&ProbeCache::dir(), &config.agent);
-                bail!(auth_hint(&agent.name, &init))
+                let methods = auth_methods(&init);
+                let mut session_opt = None;
+                if let Some((first_method, _)) = methods.first() {
+                    let auth_params = json!({ "methodId": first_method });
+                    if let Ok(Ok(_)) = agent.call("authenticate", auth_params, &fs, &mut backlog, setup).await
+                        && let Ok(Ok(r)) = agent.call("session/new", json!({ "cwd": cwd, "mcpServers": mcp }), &fs, &mut backlog, setup).await
+                        && let Some(sid) = r["sessionId"].as_str()
+                    {
+                        session_opt = Some((sid.to_string(), r));
+                    }
+                }
+                match session_opt {
+                    Some(s) => s,
+                    None => {
+                        ProbeCache::signed_out(&ProbeCache::dir(), &config.agent);
+                        bail!(auth_hint(&agent.name, &init))
+                    }
+                }
             }
             Err(e) => bail!("{}: {}", agent.name, rpc_message(&e)),
         },
@@ -1426,7 +1442,7 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
         let init = agent.handshake(&fs, &mut backlog).await?;
         let mut info = AcpInfo { auth_methods: auth_methods(&init), ..Default::default() };
         let params = json!({ "cwd": home.display().to_string(), "mcpServers": [] });
-        match agent.call("session/new", params, &fs, &mut backlog, Duration::from_secs(30)).await? {
+        match agent.call("session/new", params.clone(), &fs, &mut backlog, Duration::from_secs(30)).await? {
             Ok(r) => {
                 info.models = controls(&r).models;
                 opened = r["sessionId"].as_str().map(String::from);
@@ -1438,7 +1454,27 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
                     opened = None;
                 }
             }
-            Err(e) if is_auth_error(&e) => info.needs_auth = true,
+            Err(e) if is_auth_error(&e) => {
+                let mut authenticated = false;
+                if let Some((first_method, _)) = info.auth_methods.first() {
+                    let auth_params = json!({ "methodId": first_method });
+                    if let Ok(Ok(_)) = agent.call("authenticate", auth_params, &fs, &mut backlog, Duration::from_secs(5)).await
+                        && let Ok(Ok(r)) = agent.call("session/new", params, &fs, &mut backlog, Duration::from_secs(30)).await
+                    {
+                        info.models = controls(&r).models;
+                        opened = r["sessionId"].as_str().map(String::from);
+                        if let Some(session) = opened.clone().filter(|_| deletes_sessions(&init))
+                            && let Ok(Ok(_)) = agent.call("session/delete", json!({ "sessionId": session }), &fs, &mut backlog, Duration::from_secs(10)).await
+                        {
+                            opened = None;
+                        }
+                        authenticated = true;
+                    }
+                }
+                if !authenticated {
+                    info.needs_auth = true;
+                }
+            }
             Err(e) => bail!("{}: {}", agent.name, rpc_message(&e)),
         }
         agent.stop().await;
@@ -1454,6 +1490,67 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
         discard_session(&agent_id, &session, &home).await;
     }
     let info = probed.map_err(|_| anyhow!("{id} didn't respond in 90s"))??;
+    ProbeCache::store(&cache, &agent_id, &bin, &info);
+    Ok(info)
+}
+
+/// Authenticate an ACP agent, e.g. when the user clicks "Sign in".
+/// Calls the ACP `authenticate` RPC with `method_id` (or the default auth method),
+/// opening the vendor's browser sign-in flow and awaiting completion, then probes models.
+pub async fn acp_authenticate(id: &str, method_id: Option<&str>) -> Result<AcpInfo> {
+    let agent_id = match id {
+        "opencode" => AgentId::OpenCode,
+        "droid" => AgentId::Droid,
+        other => AgentId::Acp(other.into()),
+    };
+    let (bin, _, _) = launch_spec(&agent_id)?;
+    let home = trek_core::paths::home();
+    let mut opened: Option<String> = None;
+    let auth_task = async {
+        let mut agent = Agent::spawn(&agent_id, &home, &[], None).await?;
+        let fs = FsPolicy { cwd: home.clone(), full_access: false, read_only: false };
+        let mut backlog = Vec::new();
+        let init = agent.handshake(&fs, &mut backlog).await?;
+        let methods = auth_methods(&init);
+        let chosen_method = method_id
+            .map(|s| s.to_string())
+            .or_else(|| methods.first().map(|(id, _)| id.clone()))
+            .unwrap_or_else(|| "oauth-personal".to_string());
+
+        let params = json!({ "methodId": chosen_method });
+        // Allow up to 300s (5 minutes) for browser OAuth completion.
+        match agent.call("authenticate", params, &fs, &mut backlog, Duration::from_secs(300)).await? {
+            Ok(_) => {},
+            Err(e) => bail!("{}: {}", agent.name, rpc_message(&e)),
+        }
+
+        let mut info = AcpInfo { auth_methods: methods, ..Default::default() };
+        let session_params = json!({ "cwd": home.display().to_string(), "mcpServers": [] });
+        match agent.call("session/new", session_params, &fs, &mut backlog, Duration::from_secs(30)).await? {
+            Ok(r) => {
+                info.models = controls(&r).models;
+                opened = r["sessionId"].as_str().map(String::from);
+                if let Some(session) = opened.clone().filter(|_| deletes_sessions(&init))
+                    && let Ok(Ok(_)) = agent.call("session/delete", json!({ "sessionId": session }), &fs, &mut backlog, Duration::from_secs(10)).await
+                {
+                    opened = None;
+                }
+            }
+            Err(e) if is_auth_error(&e) => info.needs_auth = true,
+            Err(e) => bail!("{}: {}", agent.name, rpc_message(&e)),
+        }
+        agent.stop().await;
+        if info.models.is_empty() && agent_id == AgentId::Acp("github-copilot".into()) {
+            info.models = copilot_models().await;
+        }
+        Ok(info)
+    };
+    let run = tokio::time::timeout(Duration::from_secs(330), auth_task).await;
+    if let Some(session) = opened {
+        discard_session(&agent_id, &session, &home).await;
+    }
+    let info = run.map_err(|_| anyhow!("{id} authentication timed out"))??;
+    let cache = ProbeCache::dir();
     ProbeCache::store(&cache, &agent_id, &bin, &info);
     Ok(info)
 }

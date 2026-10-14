@@ -351,7 +351,7 @@ fn rows_carry_the_thread_s_details_and_switching_agent_picks_its_default_model()
         assert_eq!(r.agent.key, relay.key());
         // Logos are the Mac's own keys.
         assert_eq!(crate::remote::agent_ref(&trek_core::AgentId::ClaudeCode).logo.as_deref(), Some("claude-code"));
-        assert_eq!(crate::remote::agent_ref(&trek_core::AgentId::Acp("gemini".into())).logo.as_deref(), Some("gemini"));
+        assert_eq!(crate::remote::agent_ref(&trek_core::AgentId::Acp("kimi".into())).logo.as_deref(), Some("kimi"));
     });
 }
 

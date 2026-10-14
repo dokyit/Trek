@@ -195,6 +195,32 @@ try {
     }
     $sha = (Get-FileHash "$Out\$Name" -Algorithm SHA256).Hash.ToLowerInvariant()
 
+    # ---------- installer (.exe) ----------
+    $iscc = Get-Command "iscc" -ErrorAction SilentlyContinue
+    if (-not $iscc) {
+        $innoDefault = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+        if (Test-Path $innoDefault) { $iscc = $innoDefault }
+    }
+    $installerName = "Trek-Setup-x86_64.exe"
+    $installerPath = Join-Path $Out $installerName
+    $haveInstaller = $false
+    if ($iscc) {
+        Say " building Windows setup wizard ($installerName)..."
+        $issFile = Join-Path $PSScriptRoot "installer.iss"
+        if (Test-Path $issFile) {
+            & $iscc "/DAppVersion=$Version" "/O$Out" "/F$($installerName.Replace('.exe', ''))" $issFile
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $installerPath)) {
+                $haveInstaller = $true
+                $installerSha = (Get-FileHash $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                Say " $installerName  sha256 $installerSha"
+            } else {
+                Say " ! Inno Setup compilation failed"
+            }
+        }
+    } else {
+        Say " ! iscc not found; skipping Windows setup installer (.exe)"
+    }
+
     $signature = ''
     if ($haveKey) {
         # Whether the key has a password: minisign's key names its KDF ("Sc", scrypt) or none.
@@ -267,7 +293,7 @@ try {
     [IO.File]::WriteAllText($manifestPath, ($merged | ConvertTo-Json -Depth 8) + "`n")
     Say " $manifestPath -> $url"
 
-    $assets = @("$Out\$Name") + $(if ($signature) { @("$Out\$Name.minisig") } else { @() }) + @($manifestPath)
+    $assets = @("$Out\$Name") + $(if ($signature) { @("$Out\$Name.minisig") } else { @() }) + $(if ($haveInstaller) { @($installerPath) } else { @() }) + @($manifestPath)
     if (-not $Publish) {
         Say " dry run: built $Out; not publishing. Would upload to ${Repo}'s release $ReleaseTag ($Channel):"
         foreach ($a in $assets) { Say "   $(Split-Path $a -Leaf)" }
@@ -277,7 +303,10 @@ try {
     # ---------- publish ----------
     # Archive and signature first, the manifest that points at them last (release.sh's order):
     # a client that fetches the manifest mid-upload finds the zip already there.
-    & gh release upload $ReleaseTag --repo $Repo --clobber "$Out\$Name" "$Out\$Name.minisig"
+    $uploadFiles = @("$Out\$Name")
+    if ($signature) { $uploadFiles += "$Out\$Name.minisig" }
+    if ($haveInstaller) { $uploadFiles += $installerPath }
+    & gh release upload $ReleaseTag --repo $Repo --clobber @uploadFiles
     if ($LASTEXITCODE -ne 0) { Die 'uploading the archive failed' }
     & gh release upload $ReleaseTag --repo $Repo --clobber $manifestPath
     if ($LASTEXITCODE -ne 0) { Die 'uploading the manifest failed - the release still has the previous one' }

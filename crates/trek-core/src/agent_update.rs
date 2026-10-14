@@ -200,7 +200,6 @@ pub const HARNESSES: &[Harness] = &[
     Harness { agent: "droid", binary: "droid", npm: None, moved_from: None, majors: &[], self_update: None, installer: Some("curl -fsSL https://app.factory.ai/cli | sh"), feed: Feed::DroidInstaller, brew: &["droid"], adapter: false },
     Harness { agent: "acp:cursor", binary: "cursor-agent", npm: None, moved_from: None, majors: &[], self_update: Some(&["update"]), installer: None, feed: Feed::CursorInstaller, brew: &["cursor-cli"], adapter: false },
     Harness { agent: "acp:github-copilot", binary: "copilot", npm: Some("@github/copilot"), moved_from: None, majors: &[], self_update: Some(&["update"]), installer: None, feed: Feed::Npm, brew: &["copilot-cli"], adapter: false },
-    Harness { agent: "acp:gemini", binary: "gemini", npm: Some("@google/gemini-cli"), moved_from: None, majors: &[], self_update: None, installer: None, feed: Feed::Npm, brew: &["gemini-cli"], adapter: false },
     Harness { agent: "acp:kimi", binary: "kimi", npm: Some("@moonshot-ai/kimi-code"), moved_from: None, majors: &[], self_update: Some(&["upgrade"]), installer: None, feed: Feed::Npm, brew: &["kimi-cli"], adapter: false },
     Harness { agent: "acp:qwen-code", binary: "qwen", npm: Some("@qwen-code/qwen-code"), moved_from: None, majors: &[], self_update: None, installer: None, feed: Feed::Npm, brew: &["qwen-code"], adapter: false },
     Harness { agent: "acp:grok", binary: "grok", npm: None, moved_from: None, majors: &[], self_update: Some(&["update"]), installer: None, feed: Feed::GrokStable, brew: &[], adapter: false },
@@ -325,7 +324,7 @@ pub fn install_of(resolved: &Path) -> Install {
     // Homebrew exists on macOS only: a Windows folder called Cellar is just a folder.
     if !cfg!(windows) {
         // Before node_modules: a formula may be an npm package installed into its keg
-        // (gemini-cli, qwen-code), and only brew may change a keg.
+        // (qwen-code), and only brew may change a keg.
         if let Some(i) = at("Cellar").filter(|i| parts.len() > i + 1) {
             return Install::Brew { formula: parts[i + 1].clone(), prefix: rooted(&root, &parts[..i]), tap: None };
         }
@@ -1678,7 +1677,7 @@ mod tests {
             Install::Npm { package: "@openai/codex".into(), prefix: "/Users/me/.nvm/versions/node/v22.3.0".into() }
         );
         assert_eq!(p("/usr/local/lib/node_modules/opencode-ai/bin/opencode"), Install::Npm { package: "opencode-ai".into(), prefix: "/usr/local".into() });
-        assert_eq!(p("/Users/me/.bun/install/global/node_modules/@google/gemini-cli/dist/index.js"), Install::Bun { package: "@google/gemini-cli".into() });
+        assert_eq!(p("/Users/me/.bun/install/global/node_modules/@moonshot-ai/kimi-code/dist/index.js"), Install::Bun { package: "@moonshot-ai/kimi-code".into() });
         assert_eq!(p("/Users/me/Library/pnpm/global/5/node_modules/@qwen-code/qwen-code/cli.js"), Install::Pnpm { package: "@qwen-code/qwen-code".into() });
         // Homebrew is macOS's: on Windows these are folders like any other (see
         // `homebrew_is_not_looked_for_on_windows`).
@@ -1688,16 +1687,12 @@ mod tests {
             assert_eq!(p("/opt/homebrew/Caskroom/copilot-cli/1.0.69/copilot"), Install::Cask { cask: "copilot-cli".into(), prefix: "/opt/homebrew".into() });
             // Formulae that are npm packages installed into their keg: brew's, not npm's.
             assert_eq!(
-                p("/opt/homebrew/Cellar/gemini-cli/0.46.0/libexec/lib/node_modules/@google/gemini-cli/dist/index.js"),
-                Install::Brew { formula: "gemini-cli".into(), prefix: "/opt/homebrew".into(), tap: None }
-            );
-            assert_eq!(
                 p("/usr/local/Cellar/qwen-code/0.24.7/libexec/lib/node_modules/@qwen-code/qwen-code/cli.js"),
                 Install::Brew { formula: "qwen-code".into(), prefix: "/usr/local".into(), tap: None }
             );
-            let keg = install_of(Path::new("/opt/homebrew/Cellar/gemini-cli/0.46.0/libexec/lib/node_modules/@google/gemini-cli/dist/index.js"));
-            assert!(h("acp:gemini").owns(&keg));
-            assert_eq!(update_command(h("acp:gemini"), &keg, Path::new("/opt/homebrew/bin/gemini"), false, None).unwrap().shown(), "brew upgrade gemini-cli");
+            let keg = install_of(Path::new("/usr/local/Cellar/qwen-code/0.24.7/libexec/lib/node_modules/@qwen-code/qwen-code/cli.js"));
+            assert!(h("acp:qwen-code").owns(&keg));
+            assert_eq!(update_command(h("acp:qwen-code"), &keg, Path::new("/usr/local/bin/qwen"), false, None).unwrap().shown(), "brew upgrade qwen-code");
         }
         // A global prefix of the user's own (npm's fix for EACCES).
         assert_eq!(
@@ -1881,7 +1876,7 @@ mod tests {
         assert_eq!(update_command(h("codex"), &nvm, bin, false, None).unwrap().path, [dir("/Users/me/.nvm/versions/node/v22.3.0")]);
         assert_eq!(shown("codex", Install::Volta, false).as_deref(), Some("volta install @openai/codex@latest"));
         assert_eq!(shown("acp:grok", Install::Volta, false), None, "no package to install");
-        assert_eq!(shown("acp:gemini", Install::Bun { package: "@google/gemini-cli".into() }, false).as_deref(), Some("bun add -g @google/gemini-cli@latest"));
+        assert_eq!(shown("acp:kimi", Install::Bun { package: "@moonshot-ai/kimi-code".into() }, false).as_deref(), Some("bun add -g @moonshot-ai/kimi-code@latest"));
         let tapped = Install::Brew { formula: "opencode".into(), prefix: "/opt/homebrew".into(), tap: Some("anomalyco/tap".into()) };
         assert_eq!(shown("opencode", tapped, false).as_deref(), Some("brew upgrade anomalyco/tap/opencode"));
         let core = Install::Brew { formula: "block-goose-cli".into(), prefix: "/usr/local".into(), tap: None };
@@ -1904,7 +1899,7 @@ mod tests {
             assert_eq!(droid.shown(), "curl -fsSL https://app.factory.ai/cli | sh");
         }
         assert_eq!(shown("acp:pi", Install::Native, false).as_deref(), Some("x update"));
-        assert_eq!(shown("acp:gemini", Install::Native, false), None, "no update command, no installer");
+        assert_eq!(shown("acp:qwen-code", Install::Native, false), None, "no update command, no installer");
     }
 
     #[test]
@@ -2111,7 +2106,7 @@ mod tests {
         assert_eq!(p(r"C:\npm\lib\node_modules\opencode-ai\bin\opencode"), npm("opencode-ai", r"C:\npm"));
         // Other package managers.
         assert_eq!(p(r"C:\Users\me\AppData\Local\pnpm\global\5\node_modules\@qwen-code\qwen-code\cli.js"), Install::Pnpm { package: "@qwen-code/qwen-code".into() });
-        assert_eq!(p(r"C:\Users\me\.bun\install\global\node_modules\@google\gemini-cli\dist\index.js"), Install::Bun { package: "@google/gemini-cli".into() });
+        assert_eq!(p(r"C:\Users\me\.bun\install\global\node_modules\@moonshot-ai\kimi-code\dist\index.js"), Install::Bun { package: "@moonshot-ai/kimi-code".into() });
         assert_eq!(p(r"C:\Users\me\AppData\Local\Volta\bin\codex.exe"), Install::Volta);
         assert_eq!(p(r"C:\Users\me\AppData\Local\Volta\tools\image\packages\@openai\codex\node_modules\@openai\codex\bin\codex.js"), Install::Volta);
         assert_eq!(
@@ -2740,11 +2735,11 @@ mod tests {
         // UNVERIFIED against a real Bun: the `.bunx` file is read as UTF-16 text holding the script's
         // path, which is how Bun's source writes it; a layout that differs reads as the vendor's own.
         let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>();
-        let shim = Path::new(r"C:\Users\me\.bun\bin\gemini.exe");
-        let relative = utf16("..\\install\\global\\node_modules\\@google\\gemini-cli\\dist\\index.js\0");
+        let shim = Path::new(r"C:\Users\me\.bun\bin\kimi.exe");
+        let relative = utf16("..\\install\\global\\node_modules\\@moonshot-ai\\kimi-code\\dist\\index.js\0");
         let target = bunx_target(shim, &relative).unwrap();
-        assert_eq!(target, Path::new(r"C:\Users\me\.bun\install\global\node_modules\@google\gemini-cli\dist\index.js"));
-        assert_eq!(install_of(&target), Install::Bun { package: "@google/gemini-cli".into() });
+        assert_eq!(target, Path::new(r"C:\Users\me\.bun\install\global\node_modules\@moonshot-ai\kimi-code\dist\index.js"));
+        assert_eq!(install_of(&target), Install::Bun { package: "@moonshot-ai/kimi-code".into() });
         let absolute = utf16("\\??\\C:\\Users\\me\\.bun\\install\\global\\node_modules\\qwen\\cli.js\0");
         assert_eq!(install_of(&bunx_target(shim, &absolute).unwrap()), Install::Bun { package: "qwen".into() });
         assert_eq!(bunx_target(shim, &utf16("not a script\0")), None);

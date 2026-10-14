@@ -515,7 +515,7 @@ mod tests {
         assert_eq!(id("gpt-5.6-luna", &AgentId::Direct("ollama".into())), None, "local models are free to run");
         assert_eq!(id("fusion-claude-opus-5-5-high-sidekick-swe-2-medium", &devin), None);
         assert_eq!(id("gemini-2.5-pro", &AgentId::Direct("google".into())), Some(("gemini-2.5-pro", false)));
-        assert_eq!(id("models/gemini-2.5-flash", &AgentId::Acp("gemini".into())), Some(("gemini-2.5-flash", false)));
+        assert_eq!(id("models/gemini-2.5-flash", &AgentId::Acp("antigravity-acp".into())), Some(("gemini-2.5-flash", false)));
         assert_eq!(id("grok-4.7", &AgentId::Acp("grok".into())), Some(("grok-4.7", false)));
     }
 

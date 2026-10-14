@@ -53,7 +53,7 @@ function Install-TrekFiles([string]$targetDir) {
     $sourceDir = Find-TrekSources
     if ($sourceDir) {
         Write-Host "Installing from local source: $sourceDir -> $targetDir"
-        $filesToCopy = @("trek.exe", "trek-mcp.exe", "trek-update.exe")
+        $filesToCopy = @("trek.exe", "trek-mcp.exe", "trek-update.exe", "Uninstall-Trek.ps1")
         foreach ($f in $filesToCopy) {
             $src = Join-Path $sourceDir $f
             if (Test-Path $src) {
@@ -73,6 +73,11 @@ function Install-TrekFiles([string]$targetDir) {
         Remove-Item $tempZip -Force -ErrorAction SilentlyContinue
     }
 
+    $uninstallSrc = Join-Path $PSScriptRoot "Uninstall-Trek.ps1"
+    if (Test-Path $uninstallSrc) {
+        Copy-Item -Path $uninstallSrc -Destination (Join-Path $targetDir "Uninstall-Trek.ps1") -Force -ErrorAction SilentlyContinue
+    }
+
     # Create Start Menu shortcut
     $startMenuPrograms = [Environment]::GetFolderPath("Programs")
     if (Test-Path $startMenuPrograms) {
@@ -87,6 +92,33 @@ function Install-TrekFiles([string]$targetDir) {
             $shortcut.Save()
         }
     }
+
+    Register-WindowsUninstall -targetDir $targetDir
+}
+
+function Register-WindowsUninstall([string]$targetDir) {
+    $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Trek"
+    if (-not (Test-Path $regPath)) {
+        New-Item -Path $regPath -Force | Out-Null
+    }
+    $targetExe = Join-Path $targetDir "trek.exe"
+    $uninstallerScript = Join-Path $targetDir "Uninstall-Trek.ps1"
+
+    $version = "0.4.3"
+    if (Test-Path $targetExe) {
+        $fileVersion = (Get-Item $targetExe).VersionInfo.ProductVersion
+        if ($fileVersion) { $version = $fileVersion }
+    }
+
+    Set-ItemProperty -Path $regPath -Name "DisplayName" -Value "Trek" -Force
+    Set-ItemProperty -Path $regPath -Name "DisplayVersion" -Value $version -Force
+    Set-ItemProperty -Path $regPath -Name "Publisher" -Value "Trek" -Force
+    Set-ItemProperty -Path $regPath -Name "DisplayIcon" -Value "$targetExe,0" -Force
+    Set-ItemProperty -Path $regPath -Name "InstallLocation" -Value $targetDir -Force
+    Set-ItemProperty -Path $regPath -Name "UninstallString" -Value "powershell.exe -ExecutionPolicy Bypass -File `"$uninstallerScript`"" -Force
+    Set-ItemProperty -Path $regPath -Name "QuietUninstallString" -Value "powershell.exe -ExecutionPolicy Bypass -File `"$uninstallerScript`" -Silent" -Force
+    Set-ItemProperty -Path $regPath -Name "NoModify" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path $regPath -Name "NoRepair" -Value 1 -Type DWord -Force
 }
 
 function Create-DesktopShortcut([string]$targetDir) {

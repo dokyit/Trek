@@ -725,25 +725,46 @@ impl SettingsView {
                 .child(v_flex().child(div().text_size(px(14.)).font_medium().child(a.name.clone())).child(
                     div().text_size(px(12.5)).text_color(if needs_login { palette::amber(cx) } else { muted }).child(account),
                 ));
-            let is_signing = self.signing_in_agents.borrow().contains(&key);
+            let is_signing = self.workspace.read(cx).authenticating_agents.contains(&key) || self.signing_in_agents.borrow().contains(&key);
             let signing_ref = self.signing_in_agents.clone();
             let k_sign = key.clone();
-            let sign_in = setup.filter(|_| needs_login).map(|s| {
-                let cmd = s.login.to_string();
-                let signing_ref = signing_ref.clone();
-                let k_sign = k_sign.clone();
-                Button::new(SharedString::from(format!("login-{key}")))
-                    .small()
-                    .outline()
-                    .loading(is_signing)
-                    .label(if is_signing { "Signing in…" } else { "Sign in" })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        signing_ref.borrow_mut().insert(k_sign.clone());
-                        cx.notify();
-                        let cmd = cmd.clone();
-                        this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: cmd, cwd: None }))
-                    }))
-            });
+            let is_acp = matches!(a.agent, AgentId::Acp(_));
+            let sign_in = if needs_login {
+                if is_acp {
+                    Some(
+                        Button::new(SharedString::from(format!("login-{key}")))
+                            .small()
+                            .outline()
+                            .loading(is_signing)
+                            .label(if is_signing { "Signing in…" } else { "Sign in" })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let k = k_sign.clone();
+                                this.workspace.update(cx, |ws, cx| ws.authenticate_acp_agent(&k, None, cx));
+                            })),
+                    )
+                } else if let Some(s) = setup {
+                    let cmd = s.login.to_string();
+                    let signing_ref = signing_ref.clone();
+                    let k_sign = k_sign.clone();
+                    Some(
+                        Button::new(SharedString::from(format!("login-{key}")))
+                            .small()
+                            .outline()
+                            .loading(is_signing)
+                            .label(if is_signing { "Signing in…" } else { "Sign in" })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                signing_ref.borrow_mut().insert(k_sign.clone());
+                                cx.notify();
+                                let cmd = cmd.clone();
+                                this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: cmd, cwd: None }));
+                            })),
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let more = setup.map(|s| {
                 let (login, url) = (s.login.to_string(), s.account_url);
                 let ws = self.workspace.clone();
@@ -874,6 +895,9 @@ impl SettingsView {
         let AgentId::Acp(id) = agent else { return None };
         let added = self.workspace.read(cx).settings.added_agents.iter().find(|a| a.id == *id).cloned()?;
         let update = self.workspace.read(cx).registry_update(id);
+        let key = agent.key();
+        let acp = self.workspace.read(cx).acp_info.get(&key).and_then(|r| r.as_ref().ok()).cloned();
+        let auth_methods = acp.as_ref().map(|i| i.auth_methods.clone()).unwrap_or_default();
         let muted = cx.theme().muted_foreground;
         let ws = self.workspace.clone();
         let menu = Button::new(SharedString::from(format!("more-{}", agent.key())))
@@ -882,6 +906,19 @@ impl SettingsView {
             .icon(Icon::new(IconName::Ellipsis).text_color(muted))
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                 let mut menu = menu.min_w(px(180.));
+                if !auth_methods.is_empty() {
+                    for (method_id, method_name) in auth_methods.clone() {
+                        let (ws, key, mid) = (ws.clone(), key.clone(), method_id.clone());
+                        menu = menu.item(PopupMenuItem::new(format!("Sign in ({method_name})")).on_click(move |_, _, cx| {
+                            ws.update(cx, |ws, cx| ws.authenticate_acp_agent(&key, Some(mid.clone()), cx));
+                        }));
+                    }
+                } else {
+                    let (ws, key) = (ws.clone(), key.clone());
+                    menu = menu.item(PopupMenuItem::new("Sign in…").on_click(move |_, _, cx| {
+                        ws.update(cx, |ws, cx| ws.authenticate_acp_agent(&key, None, cx));
+                    }));
+                }
                 if let Some(v) = update.clone() {
                     let (ws, id) = (ws.clone(), added.id.clone());
                     menu = menu.item(PopupMenuItem::new(format!("Update to {v}")).on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.install_registry_agent(&id, cx))));

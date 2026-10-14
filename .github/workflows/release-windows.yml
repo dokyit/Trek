@@ -137,6 +137,11 @@ jobs:
           Expand-Archive $zip "$env:RUNNER_TEMP\minisign" -Force
           "TREK_MINISIGN_EXE=$env:RUNNER_TEMP\minisign\minisign-win64\x86_64\minisign.exe" >> $env:GITHUB_ENV
 
+      - name: Install Inno Setup
+        run: |
+          choco install innosetup --no-progress -y
+          "C:\Program Files (x86)\Inno Setup 6" >> $env:GITHUB_PATH
+
       # The secret is the key file's whole contents (it is all ASCII).
       - name: minisign secret key
         env:
