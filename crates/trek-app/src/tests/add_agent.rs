@@ -123,3 +123,22 @@ fn a_custom_command_becomes_an_agent_on_the_agents_page_and_survives_a_restart()
         assert!(trek.read(cx, |ws, _| ws.settings.added_agents.is_empty()));
     });
 }
+
+#[test]
+fn running_in_terminal_from_settings_redirects_and_opens_dock() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| ws.navigate(crate::workspace::Route::Settings(crate::workspace::SettingsPage::Agents), cx));
+        trek.render(cx);
+        assert!(matches!(trek.read(cx, |ws, _| ws.route.clone()), crate::workspace::Route::Settings(_)));
+        
+        trek.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::RunInTerminal {
+            command: "echo test".into(),
+            cwd: None,
+        }));
+        trek.render(cx);
+        
+        assert!(!matches!(trek.read(cx, |ws, _| ws.route.clone()), crate::workspace::Route::Settings(_)), "navigates out of settings");
+        assert!(trek.visible(cx, "terminal-dock"), "opens terminal dock");
+    });
+}

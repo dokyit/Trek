@@ -2281,8 +2281,8 @@ impl Render for Composer {
             .drag_over::<ExternalPaths>(move |s, _, _, _| s.opacity(0.85).border_color(drop_tint))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| this.add_paths(paths.paths(), window, cx)));
 
-        // Status strip under the card (threads).
-        let status = (!is_draft).then(|| {
+        // Status strip under the card (threads and drafts).
+        let status = Some({
             h_flex()
                 .px(px(6.))
                 .pt(px(8.))

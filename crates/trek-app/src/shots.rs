@@ -67,6 +67,11 @@ use std::time::{Duration, Instant};
 
 pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     let Some(dir) = std::env::var_os("TREK_SHOT_DIR").map(PathBuf::from) else { return };
+    #[cfg(target_os = "macos")]
+    if let Some(mtm) = objc2::MainThreadMarker::new() {
+        objc2_app_kit::NSApplication::sharedApplication(mtm)
+            .setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
+    }
     let _ = std::fs::create_dir_all(&dir);
     // Weak between batches: this loop outlives the app's own wind-down, and a handle it held
     // would be one left when GPUI drops its entities (the leak detector panics on that).

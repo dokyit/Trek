@@ -61,3 +61,16 @@ fn the_dock_comes_back_as_it_was_left() {
         assert!((viewport.height - (dock.origin.y + dock.size.height)) < gpui_kit::px(12.), "dock {dock:?} in a window {viewport:?}");
     });
 }
+
+#[test]
+fn the_terminal_and_icon_display_in_new_thread_draft() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.render(cx);
+        assert!(trek.visible(cx, "open-terminal"), "terminal button must be visible in draft/new thread view");
+        assert!(!trek.visible(cx, "terminal-dock"));
+        trek.click(cx, "open-terminal");
+        trek.render(cx);
+        assert!(trek.visible(cx, "terminal-dock"), "clicking terminal in new thread draft opens the terminal dock");
+    });
+}

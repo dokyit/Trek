@@ -119,6 +119,7 @@ pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
     /// `DWMWA_SYSTEMBACKDROP_TYPE`, and its `DWMSBT_NONE`.
     const SYSTEMBACKDROP_TYPE: u32 = 38;
     const BACKDROP_NONE: i32 = 1;
+    const BACKDROP_MICA_ALT: i32 = 4;
     let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
     let RawWindowHandle::Win32(win32) = handle.as_raw() else { return };
     let hwnd = win32.hwnd.get() as *mut core::ffi::c_void;
@@ -129,7 +130,9 @@ pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
         unsafe { DwmSetWindowAttribute(hwnd, attribute, (&value as *const i32).cast(), std::mem::size_of::<i32>() as u32) };
     };
     set(USE_IMMERSIVE_DARK_MODE, dark as i32);
-    if !glass {
+    if glass {
+        set(SYSTEMBACKDROP_TYPE, BACKDROP_MICA_ALT);
+    } else {
         set(SYSTEMBACKDROP_TYPE, BACKDROP_NONE);
     }
 }

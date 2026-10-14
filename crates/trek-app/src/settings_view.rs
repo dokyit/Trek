@@ -236,6 +236,8 @@ pub struct SettingsView {
     icon_file: Probe<(String, bool)>,
     /// Trek's data folder, found once (finding it makes sure it exists).
     pub(super) data_dir: std::path::PathBuf,
+    installing_agents: std::rc::Rc<std::cell::RefCell<HashSet<String>>>,
+    signing_in_agents: std::rc::Rc<std::cell::RefCell<HashSet<String>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -454,6 +456,8 @@ impl SettingsView {
             snapshots: Probe::default(),
             icon_file: Probe::default(),
             data_dir: trek_core::paths::data_dir(),
+            installing_agents: std::rc::Rc::new(std::cell::RefCell::new(HashSet::new())),
+            signing_in_agents: std::rc::Rc::new(std::cell::RefCell::new(HashSet::new())),
             _subscriptions: subs,
         }
     }
@@ -673,6 +677,7 @@ impl SettingsView {
         let disabled = ws.settings.disabled_agents.clone();
         let agents: Vec<_> = ws.agents.iter().filter(|a| !matches!(a.agent, AgentId::Direct(_))).cloned().collect();
         let (installed, missing): (Vec<_>, Vec<_>) = agents.into_iter().partition(|a| a.availability != Availability::NotInstalled);
+        self.installing_agents.borrow_mut().retain(|k| missing.iter().any(|m| m.agent.key() == *k));
         let mut out: Vec<AnyElement> = vec![];
         let setup_key = |a: &AgentId| match a {
             AgentId::Acp(id) => id.clone(),
@@ -720,12 +725,24 @@ impl SettingsView {
                 .child(v_flex().child(div().text_size(px(14.)).font_medium().child(a.name.clone())).child(
                     div().text_size(px(12.5)).text_color(if needs_login { palette::amber(cx) } else { muted }).child(account),
                 ));
+            let is_signing = self.signing_in_agents.borrow().contains(&key);
+            let signing_ref = self.signing_in_agents.clone();
+            let k_sign = key.clone();
             let sign_in = setup.filter(|_| needs_login).map(|s| {
                 let cmd = s.login.to_string();
-                Button::new(SharedString::from(format!("login-{key}"))).small().outline().label("Sign in").on_click(cx.listener(move |this, _, _, cx| {
-                    let cmd = cmd.clone();
-                    this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: cmd, cwd: None }))
-                }))
+                let signing_ref = signing_ref.clone();
+                let k_sign = k_sign.clone();
+                Button::new(SharedString::from(format!("login-{key}")))
+                    .small()
+                    .outline()
+                    .loading(is_signing)
+                    .label(if is_signing { "Signing in…" } else { "Sign in" })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        signing_ref.borrow_mut().insert(k_sign.clone());
+                        cx.notify();
+                        let cmd = cmd.clone();
+                        this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: cmd, cwd: None }))
+                    }))
             });
             let more = setup.map(|s| {
                 let (login, url) = (s.login.to_string(), s.account_url);
@@ -808,12 +825,23 @@ impl SettingsView {
                         return Self::row(title, install, menu, cx);
                     }
                     let cmd = install.clone();
-                    let button = Button::new(SharedString::from(format!("install-{key}"))).small().outline().icon(IconName::ArrowDown).label("Install").on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            let cmd = cmd.clone();
-                            this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: cmd, cwd: None }))
-                        }),
-                    );
+                    let is_installing = self.installing_agents.borrow().contains(&key);
+                    let install_ref = self.installing_agents.clone();
+                    let k_inst = key.clone();
+                    let button = Button::new(SharedString::from(format!("install-{key}")))
+                        .small()
+                        .outline()
+                        .loading(is_installing)
+                        .icon(if is_installing { IconName::RefreshCw } else { IconName::ArrowDown })
+                        .label(if is_installing { "Installing…" } else { "Install" })
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                install_ref.borrow_mut().insert(k_inst.clone());
+                                cx.notify();
+                                let cmd = cmd.clone();
+                                this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: cmd, cwd: None }))
+                            }),
+                        );
                     Self::row(title, install, button, cx)
                 })
                 .collect();
