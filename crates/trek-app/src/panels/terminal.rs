@@ -232,6 +232,13 @@ fn shell_for(setting: &str, job: Option<&Job>, env_shell: Option<&str>, windows:
 
 /// The shell for `[terminal] shell = setting` as a process to start in a pty, in `cwd`, running
 /// `job` when there is one.
+/// The shell's name, as a terminal tab shows it ("zsh", "pwsh"): what `[terminal] shell` (`setting`)
+/// resolves to on this machine, without its folder or extension.
+pub fn shell_name(setting: &str) -> String {
+    let shell = shell_for(setting, None, std::env::var("SHELL").ok().as_deref(), cfg!(windows), |name| trek_core::detect::which(name), std::env::var("COMSPEC").ok().as_deref());
+    std::path::Path::new(&shell).file_stem().map(|s| s.to_string_lossy().to_string()).filter(|s| !s.is_empty()).unwrap_or(shell)
+}
+
 fn shell_command(setting: &str, cwd: Option<PathBuf>, job: Option<&Job>) -> CommandBuilder {
     let windows = cfg!(windows);
     let shell = shell_for(setting, job, std::env::var("SHELL").ok().as_deref(), windows, |name| trek_core::detect::which(name), std::env::var("COMSPEC").ok().as_deref());

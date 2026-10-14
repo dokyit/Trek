@@ -238,9 +238,12 @@ fn the_tools_panel_opens_on_a_grid_of_tools_and_never_clips_a_tab() {
         trek.render(cx);
         assert!(!trek.visible(cx, "tool-tile-Terminal"), "the tool opened in a tab");
         // Many tools at the panel's default width: the tabs not in front drop to their icons,
-        // then the strip scrolls with a menu of every tab; the one in front stays whole.
+        // then the strip scrolls with a menu of every tab; the one in front stays whole. (The
+        // panel's own terminals stack from its launcher; the event's terminal is the dock under
+        // the chat.)
+        let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
         for tool in [crate::workspace::PanelTool::Git, crate::workspace::PanelTool::Explorer, crate::workspace::PanelTool::SideChat, crate::workspace::PanelTool::Terminal, crate::workspace::PanelTool::Terminal, crate::workspace::PanelTool::Terminal, crate::workspace::PanelTool::Terminal, crate::workspace::PanelTool::Terminal, crate::workspace::PanelTool::Terminal] {
-            trek.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::OpenTool(tool)));
+            trek.window(cx, |window, cx| panel.update(cx, |p, cx| p.open_tool(tool, window, cx)));
         }
         // The frames the panel asks for once it has measured its strip.
         for _ in 0..3 {
