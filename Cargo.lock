@@ -9089,7 +9089,7 @@ dependencies = [
 
 [[package]]
 name = "trek-agents"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -9115,7 +9115,7 @@ dependencies = [
 
 [[package]]
 name = "trek-app"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -9178,7 +9178,7 @@ dependencies = [
 
 [[package]]
 name = "trek-core"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9211,7 +9211,7 @@ dependencies = [
 
 [[package]]
 name = "trek-ipc"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
@@ -9223,7 +9223,7 @@ dependencies = [
 
 [[package]]
 name = "trek-mcp"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "base64 0.22.1",
  "core-foundation 0.10.1",
@@ -9238,7 +9238,7 @@ dependencies = [
 
 [[package]]
 name = "trek-remote"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "async-channel",
  "base64 0.22.1",
@@ -9260,7 +9260,7 @@ dependencies = [
 
 [[package]]
 name = "trek-test-fixtures"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "base64 0.22.1",
  "minisign-verify",
@@ -9270,7 +9270,7 @@ dependencies = [
 
 [[package]]
 name = "trek-update"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "trek-test-fixtures",
  "windows-sys 0.61.2",
