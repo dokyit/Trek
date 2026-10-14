@@ -239,9 +239,9 @@ fn main() {
     let forwarded_links = links_tx.clone();
     let app = gpui_kit::application().with_assets(assets::Assets);
     perf::phase("platform");
-    #[cfg(all(feature = "shots", target_os = "macos"))]
-    if std::env::var_os("TREK_SHOT_DIR").is_some() {
-        // Capture runs are invisible: no Dock tile, no recent-apps entry.
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("TREK_SHOT_DIR").is_some() || std::env::var_os("TREK_BACKGROUND").is_some() {
+        // Capture and test runs are invisible: no Dock tile, no recent-apps entry.
         if let Some(mtm) = objc2::MainThreadMarker::new() {
             objc2_app_kit::NSApplication::sharedApplication(mtm)
                 .setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
@@ -260,6 +260,19 @@ fn main() {
     });
     app.run(|cx| {
         perf::phase("run");
+        #[cfg(target_os = "macos")]
+        if std::env::var_os("TREK_SHOT_DIR").is_some() || std::env::var_os("TREK_BACKGROUND").is_some() {
+            if let Some(mtm) = objc2::MainThreadMarker::new() {
+                objc2_app_kit::NSApplication::sharedApplication(mtm)
+                    .setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
+            }
+            cx.defer(|_| {
+                if let Some(mtm) = objc2::MainThreadMarker::new() {
+                    objc2_app_kit::NSApplication::sharedApplication(mtm)
+                        .setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
+                }
+            });
+        }
         // Windows toasts need an identity (the AppUserModelID) set before any window opens.
         #[cfg(windows)]
         cx.set_app_identity(winsys::APP_ID, winsys::APP_NAME);

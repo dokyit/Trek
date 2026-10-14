@@ -199,6 +199,10 @@ impl TrekWindow {
                         _ => Job::Setup(command.clone()),
                     };
                     let cwd = cwd.clone();
+                    if matches!(this.workspace.read(cx).route, Route::Settings(_)) {
+                        let target = this.workspace.read(cx).focused_thread().map(|id| Route::Thread(id.to_string())).unwrap_or(Route::Draft { project: None });
+                        this.workspace.update(cx, |ws, cx| ws.navigate(target, cx));
+                    }
                     if this.workspace.read(cx).ide() {
                         this.ide.update(cx, |ide, cx| ide.run_command(job, cwd, window, cx));
                     } else {

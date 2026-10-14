@@ -94,7 +94,7 @@ pub fn chrome_bg(glass: Option<f32>, cx: &App) -> Hsla {
 /// times) falls under 3:1 over a bright wallpaper's Mica.
 pub fn chrome_alpha(tint: f32, material: Material) -> f32 {
     match material {
-        Material::Mica => tint.max(0.3),
+        Material::Mica => (tint + 0.35).clamp(0.65, 0.95),
         Material::Native | Material::Blur => tint,
     }
 }
@@ -124,7 +124,7 @@ fn material() -> Material {
 pub fn panel_alpha(tint: f32, material: Material) -> f32 {
     let floor = match material {
         Material::Native => 0.6,
-        Material::Mica => 0.7,
+        Material::Mica => 0.82,
         Material::Blur => 0.82,
     };
     (tint + 0.2).clamp(floor, 0.95)

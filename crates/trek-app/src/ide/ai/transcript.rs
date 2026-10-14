@@ -884,6 +884,7 @@ impl AiTranscript {
         }
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
+        let secs = started.elapsed().as_secs();
         let doing = if live.reasoning.is_some() {
             "Thinking".to_string()
         } else {
@@ -892,9 +893,8 @@ impl AiTranscript {
                 .rev()
                 .take_while(|i| !matches!(i, Item::User { .. } | Item::Assistant { .. }))
                 .find_map(|i| if let Item::Tool { title, detail, .. } = i { Some(phrase(title, detail, None)) } else { None })
-                .unwrap_or_else(|| "Working".into())
+                .unwrap_or_else(|| crate::mascot::word(&id, secs).into())
         };
-        let secs = started.elapsed().as_secs();
         let queued: Vec<(usize, String)> = live.queued.iter().enumerate().map(|(i, (t, _))| (i, orch::preview(context::split(t).said, 80))).collect();
         Some(
             v_flex()

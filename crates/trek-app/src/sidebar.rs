@@ -442,10 +442,11 @@ impl Sidebar {
         }
         match t.run_state {
             RunState::Working => {
-                let elapsed = ws.live.get(&t.id).and_then(|l| l.turn_started).map(|s| time::elapsed(s.elapsed())).unwrap_or_default();
+                let (elapsed, secs) = ws.live.get(&t.id).and_then(|l| l.turn_started).map(|s| (time::elapsed(s.elapsed()), s.elapsed().as_secs())).unwrap_or_default();
+                let word = crate::mascot::word(&t.id, secs);
                 // The loader holds still and the clock beside it ticks: a spinning one would redraw
                 // the whole sidebar every frame.
-                let text = if elapsed.is_empty() { "Working".to_string() } else { format!("Working {elapsed}") };
+                let text = if elapsed.is_empty() { word.to_string() } else { format!("{word} {elapsed}") };
                 mark(format!("card-working-{}", t.id), palette::working(cx), Some(Icon::new(crate::assets::Lucide::LoaderCircle)), false, text)
             }
             RunState::NeedsYou => mark(format!("card-needs-{}", t.id), palette::needs_you(cx), None, true, needs_label(ws, &t.id).into()),

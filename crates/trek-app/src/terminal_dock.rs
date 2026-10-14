@@ -87,7 +87,10 @@ impl TerminalDock {
         let term = cx.new(|cx| {
             let mut t = TerminalPanel::with_command(cwd, job, shell, cx);
             t.on_exit(move |cx| {
-                let _ = ws.update(cx, |ws, cx| ws.detect_agents(cx));
+                let _ = ws.update(cx, |ws, cx| {
+                    ws.acp_info.clear();
+                    ws.detect_agents(cx);
+                });
             });
             t
         });
