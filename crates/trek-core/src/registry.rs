@@ -977,7 +977,7 @@ mod tests {
         assert_eq!(r.version, "1.0.0");
         assert!(r.agent("devin").is_some() && r.agent("fast-agent").is_some());
         assert!(r.agents.iter().all(|a| valid_id(&a.id)), "the malformed id is skipped, not fatal");
-        assert_eq!(r.agents.len(), 11);
+        assert_eq!(r.agents.len(), 10);
         let devin = r.agent("devin").unwrap();
         assert_eq!(devin.name, "Devin");
         assert_eq!(devin.link(), Some("https://docs.devin.ai/cli"));
@@ -1010,7 +1010,7 @@ mod tests {
         assert_eq!(ids("devin").first(), Some(&"devin"));
         assert_eq!(ids("").len(), r.agents.len());
         assert!(ids("zzzz-nothing").is_empty());
-        assert_eq!(ids("gem"), ["gemini"]);
+        assert_eq!(ids("kil"), ["kilo"]);
         assert!(ids("cognition").contains(&"devin"), "authors match");
     }
 

@@ -185,7 +185,6 @@ const OPENCODE: Hint = Hint { unix: "curl -fsSL https://opencode.ai/install | ba
 const DROID: Hint = Hint { unix: "curl -fsSL https://app.factory.ai/cli | sh", windows: "irm https://app.factory.ai/cli/windows | iex" };
 const CURSOR: Hint = Hint { unix: "curl https://cursor.com/install -fsS | bash", windows: "irm 'https://cursor.com/install?win32=true' | iex" };
 const GITHUB_COPILOT: Hint = Hint::same("npm i -g @github/copilot");
-const GEMINI: Hint = Hint::same("npm i -g @google/gemini-cli");
 const KIMI: Hint = Hint::same("npm i -g @moonshot-ai/kimi-code");
 const QWEN_CODE: Hint = Hint::same("npm i -g @qwen-code/qwen-code");
 const GROK: Hint = Hint { unix: "curl -fsSL https://x.ai/cli/install.sh | bash", windows: "irm https://x.ai/cli/install.ps1 | iex" };
@@ -217,7 +216,6 @@ pub struct AcpAgent {
 pub const ACP_AGENTS: &[AcpAgent] = &[
     AcpAgent { id: "cursor", name: "Cursor", binary: "cursor-agent", args: &["acp"], version_marker: None, install_hint: CURSOR.here() },
     AcpAgent { id: "github-copilot", name: "GitHub Copilot", binary: "copilot", args: &["--acp"], version_marker: None, install_hint: GITHUB_COPILOT.here() },
-    AcpAgent { id: "gemini", name: "Gemini CLI", binary: "gemini", args: &["--acp"], version_marker: None, install_hint: GEMINI.here() },
     AcpAgent { id: "kimi", name: "Kimi", binary: "kimi", args: &["acp"], version_marker: None, install_hint: KIMI.here() },
     AcpAgent { id: "qwen-code", name: "Qwen Code", binary: "qwen", args: &["--acp"], version_marker: None, install_hint: QWEN_CODE.here() },
     AcpAgent { id: "grok", name: "Grok", binary: "grok", args: &["agent", "stdio"], version_marker: None, install_hint: GROK.here() },
@@ -247,7 +245,6 @@ pub fn install_hint(key: &str) -> Option<Hint> {
         "droid" => DROID,
         "cursor" => CURSOR,
         "github-copilot" => GITHUB_COPILOT,
-        "gemini" => GEMINI,
         "kimi" => KIMI,
         "qwen-code" => QWEN_CODE,
         "grok" => GROK,
@@ -267,7 +264,6 @@ pub fn agent_setup(key: &str) -> Option<AgentSetup> {
         "droid" => ("droid", "https://app.factory.ai/settings/billing"),
         "cursor" => ("cursor-agent login", "https://cursor.com/dashboard"),
         "github-copilot" => ("copilot login", "https://github.com/settings/copilot"),
-        "gemini" => ("gemini", "https://aistudio.google.com"),
         "kimi" => ("kimi login", "https://www.kimi.com/code"),
         "qwen-code" => ("qwen", "https://chat.qwen.ai"),
         "grok" => ("grok login", "https://grok.com/settings"),
@@ -275,12 +271,17 @@ pub fn agent_setup(key: &str) -> Option<AgentSetup> {
         "goose" => ("goose configure", "https://block.github.io/goose"),
         "amp" => ("amp login", "https://ampcode.com/settings"),
         "pi" => ("pi", "https://pi.dev"),
+        "antigravity" | "antigravity-acp" => ("agy", "https://antigravity.google"),
         _ => return None,
     };
-    Some(AgentSetup { install: install_hint(key)?.here(), login, account_url })
+    let install = install_hint(key).map(|h| h.here()).unwrap_or("");
+    Some(AgentSetup { install, login, account_url })
 }
 
 pub fn acp_display_name(id: &str) -> String {
+    if id == "antigravity" || id == "antigravity-acp" {
+        return "Google Antigravity".to_string();
+    }
     match ACP_AGENTS.iter().find(|a| a.id == id) {
         Some(a) => a.name.to_string(),
         None => added_agent(id).map_or_else(|| id.to_string(), |a| a.name),
@@ -317,7 +318,7 @@ mod tests {
     }
 
     /// Every agent Trek can install, by `AgentId::key()`.
-    const INSTALLABLE: &[&str] = &["claude-code", "codex", "opencode", "droid", "cursor", "github-copilot", "gemini", "kimi", "qwen-code", "grok", "devin", "goose", "amp", "pi"];
+    const INSTALLABLE: &[&str] = &["claude-code", "codex", "opencode", "droid", "cursor", "github-copilot", "kimi", "qwen-code", "grok", "devin", "goose", "amp", "pi"];
 
     #[test]
     fn install_lines_for_macos_are_what_they_were() {
@@ -345,7 +346,7 @@ mod tests {
         assert_eq!(win("opencode"), "npm i -g opencode-ai");
         assert!(win("goose").contains("download_cli.ps1"), "{}", win("goose"));
         // The npm packages are the same on both.
-        for key in ["codex", "github-copilot", "gemini", "kimi", "qwen-code", "amp", "pi"] {
+        for key in ["codex", "github-copilot", "kimi", "qwen-code", "amp", "pi"] {
             let hint = install_hint(key).unwrap();
             assert_eq!(hint.unix, hint.windows, "{key}");
             assert!(hint.windows.starts_with("npm i -g "), "{key}");

@@ -1142,6 +1142,8 @@ pub struct Workspace {
     pub devin_loading: bool,
     /// What each installed ACP agent reported (models, login state), keyed by `AgentId::key()`.
     pub acp_info: HashMap<String, Result<AcpInfo, String>>,
+    /// ACP agents currently performing an authentication flow.
+    pub authenticating_agents: HashSet<String>,
     /// The ACP Registry and the agents being added from it (Settings › Agents › Add agent).
     pub added_agents: AddedAgents,
     /// Slash commands an agent offered in its last session in a folder: (`AgentId::key()`, cwd).
@@ -1513,6 +1515,7 @@ impl Workspace {
             devin_status_at: 0,
             devin_loading: false,
             acp_info: HashMap::new(),
+            authenticating_agents: HashSet::new(),
             added_agents: AddedAgents::default(),
             usage_loading: false,
             reset_credits_in_flight: HashSet::new(),
@@ -5776,6 +5779,45 @@ impl Workspace {
         if !self.acp_info.contains_key(key) {
             self.probe_acp(Some(key), cx);
         }
+    }
+
+    /// Authenticate an ACP agent (e.g. Google Antigravity, Devin, Cursor). Runs the agent's
+    /// `authenticate` flow (browser OAuth or token exchange), updates `acp_info`, and notifies.
+    pub fn authenticate_acp_agent(&mut self, key: &str, method_id: Option<String>, cx: &mut Context<Self>) {
+        let key_str = key.to_string();
+        self.authenticating_agents.insert(key_str.clone());
+        cx.notify();
+        let probe_id = key.strip_prefix("acp:").unwrap_or(key).to_string();
+        let p_id = probe_id.clone();
+        let (tx, rx) = async_channel::bounded(1);
+        trek_core::runtime().spawn(async move {
+            let r = trek_agents::acp_authenticate(&p_id, method_id.as_deref()).await.map_err(|e| format!("{e:#}"));
+            let _ = tx.send(r).await;
+        });
+        let task = cx.spawn(async move |this, cx| {
+            if let Ok(r) = rx.recv().await {
+                let _ = this.update(cx, |this, cx| {
+                    this.authenticating_agents.remove(&key_str);
+                    match &r {
+                        Ok(info) => {
+                            this.acp_info.insert(key_str.clone(), Ok(info.clone()));
+                            cx.emit(WorkspaceEvent::Toast {
+                                message: format!("Signed in to {}", trek_core::catalog::acp_display_name(&probe_id)),
+                                undo: None,
+                            });
+                        }
+                        Err(e) => {
+                            cx.emit(WorkspaceEvent::Toast {
+                                message: format!("Authentication failed: {e}"),
+                                undo: None,
+                            });
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        });
+        self.keep(task);
     }
 
     fn probe_acp(&mut self, only: Option<&str>, cx: &mut Context<Self>) {

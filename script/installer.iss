@@ -24,6 +24,7 @@ Source: "..\target\release\trek.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\trek-mcp.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; If trek-update exists
 Source: "..\target\release\trek-update.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "Uninstall-Trek.ps1"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\Trek"; Filename: "{app}\trek.exe"
@@ -68,8 +69,8 @@ begin
   if CurStep = ssPostInstall then
   begin
     if Option1Radio.Checked then
-      Exec(ExpandConstant('{app}\trek.exe\), '', ExpandConstant('{app}\), SW_SHOW, ewNoWait, ResultCode)
+      Exec(ExpandConstant('{app}\trek.exe'), '', ExpandConstant('{app}'), SW_SHOW, ewNoWait, ResultCode)
     else if Option2Radio.Checked then
-      Exec(ExpandConstant('explorer.exe\), ExpandConstant('"{app}"\), '', SW_SHOW, ewNoWait, ResultCode);
+      Exec('explorer.exe', ExpandConstant('"{app}"'), '', SW_SHOW, ewNoWait, ResultCode);
   end;
 end;

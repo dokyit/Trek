@@ -1333,7 +1333,7 @@ mod tests {
         assert_eq!(tokens_note(&r, "today"), "≈ $1.28 at API prices today");
         assert_eq!(tokens_note(&r, super::during(Range::All)), "≈ $1.28 at API prices so far");
         // Threads that didn't report their tokens are said to be missing from it.
-        let quiet = thread(AgentId::Acp("gemini".into()));
+        let quiet = thread(AgentId::Acp("kimi".into()));
         let r = Recap::compute(window, at + 5_000, &[claude.clone(), quiet]);
         assert_eq!(tokens_note(&r, "this week"), "≈ $1.25 at API prices · 1 of 2 threads");
         // Tokens on a model without a known price are said to be left out.
@@ -1341,10 +1341,10 @@ mod tests {
         fusion.usage = vec![row(&fusion, "fusion-x", TokenUsage { input: 2_000_000, output: 5_000, ..Default::default() }, None)];
         let r = Recap::compute(window, at + 5_000, &[claude.clone(), fusion.clone()]);
         assert_eq!(tokens_note(&r, "today"), "≈ $1.25 at API prices · 2M tokens unpriced");
-        let r = Recap::compute(window, at + 5_000, &[claude.clone(), fusion.clone(), thread(AgentId::Acp("gemini".into()))]);
+        let r = Recap::compute(window, at + 5_000, &[claude.clone(), fusion.clone(), thread(AgentId::Acp("kimi".into()))]);
         assert_eq!(tokens_note(&r, "today"), "≈ $1.25 at API prices · 2M tokens unpriced · 2 of 3 threads");
         // Nothing priced: just where the tokens came from.
-        let r = Recap::compute(window, at + 5_000, &[fusion, thread(AgentId::Acp("gemini".into()))]);
+        let r = Recap::compute(window, at + 5_000, &[fusion, thread(AgentId::Acp("kimi".into()))]);
         assert_eq!(tokens_note(&r, "today"), "From 1 of 2 threads");
     }
 

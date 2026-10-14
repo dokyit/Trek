@@ -17,7 +17,7 @@ credentials:
   approval as cards, sub-agent progress, switching to Full access mid-thread.
 - **Codex** through `codex app-server` (JSON-RPC): approvals, questions and plan approval as cards, plan
   progress, sub-agent progress, steering a running turn, OpenAI models.
-- **OpenCode, Factory Droid and ACP agents** (Cursor, GitHub Copilot, Gemini CLI, Kimi, Qwen Code, Grok,
+- **OpenCode, Factory Droid and ACP agents** (Cursor, GitHub Copilot, Kimi, Qwen Code, Grok,
   Devin, Goose, Amp, Pi) through the Agent Client Protocol, when they're installed: approvals, plan
   progress, the agent's own slash commands, resuming saved sessions. OpenCode gets "ask" rules so Trek can
   gate its edits and commands, added only where your own OpenCode config sets none.
