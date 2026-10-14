@@ -208,6 +208,8 @@ impl Workspace {
         let applying = windows.into_iter().filter(|w| {
             if trek_agents::limits::is_fable_model(model) {
                 matches!(&w.scope, LimitScope::Model(m) if m.to_lowercase().contains("fable"))
+            } else if trek_agents::limits::is_swe_model(model) {
+                matches!(&w.scope, LimitScope::Model(m) if trek_agents::limits::is_swe_model(Some(m)))
             } else {
                 match &w.scope {
                     LimitScope::Model(m) => model.is_some_and(|mod_str| mod_str.to_lowercase().contains(&m.to_lowercase())),
@@ -280,7 +282,12 @@ impl Workspace {
     fn filling(&self, agent: &AgentId) -> bool {
         self.settings.general.wrap_up_near_limit
             && self.agent_status.get(&agent.key()).is_some_and(|s| s.limits.iter().any(|l| (FILLING..100.0).contains(&l.percent)))
-            && self.threads.iter().any(|t| t.agent == *agent && self.turn_running(&t.id))
+            && self.threads.iter().any(|t| {
+                t.agent == *agent
+                    && self.turn_running(&t.id)
+                    && !trek_agents::limits::is_fable_model(t.model.as_deref())
+                    && !trek_agents::limits::is_swe_model(t.model.as_deref())
+            })
     }
 
     /// How long Claude Code's and Codex's usage is left unread (unix ms): five minutes, or two
@@ -294,7 +301,14 @@ impl Workspace {
     /// it and its quota is filling up, or isn't known yet.
     pub(super) fn watches_devin_usage(&self) -> bool {
         let devin = super::devin_agent();
-        self.filling(&devin) || (self.settings.general.wrap_up_near_limit && self.devin_status_at == 0 && self.threads.iter().any(|t| t.agent == devin && self.turn_running(&t.id)))
+        self.filling(&devin)
+            || (self.settings.general.wrap_up_near_limit
+                && self.devin_status_at == 0
+                && self.threads.iter().any(|t| {
+                    t.agent == devin
+                        && self.turn_running(&t.id)
+                        && !trek_agents::limits::is_swe_model(t.model.as_deref())
+                }))
     }
 
     /// Fill in resets the agents' usage windows now know (after `refresh_usage`).
