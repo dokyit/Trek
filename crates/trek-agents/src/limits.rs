@@ -83,7 +83,7 @@ fn http_429(message: &str) -> bool {
 /// Which limit a message names: "session limit" / "5-hour", "weekly", or a model's ("Opus limit").
 pub fn scope_of(message: &str) -> LimitScope {
     let m = message.to_lowercase();
-    for family in ["opus", "sonnet", "haiku", "fable"] {
+    for family in ["opus", "sonnet", "haiku", "fable", "swe-2", "swe"] {
         if m.contains(&format!("{family} limit")) || m.contains(&format!("{family} weekly limit")) {
             return LimitScope::Model(crate::status::capitalize(family));
         }
@@ -123,7 +123,7 @@ fn reset_in(message: &str, now: i64, offset: &dyn Fn(Option<&str>, i64) -> Optio
     if let Some((_, tail)) = message.rsplit_once('|') {
         let digits = tail.trim();
         if (10..=13).contains(&digits.len()) && digits.chars().all(|c| c.is_ascii_digit()) {
-            let n = digits.parse::<i64>().ok()?;
+            let n = digits.parse::<i64>().ok()? ;
             return Some(if digits.len() == 13 { n } else { n * 1000 });
         }
     }
@@ -329,14 +329,41 @@ pub fn fable_applies(l: &UsageLimit, scope: &LimitScope) -> bool {
     lower.contains("fable") || matches!(scope, LimitScope::Model(m) if m.to_lowercase().contains("fable"))
 }
 
+/// Whether `model` refers to Cognition Devin's SWE-2 models (e.g. `swe-2-high`, `swe-2-medium`, `swe-2-max`).
+pub fn is_swe_model(model: Option<&str>) -> bool {
+    model.is_some_and(|m| {
+        let lower = m.to_lowercase();
+        lower.contains("swe-2")
+            || lower.contains("swe_2")
+            || lower.contains("swe2")
+            || lower.contains("swe-bench")
+            || lower == "swe"
+    })
+}
+
+/// A separate usage limit checker specifically for SWE-2 models from Devin (such as swe-2-high),
+/// so standard daily/weekly account quotas do not intervene with SWE-2 (which is unmetered under
+/// promotional periods or governed by separate SWE-2 limits).
+pub fn swe_applies(l: &UsageLimit, scope: &LimitScope) -> bool {
+    let lower = l.label.to_lowercase();
+    lower.contains("swe-2")
+        || lower.contains("swe_2")
+        || lower.contains("swe2")
+        || lower.contains("swe")
+        || matches!(scope, LimitScope::Model(m) if is_swe_model(Some(m)))
+}
+
 /// Whether usage window `l` holds back a thread on `model` that a limit in `scope` stopped.
-/// When Fable models are in play, a separate Fable checker is used so general usage limits
-/// ("5-hour limit", "Weekly limit") do not intervene with Fable.
-/// For non-Fable models, account windows hold back every model; one on a model or
+/// When Fable or SWE-2 models are in play, separate model-specific checkers are used so
+/// general usage limits ("5-hour limit", "Weekly limit", "Daily limit") do not intervene.
+/// For standard models, account windows hold back every model; one on a model or
 /// surface ("Weekly · Fable", "5-hour · gpt-reserve") only that one.
 pub fn applies(l: &UsageLimit, scope: &LimitScope, model: Option<&str>) -> bool {
     if is_fable_model(model) || matches!(scope, LimitScope::Model(m) if m.to_lowercase().contains("fable")) {
         return fable_applies(l, scope);
+    }
+    if is_swe_model(model) || matches!(scope, LimitScope::Model(m) if is_swe_model(Some(m))) {
+        return swe_applies(l, scope);
     }
     let Some((_, name)) = l.label.split_once('·') else { return !l.label.contains("(scoped)") };
     let name = name.trim().to_lowercase();
@@ -351,7 +378,15 @@ pub fn window_scope(l: &UsageLimit) -> LimitScope {
         (Some((_, name)), _) => LimitScope::Model(name.trim().to_string()),
         (None, "5h") => LimitScope::Session,
         (None, "7d") => LimitScope::Weekly,
-        _ => LimitScope::Other,
+        _ => {
+            if is_fable_model(Some(&l.label)) {
+                LimitScope::Model("Fable".to_string())
+            } else if is_swe_model(Some(&l.label)) {
+                LimitScope::Model("SWE-2".to_string())
+            } else {
+                LimitScope::Other
+            }
+        }
     }
 }
 
@@ -567,6 +602,25 @@ mod tests {
         assert_eq!(limited_until(&limits, &LimitScope::Model("Fable".into()), None, 6_000), Some(900_000));
         // Nothing used up, nothing in force.
         assert_eq!(limited_until(&[window("5-hour limit", "5h", 98., 5_000)], &LimitScope::Session, None, 0), None);
+    }
+
+    #[test]
+    fn swe_2_high_devin_limits_do_not_intervene_from_account_quota() {
+        let devin_limits = [
+            window("Daily limit", "24h", 100., 18_000_000),
+            window("Weekly limit", "7d", 100., 86_400_000),
+            window("SWE-2 limit", "24h", 100., 50_000),
+        ];
+        // Standard model is stopped by Daily limit:
+        assert_eq!(limited_until(&devin_limits[..2], &LimitScope::Other, Some("gpt-5-6-luna"), 1_000), Some(86_400_000));
+        // swe-2-high is unmetered by the general daily/weekly quota during promotion:
+        assert_eq!(limited_until(&devin_limits[..2], &LimitScope::Other, Some("swe-2-high"), 1_000), None);
+        assert_eq!(limited_until(&devin_limits[..2], &LimitScope::Other, Some("swe-2"), 1_000), None);
+        assert_eq!(limited_until(&devin_limits[..2], &LimitScope::Other, Some("devin/swe-2-high"), 1_000), None);
+        // But if a window scoped to SWE-2 is present, it does apply to swe-2-high:
+        assert_eq!(limited_until(&devin_limits, &LimitScope::Other, Some("swe-2-high"), 1_000), Some(50_000));
+        // Reset from usage should also not return daily/weekly limit for swe-2-high when only general limits exist:
+        assert_eq!(reset_from_usage(&devin_limits[..2], &LimitScope::Other, Some("swe-2-high"), 1_000), None);
     }
 
     #[test]
