@@ -317,10 +317,27 @@ fn local_zone_name() -> Option<String> {
     iana_time_zone::get_timezone().ok()
 }
 
-/// Whether usage window `l` holds back a thread on `model` that a limit in `scope` stopped. The
-/// account's own windows ("5-hour limit", "Weekly limit") hold back every model; one on a model or
+/// Whether `model` refers to a Fable model.
+pub fn is_fable_model(model: Option<&str>) -> bool {
+    model.is_some_and(|m| m.to_lowercase().contains("fable"))
+}
+
+/// A separate usage limit checker specifically for Fable models, so standard session / account limits
+/// do not intervene with Fable. Fable only responds to windows scoped specifically to Fable.
+pub fn fable_applies(l: &UsageLimit, scope: &LimitScope) -> bool {
+    let lower = l.label.to_lowercase();
+    lower.contains("fable") || matches!(scope, LimitScope::Model(m) if m.to_lowercase().contains("fable"))
+}
+
+/// Whether usage window `l` holds back a thread on `model` that a limit in `scope` stopped.
+/// When Fable models are in play, a separate Fable checker is used so general usage limits
+/// ("5-hour limit", "Weekly limit") do not intervene with Fable.
+/// For non-Fable models, account windows hold back every model; one on a model or
 /// surface ("Weekly · Fable", "5-hour · gpt-reserve") only that one.
 pub fn applies(l: &UsageLimit, scope: &LimitScope, model: Option<&str>) -> bool {
+    if is_fable_model(model) || matches!(scope, LimitScope::Model(m) if m.to_lowercase().contains("fable")) {
+        return fable_applies(l, scope);
+    }
     let Some((_, name)) = l.label.split_once('·') else { return !l.label.contains("(scoped)") };
     let name = name.trim().to_lowercase();
     let Some(word) = name.split_whitespace().next() else { return false };
@@ -545,6 +562,8 @@ mod tests {
         assert_eq!(limited_until(&limits, &LimitScope::Session, Some("claude-sonnet-5-5"), 6_000), None);
         // A Fable thread waits for the Fable week, by its model or its limit's name.
         assert_eq!(limited_until(&limits, &LimitScope::Session, Some("claude-fable-5-1"), 6_000), Some(900_000));
+        // General session limits do not intervene with Fable threads.
+        assert_eq!(limited_until(&limits[..1], &LimitScope::Session, Some("claude-fable-5-1"), 1_000), None);
         assert_eq!(limited_until(&limits, &LimitScope::Model("Fable".into()), None, 6_000), Some(900_000));
         // Nothing used up, nothing in force.
         assert_eq!(limited_until(&[window("5-hour limit", "5h", 98., 5_000)], &LimitScope::Session, None, 0), None);
