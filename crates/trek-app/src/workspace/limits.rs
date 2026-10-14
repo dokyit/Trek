@@ -204,7 +204,18 @@ impl Workspace {
                 }
             }
         }
-        if let Some(w) = due(windows) {
+        let model = self.thread(id).and_then(|t| t.model.as_deref());
+        let applying = windows.into_iter().filter(|w| {
+            if trek_agents::limits::is_fable_model(model) {
+                matches!(&w.scope, LimitScope::Model(m) if m.to_lowercase().contains("fable"))
+            } else {
+                match &w.scope {
+                    LimitScope::Model(m) => model.is_some_and(|mod_str| mod_str.to_lowercase().contains(&m.to_lowercase())),
+                    _ => true,
+                }
+            }
+        });
+        if let Some(w) = due(applying) {
             self.wrap_up(id, w, cx);
         }
     }

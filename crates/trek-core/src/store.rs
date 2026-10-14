@@ -527,6 +527,7 @@ impl Store {
     pub fn open(path: &Path) -> Result<Store> {
         let mut store = Store::with_connection(Connection::open(path)?)?;
         let reader = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI)?;
+        let _ = reader.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA cache_size = -64000; PRAGMA mmap_size = 268435456;");
         store.reader = Some(Arc::new(Mutex::new(reader)));
         Ok(store)
     }
@@ -546,6 +547,7 @@ impl Store {
         if !mode.eq_ignore_ascii_case("wal") {
             conn.execute_batch("PRAGMA journal_mode = WAL")?;
         }
+        let _ = conn.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA cache_size = -64000; PRAGMA mmap_size = 268435456; PRAGMA temp_store = MEMORY;");
         // IMMEDIATE takes the write lock up front: with another Trek migrating the same database,
         // this waits for it (or fails whole) instead of applying half the steps.
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1329,7 +1331,7 @@ impl Store {
     /// Lines each of a thread's tool calls added and removed, by call id.
     pub fn tool_lines(&self, thread_id: &str) -> Result<HashMap<String, (u32, u32)>> {
         self.with(|c| {
-            let mut st = c.prepare("SELECT tool_id, added, removed FROM tool_lines WHERE thread_id = ?1")?;
+            let mut st = c.prepare_cached("SELECT tool_id, added, removed FROM tool_lines WHERE thread_id = ?1")?;
             let rows = st.query_map([thread_id], |r| Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?))))?;
             rows.collect()
         })
@@ -1350,7 +1352,7 @@ impl Store {
     /// A thread's checkpoints, oldest first.
     pub fn checkpoints(&self, thread_id: &str) -> Result<Vec<Checkpoint>> {
         self.with(|c| {
-            let mut st = c.prepare("SELECT item_id, repo, sha, created_at FROM checkpoints WHERE thread_id = ?1 ORDER BY created_at, item_id")?;
+            let mut st = c.prepare_cached("SELECT item_id, repo, sha, created_at FROM checkpoints WHERE thread_id = ?1 ORDER BY created_at, item_id")?;
             let rows = st.query_map([thread_id], Checkpoint::from_row)?;
             rows.collect()
         })
