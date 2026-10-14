@@ -1,29 +1,37 @@
 ; Trek Inno Setup Installer Script
 ; Defaults to user folder: {userappdata}\Programs\Trek (no admin privileges needed)
 
+#ifndef AppVersion
+#define AppVersion "0.4.5"
+#endif
+
+#ifndef BinDir
+#define BinDir "..\target\release"
+#endif
+
 [Setup]
 AppName=Trek
-AppVersion=0.4.3
+AppVersion={#AppVersion}
 AppPublisher=Trek
 DefaultDirName={userappdata}\Programs\Trek
 DefaultGroupName=Trek
 DisableProgramGroupPage=yes
-OutputBaseFilename=Trek-Setup
+OutputBaseFilename=Trek-Setup-x86_64
 Compression=lzma
 SolidCompression=yes
 PrivilegesRequired=lowest
 OutputDir=..\target\installer
-SetupIconFile=..\crates\trek-app\assets\icon.ico
+SetupIconFile=..\assets\brand\trek.ico
 UninstallDisplayIcon={app}\trek.exe
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-Source: "..\target\release\trek.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\target\release\trek-mcp.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\trek.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\trek-mcp.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; If trek-update exists
-Source: "..\target\release\trek-update.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#BinDir}\trek-update.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "Uninstall-Trek.ps1"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]

@@ -122,8 +122,12 @@ them through your login shell's `PATH`; Settings → Agents & Subscriptions show
 
 ### Windows
 
-Download `Trek-<version>-windows-x86_64.zip` from the same [Releases](https://github.com/dokyit/Trek/releases)
-page, unzip it into a folder of its own that Windows doesn't guard, such as `C:\Users\<you>\Trek` or
+Download `Trek-Setup-x86_64.exe` (guided setup installer) or `Trek-<version>-windows-x86_64.zip` (portable archive)
+from the same [Releases](https://github.com/dokyit/Trek/releases) page. The installer sets up Trek in
+`%LOCALAPPDATA%\Programs\Trek`, creates Start Menu and Desktop shortcuts, provides finish options, and registers
+an uninstaller in Windows Settings (*Installed apps* / *Add or remove programs*).
+
+If using the zip, unpack it into a folder of its own that Windows doesn't guard, such as `C:\Users\<you>\Trek` or
 `%LOCALAPPDATA%\Programs\Trek` (not Documents, Desktop, Downloads or `Program Files`), and run `trek.exe`. The zip holds
 `trek.exe`, `trek-mcp.exe` and `trek-update.exe`, and nothing else. Nothing is Authenticode-signed yet, so
 SmartScreen warns once on first launch: **More info** > **Run anyway**. Trek targets Windows 11 on x64;
