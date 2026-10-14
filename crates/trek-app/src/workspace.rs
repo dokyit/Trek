@@ -2519,10 +2519,7 @@ impl Workspace {
         if self.live.get(id).is_some_and(|l| l.loaded || l.loading) || self.thread(id).is_none() {
             return self.ensure_loaded(id, cx);
         }
-        if self.live.get(id).is_none_or(|l| l.spend.is_none()) {
-            let spend = self.load_spend(id);
-            self.live.entry(id.to_string()).or_default().spend = Some(spend);
-        }
+        let need_spend = self.live.get(id).is_none_or(|l| l.spend.is_none());
         self.live.entry(id.to_string()).or_default().loading = true;
         let (store, tid) = (self.store.clone(), id.to_string());
         let task = cx.spawn(async move |this, cx| {
@@ -2530,11 +2527,30 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     let checkpointed: HashSet<String> = store.checkpoints(&tid).unwrap_or_default().into_iter().map(|c| c.item_id).collect();
-                    (tid.clone(), checkpointed, store.tool_lines(&tid).unwrap_or_default(), store.items_with_ids(&tid).unwrap_or_default())
+                    let spend_data = if need_spend {
+                        let own = store.usage_of(&[tid.clone()]).unwrap_or_default();
+                        let subs = store.descendants(&tid).unwrap_or_default();
+                        let theirs = store.usage_of(&subs).unwrap_or_default();
+                        Some((own, subs, theirs))
+                    } else {
+                        None
+                    };
+                    (tid.clone(), checkpointed, store.tool_lines(&tid).unwrap_or_default(), store.items_with_ids(&tid).unwrap_or_default(), spend_data)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                let (id, checkpointed, lines, rows) = read;
+                let (id, checkpointed, lines, rows, spend_data) = read;
+                if let Some((own, subs, theirs)) = spend_data {
+                    let sub_threads = theirs.iter().map(|r| r.thread_id.as_str()).collect::<HashSet<_>>().len();
+                    let consults = subs.iter().all(|c| this.delegations.get(c).is_none_or(|d| d.mode == trek_core::orchestrate::Mode::Advise));
+                    let spend = crate::cost::ThreadSpend {
+                        own: trek_core::store::UsageRow::spend(&own),
+                        subs: trek_core::store::UsageRow::spend(&theirs),
+                        sub_threads,
+                        consults,
+                    };
+                    this.live.entry(id.clone()).or_default().spend = Some(spend);
+                }
                 let Some(live) = this.live.get_mut(&id) else { return };
                 live.loading = false;
                 // Deleted while it was read: nothing is left to show it in.
