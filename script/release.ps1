@@ -208,17 +208,19 @@ try {
         Say " building Windows setup wizard ($installerName)..."
         $issFile = Join-Path $PSScriptRoot "installer.iss"
         if (Test-Path $issFile) {
-            & $iscc "/DAppVersion=$Version" "/O$Out" "/F$($installerName.Replace('.exe', ''))" $issFile
+            $absBin = (Resolve-Path $BinDir).Path
+            $absOut = (Resolve-Path $Out).Path
+            & $iscc "/DAppVersion=$Version" "/DBinDir=$absBin" "/O$absOut" "/F$($installerName.Replace('.exe', ''))" $issFile
             if ($LASTEXITCODE -eq 0 -and (Test-Path $installerPath)) {
                 $haveInstaller = $true
                 $installerSha = (Get-FileHash $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
                 Say " $installerName  sha256 $installerSha"
             } else {
-                Say " ! Inno Setup compilation failed"
+                if ($Publish) { Die "Inno Setup compilation failed" } else { Say " ! Inno Setup compilation failed" }
             }
         }
     } else {
-        Say " ! iscc not found; skipping Windows setup installer (.exe)"
+        if ($Publish) { Die "iscc not found; cannot build Windows setup installer (.exe)" } else { Say " ! iscc not found; skipping Windows setup installer (.exe)" }
     }
 
     $signature = ''
