@@ -57,6 +57,7 @@ mod sidebar;
 mod single_instance;
 mod system;
 mod tabs;
+mod terminal_dock;
 mod thread_view;
 mod thread_window;
 mod time;

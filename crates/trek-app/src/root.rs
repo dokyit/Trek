@@ -35,6 +35,8 @@ pub struct TrekWindow {
     pub(crate) basecamp: Entity<Basecamp>,
     pub(crate) notes: Entity<crate::notes::NotesView>,
     pub(crate) right_panel: Entity<RightPanel>,
+    /// The terminal docked under the chat (⌃`).
+    pub(crate) terminal_dock: Entity<crate::terminal_dock::TerminalDock>,
     pub(crate) working_bar: Entity<WorkingBar>,
     /// What the thread's agent runs in the background, above the composer.
     pub(crate) background_strip: Entity<crate::background_strip::BackgroundStrip>,
@@ -145,6 +147,7 @@ impl TrekWindow {
             p.width = saved_width.max(crate::panels::MIN_PANEL);
             p
         });
+        let terminal_dock = cx.new(|cx| crate::terminal_dock::TerminalDock::new(workspace.clone(), cx));
         let palette = cx.new(|cx| CommandPalette::new(workspace.clone(), right_panel.clone(), basecamp.clone(), window, cx));
         let now = crate::motion::now(cx);
         let sidebar_motion: SharedSpring = std::rc::Rc::new(std::cell::RefCell::new(crate::motion::Spring::new(crate::motion::SURFACE, crate::motion::UNIT, if workspace.read(cx).sidebar_collapsed { 0. } else { 1. }, now)));
@@ -152,6 +155,8 @@ impl TrekWindow {
         let title = cx.new(|cx| WindowTitle::new(workspace.clone(), right_panel.clone(), sidebar_motion.clone(), cx));
         let preview = cx.new(|cx| crate::image_preview::ImagePreview::new(window, cx));
         let subscriptions = vec![
+            // The dock's showing and hiding changes the chat column's layout.
+            cx.observe(&terminal_dock, |_, _, cx| cx.notify()),
             // Open files follow checkouts and rewinds in the workbench, which keeps them.
             cx.observe(&workspace, |this, _, cx| {
                 this.right_panel.update(cx, |p, cx| p.sync_native(cx));
@@ -178,6 +183,11 @@ impl TrekWindow {
                 WorkspaceEvent::OpenTool(crate::workspace::PanelTool::Terminal) if this.workspace.read(cx).ide() => {
                     this.ide.update(cx, |ide, cx| ide.show_panel(crate::ide::PanelTab::Terminal, window, cx));
                 }
+                // The harness's terminal is the dock under the chat.
+                WorkspaceEvent::OpenTool(crate::workspace::PanelTool::Terminal) => {
+                    this.workspace.update(cx, |ws, cx| ws.set_mode(crate::workspace::Mode::Agents, cx));
+                    this.terminal_dock.update(cx, |d, cx| d.show(window, cx));
+                }
                 WorkspaceEvent::OpenTool(tool) => {
                     let tool = *tool;
                     this.workspace.update(cx, |ws, cx| ws.set_mode(crate::workspace::Mode::Agents, cx));
@@ -192,7 +202,7 @@ impl TrekWindow {
                     if this.workspace.read(cx).ide() {
                         this.ide.update(cx, |ide, cx| ide.run_command(job, cwd, window, cx));
                     } else {
-                        this.right_panel.update(cx, |p, cx| p.run_command(job, cwd, window, cx));
+                        this.terminal_dock.update(cx, |d, cx| d.run_command(job, cwd, window, cx));
                     }
                 }
                 WorkspaceEvent::InsertIntoComposer(text) => this.composer.update(cx, |c, cx| c.insert_text(text, window, cx)),
@@ -338,6 +348,7 @@ impl TrekWindow {
             basecamp,
             notes,
             right_panel,
+            terminal_dock,
             working_bar,
             background_strip,
             ide,
@@ -1174,6 +1185,7 @@ impl Render for TrekWindow {
         let max_width = if overlay { (room - 40.).max(240.) } else { (room - MIN_CHAT * 0.8).min((room - MIN_CHAT).max(crate::panels::MIN_PANEL)) };
         let right_width = wanted_width.clamp(crate::panels::MIN_PANEL.min(max_width), max_width);
         let dragging = self.panel_drag.is_some();
+        let dock_dragging = self.terminal_dock.read(cx).dragging();
         // Editor mode: the workbench is everything under the title bar. The harness's route stays
         // as it was, for when the user switches back.
         let body = if crossing {
@@ -1213,6 +1225,16 @@ impl Render for TrekWindow {
                     }))
                     .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_panel_drag(cx)))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_panel_drag(cx)))
+            })
+            // The terminal dock's edge, likewise.
+            .when(dock_dragging, |el| {
+                el.cursor(CursorStyle::ResizeUpDown)
+                    .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, cx| {
+                        let viewport = window.viewport_size().height.as_f32();
+                        this.terminal_dock.update(cx, |d, cx| d.drag_to(e.position.y, viewport, cx));
+                    }))
+                    .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.terminal_dock.update(cx, |d, cx| d.end_drag(cx))))
+                    .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.terminal_dock.update(cx, |d, cx| d.end_drag(cx))))
             })
             .size_full()
             .bg(cx.theme().background)
@@ -1320,7 +1342,7 @@ impl Render for TrekWindow {
                 if this.workspace.read(cx).ide() {
                     this.ide.update(cx, |ide, cx| ide.toggle_terminal(window, cx));
                 } else {
-                    this.right_panel.update(cx, |p, cx| p.open_tool(crate::workspace::PanelTool::Terminal, window, cx));
+                    this.terminal_dock.update(cx, |d, cx| d.toggle(window, cx));
                 }
             }))
             .on_action(cx.listener(|this, _: &crate::QuickOpen, window, cx| {
@@ -1393,6 +1415,8 @@ impl TrekWindow {
         // drawn. Each re-renders when it's notified.
         let fill = || StyleRefinement::default().size_full();
         let tabs = crate::tabs::strip(&self.workspace, glass.is_some(), cx);
+        // The terminal dock, under the chat (threads and drafts) while it's shown.
+        let dock = self.terminal_dock.read(cx).open.then(|| self.terminal_dock.clone());
         let content = {
             match route {
             Route::Settings(_) => self.settings.clone().into_any_element(),
@@ -1451,6 +1475,7 @@ impl TrekWindow {
                                 .child(Composer::element(&self.composer, &mut self.composer_changed, cx)),
                         ),
                 )
+                .children(dock)
                 .into_any_element(),
             _ => v_flex()
                 .size_full()
@@ -1460,6 +1485,7 @@ impl TrekWindow {
                 .child(crate::working_bar::cached(&self.working_bar, self.thread_view.read(cx).tail.clone(), cx))
                 .child(crate::background_strip::cached(&self.background_strip, cx))
                 .child(Composer::element(&self.composer, &mut self.composer_changed, cx))
+                .children(dock)
                 .into_any_element(),
             }
         };

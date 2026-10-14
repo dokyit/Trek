@@ -828,6 +828,8 @@ impl CommandPalette {
             // The window's own action: in the editor it's the primary side bar.
             Action::ToggleSidebar => window.dispatch_action(Box::new(crate::ToggleSidebar), cx),
             Action::ToggleTools => self.right_panel.update(cx, |p, cx| p.toggle(cx)),
+            // The terminal's place depends on the mode (the dock under the chat, the editor's panel).
+            Action::OpenTool(PanelTool::Terminal) => self.workspace.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::OpenTool(PanelTool::Terminal))),
             Action::OpenTool(tool) => self.right_panel.update(cx, |p, cx| p.open_tool(tool, window, cx)),
             Action::Theme(choice) => {
                 ws.update(cx, |ws, cx| {

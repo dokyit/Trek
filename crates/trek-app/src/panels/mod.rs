@@ -157,28 +157,6 @@ impl RightPanel {
         }
     }
 
-    /// Run a setup command (install / sign in) or a project action in a fresh terminal tab, then
-    /// rescan agents.
-    pub fn run_command(&mut self, job: terminal::Job, cwd: Option<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        self.open = true;
-        self.launcher_open = false;
-        let cwd = cwd.or_else(|| self.workspace.read(cx).current_cwd());
-        let shell = self.workspace.read(cx).settings.terminal.shell.clone();
-        let ws = self.workspace.downgrade();
-        let view = cx.new(|cx| {
-            let mut t = terminal::TerminalPanel::with_command(cwd, job, shell, cx);
-            t.on_exit(move |cx| {
-                let _ = ws.update(cx, |ws, cx| ws.detect_agents(cx));
-            });
-            t
-        });
-        let id = self.next_id;
-        self.next_id += 1;
-        self.tabs.push(Tab { id, tool: PanelTool::Terminal, view: View::Terminal(view) });
-        self.active = Some(id);
-        self.after_activate(window, cx);
-    }
-
     fn after_activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_native(cx);
         match self.active_tab().map(|t| &t.view) {

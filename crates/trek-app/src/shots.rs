@@ -713,11 +713,12 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                         p.toggle(cx);
                     }
                 }),
-                "git" | "explorer" | "terminal" | "browser" | "sidechat" | "simulator" => {
+                // The terminal is the dock under the chat, not a tab of the panel.
+                "terminal" => trek.read(cx).terminal_dock.clone().update(cx, |d, cx| d.show(window, cx)),
+                "git" | "explorer" | "browser" | "sidechat" | "simulator" => {
                     let tool = match arg {
                         "git" => PanelTool::Git,
                         "explorer" => PanelTool::Explorer,
-                        "terminal" => PanelTool::Terminal,
                         "browser" => PanelTool::Browser,
                         "sidechat" => PanelTool::SideChat,
                         _ => PanelTool::Simulator,

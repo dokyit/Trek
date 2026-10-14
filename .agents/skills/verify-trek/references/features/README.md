@@ -16,7 +16,7 @@ Start the isolated app before using a CLI route. Each page below describes the u
 ## Tools
 
 - [Git and turn changes](git-and-turn-changes.md) — inspect working-tree or per-turn diffs, commit, push, and create pull requests.
-- [File Explorer and Terminal](explorer-and-terminal.md) — inspect project files and use a real shell beside the thread.
+- [File Explorer and Terminal](explorer-and-terminal.md) — inspect project files and use a real shell under the chat (⌃`) or beside the thread.
 - [Editor and deep links](editor.md) — open and edit project files in-app, and reach them from `trek://` links and editor extensions.
 - [Browser](browser.md) — browse, inspect elements, take page screenshots, and open devtools.
 - [iOS Simulator](ios-simulator.md) — boot devices, mirror the screen, install apps, tap, type, and capture.

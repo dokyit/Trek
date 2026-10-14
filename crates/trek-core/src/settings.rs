@@ -245,15 +245,21 @@ impl ProjectPrefs {
 pub struct Layout {
     /// Width of the right tools panel, in points.
     pub right_panel_width: f32,
+    /// Height of the terminal docked under the chat, in points.
+    pub terminal_height: f32,
+    /// Whether the chat's terminal dock is shown (it comes back as it was left).
+    pub terminal_open: bool,
 }
 
 impl Default for Layout {
     fn default() -> Self {
-        Self { right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH }
+        Self { right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH, terminal_height: DEFAULT_TERMINAL_HEIGHT, terminal_open: false }
     }
 }
 
 pub const DEFAULT_RIGHT_PANEL_WIDTH: f32 = 440.;
+pub const DEFAULT_TERMINAL_HEIGHT: f32 = 240.;
+pub const MIN_TERMINAL_HEIGHT: f32 = 120.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

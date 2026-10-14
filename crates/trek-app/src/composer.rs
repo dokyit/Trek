@@ -6,7 +6,7 @@ use crate::attachments::{self, Attaching, Outbox};
 use crate::dictate;
 use crate::palette;
 use crate::ui::{self, Pill};
-use crate::workspace::{PanelTool, Route, Scope, Workspace, WorkspaceEvent};
+use crate::workspace::{Route, Scope, Workspace, WorkspaceEvent};
 use crate::TogglePlan;
 use gpui_kit::component::input::{Enter, Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -2336,17 +2336,22 @@ impl Render for Composer {
                     )
                 })
                 .child(div().flex_1())
-                // The tools panel lives in the main window.
+                // The terminal docks under the chat in the main window (⌃` too); lit while it's out.
                 .when(main, |el| {
+                    let open = self.workspace.read(cx).settings.layout.terminal_open;
+                    let tip = crate::keys::shared(if open { "Hide the terminal (⌃`)" } else { "A terminal under the chat (⌃`)" });
                     el.child(
                         h_flex()
                             .id("open-terminal")
+                            .test_support()
                             .gap(px(6.))
                             .cursor_pointer()
+                            .when(open, |el| el.text_color(theme.foreground))
                             .hover(|s| s.text_color(theme.foreground))
                             .child(Icon::new(IconName::SquareTerminal).xsmall())
                             .child("Terminal")
-                            .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::OpenTool(PanelTool::Terminal))))),
+                            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                            .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::ToggleTerminal), cx)),
                     )
                 })
         });
