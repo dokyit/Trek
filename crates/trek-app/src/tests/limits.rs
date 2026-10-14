@@ -997,3 +997,28 @@ fn using_a_reset_credit_spends_it_off_the_main_thread_and_drops_it_from_usage() 
         assert_eq!(left, 0, "a spent reset leaves the list right away");
     });
 }
+
+#[test]
+fn swe_2_high_devin_limits_do_not_wrap_up_or_intervene() {
+    run(async |cx| {
+        let trek = open(cx);
+        test_clock(&trek, cx);
+        trek.update(cx, |ws, cx| {
+            let prefs = Prefs { model: Some("swe-2-high".into()), ..ws.prefs_in(&Scope::Main) };
+            ws.set_prefs_in(&Scope::Main, prefs, cx);
+        });
+        let id = trek.send(cx, "mock:long 8s");
+        let thread = id.clone();
+        trek.wait(cx, "the turn to start", |ws| ws.turn_running(&thread) && ws.live.get(&thread).is_some_and(|l| l.commands.is_some())).await;
+        let now = trek.read(cx, |ws, _| ws.now());
+        // Devin account Daily and Weekly limits are close to full:
+        let close = [("Daily limit", "24h", 98.0, 3_600_000), ("Weekly limit", "7d", 99.0, 86_400_000)];
+        let status = usage(now, &close).unwrap();
+        trek.update(cx, |ws, cx| {
+            ws.agent_status.insert(mock().key(), status);
+            ws.wrap_up_where_due(&mock(), cx);
+        });
+        // General Devin daily/weekly limits must NOT intervene with swe-2-high:
+        assert!(wrap_up_notes(&trek, cx, &id).is_empty());
+    });
+}
