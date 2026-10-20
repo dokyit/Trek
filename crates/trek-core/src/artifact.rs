@@ -119,7 +119,8 @@ fn decode_entities(s: &str) -> String {
     while let Some(at) = rest.find('&') {
         out.push_str(&rest[..at]);
         rest = &rest[at..];
-        let Some(end) = rest[..rest.len().min(12)].find(';') else {
+        // ';' is ASCII, so a byte position within the first 12 bytes is always a char boundary.
+        let Some(end) = rest.bytes().take(12).position(|b| b == b';') else {
             out.push('&');
             rest = &rest[1..];
             continue;
@@ -451,6 +452,13 @@ pub fn navigation_allowed(url: &str, origin: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ampersand_before_wide_characters_is_not_an_entity() {
+        assert_eq!(title("<h1>Supply & Demand: ✓ done</h1>").as_deref(), Some("Supply & Demand: ✓ done"));
+        assert_eq!(title("<title>Tom & Jerry — 日本語 ✓</title>").as_deref(), Some("Tom & Jerry — 日本語 ✓"));
+        assert_eq!(decode_entities("a &amp; b &mdash; &#x2713;; &日本語日本語"), "a & b — ✓; &日本語日本語");
+    }
 
     fn theme() -> Theme {
         Theme {

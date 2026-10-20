@@ -41,9 +41,17 @@ cleanup() {
     rm -rf "$WORK"
   fi
 }
+
+# The run starts by emptying $WORK and ends by removing it: only ever a folder this script made.
+MARKER="$WORK/.trek-update-e2e"
+if [[ -d $WORK && ! -e $MARKER && -n $(print -l "$WORK"/*(DN[1])) ]]; then
+  echo "$WORK exists and isn't an update-e2e scratch folder (no .trek-update-e2e in it); name an empty or new folder in TREK_E2E_DIR" >&2
+  exit 2
+fi
 trap cleanup EXIT
 
 rm -rf "$WORK"; mkdir -p "$WORK/app" "$WORK/serve" "$WORK/data"
+touch "$MARKER"
 tar -xzf "$OLD" -C "$WORK/app"
 FROM=$(version_of "$APP")
 MANIFEST=$(print -l "$NEW"/{stable,beta,nightly}.json(N) | head -1)

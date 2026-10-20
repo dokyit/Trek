@@ -15,7 +15,7 @@ use gpui_kit::{Context, Task};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::time::Duration;
-use trek_agents::{AgentEvent, Command, Decision, McpServer};
+use trek_agents::{AgentEvent, Command, Decision, McpServer, McpTransport};
 use trek_core::catalog;
 use trek_core::limit::LimitScope;
 use trek_core::orchestrate::{self as orch, MAX_DEPTH, MAX_PER_REQUEST, MAX_RUNNING, Mode, Outcome, Report};
@@ -94,6 +94,8 @@ impl TaskState {
 
 /// How long Stop gives a sub-agent to end its turn before its session is shut down.
 const STOP_GRACE: Duration = Duration::from_secs(5);
+/// Trek's computer-use server, as sessions name it.
+pub const COMPUTER_SERVER: &str = "trek-computer";
 /// The per-call limit Codex and Claude get for Trek's orchestration tools: longer than the
 /// longest wait.
 const TOOL_TIMEOUT_SECS: u64 = 1900;
@@ -165,23 +167,32 @@ impl Workspace {
 
     /// MCP servers for a new session of `agent` in `thread` (`None`: a draft's, warmed up before
     /// its thread exists): `mcp_servers`, plus Trek's orchestration tools with a session key of
-    /// their own. Returns the key too, to name the session's thread and to retire it.
+    /// their own. Background computer use gets the same key, to tell Trek what it's doing (for its
+    /// picture-in-picture window). Returns the key too, to name the session's thread and to
+    /// retire it.
     pub(super) fn session_mcp(&mut self, agent: &AgentId, thread: Option<&str>) -> (Vec<McpServer>, Option<String>) {
         let mut servers = self.mcp_servers();
         // The mock talks to Trek itself; a real agent needs the server binary.
         let mock = matches!(agent, AgentId::Direct(p) if p == catalog::MOCK_PROVIDER);
         let bin = super::trek_mcp_binary();
-        let Some(ipc) = self.ipc.as_ref().filter(|_| self.settings.tools.orchestration && (mock || bin.is_some())) else { return (servers, None) };
+        let orchestrate = self.settings.tools.orchestration && (mock || bin.is_some());
+        let behind = servers.iter().position(|s| s.name == COMPUTER_SERVER && s.env().iter().any(|(k, v)| k == trek_ipc::ENV_COMPUTER_MODE && v == trek_ipc::COMPUTER_BACKGROUND));
+        let Some(ipc) = self.ipc.as_ref().filter(|_| orchestrate || behind.is_some()) else { return (servers, None) };
         let key = ipc.open_session(thread);
-        servers.push(McpServer {
-            tool_timeout_secs: Some(TOOL_TIMEOUT_SECS),
-            ..McpServer::stdio(
-                trek_agents::mock::ORCHESTRATE_SERVER,
-                bin.map(|b| b.display().to_string()).unwrap_or_else(|| "trek-mcp".into()),
-                vec!["orchestrate".into()],
-                ipc.env(&key),
-            )
-        });
+        if let Some(McpTransport::Stdio { env, .. }) = behind.map(|i| &mut servers[i].transport) {
+            env.extend(ipc.env(&key));
+        }
+        if orchestrate {
+            servers.push(McpServer {
+                tool_timeout_secs: Some(TOOL_TIMEOUT_SECS),
+                ..McpServer::stdio(
+                    trek_agents::mock::ORCHESTRATE_SERVER,
+                    bin.map(|b| b.display().to_string()).unwrap_or_else(|| "trek-mcp".into()),
+                    vec!["orchestrate".into()],
+                    ipc.env(&key),
+                )
+            });
+        }
         (servers, Some(key))
     }
 
@@ -226,8 +237,18 @@ impl Workspace {
         let id = || call.params.get("id").and_then(Value::as_str).map(str::trim).unwrap_or_default().to_string();
         let result = if self.thread(&call.thread).is_none() {
             Err("This thread isn't in Trek any more.".to_string())
+        } else if call.method != trek_ipc::COMPUTER_ACTIVITY && !self.settings.tools.orchestration {
+            // A session can hold a key for background computer use alone: the key doesn't
+            // bring the sub-agent tools with it.
+            Err("Sub-agent tools are off in Trek's settings (Tools & MCP).".to_string())
         } else {
             match call.method.as_str() {
+                // Background computer use saying what it's doing, for its picture-in-picture window.
+                trek_ipc::COMPUTER_ACTIVITY => {
+                    let (thread, picture) = (call.thread.clone(), self.settings.tools.background_pip);
+                    self.background_use.update(cx, |b, cx| b.record(&thread, &call.params, picture, cx));
+                    Ok(json!({}))
+                }
                 "list_models" => Ok(self.list_models(&call.thread)),
                 "delegate_task" => match self.delegate(&call.thread, &call.params, cx) {
                     Ok(child) if call.params.get("wait").and_then(Value::as_bool) == Some(true) => {
@@ -373,7 +394,9 @@ impl Workspace {
         }
         // Advising, it can't change anything: nothing it asks to do is approved (`screen_advice`).
         let hand_holding = if mode == Mode::Advise { HandHolding::Supervised } else { parent.hand_holding };
-        let mut child = self.store.create_thread(parent.cwd.as_deref(), agent, model, effort, hand_holding).map_err(|e| format!("Couldn't start the sub-agent: {e}"))?;
+        // Its parent's project (none for a thread in a folder of its own: that folder isn't one).
+        let project = self.project_dir(&parent);
+        let mut child = self.store.create_thread(project.as_deref(), agent, model, effort, hand_holding).map_err(|e| format!("Couldn't start the sub-agent: {e}"))?;
         child.title = title.chars().take(80).collect();
         // Its parent's folder, worktree and all.
         child.cwd = parent.cwd.clone();

@@ -152,5 +152,8 @@ case ${1:-} in
   ios/*) run_ios "${1#ios/}";;
   ""|help|--help|-h)
     sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//';;
-  *) [[ -f media/mac/$1.cmds ]] && run_mac "$1"; [[ -f media/ios/$1.list ]] && run_ios "$1";;
+  *) found=0
+     if [[ -f media/mac/$1.cmds ]]; then run_mac "$1"; found=1; fi
+     if [[ -f media/ios/$1.list ]]; then run_ios "$1"; found=1; fi
+     (( found )) || die "no suite named $1 (try 'capture.sh list')";;
 esac

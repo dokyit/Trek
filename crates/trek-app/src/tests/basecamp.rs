@@ -514,6 +514,22 @@ fn worked(trek: &Trek, cx: &mut TestAppContext, ago: &[(i64, &std::path::PathBuf
 }
 
 #[test]
+fn a_narrow_page_keeps_the_names_in_the_tables_readable() {
+    run(async |cx| {
+        let trek = open(cx);
+        worked(&trek, cx, &[(0, &trek.project)]);
+        // Beside the sidebar and an open tools panel the page is only a few hundred points wide.
+        cx.simulate_window_resize(trek.window, gpui_kit::size(gpui_kit::px(700.), gpui_kit::px(900.)));
+        trek.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx));
+        trek.render(cx);
+        let name = trek.bounds(cx, "basecamp-project-name-0").expect("the project's name was drawn");
+        assert!(name.size.width >= gpui_kit::px(90.), "the name keeps its room, the numbers give way: {name:?}");
+        let row = trek.bounds(cx, ("basecamp-project", 0usize)).expect("the row was drawn");
+        assert!(row.right() <= gpui_kit::px(700.), "and the row fits the window: {row:?}");
+    });
+}
+
+#[test]
 fn every_range_is_worked_out_in_one_pass_and_switching_reads_nothing() {
     run(async |cx| {
         let trek = open(cx);

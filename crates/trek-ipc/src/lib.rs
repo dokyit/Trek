@@ -78,6 +78,16 @@ pub const ENV_SESSION: &str = "TREK_IPC_SESSION";
 
 pub const VERSION: u64 = 1;
 
+/// How `trek-mcp computer` works: [`COMPUTER_BACKGROUND`] to act in the agent's own window behind
+/// the user's (macOS), anything else (or nothing) in front, with the real pointer and keyboard.
+pub const ENV_COMPUTER_MODE: &str = "TREK_COMPUTER_MODE";
+pub const COMPUTER_BACKGROUND: &str = "background";
+/// What `trek-mcp computer` tells Trek it is doing in the background, after each tool call, so
+/// Trek can show it (its picture-in-picture window): `{action, detail, window: {id, pid, app,
+/// title, x, y, width, height}, point?: {x, y}, from?: {x, y}}`, points in the window's own
+/// coordinates (screen points, origin at its top-left). Answered with `{}`.
+pub const COMPUTER_ACTIVITY: &str = "computer_activity";
+
 /// The longest frame either side accepts. Requests are small; results are capped well below.
 pub const MAX_FRAME: usize = 1 << 20;
 

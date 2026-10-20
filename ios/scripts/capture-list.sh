@@ -9,8 +9,17 @@
 # the rest reuse it. SIM picks the simulator — pin a 6.9" Pro Max for App Store sizes, e.g.
 #   SIM="iPhone 17 Pro Max" ios/scripts/capture-list.sh media/ios/store.list dist/media/store
 set -eu
+# The manifest and outdir are relative to where the caller stands (script/capture.sh runs from
+# the repo root), so make them absolute before moving into ios/.
+MANIFEST=${1:?manifest}
+case $MANIFEST in /*) ;; *) MANIFEST=$PWD/$MANIFEST;; esac
+if [ -n "${2:-}" ]; then
+  OUTDIR=$2
+  case $OUTDIR in /*) ;; *) OUTDIR=$PWD/$OUTDIR;; esac
+fi
 cd "$(dirname "$0")/.."
-MANIFEST=${1:?manifest}; OUTDIR=${2:-screenshots}
+OUTDIR=${OUTDIR:-$PWD/screenshots}
+[ -f "$MANIFEST" ] || { echo "capture-list: no manifest $MANIFEST" >&2; exit 1; }
 mkdir -p "$OUTDIR"
 BUILD=1
 grep -vE '^[[:space:]]*(#|$)' "$MANIFEST" | while IFS= read -r line; do

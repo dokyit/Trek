@@ -970,7 +970,6 @@ impl Composer {
     /// Attach files by inserting @-references into the prompt.
     fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: true, multiple: true, prompt: Some("Attach".into()) });
-        let input = self.input.clone();
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
                 let (images, files) = attachments::split_files(paths);
@@ -978,19 +977,27 @@ impl Composer {
                 if files.is_empty() {
                     return;
                 }
-                let refs: Vec<String> = files.iter().map(|p| format!("@{}", p.display())).collect();
-                let _ = input.update_in(cx, |s, window, cx| {
-                    let mut v = s.value().to_string();
-                    if !v.is_empty() && !v.ends_with(' ') {
-                        v.push(' ');
-                    }
-                    v.push_str(&refs.join(" "));
-                    v.push(' ');
-                    s.set_value(v, window, cx);
-                });
+                let _ = this.update_in(cx, |this, window, cx| this.append_file_refs(&files, window, cx));
             }
         })
         .detach();
+    }
+
+    /// `@path` references after what's typed, the caret behind them.
+    pub(crate) fn append_file_refs(&mut self, files: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        let refs: Vec<String> = files.iter().map(|p| format!("@{}", p.display())).collect();
+        self.input.update(cx, |s, cx| {
+            let mut v = s.value().to_string();
+            if !v.is_empty() && !v.ends_with(' ') {
+                v.push(' ');
+            }
+            v.push_str(&refs.join(" "));
+            v.push(' ');
+            let end = v.len();
+            // A multi-line input puts the caret at the start of a new value.
+            s.set_value(v, window, cx);
+            s.set_selected_range(end..end, cx);
+        });
     }
 
     /// Take a screenshot with macOS's own picker and attach it. `mode`: "window", "area" or "screen".

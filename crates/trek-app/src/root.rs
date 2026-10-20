@@ -1419,8 +1419,8 @@ impl TrekWindow {
         // drawn. Each re-renders when it's notified.
         let fill = || StyleRefinement::default().size_full();
         let tabs = crate::tabs::strip(&self.workspace, glass.is_some(), cx);
-        // The terminal dock, under the chat (threads and drafts) while it's shown.
-        let dock = self.terminal_dock.read(cx).open.then(|| self.terminal_dock.clone());
+        // The terminal dock, under the chat (threads and drafts) while the one on screen has it shown.
+        let dock = self.terminal_dock.read(cx).is_open(cx).then(|| self.terminal_dock.clone());
         let content = {
             match route {
             Route::Settings(_) => self.settings.clone().into_any_element(),

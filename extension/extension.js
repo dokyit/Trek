@@ -11,14 +11,18 @@ function openLink(command) {
     }
     const doc = editor.document;
     const sel = editor.selection;
-    const params = new URLSearchParams({ path: doc.uri.fsPath });
-    params.set('line', String(sel.active.line + 1));
+    // Asking about a selection names where it starts and ends, whichever way it was dragged;
+    // opening the file goes to the caret.
+    const params = [['path', doc.uri.fsPath], ['line', String((command === 'ask' ? sel.start : sel.active).line + 1)]];
     if (command === 'ask') {
-        params.set('end', String(sel.end.line + 1));
+        params.push(['end', String(sel.end.line + 1)]);
         const text = doc.getText(sel);
-        if (text) params.set('selection', text);
+        if (text) params.push(['selection', text]);
     }
-    vscode.env.openExternal(vscode.Uri.parse(`trek://${command}?${params}`));
+    // A string, not a Uri: openExternal re-encodes a Uri with encodeURI, which leaves '&', '+' and
+    // '=' bare, and they'd split or blank out the text. Spaces are %20: '+' is a literal plus.
+    const query = params.map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+    vscode.env.openExternal(`trek://${command}?${query}`);
 }
 
 function activate(context) {

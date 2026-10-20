@@ -202,3 +202,27 @@ fn stop_agent_is_offered_while_a_turn_runs_and_stops_it() {
         assert!(matches!(trek.items(cx, &id).last(), Some(trek_core::store::Item::Notice { text }) if text == "Interrupted"));
     });
 }
+
+#[test]
+fn switching_between_quick_open_and_commands_still_gives_the_keys_back() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.type_text(cx, "hi");
+        let focused = trek.window(cx, |window, cx| window.focused(cx));
+        assert!(focused.is_some(), "the composer has the keys to start with");
+        let palette = cx.read(|cx| trek.root.read(cx).palette.clone());
+        // ⌘P, then ⌘K over it, then the palette closes: the palette's own input must not be
+        // what the keys go back to.
+        trek.window(cx, |window, cx| palette.update(cx, |p, cx| p.toggle_files(window, cx)));
+        trek.render(cx);
+        trek.window(cx, |window, cx| palette.update(cx, |p, cx| p.toggle(window, cx)));
+        trek.render(cx);
+        assert!(palette.read_with(cx, |p, _| p.open));
+        trek.window(cx, |window, cx| palette.update(cx, |p, cx| p.toggle(window, cx)));
+        trek.render(cx);
+        assert!(!palette.read_with(cx, |p, _| p.open));
+        assert_eq!(trek.window(cx, |window, cx| window.focused(cx)), focused, "the composer gets the keys back");
+        trek.type_text(cx, " there");
+        assert_eq!(trek.composer_text(cx), "hi there");
+    });
+}

@@ -38,7 +38,11 @@ struct ApiRelease {
     draft: bool,
 }
 
-const CACHE: &str = "changelog.json";
+/// Where the list saved for `repo` lives: each feed's repository has a file of its own, so one
+/// feed's notes are never shown for another's releases.
+fn cache_file(repo: &str) -> std::path::PathBuf {
+    crate::paths::updates_dir().join(format!("changelog-{}.json", repo.replace('/', "-")))
+}
 
 /// `owner/repo` of a GitHub releases feed (`https://github.com/<owner>/<repo>/releases`); `None`
 /// for other feeds, which have no release list to read.
@@ -54,15 +58,16 @@ pub fn github_repo(updates: &Updates) -> Option<String> {
 /// Every published release, newest first (`for_channel` picks a channel's): fetched, or the copy
 /// saved by the last fetch when GitHub can't be reached.
 pub async fn fetch(updates: &Updates) -> Result<Vec<Release>> {
-    let cache = crate::paths::updates_dir().join(CACHE);
+    // A feed with no release list (or none of GitHub's) has no saved copy to fall back on.
+    let cache = github_repo(updates).map(|repo| cache_file(&repo));
     match fetch_live(updates).await {
         Ok(all) => {
-            if let Ok(json) = serde_json::to_vec(&all) {
-                let _ = std::fs::write(&cache, json);
+            if let (Some(cache), Ok(json)) = (&cache, serde_json::to_vec(&all)) {
+                let _ = std::fs::write(cache, json);
             }
             Ok(all)
         }
-        Err(e) => cached(&cache).ok_or(e),
+        Err(e) => cache.and_then(|c| cached(&c)).ok_or(e),
     }
 }
 
@@ -204,9 +209,17 @@ mod tests {
         let all = parse(vec![api("v0.2.0", "Trek 0.2.0", false)]);
         let dir = std::env::temp_dir().join(format!("trek-changelog-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(CACHE);
+        let path = dir.join("changelog.json");
         std::fs::write(&path, serde_json::to_vec(&all).unwrap()).unwrap();
         assert_eq!(cached(&path), Some(all));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn each_feeds_repository_keeps_its_own_saved_list() {
+        let official = cache_file("dokyit/Trek");
+        let fork = cache_file("someone/fork");
+        assert_ne!(official, fork);
+        assert_eq!(fork.file_name().unwrap(), "changelog-someone-fork.json");
     }
 }

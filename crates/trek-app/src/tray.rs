@@ -103,9 +103,14 @@ fn tray_icon_px() -> u32 {
     TRAY_SIZES[0]
 }
 
+const SHOW_BEHIND: &str = "Show Background Use";
+const HIDE_BEHIND: &str = "Hide Background Use";
+
 pub struct Tray {
     icon: TrayIcon,
     status: MenuItem,
+    /// Brings back the picture-in-picture window of background computer use, or puts it away.
+    behind: MenuItem,
     glyph: Glyph,
     /// The glyph on screen: the state's, or the other beat of the blink.
     shown: &'static str,
@@ -113,6 +118,7 @@ pub struct Tray {
     /// While agents work the summit beacon blinks between lit and ring.
     blink: Option<Task<()>>,
     _subscription: Subscription,
+    _behind: Subscription,
     _events: Task<()>,
     /// Windows: follows the taskbar's theme and scale (nothing tells us when they change).
     _surface: Option<Task<()>>,
@@ -152,26 +158,28 @@ fn set_glyph(tray: &TrayIcon, icon: Option<Icon>) -> tray_icon::Result<()> {
 struct Parts {
     icon: TrayIcon,
     status: MenuItem,
-    ids: (tray_icon::menu::MenuId, tray_icon::menu::MenuId, tray_icon::menu::MenuId, tray_icon::menu::MenuId),
+    behind: MenuItem,
+    ids: (tray_icon::menu::MenuId, tray_icon::menu::MenuId, tray_icon::menu::MenuId, tray_icon::menu::MenuId, tray_icon::menu::MenuId),
     rx: async_channel::Receiver<tray_icon::menu::MenuId>,
 }
 
 fn build() -> anyhow::Result<Parts> {
     let status = MenuItem::new("No agents running", false, None);
+    let behind = MenuItem::new(SHOW_BEHIND, false, None);
     let open = MenuItem::new("Open Trek", true, None);
     let new_thread = MenuItem::new("New Thread", true, None);
     let settings = MenuItem::new("Settings…", true, None);
     let quit = MenuItem::new(crate::words::words().quit_app, true, None);
     let menu = Menu::new();
-    menu.append_items(&[
-        &status,
-        &PredefinedMenuItem::separator(),
-        &open,
-        &new_thread,
-        &PredefinedMenuItem::separator(),
-        &settings,
-        &quit,
-    ])?;
+    // Background use is a Mac thing: Windows' computer use works in front, so there is never
+    // a picture to show or hide.
+    let (first, second) = (PredefinedMenuItem::separator(), PredefinedMenuItem::separator());
+    let mut items: Vec<&dyn tray_icon::menu::IsMenuItem> = vec![&status];
+    if !crate::words::is_windows() {
+        items.push(&behind);
+    }
+    items.extend([&first as &dyn tray_icon::menu::IsMenuItem, &open, &new_thread, &second, &settings, &quit]);
+    menu.append_items(&items)?;
     let icon = with_glyph(TrayIconBuilder::new(), load_icon(Glyph::Idle.name(), Surface::current()).ok_or_else(|| anyhow::anyhow!("tray icon glyph"))?)
         .with_tooltip("Trek")
         .with_menu(Box::new(menu))
@@ -193,13 +201,13 @@ fn build() -> anyhow::Result<Parts> {
     MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
         let _ = tx.try_send(e.id);
     }));
-    let ids = (open.id().clone(), new_thread.id().clone(), settings.id().clone(), quit.id().clone());
-    Ok(Parts { icon, status, ids, rx })
+    let ids = (open.id().clone(), new_thread.id().clone(), settings.id().clone(), quit.id().clone(), behind.id().clone());
+    Ok(Parts { icon, status, behind, ids, rx })
 }
 
 impl Tray {
     fn new(parts: Parts, workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
-        let Parts { icon, status, ids, rx } = parts;
+        let Parts { icon, status, behind, ids, rx } = parts;
         // Weak: the menu's events can come for as long as the app lives.
         let ws = workspace.downgrade();
         let events = cx.spawn(async move |_, cx| {
@@ -219,6 +227,9 @@ impl Tray {
                         ws.update(cx, |ws, cx| ws.show_in_main(Route::Settings(SettingsPage::General), cx));
                     } else if id == ids.3 {
                         crate::root::quit(cx);
+                    } else if id == ids.4 {
+                        let b = ws.read(cx).background_use.clone();
+                        b.update(cx, |b, cx| b.toggle(cx));
                     }
                 });
             }
@@ -227,6 +238,8 @@ impl Tray {
             let state = Self::read_state(ws.read(cx), cx);
             this.sync(state, cx)
         });
+        let background_use = workspace.read(cx).background_use.clone();
+        let behind_changed = cx.observe(&background_use, |this, b, cx| this.sync_behind(b.read(cx)));
         let surface = Surface::current();
         let follow = cfg!(windows).then(|| {
             cx.spawn(async move |this, cx| {
@@ -245,9 +258,11 @@ impl Tray {
                 }
             })
         });
-        let mut this = Self { icon, status, glyph: Glyph::Idle, shown: Glyph::Idle.name(), surface, blink: None, _subscription: subscription, _events: events, _surface: follow };
+        let mut this = Self { icon, status, behind, glyph: Glyph::Idle, shown: Glyph::Idle.name(), surface, blink: None, _subscription: subscription, _behind: behind_changed, _events: events, _surface: follow };
         let state = Self::read_state(workspace.read(cx), cx);
         this.sync(state, cx);
+        // The icon can come (the setting turned on) while an agent is using the computer.
+        this.sync_behind(background_use.read(cx));
         this
     }
 
@@ -261,6 +276,13 @@ impl Tray {
             0
         };
         (needs, working, !ws.motion(cx))
+    }
+
+    /// "Show Background Use" while an agent uses the computer in the background and its picture
+    /// is away; "Hide" while it shows; greyed out otherwise.
+    fn sync_behind(&mut self, b: &crate::background_use::BackgroundUse) {
+        self.behind.set_text(if b.showing() { HIDE_BEHIND } else { SHOW_BEHIND });
+        self.behind.set_enabled(!b.sessions.is_empty());
     }
 
     /// Draw glyph `name` for the taskbar as it is.

@@ -1161,6 +1161,23 @@ async fn devices_persist_across_restarts() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[tokio::test]
+async fn a_stopped_server_leaves_devices_json_to_the_one_that_replaced_it() {
+    let dir = std::env::temp_dir().join(format!("trek-remote-it-{}-{}", std::process::id(), rand_suffix()));
+    let path = dir.join("devices.json");
+    let (handle, _) = start_with(|c| c.devices_path = Some(path.clone())).await;
+    let (mut c, _) = pair(&handle, "dev-1").await;
+    // The server that replaced this one revoked the device.
+    std::fs::write(&path, r#"{"devices":[]}"#).unwrap();
+    handle.shutdown();
+    closed(&mut c).await;
+    drop(c);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let file = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(file, r#"{"devices":[]}"#, "the old server's session wrote its stale list back");
+}
+
 fn rand_suffix() -> u128 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
 }

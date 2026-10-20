@@ -64,6 +64,24 @@ fn numstat(top: &Path, cached: bool) -> HashMap<String, (i64, i64)> {
         .collect()
 }
 
+/// `git status --porcelain=v1 -z` as (index, worktree, path) per changed file. A rename or copy
+/// is followed by an entry with just the old path (no `XY ` prefix, however short): skipped.
+fn status_entries(out: &[u8]) -> Vec<(char, char, String)> {
+    let mut entries = out.split(|b| *b == 0).filter(|e| !e.is_empty());
+    let mut found = vec![];
+    while let Some(e) = entries.next() {
+        if e.len() < 4 {
+            continue;
+        }
+        let (x, y) = (e[0] as char, e[1] as char);
+        if x == 'R' || x == 'C' {
+            entries.next();
+        }
+        found.push((x, y, String::from_utf8_lossy(&e[3..]).to_string()));
+    }
+    found
+}
+
 /// Read the repository holding `root`: its branch and the two lists.
 pub(crate) fn read(root: &Path) -> ScmState {
     let Some(top) = super::git::top(root) else { return ScmState::default() };
@@ -75,14 +93,7 @@ pub(crate) fn read(root: &Path) -> ScmState {
     let out = super::git::command(&top).args(["status", "--porcelain=v1", "-z", "--untracked-files=all"]).output().ok().filter(|o| o.status.success()).map(|o| o.stdout).unwrap_or_default();
     let (staged_n, changes_n) = (numstat(&top, true), numstat(&top, false));
     let mut state = ScmState { repo: true, top: Some(top.clone()), branch, upstream, ..Default::default() };
-    let mut entries = out.split(|b| *b == 0).filter(|e| e.len() > 3);
-    while let Some(e) = entries.next() {
-        let (x, y) = (e[0] as char, e[1] as char);
-        let rel = String::from_utf8_lossy(&e[3..]).to_string();
-        // A rename's entry is followed by where it was.
-        if x == 'R' || x == 'C' {
-            entries.next();
-        }
+    for (x, y, rel) in status_entries(&out) {
         let conflict = x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D');
         if conflict {
             state.changes.push(ScmFile { rel, status: '!', added: 0, removed: 0 });
@@ -659,5 +670,20 @@ impl ScmView {
 
     pub(crate) fn file(&self, staged: bool, rel: &str) -> Option<ScmFile> {
         if staged { self.state.staged.iter() } else { self.state.changes.iter() }.find(|f| f.rel == rel).cloned()
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::status_entries;
+
+    #[test]
+    fn a_rename_from_a_short_path_does_not_swallow_the_next_entry() {
+        // `git mv a.c b.c` + an edit to zzzz.txt: the old path `a.c` is only 3 bytes.
+        let got = status_entries(b"R  b.c\0a.c\0 M zzzz.txt\0");
+        assert_eq!(got, vec![('R', ' ', "b.c".to_string()), (' ', 'M', "zzzz.txt".to_string())]);
+        let got = status_entries(b"R  new name.rs\0old/long/path.rs\0?? x.txt\0A  y\0");
+        assert_eq!(got.iter().map(|(_, _, p)| p.as_str()).collect::<Vec<_>>(), ["new name.rs", "x.txt", "y"]);
+        assert!(status_entries(b"").is_empty());
     }
 }

@@ -10,8 +10,16 @@ pub fn relative(ms: i64) -> String {
         45..=3_599 => format!("{}m", (s + 30) / 60),
         3_600..=86_399 => format!("{}h", s / 3_600),
         86_400..=604_799 => format!("{}d", s / 86_400),
-        _ => chrono::DateTime::from_timestamp_millis(ms).map(|d| d.format("%b %-d").to_string()).unwrap_or_default(),
+        _ => short_date(ms, &chrono::Local),
     }
+}
+
+/// "Sep 12" in the given zone (the user's own, not UTC).
+fn short_date<Tz: TimeZone>(ms: i64, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    DateTime::from_timestamp_millis(ms).map(|d| d.with_timezone(tz).format("%b %-d").to_string()).unwrap_or_default()
 }
 
 /// Elapsed run time: "12s", "4m 03s", "1h 3m".
@@ -96,7 +104,7 @@ pub fn morning<Tz: TimeZone>(now: &DateTime<Tz>, days: i64) -> Option<DateTime<T
 
 #[cfg(test)]
 mod tests {
-    use super::{countdown, morning, reset_clock};
+    use super::{countdown, morning, reset_clock, short_date};
     use chrono::{DateTime, FixedOffset, MappedLocalTime, NaiveDate, NaiveDateTime, Offset, TimeZone};
 
     fn at(tz: &impl TimeZone<Offset = FixedOffset>, s: &str) -> DateTime<FixedOffset> {
@@ -106,6 +114,14 @@ mod tests {
 
     fn fmt(t: Option<DateTime<FixedOffset>>) -> String {
         t.map(|t| t.format("%Y-%m-%d %H:%M %:z").to_string()).unwrap_or_default()
+    }
+
+    #[test]
+    fn old_dates_are_the_users_own_day() {
+        // 01:00 UTC on Sep 12 is still the evening of Sep 11 at UTC-8, and already Sep 12 at UTC+9.
+        let ms = NaiveDate::from_ymd_opt(2026, 9, 12).unwrap().and_hms_opt(1, 0, 0).unwrap().and_utc().timestamp_millis();
+        assert_eq!(short_date(ms, &FixedOffset::west_opt(8 * 3600).unwrap()), "Sep 11");
+        assert_eq!(short_date(ms, &FixedOffset::east_opt(9 * 3600).unwrap()), "Sep 12");
     }
 
     #[test]

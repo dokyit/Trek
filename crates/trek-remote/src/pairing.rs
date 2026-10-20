@@ -420,7 +420,10 @@ impl DeviceRegistry {
             std::fs::create_dir_all(dir)?;
         }
         let json = serde_json::to_vec_pretty(&DevicesFile { devices: self.devices.clone() }).map_err(io::Error::other)?;
-        let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+        // Two servers in one process (a restart) may save at once: each its own temp file.
+        static SAVES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = path.with_extension(format!("tmp-{}-{n}", std::process::id()));
         {
             use std::io::Write as _;
             let mut opts = std::fs::OpenOptions::new();

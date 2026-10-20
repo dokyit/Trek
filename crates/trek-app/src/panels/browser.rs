@@ -527,6 +527,18 @@ fn host_of(url: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.strip_prefix("www.").unwrap_or(host).to_string())
 }
 
+/// Scheme, host and port of `url` (everything before its path); `None` when it has no authority.
+fn origin_of(url: &str) -> Option<&str> {
+    let (scheme, rest) = url.split_once("://")?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    Some(&url[..scheme.len() + 3 + end])
+}
+
+/// `a` and `b` are on one origin: what a page can move between by the history API, and no more.
+fn same_origin(a: &str, b: &str) -> bool {
+    matches!((origin_of(a), origin_of(b)), (Some(x), Some(y)) if x.eq_ignore_ascii_case(y))
+}
+
 fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
@@ -1118,9 +1130,12 @@ impl BrowserPanel {
                 }
             }
             "url" => {
+                // The page names its own address after a history change, and any page can name
+                // any address: it counts only for the origin the view is on and the message came from.
+                let actual = self.tab_mut(id).and_then(|t| t.view.read(cx).raw().url().ok()).map(from_view);
                 let url = str_of("url");
                 if let Some(tab) = self.tab_mut(id) {
-                    if !url.is_empty() && !internal {
+                    if !url.is_empty() && !internal && same_origin(&url, &origin) && actual.as_deref().is_some_and(|a| same_origin(&url, a)) {
                         tab.page.url = url;
                     }
                 }
@@ -1876,12 +1891,26 @@ impl Render for BrowserPanel {
 mod tests {
     // Named, not `super::*`: that would bring GPUI's `test` attribute over the standard one.
     use super::{
-        ERROR_URL, FAVICON_MAX_BYTES, Page, START_URL, decode_favicon, download_favicon, extract_title, favicon_url, from_view, from_webview2, host_of, normalize, to_view,
-        to_webview2,
+        ERROR_URL, FAVICON_MAX_BYTES, Page, START_URL, decode_favicon, download_favicon, extract_title, favicon_url, from_view, from_webview2, host_of, normalize, same_origin,
+        to_view, to_webview2,
     };
     use gpui_kit::ImageFormat;
     #[cfg(windows)]
     use super::{Captures, Msg, PAGES_SCHEME, native};
+
+    #[test]
+    fn a_page_can_only_name_an_address_on_its_own_origin() {
+        let here = "https://evil.example/page?x=1";
+        assert!(same_origin("https://evil.example/other#frag", here));
+        assert!(same_origin("HTTPS://Evil.Example", here));
+        assert!(!same_origin("https://github.com/login", here));
+        assert!(!same_origin("https://github.com@evil.example/", here));
+        assert!(!same_origin("http://evil.example/page", here));
+        assert!(!same_origin("https://evil.example:8443/page", here));
+        assert!(!same_origin("https://evil.example.github.com/", here));
+        assert!(!same_origin("about:blank", "about:blank"));
+        assert!(same_origin("file:///a/b.html", "file:///c/d.html"));
+    }
 
     #[test]
     fn trek_pages_cross_into_webview2_and_back() {

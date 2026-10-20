@@ -1878,3 +1878,18 @@ endstream endobj
 trailer<</Root 1 0 R>>
 %%EOF
 ";
+#[test]
+fn a_thread_or_draft_shown_in_the_main_window_from_elsewhere_brings_the_harness_back() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        // ⌘N in a thread window, with the main window in the editor.
+        editor_on_draft(&trek, cx);
+        trek.update(cx, |ws, cx| ws.show_in_main(Route::Draft { project: None }, cx));
+        assert_eq!(trek.read(cx, |ws, _| (ws.mode, ws.route.clone())), (Mode::Agents, Route::Draft { project: None }));
+        // A thread opened from a thread window (a fork, a lineage link).
+        trek.update(cx, |ws, cx| ws.set_mode(Mode::Editor, cx));
+        trek.update(cx, |ws, cx| ws.show_in_main(Route::Thread(id.clone()), cx));
+        assert_eq!(trek.read(cx, |ws, _| (ws.mode, ws.route.clone())), (Mode::Agents, Route::Thread(id.clone())));
+    });
+}

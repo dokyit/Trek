@@ -178,7 +178,7 @@ extension PairingView {
     }
 
     private var fingerprintHint: String {
-        fingerprintInvalid ? "8 characters, 0–9 and A–F, as your Mac shows it."
+        fingerprintInvalid ? "\(Fingerprint.typedLength) characters, 0–9 and A–F, as your Mac shows it."
             : "Shown beside the code on your Mac. It proves this is your Mac."
     }
 

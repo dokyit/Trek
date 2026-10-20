@@ -132,8 +132,35 @@ struct Edit {
 /// Told when a file or folder moved (`Some(to)`) or went to the Trash (`None`).
 pub type OnMoved = Box<dyn Fn(PathBuf, Option<PathBuf>, &mut Window, &mut App)>;
 
-/// Why `name` can't be made or renamed to in `dir`, when it can't.
-fn name_problem(dir: &Path, name: &str, nested: bool) -> Option<String> {
+/// `to` is `from` itself under another case: on a case-insensitive volume (macOS's, Windows's)
+/// the new spelling "exists" because it is the file being renamed.
+fn is_case_change(from: &Path, to: &Path) -> bool {
+    let (Some(a), Some(b)) = (from.file_name(), to.file_name()) else { return false };
+    let (a, b) = (a.to_string_lossy(), b.to_string_lossy());
+    if a == b || a.to_lowercase() != b.to_lowercase() {
+        return false;
+    }
+    match (from.symlink_metadata(), to.symlink_metadata()) {
+        (Ok(f), Ok(t)) => same_file(&f, &t),
+        _ => false,
+    }
+}
+
+#[cfg(unix)]
+fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    (a.dev(), a.ino()) == (b.dev(), b.ino())
+}
+
+/// Windows can't tell from the metadata alone; the names already differ only in case.
+#[cfg(not(unix))]
+fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    a.len() == b.len() && a.modified().ok() == b.modified().ok()
+}
+
+/// Why `name` can't be made or renamed to in `dir`, when it can't. `renaming` is the path being
+/// renamed, whose own name in another case isn't a clash.
+fn name_problem(dir: &Path, name: &str, nested: bool, renaming: Option<&Path>) -> Option<String> {
     let name = name.trim();
     if name.is_empty() {
         return Some("A name is needed.".into());
@@ -141,7 +168,11 @@ fn name_problem(dir: &Path, name: &str, nested: bool) -> Option<String> {
     if name.split('/').any(|p| p == "." || p == "..") || name.starts_with('/') || (!nested && name.contains('/')) {
         return Some(format!("“{name}” isn't a valid name here."));
     }
-    dir.join(name).symlink_metadata().is_ok().then(|| format!("A file or folder “{name}” already exists here. Choose another name."))
+    let to = dir.join(name);
+    if renaming.is_some_and(|from| is_case_change(from, &to)) {
+        return None;
+    }
+    to.symlink_metadata().is_ok().then(|| format!("A file or folder “{name}” already exists here. Choose another name."))
 }
 
 pub struct ExplorerPanel {
@@ -387,7 +418,7 @@ impl ExplorerPanel {
                 return self.cancel_edit(cx);
             }
         }
-        if let Some(why) = name_problem(&dir, &name, !matches!(kind, EditKind::Rename(_))) {
+        if let Some(why) = name_problem(&dir, &name, !matches!(kind, EditKind::Rename(_)), if let EditKind::Rename(from) = &kind { Some(from) } else { None }) {
             return self.toast(why, cx);
         }
         let to = dir.join(&name);
@@ -616,5 +647,32 @@ impl ExplorerPanel {
             let (ws, root, me) = (self.workspace.clone(), root.to_path_buf(), cx.weak_entity());
             row.context_menu(move |menu, _, _| row_menu(menu, me.clone(), &ws, &path, is_dir, &root)).into_any_element()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::name_problem;
+
+    #[test]
+    fn a_rename_that_only_changes_case_is_not_a_clash_with_itself() {
+        let dir = std::env::temp_dir().join(format!("trek-explorer-case-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let from = dir.join("readme.md");
+        std::fs::write(&from, "x").unwrap();
+        std::fs::write(dir.join("other.md"), "y").unwrap();
+        let case_insensitive = dir.join("README.md").symlink_metadata().is_ok();
+        // Whether or not the volume folds case, renaming to another case of its own name is fine.
+        assert_eq!(name_problem(&dir, "README.md", false, Some(&from)), None);
+        // A different file's name still clashes, and so does a new file's.
+        assert!(name_problem(&dir, "other.md", false, Some(&from)).is_some());
+        assert!(name_problem(&dir, "readme.md", true, None).is_some());
+        if case_insensitive {
+            assert!(name_problem(&dir, "README.md", true, None).is_some(), "a new file can't take the spelling of an existing one");
+            std::fs::rename(&from, dir.join("README.md")).unwrap();
+            assert!(std::fs::read_dir(&dir).unwrap().any(|e| e.unwrap().file_name() == "README.md"));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

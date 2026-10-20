@@ -24,7 +24,7 @@ $Settings = @(
 ) -join "`n"
 $Tools = @('git', 'explorer', 'terminal', 'browser', 'sidechat', 'simulator')
 $BasicRoutes = @('draft', 'no-project', 'basecamp', 'notes', 'appearance', 'first')
-$ControlVerbs = @('range', 'settled', 'glass', 'tint', 'theme', 'pace', 'wait', 'new', 'diff', 'tools', 'editor', 'ide', 'artifacts', 'scroll', 'click', 'rclick', 'hover', 'elements', 'key', 'note')
+$ControlVerbs = @('range', 'settled', 'glass', 'tint', 'theme', 'pace', 'wait', 'new', 'diff', 'tools', 'editor', 'ide', 'artifacts', 'scroll', 'click', 'rclick', 'hover', 'elements', 'key', 'note', 'background-use')
 $ValueFlags = @('--size', '--timeout', '--output', '--lines', '--grep')
 
 $script:Human = $args -contains '--human'
@@ -297,6 +297,9 @@ function Route-Line([string]$Route) {
 }
 function Invoke-Check([bool]$Quick) {
     $steps = [System.Collections.Generic.List[object]]::new()
+    # With-Lock runs the block in a child scope, so `$shots = ...` or `+=` in there would not reach
+    # Out-Result below; a list filled by .Add() does.
+    $shots = [System.Collections.Generic.List[string]]::new()
     With-Lock {
         foreach ($f in Get-ChildItem "$Root\script\*.ps1", "$Root\script\lib\*.ps1" -ErrorAction SilentlyContinue) {
             $n = "ps1 parses: $($f.Name)"
@@ -322,7 +325,6 @@ function Invoke-Check([bool]$Quick) {
         # state but never validating an older process that happened to be open.
         if ($wasRunning) { Stop-Trek | Out-Null }
         Start-Trek $false '1280x820' | Out-Null
-        $shots = @()
         try {
             $state = Read-State
             foreach ($route in 'basecamp', 'settings:general') {
@@ -332,7 +334,7 @@ function Invoke-Check([bool]$Quick) {
                 $art = Join-Path $RunDir 'artifacts'
                 New-Item -ItemType Directory -Force $art | Out-Null
                 Copy-Item (Join-Path $ShotDir "$name.png") (Join-Path $art "$name.png") -Force
-                $shots += (Join-Path $art "$name.png")
+                $shots.Add((Join-Path $art "$name.png"))
             }
             $steps.Add(@{ name = 'isolated UI smoke'; passed = $true; routes = @('basecamp', 'settings:general'); screenshots = $shots })
         } finally { if (-not $wasRunning) { Stop-Trek | Out-Null } }

@@ -84,6 +84,7 @@ fn an_answer_with_a_server_left_running_is_done_not_working() {
         // The end of its output, with Stop, and the whole of it a click away (the agent says where).
         trek.click(cx, ("bg-task", 0usize));
         assert!(cx.read(|cx| trek.root.read(cx).background_strip.read(cx).output_open()).is_some());
+        assert!(trek.read(cx, |ws, _| ws.overlay_open), "the popover holds the native views back");
         trek.render(cx);
         assert!(trek.visible(cx, "bg-output-card") && trek.visible(cx, "bg-output-text"));
         assert!(trek.visible(cx, "bg-output-full"));
@@ -92,6 +93,7 @@ fn an_answer_with_a_server_left_running_is_done_not_working() {
         trek.wait(cx, "the server to stop", move |ws| ws.live[&t].background.is_empty()).await;
         trek.render(cx);
         assert!(!trek.visible(cx, "background-strip") && !trek.visible(cx, format!("live-line-at-work-{id}")));
+        assert!(!trek.read(cx, |ws, _| ws.overlay_open), "the popover went with its task, and so did its hold");
         assert_eq!(trek.run_state(cx, &id), RunState::Idle);
     });
 }

@@ -62,9 +62,14 @@ function Install-TrekFiles([string]$targetDir) {
         }
     } else {
         Write-Host "Downloading latest Trek release for Windows..."
-        $zipUrl = "https://github.com/dokyit/Trek/releases/latest/download/Trek-windows-x86_64.zip"
-        $tempZip = Join-Path $env:TEMP "Trek-windows-x86_64.zip"
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        # Release assets carry the version (Trek-<version>-windows-x86_64.zip), so ask the API
+        # which one the latest release has instead of guessing a fixed name.
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/dokyit/Trek/releases/latest" -Headers @{ "User-Agent" = "Trek-Installer" } -UseBasicParsing
+        $asset = $release.assets | Where-Object { $_.name -like "Trek-*-windows-x86_64.zip" } | Select-Object -First 1
+        if (-not $asset) { throw "The latest Trek release has no Windows zip (Trek-<version>-windows-x86_64.zip)." }
+        $zipUrl = $asset.browser_download_url
+        $tempZip = Join-Path $env:TEMP $asset.name
         Invoke-WebRequest -Uri $zipUrl -OutFile $tempZip -UseBasicParsing
 
         Write-Host "Extracting Trek to $targetDir..."
@@ -103,6 +108,9 @@ function Register-WindowsUninstall([string]$targetDir) {
     }
     $targetExe = Join-Path $targetDir "trek.exe"
     $uninstallerScript = Join-Path $targetDir "Uninstall-Trek.ps1"
+    # The uninstaller must act on the folder chosen here, not its default. A trailing backslash
+    # would escape the closing quote on the command line, so double it.
+    $dirArg = if ($targetDir.EndsWith("\")) { "$targetDir\" } else { $targetDir }
 
     $version = "0.4.3"
     if (Test-Path $targetExe) {
@@ -115,8 +123,8 @@ function Register-WindowsUninstall([string]$targetDir) {
     Set-ItemProperty -Path $regPath -Name "Publisher" -Value "Trek" -Force
     Set-ItemProperty -Path $regPath -Name "DisplayIcon" -Value "$targetExe,0" -Force
     Set-ItemProperty -Path $regPath -Name "InstallLocation" -Value $targetDir -Force
-    Set-ItemProperty -Path $regPath -Name "UninstallString" -Value "powershell.exe -ExecutionPolicy Bypass -File `"$uninstallerScript`"" -Force
-    Set-ItemProperty -Path $regPath -Name "QuietUninstallString" -Value "powershell.exe -ExecutionPolicy Bypass -File `"$uninstallerScript`" -Silent" -Force
+    Set-ItemProperty -Path $regPath -Name "UninstallString" -Value "powershell.exe -ExecutionPolicy Bypass -File `"$uninstallerScript`" -InstallDir `"$dirArg`"" -Force
+    Set-ItemProperty -Path $regPath -Name "QuietUninstallString" -Value "powershell.exe -ExecutionPolicy Bypass -File `"$uninstallerScript`" -InstallDir `"$dirArg`" -Silent" -Force
     Set-ItemProperty -Path $regPath -Name "NoModify" -Value 1 -Type DWord -Force
     Set-ItemProperty -Path $regPath -Name "NoRepair" -Value 1 -Type DWord -Force
 }

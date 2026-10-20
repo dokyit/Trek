@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 /// The colour of `path`'s type, for its chip: `None` for lockfiles and plain files, which stay
 /// neutral.
 pub fn type_colour(path: &str) -> Option<u32> {
-    let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or(path).to_lowercase();
+    let name = base_name(path).to_lowercase();
     if name.ends_with(".lock") || matches!(name.as_str(), "package-lock.json" | "pnpm-lock.yaml" | "npm-shrinkwrap.json" | "go.sum") {
         return None;
     }
@@ -121,6 +121,11 @@ struct IconMap {
 static ICONS: LazyLock<IconMap> =
     LazyLock::new(|| crate::assets::brand_bytes("file-icons/map.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default());
 
+/// The last component of `path`, whichever separator it uses (Windows paths reach here as written).
+fn base_name(path: &str) -> &str {
+    path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
 /// Looks `key` up as written, then in lower case.
 fn find<'a>(map: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
     map.get(key).or_else(|| map.get(&key.to_lowercase())).map(String::as_str)
@@ -129,7 +134,7 @@ fn find<'a>(map: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
 /// The icon for a file at `path`: by its whole name, then by its suffixes, longest first.
 pub fn icon_name(path: &str) -> &'static str {
     let icons = &*ICONS;
-    let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or(path);
+    let name = base_name(path);
     if let Some(icon) = find(&icons.names, name).or_else(|| find(&icons.suffixes, name)) {
         return icon;
     }
@@ -138,7 +143,7 @@ pub fn icon_name(path: &str) -> &'static str {
 
 /// The icon for a folder at `path` (`src`, `docs`, `.github`), open or closed.
 pub fn folder_icon_name(path: &str, open: bool) -> String {
-    let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or(path);
+    let name = base_name(path);
     let icon = find(&ICONS.folders, name).unwrap_or("_folder");
     if open { format!("{icon}_open") } else { icon.to_string() }
 }
@@ -171,6 +176,17 @@ mod tests {
         for neutral in ["Cargo.lock", "frontend/package-lock.json", "pnpm-lock.yaml", "LICENSE", "notes.xyz", "src/"] {
             assert_eq!(type_colour(neutral), None, "{neutral}");
         }
+    }
+
+    #[test]
+    fn windows_paths_are_looked_up_by_their_file_name() {
+        assert_eq!(icon_name(r"C:\proj\Cargo.toml"), "cargo");
+        assert_eq!(icon_name(r"C:\proj\README.md"), "readme");
+        assert_eq!(icon_name(r"C:\proj\Dockerfile"), "docker");
+        assert_eq!(folder_icon_name(r"C:\proj\src\", true), "folder_src_open");
+        assert_eq!(type_colour(r"web\package-lock.json"), None);
+        assert_eq!(type_colour(r"build\Makefile"), type_colour("Makefile"));
+        assert!(type_colour(r"build\Makefile").is_some());
     }
 
     #[test]

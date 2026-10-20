@@ -724,6 +724,17 @@ pub(crate) fn picker_items<H: PickerHost>(host: &H, cx: &App) -> Vec<PickItem> {
 /// Put row `ix` in place of the token being completed.
 pub(crate) fn accept_pick<H: PickerHost>(host: &mut H, ix: usize, window: &mut Window, cx: &mut Context<H>) {
     let Some(t) = host.pickers_ref().trigger.clone() else { return };
+    // The caret moved since the picker opened (a click, ←, Home) and no longer sits in the token
+    // the rows are for: the picker catches up, and nothing is replaced.
+    let stale = {
+        let live = host.input().read(cx);
+        mentions::trigger_at(&live.value(), live.cursor()).as_ref() != Some(&t)
+    };
+    if stale {
+        update_trigger(host, cx);
+        cx.notify();
+        return;
+    }
     let Some(item) = picker_items(host, cx).into_iter().nth(ix) else { return };
     let folder = item.icon == PickIcon::Folder;
     host.input().update(cx, |s, cx| {

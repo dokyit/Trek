@@ -247,6 +247,12 @@ impl NotesView {
         handle.focus(window, cx);
     }
 
+    /// The notes as listed, newest first, and whether the one on screen is unsaved.
+    #[cfg(test)]
+    pub(crate) fn listed(&self) -> (Vec<String>, bool) {
+        (self.notes.iter().map(|n| n.body.clone()).collect(), self.dirty)
+    }
+
     fn note(&self) -> Option<&Note> {
         self.notes.iter().find(|n| Some(&n.id) == self.current.as_ref())
     }
@@ -269,6 +275,13 @@ impl NotesView {
     /// unsaved changes keeps them, and is saved over the phone's as it would have been.
     fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.dirty {
+            // The note being typed in stays as it is; the others are as the phone left them.
+            if let Some(mine) = self.note().cloned() {
+                self.notes = notes::list_in(&notes::notes_dir());
+                self.notes.retain(|n| n.id != mine.id);
+                self.notes.insert(0, mine);
+                cx.notify();
+            }
             return;
         }
         self.notes = notes::list_in(&notes::notes_dir());
@@ -358,23 +371,53 @@ impl NotesView {
             self.notes.insert(0, n);
         }
         self._save = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(400)).await;
-            let _ = this.update(cx, |this, _| this.flush());
+            let mut wait = Duration::from_millis(400);
+            let mut told = false;
+            loop {
+                cx.background_executor().timer(wait).await;
+                // A save that fails (disk full, a read-only folder) leaves the note unsaved: say
+                // so once, and keep trying while it is.
+                let Ok(failed) = this.update(cx, |this, cx| match this.save() {
+                    Ok(()) => false,
+                    Err(e) => {
+                        if !std::mem::replace(&mut told, true) {
+                            this.workspace.update(cx, |_, cx| {
+                                cx.emit(crate::workspace::WorkspaceEvent::Toast { message: format!("Couldn't save the note: {e}. Trying again."), undo: None })
+                            });
+                        }
+                        true
+                    }
+                }) else {
+                    return;
+                };
+                if !failed {
+                    return;
+                }
+                wait = Duration::from_secs(5);
+            }
         }));
         cx.notify();
     }
 
     /// Save the note on screen if it changed.
     fn flush(&mut self) {
+        let _ = self.save();
+    }
+
+    /// Save the note on screen if it changed. A failed save leaves it changed, so it is tried
+    /// again and a phone's edits don't replace what was typed.
+    fn save(&mut self) -> std::io::Result<()> {
         if !self.dirty {
-            return;
+            return Ok(());
         }
         if let Some(note) = self.note()
             && let Err(e) = notes::save(note)
         {
             tracing::warn!("note {}: {e}", note.id);
+            return Err(e);
         }
         self.dirty = false;
+        Ok(())
     }
 
     fn read(state: &Entity<TextareaState>, cx: &App) -> (String, Range<usize>) {

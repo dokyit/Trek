@@ -524,7 +524,8 @@ pub fn toggle_block(text: &str, sel: Range<usize>, block: Block) -> Edit {
     let end_at = if sel.end > sel.start && text[..sel.end].ends_with('\n') { sel.end - 1 } else { sel.end };
     let end = text[end_at..].find('\n').map(|i| end_at + i).unwrap_or(text.len());
     let lines: Vec<&str> = text[start..end].split('\n').collect();
-    let all = lines.iter().filter(|l| !l.trim().is_empty()).all(|l| marker_len(l, block).is_some());
+    // Blank lines alone aren't a block already: they get the marker.
+    let all = lines.iter().any(|l| !l.trim().is_empty()) && lines.iter().filter(|l| !l.trim().is_empty()).all(|l| marker_len(l, block).is_some());
     let mut n = 0;
     let changed: Vec<String> = lines
         .iter()
@@ -536,6 +537,9 @@ pub fn toggle_block(text: &str, sel: Range<usize>, block: Block) -> Edit {
                 let cut = marker_len(l, block).unwrap_or(0);
                 let indent = l.len() - l.trim_start().len();
                 format!("{}{}", &l[..indent.min(cut)], &l[cut..])
+            } else if l.trim().is_empty() {
+                n += 1;
+                format!("{l}{}", marker(block, n))
             } else {
                 n += 1;
                 let cut = any_marker_len(l);
@@ -669,6 +673,21 @@ mod tests {
         assert_eq!(h.selection, 4..4, "the cursor stays in the word");
         let h2 = toggle_block(&h.text, 3..3, Block::Heading(2));
         assert_eq!(h2.text, "## Title\nbody", "one heading level swaps for another");
+    }
+
+    #[test]
+    fn a_blank_line_starts_a_block() {
+        let e = toggle_block("", 0..0, Block::Bullets);
+        assert_eq!(e.text, "- ");
+        assert_eq!(e.selection, 2..2);
+        assert_eq!(toggle_block("", 0..0, Block::Checklist).text, "- [ ] ");
+        assert_eq!(toggle_block("", 0..0, Block::Heading(2)).text, "## ");
+        assert_eq!(toggle_block("", 0..0, Block::Quote).text, "> ");
+        // The blank line between two paragraphs, and turning it off again.
+        let text = "one\n\ntwo";
+        let on = toggle_block(text, 4..4, Block::Numbers);
+        assert_eq!(on.text, "one\n1. \ntwo");
+        assert_eq!(toggle_block(&on.text, on.selection.clone(), Block::Numbers).text, text);
     }
 
     #[test]

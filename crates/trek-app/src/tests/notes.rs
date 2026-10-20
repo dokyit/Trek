@@ -183,3 +183,56 @@ fn with_artifacts_off_a_video_is_a_chip_that_opens_in_quick_look() {
         assert_eq!(log.borrow().made, 0);
     });
 }
+
+#[test]
+fn a_phones_changes_that_arrive_mid_typing_are_read_without_losing_the_typing() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.click(cx, "open-notes");
+        trek.render(cx);
+        let notes = notes_view(&trek, cx);
+        trek.window(cx, |window, cx| notes.update(cx, |n, cx| n.set_text("mine".into(), window, cx)));
+        assert_eq!(cx.read(|cx| notes.read(cx).listed()), (vec!["mine".to_string()], true), "unsaved");
+        // The phone adds a note while it is.
+        let theirs = trek_core::notes::create_in(&trek_core::notes::notes_dir()).unwrap();
+        std::fs::write(&theirs.path, "from the phone").unwrap();
+        trek.update(cx, |ws, cx| {
+            ws.notes_epoch += 1;
+            cx.notify();
+        });
+        assert_eq!(cx.read(|cx| notes.read(cx).listed()), (vec!["mine".to_string(), "from the phone".to_string()], true));
+        // The save lands, the typing intact, and the phone's note is still listed.
+        cx.executor().advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        assert_eq!(cx.read(|cx| notes.read(cx).listed()), (vec!["mine".to_string(), "from the phone".to_string()], false));
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn a_note_that_could_not_be_saved_stays_unsaved_and_is_tried_again() {
+    use std::os::unix::fs::PermissionsExt;
+    run(async |cx| {
+        let trek = open(cx);
+        trek.click(cx, "open-notes");
+        trek.render(cx);
+        let notes = notes_view(&trek, cx);
+        let dir = trek_core::notes::notes_dir();
+        trek.window(cx, |window, cx| notes.update(cx, |n, cx| n.set_text("first".into(), window, cx)));
+        saved(cx);
+        // The folder turns read-only (a sync conflict, a full disk): the next save fails.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::write(dir.join("probe"), "").is_ok() {
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return; // permissions don't bind this user
+        }
+        trek.window(cx, |window, cx| notes.update(cx, |n, cx| n.set_text("second".into(), window, cx)));
+        saved(cx);
+        assert!(cx.read(|cx| notes.read(cx).listed().1), "still unsaved");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        cx.executor().advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        assert_eq!(saved(cx), "second");
+        assert!(!cx.read(|cx| notes.read(cx).listed().1));
+    });
+}

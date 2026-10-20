@@ -64,6 +64,8 @@ enum Action {
     Editor(crate::workspace::EditorCommand),
     /// The thread and window commands a menu bar has (`WindowCommand`).
     Window(WindowCommand),
+    /// Bring back (or put away) the picture of background computer use.
+    BackgroundUse,
 }
 
 /// What a Mac's menus offer that nothing else in the palette did. Windows draws no menu bar, so
@@ -449,10 +451,14 @@ impl CommandPalette {
                 })
             });
         }
+        // Already open (⌘P then ⌘K): what has focus now is the palette's own input, not what to go back to.
+        let reopened = self.open;
         self.open = true;
         let motion = self.workspace.read(cx).motion(cx);
         self.presence.enter((), motion, crate::motion::now(cx));
-        self.restore = window.focused(cx);
+        if !reopened {
+            self.restore = window.focused(cx);
+        }
         self.selected = 0;
         self.input.update(cx, |s, cx| {
             s.set_value("", window, cx);
@@ -715,6 +721,12 @@ impl CommandPalette {
                 add(e, "recap range span today week all time ever history");
             }
         }
+        // While an agent uses the computer in the background: its picture-in-picture window.
+        let behind = ws.background_use.read(cx);
+        if !behind.sessions.is_empty() {
+            let label = if behind.showing() { "Hide background use" } else { "Show background use" };
+            add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::AppWindow)), label, Action::BackgroundUse), "computer use picture in picture pip window watch agent clicking typing");
+        }
         add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::NotebookPen)), "Notes", Action::Notes).hint(keys::hint(Id::OpenNotes)), "jot write todo checklist scratch pad memo");
         add(Entry::new(c, icon(Icon::new(crate::assets::Lucide::MessageSquarePlus)), "New thread without a project", Action::NewChat), "chat scratch no project question");
         let glass = ws.settings.appearance.glass;
@@ -817,6 +829,10 @@ impl CommandPalette {
             Action::Basecamp => ws.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx)),
             Action::BasecampRange(range) => self.basecamp.update(cx, |b, cx| b.set_range(range, cx)),
             Action::Notes => ws.update(cx, |ws, cx| ws.navigate(Route::Notes, cx)),
+            Action::BackgroundUse => {
+                let b = ws.read(cx).background_use.clone();
+                b.update(cx, |b, cx| b.toggle(cx));
+            }
             Action::NewChat => ws.update(cx, |ws, cx| ws.navigate(Route::Draft { project: None }, cx)),
             Action::Glass(on) => ws.update(cx, |ws, cx| {
                 ws.settings.appearance.glass = on;

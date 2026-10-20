@@ -211,3 +211,67 @@ fn a_models_own_efforts_replace_the_shared_ones() {
         assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().effort), Effort::High);
     });
 }
+
+#[test]
+fn a_first_message_whose_thread_couldnt_be_made_goes_back_to_the_composer() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: None }, cx));
+        trek.render(cx);
+        // No folder can be made for a thread in no project: a file has the place they go.
+        let chats = trek_core::paths::chats_dir();
+        let _ = std::fs::remove_dir_all(&chats);
+        std::fs::create_dir_all(chats.parent().unwrap()).unwrap();
+        std::fs::write(&chats, "").unwrap();
+        let image = trek.project.join("shot.png");
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([90, 140, 200, 255])).save(&image).unwrap();
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        composer.update(cx, |c, cx| c.attach_image(image.clone(), cx));
+        trek.type_text(cx, "a long prompt");
+        trek.press(cx, "enter");
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: None }, "no thread");
+        assert_eq!(trek.composer_text(cx), "a long prompt");
+        assert_eq!(cx.read(|cx| composer.read(cx).attached().0), [image]);
+        std::fs::remove_file(&chats).unwrap();
+    });
+}
+
+/// The picker's trigger is only recomputed as text changes. Enter with the caret moved out of
+/// the token must not replace what lies between the caret and the old `@`.
+#[test]
+fn a_pick_with_the_caret_gone_from_the_token_replaces_nothing() {
+    run(async |cx| {
+        let trek = open(cx);
+        std::fs::write(trek.project.join("alpha_only.rs"), "").unwrap();
+        let picks = |trek: &Trek, cx: &gpui_kit::TestAppContext| cx.read(|cx| trek.root.read(cx).composer.read(cx).picks(cx));
+        trek.type_text(cx, "fix the bug in @alpha");
+        for _ in 0..2000 {
+            cx.run_until_parked();
+            if picks(&trek, cx).contains(&"alpha_only.rs".to_string()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(picks(&trek, cx).contains(&"alpha_only.rs".to_string()), "{:?}", picks(&trek, cx));
+        trek.press(cx, "home");
+        trek.press(cx, "enter");
+        assert_eq!(trek.composer_text(cx), "fix the bug in @alpha");
+        assert!(picks(&trek, cx).is_empty(), "the picker closed with the caret out of the token");
+    });
+}
+
+/// "Add photos & files" appends `@path` references and leaves the caret after them.
+#[test]
+fn attached_files_leave_the_caret_after_their_references() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.type_text(cx, "please review");
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        let file = trek.project.join("notes.md");
+        trek.window(cx, |window, cx| composer.update(cx, |c, cx| c.append_file_refs(std::slice::from_ref(&file), window, cx)));
+        let want = format!("please review @{} ", file.display());
+        assert_eq!(trek.composer_text(cx), want);
+        trek.type_text(cx, "thanks");
+        assert_eq!(trek.composer_text(cx), format!("{want}thanks"));
+    });
+}

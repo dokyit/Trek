@@ -386,7 +386,10 @@ private nonisolated struct Parser {
         case "\\":
             pos += 1
             let name = commandName()
-            return command(name)
+            // `\frac\frac\frac…` takes its arguments through here, never through `list`.
+            depth += 1
+            defer { depth -= 1 }
+            return depth > MathParse.maxDepth ? restAsText() : command(name)
         case let c?:
             pos += 1
             return [symbol(c)]
@@ -478,7 +481,10 @@ private nonisolated struct Parser {
                 return out
             case "{":
                 flush()
-                out.append(contentsOf: textInner(face))
+                depth += 1
+                let inner = depth > MathParse.maxDepth ? restAsText() : textInner(face)
+                depth -= 1
+                out.append(contentsOf: inner)
             case "$":
                 flush()
                 let start = pos

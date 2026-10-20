@@ -74,24 +74,12 @@ pub(crate) fn snapshot(cwd: &Path) -> Snapshot {
         let mut it = s.split_whitespace().filter_map(|n| n.parse::<u32>().ok());
         Some((it.next()?, it.next()?))
     });
-    let mut stats = std::collections::HashMap::new();
-    let numstat = git_read(cwd, &["diff", "HEAD", "--numstat"]).or_else(|_| git_read(cwd, &["diff", "--cached", "--numstat"])).unwrap_or_default();
-    for line in numstat.lines() {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() == 3 {
-            stats.insert(parts[2].to_string(), (parts[0].parse().unwrap_or(0), parts[1].parse().unwrap_or(0)));
-        }
-    }
+    // NUL-separated (`-z`): git prints a path with a non-ASCII or odd character quoted otherwise,
+    // and the quoted text is no path.
+    let numstat = git_read(cwd, &["diff", "HEAD", "--numstat", "-z"]).or_else(|_| git_read(cwd, &["diff", "--cached", "--numstat", "-z"])).unwrap_or_default();
+    let stats = parse_numstat(&numstat);
     let mut files = Vec::new();
-    for line in git_read(cwd, &["status", "--porcelain=v1", "-uall"]).unwrap_or_default().lines() {
-        if line.len() < 4 {
-            continue;
-        }
-        let status = line[..2].trim().to_string();
-        let mut path = line[3..].to_string();
-        if let Some((_, to)) = path.split_once(" -> ") {
-            path = to.to_string();
-        }
+    for (status, path) in parse_status(&git_read(cwd, &["status", "--porcelain=v1", "-z", "-uall"]).unwrap_or_default()) {
         let (additions, deletions) = match stats.get(&path) {
             Some(s) => *s,
             None if status == "??" => (untracked_text(&cwd.join(&path)).map(|s| s.lines().count() as i64).unwrap_or(0), 0),
@@ -100,6 +88,41 @@ pub(crate) fn snapshot(cwd: &Path) -> Snapshot {
         files.push(FileChange { path, status, additions, deletions });
     }
     Snapshot { is_repo: true, branch, upstream, files }
+}
+
+/// The (status, path) of each entry of `git status --porcelain=v1 -z`; a rename or copy is at its
+/// new path.
+fn parse_status(out: &str) -> Vec<(String, String)> {
+    let mut entries = out.split('\0').filter(|e| e.len() > 3);
+    let mut files = Vec::new();
+    while let Some(e) = entries.next() {
+        let Some((xy, path)) = e.split_at_checked(2).and_then(|(xy, rest)| Some((xy, rest.strip_prefix(' ')?))) else { continue };
+        // The old path of a rename follows its entry.
+        if xy.starts_with(['R', 'C']) || xy.ends_with(['R', 'C']) {
+            entries.next();
+        }
+        files.push((xy.trim().to_string(), path.to_string()));
+    }
+    files
+}
+
+/// The (added, deleted) lines of each path in `git diff --numstat -z`; a rename's path is its new one.
+fn parse_numstat(out: &str) -> std::collections::HashMap<String, (i64, i64)> {
+    let mut stats = std::collections::HashMap::new();
+    let mut entries = out.split('\0');
+    while let Some(e) = entries.next() {
+        let mut parts = e.splitn(3, '\t');
+        let (Some(added), Some(deleted), Some(path)) = (parts.next(), parts.next(), parts.next()) else { continue };
+        // A rename has an empty path here, then its old and new paths as entries of their own.
+        let path = if path.is_empty() {
+            entries.next();
+            entries.next().unwrap_or_default()
+        } else {
+            path
+        };
+        stats.insert(path.to_string(), (added.parse().unwrap_or(0), deleted.parse().unwrap_or(0)));
+    }
+    stats
 }
 
 /// A worktree's changes in the shape the file list draws (`U`ntracked shows as `??` does).
@@ -1200,7 +1223,7 @@ impl Render for GitPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{pr_body, pr_label};
+    use super::{parse_numstat, parse_status, pr_body, pr_label};
 
     #[test]
     fn pull_request_links_read_as_repo_and_number() {
@@ -1217,5 +1240,43 @@ mod tests {
         let long = "é".repeat(2000);
         let body = pr_body(Some(&long), &[]);
         assert!(body.ends_with('…') && body.len() <= 3003);
+    }
+
+    #[test]
+    fn status_paths_come_unquoted_with_renames_at_their_new_path() {
+        let out = " M résumé.md\0?? a \"b\".txt\0R  new.rs\0old.rs\0A  日本.txt\0";
+        let files = parse_status(out);
+        let files: Vec<(&str, &str)> = files.iter().map(|(s, p)| (s.as_str(), p.as_str())).collect();
+        assert_eq!(files, [("M", "résumé.md"), ("??", "a \"b\".txt"), ("R", "new.rs"), ("A", "日本.txt")]);
+    }
+
+    #[test]
+    fn numstat_counts_are_keyed_by_the_real_path() {
+        let stats = parse_numstat("3\t1\tr\u{e9}sum\u{e9}.md\0-\t-\timg.png\00\t0\t\0old.rs\0new.rs\0");
+        assert_eq!(stats.get("résumé.md"), Some(&(3, 1)));
+        assert_eq!(stats.get("img.png"), Some(&(0, 0)));
+        assert_eq!(stats.get("new.rs"), Some(&(0, 0)));
+        assert_eq!(stats.len(), 3);
+    }
+
+    #[test]
+    fn the_snapshot_of_a_repo_names_a_non_ascii_file_by_its_path() {
+        let dir = std::env::temp_dir().join(format!("trek-git-panel-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| assert!(crate::panels::git::git(&dir, args).is_ok(), "git {args:?}");
+        run(&["init", "-q"]);
+        std::fs::write(dir.join("résumé.md"), "one\n").unwrap();
+        run(&["add", "."]);
+        run(&["-c", "commit.gpgsign=false", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "first"]);
+        std::fs::write(dir.join("résumé.md"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.join("é.txt"), "a\nb\nc\n").unwrap();
+        let snap = super::snapshot(&dir);
+        let by_path = |p: &str| snap.files.iter().find(|f| f.path == p).unwrap_or_else(|| panic!("{p} missing from {:?}", snap.files));
+        assert_eq!((by_path("résumé.md").additions, by_path("résumé.md").deletions), (1, 0));
+        assert_eq!(by_path("é.txt").additions, 3);
+        let diff = super::file_diff(&dir, by_path("résumé.md"));
+        assert!(diff.iter().any(|(_, l)| l == "+two"), "no added line in the diff of résumé.md ({} lines)", diff.len());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

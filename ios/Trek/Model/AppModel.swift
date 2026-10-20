@@ -270,6 +270,8 @@ final class AppModel {
     }
 
     private func reset() {
+        // Whoever awaits an answer would otherwise wait for ever (a continuation never resumed).
+        failPending("Disconnected from your Mac.")
         threads = []
         projects = []
         agents = []
@@ -309,6 +311,10 @@ final class AppModel {
                 agents = s.agents
                 fullAccessAllowed = s.fullAccess ?? false
             }
+            // Rows the Mac no longer lists (a sub-agent deleted while this phone was away) go,
+            // unless a thread is open on one.
+            let kept = Set(s.unlisted.map(\.id))
+            unlisted = unlisted.filter { kept.contains($0.key) || stores[$0.key] != nil }
             for t in s.unlisted { setUnlisted(t) }
             learnIcons()
         case .thread(let t):
@@ -397,10 +403,10 @@ final class AppModel {
 
     /// The connection went: the answers still awaited aren't coming (a request isn't sent again
     /// by itself, the Mac may have done it already), so what waits on them stops waiting.
-    private func failPending() {
+    private func failPending(_ why: String = "The connection to your Mac dropped. Check that it went through before trying again.") {
         let waiting = replies
         replies.removeAll()
-        for (id, f) in waiting { f(.error(re: id, code: .unknown, message: "The connection to your Mac dropped. Check that it went through before trying again.")) }
+        for (id, f) in waiting { f(.error(re: id, code: .unknown, message: why)) }
     }
 
     /// Failures of an action become a toast; `ok` runs on success.
