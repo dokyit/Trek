@@ -843,6 +843,8 @@ pub enum EditorCommand {
 pub enum WorkspaceEvent {
     /// Open (or focus) a right-panel tool.
     OpenTool(PanelTool),
+    /// Open a page in the tools panel's Browser (a link clicked in a terminal).
+    OpenInBrowser(String),
     /// A toast-worthy message with an optional undo.
     Toast { message: String, undo: Option<UndoAction> },
     /// A thread needs the user or finished: an in-app toast when it's off screen, plus a system

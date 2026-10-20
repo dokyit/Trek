@@ -18,7 +18,8 @@
 //! `range today|week|all` (Basecamp's), `usage-demo` (plans and limits for the Usage card, no real agent asked), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
 //! `wait <ms>` or `wait idle|permission|question|plan [cap ms]`, `record <name> <ms> [fps]` (frames
 //! to `<name>.frames/` plus `<name>.ffconcat` for ffmpeg's concat demuxer; `record stop`, `record wait`),
-//! `editor on|off|root|view|panel|chat|ai|open …` (Trek IDE; see `run`), `agent-install <id> <percent>|fail <message>|clear`
+//! `editor on|off|root|view|panel|chat|ai|open …` (Trek IDE; see `run`), `terminal feed <text>|link <n>`
+//! (the terminal on screen: text as if its shell printed it, or its n-th link opened as a ⌘-click would), `agent-install <id> <percent>|fail <message>|clear`
 //! (an ACP Registry install's row, without downloading), `toast [undo|error] <message>` (a toast, with
 //! an Undo or the error icon), `shot <name>`, `quit`.
 //!
@@ -754,6 +755,33 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         cx.refresh_windows();
         return Ok(());
     }
+    if verb == "terminal" {
+        // The terminal on screen without a shell (an isolated Trek starts none): `terminal feed
+        // <text>` writes text into its screen as if the shell printed it (`\n` a new line, `\e`
+        // an escape, `\a` the bell, `\\` a backslash), and `terminal link <n>` opens the n-th
+        // link on it (from 1, top to bottom) as ⌘-clicking it does.
+        let (sub, rest) = arg.split_once(' ').unwrap_or((arg, ""));
+        let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        let in_editor = ws.read(cx).ide();
+        main.update(cx, |root, window, cx| -> anyhow::Result<()> {
+            let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
+            let Some(trek) = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok()) else {
+                anyhow::bail!("terminal: no Trek window");
+            };
+            let term = front_terminal(&trek, in_editor, window, cx).ok_or_else(|| anyhow::anyhow!("terminal: none on screen (`tools terminal` shows the dock)"))?;
+            match sub {
+                "feed" => term.update(cx, |t, cx| t.print(unescape(rest).as_bytes(), cx)),
+                "link" => {
+                    let n: usize = rest.trim().parse().map_err(|_| anyhow::anyhow!("terminal link <n>: n counts from 1"))?;
+                    term.update(cx, |t, cx| t.open_nth_link(n, window, cx))?;
+                }
+                _ => anyhow::bail!("terminal feed <text>|link <n>"),
+            }
+            Ok(())
+        })??;
+        cx.refresh_windows();
+        return Ok(());
+    }
     if verb == "note" {
         // Notes without a pointer: `note text <markdown>` (the note on screen's whole text, `\n`
         // for a new line; one is started when there's none), `note image <path>…` / `note attach <path>…` (files
@@ -1232,6 +1260,40 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
 }
 
 /// An element id as written in a command: `name#3` is a row, ("name", 3).
+/// The terminal on screen: the one with the keys, else (in the editor) the editor's, else the
+/// dock's, else the tools panel's.
+fn front_terminal(trek: &Entity<crate::root::TrekWindow>, in_editor: bool, window: &Window, cx: &App) -> Option<Entity<crate::panels::terminal::TerminalPanel>> {
+    let t = trek.read(cx);
+    let (ide, dock, panel) = (t.ide.read(cx).shown_terminal(), t.terminal_dock.read(cx).shown(cx), t.right_panel.read(cx).shown_terminal());
+    let shown: Vec<_> = if in_editor { [ide, dock, panel] } else { [dock, panel, ide] }.into_iter().flatten().collect();
+    shown.iter().find(|t| t.read(cx).focus_handle().contains_focused(window, cx)).or(shown.first()).cloned()
+}
+
+/// `terminal feed`'s text as bytes for the screen: `\n` a new line (CR LF, as a shell's output
+/// has it), `\r`, `\t`, `\e` an escape, `\a` the bell, `\\` a backslash. One pair of quotes
+/// around it all is the manifest's, not the text's.
+fn unescape(text: &str) -> String {
+    let text = text.strip_prefix('"').and_then(|t| t.strip_suffix('"')).unwrap_or(text);
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push_str("\r\n"),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('e') => out.push('\x1b'),
+            Some('a') => out.push('\x07'),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 fn element_id(id: &str) -> ElementId {
     match id.rsplit_once('#').and_then(|(n, i)| Some((n, i.parse::<u64>().ok()?))) {
         Some((name, ix)) => ElementId::NamedInteger(name.to_string().into(), ix),

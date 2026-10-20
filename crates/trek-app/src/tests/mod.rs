@@ -49,6 +49,7 @@ mod sidebar;
 mod snapshots;
 mod tab_stops;
 mod tabs;
+mod terminal;
 mod terminal_dock;
 mod titlebar;
 mod upkeep;

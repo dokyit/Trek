@@ -552,6 +552,22 @@ pub struct Terminal {
     /// whatever this says. Read when the app starts and when it saves settings, so a hand edit
     /// of the file applies to the next launch.
     pub shell: String,
+    /// Where a link ⌘-clicked in a terminal opens. Until the user picks, the first click asks
+    /// and stores the answer here.
+    pub open_links: OpenLinks,
+}
+
+/// Where a link clicked in the terminal opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OpenLinks {
+    /// Not chosen yet: the first click asks, and the answer is kept.
+    #[default]
+    Ask,
+    /// The tools panel's Browser.
+    BuiltIn,
+    /// The system's default browser.
+    Default,
 }
 
 /// How many providers the Usage card shows at once.
@@ -1203,6 +1219,24 @@ mod tests {
         assert!(text.contains("[terminal]"), "{text}");
         assert_eq!(toml::from_str::<Settings>(&text).unwrap().terminal.shell, s.terminal.shell);
         assert_eq!(toml::from_str::<Settings>("[terminal]\nshell = \"nu\"\n").unwrap().terminal.shell, "nu");
+    }
+
+    #[test]
+    fn terminal_links_ask_until_a_browser_is_chosen() {
+        let old: Settings = toml::from_str("[terminal]\nshell = \"nu\"\n").unwrap();
+        assert_eq!(old.terminal.open_links, OpenLinks::Ask, "files from before the key ask first");
+        for (choice, word) in [(OpenLinks::Ask, "ask"), (OpenLinks::BuiltIn, "built-in"), (OpenLinks::Default, "default")] {
+            let mut s = Settings::default();
+            s.terminal.open_links = choice;
+            let text = toml::to_string_pretty(&s).unwrap();
+            assert!(text.contains(&format!("open_links = \"{word}\"")), "{text}");
+            assert_eq!(toml::from_str::<Settings>(&text).unwrap().terminal.open_links, choice);
+        }
+        // A value from a later build is kept in the file but read as asking; the shell beside it survives.
+        let (s, problem) = Settings::parse("[terminal]\nshell = \"nu\"\nopen_links = \"some-new-browser\"\n");
+        assert_eq!((s.terminal.shell.as_str(), s.terminal.open_links), ("nu", OpenLinks::Ask));
+        assert_eq!(problem.map(|p| p.dropped), Some(vec!["terminal.open_links".to_string()]));
+        assert!(s.to_toml().unwrap().contains("open_links = \"some-new-browser\""), "written back as it was");
     }
 
     #[test]

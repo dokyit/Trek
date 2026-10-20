@@ -629,7 +629,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
                 let region = region_points(m, x, y, rw, rh)?;
                 let shot = self.desktop.capture_window(&w, Some(region), MAX_IMAGE_SIDE)?;
                 self.tell(activity("screenshot", "Looking closer".into(), &w, Some((region.0 + region.2 / 2.0, region.1 + region.3 / 2.0)), None));
-                let info = region_info(region, shot.width, shot.height, m, shot.note).replace("full-screen screenshot", "window's screenshot").replace("full-screenshot", "window-screenshot").replace("(screen points", "(window points");
+                let info = region_info(region, shot.width, shot.height, m, shot.note).replace("full-screen screenshot", "window's screenshot").replace("full-screenshot", "window-screenshot").replace(&format!("(screen {SCREEN_UNITS}"), &format!("(window {SCREEN_UNITS}"));
                 Ok(vec![rpc::image_png(shot.png_base64), text(info)])
             }
         }
@@ -663,7 +663,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
             _ => "Clicking",
         };
         self.tell(activity("click", doing.into(), &w, Some((px, py)), None));
-        Ok(vec![text(format!("{what} at ({}, {}) in {}'s window (window points {}, {}), in the background.", fmt_num(x), fmt_num(y), w.owner, fmt_num(px), fmt_num(py)))])
+        Ok(vec![text(format!("{what} at ({}, {}) in {}'s window (window {SCREEN_UNITS} {}, {}), in the background.", fmt_num(x), fmt_num(y), w.owner, fmt_num(px), fmt_num(py)))])
     }
 
     fn bg_move(&mut self, args: &Value) -> ToolResult {
@@ -1379,7 +1379,7 @@ mod tests {
         // Points past the window's screenshot are refused; a zoom is cut from the window.
         assert!(c.call("click", &json!({"x": 900, "y": 10})).unwrap_err().contains("outside the screenshot (800x600)"));
         let zoom = c.call("screenshot", &json!({"region": {"x": 0, "y": 0, "width": 200, "height": 100}})).unwrap();
-        assert!(zoom[1]["text"].as_str().unwrap().contains("window points"), "{}", zoom[1]);
+        assert!(zoom[1]["text"].as_str().unwrap().contains(&format!("window {SCREEN_UNITS}")), "{}", zoom[1]);
         assert_eq!(fake.events().last(), Some(&Event::CaptureWindow { id: 7, region: Some((0.0, 0.0, 200.0, 100.0)), max_side: 1568 }));
         // The list says which window it works in.
         let listed = c.call("list_windows", &json!({})).unwrap();

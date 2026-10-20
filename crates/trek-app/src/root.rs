@@ -193,6 +193,12 @@ impl TrekWindow {
                     this.workspace.update(cx, |ws, cx| ws.set_mode(crate::workspace::Mode::Agents, cx));
                     this.right_panel.update(cx, |p, cx| p.open_tool(tool, window, cx));
                 }
+                // The Browser is the tools panel's, beside the chat, as for `OpenTool`.
+                WorkspaceEvent::OpenInBrowser(url) => {
+                    let url = url.clone();
+                    this.workspace.update(cx, |ws, cx| ws.set_mode(crate::workspace::Mode::Agents, cx));
+                    this.right_panel.update(cx, |p, cx| p.open_url(&url, window, cx));
+                }
                 WorkspaceEvent::RunInTerminal { command, cwd } | WorkspaceEvent::RunProjectAction { command, cwd } => {
                     let job = match event {
                         WorkspaceEvent::RunProjectAction { .. } => Job::Action(command.clone()),
