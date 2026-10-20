@@ -406,14 +406,20 @@ mod tests {
 
     #[test]
     fn command_lines_split_as_a_shell_would() {
-        assert_eq!(split_words(r#"node "/Users/me/My Servers/x.js" --flag='a b' c\ d"#).unwrap(), ["node", "/Users/me/My Servers/x.js", "--flag=a b", "c d"]);
-        assert_eq!(split_words(r#"echo "say \"hi\"" '' x"#).unwrap(), ["echo", "say \"hi\"", "", "x"]);
-        // A multi-line command pasted into one line keeps its continuations as nothing.
-        assert_eq!(split_words("npx -y \\  @scope/server \\").unwrap(), ["npx", "-y", "@scope/server"]);
-        assert!(split_words("echo 'open").is_err());
-        for w in ["plain", "with space", "it's", "", "a\"b"] {
-            assert_eq!(split_words(&quote(w)).unwrap(), [w]);
+        // The POSIX reading, which `split_words` uses everywhere but Windows.
+        fn split(line: &str) -> Result<Vec<String>, String> {
+            split_words_with(line, true)
         }
+        assert_eq!(split(r#"node "/Users/me/My Servers/x.js" --flag='a b' c\ d"#).unwrap(), ["node", "/Users/me/My Servers/x.js", "--flag=a b", "c d"]);
+        assert_eq!(split(r#"echo "say \"hi\"" '' x"#).unwrap(), ["echo", "say \"hi\"", "", "x"]);
+        // A multi-line command pasted into one line keeps its continuations as nothing.
+        assert_eq!(split("npx -y \\  @scope/server \\").unwrap(), ["npx", "-y", "@scope/server"]);
+        assert!(split("echo 'open").is_err());
+        for w in ["plain", "with space", "it's", "", "a\"b"] {
+            assert_eq!(split(&quote(w)).unwrap(), [w]);
+        }
+        // `split_words` itself picks the reading for this platform.
+        assert_eq!(split_words("a 'b c'").unwrap(), ["a", "b c"]);
     }
 
     #[test]
