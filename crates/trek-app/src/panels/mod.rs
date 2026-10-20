@@ -8,6 +8,7 @@ mod side_chat;
 mod simhid;
 mod simulator;
 pub(crate) mod terminal;
+pub(crate) mod terminal_links;
 
 use crate::ui;
 use crate::workspace::{PanelTool, Workspace};
@@ -135,7 +136,8 @@ impl RightPanel {
             PanelTool::Explorer => View::Explorer(cx.new(|cx| explorer::ExplorerPanel::new(ws, cx))),
             PanelTool::Terminal => {
                 let (cwd, shell) = (ws.read(cx).current_cwd(), ws.read(cx).settings.terminal.shell.clone());
-                View::Terminal(cx.new(|cx| terminal::TerminalPanel::new(cwd, shell, cx)))
+                let ws = ws.downgrade();
+                View::Terminal(cx.new(|cx| terminal::TerminalPanel::new(ws, cwd, shell, cx)))
             }
             PanelTool::Browser => View::Browser(cx.new(|cx| browser::BrowserPanel::new(ws, window, cx))),
             PanelTool::SideChat => View::SideChat(cx.new(|cx| side_chat::SideChatPanel::new(ws, window, cx))),
@@ -146,6 +148,14 @@ impl RightPanel {
         self.tabs.push(Tab { id, tool, view });
         self.active = Some(id);
         self.after_activate(window, cx);
+    }
+
+    /// Open the Browser tool on `url` (a link clicked in a terminal).
+    pub fn open_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_tool(PanelTool::Browser, window, cx);
+        if let Some(Tab { view: View::Browser(b), .. }) = self.active_tab() {
+            b.update(cx, |b, cx| b.open_url(url, window, cx));
+        }
     }
 
     /// Open the Git tool on the changes of the turn ending at `end` (by item id) of `thread`,
@@ -181,6 +191,15 @@ impl RightPanel {
             View::Browser(b) => Some(b.clone()),
             _ => None,
         })
+    }
+
+    /// The Terminal tab in front, while the panel is open (the shots harness's `terminal`).
+    #[cfg(any(test, feature = "shots"))]
+    pub fn shown_terminal(&self) -> Option<Entity<terminal::TerminalPanel>> {
+        match self.active_tab().map(|t| &t.view) {
+            Some(View::Terminal(t)) if self.open => Some(t.clone()),
+            _ => None,
+        }
     }
 
     /// The tab in front, by its id.

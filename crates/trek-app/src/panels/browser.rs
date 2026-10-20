@@ -1016,6 +1016,18 @@ impl BrowserPanel {
         self.sync_views(cx);
     }
 
+    /// Show `url` (a link from elsewhere in Trek): in the tab in front while it's a new tab,
+    /// else in a tab of its own.
+    pub fn open_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let url = normalize(url);
+        if self.active_tab().is_some_and(|t| t.page.url == START_URL) {
+            self.editing = false;
+            self.navigate(url, cx);
+        } else {
+            self.new_tab(&url, window, cx);
+        }
+    }
+
     /// Load `url` in the active tab and watch for it failing to load.
     fn navigate(&mut self, url: String, cx: &mut Context<Self>) {
         self.stop_picking(cx);

@@ -13,7 +13,7 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Si
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use trek_core::catalog::DIRECT_PROVIDERS;
-use trek_core::settings::{Channel, FollowUp, NotifyMode, OnUsageLimit, RunIn, Settings, ThemeChoice, secrets};
+use trek_core::settings::{Channel, FollowUp, NotifyMode, OnUsageLimit, OpenLinks, RunIn, Settings, ThemeChoice, secrets};
 use trek_core::{AgentId, Effort, HandHolding};
 
 /// A compact dropdown button that shows the current choice.
@@ -311,6 +311,26 @@ impl SettingsView {
                     "Settle threads when their work is merged",
                     "A thread that committed on a branch settles once that branch is merged into the default branch, here or on origin, or when you merge its worktree from the Git tool.",
                     self.switch("settle-on-merge", s.inbox.auto_settle_on_merge, |s, v| s.inbox.auto_settle_on_merge = v),
+                    cx,
+                )],
+                cx,
+            ),
+            Self::heading("Terminal", cx),
+            ui::group(
+                vec![Self::row(
+                    "Open links in",
+                    match s.terminal.open_links {
+                        OpenLinks::Ask => crate::keys::shared("⌘-click a link in a terminal to open it. The first one asks where."),
+                        OpenLinks::BuiltIn => crate::keys::shared("⌘-click a link in a terminal to open it in the Browser tool beside the chat."),
+                        OpenLinks::Default => crate::keys::shared("⌘-click a link in a terminal to open it in your default browser."),
+                    },
+                    ui::segmented(
+                        "terminal-open-links",
+                        vec![(OpenLinks::Ask, "Ask"), (OpenLinks::BuiltIn, "Built-in browser"), (OpenLinks::Default, "Default browser")],
+                        s.terminal.open_links,
+                        self.setter(|s, v| s.terminal.open_links = v),
+                        cx,
+                    ),
                     cx,
                 )],
                 cx,

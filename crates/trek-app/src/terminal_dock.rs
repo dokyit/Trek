@@ -6,7 +6,7 @@
 //! tall, which all threads share). The tools panel's Terminal tile still opens a shell beside the
 //! thread; this one is under it, where T3 keeps its terminal.
 
-use crate::panels::terminal::{Job, TerminalPanel};
+use crate::panels::terminal::{Job, TerminalPanel, TitleChanged};
 use crate::workspace::{Route, Workspace, WorkspaceEvent};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -171,7 +171,7 @@ impl TerminalDock {
         let shell = self.workspace.read(cx).settings.terminal.shell.clone();
         let ws = self.workspace.downgrade();
         let term = cx.new(|cx| {
-            let mut t = TerminalPanel::with_command(cwd, job, shell, cx);
+            let mut t = TerminalPanel::with_command(ws.clone(), cwd, job, shell, cx);
             t.on_exit(move |cx| {
                 let _ = ws.update(cx, |ws, cx| {
                     ws.acp_info.clear();
@@ -180,6 +180,7 @@ impl TerminalDock {
             });
             t
         });
+        Self::follow_title(&term, cx);
         let dock = self.dock_mut(cx);
         dock.terminals.push(term);
         dock.active = dock.terminals.len() - 1;
@@ -219,6 +220,12 @@ impl TerminalDock {
         self.dock(cx).map_or(0, |d| d.terminals.len())
     }
 
+    /// The shell in front in the dock, while the dock is shown (the shots harness's `terminal`).
+    #[cfg(feature = "shots")]
+    pub fn shown(&self, cx: &App) -> Option<Entity<TerminalPanel>> {
+        self.is_open(cx).then(|| self.front(cx)).flatten()
+    }
+
     /// The shell in front in the thread on screen's dock.
     fn front(&self, cx: &App) -> Option<Entity<TerminalPanel>> {
         self.dock(cx).and_then(|d| d.terminals.get(d.active).cloned())
@@ -227,11 +234,18 @@ impl TerminalDock {
     fn new_terminal(&mut self, cx: &mut Context<Self>) {
         let cwd = self.workspace.read(cx).current_cwd();
         let shell = self.workspace.read(cx).settings.terminal.shell.clone();
-        let term = cx.new(|cx| TerminalPanel::new(cwd, shell, cx));
+        let ws = self.workspace.downgrade();
+        let term = cx.new(|cx| TerminalPanel::new(ws, cwd, shell, cx));
+        Self::follow_title(&term, cx);
         let dock = self.dock_mut(cx);
         dock.terminals.push(term);
         dock.active = dock.terminals.len() - 1;
         cx.notify();
+    }
+
+    /// Redraw the tabs when `term`'s title changes.
+    fn follow_title(term: &Entity<TerminalPanel>, cx: &mut Context<Self>) {
+        cx.subscribe(term, |_, _, _: &TitleChanged, cx| cx.notify()).detach();
     }
 
     /// Close the shell in front; the dock goes with the last one.
@@ -309,6 +323,8 @@ impl Render for TerminalDock {
         let fill = StyleRefinement::default().size_full();
         let (count, active) = self.dock(cx).map_or((0, 0), |d| (d.terminals.len(), d.active));
         let many = count > 1;
+        // What each shell is called: the title its shell or program set, else the shell's name.
+        let titles: Vec<Option<String>> = self.dock(cx).map_or(vec![], |d| d.terminals.iter().map(|t| t.read(cx).title().map(str::to_string)).collect());
 
         let header = h_flex()
             .h(px(HEADER))
@@ -327,6 +343,11 @@ impl Render for TerminalDock {
                     .child("TERMINAL")
                     .when(!many, |el| el.child(div().absolute().bottom(px(4.)).left(px(8.)).right(px(8.)).h(px(1.5)).bg(ember))),
             )
+            .when(!many, |el| {
+                el.children(titles.first().cloned().flatten().map(|title| {
+                    div().id("terminal-dock-title").test_support().min_w_0().max_w(px(360.)).truncate().text_size(px(11.5)).text_color(theme.muted_foreground).child(title)
+                }))
+            })
             .when(many, |el| {
                 // More than one shell: a tab each, the one in front underlined.
                 el.children((0..count).map(|ix| {
@@ -344,7 +365,7 @@ impl Render for TerminalDock {
                         .text_color(if on { theme.foreground } else { theme.muted_foreground })
                         .when(!on, |el| el.hover(|s| s.text_color(theme.foreground)))
                         .child(Icon::new(IconName::SquareTerminal).xsmall())
-                        .child(format!("{shell} {}", ix + 1))
+                        .child(div().max_w(px(180.)).truncate().child(titles.get(ix).cloned().flatten().unwrap_or_else(|| format!("{shell} {}", ix + 1))))
                         .when(on, |el| el.child(div().absolute().bottom(px(4.)).left(px(8.)).right(px(8.)).h(px(1.5)).bg(ember)))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.dock_mut(cx).active = ix;

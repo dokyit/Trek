@@ -3,7 +3,7 @@
 //! and the agents' background tasks.
 
 use super::IdeWorkbench;
-use crate::panels::terminal::{Job, TerminalPanel};
+use crate::panels::terminal::{Job, TerminalPanel, TitleChanged};
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
@@ -99,15 +99,22 @@ impl IdeWorkbench {
         let shell = self.workspace.read(cx).settings.terminal.shell.clone();
         let ws = self.workspace.downgrade();
         let term = cx.new(|cx| {
-            let mut t = TerminalPanel::with_command(cwd, job, shell, cx);
+            let mut t = TerminalPanel::with_command(ws.clone(), cwd, job, shell, cx);
             t.on_exit(move |cx| {
                 let _ = ws.update(cx, |ws, cx| ws.detect_agents(cx));
             });
             t
         });
+        cx.subscribe(&term, |_, _, _: &TitleChanged, cx| cx.notify()).detach();
         self.terminals.push(term);
         self.terminal = self.terminals.len() - 1;
         self.show_panel(PanelTab::Terminal, window, cx);
+    }
+
+    /// The terminal in front, while the bottom panel shows terminals (the shots harness's `terminal`).
+    #[cfg(feature = "shots")]
+    pub fn shown_terminal(&self) -> Option<Entity<TerminalPanel>> {
+        (self.layout.panel_open && self.panel_tab == PanelTab::Terminal).then(|| self.terminals.get(self.terminal).cloned()).flatten()
     }
 
     /// The terminal's latest output goes to the AI side bar as a chip.
@@ -149,7 +156,10 @@ impl IdeWorkbench {
     fn new_terminal(&mut self, cx: &mut Context<Self>) {
         let cwd = self.workspace.read(cx).ide_root.clone();
         let shell = self.workspace.read(cx).settings.terminal.shell.clone();
-        self.terminals.push(cx.new(|cx| TerminalPanel::new(cwd, shell, cx)));
+        let ws = self.workspace.downgrade();
+        let term = cx.new(|cx| TerminalPanel::new(ws, cwd, shell, cx));
+        cx.subscribe(&term, |_, _, _: &TitleChanged, cx| cx.notify()).detach();
+        self.terminals.push(term);
         self.terminal = self.terminals.len() - 1;
         cx.notify();
     }
@@ -251,7 +261,9 @@ impl IdeWorkbench {
                 .size_full()
                 .child(div().flex_1().min_w_0().h_full().children(self.terminals.get(self.terminal).map(|t| t.clone().cached(fill.clone()))))
                 .child(
-                    v_flex().w(px(140.)).h_full().flex_none().border_l_1().border_color(theme.border).py_1().children(self.terminals.iter().enumerate().map(|(ix, _)| {
+                    v_flex().w(px(140.)).h_full().flex_none().border_l_1().border_color(theme.border).py_1().children(self.terminals.iter().enumerate().map(|(ix, t)| {
+                        // The title its shell or program set, else the shell's name.
+                        let name = t.read(cx).title().map(str::to_string).unwrap_or_else(|| format!("{shell} {}", ix + 1));
                         let on = ix == self.terminal;
                         h_flex()
                             .id(("ide-terminal", ix))
@@ -263,7 +275,7 @@ impl IdeWorkbench {
                             .when(on, |el| el.bg(theme.list_active))
                             .when(!on, |el| el.text_color(theme.muted_foreground).hover(|s| s.bg(theme.list_hover)))
                             .child(Icon::new(IconName::SquareTerminal).xsmall())
-                            .child(format!("{shell} {}", ix + 1))
+                            .child(div().min_w_0().truncate().child(name))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.terminal = ix;
                                 cx.notify();
