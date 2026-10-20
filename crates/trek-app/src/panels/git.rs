@@ -1252,7 +1252,7 @@ mod tests {
 
     #[test]
     fn numstat_counts_are_keyed_by_the_real_path() {
-        let stats = parse_numstat("3\t1\tr\u{e9}sum\u{e9}.md\0-\t-\timg.png\00\t0\t\0old.rs\0new.rs\0");
+        let stats = parse_numstat("3\t1\tr\u{e9}sum\u{e9}.md\0-\t-\timg.png\x000\t0\t\0old.rs\0new.rs\0");
         assert_eq!(stats.get("résumé.md"), Some(&(3, 1)));
         assert_eq!(stats.get("img.png"), Some(&(0, 0)));
         assert_eq!(stats.get("new.rs"), Some(&(0, 0)));
