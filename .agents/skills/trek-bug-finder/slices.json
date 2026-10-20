@@ -1,0 +1,289 @@
+{
+  "_comment": "Single source of truth for what the bug finder covers. Edit here, then run: trek_bug_finder.py sync. The workflow script embeds a generated copy of slices; `domains --uncovered` lists tracked source files no slice reads.",
+  "slices": [
+    {
+      "key": "core-store",
+      "what": "persistence: SQLite store, search, usage, checkpoints, rewind, lineage, transcripts, core types",
+      "paths": [
+        "crates/trek-core/src/store.rs",
+        "crates/trek-core/src/store/",
+        "crates/trek-core/src/checkpoint.rs",
+        "crates/trek-core/src/rewind.rs",
+        "crates/trek-core/src/lineage.rs",
+        "crates/trek-core/src/transcript.rs",
+        "crates/trek-core/src/types.rs",
+        "crates/trek-core/src/lib.rs"
+      ],
+      "focus": [
+        "SQLite migrations and transaction boundaries",
+        "Search and usage queries on odd input",
+        "Checkpoint, rewind and lineage consistency after a crash or partial write"
+      ]
+    },
+    {
+      "key": "core-config",
+      "what": "settings, agent registry and catalog, paths, detection of installed tools, skills, MCP config, open-in, winget, elevation, process handling, limits, git and worktrees",
+      "paths": [
+        "crates/trek-core/src/settings.rs",
+        "crates/trek-core/src/registry.rs",
+        "crates/trek-core/src/catalog.rs",
+        "crates/trek-core/src/paths.rs",
+        "crates/trek-core/src/detect.rs",
+        "crates/trek-core/src/skills.rs",
+        "crates/trek-core/src/mcp.rs",
+        "crates/trek-core/src/open_in.rs",
+        "crates/trek-core/src/winget.rs",
+        "crates/trek-core/src/elevated.rs",
+        "crates/trek-core/src/procs.rs",
+        "crates/trek-core/src/limit.rs",
+        "crates/trek-core/src/git.rs",
+        "crates/trek-core/src/worktree.rs"
+      ],
+      "focus": [
+        "Skill origin and source classification, disable and enable round trips",
+        "Settings salvage: unknown keys survive a save, removed keys do not come back",
+        "Keychain and secrets fallback, environment variable keys",
+        "Path traversal and filesystem safety, cross-device moves"
+      ]
+    },
+    {
+      "key": "core-updates",
+      "what": "agent update parsing, Trek self-update and relocation, changelog, feeds, pricing, verification; the trek-update helper binary",
+      "paths": [
+        "crates/trek-core/src/agent_update.rs",
+        "crates/trek-core/src/update.rs",
+        "crates/trek-core/src/update/",
+        "crates/trek-core/src/changelog.rs",
+        "crates/trek-core/src/feeds.rs",
+        "crates/trek-core/src/pricing.rs",
+        "crates/trek-core/src/verification.rs",
+        "crates/trek-update/"
+      ],
+      "focus": []
+    },
+    {
+      "key": "core-content",
+      "what": "imports from Claude Code, Codex and OpenCode history; Basecamp; notes; artifacts and their CSP; visualizations; inline edits; orchestration; hunks and changes; restating",
+      "paths": [
+        "crates/trek-core/src/import/",
+        "crates/trek-core/src/basecamp.rs",
+        "crates/trek-core/src/notes.rs",
+        "crates/trek-core/src/artifact.rs",
+        "crates/trek-core/src/visualization.rs",
+        "crates/trek-core/src/inline_edit.rs",
+        "crates/trek-core/src/orchestrate.rs",
+        "crates/trek-core/src/hunks.rs",
+        "crates/trek-core/src/changes.rs",
+        "crates/trek-core/src/restate.rs"
+      ],
+      "focus": []
+    },
+    {
+      "key": "agents",
+      "what": "the agent adapters: Claude Code, Codex, OpenCode, ACP, direct API, mock; limits, status, titles, stop handling",
+      "paths": [
+        "crates/trek-agents/"
+      ],
+      "focus": [
+        "Streaming SSE chunking and error termination",
+        "Anthropic thinking blocks and signatures across turns",
+        "Dynamic model discovery per provider wire (headers, endpoints, cache)",
+        "Rate-limit reset parsing: dates, zones, durations, parentheses",
+        "ACP and CLI process spawning, stdin and stdout pipes, stop handling"
+      ]
+    },
+    {
+      "key": "remote",
+      "what": "the phone link: pairing, TLS, host, server, protocol, the Mac side of the link and push notifications",
+      "paths": [
+        "crates/trek-remote/",
+        "crates/trek-app/src/remote.rs",
+        "crates/trek-app/src/remote/",
+        "crates/trek-app/src/push.rs"
+      ],
+      "focus": [
+        "Socket reconnection and authentication",
+        "Pairing and TLS edge cases",
+        "Address advertising on odd networks (IPv6-only, link-local, VPN)"
+      ]
+    },
+    {
+      "key": "ios",
+      "what": "the iPhone companion app (Swift)",
+      "paths": [
+        "ios/Trek/*.swift",
+        "ios/scripts/"
+      ],
+      "focus": []
+    },
+    {
+      "key": "ipc-mcp",
+      "what": "trek-mcp (computer use, simulator, orchestrate, desktop, keys), trek-ipc, the app IPC, deep links, single instance, the editor extension",
+      "paths": [
+        "crates/trek-mcp/",
+        "crates/trek-ipc/",
+        "crates/trek-app/src/ipc.rs",
+        "crates/trek-app/src/deep_link.rs",
+        "crates/trek-app/src/single_instance.rs",
+        "extension/extension.js",
+        "crates/trek-app/simhid/"
+      ],
+      "focus": [
+        "JSON-RPC serialisation and error responses",
+        "Stdio communication and hung child processes"
+      ]
+    },
+    {
+      "key": "workspace-a",
+      "what": "the workspace model and root window: thread lifecycle, turns, projects, windows, tabs",
+      "paths": [
+        "crates/trek-app/src/workspace.rs",
+        "crates/trek-app/src/root.rs",
+        "crates/trek-app/src/thread_window.rs",
+        "crates/trek-app/src/tabs.rs"
+      ],
+      "focus": [
+        "Async runtime tasks and GPUI updates",
+        "Race conditions during rapid thread switching",
+        "Model fetching concurrency and in-flight state",
+        "Process cleanup on window close"
+      ]
+    },
+    {
+      "key": "workspace-b",
+      "what": "workspace submodules",
+      "paths": [
+        "crates/trek-app/src/workspace/"
+      ],
+      "focus": []
+    },
+    {
+      "key": "thread-ui",
+      "what": "thread view, composer, mentions, attachments, agent updates, working bar, trail words, activity, changes card, jobs, cost",
+      "paths": [
+        "crates/trek-app/src/thread_view.rs",
+        "crates/trek-app/src/composer.rs",
+        "crates/trek-app/src/composer/",
+        "crates/trek-app/src/mentions.rs",
+        "crates/trek-app/src/attachments.rs",
+        "crates/trek-app/src/agent_updates.rs",
+        "crates/trek-app/src/working_bar.rs",
+        "crates/trek-app/src/words.rs",
+        "crates/trek-app/src/activity.rs",
+        "crates/trek-app/src/changes_card.rs",
+        "crates/trek-app/src/job.rs",
+        "crates/trek-app/src/cost.rs"
+      ],
+      "focus": [
+        "Picker index bounds and keyboard wrapping",
+        "Empty list and loading states, custom model query row",
+        "Key event capture and paste handling"
+      ]
+    },
+    {
+      "key": "ide",
+      "what": "the IDE: explorer, terminal, preview, browser, editor, LSP client, languages, worktree UI",
+      "paths": [
+        "crates/trek-app/src/ide/",
+        "crates/trek-app/src/editor.rs",
+        "crates/trek-app/src/lsp_client.rs",
+        "crates/trek-app/src/languages.rs",
+        "crates/trek-app/src/worktree_ui.rs",
+        "crates/trek-app/src/terminal_dock.rs"
+      ],
+      "focus": []
+    },
+    {
+      "key": "panels",
+      "what": "panels, sidebar, command palette, keys and shortcuts, Basecamp view",
+      "paths": [
+        "crates/trek-app/src/panels/",
+        "crates/trek-app/src/sidebar.rs",
+        "crates/trek-app/src/command_palette.rs",
+        "crates/trek-app/src/keys.rs",
+        "crates/trek-app/src/shortcuts.rs",
+        "crates/trek-app/src/basecamp.rs"
+      ],
+      "focus": []
+    },
+    {
+      "key": "rendering",
+      "what": "math, visualizations, markdown, artifact web views, note images and notes UI, image preview, formatting and time",
+      "paths": [
+        "crates/trek-app/src/math/",
+        "crates/trek-app/src/visualization/",
+        "crates/trek-app/src/md.rs",
+        "crates/trek-app/src/artifact/",
+        "crates/trek-app/src/note_images.rs",
+        "crates/trek-app/src/notes.rs",
+        "crates/trek-app/src/image_preview.rs",
+        "crates/trek-app/src/format.rs",
+        "crates/trek-app/src/time.rs"
+      ],
+      "focus": []
+    },
+    {
+      "key": "settings-system",
+      "what": "settings UI, onboarding, add agent, integrations, updater, tray, toasts, dictation, screen clips, system and window code, main, logging, perf, shots",
+      "paths": [
+        "crates/trek-app/src/settings_view.rs",
+        "crates/trek-app/src/settings_view/",
+        "crates/trek-app/src/onboarding.rs",
+        "crates/trek-app/src/add_agent.rs",
+        "crates/trek-app/src/integrations.rs",
+        "crates/trek-app/src/updater.rs",
+        "crates/trek-app/src/tray.rs",
+        "crates/trek-app/src/toast.rs",
+        "crates/trek-app/src/dictate.rs",
+        "crates/trek-app/src/screenclip.rs",
+        "crates/trek-app/src/system.rs",
+        "crates/trek-app/src/winsys.rs",
+        "crates/trek-app/src/winlook.rs",
+        "crates/trek-app/src/window_place.rs",
+        "crates/trek-app/src/main.rs",
+        "crates/trek-app/src/logging.rs",
+        "crates/trek-app/src/perf.rs",
+        "crates/trek-app/src/shots.rs"
+      ],
+      "focus": [
+        "Pickers and pages reading state that fetches model lists",
+        "Updater swap and relaunch"
+      ]
+    },
+    {
+      "key": "app-chrome",
+      "what": "look and feel: brand, palette, fonts, motion, chrome, mascot, file icons, the shared UI helpers, embedded assets, the background strip",
+      "paths": [
+        "crates/trek-app/src/assets.rs",
+        "crates/trek-app/src/background_strip.rs",
+        "crates/trek-app/src/brand.rs",
+        "crates/trek-app/src/chrome.rs",
+        "crates/trek-app/src/file_icon.rs",
+        "crates/trek-app/src/fonts.rs",
+        "crates/trek-app/src/mascot.rs",
+        "crates/trek-app/src/motion.rs",
+        "crates/trek-app/src/palette.rs",
+        "crates/trek-app/src/ui.rs"
+      ],
+      "focus": [
+        "Embedded asset lookups that can miss or panic",
+        "Animation state that never ends or restarts on every render",
+        "Theme colour maths on edge values"
+      ]
+    },
+    {
+      "key": "scripts",
+      "what": "build, bundle, release, install and verification shell scripts; build.rs; Cargo manifests; the benchmark and seed examples in trek-core",
+      "paths": [
+        "script/",
+        ".agents/skills/verify-trek/scripts/",
+        "ios/scripts/",
+        "crates/trek-app/build.rs",
+        "crates/trek-app/Cargo.toml",
+        "Cargo.toml",
+        "crates/trek-core/examples/"
+      ],
+      "focus": []
+    }
+  ]
+}
