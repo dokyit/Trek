@@ -107,6 +107,8 @@ struct Header {
     /// It waits on sub-agents rather than working itself (its turn is over, or blocked in a call
     /// for their answers): their logos, and "Waiting on Sol".
     waiting: Option<(Vec<AgentId>, String)>,
+    /// It's using the computer in the background: in which app, and whether its picture shows.
+    behind: Option<(String, bool)>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -246,6 +248,8 @@ impl WorkingBar {
                     this.sync(cx);
                 }
             }),
+            // Background computer use: the bar says where, and brings its picture back.
+            cx.observe(&workspace.read(cx).background_use.clone(), |this, _, cx| this.sync(cx)),
             cx.observe_window_activation(window, |this, window, cx| {
                 this.active = window.is_window_active() || crate::mascot::force_active();
                 // Restart the ticker at the new rate rather than after its current wait.
@@ -300,6 +304,10 @@ impl WorkingBar {
             started: if waiting.is_some() { since } else { live.turn_started },
             agents: live.active_tasks().max(live.background_agents().count()),
             waiting,
+            behind: {
+                let b = ws.background_use.read(cx);
+                b.session(id).map(|s| (s.window.app.clone(), b.showing()))
+            },
         });
         let current = activity::live(ws, id).and_then(|t| group(ws, id, &t.tools, t.headline.as_deref()));
         // The transcript holds a folding group back wherever it's shown, so every bar on it shows
@@ -848,7 +856,8 @@ impl Render for WorkingBar {
                                 .text_size(px(13.))
                                 .child(who),
                         )
-                        .child(div().flex_1().min_w_0().child(trail)),
+                        .child(div().flex_1().min_w_0().child(trail))
+                        .children(h.behind.clone().map(|(app, showing)| behind_chip(&app, showing, &self.workspace, cx))),
                 )
         });
         v_flex()
@@ -860,6 +869,39 @@ impl Render for WorkingBar {
             .children(header)
             .into_any_element()
     }
+}
+
+/// "● Safari in the background · Show": the agent is using the computer behind the user's
+/// windows; the button brings its picture-in-picture window back (or puts it away).
+fn behind_chip(app: &str, showing: bool, workspace: &Entity<Workspace>, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let b = workspace.read(cx).background_use.clone();
+    h_flex()
+        .id("background-use-chip")
+        .test_support()
+        // In a narrow pane the app's name gives way, not the button.
+        .flex_shrink(1.)
+        .min_w_0()
+        .pb(px(4.))
+        .gap(px(6.))
+        .text_size(px(12.))
+        .text_color(theme.muted_foreground)
+        .child(div().flex_none().size(px(6.)).rounded_full().bg(crate::palette::emerald(cx)))
+        .child(div().min_w_0().truncate().child(format!("{app} in the background")))
+        .child(
+            div()
+                .id("background-use-toggle")
+                .test_support()
+                .flex_none()
+                .px(px(6.))
+                .py(px(1.))
+                .rounded(px(5.))
+                .text_color(theme.foreground.opacity(0.85))
+                .hover(|el| el.bg(theme.foreground.opacity(0.08)))
+                .child(if showing { "Hide" } else { "Show" })
+                .on_click(move |_, _, cx| b.update(cx, |b, cx| b.toggle(cx))),
+        )
+        .into_any_element()
 }
 
 /// "Breaking trail…": what the turn in `thread` is doing after `elapsed` (the first word before

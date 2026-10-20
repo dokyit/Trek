@@ -663,6 +663,23 @@ fn quit(cx: &mut AsyncApp) -> anyhow::Result<()> {
 }
 
 fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::Result<()> {
+    // The picture-in-picture window of background computer use, as its buttons and the menu
+    // bar icon drive it.
+    if verb == "background-use" {
+        let b = ws.read(cx).background_use.clone();
+        return b.update(cx, |b, cx| {
+            match arg {
+                "fold" => b.set_folded(true, cx),
+                "unfold" => b.set_folded(false, cx),
+                "hide" => b.tuck(cx),
+                "show" => b.show(cx),
+                "toggle" => b.toggle(cx),
+                "next" => b.next(cx),
+                _ => anyhow::bail!("background-use fold|unfold|hide|show|toggle|next"),
+            }
+            Ok(())
+        });
+    }
     if verb == "usage-demo" {
         usage_demo(ws, cx);
         return Ok(());

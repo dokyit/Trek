@@ -14,10 +14,11 @@ use core_graphics::event::{
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect};
 use core_graphics::window::{
-    copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly,
+    copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements, kCGWindowListOptionIncludingWindow,
+    kCGWindowListOptionOnScreenOnly,
 };
 
-use super::{Button, Capture, Desktop, Display, Rect, WindowInfo};
+use super::{Button, Capture, Desktop, Display, Input, Rect, WindowInfo};
 use crate::keys::{self, KeyCombo};
 use crate::util::{self, TempFile};
 
@@ -178,6 +179,88 @@ impl Desktop for Mac {
     fn open_app(&self, name: &str) -> Result<(), String> {
         util::run_ok("/usr/bin/open", &["-a", name], None, Duration::from_secs(30)).map(|_| ())
     }
+
+    fn works_behind(&self) -> bool {
+        true
+    }
+
+    fn window(&self, id: i64) -> Result<Option<WindowInfo>, String> {
+        let Ok(id) = u32::try_from(id) else { return Ok(None) };
+        let arr = copy_window_info(kCGWindowListOptionIncludingWindow, id).ok_or("CGWindowListCopyWindowInfo returned nothing")?;
+        Ok(arr.iter().find_map(|item| window_info(*item as CFDictionaryRef, true)).filter(|w| w.id == id as i64))
+    }
+
+    /// `screencapture -l`, which draws the window from its own buffer: what covers it doesn't
+    /// show. A zoom is cut from the full-resolution capture.
+    fn capture_window(&self, w: &WindowInfo, region: Option<Rect>, max_side: u32) -> Result<Capture, String> {
+        let tmp = TempFile::new("png");
+        let out = util::run(
+            "/usr/sbin/screencapture",
+            &["-x", "-o", "-t", "png", &format!("-l{}", w.id), tmp.path_str()],
+            None,
+            Duration::from_secs(20),
+        )?;
+        let size = std::fs::metadata(&tmp.0).map(|m| m.len()).unwrap_or(0);
+        if !out.success() || size == 0 {
+            if !unsafe { CGPreflightScreenCaptureAccess() } {
+                return Err(SCREEN_RECORDING_ERROR.into());
+            }
+            let detail = if out.success() { "empty capture".to_string() } else { out.reason() };
+            return Err(format!("Couldn't capture {}'s window ({detail}). It may have closed or been minimised: list_windows shows what's open.", w.owner));
+        }
+        let (_, w0, h0) = util::load_png(&tmp.0)?;
+        if let Some((x, y, rw, rh)) = region {
+            // Pixels per point in this capture (2 on a Retina display).
+            let scale = w0 as f64 / w.w.max(1.0);
+            // At least a pixel in: sips takes an offset of 0 as none, and cuts from the centre.
+            let (cx, cy) = ((x * scale).round().max(1.0), (y * scale).round().max(1.0));
+            let cw = (rw * scale).round().clamp(1.0, w0 as f64 - cx);
+            let ch = (rh * scale).round().clamp(1.0, h0 as f64 - cy);
+            let (cw, ch, cx, cy) = (cw.to_string(), ch.to_string(), cx.to_string(), cy.to_string());
+            util::run_ok("/usr/bin/sips", &["-c", &ch, &cw, "--cropOffset", &cy, &cx, tmp.path_str(), "--out", tmp.path_str()], None, Duration::from_secs(30))
+                .map_err(|e| format!("sips failed to cut the zoom out: {e}"))?;
+        }
+        let (_, w1, h1) = util::load_png(&tmp.0)?;
+        if w1.max(h1) > max_side {
+            util::sips_fit(tmp.path_str(), max_side)?;
+        }
+        let (png_base64, width, height) = util::load_png(&tmp.0)?;
+        Ok(Capture { png_base64, width, height, note: "" })
+    }
+
+    fn behind(&self, w: &WindowInfo, input: &Input) -> Result<(), String> {
+        super::skylight::deliver(w, input)
+    }
+
+    /// `open -g`: launched, or opened if it's running, and left behind the user's front app.
+    fn open_app_behind(&self, name: &str) -> Result<(), String> {
+        util::run_ok("/usr/bin/open", &["-g", "-a", name], None, Duration::from_secs(30)).map(|_| ())
+    }
+
+    fn app_pid(&self, name: &str) -> Option<i64> {
+        let out = util::run_ok("/usr/bin/lsappinfo", &["info", "-only", "pid", name], None, Duration::from_secs(5)).ok()?;
+        parse_lsappinfo_pid(&out)
+    }
+}
+
+/// The pid in `lsappinfo info -only pid` output: `"pid"=1234` on older macOS, a multi-line dump
+/// with `pid = 1234 ...` on newer ones.
+fn parse_lsappinfo_pid(out: &str) -> Option<i64> {
+    let mut rest = out;
+    while let Some(i) = rest.find("pid") {
+        let (before, after) = (&rest[..i], &rest[i + 3..]);
+        rest = after;
+        if before.chars().next_back().is_some_and(|c| c.is_alphanumeric()) {
+            continue;
+        }
+        let after = after.strip_prefix('"').unwrap_or(after).trim_start();
+        let Some(value) = after.strip_prefix('=') else { continue };
+        let digits: String = value.trim_start().chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(pid) = digits.parse() {
+            return Some(pid);
+        }
+    }
+    None
 }
 
 // ---- CoreGraphics helpers ----
@@ -216,13 +299,13 @@ fn sleep_ms(ms: u64) {
 }
 
 #[derive(Debug, PartialEq)]
-enum TypeSegment {
+pub(super) enum TypeSegment {
     Key(u16),
     /// UTF-16 chunk (≤ 20 units, the CGEventKeyboardSetUnicodeString limit).
     Text(Vec<u16>),
 }
 
-fn split_for_typing(s: &str) -> Vec<TypeSegment> {
+pub(super) fn split_for_typing(s: &str) -> Vec<TypeSegment> {
     const MAX_UNITS: usize = 20;
     let mut out = Vec::new();
     let mut cur: Vec<u16> = Vec::new();
@@ -259,53 +342,69 @@ fn on_screen_windows() -> Result<Vec<WindowInfo>, String> {
         kCGNullWindowID,
     )
     .ok_or("CGWindowListCopyWindowInfo returned nothing")?;
+    Ok(arr.iter().filter_map(|item| window_info(*item as CFDictionaryRef, false)).collect())
+}
+
+/// An app's window (layer 0, at least 2x2) from its window-list entry. `on_screen`: only one
+/// that's on screen now (not minimised, not on another Space).
+fn window_info(item: CFDictionaryRef, on_screen: bool) -> Option<WindowInfo> {
     let key = CFString::from_static_string;
-    let mut out = Vec::new();
-    for item in arr.iter() {
-        let dict: CFDictionary<CFString, CFType> =
-            unsafe { CFDictionary::wrap_under_get_rule(*item as CFDictionaryRef) };
-        let get_str = |k: &'static str| {
-            dict.find(key(k))
-                .and_then(|v| v.downcast::<CFString>())
-                .map(|s| s.to_string())
-                .unwrap_or_default()
-        };
-        let get_num = |k: &'static str| {
-            dict.find(key(k))
-                .and_then(|v| v.downcast::<CFNumber>())
-                .and_then(|n| n.to_i64())
-                .unwrap_or(-1)
-        };
-        if get_num("kCGWindowLayer") != 0 {
-            continue;
-        }
-        let Some(bounds) = dict
-            .find(key("kCGWindowBounds"))
-            .and_then(|v| v.downcast::<CFDictionary>())
-            .and_then(|d| CGRect::from_dict_representation(&d))
-        else {
-            continue;
-        };
-        if bounds.size.width < 2.0 || bounds.size.height < 2.0 {
-            continue;
-        }
-        out.push(WindowInfo {
-            owner: get_str("kCGWindowOwnerName"),
-            title: get_str("kCGWindowName"),
-            pid: get_num("kCGWindowOwnerPID"),
-            id: get_num("kCGWindowNumber"),
-            x: bounds.origin.x,
-            y: bounds.origin.y,
-            w: bounds.size.width,
-            h: bounds.size.height,
-        });
+    let dict: CFDictionary<CFString, CFType> = unsafe { CFDictionary::wrap_under_get_rule(item) };
+    let get_str = |k: &'static str| {
+        dict.find(key(k))
+            .and_then(|v| v.downcast::<CFString>())
+            .map(|s| s.to_string())
+            .unwrap_or_default()
+    };
+    let get_num = |k: &'static str| {
+        dict.find(key(k))
+            .and_then(|v| v.downcast::<CFNumber>())
+            .and_then(|n| n.to_i64())
+            .unwrap_or(-1)
+    };
+    if get_num("kCGWindowLayer") != 0 {
+        return None;
     }
-    Ok(out)
+    if on_screen
+        && !dict
+            .find(key("kCGWindowIsOnscreen"))
+            .and_then(|v| v.downcast::<core_foundation::boolean::CFBoolean>())
+            .is_some_and(bool::from)
+    {
+        return None;
+    }
+    let bounds = dict
+        .find(key("kCGWindowBounds"))
+        .and_then(|v| v.downcast::<CFDictionary>())
+        .and_then(|d| CGRect::from_dict_representation(&d))?;
+    if bounds.size.width < 2.0 || bounds.size.height < 2.0 {
+        return None;
+    }
+    Some(WindowInfo {
+        owner: get_str("kCGWindowOwnerName"),
+        title: get_str("kCGWindowName"),
+        pid: get_num("kCGWindowOwnerPID"),
+        id: get_num("kCGWindowNumber"),
+        x: bounds.origin.x,
+        y: bounds.origin.y,
+        w: bounds.size.width,
+        h: bounds.size.height,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lsappinfo_pid_formats() {
+        assert_eq!(parse_lsappinfo_pid("\"pid\"=1234\n"), Some(1234));
+        let dump = "[ NULL ]  [ NULL ]  \n    bundleID=[ NULL ] \n    bundle path=[ NULL ] \n    pid = 698 !cgsConnection !signalled type=[ NULL ]  flavor=[ NULL ]  Version=[ NULL ]  Arch=!!none \n";
+        assert_eq!(parse_lsappinfo_pid(dump), Some(698));
+        assert_eq!(parse_lsappinfo_pid("    pid = 419 token=[sess=100020 pid=419 uid:0]"), Some(419));
+        assert_eq!(parse_lsappinfo_pid(""), None);
+        assert_eq!(parse_lsappinfo_pid("Arch=!!none"), None);
+    }
 
     #[test]
     fn typing_segments() {

@@ -1,5 +1,5 @@
 ; Trek Inno Setup Installer Script
-; Defaults to user folder: {userappdata}\Programs\Trek (no admin privileges needed)
+; Defaults to user folder: {localappdata}\Programs\Trek (no admin privileges needed)
 
 #ifndef AppVersion
 #define AppVersion "0.4.5"
@@ -13,7 +13,7 @@
 AppName=Trek
 AppVersion={#AppVersion}
 AppPublisher=Trek
-DefaultDirName={userappdata}\Programs\Trek
+DefaultDirName={localappdata}\Programs\Trek
 DefaultGroupName=Trek
 DisableProgramGroupPage=yes
 OutputBaseFilename=Trek-Setup-x86_64
@@ -70,11 +70,13 @@ begin
   Option3Radio.Width := ScaleX(300);
 end;
 
+// ssDone runs after the user clicks Finish, so the choice on the "Trek is Ready!" page is
+// final by then (ssPostInstall fires while files are still being installed, before that page).
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
 begin
-  if CurStep = ssPostInstall then
+  if CurStep = ssDone then
   begin
     if Option1Radio.Checked then
       Exec(ExpandConstant('{app}\trek.exe'), '', ExpandConstant('{app}'), SW_SHOW, ewNoWait, ResultCode)

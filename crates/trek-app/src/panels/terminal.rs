@@ -2,9 +2,10 @@
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -299,11 +300,62 @@ fn paste_bytes(text: &str, bracketed: bool, windows: bool) -> String {
     if bracketed { format!("\x1b[200~{text}\x1b[201~") } else { text }
 }
 
+/// Ends the shell when the terminal goes away. The output thread holds duplicates of the pty's
+/// master, so dropping the panel hangs nothing up by itself: an idle shell would stay at its
+/// prompt and the thread would stay blocked in `read` for good. Once the shell is gone the pty
+/// closes, the read ends, and the thread reaps the child.
+struct Hangup {
+    killer: Box<dyn ChildKiller + Send + Sync>,
+    /// Set by the output thread once it has reaped the child: its pid may be someone else's by then.
+    reaped: Arc<AtomicBool>,
+}
+
+impl Drop for Hangup {
+    fn drop(&mut self) {
+        if !self.reaped.load(Ordering::SeqCst) {
+            let _ = self.killer.kill();
+        }
+    }
+}
+
+/// A shell on a pty with the thread that feeds its output into the screen.
+struct Session {
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    master: Box<dyn MasterPty + Send>,
+    hangup: Hangup,
+    /// Ends after the shell has: its output is over and the child is reaped.
+    thread: std::thread::JoinHandle<()>,
+}
+
+/// Start `cmd` on a new pty of `size`, pumping its output into `screen` and waking `wake`.
+fn start_session(size: (u16, u16), cmd: CommandBuilder, screen: Screen, wake: async_channel::Sender<()>) -> anyhow::Result<Session> {
+    let pty = native_pty_system().openpty(PtySize { rows: size.0, cols: size.1, pixel_width: 0, pixel_height: 0 })?;
+    let mut child = pty.slave.spawn_command(cmd)?;
+    let hangup = Hangup { killer: child.clone_killer(), reaped: Arc::new(AtomicBool::new(false)) };
+    let reader = pty.master.try_clone_reader()?;
+    let writer = Arc::new(Mutex::new(pty.master.take_writer()?));
+    let answering = writer.clone();
+    let reaped = hangup.reaped.clone();
+    let thread = std::thread::spawn(move || {
+        // Only ConPTY asks where the cursor is, and a Mac's shells never got an answer.
+        pump(reader, &screen, &wake, |bytes| {
+            if cfg!(windows) {
+                write_to(&answering, bytes);
+            }
+        });
+        let _ = child.wait();
+        reaped.store(true, Ordering::SeqCst);
+    });
+    Ok(Session { writer, master: pty.master, hangup, thread })
+}
+
 pub struct TerminalPanel {
     parser: Screen,
     /// Shared with the thread that reads the shell's output, which answers its queries (ConPTY's).
     writer: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
     master: Option<Box<dyn MasterPty + Send>>,
+    /// Hangs the shell up when the panel is dropped (a closed tab).
+    _hangup: Option<Hangup>,
     size: (u16, u16),
     focus: FocusHandle,
     exited: bool,
@@ -312,6 +364,8 @@ pub struct TerminalPanel {
     /// Runs once when the shell exits (used by Install / Sign in to rescan agents).
     on_exit: Option<Box<dyn FnOnce(&mut App)>>,
     _reader: Option<Task<()>>,
+    /// What the wheel has turned short of a whole line, in points.
+    wheel: f32,
 }
 
 fn ansi(idx: u8) -> Hsla {
@@ -360,12 +414,14 @@ impl TerminalPanel {
             parser: Arc::new(Mutex::new(vt100::Parser::new(size.0, size.1, 2000))),
             writer: None,
             master: None,
+            _hangup: None,
             size,
             focus: cx.focus_handle(),
             exited: false,
             font: None,
             on_exit: None,
             _reader: None,
+            wheel: 0.,
         };
         // An isolated (test) process starts no shell: one would run the user's login profile,
         // and the command (a project's tests, an agent's sign-in) for real.
@@ -384,24 +440,14 @@ impl TerminalPanel {
     }
 
     fn spawn(&mut self, cwd: Option<PathBuf>, job: Option<Job>, shell: &str, cx: &mut Context<Self>) -> anyhow::Result<()> {
-        let pty = native_pty_system().openpty(PtySize { rows: self.size.0, cols: self.size.1, pixel_width: 0, pixel_height: 0 })?;
         let cmd = shell_command(shell, cwd, job.as_ref());
-        let mut child = pty.slave.spawn_command(cmd)?;
-        let reader = pty.master.try_clone_reader()?;
-        let writer = Arc::new(Mutex::new(pty.master.take_writer()?));
-        self.writer = Some(writer.clone());
-        self.master = Some(pty.master);
         let (tx, rx) = async_channel::bounded::<()>(1);
-        let screen = self.parser.clone();
-        std::thread::spawn(move || {
-            // Only ConPTY asks where the cursor is, and a Mac's shells never got an answer.
-            pump(reader, &screen, &tx, |bytes| {
-                if cfg!(windows) {
-                    write_to(&writer, bytes);
-                }
-            });
-            let _ = child.wait();
-        });
+        let session = start_session(self.size, cmd, self.parser.clone(), tx)?;
+        let Session { writer, master, hangup, thread } = session;
+        drop(thread); // detached: it ends by itself once the shell has
+        self.writer = Some(writer);
+        self.master = Some(master);
+        self._hangup = Some(hangup);
         self._reader = Some(cx.spawn(async move |this, cx| {
             while rx.recv().await.is_ok() {
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
@@ -425,7 +471,9 @@ impl TerminalPanel {
         self.on_exit = Some(Box::new(f));
     }
 
+    /// Write to the shell; the view goes back to the bottom, where what's typed shows.
     fn write(&mut self, bytes: &[u8]) {
+        self.screen().screen_mut().set_scrollback(0);
         if let Some(w) = &self.writer {
             write_to(w, bytes);
         }
@@ -436,7 +484,10 @@ impl TerminalPanel {
             return;
         }
         self.size = (rows, cols);
-        self.screen().screen_mut().set_size(rows, cols);
+        let mut screen = self.screen();
+        screen.screen_mut().set_scrollback(0);
+        screen.screen_mut().set_size(rows, cols);
+        drop(screen);
         if let Some(m) = &self.master {
             let _ = m.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
         }
@@ -445,6 +496,13 @@ impl TerminalPanel {
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
         let m = &k.modifiers;
+        // Shift+PageUp / PageDown page through the scrollback, as in Terminal.
+        if m.shift && !m.control && !m.alt && !m.platform && matches!(k.key.as_str(), "pageup" | "pagedown") {
+            let page = self.size.0.saturating_sub(1).max(1) as isize;
+            self.scroll_by(if k.key == "pageup" { page } else { -page }, cx);
+            cx.stop_propagation();
+            return;
+        }
         if let Some(shortcut) = shortcut(&k.key, m, cfg!(windows)) {
             match shortcut {
                 Shortcut::Paste => {
@@ -499,6 +557,51 @@ impl TerminalPanel {
         self.focus.clone()
     }
 
+    /// Move the view `lines` back into the scrollback (forward, towards the bottom, when
+    /// negative). New output while it's back there leaves it on the same lines.
+    fn scroll_by(&mut self, lines: isize, cx: &mut Context<Self>) {
+        let mut screen = self.screen();
+        let before = screen.screen().scrollback();
+        screen.screen_mut().set_scrollback(before.saturating_add_signed(lines));
+        let moved = screen.screen().scrollback() != before;
+        drop(screen);
+        if moved {
+            cx.notify();
+        }
+    }
+
+    /// The wheel (or trackpad) over the terminal: whole lines of the scrollback, what's left of
+    /// a line kept for the next turn.
+    fn wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        self.wheel += event.delta.pixel_delta(px(LINE_HEIGHT)).y.as_f32();
+        let lines = (self.wheel / LINE_HEIGHT).trunc();
+        self.wheel -= lines * LINE_HEIGHT;
+        if lines != 0. {
+            self.scroll_by(lines as isize, cx);
+        }
+        cx.stop_propagation();
+    }
+
+    /// How many lines back into the scrollback the view is (0: at the bottom).
+    #[cfg(test)]
+    pub fn scrolled_back(&self) -> usize {
+        self.screen().screen().scrollback()
+    }
+
+    /// Output as if the shell wrote it (tests start no shell).
+    #[cfg(test)]
+    pub fn feed(&self, bytes: &[u8]) {
+        self.screen().process(bytes);
+    }
+
+    /// The rows on view, scrolled back or not.
+    #[cfg(test)]
+    pub fn visible_rows(&self) -> Vec<String> {
+        let parser = self.screen();
+        let screen = parser.screen();
+        screen.rows(0, screen.size().1).collect()
+    }
+
     /// The last `n` lines with something on them, as the screen shows them ("Add to Chat":
     /// the terminal has no selection of its own).
     pub fn recent_output(&self, n: usize) -> String {
@@ -525,7 +628,9 @@ impl Render for TerminalPanel {
         let parser = parser.lock().unwrap_or_else(|e| e.into_inner());
         let screen = parser.screen();
         let (rows, cols) = screen.size();
+        // Scrolled back, the cursor's row is that many further down the view (or off it).
         let (cur_row, cur_col) = screen.cursor_position();
+        let cur_row = cur_row as usize + screen.scrollback();
         let show_cursor = !screen.hide_cursor() && !self.exited;
         let mut lines = Vec::with_capacity(rows as usize);
         for r in 0..rows {
@@ -546,7 +651,7 @@ impl Render for TerminalPanel {
                     fg = fg.or(Some(theme.background));
                     bg = bg.or(Some(theme.foreground));
                 }
-                if show_cursor && r == cur_row && c == cur_col {
+                if show_cursor && r as usize == cur_row && c == cur_col {
                     bg = Some(theme.foreground.opacity(0.75));
                     fg = Some(theme.background);
                 }
@@ -571,6 +676,7 @@ impl Render for TerminalPanel {
         let entity = cx.entity().downgrade();
         div()
             .id("terminal")
+            .test_support()
             .key_context("Terminal")
             .track_focus(&self.focus)
             .size_full()
@@ -587,6 +693,7 @@ impl Render for TerminalPanel {
                 this.focus.focus(window, cx);
             }))
             .on_key_down(cx.listener(Self::key))
+            .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.wheel(e, cx)))
             .child(
                 canvas(
                     move |bounds, _, cx| {
@@ -674,6 +781,27 @@ mod tests {
         assert!(ps[2].contains("; winget install it's; $ok = $?;"), "{}", ps[2]);
         assert!(shell_args(Flavor::Cmd, None).is_empty());
         assert_eq!(shell_args(Flavor::Cmd, Some("dir")), ["/c", "dir & echo. & call echo [finished with exit code %^errorlevel%]"], "one `call`: an earlier one resets the exit code");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_a_terminal_ends_its_shell_and_the_thread_reading_it() {
+        use super::{CommandBuilder, Duration, Session, start_session};
+        let screen: Screen = Arc::new(Mutex::new(vt100::Parser::new(30, 100, 0)));
+        let (tx, _rx) = async_channel::bounded::<()>(1);
+        // An idle shell that prints nothing: nothing but a hangup can end it.
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.args(["-c", "exec sleep 600"]);
+        let session = start_session((30, 100), cmd, screen, tx).unwrap();
+        let Session { writer, master, hangup, thread } = session;
+        // What the panel keeps and what it hands the thread; dropping them is closing the tab.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(thread.join().is_ok());
+        });
+        assert!(done_rx.recv_timeout(Duration::from_millis(500)).is_err(), "the thread ended with the shell still running");
+        drop((writer, master, hangup));
+        assert_eq!(done_rx.recv_timeout(Duration::from_secs(10)), Ok(true), "the shell and the thread outlived the terminal");
     }
 
     #[test]

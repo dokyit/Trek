@@ -499,6 +499,9 @@ impl Workspace {
                         ];
                         let devices = handle.devices();
                         ws.remote = Some(Remote { handle, offer: None, addresses, advertise, routes, started_with: (port, reach), devices, connected: HashSet::new(), sent: HashMap::new(), unlisted: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _advert: advert, _tasks: tasks });
+                        // A port or address changed while it started (`sync_remote` waits for a start
+                        // to finish): start again with the new one.
+                        ws.sync_remote(cx);
                     }
                     // Turned off while it started.
                     Ok((handle, ..)) => handle.shutdown(),
@@ -550,8 +553,24 @@ impl Workspace {
     /// Show a new pairing code (QR code and text) in Settings › Phone.
     pub fn offer_pairing(&mut self, cx: &mut Context<Self>) {
         if let Some(remote) = self.remote.as_mut() {
-            remote.offer = Some(remote.handle.pairing_offer());
+            let offer = remote.handle.pairing_offer();
+            let expires_at = offer.expires_at;
+            remote.offer = Some(offer);
             cx.notify();
+            // The server stops taking the code then; Settings stops showing it.
+            let wait = std::time::Duration::from_millis((expires_at - trek_core::store::now_ms()).max(0) as u64);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                let _ = this.update(cx, |ws, cx| {
+                    if let Some(remote) = ws.remote.as_mut() {
+                        if remote.offer.as_ref().is_some_and(|o| o.expires_at == expires_at) {
+                            remote.offer = None;
+                            cx.notify();
+                        }
+                    }
+                });
+            })
+            .detach();
         }
     }
 
@@ -687,17 +706,13 @@ impl Workspace {
             commands::Phone::Open(open) => return Ok(Some(open)),
             commands::Phone::Send(text) => text,
         };
-        // An explicit choice from the phone wins over the setting, for this message only.
-        let before = self.settings.general.follow_up;
-        if let Some(mode) = req.mode {
-            self.settings.general.follow_up = match mode {
-                tr::SendMode::Steer => trek_core::settings::FollowUp::Steer,
-                tr::SendMode::Queue => trek_core::settings::FollowUp::Queue,
-            };
-        }
         let images = save_uploads(&req.images)?;
-        self.send_to(&req.thread_id, text, images, cx);
-        self.settings.general.follow_up = before;
+        // An explicit choice from the phone wins over the setting, for this message only.
+        let follow = req.mode.map(|mode| match mode {
+            tr::SendMode::Steer => trek_core::settings::FollowUp::Steer,
+            tr::SendMode::Queue => trek_core::settings::FollowUp::Queue,
+        });
+        self.send_as(&req.thread_id, text, images, follow, cx);
         Ok(None)
     }
 
@@ -1831,6 +1846,8 @@ fn hand_holding(access: tr::Access, settings: &trek_core::settings::Settings) ->
     })
 }
 
+static UPLOADS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// Photos from the phone, saved with the composer's snapshots for the agent to read.
 fn save_uploads(images: &[tr::ImageUpload]) -> tr::HostResult<Vec<PathBuf>> {
     if images.is_empty() {
@@ -1847,7 +1864,9 @@ fn save_uploads(images: &[tr::ImageUpload]) -> tr::HostResult<Vec<PathBuf>> {
             if bytes.len() > 10 << 20 {
                 return Err(tr::HostError::bad_request("That photo is too big (10 MB at most)"));
             }
-            let path = dir.join(format!("iPhone {stamp} {}.{ext}", i + 1));
+            // The stamp is to the second, and two sends can land in one.
+            let n = UPLOADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = dir.join(format!("iPhone {stamp} {}-{n}.{ext}", i + 1));
             std::fs::write(&path, bytes).map_err(|e| tr::HostError::other(format!("Couldn't keep the photo: {e}")))?;
             Ok(path)
         })

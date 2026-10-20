@@ -304,6 +304,12 @@ impl Default for Snapshots {
 pub struct Tools {
     /// Give agents the computer-use MCP tools (screenshot, click, type).
     pub computer_use: bool,
+    /// Computer use works in the background (macOS): the agent clicks and types in a window of its
+    /// own behind the user's, without their pointer or keyboard. Off: in front, with both.
+    pub computer_background: bool,
+    /// Show what background computer use is doing in a small floating window (picture in
+    /// picture), which the user can tuck away and bring back.
+    pub background_pip: bool,
     /// Give agents the iOS Simulator MCP tools.
     pub simulator: bool,
     /// Give agents Trek's sub-agent tools (`delegate_task` and friends): they can hand work to
@@ -318,7 +324,7 @@ pub struct Tools {
 
 impl Default for Tools {
     fn default() -> Self {
-        Self { computer_use: false, simulator: true, orchestration: true, mcp_servers: vec![], figma_desktop: false }
+        Self { computer_use: false, computer_background: true, background_pip: true, simulator: true, orchestration: true, mcp_servers: vec![], figma_desktop: false }
     }
 }
 
@@ -857,15 +863,26 @@ impl Settings {
     /// all leaves every setting at its default with saving refused, so it's never written over.
     /// Either way a copy of the file is kept, and the problem returned for the user to see.
     pub fn load_checked() -> (Settings, Option<LoadProblem>) {
-        let path = crate::paths::settings_file();
-        let text = match std::fs::read(&path) {
+        Self::load_from(&crate::paths::settings_file())
+    }
+
+    fn load_from(path: &std::path::Path) -> (Settings, Option<LoadProblem>) {
+        let text = match std::fs::read(path) {
             Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-            Err(_) => return (Self::migrated(Settings::default()), None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Self::migrated(Settings::default()), None),
+            // A file that is there but can't be read (permissions, a lock) isn't a fresh install:
+            // run on defaults and refuse to save over it.
+            Err(e) => {
+                let mut s = Settings::default();
+                s.onboarding.completed = true;
+                s.guard.block("settings.toml couldn't be read");
+                return (Self::migrated(s), Some(LoadProblem { backup: None, dropped: vec![], unreadable: true, error: e.to_string() }));
+            }
         };
         let (s, problem) = Self::parse(&text);
         let problem = problem.map(|mut p| {
             tracing::warn!("settings: {}; dropped: {:?}", p.error, p.dropped);
-            p.backup = back_up(&path, &text);
+            p.backup = back_up(path, &text);
             p
         });
         (Self::migrated(s), problem)
@@ -992,6 +1009,27 @@ fn salvage<T: serde::de::DeserializeOwned>(node: &toml::Table, path: &mut Vec<St
             }
         } else if let toml::Value::Table(t) = v {
             salvage::<T>(t, path, kept, dropped);
+        } else if let toml::Value::Array(items) = v
+            && items.iter().all(toml::Value::is_table)
+        {
+            // A list of tables (the MCP servers): one bad entry shouldn't take the others along.
+            let good: Vec<toml::Value> = items
+                .iter()
+                .filter(|item| {
+                    let mut probe = toml::Value::Table(toml::Table::new());
+                    set_at(&mut probe, path, toml::Value::Array(vec![(*item).clone()]));
+                    probe.try_into::<T>().is_ok()
+                })
+                .cloned()
+                .collect();
+            if !good.is_empty() {
+                let mut root = toml::Value::Table(std::mem::take(kept));
+                set_at(&mut root, path, toml::Value::Array(good));
+                if let toml::Value::Table(t) = root {
+                    *kept = t;
+                }
+            }
+            dropped.push(path.clone());
         } else {
             dropped.push(path.clone());
         }
@@ -1094,6 +1132,7 @@ pub mod secrets {
         delete_mcp(&mcp_env_account(server, var))
     }
 
+    /// The key for `provider`: its environment variable if set, else the one saved in the Keychain.
     pub fn api_key(provider: &str) -> Option<String> {
         if crate::paths::isolated() {
             return None;
@@ -1104,6 +1143,15 @@ pub mod secrets {
                     return Some(v);
                 }
             }
+        }
+        stored_api_key(provider)
+    }
+
+    /// The key saved in the Keychain for `provider`, ignoring its environment variable (what
+    /// Remove can remove).
+    pub fn stored_api_key(provider: &str) -> Option<String> {
+        if crate::paths::isolated() {
+            return None;
         }
         keyring::Entry::new(SERVICE, provider).ok()?.get_password().ok()
     }
@@ -1340,6 +1388,35 @@ mod tests {
     }
 
     #[test]
+    fn one_bad_mcp_server_leaves_the_others() {
+        let text = "[[tools.mcp_servers]]\nname = \"a\"\ncommand = \"x\"\n\n[[tools.mcp_servers]]\nname = \"b\"\ncommand = \"y\"\nenabled = \"yes\"\n\n[[tools.mcp_servers]]\nname = \"c\"\ncommand = \"z\"\n";
+        let (mut s, problem) = Settings::parse(text);
+        assert_eq!(problem.expect("a problem").dropped, ["tools.mcp_servers"]);
+        let names: Vec<&str> = s.tools.mcp_servers.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["a", "c"]);
+        // Untouched, the file is written back as it was; once the list changes, the good servers stay.
+        assert!(s.to_toml().unwrap().contains("yes"));
+        s.tools.mcp_servers.push(McpServerConfig::stdio("d", "w", vec![]));
+        let back: Settings = toml::from_str(&s.to_toml().unwrap()).unwrap();
+        let names: Vec<&str> = back.tools.mcp_servers.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["a", "c", "d"]);
+    }
+
+    #[test]
+    fn a_file_that_cant_be_read_is_not_a_missing_one() {
+        let dir = std::env::temp_dir().join(format!("trek-settings-read-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Nothing there: a fresh install, saving allowed.
+        let (s, problem) = Settings::load_from(&dir.join("settings.toml"));
+        assert!(problem.is_none() && s.guard.blocked().is_none() && !s.onboarding.completed);
+        // A folder where the file should be reads as an error other than "not found".
+        let (s, problem) = Settings::load_from(&dir);
+        assert!(problem.expect("a problem").unreadable);
+        assert!(s.onboarding.completed && s.save().is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_problem_keeps_one_copy_of_the_file() {
         let dir = std::env::temp_dir().join(format!("trek-settings-bad-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1349,6 +1426,19 @@ mod tests {
         assert!(first.file_name().unwrap().to_string_lossy().starts_with("settings.toml.bad-"));
         assert_eq!(back_up(&path, "bad = [").unwrap(), first, "the same text isn't copied twice");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_key_from_the_environment_is_not_one_saved_in_the_keychain() {
+        // The API Keys page offers Remove for what the Keychain holds; a shell variable isn't that.
+        let var = crate::catalog::direct_provider("openrouter").and_then(|p| p.env_key).expect("env var");
+        let value = format!("sk-env-{}", uuid::Uuid::new_v4());
+        unsafe { std::env::set_var(var, &value) };
+        let (found, stored) = (secrets::api_key("openrouter"), secrets::stored_api_key("openrouter"));
+        unsafe { std::env::remove_var(var) };
+        assert_ne!(stored.as_deref(), Some(value.as_str()), "the environment is not the Keychain");
+        // (Another test may have isolated the process, which turns every key off.)
+        assert!(found.is_none() || found.as_deref() == Some(value.as_str()));
     }
 
     #[test]

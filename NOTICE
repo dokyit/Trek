@@ -16,6 +16,9 @@ Third-party materials bundled in this repository:
   KaTeX (Khan Academy and other contributors), MIT; the layout rules in
   crates/trek-app/src/math/layout.rs follow KaTeX's implementation of TeX's
   (crates/trek-app/src/math/LICENSE-KaTeX).
+* crates/trek-mcp/src/desktop/skylight.rs — the recipe for input to a window in the
+  background (the window server's event records and event fields) follows the findings of
+  cua-driver (Cua AI, github.com/trycua/cua), MIT.
 * Agent and provider logos under crates/trek-app/assets/logos and
   ios/Trek/Assets.xcassets/Logos are trademarks of their respective owners
   (Anthropic, OpenAI, Google, Microsoft/GitHub, xAI, Cursor, Factory, DeepSeek,

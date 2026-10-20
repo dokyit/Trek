@@ -236,9 +236,20 @@ pub struct SettingsView {
     icon_file: Probe<(String, bool)>,
     /// Trek's data folder, found once (finding it makes sure it exists).
     pub(super) data_dir: std::path::PathBuf,
-    installing_agents: std::rc::Rc<std::cell::RefCell<HashSet<String>>>,
-    signing_in_agents: std::rc::Rc<std::cell::RefCell<HashSet<String>>>,
+    installing_agents: Started,
+    signing_in_agents: Started,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Agents whose Install or Sign in was handed to a terminal, and when. Trek can't see that command
+/// end, so the button reads "Installing…" or "Signing in…" until the agent's state changes, Scan
+/// again is pressed, or `STARTED_FOR` has passed; then it can be tried again.
+type Started = std::rc::Rc<std::cell::RefCell<HashMap<String, std::time::Instant>>>;
+
+const STARTED_FOR: std::time::Duration = std::time::Duration::from_secs(120);
+
+fn is_started(set: &Started, key: &str) -> bool {
+    set.borrow().get(key).is_some_and(|at| at.elapsed() < STARTED_FOR)
 }
 
 /// Something a page shows that takes the disk, a process or a system call to learn. It's read on a
@@ -329,7 +340,8 @@ impl SettingsView {
         let mut saved_keys = HashMap::new();
         for p in DIRECT_PROVIDERS.iter().filter(|p| !p.local) {
             key_inputs.insert(p.id, cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Paste key")));
-            saved_keys.insert(p.id, secrets::api_key(p.id).is_some());
+            // What the Keychain holds, not a shell variable: Remove can only remove the former.
+            saved_keys.insert(p.id, secrets::stored_api_key(p.id).is_some());
         }
         let subs = vec![cx.observe(&workspace, |_, _, cx| cx.notify())];
         let mcp_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. github"));
@@ -456,8 +468,8 @@ impl SettingsView {
             snapshots: Probe::default(),
             icon_file: Probe::default(),
             data_dir: trek_core::paths::data_dir(),
-            installing_agents: std::rc::Rc::new(std::cell::RefCell::new(HashSet::new())),
-            signing_in_agents: std::rc::Rc::new(std::cell::RefCell::new(HashSet::new())),
+            installing_agents: Started::default(),
+            signing_in_agents: Started::default(),
             _subscriptions: subs,
         }
     }
@@ -669,6 +681,17 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// Note that `key`'s command went to a terminal, and redraw once it stops counting.
+    fn start(set: &Started, key: String, cx: &mut Context<Self>) {
+        set.borrow_mut().insert(key, std::time::Instant::now());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(STARTED_FOR).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+    }
+
     /// One row per agent: logo, account and plan, enable switch, and Sign in or Install.
     fn agents_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let ws = self.workspace.read(cx);
@@ -677,7 +700,7 @@ impl SettingsView {
         let disabled = ws.settings.disabled_agents.clone();
         let agents: Vec<_> = ws.agents.iter().filter(|a| !matches!(a.agent, AgentId::Direct(_))).cloned().collect();
         let (installed, missing): (Vec<_>, Vec<_>) = agents.into_iter().partition(|a| a.availability != Availability::NotInstalled);
-        self.installing_agents.borrow_mut().retain(|k| missing.iter().any(|m| m.agent.key() == *k));
+        self.installing_agents.borrow_mut().retain(|k, _| missing.iter().any(|m| m.agent.key() == *k));
         let mut out: Vec<AnyElement> = vec![];
         let setup_key = |a: &AgentId| match a {
             AgentId::Acp(id) => id.clone(),
@@ -725,7 +748,11 @@ impl SettingsView {
                 .child(v_flex().child(div().text_size(px(14.)).font_medium().child(a.name.clone())).child(
                     div().text_size(px(12.5)).text_color(if needs_login { palette::amber(cx) } else { muted }).child(account),
                 ));
-            let is_signing = self.workspace.read(cx).authenticating_agents.contains(&key) || self.signing_in_agents.borrow().contains(&key);
+            // A login that took stops being waited on once the agent is signed in.
+            if !needs_login {
+                self.signing_in_agents.borrow_mut().remove(&key);
+            }
+            let is_signing = self.workspace.read(cx).authenticating_agents.contains(&key) || is_started(&self.signing_in_agents, &key);
             let signing_ref = self.signing_in_agents.clone();
             let k_sign = key.clone();
             let is_acp = matches!(a.agent, AgentId::Acp(_));
@@ -753,8 +780,7 @@ impl SettingsView {
                             .loading(is_signing)
                             .label(if is_signing { "Signing in…" } else { "Sign in" })
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                signing_ref.borrow_mut().insert(k_sign.clone());
-                                cx.notify();
+                                Self::start(&signing_ref, k_sign.clone(), cx);
                                 let cmd = cmd.clone();
                                 this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: cmd, cwd: None }));
                             })),
@@ -846,7 +872,7 @@ impl SettingsView {
                         return Self::row(title, install, menu, cx);
                     }
                     let cmd = install.clone();
-                    let is_installing = self.installing_agents.borrow().contains(&key);
+                    let is_installing = is_started(&self.installing_agents, &key);
                     let install_ref = self.installing_agents.clone();
                     let k_inst = key.clone();
                     let button = Button::new(SharedString::from(format!("install-{key}")))
@@ -857,8 +883,7 @@ impl SettingsView {
                         .label(if is_installing { "Installing…" } else { "Install" })
                         .on_click(
                             cx.listener(move |this, _, _, cx| {
-                                install_ref.borrow_mut().insert(k_inst.clone());
-                                cx.notify();
+                                Self::start(&install_ref, k_inst.clone(), cx);
                                 let cmd = cmd.clone();
                                 this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: cmd, cwd: None }))
                             }),
@@ -882,7 +907,11 @@ impl SettingsView {
                         .loading(detecting)
                         .icon(IconName::RefreshCw)
                         .label("Scan again")
-                        .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.detect_agents(cx)))),
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.installing_agents.borrow_mut().clear();
+                            this.signing_in_agents.borrow_mut().clear();
+                            this.workspace.update(cx, |ws, cx| ws.detect_agents(cx))
+                        })),
                 )
                 .into_any_element(),
         );
@@ -1150,6 +1179,23 @@ impl SettingsView {
                 permission("sr-perm", "Screen Recording", sr, crate::integrations::SCREEN_RECORDING_PANE, cx),
                 cx,
             ));
+        }
+        // The Mac's agents can work behind the user's windows; Windows' work in front.
+        if !crate::words::is_windows() {
+            computer_use.push(Self::row(
+                "Work in the background",
+                "Agents click and type in a window of their own behind yours, so you keep the pointer and keyboard. Off: they use the real pointer and keyboard, in front. Applies to new sessions.",
+                self.switch("computer-background", s.tools.computer_background, |s, v| s.tools.computer_background = v),
+                cx,
+            ));
+            if s.tools.computer_background {
+                computer_use.push(Self::row(
+                    "Show what they're doing",
+                    &format!("A small floating picture of the window an agent works in, live. Fold it to a pill or put it away; bring it back from the {}.", crate::words::words().tray_label.to_lowercase()),
+                    self.switch("background-pip", s.tools.background_pip, |s, v| s.tools.background_pip = v),
+                    cx,
+                ));
+            }
         }
         out.push(ui::group(computer_use, cx));
         if let Some(note) = permissions_note {
@@ -1635,7 +1681,7 @@ impl Render for SettingsView {
             self.sync_project_name(window, cx);
         }
         let body = self.content(cx);
-        div().id("settings-content").size_full().overflow_y_scroll().child(
+        div().id("settings-content").test_support().size_full().overflow_y_scroll().child(
             h_flex().w_full().justify_center().child(
                 v_flex()
                     .w_full()
@@ -1657,11 +1703,22 @@ impl Render for SettingsView {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob import brings its own `test` attribute.
-    use super::{SettingsPage, page_named};
+    use super::{SettingsPage, Started, STARTED_FOR, is_started, page_named};
 
     #[test]
     fn the_legal_note_reads_as_one_paragraph() {
         assert!(!super::pages::LEGAL.contains("  ") && !super::pages::LEGAL.contains('\n'), "{}", super::pages::LEGAL);
+    }
+
+    #[test]
+    fn a_started_install_stops_counting_after_a_while() {
+        let set = Started::default();
+        assert!(!is_started(&set, "droid"));
+        set.borrow_mut().insert("droid".into(), std::time::Instant::now());
+        assert!(is_started(&set, "droid"));
+        let long_ago = std::time::Instant::now().checked_sub(STARTED_FOR + std::time::Duration::from_secs(1)).expect("an hour has passed since boot");
+        set.borrow_mut().insert("droid".into(), long_ago);
+        assert!(!is_started(&set, "droid"));
     }
 
     #[test]

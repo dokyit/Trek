@@ -47,7 +47,7 @@ enum Loaded {
     Fetched(Result<Registry, String>),
 }
 
-enum Step {
+pub(crate) enum Step {
     Progress(Progress),
     Done(Result<AddedAgent, String>),
 }
@@ -168,27 +168,35 @@ impl Workspace {
         let id = id.to_string();
         let task = cx.spawn(async move |this, cx| {
             while let Ok(step) = rx.recv().await {
-                let _ = this.update(cx, |this, cx| {
-                    match step {
-                        Step::Progress(p) => {
-                            this.added_agents.installs.insert(id.clone(), Install::Running(Some(p)));
-                        }
-                        Step::Done(Ok(added)) => {
-                            this.added_agents.installs.remove(&id);
-                            let name = added.name.clone();
-                            let updated = this.settings.added_agents.iter().any(|a| a.id == added.id);
-                            this.put_added(added, cx);
-                            cx.emit(WorkspaceEvent::Toast { message: if updated { format!("{name} is up to date") } else { format!("{name} is ready in Trek") }, undo: None });
-                        }
-                        Step::Done(Err(e)) => {
-                            this.added_agents.installs.insert(id.clone(), Install::Failed(e));
-                        }
-                    }
-                    cx.notify();
-                });
+                let _ = this.update(cx, |this, cx| this.install_step(&id, step, cx));
             }
         });
         self.keep(task);
+        cx.notify();
+    }
+
+    /// What registry agent `id`'s install reported. One removed while it ran (an update's) stays
+    /// removed: what the install left goes too.
+    pub(crate) fn install_step(&mut self, id: &str, step: Step, cx: &mut gpui_kit::Context<Self>) {
+        let Some(Install::Running(progress)) = self.added_agents.installs.get_mut(id) else {
+            if let Step::Done(Ok(added)) = step {
+                trek_core::runtime().spawn_blocking(move || registry::remove(&added));
+            }
+            return;
+        };
+        match step {
+            Step::Progress(p) => *progress = Some(p),
+            Step::Done(Ok(added)) => {
+                self.added_agents.installs.remove(id);
+                let name = added.name.clone();
+                let updated = self.settings.added_agents.iter().any(|a| a.id == added.id);
+                self.put_added(added, cx);
+                cx.emit(WorkspaceEvent::Toast { message: if updated { format!("{name} is up to date") } else { format!("{name} is ready in Trek") }, undo: None });
+            }
+            Step::Done(Err(e)) => {
+                self.added_agents.installs.insert(id.to_string(), Install::Failed(e));
+            }
+        }
         cx.notify();
     }
 

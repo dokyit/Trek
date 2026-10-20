@@ -174,8 +174,8 @@ impl<'a> Parser<'a> {
     }
 
     fn skip_space(&mut self) {
-        while self.peek().is_some_and(char::is_whitespace) {
-            self.pos += 1;
+        while let Some(c) = self.peek().filter(|c| c.is_whitespace()) {
+            self.pos += c.len_utf8();
         }
     }
 
@@ -443,7 +443,10 @@ impl<'a> Parser<'a> {
                 '}' => break,
                 '{' => {
                     flush(&mut run, &mut out);
-                    out.extend(self.text_inner(face));
+                    self.depth += 1;
+                    let inner = if self.depth > MAX_DEPTH { self.rest_as_text() } else { self.text_inner(face) };
+                    self.depth -= 1;
+                    out.extend(inner);
                 }
                 '$' => {
                     flush(&mut run, &mut out);
@@ -1301,8 +1304,24 @@ mod tests {
     }
 
     #[test]
+    fn multi_byte_whitespace_is_just_space() {
+        for ws in ["\u{a0}", "\u{85}", "\u{2003}", "\u{202f}", "\u{3000}"] {
+            assert_eq!(syms(&parse(&format!("a{ws}b"))), syms(&parse("a b")), "{ws:?}");
+            let _ = parse(&format!("x{ws}={ws}1{ws}"));
+            let _ = parse(&format!(r"\frac{ws}{{a}}{ws}{{b}}"));
+            let _ = parse(&format!(r"\alpha{ws}\beta"));
+        }
+    }
+
+    #[test]
+    fn deep_text_braces_do_not_overflow_the_stack() {
+        let _ = parse(&(r"\text{".to_string() + &"{".repeat(100_000) + "x"));
+        let _ = parse(&(r"\text{".to_string() + &"{".repeat(100_000) + "x" + &"}".repeat(100_000)));
+    }
+
+    #[test]
     fn fuzz_never_panics() {
-        let pieces = [r"\frac", r"\sqrt", "[", "]", "{", "}", "^", "_", "&", r"\\", r"\left", r"\right", r"\middle", "(", ")", "|", r"\begin{pmatrix}", r"\end{pmatrix}", r"\begin{cases}", r"\end{cases}", r"\begin{array}{c|l}", r"\end{array}", "x", "1", " ", r"\alpha", r"\text{", "$", r"\boxed", r"\hat", r"\overbrace", r"\over", r"\displaystyle", r"\not", r"\limits", "'", r"\hline", r"\big", r"\unknowncmd", "é", "日", r"\operatorname*", r"\xrightarrow[", r"\mathbb", r"\binom", r"\tag", r"\kern", "%", "~", r"\,"];
+        let pieces = [r"\frac", r"\sqrt", "[", "]", "{", "}", "^", "_", "&", r"\\", r"\left", r"\right", r"\middle", "(", ")", "|", r"\begin{pmatrix}", r"\end{pmatrix}", r"\begin{cases}", r"\end{cases}", r"\begin{array}{c|l}", r"\end{array}", "x", "1", " ", r"\alpha", r"\text{", "$", r"\boxed", r"\hat", r"\overbrace", r"\over", r"\displaystyle", r"\not", r"\limits", "'", r"\hline", r"\big", r"\unknowncmd", "é", "日", r"\operatorname*", r"\xrightarrow[", r"\mathbb", r"\binom", r"\tag", r"\kern", "%", "~", r"\,", "\u{a0}", "\u{202f}", "\u{3000}", "\u{2003}", "\u{85}"];
         let mut seed = 0x9e37_79b9_7f4a_7c15u64;
         for _ in 0..6000 {
             seed ^= seed << 13;

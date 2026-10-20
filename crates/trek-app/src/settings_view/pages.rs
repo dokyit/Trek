@@ -648,10 +648,17 @@ impl SettingsView {
                 h_flex()
                     .gap(px(6.))
                     .child(div().text_size(px(12.5)).text_color(muted).child("••••••••"))
-                    .child(Button::new(SharedString::from(format!("del-{id}"))).small().ghost().label("Remove").on_click(cx.listener(move |this, _, _, cx| {
-                        let _ = secrets::delete_api_key(id);
+                    .child(Button::new(SharedString::from(format!("del-{id}"))).small().ghost().label("Remove").on_click(cx.listener(move |this, _, window, cx| {
+                        // A key that is already gone (removed in Keychain Access) counts as removed.
+                        if let Err(e) = secrets::delete_api_key(id) {
+                            if secrets::stored_api_key(id).is_some() {
+                                crate::toast::push(window, format!("Couldn't remove the key: {e}"), cx);
+                                return;
+                            }
+                        }
                         this.saved_keys.insert(id, false);
                         this.workspace.update(cx, |ws, cx| {
+                            ws.forget_keyed_providers();
                             ws.settings.api_providers.retain(|p| p != id);
                             ws.direct_models.remove(id);
                             ws.save_settings(cx);
@@ -674,6 +681,7 @@ impl SettingsView {
                                 this.saved_keys.insert(id, true);
                                 input.update(cx, |s, cx| s.set_value("", window, cx));
                                 this.workspace.update(cx, |ws, cx| {
+                                    ws.forget_keyed_providers();
                                     if !ws.settings.api_providers.iter().any(|p| p == id) {
                                         ws.settings.api_providers.push(id.to_string());
                                     }

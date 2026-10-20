@@ -45,8 +45,14 @@ pub fn read_servers(name: &str, text: &str) -> Result<Vec<McpServerConfig>, Stri
 
 /// Split a command line into words as a shell would: '…' and "…" quote, a backslash escapes the
 /// next character. A backslash that starts a word before a space is a line continuation (a
-/// multi-line command pasted into one line).
+/// multi-line command pasted into one line). On Windows a backslash is a path separator and
+/// stays in the word (`node C:\srv\index.js`).
 pub fn split_words(line: &str) -> Result<Vec<String>, String> {
+    split_words_with(line, !cfg!(windows))
+}
+
+/// `split_words`, with backslashes as escapes (`posix`) or as ordinary characters.
+fn split_words_with(line: &str, posix: bool) -> Result<Vec<String>, String> {
     let mut words = vec![];
     let mut word: Option<String> = None;
     let mut chars = line.chars().peekable();
@@ -56,7 +62,8 @@ pub fn split_words(line: &str) -> Result<Vec<String>, String> {
                 words.extend(word.take());
             }
             '\\' if word.is_none() && chars.peek().is_none_or(|n| n.is_whitespace()) => {}
-            '\\' => {
+            // Off POSIX, `\'` is still how `quote` writes a quote mark inside a word.
+            '\\' if posix || chars.peek() == Some(&'\'') => {
                 if let Some(n) = chars.next() {
                     word.get_or_insert_default().push(n);
                 }
@@ -76,7 +83,7 @@ pub fn split_words(line: &str) -> Result<Vec<String>, String> {
                 loop {
                     match chars.next() {
                         Some('"') => break,
-                        Some('\\') if chars.peek().is_some_and(|n| matches!(n, '"' | '\\' | '$' | '`')) => w.push(chars.next().unwrap_or_default()),
+                        Some('\\') if posix && chars.peek().is_some_and(|n| matches!(n, '"' | '\\' | '$' | '`')) => w.push(chars.next().unwrap_or_default()),
                         Some(c) => w.push(c),
                         None => return Err("A quote isn't closed.".into()),
                     }
@@ -407,6 +414,19 @@ mod tests {
         for w in ["plain", "with space", "it's", "", "a\"b"] {
             assert_eq!(split_words(&quote(w)).unwrap(), [w]);
         }
+    }
+
+    #[test]
+    fn windows_paths_keep_their_backslashes() {
+        let line = r"node C:\Users\me\mcp\index.js --root D:\data\ --name 'a b'";
+        assert_eq!(split_words_with(line, false).unwrap(), ["node", r"C:\Users\me\mcp\index.js", "--root", r"D:\data\", "--name", "a b"]);
+        assert_eq!(split_words_with(r#"x "C:\a b\c.js""#, false).unwrap(), ["x", r"C:\a b\c.js"]);
+        // What `quote` writes still reads back.
+        for w in ["plain", "with space", "it's", "", "a\"b", r"C:\x y\z"] {
+            assert_eq!(split_words_with(&quote(w), false).unwrap(), [w]);
+        }
+        // The shell reading is unchanged elsewhere.
+        assert_eq!(split_words_with(r"a C:\x", true).unwrap(), ["a", "C:x"]);
     }
 
     #[test]

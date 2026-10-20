@@ -710,3 +710,25 @@ fn a_sub_agent_waiting_on_an_approval_shows_on_its_parent_everywhere() {
         assert!(!trek.visible(cx, format!("review-needs-{id}")));
     });
 }
+
+#[test]
+fn a_thread_in_no_project_makes_no_project_of_its_folder() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: None }, cx));
+        let id = trek.send(cx, "a quick thought");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let folder = trek.read(cx, |ws, _| ws.thread(&id).and_then(|t| t.cwd.clone())).expect("its folder");
+        assert!(trek_core::paths::is_chat_dir(&folder));
+        // A sub-agent and a fork work in its folder, and are in no project either.
+        let child = trek.update(cx, |ws, cx| ws.delegate(&id, &json!({ "title": "Second opinion", "prompt": "y" }), cx)).unwrap();
+        let fork = trek.update(cx, |ws, cx| ws.fork_thread(&id, crate::workspace::ForkAt::End, &crate::workspace::Scope::Main, cx)).expect("fork");
+        for t in [&child, &fork] {
+            let t = trek.read(cx, |ws, _| ws.thread(t).cloned()).expect("thread");
+            assert_eq!((t.project_id.as_deref(), t.cwd.as_deref()), (None, Some(folder.as_path())), "{}", t.title);
+        }
+        let projects = trek.read(cx, |ws, _| ws.store.projects().unwrap());
+        assert!(!projects.iter().any(|p| trek_core::paths::is_chat_dir(&p.path)), "{projects:?}");
+        wait_task(&trek, cx, &child, TaskState::Done).await;
+    });
+}

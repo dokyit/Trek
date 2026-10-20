@@ -585,7 +585,11 @@ async fn serve<H: RemoteHost>(stream: TcpStream, peer: SocketAddr, inner: Arc<In
             // between this check and the old connection saying it went away.
             inner.notice(ServerNotice::Disconnected { device_id: device_id.clone() });
         }
-        state.registry.touch(&device_id, now_ms());
+        // A stopped server (restarted with a new port or address) leaves devices.json to the
+        // one that replaced it: its list here may be stale by now.
+        if !*inner.shutdown.borrow() {
+            state.registry.touch(&device_id, now_ms());
+        }
     }
     tracing::info!(%peer, device_id, "phone disconnected");
 }

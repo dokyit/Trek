@@ -42,6 +42,10 @@
 //! | `mock:told`                  | what Trek told the session besides its messages (its          |
 //! |                              | `SessionConfig::instructions`)                                |
 //! | `mock:mcp`                   | the MCP servers the session was given, with their transport   |
+//! | `mock:background` id [WxH]   | uses the computer in the background in window `id` (WxH points,|
+//! | [app]                        | of app `app`), telling Trek each step as `trek-mcp computer`  |
+//! |                              | would, so its picture-in-picture window shows it; nothing is  |
+//! |                              | clicked for real                                              |
 //! | `mock:consult` [prompt]      | asks a mock sub-agent (Trek's `delegate_task`) and waits      |
 //! | `mock:delegate` [prompt]     | starts a mock sub-agent and ends its turn; Trek wakes it      |
 //! | `mock:pair` [prompt]         | starts two mock sub-agents on the same task and ends its turn |
@@ -207,6 +211,8 @@ enum Script {
     Told,
     /// List the MCP servers the session was given (`SessionConfig::mcp_servers`).
     Mcp,
+    /// Use the computer in the background, as far as Trek can tell (`mock:background`).
+    Background,
     Limit(Duration),
     /// A 5-hour window nearly used up partway through, resetting after a while (`mock:nearlimit`).
     NearLimit(Duration),
@@ -326,6 +332,7 @@ impl Script {
                 "recall" => Script::Recall,
                 "told" if w.starts_with("mock:") => Script::Told,
                 "mcp" if w.starts_with("mock:") => Script::Mcp,
+                "background" if w.starts_with("mock:") => Script::Background,
                 _ => return None,
             })
         });
@@ -376,6 +383,7 @@ pub fn title(request: &str) -> String {
         Script::Recall => "What was said",
         Script::Told => "What Trek said",
         Script::Mcp => "List the MCP servers",
+        Script::Background => "Check the page in the background",
         Script::Limit(_) | Script::NearLimit(_) => "Refactor the parser",
         Script::Deaf(_) => "Run the long migration",
         Script::Delegate { .. } => "Get a second opinion",
@@ -724,6 +732,7 @@ impl Session {
             Script::Pair => self.pair(text).await?,
             Script::StartThread { worktree, wait } => self.start_thread(text, worktree, wait).await?,
             Script::Handoff => self.handoff(text).await?,
+            Script::Background => self.background_use(text).await?,
             Script::Server(until) => self.server(until).await?,
             Script::Watch(after) => self.watch(after).await?,
             Script::Dev => {
@@ -1582,6 +1591,39 @@ impl Session {
             Ok(_) => self.say("Handed off: the work goes on in the new thread.").await,
             Err(e) => self.say(&format!("I couldn't hand off: {e}")).await,
         }
+    }
+
+    /// `mock:background <id> [WxH] [app]`: steps of computer use in window `id`, each a tool row
+    /// and a report to Trek (`trek_ipc::COMPUTER_ACTIVITY`) as `trek-mcp computer` sends in the
+    /// background. Nothing is clicked or typed for real.
+    async fn background_use(&mut self, text: &str) -> Step {
+        let args: Vec<&str> = after_keyword(text, &["mock:background"]).unwrap_or_default().split_whitespace().collect();
+        let Some(id) = args.first().and_then(|a| a.parse::<i64>().ok()) else {
+            return self.say("Which window? `mock:background <window id> [WxH] [app]`.").await;
+        };
+        let (w, h) = args.get(1).and_then(|s| s.split_once('x')).and_then(|(w, h)| Some((w.parse::<f64>().ok()?, h.parse::<f64>().ok()?))).unwrap_or((800., 600.));
+        let app = args.get(2..).map(|a| a.join(" ")).filter(|a| !a.is_empty()).unwrap_or_else(|| "Safari".into());
+        self.think("I'll check the page in its own window, behind the user's.").await?;
+        let window = serde_json::json!({"id": id, "pid": 0, "app": app, "title": "", "x": 0.0, "y": 0.0, "width": w, "height": h});
+        let at = |x: f64, y: f64| Some(serde_json::json!({"x": w * x, "y": h * y}));
+        let steps = [
+            ("screenshot", "Looking", None),
+            ("click", "Clicking", at(0.3, 0.25)),
+            ("type_text", "Typing “trek background use”", None),
+            ("scroll", "Scrolling down", at(0.5, 0.6)),
+            ("click", "Clicking", at(0.7, 0.4)),
+            ("key", "Pressing return", None),
+        ];
+        for (tool, detail, point) in steps {
+            let call = self.id("tool");
+            self.tool_start(&call, &format!("mcp__trek-computer__{tool}"), detail).await?;
+            let action = if tool == "type_text" { "type" } else { tool };
+            let report = serde_json::json!({"action": action, "detail": detail, "window": window, "point": point, "from": null});
+            let told = self.ipc(trek_ipc::COMPUTER_ACTIVITY, report).await?;
+            self.emit(AgentEvent::ToolFinished { id: call, output: format!("{detail} in {app}'s window, in the background."), ok: told.is_ok() }).await?;
+            self.pause(Duration::from_millis(1500)).await?;
+        }
+        self.say(&format!("Done: I worked in {app}'s window behind yours.")).await
     }
 
     /// `mock:server`: a dev server left running in the background, printing as it goes. It runs

@@ -21,6 +21,8 @@ pub use ide::{ChatMode, IdeChat, IdeTab, Mode};
 pub use review::{FileReview, Review, as_given};
 
 pub use added_agents::{AddedAgents, Install as AgentInstall, is_added};
+#[cfg(test)]
+pub(crate) use added_agents::Step as InstallStep;
 pub use agent_updates::Hold;
 pub use limits::Clock;
 pub use lineage::{LineageRow, ThreadState};
@@ -253,7 +255,7 @@ pub struct LiveThread {
     git_guard: std::sync::Arc<GitGuard>,
     /// Messages for the agent held until the git work before them is done: a turn mustn't start
     /// before its checkpoint is taken, or before files a rewind restores are back.
-    held: Vec<Command>,
+    pub(crate) held: Vec<Command>,
     _git: Option<Task<()>>,
     /// A usage limit the running turn reported: the thread pauses when the turn ends.
     limit: Option<limits::Hit>,
@@ -1056,6 +1058,10 @@ pub struct Workspace {
     /// What checking each of the user's MCP servers found, by name (`check_mcp_server`).
     pub mcp_checks: HashMap<String, McpCheck>,
     pub detecting: bool,
+    /// The cloud providers the user has a key for, found once (each is a Keychain read, and
+    /// `ready_agents` runs while drawing). Forgotten when a key is saved or removed and when the
+    /// agents are found again.
+    pub(crate) keyed_providers: std::cell::RefCell<Option<Vec<&'static str>>>,
     pub importing: bool,
     pub import_summary: Option<ImportSummary>,
     pub live: HashMap<String, LiveThread>,
@@ -1185,6 +1191,9 @@ pub struct Workspace {
     ide_prev_route: Option<Route>,
     /// Threads open in windows of their own.
     pub thread_windows: HashMap<String, AnyWindowHandle>,
+    /// Agents using the computer in the background, and the picture-in-picture window that
+    /// shows them (`background_use`).
+    pub background_use: Entity<crate::background_use::BackgroundUse>,
     /// A message for the main window's composer while that window is being reopened: a window
     /// opened just now hears no events until later, so `TrekWindow::new` takes it from here.
     pub(crate) pending_compose: Option<(String, String, Vec<PathBuf>)>,
@@ -1254,6 +1263,9 @@ pub struct Workspace {
     awaited: HashSet<String>,
     /// The orchestration key of the pre-warmed draft session (`warm`), until it has a thread.
     warm_ipc: Option<String>,
+    /// The thread the main window's draft last became as it was sent: the terminal dock hands
+    /// the draft's shells on to it.
+    pub draft_became: Option<String>,
     /// Threads setting up or maintaining a project's verification skill (`workspace::verification`).
     verify_runs: HashMap<String, verification::VerifyRun>,
     /// What finished turns changed (`turn_changes`).
@@ -1465,6 +1477,7 @@ impl Workspace {
             direct_inflight: HashSet::new(),
             mcp_checks: HashMap::new(),
             detecting: false,
+            keyed_providers: std::cell::RefCell::new(None),
             importing: false,
             import_summary: None,
             live: HashMap::new(),
@@ -1534,6 +1547,10 @@ impl Workspace {
             lsp_servers: Default::default(),
             ide_prev_route: None,
             thread_windows: HashMap::new(),
+            background_use: {
+                let ws = cx.entity().downgrade();
+                cx.new(|_| crate::background_use::BackgroundUse::new(ws))
+            },
             pending_compose: None,
             mock_agent: trek_agents::mock::enabled(),
             #[cfg(test)]
@@ -1566,6 +1583,7 @@ impl Workspace {
             thread_waiters: HashMap::new(),
             awaited: HashSet::new(),
             warm_ipc: None,
+            draft_became: None,
             verify_runs: HashMap::new(),
             changes_cache: Default::default(),
             end_children_on_quit: (!cfg!(test)).then_some(trek_core::procs::end_all as fn(std::time::Duration)),
@@ -1787,6 +1805,11 @@ impl Workspace {
     /// Navigate the main window from a thread window, and bring it forward (reopening it if it
     /// was closed).
     pub fn show_in_main(&mut self, route: Route, cx: &mut Context<Self>) {
+        // The editor doesn't draw the harness's threads and drafts: the main window goes back to
+        // the harness to show one (and its composer, which a fork's message goes to).
+        if self.ide() && matches!(route, Route::Thread(_) | Route::Draft { .. }) {
+            self.mode = Mode::Agents;
+        }
         self.navigate(route, cx);
         cx.emit(WorkspaceEvent::ActivateMain);
     }
@@ -2552,7 +2575,10 @@ impl Workspace {
                         sub_threads,
                         consults,
                     };
-                    this.live.entry(id.clone()).or_default().spend = Some(spend);
+                    // Not for a thread deleted while it was read (its live state went with it).
+                    if let Some(live) = this.live.get_mut(&id) {
+                        live.spend = Some(spend);
+                    }
                 }
                 let Some(live) = this.live.get_mut(&id) else { return };
                 live.loading = false;
@@ -2746,6 +2772,9 @@ impl Workspace {
                         live.close_turn(false);
                         live.streaming = None;
                         live.reasoning = None;
+                        // A message still held for its checkpoint goes nowhere: the new agent's
+                        // session would otherwise be sent it, interrupted as it shows.
+                        live.held.retain(|c| !matches!(c, Command::Prompt { .. }));
                         live.items.push(Item::Notice { text: "Interrupted".into() });
                         live.revision += 1;
                         cut = true;
@@ -3059,7 +3088,7 @@ impl Workspace {
         };
         let p = self.prefs();
         // Same project as its thread, and the same folder (a worktree, maybe).
-        let project = self.current_thread().and_then(|t| self.project_dir(t)).or_else(|| cwd.clone());
+        let project = self.current_thread().and_then(|t| self.project_dir(t)).or_else(|| cwd.clone().filter(|c| !trek_core::paths::is_chat_dir(c)));
         let mut t = self.store.create_thread(project.as_deref(), p.agent, p.model, p.effort, HandHolding::Supervised).ok()?;
         t.cwd = cwd;
         t.title = "Side chat".into();
@@ -3071,6 +3100,20 @@ impl Workspace {
         self.live.entry(id.clone()).or_default().loaded = true;
         cx.notify();
         Some(id)
+    }
+
+    /// The cloud providers with a key in the environment or the Keychain, read once until
+    /// `forget_keyed_providers`.
+    fn keyed_providers(&self) -> Vec<&'static str> {
+        self.keyed_providers
+            .borrow_mut()
+            .get_or_insert_with(|| catalog::DIRECT_PROVIDERS.iter().filter(|p| !p.local && trek_core::settings::secrets::api_key(p.id).is_some()).map(|p| p.id).collect())
+            .clone()
+    }
+
+    /// A key was saved or removed: read the providers' keys again next time.
+    pub fn forget_keyed_providers(&self) {
+        *self.keyed_providers.borrow_mut() = None;
     }
 
     /// Agents the user can pick right now.
@@ -3093,12 +3136,10 @@ impl Workspace {
                 out.push(id);
             }
         }
-        for p in catalog::DIRECT_PROVIDERS {
-            if !p.local && trek_core::settings::secrets::api_key(p.id).is_some() {
-                let id = AgentId::Direct(p.id.to_string());
-                if !out.contains(&id) {
-                    out.push(id);
-                }
+        for p in self.keyed_providers() {
+            let id = AgentId::Direct(p.to_string());
+            if !out.contains(&id) {
+                out.push(id);
             }
         }
         if self.mock_agent {
@@ -3136,6 +3177,7 @@ impl Workspace {
                 // The draft's tab becomes the thread's.
                 self.open_tab(&id);
                 self.route = Route::Thread(id.clone());
+                self.draft_became = Some(id.clone());
                 id
             }
             _ => return,
@@ -3147,18 +3189,16 @@ impl Workspace {
     /// `prefs`, in a worktree when they ask for one, on the session warmed up while it was typed
     /// if that still fits. Puts it nowhere on screen (the harness's draft and the editor's AI side
     /// bar each do that their own way) and sends nothing. `None` when it couldn't be made (said in
-    /// a toast; the message goes back to the composer when a worktree couldn't be planned).
+    /// a toast; the message goes back to the composer).
     pub fn start_thread(&mut self, project: Option<PathBuf>, prefs: Prefs, text: &str, images: &[PathBuf], cx: &mut Context<Self>) -> Option<String> {
         match self.make_thread(project, prefs, text, true, |_| {}, cx) {
             Ok(id) => Some(id),
             Err(e) => {
                 cx.emit(WorkspaceEvent::Toast { message: e.to_string(), undo: None });
-                // The message goes back to the composer when its worktree couldn't be planned.
-                if matches!(e, MakeThreadError::Worktree(_)) {
-                    cx.emit(WorkspaceEvent::InsertIntoComposer(text.to_string()));
-                    for image in images {
-                        cx.emit(WorkspaceEvent::AttachImage(image.clone()));
-                    }
+                // The message goes back to the composer (which let go of it as it was sent).
+                cx.emit(WorkspaceEvent::InsertIntoComposer(text.to_string()));
+                for image in images {
+                    cx.emit(WorkspaceEvent::AttachImage(image.clone()));
                 }
                 None
             }
@@ -3260,6 +3300,12 @@ impl Workspace {
         let text = text.trim().to_string();
         if text.is_empty() && images.is_empty() {
             return;
+        }
+        // Its history comes in first (a thread not opened this run, sent to from the phone or by
+        // another agent): the message goes after it, rather than be read back in as new when the
+        // thread is opened. One read from the agent's files holds the message (below).
+        if self.thread(&id).is_some() {
+            self.ensure_loaded(&id, cx);
         }
         // The thread's history is still being read from the agent's files, or its worktree is being
         // made or is missing: hold the message until that's sorted (`ensure_loaded`,
@@ -3430,6 +3476,12 @@ impl Workspace {
     fn ensure_session(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(thread) = self.thread(id).cloned() else { return };
         if self.live.get(id).is_some_and(|l| l.commands.is_some() || l.preparing || l.removing) {
+            return;
+        }
+        // A recap is made from the history, so none starts before it's in: one still being read
+        // starts its session when it lands, with the first message that waited for it (`send_queued`).
+        self.ensure_loaded(id, cx);
+        if self.live.get(id).is_some_and(|l| l.loading) {
             return;
         }
         // No folder to run in until the worktree is back (or the thread moves to the project's),
@@ -4957,7 +5009,8 @@ impl Workspace {
             None => whole_session(&thread, live.mark.clone(), &kept, native),
         };
         // Made in the thread's project, as a new thread in a worktree is (`send`).
-        let folder = if thread.worktree.is_some() { self.project_dir(&thread) } else { thread.cwd.clone() };
+        // (A thread in no project's fork is in none: its folder isn't one.)
+        let folder = self.draft_folder(&thread);
         let mut fork = match self.store.create_thread(folder.as_deref(), thread.agent.clone(), thread.model.clone(), thread.effort, thread.hand_holding) {
             Ok(t) => t,
             Err(e) => {
@@ -5626,6 +5679,7 @@ impl Workspace {
             if let Ok(agents) = rx.recv().await {
                 let _ = this.update(cx, |this, cx| {
                     this.agents = agents;
+                    this.forget_keyed_providers();
                     this.detecting = false;
                     if this.agents.iter().any(|a| a.agent == AgentId::Codex && a.availability == Availability::Ready) {
                         this.fetch_codex_models(cx);
@@ -6019,8 +6073,9 @@ impl Workspace {
         let mut out = vec![];
         if let Some(bin) = trek_mcp_binary() {
             let bin = bin.display().to_string();
-            for family in trek_mcp_families(tools.computer_use, tools.simulator, crate::words::is_windows()) {
-                out.push(McpServer::stdio(format!("trek-{family}"), bin.clone(), vec![family.into()], vec![]));
+            let windows = crate::words::is_windows();
+            for family in trek_mcp_families(tools.computer_use, tools.simulator, windows) {
+                out.push(McpServer::stdio(format!("trek-{family}"), bin.clone(), vec![family.into()], trek_mcp_env(family, tools.computer_background, windows)));
             }
         }
         // Figma's own server in its desktop app: local and without a login, so every agent can
@@ -6843,6 +6898,16 @@ fn trek_mcp_families(computer_use: bool, simulator: bool, windows: bool) -> Vec<
     [(computer_use, "computer"), (simulator && !windows, "simulator")].into_iter().filter(|(on, _)| *on).map(|(_, family)| family).collect()
 }
 
+/// The environment Trek's own MCP server `family` starts with: the computer's works in the
+/// background where asked, on a Mac (Windows' works in front).
+fn trek_mcp_env(family: &str, background: bool, windows: bool) -> Vec<(String, String)> {
+    if family == "computer" && background && !windows {
+        vec![(trek_ipc::ENV_COMPUTER_MODE.to_string(), trek_ipc::COMPUTER_BACKGROUND.to_string())]
+    } else {
+        vec![]
+    }
+}
+
 /// Whether merging a thread's work settles it: only one sitting idle in the inbox. Merged while
 /// it was busy, pinned, kept or snoozed, it stays where the user put it. Shared by the merge
 /// watch (`settle_merged`) and the Git tool's "Merge into <base>".
@@ -6880,6 +6945,11 @@ mod tests {
     #[test]
     fn the_simulator_is_handed_to_no_agent_on_windows() {
         assert_eq!(trek_mcp_families(true, true, false), ["computer", "simulator"]);
+        let background = vec![("TREK_COMPUTER_MODE".to_string(), "background".to_string())];
+        assert_eq!(trek_mcp_env("computer", true, false), background, "a Mac's computer use works in the background");
+        assert_eq!(trek_mcp_env("computer", false, false), vec![], "unless asked to work in front");
+        assert_eq!(trek_mcp_env("computer", true, true), vec![], "Windows' works in front");
+        assert_eq!(trek_mcp_env("simulator", true, false), vec![]);
         assert_eq!(trek_mcp_families(false, true, false), ["simulator"]);
         assert_eq!(trek_mcp_families(true, true, true), ["computer"], "its switch may still be on in settings that came from a Mac");
         assert!(trek_mcp_families(false, true, true).is_empty());

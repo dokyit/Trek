@@ -35,20 +35,57 @@ pub fn spec(ext: &str) -> Option<(&'static str, &'static [&'static str], &'stati
 /// `file://` URI for a path — every byte outside the unreserved set is %XX'd
 /// (paths with spaces or non-ASCII still parse server-side).
 fn uri_of(path: &Path) -> Option<String> {
+    Some(uri_of_str(path.to_str()?))
+}
+
+/// `X:` or `X:` + a separator at the start of `p`: a Windows drive path.
+fn has_drive(p: &str) -> bool {
+    let b = p.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && b.get(2).is_none_or(|c| matches!(c, b'\\' | b'/'))
+}
+
+/// The URI of a path string. Windows shapes get the `file:///C:/dir/file` form (drive colon
+/// bare, separators flipped, upper-case drive letter so equal paths give equal URIs) and
+/// `\\host\share` the `file://host/share` one; a POSIX path is just encoded after `file://`.
+fn uri_of_str(path: &str) -> String {
     const UNRESERVED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~/";
+    let unc = path.strip_prefix(r"\\?\UNC\").or_else(|| path.strip_prefix(r"\\").filter(|r| !r.starts_with(r"?\")));
+    let (host, body) = if let Some(rest) = unc {
+        let (host, dir) = rest.split_once('\\').unwrap_or((rest, ""));
+        (host, format!("/{}", dir.replace('\\', "/")))
+    } else {
+        let p = path.strip_prefix(r"\\?\").unwrap_or(path);
+        if has_drive(p) {
+            let (drive, tail) = p.split_at(2);
+            ("", format!("/{}:{}", drive[..1].to_ascii_uppercase(), tail.replace('\\', "/")))
+        } else {
+            ("", p.to_string())
+        }
+    };
     let mut s = String::from("file://");
-    for b in path.to_str()?.bytes() {
-        if UNRESERVED.contains(&b) {
+    for (i, b) in host.bytes().chain(body.bytes()).enumerate() {
+        // The colon right after the drive letter stays bare (`/C:`).
+        let drive_colon = i == host.len() + 2 && b == b':' && has_drive(&body[1..]);
+        if UNRESERVED.contains(&b) || drive_colon {
             s.push(b as char);
         } else {
             s.push_str(&format!("%{b:02X}"));
         }
     }
-    Some(s)
+    s
 }
 
 /// The file path a `file://` URI names; anything else is None.
 fn path_of_uri(uri: &str) -> Option<PathBuf> {
+    let s = path_string_of_uri(uri)?;
+    #[cfg(windows)]
+    let s = s.replace('/', "\\");
+    Some(PathBuf::from(s))
+}
+
+/// [`path_of_uri`] as a string with `/` separators: `/dir/file` for POSIX, `C:/dir/file` for a
+/// drive path (however the server encoded the colon) and `\\host\share\file` for a network share.
+fn path_string_of_uri(uri: &str) -> Option<String> {
     let s = uri.strip_prefix("file://")?;
     let mut out = Vec::with_capacity(s.len());
     let mut b = s.bytes().peekable();
@@ -61,7 +98,37 @@ fn path_of_uri(uri: &str) -> Option<PathBuf> {
             out.push(c);
         }
     }
-    Some(PathBuf::from(String::from_utf8(out).ok()?))
+    let decoded = String::from_utf8(out).ok()?;
+    // `file://host/path`: a host that isn't this machine is a network share.
+    let (host, path) = match decoded.find('/') {
+        Some(0) => ("", decoded.as_str()),
+        Some(i) => decoded.split_at(i),
+        None => (decoded.as_str(), ""),
+    };
+    if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
+        return Some(format!(r"\\{host}{}", path.replace('/', "\\")));
+    }
+    Some(match path.strip_prefix('/') {
+        Some(drive) if has_drive(drive) => drive.to_string(),
+        _ => path.to_string(),
+    })
+}
+
+/// A server-sent URI in the form [`uri_of`] builds, so equal files compare equal as strings
+/// (servers differ on `%3A` vs `:`, drive-letter case, and which bytes they escape).
+fn canonical_uri(uri: &str) -> String {
+    path_string_of_uri(uri).map(|p| uri_of_str(&p)).unwrap_or_else(|| uri.to_string())
+}
+
+/// The `languageId` a document opens with: one server covers `ts` and `tsx` (or `js` and
+/// `jsx`), but it parses JSX only for the `*react` ids.
+fn language_id(server_lang: &'static str, uri: &str) -> &'static str {
+    let ext = uri.rsplit('.').next().unwrap_or_default();
+    match (server_lang, ext.to_ascii_lowercase().as_str()) {
+        ("typescript", "tsx") => "typescriptreact",
+        ("javascript", "jsx") => "javascriptreact",
+        _ => server_lang,
+    }
 }
 
 /// Byte offset → LSP position (line + UTF-16 code units within it).
@@ -238,7 +305,7 @@ impl Client {
             Kind::Request => self.send(&answer(msg)),
             Kind::Notification if msg["method"] == "textDocument/publishDiagnostics" => {
                 let p = &msg["params"];
-                let uri = p["uri"].as_str().unwrap_or_default().to_string();
+                let uri = canonical_uri(p["uri"].as_str().unwrap_or_default());
                 let diags = serde_json::from_value::<Vec<lsp_types::Diagnostic>>(p["diagnostics"].clone()).unwrap_or_default();
                 lock(&self.diag_senders).retain(|tx| tx.try_send((uri.clone(), diags.clone())).is_ok());
             }
@@ -325,7 +392,7 @@ impl Client {
         self.notify(
             "textDocument/didOpen",
             json!({ "textDocument": {
-                "uri": uri, "languageId": self.lang,
+                "uri": uri, "languageId": language_id(self.lang, uri),
                 "version": self.version.fetch_add(1, Ordering::SeqCst) as i64,
                 "text": text,
             }}),
@@ -807,6 +874,66 @@ mod tests {
         server.write_all(&frame(&json!({ "jsonrpc": "2.0", "id": id, "result": {} }))).unwrap();
         assert_eq!(next(&mut from_client)["method"], "initialized");
         assert_eq!(next(&mut from_client)["method"], "textDocument/didOpen");
+    }
+
+    #[test]
+    fn lsp_file_uris_cover_posix_and_windows_paths() {
+        // POSIX: encoded after `file://`, a backslash is just a file name character.
+        assert_eq!(uri_of_str("/Users/me/a b/\u{e9}.rs"), "file:///Users/me/a%20b/%C3%A9.rs");
+        assert_eq!(uri_of_str("/tmp/a\\b"), "file:///tmp/a%5Cb");
+        assert_eq!(path_string_of_uri("file:///Users/me/a%20b/%C3%A9.rs").unwrap(), "/Users/me/a b/\u{e9}.rs");
+        assert_eq!(path_string_of_uri("file://localhost/tmp/a.rs").unwrap(), "/tmp/a.rs");
+        assert_eq!(path_string_of_uri("https://x/y"), None);
+        // Windows drive paths: `file:///C:/...`, never the drive in the host part.
+        assert_eq!(uri_of_str(r"C:\Users\me\a b.rs"), "file:///C:/Users/me/a%20b.rs");
+        assert_eq!(uri_of_str("c:/Users/me/a.rs"), "file:///C:/Users/me/a.rs");
+        assert_eq!(uri_of_str(r"\\?\D:\src"), "file:///D:/src");
+        assert_eq!(uri_of_str(r"\\srv\share\a.rs"), "file://srv/share/a.rs");
+        assert_eq!(path_string_of_uri("file:///C:/Users/me/a%20b.rs").unwrap(), "C:/Users/me/a b.rs");
+        assert_eq!(path_string_of_uri("file:///c%3A/Users/me/a.rs").unwrap(), "c:/Users/me/a.rs");
+        assert_eq!(path_string_of_uri("file://srv/share/a.rs").unwrap(), r"\\srv\share\a.rs");
+        // Round trip, and servers' spellings of the same file meet in one form.
+        for uri in ["file:///C:/Users/me/a%20b.rs", "file://srv/share/a.rs", "file:///tmp/a%20b.rs"] {
+            assert_eq!(uri_of_str(&path_string_of_uri(uri).unwrap()), uri);
+        }
+        assert_eq!(canonical_uri("file:///c%3A/Users/me/a.rs"), "file:///C:/Users/me/a.rs");
+        assert_eq!(canonical_uri("file:///tmp/a+b@c.rs"), "file:///tmp/a%2Bb%40c.rs");
+        assert_eq!(canonical_uri("untitled:Untitled-1"), "untitled:Untitled-1");
+    }
+
+    #[test]
+    fn lsp_diagnostics_reach_watchers_under_the_editors_uri() {
+        let (client, mut server, mut from_client) = fake();
+        let id = next(&mut from_client)["id"].clone();
+        server.write_all(&frame(&json!({ "jsonrpc": "2.0", "id": id, "result": {} }))).unwrap();
+        let rx = client.watch_diagnostics();
+        let publish = json!({ "jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+            "params": { "uri": "file:///c%3A/Users/me/a.rs", "diagnostics": [] } });
+        server.write_all(&frame(&publish)).unwrap();
+        let (uri, _) = rx.recv_blocking().unwrap();
+        assert_eq!(uri, uri_of_str(r"C:\Users\me\a.rs"));
+    }
+
+    #[test]
+    fn lsp_jsx_documents_open_with_the_react_language_ids() {
+        assert_eq!(language_id("typescript", "file:///src/App.tsx"), "typescriptreact");
+        assert_eq!(language_id("javascript", "file:///src/App.JSX"), "javascriptreact");
+        assert_eq!(language_id("typescript", "file:///src/app.ts"), "typescript");
+        assert_eq!(language_id("javascript", "file:///src/app.mjs"), "javascript");
+        assert_eq!(language_id("rust", "file:///src/lib.rs"), "rust");
+
+        let (client, mut server, mut from_client) = {
+            let (ours, theirs) = socket_pair();
+            theirs.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let client = Client::with_io(ours.try_clone().unwrap(), ours, None, Path::new("/tmp"), "typescript");
+            (client, theirs.try_clone().unwrap(), BufReader::new(theirs))
+        };
+        let id = next(&mut from_client)["id"].clone();
+        server.write_all(&frame(&json!({ "jsonrpc": "2.0", "id": id, "result": {} }))).unwrap();
+        assert_eq!(next(&mut from_client)["method"], "initialized");
+        client.did_open("file:///src/App.tsx", "export const A = () => <div />;");
+        let open = next(&mut from_client);
+        assert_eq!(open["params"]["textDocument"]["languageId"], "typescriptreact");
     }
 
     #[test]

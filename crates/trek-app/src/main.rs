@@ -10,6 +10,7 @@ mod agent_updates;
 mod assets;
 mod attachments;
 mod background_strip;
+mod background_use;
 mod basecamp;
 mod brand;
 mod changes_card;

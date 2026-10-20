@@ -25,7 +25,7 @@ Start the isolated app before using a CLI route. Each page below describes the u
 ## Configuration and continuity
 
 - [Agents, models, and permissions](agents-models-and-permissions.md) — configure CLI agents, API/local models, effort, hand-holding, and approval policy.
-- [Skills, MCP, and computer use](skills-mcp-and-computer-use.md) — discover skills and configure agent tools and MCP servers.
+- [Skills, MCP, and computer use](skills-mcp-and-computer-use.md) — discover skills and configure agent tools and MCP servers; background computer use and its picture-in-picture window.
 - [Appearance, notifications, and snapshots](appearance-notifications-and-snapshots.md) — theme Trek, choose alerts, and attach app screenshots.
 - [Phone companion](phone-companion.md) — pair an iPhone, follow threads, and answer agents remotely.
 - [Imports and updates](imports-and-updates.md) — browse/resume supported local history and install signed Trek releases.

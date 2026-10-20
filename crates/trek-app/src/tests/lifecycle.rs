@@ -715,3 +715,87 @@ fn a_stop_the_agent_heeds_leaves_its_session_alone() {
         trek.wait_done(cx, &id, RunState::Idle).await;
     });
 }
+
+/// A thread from an earlier run, its history stored and none of it read this run.
+fn stored_thread(trek: &Trek, cx: &mut TestAppContext, agent: trek_core::AgentId) -> String {
+    trek.update(cx, |ws, cx| {
+        let t = ws.store.create_thread(Some(&trek.project), agent, None, Effort::Medium, HandHolding::Auto).expect("thread");
+        let user = Item::User { text: "first".into(), images: vec![], at: None, resume: None, aside: false };
+        store_items(&ws.store, &t.id, vec![user, Item::Assistant { text: "First answer.".into() }, Item::TurnEnd { at: 1, took_secs: 1 }]);
+        ws.reload(cx);
+        t.id
+    })
+}
+
+fn user_texts(items: impl IntoIterator<Item = Item>) -> Vec<String> {
+    items.into_iter().filter_map(|i| if let Item::User { text, .. } = i { Some(text) } else { None }).collect()
+}
+
+#[test]
+fn a_message_sent_to_a_thread_not_opened_yet_is_kept_once() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = stored_thread(&trek, cx, mock());
+        // Sent to while it's off screen (from the phone, or by another agent).
+        trek.update(cx, |ws, cx| ws.send_to(&id, "second".into(), vec![], cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // Opened: each message once, after the history, on screen and in the store.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
+        trek.wait(cx, "the history", |ws| ws.live.get(&id).is_some_and(|l| l.loaded && !l.loading)).await;
+        assert_eq!(user_texts(trek.items(cx, &id)), ["first", "second"]);
+        let stored = trek.read(cx, |ws, _| ws.store.items_with_ids(&id).unwrap());
+        assert_eq!(user_texts(stored.into_iter().map(|(_, i)| i)), ["first", "second"]);
+    });
+}
+
+#[test]
+fn no_session_warms_up_before_the_history_it_recaps_is_in() {
+    run(async |cx| {
+        let trek = open(cx);
+        // An agent with a process to warm up (none by this name exists: it couldn't start), on a
+        // thread whose session starts from a recap of the transcript.
+        let id = stored_thread(&trek, cx, trek_core::AgentId::Acp("trek-test-absent".into()));
+        // Typing starts as it opens, while its history is still being read.
+        let started = trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Thread(id.clone()), cx);
+            ws.warm_up(cx);
+            ws.live[&id].commands.is_some()
+        });
+        assert!(!started, "a session would start from an empty recap");
+        assert!(trek.read(cx, |ws, _| ws.live[&id].loaded));
+    });
+}
+
+#[test]
+fn switching_agent_mid_turn_drops_the_message_held_for_its_checkpoint() {
+    use trek_agents::{AgentEvent, Command};
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TextDelta("Starting".into())], cx));
+        // Its message still waits for the checkpoint of the files.
+        trek.update(cx, |ws, _| ws.live.get_mut(&id).unwrap().held.push(Command::Prompt { text: "A".into(), images: vec![] }));
+        let scope = crate::workspace::Scope::Thread(id.clone());
+        trek.update(cx, |ws, cx| {
+            let mut p = ws.prefs_in(&scope);
+            p.agent = trek_core::AgentId::Codex;
+            p.model = None;
+            ws.set_prefs_in(&scope, p, cx)
+        });
+        assert!(matches!(trek.items(cx, &id).last(), Some(Item::Notice { text }) if text == "Interrupted"));
+        assert!(trek.read(cx, |ws, _| !ws.live[&id].held.iter().any(|c| matches!(c, Command::Prompt { .. }))), "the next session isn't sent it");
+    });
+}
+
+#[test]
+fn a_thread_deleted_while_its_history_is_read_leaves_nothing_behind() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = stored_thread(&trek, cx, mock());
+        trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Thread(id.clone()), cx);
+            ws.delete_thread(&id, cx);
+        });
+        assert!(trek.read(cx, |ws, _| ws.thread(&id).is_none() && !ws.live.contains_key(&id)));
+    });
+}

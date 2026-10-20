@@ -154,29 +154,16 @@ enum LivePage {
 
     /// The page as it's loaded: `html` with Trek's head first (charset, the policy, the viewport
     /// and the theme's stylesheet), so the page's own styles come after and win. A fragment (no
-    /// `<html>` or `<head>`) is made a whole document with it as the body.
+    /// `<html>` or `<head>`) becomes the body.
     static func document(_ html: String, theme: LivePageTheme) -> String {
         let ours = "<meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"\(csp)\">"
             + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1\">"
             + "<style id=\"\(themeStyleID)\">\(theme.css.replacingOccurrences(of: "</", with: "<\\/"))</style>"
-        if let end = tagEnd("head", in: html) {
-            return String(html[..<end]) + ours + String(html[end...])
-        } else if let end = tagEnd("html", in: html) {
-            return String(html[..<end]) + "<head>\(ours)</head>" + String(html[end...])
-        }
-        return "<!doctype html><html><head>\(ours)</head><body>\(html)</body></html>"
-    }
-
-    /// Just past the first `<tag …>` in `html` (not `<header>` for `head`).
-    private static func tagEnd(_ tag: String, in html: String) -> String.Index? {
-        var from = html.startIndex
-        while let open = html.range(of: "<\(tag)", options: .caseInsensitive, range: from..<html.endIndex) {
-            if open.upperBound < html.endIndex, [">", " ", "\t", "\n", "\r"].contains(html[open.upperBound]) {
-                return html[open.upperBound...].firstIndex(of: ">").map { html.index(after: $0) }
-            }
-            from = open.upperBound
-        }
-        return nil
+        // Ours is the very first thing the parser sees, so the policy is in force before any of
+        // the page's markup, however the page begins (a script ahead of its `<head>`, a comment
+        // that names one). The page's own doctype, `<html>` and `<head>` after it merge into
+        // this head, and a fragment falls into the body the parser makes.
+        return "<!doctype html><html><head>\(ours)</head>\(html)"
     }
 
     /// A script that swaps the page's theme stylesheet for `css` in place: a switch between Night

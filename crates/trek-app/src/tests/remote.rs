@@ -257,10 +257,45 @@ fn a_phone_pins_settles_renames_and_sends_photos() {
         let images = sent.expect("the message");
         assert_eq!(images.len(), 1);
         assert!(std::path::Path::new(&images[0]).exists() && images[0].ends_with(".png"), "{images:?}");
+        // Two photos sent in the same second are kept apart.
+        for text in ["photo one", "photo two"] {
+            let image = tr::ImageUpload { mime: "image/png".into(), data: png.into() };
+            ask(&trek, cx, |reply| tr::HostRequest::Send { req: tr::SendRequest { thread_id: id.clone(), text: text.into(), mode: None, images: vec![image] }, reply }).unwrap();
+        }
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let kept: Vec<String> = trek
+            .items(cx, &id)
+            .into_iter()
+            .filter_map(|i| match i {
+                trek_core::store::Item::User { text, images, .. } if text.starts_with("photo ") => images.into_iter().next(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kept.len(), 2, "{kept:?}");
+        assert_ne!(kept[0], kept[1], "one photo replaced the other");
         // Not a photo: refused.
         let junk = tr::ImageUpload { mime: "image/png".into(), data: "aGVsbG8=".into() };
         let refused = ask(&trek, cx, |reply| tr::HostRequest::Send { req: tr::SendRequest { thread_id: id.clone(), text: "x".into(), mode: None, images: vec![junk] }, reply });
         assert_eq!(refused.unwrap_err().code, tr::ErrorCode::BadRequest);
+    });
+}
+
+#[test]
+fn a_photo_that_cannot_be_kept_leaves_the_macs_follow_up_setting_alone() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let mac = trek.read(cx, |ws, _| ws.settings.general.follow_up);
+        let (other, mode) = match mac {
+            trek_core::settings::FollowUp::Queue => (trek_core::settings::FollowUp::Steer, tr::SendMode::Steer),
+            trek_core::settings::FollowUp::Steer => (trek_core::settings::FollowUp::Queue, tr::SendMode::Queue),
+        };
+        assert_ne!(mac, other);
+        let junk = tr::ImageUpload { mime: "image/png".into(), data: "aGVsbG8=".into() };
+        let refused = ask(&trek, cx, |reply| tr::HostRequest::Send { req: tr::SendRequest { thread_id: id.clone(), text: "x".into(), mode: Some(mode), images: vec![junk] }, reply });
+        assert_eq!(refused.unwrap_err().code, tr::ErrorCode::BadRequest);
+        assert_eq!(trek.read(cx, |ws, _| ws.settings.general.follow_up), mac);
     });
 }
 

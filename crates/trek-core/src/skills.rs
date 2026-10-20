@@ -136,9 +136,20 @@ pub fn read_front_matter(skill_md: &Path) -> Option<(String, String)> {
             let front = &rest[..pos];
             let after_dash = rest[pos..].trim_start_matches(|c| c == '\r' || c == '\n').strip_prefix("---").unwrap_or_default();
             body = after_dash;
-            for line in front.lines() {
+            let mut lines = front.lines().peekable();
+            while let Some(line) = lines.next() {
                 if let Some((k, v)) = line.split_once(':') {
-                    let v = v.trim().trim_matches('"').trim_matches('\'').to_string();
+                    let mut v = v.trim().trim_matches('"').trim_matches('\'').to_string();
+                    // A folded (`>-`) or literal (`|`) block: the text is on the indented lines below.
+                    let mut block = v.chars();
+                    if matches!(block.next(), Some('>' | '|')) && block.all(|c| matches!(c, '+' | '-' | '0'..='9')) {
+                        let folded = v.starts_with('>');
+                        let mut text = vec![];
+                        while let Some(next) = lines.next_if(|l| l.trim().is_empty() || l.starts_with([' ', '\t'])) {
+                            text.push(next.trim());
+                        }
+                        v = text.join(if folded { " " } else { "\n" }).trim().to_string();
+                    }
                     match k.trim() {
                         "name" if !v.is_empty() => name = Some(v),
                         "description" if !v.is_empty() => desc = Some(v),
@@ -397,6 +408,11 @@ mod tests {
         // Front matter with name but no description does not use 'name:' as fallback description.
         std::fs::write(s.join("SKILL.md"), "---\nname: no-desc\n---\n# Heading\n\nBody description line.").unwrap();
         assert_eq!(read_front_matter(&s.join("SKILL.md")), Some(("no-desc".into(), "Body description line.".into())));
+        // A folded or literal block holds its text on the indented lines below.
+        std::fs::write(s.join("SKILL.md"), "---\nname: folded\ndescription: >-\n  Coordinate workers:\n  threaded messages.\n\nother: x\n---\nbody").unwrap();
+        assert_eq!(read_front_matter(&s.join("SKILL.md")), Some(("folded".into(), "Coordinate workers: threaded messages.".into())));
+        std::fs::write(s.join("SKILL.md"), "---\ndescription: |\n  line one\n  line two\nname: literal\n---\nbody").unwrap();
+        assert_eq!(read_front_matter(&s.join("SKILL.md")), Some(("literal".into(), "line one\nline two".into())));
         // Synced skill source classification
         let home = paths::agents_home();
         assert_eq!(source_for(&home.join(".claude/skills/synced/bucket/my-skill"), None), SkillSource::Synced);

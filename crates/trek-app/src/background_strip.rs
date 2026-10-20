@@ -156,6 +156,7 @@ impl BackgroundStrip {
                 .collect(),
             (None, _) => vec![],
         };
+        let had_output = self.output.is_some();
         if shown.as_ref().map(|s| &s.thread) != self.shown.as_ref().map(|s| &s.thread) {
             self.expanded = false;
             self.output = None;
@@ -164,6 +165,9 @@ impl BackgroundStrip {
             && shown.as_ref().is_none_or(|s| !s.rows.iter().any(|r| r.id == *open))
         {
             self.output = None;
+        }
+        // The popover goes with its output, and so does the hold it took on the native views.
+        if had_output && self.output.is_none() {
             self.overlay(false, cx);
         }
         if self.review && self.output.is_none() {

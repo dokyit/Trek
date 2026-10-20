@@ -304,8 +304,9 @@ fn program(words: &[String]) -> &[String] {
             i += 1;
         } else if w == "timeout" {
             i += 1;
-            while words.get(i).is_some_and(|w| w.starts_with('-')) {
-                i += 1;
+            while let Some(w) = words.get(i).filter(|w| w.starts_with('-')) {
+                // `-s SIGNAL` and `-k DURATION` take the next word as their value.
+                i += if matches!(w.as_str(), "-s" | "-k" | "--signal" | "--kill-after") { 2 } else { 1 };
             }
             i += words.get(i).is_some_and(|w| w.starts_with(|c: char| c.is_ascii_digit())) as usize;
         } else {
@@ -579,6 +580,10 @@ mod tests {
         assert!(runs("scripts/app", "/repo/scripts/app status"));
         assert!(runs("scripts/app", "APP_ENV=test ./scripts/app check 2>&1 | tail -5"));
         assert!(runs("scripts/app", "timeout 60 sh scripts/app check"));
+        // `timeout`'s -s and -k take a value of their own.
+        assert!(runs("scripts/app", "timeout -s KILL 60 sh scripts/app check"));
+        assert!(runs("scripts/app", "timeout -k 5 60 sh scripts/app check"));
+        assert!(runs("scripts/app", "timeout --signal=KILL --kill-after 5 60 sh scripts/app check"));
         assert!(runs("scripts/app", "bash -lc 'cd /repo && ./scripts/app check'"));
         assert!(runs("scripts/app", "bash -x scripts/app check"));
         assert!(runs("scripts/app", "bash -o pipefail -c './scripts/app check | tail'"));

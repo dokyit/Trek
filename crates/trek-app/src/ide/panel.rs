@@ -54,6 +54,15 @@ impl PanelTab {
     }
 }
 
+/// The lines of `text` around a problem spanning `line..=end` (0-based), PROBLEM_CONTEXT on
+/// each side: their first and last (0-based) and the text.
+fn problem_lines(text: &str, line: u32, end: u32) -> (u32, u32, String) {
+    let lines: Vec<&str> = text.lines().collect();
+    let (a, b) = (line.saturating_sub(PROBLEM_CONTEXT), (end + PROBLEM_CONTEXT).min(lines.len().saturating_sub(1) as u32));
+    let snippet = lines.get(a as usize..=b as usize).map(|l| l.join("\n")).unwrap_or_default();
+    (a, b, snippet)
+}
+
 impl IdeWorkbench {
     /// Show the panel on `tab` (a terminal is started the first time Terminal shows).
     pub fn show_panel(&mut self, tab: PanelTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -115,10 +124,13 @@ impl IdeWorkbench {
     /// as a request to fix it (a new chat when it's on none).
     pub fn fix_problem(&mut self, path: std::path::PathBuf, d: lsp_types::Diagnostic, window: &mut Window, cx: &mut Context<Self>) {
         let line = d.range.start.line;
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
-        let lines: Vec<&str> = text.lines().collect();
-        let (a, b) = (line.saturating_sub(PROBLEM_CONTEXT), (d.range.end.line + PROBLEM_CONTEXT).min(lines.len().saturating_sub(1) as u32));
-        let snippet = lines.get(a as usize..=b as usize).map(|l| l.join("\n")).unwrap_or_default();
+        // The server judged the buffer, which may hold edits the file on disk doesn't.
+        let open = self.editors().into_iter().find(|e| e.read(cx).path == path);
+        let text = match open {
+            Some(e) => e.read(cx).text_state().read(cx).value().to_string(),
+            None => std::fs::read_to_string(&path).unwrap_or_default(),
+        };
+        let (a, b, snippet) = problem_lines(&text, line, d.range.end.line);
         let severity = match d.severity {
             Some(DiagnosticSeverity::ERROR) => "error",
             Some(DiagnosticSeverity::WARNING) => "warning",
@@ -234,6 +246,7 @@ impl IdeWorkbench {
         let fill = StyleRefinement::default().size_full();
         if self.terminals.len() > 1 {
             // More than one: their names down the right, as VS Code lists them.
+            let shell = crate::panels::terminal::shell_name(&self.workspace.read(cx).settings.terminal.shell);
             return h_flex()
                 .size_full()
                 .child(div().flex_1().min_w_0().h_full().children(self.terminals.get(self.terminal).map(|t| t.clone().cached(fill.clone()))))
@@ -250,7 +263,7 @@ impl IdeWorkbench {
                             .when(on, |el| el.bg(theme.list_active))
                             .when(!on, |el| el.text_color(theme.muted_foreground).hover(|s| s.bg(theme.list_hover)))
                             .child(Icon::new(IconName::SquareTerminal).xsmall())
-                            .child(format!("zsh {}", ix + 1))
+                            .child(format!("{shell} {}", ix + 1))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.terminal = ix;
                                 cx.notify();
@@ -483,5 +496,23 @@ impl IdeWorkbench {
                     })
             }))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::problem_lines;
+
+    #[test]
+    fn a_problems_lines_come_from_the_text_it_was_reported_on() {
+        let buffer: String = (1..=60).map(|n| format!("line {n}\n")).collect();
+        // An error at line 45 of an unsaved, longer buffer: its own lines 42-48.
+        let (a, b, snippet) = problem_lines(&buffer, 44, 44);
+        assert_eq!((a, b), (41, 47));
+        assert_eq!(snippet.lines().next(), Some("line 42"));
+        assert_eq!(snippet.lines().last(), Some("line 48"));
+        // Short text clamps at its end; a line past it quotes nothing.
+        assert_eq!(problem_lines("a\nb\n", 1, 1), (0, 1, "a\nb".to_string()));
+        assert_eq!(problem_lines("a\n", 9, 9).2, "");
     }
 }

@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use futures::StreamExt;
 use serde_json::{Value, json};
-use trek_core::catalog::{ModelInfo, Wire, direct_provider};
+use trek_core::catalog::{DirectProvider, ModelInfo, Wire, direct_provider};
 use trek_core::settings::secrets;
 use trek_core::{AgentId, Effort, HandHolding, TokenUsage, UsageCost};
 
@@ -171,6 +171,23 @@ pub async fn run(
     if !provider.local && key.is_none() {
         bail!("No API key for {}. Add one in Settings → API Keys.", provider.name);
     }
+    let url = match provider.wire {
+        Wire::Anthropic => ANTHROPIC_MESSAGES_URL,
+        _ => provider.base_url,
+    };
+    session(config, provider, url, key, commands, events).await
+}
+
+/// A session with `provider`, its requests sent to `url` (the messages endpoint for Anthropic,
+/// the base URL for the OpenAI wire).
+async fn session(
+    config: SessionConfig,
+    provider: &DirectProvider,
+    url: &str,
+    key: Option<String>,
+    commands: async_channel::Receiver<Command>,
+    events: async_channel::Sender<AgentEvent>,
+) -> Result<()> {
     let mut model = config.model.clone().context("Pick a model first")?;
     let mut effort = config.effort;
     let mut hand_holding = config.hand_holding;
@@ -203,6 +220,9 @@ pub async fn run(
                     for e in skipped {
                         events.send(AgentEvent::Notice(format!("Image left out: {e}"))).await?;
                     }
+                    // Where this message starts in `history`: a failed first request takes it back
+                    // out, so the next message doesn't carry one that was never answered.
+                    let turn_start = history.len();
                     history.push(message);
 
                     // Multi-turn agent loop for tool calls
@@ -212,14 +232,14 @@ pub async fn run(
                         turn_count += 1;
                         let result = match provider.wire {
                             Wire::Anthropic => {
-                                anthropic_turn(&client, ANTHROPIC_MESSAGES_URL, key.as_deref().unwrap_or_default(), &model, effort, &system, &history, &events, &commands, &mut kept, &mut shutdown).await
+                                anthropic_turn(&client, url, key.as_deref().unwrap_or_default(), &model, effort, &system, &history, &events, &commands, &mut kept, &mut shutdown).await
                             }
                             _ => {
                                 let usage = REPORTS_USAGE.contains(&provider.id);
                                 openai_turn(
                                     &client,
                                     &config.agent,
-                                    provider.base_url,
+                                    url,
                                     key.as_deref(),
                                     provider.local,
                                     usage,
@@ -237,30 +257,35 @@ pub async fn run(
                         };
                         match result {
                             Ok(resp) => {
-                                if let Some(content) = resp.content {
-                                    history.push(content);
-                                    break;
+                                let anthropic = resp.content.is_some();
+                                match resp.content {
+                                    Some(content) => history.push(content),
+                                    None if resp.tool_calls.is_empty() => history.push(json!({ "role": "assistant", "content": resp.text })),
+                                    None => {
+                                        let tool_calls_json: Vec<Value> = resp.tool_calls.iter().map(|c| json!({
+                                            "id": c.id,
+                                            "type": "function",
+                                            "function": {
+                                                "name": c.name,
+                                                "arguments": c.arguments
+                                            }
+                                        })).collect();
+                                        history.push(json!({
+                                            "role": "assistant",
+                                            "content": if resp.text.is_empty() { Value::Null } else { Value::String(resp.text.clone()) },
+                                            "tool_calls": tool_calls_json
+                                        }));
+                                    }
                                 }
                                 if resp.tool_calls.is_empty() {
-                                    history.push(json!({ "role": "assistant", "content": resp.text }));
                                     break;
                                 }
-                                let tool_calls_json: Vec<Value> = resp.tool_calls.iter().map(|c| json!({
-                                    "id": c.id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": c.name,
-                                        "arguments": c.arguments
-                                    }
-                                })).collect();
-                                history.push(json!({
-                                    "role": "assistant",
-                                    "content": if resp.text.is_empty() { Value::Null } else { Value::String(resp.text.clone()) },
-                                    "tool_calls": tool_calls_json
-                                }));
 
-                                let mut tool_interrupted = false;
-                                for call in &resp.tool_calls {
+                                // Every call gets a result, even one a Stop cut short or never
+                                // started: providers reject a history with a call left unanswered.
+                                let mut results = Vec::new();
+                                let mut stopped = None;
+                                for (i, call) in resp.tool_calls.iter().enumerate() {
                                     let (title, detail) = tool_display(&call.name, &call.arguments);
                                     events.send(AgentEvent::ToolStarted {
                                         id: call.id.clone(),
@@ -268,7 +293,7 @@ pub async fn run(
                                         detail: detail.clone(),
                                     }).await?;
 
-                                    let (output, ok, lines) = execute_tool(
+                                    let ran = execute_tool(
                                         &call.name,
                                         &call.arguments,
                                         &config.cwd,
@@ -279,7 +304,13 @@ pub async fn run(
                                         &commands,
                                         &mut kept,
                                         &mut shutdown,
-                                    ).await?;
+                                    ).await;
+                                    let (output, ok, lines, stop) = match ran {
+                                        Ok((output, ok, lines)) => (output, ok, lines, None),
+                                        // A Stop (or shutdown) while the tool ran or waited for
+                                        // permission: it ends this turn, not the session.
+                                        Err(e) => (format!("{e:#}"), false, None, Some(e)),
+                                    };
 
                                     if let Some((added, removed)) = lines {
                                         events.send(AgentEvent::ToolLines {
@@ -294,24 +325,31 @@ pub async fn run(
                                         output: output.clone(),
                                         ok,
                                     }).await?;
+                                    results.push((call.id.clone(), output, ok));
 
-                                    history.push(json!({
-                                        "role": "tool",
-                                        "tool_call_id": call.id,
-                                        "content": output
-                                    }));
-
-                                    if shutdown {
-                                        tool_interrupted = true;
+                                    if let Some(e) = stop {
+                                        for rest in &resp.tool_calls[i + 1..] {
+                                            results.push((rest.id.clone(), "Not run: the turn was stopped".to_string(), false));
+                                        }
+                                        stopped = Some(e);
                                         break;
                                     }
                                 }
-                                if tool_interrupted || shutdown {
+                                push_tool_results(&mut history, anthropic, results);
+                                if let Some(e) = stopped {
+                                    turn_error.get_or_insert_with(|| format!("{e:#}"));
+                                    break;
+                                }
+                                if shutdown {
                                     break;
                                 }
                             }
                             Err(e) => {
-                                history.pop();
+                                // Only the message itself: once tools have run, the history ends
+                                // with their results, a whole exchange to keep.
+                                if history.len() == turn_start + 1 {
+                                    history.pop();
+                                }
                                 if let Some(crate::limits::LimitError(limit)) = e.downcast_ref() {
                                     events.send(limit.clone().event()).await?;
                                 }
@@ -370,12 +408,31 @@ pub async fn run(
     Ok(())
 }
 
+/// The results of one answer's tool calls, `(id, output, ok)`, in the shape the wire wants:
+/// one user message of `tool_result` blocks for Anthropic, a `tool` message each otherwise.
+fn push_tool_results(history: &mut Vec<Value>, anthropic: bool, results: Vec<(String, String, bool)>) {
+    if anthropic {
+        let blocks: Vec<Value> = results
+            .into_iter()
+            .map(|(id, output, ok)| json!({ "type": "tool_result", "tool_use_id": id, "content": output, "is_error": !ok }))
+            .collect();
+        history.push(json!({ "role": "user", "content": blocks }));
+    } else {
+        for (id, output, _) in results {
+            history.push(json!({ "role": "tool", "tool_call_id": id, "content": output }));
+        }
+    }
+}
+
+/// Whether Auto mode may run `cmd` without asking: a read-only command from a short list, run
+/// as it is. The shell runs whatever else the line holds, so anything that chains, substitutes or
+/// redirects is out, and so are the flags that make a listed tool write, delete or run commands.
 fn is_safe_command(cmd: &str) -> bool {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
         return true;
     }
-    if trimmed.contains(';') || trimmed.contains('&') || trimmed.contains('|') || trimmed.contains('>') {
+    if trimmed.contains([';', '&', '|', '>', '<', '`', '\n', '\r']) || trimmed.contains("$(") {
         return false;
     }
     let safe_prefixes = [
@@ -384,7 +441,28 @@ fn is_safe_command(cmd: &str) -> bool {
         "ls", "cat", "head", "tail", "grep", "rg", "find", "fd",
         "pwd", "which", "echo", "wc", "stat", "file"
     ];
-    safe_prefixes.iter().any(|p| trimmed == *p || trimmed.starts_with(&format!("{p} ")))
+    let Some(prefix) = safe_prefixes.iter().find(|p| trimmed == **p || trimmed.starts_with(&format!("{p} "))) else {
+        return false;
+    };
+    // The arguments as the shell will see them, near enough: quotes and backslashes go, so
+    // `'-delete'` or `-de''lete` reads as `-delete`.
+    let args: Vec<String> = trimmed[prefix.len()..].split_whitespace().map(|a| a.replace(['\'', '"', '\\'], "")).collect();
+    // A cluster of short flags (`-df`) holding any of `letters`.
+    let short = |a: &str, letters: &str| a.starts_with('-') && !a.starts_with("--") && a.chars().skip(1).any(|c| letters.contains(c));
+    !args.iter().any(|a| {
+        let a = a.as_str();
+        match *prefix {
+            "find" => matches!(a, "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-fprint" | "-fprint0" | "-fprintf" | "-fls"),
+            "fd" => short(a, "xX") || a.starts_with("--exec"),
+            // Listing only: a name creates a branch, and these flags delete, move, copy or
+            // retarget one.
+            "git branch" => !a.starts_with('-') || short(a, "dDmMcCfu") || ["--delete", "--move", "--copy", "--force", "--set-upstream", "--unset-upstream", "--edit-description", "--track", "--no-track"].iter().any(|f| a.starts_with(f)),
+            "git diff" | "git log" | "git show" => a.starts_with("--output"),
+            "rg" => a.starts_with("--pre"),
+            "cargo check" | "cargo test" | "cargo clippy" => a == "--fix",
+            _ => false,
+        }
+    })
 }
 
 fn tool_display(name: &str, args_json: &str) -> (&'static str, String) {
@@ -579,67 +657,80 @@ async fn run_bash_command(
     shutdown: &mut bool,
 ) -> Result<(String, bool)> {
     #[cfg(unix)]
-    let mut child = match trek_core::procs::async_command("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn() {
-            Ok(c) => c,
-            Err(e) => return Ok((format!("Failed to execute command: {e}"), false)),
-        };
-
+    let mut shell = trek_core::procs::async_command("sh");
+    #[cfg(unix)]
+    shell.arg("-c");
     #[cfg(windows)]
-    let mut child = match trek_core::procs::async_command("cmd.exe")
-        .arg("/c")
-        .arg(command)
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn() {
-            Ok(c) => c,
-            Err(e) => return Ok((format!("Failed to execute command: {e}"), false)),
-        };
+    let mut shell = trek_core::procs::async_command("cmd.exe");
+    #[cfg(windows)]
+    shell.arg("/c");
+    shell.arg(command).current_dir(cwd).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    // In a group of its own, so a Stop ends what the command started too, not just the shell.
+    // A command that finishes may leave something running on purpose (a server it started in
+    // the background), so nothing is ended then.
+    #[cfg(unix)]
+    shell.process_group(0);
+    let mut child = match shell.spawn() {
+        Ok(c) => c,
+        Err(e) => return Ok((format!("Failed to execute command: {e}"), false)),
+    };
 
     let mut stdout = child.stdout.take().expect("stdout");
     let mut stderr = child.stderr.take().expect("stderr");
     let mut stdout_buf = Vec::new();
     let mut stderr_buf = Vec::new();
 
-    let read_out = tokio::io::AsyncReadExt::read_to_end(&mut stdout, &mut stdout_buf);
-    let read_err = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut stderr_buf);
-
-    tokio::select! {
-        res = async {
+    let finished = {
+        let read_out = tokio::io::AsyncReadExt::read_to_end(&mut stdout, &mut stdout_buf);
+        let read_err = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut stderr_buf);
+        let run = async {
             tokio::try_join!(read_out, read_err)?;
             child.wait().await
-        } => {
-            let status = res?;
-            let mut out = String::from_utf8_lossy(&stdout_buf).to_string();
-            let err = String::from_utf8_lossy(&stderr_buf);
-            if !err.is_empty() {
-                if !out.is_empty() {
-                    out.push('\n');
+        };
+        tokio::pin!(run);
+        // A message, a model or an access level sent meanwhile waits for the command to end;
+        // only a Stop (or shutdown) cuts it short.
+        loop {
+            tokio::select! {
+                res = &mut run => break Ok(res),
+                cmd = commands.recv() => {
+                    if let Err(e) = keep_command(cmd, kept, shutdown) {
+                        break Err(e);
+                    }
                 }
-                out.push_str(&err);
             }
-            const MAX_OUT: usize = 50_000;
-            if out.len() > MAX_OUT {
-                out.truncate(MAX_OUT);
-                out.push_str("\n... [output truncated]");
-            }
-            if out.trim().is_empty() {
-                out = "(Command finished with no output)".to_string();
-            }
-            Ok((out, status.success()))
         }
-        cmd = commands.recv() => {
+    };
+    let status = match finished {
+        Ok(res) => res?,
+        Err(e) => {
+            #[cfg(unix)]
+            if let Some(pid) = child.id() {
+                // SAFETY: a negative pid asks kill(2) to signal that process group, the child's
+                // own (it isn't reaped yet, so the id is still its).
+                unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+            }
             let _ = child.kill().await;
-            keep_command(cmd, kept, shutdown)?;
-            bail!("Interrupted")
+            return Err(e);
         }
+    };
+    let mut out = String::from_utf8_lossy(&stdout_buf).to_string();
+    let err = String::from_utf8_lossy(&stderr_buf);
+    if !err.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&err);
     }
+    const MAX_OUT: usize = 50_000;
+    if out.len() > MAX_OUT {
+        out.truncate(MAX_OUT);
+        out.push_str("\n... [output truncated]");
+    }
+    if out.trim().is_empty() {
+        out = "(Command finished with no output)".to_string();
+    }
+    Ok((out, status.success()))
 }
 
 async fn run_read_file(
@@ -915,6 +1006,17 @@ async fn send_request(
     }
 }
 
+/// `direct_tools` in the shape the Messages API takes them.
+fn anthropic_tools() -> Vec<Value> {
+    direct_tools()
+        .into_iter()
+        .map(|t| {
+            let f = &t["function"];
+            json!({ "name": f["name"], "description": f["description"], "input_schema": f["parameters"] })
+        })
+        .collect()
+}
+
 fn anthropic_body(model: &str, effort: Effort, system: &str, history: &[Value]) -> Value {
     let mut body = json!({
         "model": model,
@@ -922,6 +1024,7 @@ fn anthropic_body(model: &str, effort: Effort, system: &str, history: &[Value]) 
         "stream": true,
         "system": system,
         "messages": history,
+        "tools": anthropic_tools(),
     });
     if model.starts_with("claude-haiku-4") {
         if effort >= Effort::Low {
@@ -977,6 +1080,8 @@ async fn anthropic_turn(
     let mut stream = resp.bytes_stream();
     let mut buf = Vec::new();
     let mut blocks: Vec<Value> = Vec::new();
+    // A tool call's input, streamed as pieces of JSON, by block index.
+    let mut inputs: HashMap<usize, String> = HashMap::new();
     let mut text = String::new();
     let mut stop_reason = None;
     let mut terminal = false;
@@ -1008,6 +1113,7 @@ async fn anthropic_turn(
                                     events.send(AgentEvent::ReasoningDelta(t.into())).await?;
                                 }
                                 Some("signature_delta") => append(&mut blocks, i, "signature", d["signature"].as_str().unwrap_or_default()),
+                                Some("input_json_delta") => inputs.entry(i).or_default().push_str(d["partial_json"].as_str().unwrap_or_default()),
                                 _ => {}
                             }
                         }
@@ -1032,10 +1138,25 @@ async fn anthropic_turn(
         bail!("The model declined this request.");
     }
     events.send(AgentEvent::TextDone(text.clone())).await?;
+    let mut tool_calls = Vec::new();
+    for (i, block) in blocks.iter_mut().enumerate() {
+        if block["type"] != "tool_use" {
+            continue;
+        }
+        // Sent back as an object, as the API gave it; the tool takes it as JSON text.
+        if let Some(input) = inputs.get(&i).filter(|s| !s.trim().is_empty()) {
+            block["input"] = serde_json::from_str(input).unwrap_or_else(|_| json!({}));
+        }
+        tool_calls.push(AccumulatedToolCall {
+            id: block["id"].as_str().unwrap_or_default().to_string(),
+            name: block["name"].as_str().unwrap_or_default().to_string(),
+            arguments: block["input"].to_string(),
+        });
+    }
     Ok(TurnResponse {
         text,
         content: Some(json!({ "role": "assistant", "content": blocks })),
-        tool_calls: vec![],
+        tool_calls,
     })
 }
 
@@ -1529,5 +1650,368 @@ mod tests {
         assert!(!is_safe_command("rm -rf /"));
         assert!(!is_safe_command("git status; rm -rf ."));
         assert!(!is_safe_command("git status && rm -rf ."));
+        assert!(is_safe_command("find . -name '*.rs' -type f"));
+        assert!(is_safe_command("git branch -vv"));
+        assert!(is_safe_command("git branch --show-current"));
+        assert!(is_safe_command("echo $HOME"));
+        assert!(is_safe_command("rg -n 'fn main' src"));
+        // Commands the shell runs from inside a listed one.
+        for unsafe_command in [
+            "echo $(rm -rf ~)",
+            "cat `curl -s https://example.com/x`",
+            "ls .\nrm -rf ~",
+            "ls .\r\nrm -rf ~",
+            "cat <(rm -rf ~)",
+            "echo $((1)) $(touch x)",
+        ] {
+            assert!(!is_safe_command(unsafe_command), "{unsafe_command:?}");
+        }
+        // Listed tools with flags that delete, write or run commands.
+        for unsafe_command in [
+            "find . -name '*.rs' -delete",
+            "find . '-delete'",
+            "find . -de''lete",
+            "find . -exec rm -rf {} +",
+            "find . -execdir rm {} ;",
+            "find . -fprint out.txt",
+            "fd -x rm",
+            "fd -HIx rm",
+            "fd --exec-batch rm",
+            "git branch -D main",
+            "git branch -d main",
+            "git branch --delete main",
+            "git branch -m main old",
+            "git branch new-branch",
+            "git branch -f main HEAD~3",
+            "git diff --output=src/main.rs",
+            "git log --output src/main.rs",
+            "rg --pre ./script x",
+            "rg --pre=sh x",
+            "cargo clippy --fix",
+        ] {
+            assert!(!is_safe_command(unsafe_command), "{unsafe_command:?}");
+        }
+    }
+
+    #[test]
+    fn anthropic_requests_carry_the_tools() {
+        let body = anthropic_body("claude-sonnet-4-5", Effort::Medium, "sys", &[]);
+        let names: Vec<&str> = body["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["bash", "read_file", "write_file", "edit_file"]);
+        assert_eq!(body["tools"][1]["input_schema"]["required"], json!(["path"]));
+        assert!(body["tools"][0].get("function").is_none() && body["tools"][0].get("type").is_none());
+    }
+
+    #[tokio::test]
+    async fn anthropic_tool_use_blocks_become_tool_calls() {
+        let client = reqwest::Client::new();
+        let (_tx, commands) = async_channel::unbounded();
+        let (events, _rx) = async_channel::unbounded();
+        let (mut kept, mut shutdown) = (VecDeque::new(), false);
+        let url = sse_server(concat!(
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Looking.\"}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read_file\",\"input\":{}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\": \\\"src/\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"main.rs\\\"}\"}}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        ))
+        .await;
+        let answer = anthropic_turn(&client, &url, "key", "m", Effort::Off, "sys", &[], &events, &commands, &mut kept, &mut shutdown).await.unwrap();
+        assert_eq!(answer.text, "Looking.");
+        assert_eq!(answer.tool_calls.len(), 1);
+        assert_eq!((answer.tool_calls[0].id.as_str(), answer.tool_calls[0].name.as_str()), ("toolu_1", "read_file"));
+        assert_eq!(serde_json::from_str::<Value>(&answer.tool_calls[0].arguments).unwrap(), json!({ "path": "src/main.rs" }));
+        let content = answer.content.unwrap();
+        assert_eq!(content["content"][1]["input"], json!({ "path": "src/main.rs" }));
+    }
+
+    /// A server that answers request n with `responses[n]` (status, SSE body), one connection
+    /// each, and keeps every request body it was sent.
+    async fn script_server(responses: Vec<(u16, String)>) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = bodies.clone();
+        tokio::spawn(async move {
+            for (status, body) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![];
+                let mut buf = [0u8; 4096];
+                let body_start = loop {
+                    if let Some(at) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break at + 4;
+                    }
+                    let n = socket.read(&mut buf).await.unwrap();
+                    assert!(n > 0, "the request ended early");
+                    request.extend_from_slice(&buf[..n]);
+                };
+                let head = String::from_utf8_lossy(&request[..body_start]).to_lowercase();
+                let length: usize = head.lines().find_map(|l| l.strip_prefix("content-length:")).map_or(0, |v| v.trim().parse().unwrap());
+                while request.len() < body_start + length {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    assert!(n > 0, "the request body ended early");
+                    request.extend_from_slice(&buf[..n]);
+                }
+                seen.lock().unwrap().push(serde_json::from_slice(&request[body_start..body_start + length]).unwrap());
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                let _ = socket.shutdown().await;
+            }
+        });
+        (url, bodies)
+    }
+
+    fn openai_text(text: &str) -> (u16, String) {
+        (200, format!("data: {}\n\ndata: [DONE]\n\n", json!({ "choices": [{ "delta": { "content": text }, "finish_reason": "stop" }] })))
+    }
+
+    fn openai_tool_call(id: &str, name: &str, arguments: Value) -> (u16, String) {
+        let call = json!({ "index": 0, "id": id, "type": "function", "function": { "name": name, "arguments": arguments.to_string() } });
+        (200, format!("data: {}\n\ndata: [DONE]\n\n", json!({ "choices": [{ "delta": { "tool_calls": [call] }, "finish_reason": "tool_calls" }] })))
+    }
+
+    struct TestSession {
+        commands: async_channel::Sender<Command>,
+        events: async_channel::Receiver<AgentEvent>,
+        bodies: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+        cwd: PathBuf,
+        task: tokio::task::JoinHandle<Result<()>>,
+    }
+
+    impl TestSession {
+        async fn start(provider: &'static str, hand_holding: HandHolding, responses: Vec<(u16, String)>) -> TestSession {
+            let (url, bodies) = script_server(responses).await;
+            let cwd = std::env::temp_dir().join(format!("trek_test_direct_session_{}", next_id()));
+            std::fs::create_dir_all(&cwd).unwrap();
+            let config = SessionConfig {
+                agent: AgentId::Direct(provider.into()),
+                cwd: cwd.clone(),
+                model: Some("m".into()),
+                effort: Effort::Off,
+                hand_holding,
+                plan: false,
+                read_only: false,
+                resume: None,
+                resume_at: None,
+                fork: false,
+                recap: None,
+                fast: None,
+                mcp_servers: vec![],
+                instructions: None,
+                read_dirs: vec![],
+            };
+            let (commands, commands_rx) = async_channel::unbounded();
+            let (events_tx, events) = async_channel::unbounded();
+            let provider = direct_provider(provider).unwrap();
+            let task = tokio::spawn(async move { session(config, provider, &url, Some("key".into()), commands_rx, events_tx).await });
+            TestSession { commands, events, bodies, cwd, task }
+        }
+
+        async fn send(&self, command: Command) {
+            self.commands.send(command).await.unwrap();
+        }
+
+        async fn prompt(&self, text: &str) {
+            self.send(Command::Prompt { text: text.into(), images: vec![] }).await;
+        }
+
+        /// The next event `pick` takes, failing on an error or the session's end on the way.
+        async fn until<T>(&self, mut pick: impl FnMut(&AgentEvent) -> Option<T>) -> T {
+            loop {
+                let event = tokio::time::timeout(Duration::from_secs(20), self.events.recv()).await.expect("an event in time").expect("the session is running");
+                if let Some(found) = pick(&event) {
+                    return found;
+                }
+                assert!(!matches!(event, AgentEvent::Error(_) | AgentEvent::Exited), "{event:?}");
+            }
+        }
+
+        async fn turn_complete(&self) -> Option<String> {
+            self.until(|e| match e {
+                AgentEvent::TurnComplete { error } => Some(error.clone()),
+                _ => None,
+            })
+            .await
+        }
+
+        async fn tool_finished(&self) -> (String, bool) {
+            self.until(|e| match e {
+                AgentEvent::ToolFinished { output, ok, .. } => Some((output.clone(), *ok)),
+                _ => None,
+            })
+            .await
+        }
+
+        fn body(&self, n: usize) -> Value {
+            self.bodies.lock().unwrap()[n].clone()
+        }
+
+        async fn finish(self) {
+            drop(self.commands);
+            tokio::time::timeout(Duration::from_secs(10), self.task).await.unwrap().unwrap().unwrap();
+            let _ = std::fs::remove_dir_all(&self.cwd);
+        }
+    }
+
+    /// Every OpenAI-wire assistant message with tool calls is followed by a reply to each call.
+    fn assert_tool_calls_answered(messages: &[Value]) {
+        for (i, m) in messages.iter().enumerate() {
+            for call in m["tool_calls"].as_array().into_iter().flatten() {
+                let id = &call["id"];
+                let answered = messages[i + 1..].iter().take_while(|r| r["role"] == "tool").any(|r| &r["tool_call_id"] == id);
+                assert!(answered, "call {id} has no reply in {messages:#?}");
+            }
+        }
+    }
+
+    fn user_texts(messages: &[Value]) -> Vec<&str> {
+        messages.iter().filter(|m| m["role"] == "user").filter_map(|m| m["content"].as_str()).collect()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_during_a_command_ends_the_turn_and_what_it_started() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![openai_tool_call("call_1", "bash", json!({ "command": "sleep 30 & echo $! > bg.pid; wait" })), openai_text("next")],
+        )
+        .await;
+        s.prompt("one").await;
+        s.until(|e| matches!(e, AgentEvent::ToolStarted { .. }).then_some(())).await;
+        let pid_file = s.cwd.join("bg.pid");
+        let started = std::time::Instant::now();
+        let pid: i32 = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file).ok().and_then(|p| p.trim().parse().ok()) {
+                break pid;
+            }
+            assert!(started.elapsed() < Duration::from_secs(10), "the command didn't start");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        s.send(Command::Interrupt).await;
+        let (output, ok) = s.tool_finished().await;
+        assert!(!ok && output.contains("Interrupted"), "{output}");
+        assert_eq!(s.turn_complete().await.as_deref(), Some("Interrupted"));
+        // The background `sleep` went with the shell. SAFETY: signal 0 only checks the pid.
+        let started = std::time::Instant::now();
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(started.elapsed() < Duration::from_secs(5), "the command's background process outlived the Stop");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // The session goes on, with the cut-short call answered.
+        s.prompt("two").await;
+        assert_eq!(s.turn_complete().await, None);
+        let messages = s.body(1)["messages"].as_array().unwrap().clone();
+        assert_tool_calls_answered(&messages);
+        assert_eq!(user_texts(&messages), ["one", "two"]);
+        s.finish().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_at_a_permission_card_ends_the_turn() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::Supervised,
+            vec![openai_tool_call("call_1", "bash", json!({ "command": "touch made" })), openai_text("next")],
+        )
+        .await;
+        s.prompt("one").await;
+        s.until(|e| matches!(e, AgentEvent::PermissionRequest { .. }).then_some(())).await;
+        s.send(Command::Interrupt).await;
+        let (_, ok) = s.tool_finished().await;
+        assert!(!ok);
+        assert_eq!(s.turn_complete().await.as_deref(), Some("Interrupted"));
+        assert!(!s.cwd.join("made").exists());
+        s.prompt("two").await;
+        assert_eq!(s.turn_complete().await, None);
+        assert_tool_calls_answered(s.body(1)["messages"].as_array().unwrap());
+        s.finish().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_message_sent_while_a_command_runs_waits_for_it() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![openai_tool_call("call_1", "bash", json!({ "command": "sleep 1; echo finished" })), openai_text("a"), openai_text("b")],
+        )
+        .await;
+        s.prompt("one").await;
+        s.until(|e| matches!(e, AgentEvent::ToolStarted { .. }).then_some(())).await;
+        s.send(Command::SetHandHolding(HandHolding::Supervised)).await;
+        s.prompt("steer").await;
+        let (output, ok) = s.tool_finished().await;
+        assert!(ok && output.contains("finished"), "{output}");
+        assert_eq!(s.turn_complete().await, None);
+        let messages = s.body(2)["messages"].as_array().unwrap().clone();
+        assert_tool_calls_answered(&messages);
+        assert_eq!(user_texts(&messages), ["one", "steer"]);
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_request_after_a_tool_keeps_the_history_whole() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                (500, "boom".into()),
+                openai_tool_call("call_1", "read_file", json!({ "path": "missing.txt" })),
+                (500, "boom".into()),
+                openai_text("ok"),
+            ],
+        )
+        .await;
+        // A first request that fails takes its message back out.
+        s.prompt("zero").await;
+        assert!(s.turn_complete().await.is_some_and(|e| e.contains("500")));
+        // One that fails after a tool ran keeps the call and its result.
+        s.prompt("one").await;
+        assert!(s.turn_complete().await.is_some_and(|e| e.contains("500")));
+        s.prompt("two").await;
+        assert_eq!(s.turn_complete().await, None);
+        let messages = s.body(3)["messages"].as_array().unwrap().clone();
+        assert_tool_calls_answered(&messages);
+        assert_eq!(user_texts(&messages), ["one", "two"]);
+        assert_eq!(messages.iter().filter(|m| m["role"] == "tool").count(), 1);
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn anthropic_sessions_run_tools() {
+        let tool_use = concat!(
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read_file\",\"input\":{}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"notes.txt\\\"}\"}}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let text = concat!(
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let s = TestSession::start("anthropic", HandHolding::FullAccess, vec![(200, tool_use.into()), (200, text.into())]).await;
+        std::fs::write(s.cwd.join("notes.txt"), "hello from notes").unwrap();
+        s.prompt("read it").await;
+        let (output, ok) = s.tool_finished().await;
+        assert!(ok && output.contains("hello from notes"), "{output}");
+        assert_eq!(s.turn_complete().await, None);
+        assert!(s.body(0)["tools"].as_array().is_some_and(|t| t.len() == 4));
+        let messages = s.body(1)["messages"].as_array().unwrap().clone();
+        assert_eq!(messages.len(), 3, "{messages:#?}");
+        assert_eq!(messages[1]["content"][0]["input"], json!({ "path": "notes.txt" }));
+        let result = &messages[2]["content"][0];
+        assert_eq!((messages[2]["role"].as_str(), result["type"].as_str(), result["tool_use_id"].as_str()), (Some("user"), Some("tool_result"), Some("toolu_1")));
+        assert!(result["content"].as_str().unwrap().contains("hello from notes"));
+        s.finish().await;
     }
 }

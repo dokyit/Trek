@@ -34,6 +34,9 @@ const CHART_HEIGHT: f32 = 96.;
 const MAX_BAR: f32 = 28.;
 /// The tables' number columns.
 const NUMBER_WIDTH: f32 = 84.;
+/// How far the numbers give way, and how much room the name keeps, when the page is narrow.
+const NUMBER_MIN_WIDTH: f32 = 44.;
+const NAME_MIN_WIDTH: f32 = 96.;
 
 /// What the summaries were worked out from: another key means they're out of date.
 #[derive(Debug, Clone, PartialEq)]
@@ -480,7 +483,7 @@ impl Basecamp {
         let theme = cx.theme();
         let line = theme.foreground.opacity(0.07);
         let ws = self.workspace.read(cx);
-        let number = |text: String| div().w(px(NUMBER_WIDTH)).flex_none().text_right().truncate().child(text);
+        let number = |text: String| div().w(px(NUMBER_WIDTH)).flex_shrink(1.).min_w(px(NUMBER_MIN_WIDTH)).text_right().truncate().child(text);
         let header = h_flex()
             .h(px(28.))
             .px(px(8.))
@@ -488,7 +491,7 @@ impl Basecamp {
             .text_color(theme.muted_foreground)
             .border_b_1()
             .border_color(line)
-            .child(div().flex_1().min_w_0().child(name))
+            .child(div().flex_1().min_w(px(NAME_MIN_WIDTH)).child(name))
             .children(["Threads", "Turns", "Tokens", "Cost", "Failures"].map(|h| number(h.to_string())));
         let body = rows.iter().enumerate().map(|(i, r)| {
             let badge = match (&r.agent, &r.project) {
@@ -507,7 +510,16 @@ impl Basecamp {
                 .text_size(px(13.))
                 .border_b_1()
                 .border_color(line)
-                .child(h_flex().flex_1().min_w_0().gap(px(8.)).children(badge).child(div().min_w_0().truncate().child(r.label.clone())))
+                .child(
+                    h_flex()
+                        .id(SharedString::from(format!("{id}-name-{i}")))
+                        .test_support()
+                        .flex_1()
+                        .min_w(px(NAME_MIN_WIDTH))
+                        .gap(px(8.))
+                        .children(badge)
+                        .child(div().min_w_0().truncate().child(r.label.clone())),
+                )
                 .child(number(r.threads.to_string()))
                 .child(number(r.turns.to_string()))
                 .child(number(fmt_tokens(r.tokens)))

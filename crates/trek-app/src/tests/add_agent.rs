@@ -142,3 +142,37 @@ fn running_in_terminal_from_settings_redirects_and_opens_dock() {
         assert!(trek.visible(cx, "terminal-dock"), "opens terminal dock");
     });
 }
+
+#[test]
+fn an_agent_removed_while_its_update_installs_stays_removed() {
+    use crate::workspace::InstallStep;
+    use trek_core::registry::{AddedAgent, AgentSource, Progress};
+    run(async |cx| {
+        let trek = open(cx);
+        let agent = |version: &str| AddedAgent {
+            id: "auggie".into(),
+            name: "Auggie".into(),
+            command: "auggie".into(),
+            args: vec![],
+            env: vec![],
+            source: AgentSource::Registry,
+            version: Some(version.into()),
+            distribution: Some("binary".into()),
+            description: String::new(),
+            website: None,
+            icon: None,
+        };
+        trek.update(cx, |ws, cx| ws.add_custom_agent(agent("1.0"), vec![], cx)).unwrap();
+        // Its update is under way when the user removes it.
+        trek.update(cx, |ws, cx| {
+            ws.added_agents.installs.insert("auggie".into(), AgentInstall::Running(None));
+            ws.remove_added_agent("auggie", cx);
+            ws.install_step("auggie", InstallStep::Progress(Progress::Unpacking), cx);
+            ws.install_step("auggie", InstallStep::Done(Ok(agent("1.2"))), cx);
+        });
+        assert!(trek.read(cx, |ws, _| ws.settings.added_agents.is_empty() && ws.added_agents.installs.is_empty()));
+        // An update that fails after it's gone says nothing about it either.
+        trek.update(cx, |ws, cx| ws.install_step("auggie", InstallStep::Done(Err("offline".into())), cx));
+        assert!(trek.read(cx, |ws, _| ws.added_agents.installs.is_empty()));
+    });
+}

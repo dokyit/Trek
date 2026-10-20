@@ -270,13 +270,19 @@ pub fn built_in(registry_id: &str) -> Option<AgentId> {
 // ---------------------------------------------------------------------------------------------
 // How to get it
 
-/// This Mac, as the registry names targets.
+/// This computer, as the registry names targets.
 pub fn current_target() -> Option<&'static str> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
+    target_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn target_for(os: &str, arch: &str) -> Option<&'static str> {
+    match (os, arch) {
         ("macos", "aarch64") => Some("darwin-aarch64"),
         ("macos", "x86_64") => Some("darwin-x86_64"),
         ("linux", "aarch64") => Some("linux-aarch64"),
         ("linux", "x86_64") => Some("linux-x86_64"),
+        ("windows", "aarch64") => Some("windows-aarch64"),
+        ("windows", "x86_64") => Some("windows-x86_64"),
         _ => None,
     }
 }
@@ -969,6 +975,17 @@ mod tests {
 
     fn fixture() -> Registry {
         parse(include_str!("../fixtures/acp-registry.json")).unwrap()
+    }
+
+    #[test]
+    fn windows_has_a_target_of_its_own() {
+        assert_eq!(target_for("windows", "x86_64"), Some("windows-x86_64"));
+        assert_eq!(target_for("windows", "aarch64"), Some("windows-aarch64"));
+        assert_eq!(target_for("macos", "aarch64"), Some("darwin-aarch64"));
+        assert_eq!(target_for("freebsd", "x86_64"), None);
+        let r = fixture();
+        let devin = r.agent("devin").unwrap();
+        assert!(matches!(plan(devin, target_for("windows", "x86_64")), Some(Plan::Binary(_))));
     }
 
     #[test]
