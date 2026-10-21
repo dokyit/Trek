@@ -61,19 +61,10 @@ jobs:
       - name: Script tests
         run: bash script/tests/release-notes.sh
 
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-
       # Every crate: trek-remote (the phone server's protocol, TLS and pairing) and trek-ipc too.
-      # nextest runs each test as its own process across all cores rather than libtest's
-      # binary-at-a-time serial run; `--no-fail-fast` reports every failing test, not just the first.
+      # `--no-fail-fast`: one run reports every failing test binary, not just the first.
       - name: Test
-        run: cargo nextest run --workspace --locked --no-fail-fast
-
-      # nextest doesn't cover doc-tests.
-      - name: Doc-tests
-        run: cargo test --workspace --doc --locked
+        run: cargo test --workspace --locked --no-fail-fast
 
       # Lints that catch bugs fail the build; style lints don't (`-A clippy::all` first, so the
       # `-D warnings` above doesn't turn them into errors).
@@ -116,23 +107,12 @@ jobs:
       - name: Script tests
         run: script\tests\release-manifest.Tests.ps1
 
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-
       # Every crate: trek-remote (the phone server's protocol, TLS and pairing) and trek-ipc too.
-      # nextest runs each test as its own process across all cores rather than libtest's
-      # binary-at-a-time serial run; `--no-fail-fast` reports every failing test, not just the first.
+      # `--no-fail-fast`: one run reports every failing test binary, not just the first.
       # TREK_QUIET_SPAWNS_CONTROL: the console-window check's control, which would flash windows on
       # a desktop, runs here (crates/trek-core/tests/quiet_spawns.rs).
       - name: Test
-        run: cargo nextest run --workspace --locked --no-fail-fast
-        env:
-          TREK_QUIET_SPAWNS_CONTROL: "1"
-
-      # nextest doesn't cover doc-tests.
-      - name: Doc-tests
-        run: cargo test --workspace --doc --locked
+        run: cargo test --workspace --locked --no-fail-fast
         env:
           TREK_QUIET_SPAWNS_CONTROL: "1"
 
