@@ -16,11 +16,13 @@ Open the right panel with ⌘J and select **Source Control**. Select files/hunks
 ./.agents/skills/verify-trek/scripts/trek-dev screenshot git-panel
 ```
 
+To see the breakdown of a "+N −M" count by kind of file (Code, Tests, Docs, Config, ... and a Total), run `trek-dev control hover git-lines` with the Git tool open (or `changes-lines-<ix>` on a turn's changes card, `diff-lines` in the IDE diff, `gf-lines-<path>` on a file row) and screenshot; the card is `<id>-card`, its rows `<id>-code`, `<id>-tests`, ... and `<id>-total`.
+
 After a completed mock turn, `control diff` opens that turn’s change view when it has a recorded checkpoint. The verification CLI deliberately does not expose commit, push, PR, or worktree deletion.
 
 ## Code
 
-`crates/trek-app/src/panels/git.rs`, `workspace/turn_changes.rs`, `workspace/worktrees.rs`, `crates/trek-app/src/remote/git.rs`.
+`crates/trek-app/src/panels/git.rs`, `line_breakdown.rs` (with `trek-core/src/file_kind.rs`), `workspace/turn_changes.rs`, `workspace/worktrees.rs`, `crates/trek-app/src/remote/git.rs`.
 
 ## Verify
 

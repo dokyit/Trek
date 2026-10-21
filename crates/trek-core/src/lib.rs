@@ -11,6 +11,7 @@ pub mod checkpoint;
 pub mod detect;
 pub mod elevated;
 pub mod feeds;
+pub mod file_kind;
 pub mod git;
 pub mod hunks;
 pub mod import;

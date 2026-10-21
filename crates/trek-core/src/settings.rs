@@ -186,6 +186,10 @@ pub struct ProjectPrefs {
     /// checked out): when it comes back, so do the user's choices for it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification_away: Option<Verification>,
+    /// The paired machine new threads start on (its host id, `machines.json`), from the composer's
+    /// "On this Mac ▾"; `None` is this computer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
 }
 
 /// Where a project's verification skill lives and how it's kept up.
@@ -220,6 +224,7 @@ impl Default for ProjectPrefs {
             worktree_copy: crate::worktree::default_copy(),
             verification: None,
             verification_away: None,
+            machine: None,
         }
     }
 }

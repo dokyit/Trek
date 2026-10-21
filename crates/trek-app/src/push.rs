@@ -55,8 +55,11 @@ fn unnamed(message: &str, needs: bool, failed: bool) -> &'static str {
 /// The note for an alert the Mac raised (`message` as the Mac's banner words it). `names`: say
 /// it as the banner does, with the project in the title; else only what kind of news it is.
 pub fn note_for(topic: &str, message: &str, thread: Option<&str>, project: Option<&str>, names: bool) -> Note {
-    let needs = message.starts_with("Needs") || message.contains("waiting") || message.contains("Waiting");
-    let failed = message.starts_with("Failed");
+    // By how the banner starts (or ends), never by words that may be the thread's own title:
+    // "Finished: Fix waiting spinner" is a finish. A thread an agent started says "Thread
+    // failed · …" when it fails.
+    let needs = message.starts_with("Needs") || message.ends_with("waiting on your answer");
+    let failed = message.starts_with("Failed") || message.starts_with("Thread failed");
     let tags = if needs {
         vec!["raised_hand".into()]
     } else if failed {
@@ -270,6 +273,22 @@ mod tests {
         assert_eq!(unnamed("Paused until 2:10 AM: Rotate the signing key").message, "A thread is paused at its usage limit");
         assert_eq!(unnamed("Resumed: Rotate the signing key").message, "A thread resumed");
         assert_eq!(unnamed("Rotate the signing key is waiting on your answer").message, "A thread needs you");
+        // A thread an agent started fails in other words; a title that says "waiting" is still
+        // the title, not what the thread needs.
+        let agent_started = unnamed("Thread failed · Migrate the DB");
+        assert_eq!((agent_started.message.as_str(), agent_started.tags[0].as_str(), agent_started.priority), ("A thread failed", "x", 3));
+        assert_eq!(unnamed("Thread completed · Migrate the DB").message, "A thread finished");
+        for (message, said) in [
+            ("Finished: Fix waiting spinner", "A thread finished"),
+            ("Failed: Waiting room layout", "A thread failed"),
+            ("Paused until 2:10 AM: Fix waiting spinner", "A thread is paused at its usage limit"),
+        ] {
+            let n = unnamed(message);
+            assert_eq!((n.message.as_str(), n.priority), (said, 3), "{message}");
+            assert_ne!(n.tags[0], "raised_hand", "{message}");
+        }
+        let named = note_for("trek-abc", "Thread failed · Migrate the DB", Some("t1"), None, true);
+        assert_eq!((named.tags[0].as_str(), named.priority), ("x", 3));
         let json = serde_json::to_string(&unnamed("Failed: Rotate the signing key")).unwrap();
         assert!(!json.contains("Rotate") && !json.contains("api"), "{json}");
     }

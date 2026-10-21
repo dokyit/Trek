@@ -74,8 +74,8 @@ pipe, not the messages. LAN/Tailscale is what power users already run.
    trek://pair?host=192.168.1.20:7420&code=K7Q2-9XMV&name=Tobias%E2%80%99s%20MacBook%20Pro&hid=7f3c…&fp=b1380087…
    ```
    A Mac that answers at more than one address (its Wi-Fi and its tailnet) names the others in
-   `alt`, comma-separated: `…&alt=100.101.1.2:7420&fp=…`. The phone tries `host` first, then each
-   of them.
+   `alt`, comma-separated: `…&alt=100.101.1.2:7420&fp=…`. The phone dials `host` and each of them
+   at once and pairs over the first to open (see [Finding the Mac](#finding-the-mac-phone-side)).
    `code` is 8 Crockford base32 characters (40 bits) shown as `XXXX-XXXX`: one use, valid 10
    minutes. After a wrong code, that address (an IPv6 one by its /64) waits 1 s before its next
    try, doubling with each wrong one up to 5 minutes (forgotten after 15 quiet minutes), so one
@@ -113,8 +113,8 @@ What `ios/Trek/Net/TrekClient.swift` does, as built:
   fetch the certificate), but making a certificate whose fingerprint starts the same takes about 2^63
   tries, far beyond the ten minutes a code lasts. (The first design showed 8 characters, 32 bits,
   which a GPU could match in minutes.)
-- **Storage.** The pin is stored with the paired Mac (address, device token, host name and id) as
-  one Keychain item (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`), and every later `hello`
+- **Storage.** The pin is stored with the paired Mac (where it answered last, its routes and the
+  addresses it answered at before, device token, host name and id) as one Keychain item (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`), and every later `hello`
   connection is pinned to it.
 - **A changed certificate is never trusted silently.** If the Mac answers with another
   certificate, the phone stops (no retries, no fallback to plain) and shows **"This Mac's identity
@@ -124,8 +124,9 @@ What `ios/Trek/Net/TrekClient.swift` does, as built:
 - **Plain `ws://` only by explicit choice.** A link without `fp`, or typed pairing with the
   fingerprint left empty, shows an **"Unencrypted connection"** warning first; only "Pair without
   encryption" / "Connect without encryption" pairs over `ws://`, and the choice is stored with the
-  Mac. A TLS connection that fails its handshake (e.g. the Mac only speaks plain) is reported and
-  stopped; the phone never downgrades by itself. Records paired before TLS existed have no pin and
+  Mac. While pairing, a TLS connection that fails its handshake (e.g. the Mac only speaks plain) is
+  reported and stopped; a paired Mac's failed handshake (one cut off as Trek restarts) is retried.
+  The phone never downgrades by itself. Records paired before TLS existed have no pin and
   keep using `ws://`; Settings shows them as **Unencrypted** in amber, connected TLS Macs as
   **Encrypted · pinned** with a lock and the short fingerprint.
 - **App Transport Security.** `NSAllowsArbitraryLoads` is gone. `NSAllowsLocalNetworking` covers
@@ -209,11 +210,13 @@ Mac → phone:
 
 Both may carry `routes`, every `host:port` the Mac answers on as it is now, the pairing code's
 first: `"routes":["192.168.1.20:7420","100.101.1.2:7420"]`. The phone keeps them with the paired
-Mac and, when the one it dials doesn't answer, tries the next at once (it waits and goes round
-again only once none has): paired on the Wi-Fi, it reaches the Mac over Tailscale away from home
-without pairing again. A certificate that doesn't match the pin on one route is never trusted;
-with other routes left it's taken for another machine at that address, and "This Mac's identity
-changed" shows only when every route answers like that. Older Macs send no `routes`.
+Mac and dials them all together with the others it knows (see
+[Finding the Mac](#finding-the-mac-phone-side)): paired on the Wi-Fi, it reaches the Mac over
+Tailscale away from home without pairing again. A certificate that doesn't match the pin is never
+trusted. "This Mac's identity changed" shows when every address answers like that, or one that is
+surely the Mac's does (its tailnet address, or one its own Bonjour record led to); a wrong
+certificate at another Wi-Fi address is taken for another machine that has it on this network.
+Older Macs send no `routes`.
 
 Both may carry `features`, the optional requests this Mac serves; a phone offers only what's
 listed, so an older Mac (no list) simply doesn't show them. The protocol version stays 1:
@@ -816,8 +819,73 @@ SwiftUI, iOS 26 (Liquid Glass), bundle id `dev.trek.TrekMobile`, no third-party 
 - **Pairing**: scan QR (camera) or type host:port + code + short fingerprint; links and scans go
   through the "Pair with <Mac>?" confirmation. **Demo mode** runs the whole app on realistic
   sample data with no Mac.
-- **Settings**: paired Mac, connection state, "Encrypted · pinned" / "Unencrypted", fingerprint,
-  follow-up default, demo mode, unpair.
+- **Settings**: paired Mac, connection state in words ("Connected over Wi-Fi", "This Wi-Fi may
+  not let devices see each other. Trying Tailscale…") with Try now while it waits, its addresses
+  (Wi-Fi, Tailscale), "Encrypted · pinned" / "Unencrypted", fingerprint, follow-up default, demo
+  mode, unpair.
+
+### Finding the Mac (phone side)
+
+Where the phone was paired doesn't matter: it looks for the Mac afresh wherever it is
+(`ios/Trek/Net/TrekClient.swift`, `MacFinder.swift`; the decisions are plain values in
+`Reach.swift`).
+
+- **Candidates, dialled at once.** Each search gathers every way to the Mac: what Bonjour finds on
+  this network for the paired Mac's id (`_trek._tcp`, TXT `id=`), where it answered last, the
+  `routes` from the last `welcome` (or the code's `alt`), addresses it answered at before (up to 6,
+  kept with the pairing), and its tailnet address. Bonjour gives two kinds of candidate for each
+  interface the record is seen on: the service itself (dialled as
+  `NWConnection(to: .service(name:type:domain:interface:))` with the same pinned TLS, so
+  Network.framework resolves it there and does the interface choice and link-local scoping), and
+  the addresses it resolves to there (`DNSServiceResolve`/`DNSServiceGetAddrInfo`, IPv4 and IPv6).
+  A link-local address keeps its interface scope (`[fe80::…%en5]:7420`, `169.254.x.y%en5`) and is
+  dialled with Network.framework rather than as a URL (a URL can't carry the scope); one with no
+  scope at all, and loopback, are dropped. On Wi-Fi the local ones are dialled at once and the
+  tailnet 250 ms later (off Wi-Fi the other way round), so on the Mac's Wi-Fi the tailnet isn't
+  dialled for nothing. Each dial has 8 s to open.
+- **The cable to the Mac.** The Mac's mDNS responder also advertises on the USB link to an iPhone
+  plugged into it, and Trek on the Mac listens on all interfaces (`[::]:7420`), so a phone on a
+  network that keeps devices apart (a guest Wi-Fi) can still reach it over the cable. A record seen
+  on an interface that isn't Wi-Fi is dialled first in the round: its service, then its addresses
+  there, then the Wi-Fi's. An interface is the cable when its name says so (`anpi…`, `anri…`, `usb`),
+  or it's wired with only self-assigned addresses; a wired one with an address of its own is
+  Ethernet; `utun`/`ipsec` is Tailscale. What's tied to an interface (the service on it, a scoped
+  address) isn't kept as where the Mac answers: the Wi-Fi address stays the one dialled first next
+  time.
+- **The first to open wins.** A socket counts as open once TLS accepted the pinned certificate and
+  the WebSocket upgrade went through; it alone sends `hello` (or `pair`), and every other dial is
+  closed. Only one authenticates: the Mac replaces a device's older connection with its newer one,
+  and a code works once. Where it answered becomes the address dialled first next time (kept in the
+  Keychain with the routes and the earlier addresses).
+- **Triggers, not timers.** A new search starts at once when the network changes (`NWPathMonitor`:
+  Wi-Fi joined, another interface such as Tailscale's coming up, back online), when the app comes
+  to the front, when the user taps Try now, and 0.5 s after a working connection drops (where it
+  answered first). While nothing answers, rounds go after 1, 2, 4, 8, then every 10 s, and the
+  Bonjour browse stays open: a Mac that appears is dialled the moment it's seen.
+- **Words that explain.** The Threads list and Settings say what is going on: "Looking for
+  <Mac> on this Wi-Fi…", "Found on Wi-Fi, connecting…", "Found <Mac> over USB, connecting…". Once
+  connected they name the path, from the interface the winning connection runs over (or the one
+  Bonjour saw the Mac on, or the phone's own network for a plain address): "Connected over USB",
+  "over Ethernet", "over Wi-Fi", "over Tailscale". After 3 s with nothing on the local network:
+  "This Wi-Fi may not let devices see each other. Trying Tailscale…", or without a tailnet address
+  "…Use the same Wi-Fi at home, a hotspot, or Tailscale on both." When the Mac's record is seen on
+  the cable and the Wi-Fi dials fail, "This Wi-Fi keeps devices apart, but the USB cable should
+  work. Connecting to <Mac> over USB…" while the cable is still being dialled (every round, first);
+  when the cable fails too, it says so and asks whether Trek on the Mac is up to date. When the
+  Mac's record is seen on the Wi-Fi but it doesn't answer, it says the network may keep devices
+  apart; on the Wi-Fi where the Mac answered before (the phone's subnet holds that address), "isn't
+  answering on this Wi-Fi. Is it awake, with Trek open?"; and it names Tailscale not answering,
+  Local Network being off for Trek, and no network at all.
+- **Local Network permission and the cable.** Bonjour always needs it (TN3179: "All Bonjour
+  operations require local network access"), and the USB link is an Ethernet-like,
+  broadcast-capable interface with link-local addresses, so an outgoing connection over it is
+  local-network traffic too as far as the technote's definition goes (it doesn't mention USB). With
+  Local Network off for Trek the cable doesn't help: the phone says so and tries Tailscale.
+- **Heartbeat.** Once connected the phone pings every 10 s and drops a connection the Mac has been
+  silent on for 25 s (the Mac pings every 20 s and drops a phone silent for 60 s). Coming to the
+  front or changing network, it pings at once and drops the connection if nothing comes back in
+  4 s. Every connection resyncs: the Mac sends a `snapshot` after `welcome`, and the phone
+  subscribes again to the threads it has open and asks again for what its screens were waiting on.
 
 ### Implementation notes (v1 as built)
 
@@ -834,8 +902,10 @@ SwiftUI, iOS 26 (Liquid Glass), bundle id `dev.trek.TrekMobile`, no third-party 
   those with a higher seq). A connection that falls behind on events gets a fresh `snapshot` and a
   `transcript_reset` for each subscribed thread. A phone silent for three ping intervals is dropped.
 - `devices.json` is written with mode 0600; an unreadable one is moved aside and phones pair again.
-- The Mac must set `advertise` (LAN or tailnet address) for the QR code, and binds that same
-  address; the library's default bind address `0.0.0.0` is no use to a phone.
+- The Mac sets `advertise` (its LAN and tailnet addresses) for the QR code and the `routes` in
+  `welcome`, and listens on every interface (`[::]:7420`, or `0.0.0.0:7420` without IPv6), judging
+  each connection by the addresses it arrived on; an address change updates what is advertised
+  without restarting the server, so a phone on another route stays connected.
 - The phone reads lists element by element: a thread in a `snapshot`, an item in a `transcript`
   or a search result that doesn't decode is left out (and logged), not the whole message. Enums
   with a value it doesn't know (`send` modes, Basecamp ranges, states…) fall back to a default; an

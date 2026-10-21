@@ -210,7 +210,7 @@ fn long_transcripts_and_turn_actions() {
     }
     assert!(serde_json::from_str::<ClientEnvelope>(r#"{"type":"turn_action","thread_id":"t","item_id":"i1","action":"redo"}"#).is_err());
     let ack = server_round_trip(r#"{"type":"ack","re":"9","text":"Fix the parser"}"#);
-    assert_eq!(ack.msg, ServerMessage::Ack { thread_id: None, open: None, text: Some("Fix the parser".into()) });
+    assert_eq!(ack.msg, ServerMessage::Ack { thread_id: None, open: None, text: Some("Fix the parser".into()), project_id: None });
     server_round_trip(r#"{"type":"ack","re":"10","thread_id":"t-fork","text":"Fix the parser"}"#);
 }
 
@@ -430,7 +430,7 @@ fn spec_actions() {
 
     server_round_trip(r#"{"type":"ack","re":"9"}"#);
     let ack = server_round_trip(r#"{"type":"ack","re":"10","thread_id":"01J…"}"#);
-    assert_eq!(ack.msg, ServerMessage::Ack { thread_id: Some("01J…".into()), open: None, text: None });
+    assert_eq!(ack.msg, ServerMessage::Ack { thread_id: Some("01J…".into()), open: None, text: None, project_id: None });
     server_round_trip(r#"{"type":"pong","re":"15"}"#);
     let err = server_round_trip(r#"{"type":"error","re":"9","code":"not_found","message":"No thread 01J…"}"#);
     assert_eq!(err.msg, ServerMessage::Error { code: ErrorCode::NotFound, message: "No thread 01J…".into() });
@@ -440,7 +440,7 @@ fn spec_actions() {
 fn exact_server_json() {
     assert_eq!(ServerEnvelope::reply(Some("15".into()), ServerMessage::Pong).to_json(), r#"{"type":"pong","re":"15"}"#);
     assert_eq!(
-        ServerEnvelope::reply(Some("9".into()), ServerMessage::Ack { thread_id: None, open: None, text: None }).to_json(),
+        ServerEnvelope::reply(Some("9".into()), ServerMessage::Ack { thread_id: None, open: None, text: None, project_id: None }).to_json(),
         r#"{"type":"ack","re":"9"}"#
     );
     assert_eq!(
@@ -460,6 +460,7 @@ fn every_error_code() {
         "not_found",
         "conflict",
         "host_error",
+        "clone_failed",
     ] {
         let c: ErrorCode = serde_json::from_value(json!(code)).unwrap();
         assert_eq!(serde_json::to_value(c).unwrap(), code);
@@ -813,7 +814,7 @@ fn parity_requests_and_replies() {
         r#"{"type":"background_output","re":"5","thread_id":"t","task_id":"b1"}"#,
         r#"{"type":"icon","re":"7","agent":"acp:mistral-vibe","hash":"0f3a","png":"iVBORw0K","template":true}"#,
         r#"{"type":"ack","re":"2","text":"and open a PR"}"#,
-        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images"]}"#,
+        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines"]}"#,
         r#"{"type":"usage","re":"9","providers":[{"agent":{"key":"codex","name":"Codex","logo":"codex"},"plan":"ChatGPT Pro","limits":[],
             "resets":[{"id":"rc-1","title":"Full reset (Weekly + 5 hr)","expires_at":1791030000000}]},
             {"agent":{"key":"acp:devin","name":"Devin"},"limits":[],"no_limits":true,"as_of":1791020000000,"today":"Today in Trek: 12K tokens"}],"picked":true}"#,

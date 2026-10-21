@@ -28,6 +28,7 @@ mod limits;
 mod lineage;
 mod long_answers;
 mod look;
+mod machines;
 mod mcp;
 mod motion;
 mod notes;

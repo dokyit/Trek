@@ -38,6 +38,9 @@ jobs:
           # One cache for the whole workspace; saved from main so pull requests reuse it.
           shared-key: workspace
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Keep the workspace crates' own artifacts too, so a push that touches one crate does
+          # not rebuild the others (trek-core, trek-agents, trek-remote take minutes each).
+          cache-workspace-crates: true
 
       # gpui compiles its Metal shaders at build time with `xcrun metal`. Since Xcode 26 the Metal
       # toolchain is a separate component that an image may not have; `xcrun -f metal` finds a
@@ -90,6 +93,7 @@ jobs:
         with:
           shared-key: workspace
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port' }}
+          cache-workspace-crates: true
 
       # The PowerShell twin of the Mac's `zsh -n` over the shell scripts.
       - name: Scripts parse

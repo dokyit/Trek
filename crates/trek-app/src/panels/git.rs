@@ -16,6 +16,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use trek_core::file_kind::LineBreakdown;
 use trek_core::worktree::{self, Change, MergeBlock, Review, Worktree};
 
 #[derive(Clone, Debug)]
@@ -123,6 +124,12 @@ fn parse_numstat(out: &str) -> std::collections::HashMap<String, (i64, i64)> {
         stats.insert(path.to_string(), (added.parse().unwrap_or(0), deleted.parse().unwrap_or(0)));
     }
     stats
+}
+
+/// `files`' lines by kind of file.
+fn line_breakdown(files: &[FileChange]) -> LineBreakdown {
+    let count = |n: i64| u32::try_from(n.max(0)).unwrap_or(u32::MAX);
+    LineBreakdown::of(files.iter().map(|f| (f.path.as_str(), count(f.additions), count(f.deletions))))
 }
 
 /// A worktree's changes in the shape the file list draws (`U`ntracked shows as `??` does).
@@ -377,6 +384,11 @@ impl GitPanel {
             self._diff = None;
             cx.notify();
         }
+    }
+
+    /// The listed files' lines by kind of file, as the card over the counts breaks them down.
+    pub(crate) fn line_breakdown(&self) -> LineBreakdown {
+        line_breakdown(self.files())
     }
 
     /// The files listed: the turn's on show, else the working tree's.
@@ -851,8 +863,13 @@ impl GitPanel {
                     .text_color(muted)
                     .child(summary)
                     .child(div().flex_1())
-                    .child(div().text_color(palette::emerald(cx)).child(format!("+{total_add}")))
-                    .child(div().pl_1().text_color(palette::red(cx)).child(format!("−{total_del}"))),
+                    .child(crate::line_breakdown::hover(
+                        "git-lines",
+                        h_flex()
+                            .child(div().text_color(palette::emerald(cx)).child(format!("+{total_add}")))
+                            .child(div().pl_1().text_color(palette::red(cx)).child(format!("−{total_del}"))),
+                        self.line_breakdown(),
+                    )),
             )
             .children(self.files().iter().map(|f| {
                 let color = match f.status.as_str() {
@@ -883,8 +900,17 @@ impl GitPanel {
                     .when(!is_sel, |el| el.hover(|s| s.bg(theme.list_hover)))
                     .child(div().w(px(12.)).text_xs().font_semibold().text_color(color).child(letter))
                     .child(h_flex().flex_1().min_w_0().overflow_hidden().child(div().flex_none().child(name)).child(div().pl_1().truncate().text_xs().text_color(muted).child(dir)))
-                    .when(f.additions > 0, |el| el.child(div().text_xs().text_color(palette::emerald(cx)).child(format!("+{}", f.additions))))
-                    .when(f.deletions > 0, |el| el.child(div().text_xs().text_color(palette::red(cx)).child(format!("−{}", f.deletions))))
+                    .when(f.additions > 0 || f.deletions > 0, |el| {
+                        el.child(crate::line_breakdown::hover(
+                            format!("gf-lines-{}", f.path),
+                            h_flex()
+                                .gap_2()
+                                .text_xs()
+                                .when(f.additions > 0, |el| el.child(div().text_color(palette::emerald(cx)).child(format!("+{}", f.additions))))
+                                .when(f.deletions > 0, |el| el.child(div().text_color(palette::red(cx)).child(format!("−{}", f.deletions)))),
+                            line_breakdown(std::slice::from_ref(f)),
+                        ))
+                    })
                     .when(revertible, |el| {
                         el.child(
                             div().invisible().group_hover("git-file", |s| s.visible()).child(

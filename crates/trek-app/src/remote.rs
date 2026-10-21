@@ -38,6 +38,8 @@ pub(crate) mod bonjour;
 mod commands;
 mod git;
 mod icons;
+pub(crate) mod link;
+mod machines;
 mod notes;
 pub(crate) mod search;
 mod queue;
@@ -51,7 +53,8 @@ const TICK: Duration = Duration::from_millis(250);
 /// A phone server that couldn't start is tried again after this long.
 pub(crate) const RETRY: Duration = Duration::from_secs(10);
 /// How often this Mac's network interfaces are looked at while the server runs, so a new address
-/// (another network, DHCP, Wi-Fi back after sleep) gets a server listening on it.
+/// (another network, DHCP, Wi-Fi back after sleep) is the one phones are told to dial. The server
+/// listens on every interface, so it carries on as it is meanwhile.
 const ADDRESSES_EVERY: Duration = Duration::from_secs(5);
 /// Settled threads beyond this many (newest first) stay off the phone.
 const SETTLED_ON_PHONE: usize = 150;
@@ -61,11 +64,11 @@ pub struct Remote {
     pub handle: tr::RemoteHandle,
     /// The pairing code on screen, if any.
     pub offer: Option<tr::PairingOffer>,
-    /// This Mac's addresses as found when the server started.
+    /// This Mac's addresses as last found (`follow_addresses`).
     pub addresses: Addresses,
     /// Where the pairing code points phones (`host:port`).
     pub advertise: String,
-    /// Every address phones may dial, `advertise` first (it listens on each).
+    /// Every address phones may dial, `advertise` first (it listens on every interface).
     pub routes: Vec<String>,
     /// The port and reach it started with: a change restarts it.
     started_with: (u16, trek_core::settings::Reach),
@@ -86,9 +89,63 @@ pub struct Remote {
     pub(crate) dormant: HashMap<String, Watched>,
     /// What the thread rows were last built from (`push_remote_changes`).
     rows_key: Option<(u64, u64, i64)>,
+    /// The projects, agents (with their models) and Full access phones were last sent, hashed:
+    /// only a snapshot carries them, so one goes out when they change (`push_remote_changes`).
+    pub(crate) snapshot_key: Option<u64>,
     /// The server announced on the local network, on Wi-Fi (`bonjour`).
-    _advert: Option<bonjour::Advert>,
+    advert: Option<bonjour::Advert>,
+    /// What Bonjour announces it as: this Mac's name and lasting id. `None`: never announced
+    /// (tests).
+    pub(crate) announce: Option<(String, String)>,
+    /// Which connections the server takes; the server reads it as each one comes, and
+    /// `follow_addresses` keeps the tailnet address in it current.
+    pub(crate) policy: Arc<std::sync::Mutex<link::LinkPolicy>>,
     _tasks: Vec<Task<()>>,
+}
+
+impl Remote {
+    /// A server just started, with nothing sent through it yet. Its paired devices and the
+    /// phones connected already are read from it: call this after subscribing to its notices
+    /// (`hear_notices`), as a phone that connected before then was announced to no one.
+    pub(crate) fn new(
+        handle: tr::RemoteHandle,
+        addresses: Addresses,
+        advertise: String,
+        routes: Vec<String>,
+        started_with: (u16, trek_core::settings::Reach),
+        advert: Option<bonjour::Advert>,
+        tasks: Vec<Task<()>>,
+    ) -> Self {
+        let devices = handle.devices();
+        let connected = handle.connected_devices().into_iter().collect();
+        Remote {
+            handle,
+            offer: None,
+            addresses,
+            advertise,
+            routes,
+            started_with,
+            devices,
+            connected,
+            sent: HashMap::new(),
+            unlisted: HashMap::new(),
+            answered: HashMap::new(),
+            watched: HashMap::new(),
+            dormant: HashMap::new(),
+            rows_key: None,
+            snapshot_key: None,
+            advert,
+            announce: None,
+            policy: Arc::new(std::sync::Mutex::new(link::LinkPolicy { reach: started_with.1, tailscale: None })),
+            _tasks: tasks,
+        }
+    }
+
+    // Read by `phone_link`, which Settings › Phone is yet to show.
+    #[allow(dead_code)]
+    fn policy(&self) -> link::LinkPolicy {
+        *self.policy.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 /// A transcript phones follow: what each item looked like when last sent.
@@ -207,10 +264,10 @@ impl Tailnet {
 }
 
 impl Addresses {
-    /// Off the main thread: it may ask Tailscale.
-    pub fn find() -> Self {
-        let interfaces = interface_addresses();
-        let mut out = Self::from_interfaces(&interfaces, tailscale_ip());
+    /// This Mac's addresses, from `interfaces` as just read (`interface_addresses`). Off the
+    /// main thread: it may ask Tailscale.
+    fn find_in(interfaces: &[(String, Ipv4Addr)]) -> Self {
+        let mut out = Self::from_interfaces(interfaces, tailscale_ip());
         if out.tailscale.is_some() {
             out.tailnet = tailscale(&["status", "--json"]).as_deref().and_then(Tailnet::parse);
         }
@@ -297,8 +354,9 @@ pub(crate) fn first_ipv4(output: &str) -> Option<Ipv4Addr> {
     output.lines().find_map(|l| l.trim().parse().ok())
 }
 
-/// Where the server listens and what the pairing code tells phones to dial: the same address,
-/// so nothing answers on interfaces phones weren't pointed at.
+/// What the pairing code tells phones to dial first. The server listens on every interface
+/// whatever this says; the `reach` setting decides per connection which it serves
+/// (`link::LinkPolicy`).
 pub(crate) fn remote_endpoint(addresses: &Addresses, reach: trek_core::settings::Reach, port: u16) -> std::io::Result<(SocketAddr, String)> {
     let ip = match reach {
         trek_core::settings::Reach::Tailscale => addresses.tailscale.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "Tailscale isn't connected; choose Wi-Fi or connect Tailscale"))?,
@@ -310,7 +368,7 @@ pub(crate) fn remote_endpoint(addresses: &Addresses, reach: trek_core::settings:
 /// Where else phones reach the server, besides `remote_endpoint`'s: on Wi-Fi, the tailnet too
 /// when Tailscale is up, so a phone paired at home still finds this Mac away from it (the
 /// tailnet is the user's own network). "Tailscale" is the tailnet alone: whoever chose it may
-/// not want Trek answering on the Wi-Fi it's on.
+/// not want Trek answering on the Wi-Fi it's on (and it doesn't: `link::LinkPolicy`).
 pub(crate) fn other_endpoint(addresses: &Addresses, reach: trek_core::settings::Reach, port: u16) -> Option<SocketAddr> {
     match reach {
         trek_core::settings::Reach::Wifi => addresses.lan.and(addresses.tailscale).map(|ip| SocketAddr::from((ip, port))),
@@ -449,14 +507,20 @@ impl Workspace {
                     let host = host_info();
                     let announce = (host.name.clone(), host.id.clone());
                     let identity = tr::TlsIdentity::load_or_create(&mobile_dir(), &host.name)?;
-                    let addresses = Addresses::find();
-                    let (bind, advertise) = remote_endpoint(&addresses, reach, port)?;
+                    // What the addresses were found from is what `follow_addresses` compares with
+                    // later: an interface that comes up after this read is a change to act on.
+                    let interfaces = interface_addresses();
+                    let addresses = Addresses::find_in(&interfaces);
+                    let (_, advertise) = remote_endpoint(&addresses, reach, port)?;
                     let mut config = tr::ServerConfig::new(host);
-                    config.bind = bind;
                     config.advertise = Some(advertise.clone());
-                    config.also_bind = other_endpoint(&addresses, reach, port).into_iter().collect();
                     config.routes = remote_routes(&addresses, reach, port)?;
                     let routes = config.routes.clone();
+                    let policy = Arc::new(std::sync::Mutex::new(link::LinkPolicy { reach, tailscale: addresses.tailscale }));
+                    config.admit = Some({
+                        let policy = policy.clone();
+                        tr::Admission::new(move |peer, local| policy.lock().unwrap_or_else(|e| e.into_inner()).admits(peer.ip(), local.ip()))
+                    });
                     config.devices_path = Some(mobile_dir().join("devices.json"));
                     config.tls = Some(identity);
                     config.features = tr::feature::ALL.iter().map(|f| f.to_string()).collect();
@@ -464,14 +528,20 @@ impl Workspace {
                     let host = Arc::new(host);
                     let handle = trek_core::runtime()
                         .spawn(async move {
-                            // A server just stopped (a new port or address) lets go of its port a
-                            // moment later.
+                            // Every interface, IPv4 too (`[::]` takes both), so a new address
+                            // never needs a restart; IPv4 alone where IPv6 is off. A server just
+                            // stopped (a new port or setting) lets go of its port a moment later.
                             let mut tries = 0;
+                            config.bind = SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
                             loop {
                                 match tr::RemoteServer::start(config.clone(), host.clone()).await {
                                     Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && tries < 20 => {
                                         tries += 1;
                                         tokio::time::sleep(Duration::from_millis(100)).await;
+                                    }
+                                    Err(e) if config.bind.is_ipv6() && e.kind() != std::io::ErrorKind::AddrInUse => {
+                                        tracing::info!("phone server: can't listen on IPv6 ({e}); listening on IPv4 alone");
+                                        config.bind = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
                                     }
                                     other => break other,
                                 }
@@ -479,26 +549,28 @@ impl Workspace {
                         })
                         .await
                         .map_err(std::io::Error::other)??;
-                    anyhow::Ok((handle, requests, addresses, advertise, routes, announce))
+                    anyhow::Ok((handle, requests, addresses, advertise, routes, interfaces, announce, policy))
                 })
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 ws.remote_starting = false;
                 match started {
-                    Ok((handle, requests, addresses, advertise, routes, (name, id))) if ws.settings.mobile.enabled => {
+                    Ok((handle, requests, addresses, advertise, routes, interfaces, (name, id), policy)) if ws.settings.mobile.enabled => {
                         ws.remote_error = None;
-                        // Only where phones on this network can reach it: not this Mac alone,
-                        // and not the tailnet (a phone there dials the addresses it was given).
-                        let on_lan = reach == trek_core::settings::Reach::Wifi && addresses.lan.is_some();
-                        let advert = on_lan.then(|| bonjour::Advert::new(&name, &id, port)).flatten();
+                        let advert = announced(&addresses, reach).then(|| bonjour::Advert::new(&name, &id, port)).flatten();
+                        tracing::info!("phone server: listening on {:?}; phones are told {routes:?}", handle.listening());
                         let tasks = vec![
                             serve_requests(cx.weak_entity(), requests, cx),
                             push_changes(cx.weak_entity(), cx),
                             hear_notices(cx.weak_entity(), handle.notices(), cx),
-                            follow_addresses(cx.weak_entity(), routes.clone(), (port, reach), cx),
+                            follow_addresses(cx.weak_entity(), interfaces, cx),
                         ];
-                        let devices = handle.devices();
-                        ws.remote = Some(Remote { handle, offer: None, addresses, advertise, routes, started_with: (port, reach), devices, connected: HashSet::new(), sent: HashMap::new(), unlisted: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _advert: advert, _tasks: tasks });
+                        // After `hear_notices` subscribed: phones that connected before it did
+                        // were announced to no one, and are taken from the server instead.
+                        let mut remote = Remote::new(handle, addresses, advertise, routes, (port, reach), advert, tasks);
+                        remote.announce = Some((name, id));
+                        remote.policy = policy;
+                        ws.remote = Some(remote);
                         // A port or address changed while it started (`sync_remote` waits for a start
                         // to finish): start again with the new one.
                         ws.sync_remote(cx);
@@ -538,9 +610,9 @@ impl Workspace {
         config.bind = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
         let (host, _requests) = tr::ChannelHost::new();
         let handle = trek_core::runtime().block_on(tr::RemoteServer::start(config, Arc::new(host))).expect("a test server");
-        let connected = HashSet::from(["phone".to_string()]);
-        let started_with = (0, trek_core::settings::Reach::Wifi);
-        self.remote = Some(Remote { handle, offer: None, addresses: Addresses::default(), advertise: String::new(), routes: vec![], started_with, devices: vec![], connected, sent: HashMap::new(), unlisted: HashMap::new(), answered: HashMap::new(), watched: HashMap::new(), dormant: HashMap::new(), rows_key: None, _advert: None, _tasks: vec![] });
+        let mut remote = Remote::new(handle, Addresses::default(), String::new(), vec![], (0, trek_core::settings::Reach::Wifi), None, vec![]);
+        remote.connected.insert("phone".to_string());
+        self.remote = Some(remote);
     }
 
     fn stop_remote(&mut self, cx: &mut Context<Self>) {
@@ -596,7 +668,13 @@ impl Workspace {
     pub(crate) fn remote_request(&mut self, req: tr::HostRequest, cx: &mut Context<Self>) {
         match req {
             tr::HostRequest::Snapshot { reply } => {
-                let _ = reply.send(Ok(self.remote_snapshot()));
+                let snapshot = self.remote_snapshot();
+                // The first phone's snapshot is what later ones are compared with (not every
+                // phone's: one connecting mustn't hide a change from those connected before).
+                if let Some(remote) = self.remote.as_mut().filter(|r| r.snapshot_key.is_none()) {
+                    remote.snapshot_key = Some(hash(&(&snapshot.projects, &snapshot.agents, snapshot.full_access)));
+                }
+                let _ = reply.send(Ok(snapshot));
             }
             tr::HostRequest::Transcript { thread_id, after_seq, limit, reply } => {
                 let id = thread_id.clone();
@@ -695,6 +773,10 @@ impl Workspace {
             tr::HostRequest::AddNoteImage { req, reply } => {
                 let _ = reply.send(notes::add_image(req));
             }
+            // Another Trek driving this one (`docs/MULTI-MACHINE.md`).
+            tr::HostRequest::MachineInfo { reply } => machines::machine_info(reply, cx),
+            tr::HostRequest::CloneProject { req, progress, reply } => self.remote_clone_project(req, progress, reply, cx),
+            tr::HostRequest::PutFiles { project_id, files, reply } => self.remote_put_files(&project_id, files, reply, cx),
         }
     }
 
@@ -1180,6 +1262,13 @@ impl Workspace {
         let now = now_ms();
         let threads: Vec<tr::ThreadSummary> = self.remote_threads().into_iter().map(|t| self.remote_summary(t, now)).collect();
         let unlisted = self.remote_unlisted(&threads, now);
+        let (projects, agents, full_access) = self.remote_choices();
+        tr::Snapshot { threads, projects, agents, full_access, unlisted }
+    }
+
+    /// What of a snapshot isn't sent any other way: the projects, the agents a thread can start
+    /// with and their models, and whether Full access is unlocked.
+    fn remote_choices(&self) -> (Vec<tr::ProjectSummary>, Vec<tr::AgentOption>, bool) {
         let projects = self
             .workspace_projects()
             .into_iter()
@@ -1211,7 +1300,7 @@ impl Workspace {
                 tr::AgentOption { key: agent.key(), name: agent.display_name(), logo: crate::ui::logo_key(&agent).map(str::to_string), default_model, models, icon: icons::agent_icon(&agent) }
             })
             .collect();
-        tr::Snapshot { threads, projects, agents, full_access: self.settings.permissions.full_access_unlocked, unlisted }
+        (projects, agents, self.settings.permissions.full_access_unlocked)
     }
 
     /// Bring `w` up to date with `id`'s transcript, looking only at what can have changed since
@@ -1481,7 +1570,24 @@ impl Workspace {
         let key = (self.threads_gen, self.live.values().fold(0u64, |sum, l| sum.wrapping_add(l.revision)), now / ROWS_AT_LEAST_MS);
         let rows: Option<Vec<tr::ThreadSummary>> = (remote.rows_key != Some(key)).then(|| self.remote_threads().into_iter().map(|t| self.remote_summary(t, now)).collect());
         let unlisted = rows.as_ref().map(|rows| (self.remote_unlisted(rows, now), self.threads.iter().map(|t| t.id.clone()).collect::<HashSet<_>>()));
+        // Projects, agents and their models, Full access: only a snapshot carries them, so a new
+        // one goes when they change (agents found or signed in after a phone connected, models
+        // fetched, a project added, Full access unlocked).
+        let choices = self.remote_choices();
+        let choices_key = hash(&choices);
+        let snapshot = (remote.snapshot_key != Some(choices_key)).then(|| {
+            let threads: Vec<tr::ThreadSummary> = self.remote_threads().into_iter().map(|t| self.remote_summary(t, now)).collect();
+            let unlisted = self.remote_unlisted(&threads, now);
+            let (projects, agents, full_access) = choices;
+            tr::Snapshot { threads, projects, agents, full_access, unlisted }
+        });
         let Some(remote) = self.remote.as_mut() else { return };
+        if let Some(snapshot) = snapshot {
+            remote.snapshot_key = Some(choices_key);
+            #[cfg(test)]
+            tests::SNAPSHOTS_PUSHED.with(|n| n.set(n.get() + 1));
+            remote.handle.push(tr::HostEvent::Snapshot(snapshot));
+        }
         if let Some(rows) = rows {
             remote.rows_key = Some(key);
             let ids: HashSet<&str> = rows.iter().map(|r| r.id.as_str()).collect();
@@ -1516,6 +1622,81 @@ impl Workspace {
             }
             remote.watched.insert(id, w);
         }
+    }
+
+    /// This Mac's addresses are now `addresses`: tell phones (the routes in the next `welcome`
+    /// and pairing code), Bonjour and the reach policy, without stopping the server.
+    pub(crate) fn remote_addresses_changed(&mut self, addresses: Addresses, cx: &mut Context<Self>) {
+        let Some(remote) = self.remote.as_mut() else { return };
+        if (remote.addresses.lan, remote.addresses.tailscale) == (addresses.lan, addresses.tailscale) {
+            // What Tailscale says of the tailnet (its phones online), for Settings alone.
+            if remote.addresses != addresses {
+                remote.addresses = addresses;
+                cx.notify();
+            }
+            return;
+        }
+        let reach = remote.started_with.1;
+        // What it listens on, not the setting: the same but for tests' servers on port 0.
+        let port = remote.handle.local_addr().port();
+        // "Tailscale" with Tailscale gone: phones keep the tailnet address they have, which
+        // answers again when it's back (it rarely changes).
+        let routes = remote_routes(&addresses, reach, port).unwrap_or_else(|_| remote.routes.clone());
+        tracing::info!(
+            "phone server: this machine's addresses are now Wi-Fi {:?}, Tailscale {:?} (were {:?}, {:?}); phones are told {routes:?} (were {:?}); still listening on {:?}",
+            addresses.lan,
+            addresses.tailscale,
+            remote.addresses.lan,
+            remote.addresses.tailscale,
+            remote.routes,
+            remote.handle.listening()
+        );
+        remote.policy.lock().unwrap_or_else(|e| e.into_inner()).tailscale = addresses.tailscale;
+        let routes_changed = routes != remote.routes;
+        if routes_changed {
+            remote.advertise = routes.first().cloned().unwrap_or_default();
+            remote.handle.set_routes(Some(remote.advertise.clone()), routes.clone());
+            remote.routes = routes;
+        }
+        // Announced again under the new address (or for the first time, or no more).
+        let lan_changed = addresses.lan != remote.addresses.lan;
+        let announce = announced(&addresses, reach);
+        if lan_changed || announce != remote.advert.is_some() {
+            remote.advert = None;
+            if let Some((name, id)) = remote.announce.as_ref().filter(|_| announce) {
+                remote.advert = bonjour::Advert::new(name, id, port);
+            }
+        }
+        remote.addresses = addresses;
+        // A pairing code on screen points at the old address: one that points at the new.
+        if routes_changed && remote.offer.is_some() {
+            self.offer_pairing(cx);
+        }
+        cx.notify();
+    }
+
+    /// The phone link as it stands, for Settings › Phone: where the server listens, what phones
+    /// are told to dial, the name Bonjour announces, which connections it takes, and the last
+    /// phone that connected (when, and on which of this Mac's addresses). `None` while the
+    /// server isn't running.
+    #[cfg_attr(not(test), allow(dead_code))] // for Settings › Phone, which is yet to show it
+    pub(crate) fn phone_link(&self) -> Option<link::PhoneLink> {
+        let remote = self.remote.as_ref()?;
+        let policy = remote.policy();
+        let last_connection = remote.handle.last_connection().map(|c| link::LastConnection {
+            device_name: remote.devices.iter().find(|d| d.device_id == c.device_id).map(|d| d.name.clone()),
+            device_id: c.device_id,
+            at: c.at,
+            route: c.local.to_string(),
+            via: link::via(c.peer.ip(), c.local.ip(), policy.tailscale),
+        });
+        Some(link::PhoneLink {
+            listening: remote.handle.listening(),
+            routes: remote.routes.clone(),
+            advertised_name: remote.advert.as_ref().and(remote.announce.as_ref()).map(|(name, _)| name.clone()),
+            policy,
+            last_connection,
+        })
     }
 
     pub(crate) fn remote_notice(&mut self, notice: tr::ServerNotice, cx: &mut Context<Self>) {
@@ -1814,7 +1995,7 @@ fn item_time(item: &Item) -> Option<i64> {
 }
 
 /// What a phone would read of `body`, hashed (its JSON, written straight into the hasher).
-fn hash(body: &tr::ItemBody) -> u64 {
+fn hash(body: &impl serde::Serialize) -> u64 {
     struct Hashing(std::collections::hash_map::DefaultHasher);
     impl std::io::Write for Hashing {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -1892,13 +2073,16 @@ fn serve_requests(ws: WeakEntity<Workspace>, requests: async_channel::Receiver<t
     })
 }
 
-/// Start the server again when the address it should listen on isn't the one it does: Trek
-/// started before Wi-Fi was up (it listened on this Mac only), the network handed out another
-/// address, Tailscale came or went. The interface list is cheap to read and is what changes
-/// first; Tailscale is asked only when it does.
-fn follow_addresses(ws: WeakEntity<Workspace>, routes: Vec<String>, (port, reach): (u16, trek_core::settings::Reach), cx: &mut Context<Workspace>) -> Task<()> {
+/// Keep what phones are told current as this Mac's addresses change (Trek started before Wi-Fi
+/// was up, the network handed out another address, Tailscale came or went): the routes the next
+/// `welcome` and pairing code carry, the Bonjour record, the tailnet address the reach policy
+/// knows. The server listens on every interface and carries on: no phone is dropped. The
+/// interface list is cheap to read and is what changes first; Tailscale is asked only when it does.
+///
+/// `seen` is the interface list the server's addresses were found from (not a fresh read: an
+/// address that came up since is a change to act on).
+fn follow_addresses(ws: WeakEntity<Workspace>, mut seen: Vec<(String, Ipv4Addr)>, cx: &mut Context<Workspace>) -> Task<()> {
     cx.spawn(async move |_, cx: &mut AsyncApp| {
-        let mut seen = interface_addresses();
         loop {
             cx.background_executor().timer(ADDRESSES_EVERY).await;
             let now = cx.background_executor().spawn(async { interface_addresses() }).await;
@@ -1906,18 +2090,19 @@ fn follow_addresses(ws: WeakEntity<Workspace>, routes: Vec<String>, (port, reach
                 continue;
             }
             seen = now;
-            let wanted = cx.background_executor().spawn(async move { remote_routes(&Addresses::find(), reach, port).ok() }).await;
-            if wanted.as_ref() == Some(&routes) {
-                continue;
+            let interfaces = seen.clone();
+            let found = cx.background_executor().spawn(async move { Addresses::find_in(&interfaces) }).await;
+            if ws.update(cx, |ws, cx| ws.remote_addresses_changed(found, cx)).is_err() {
+                break;
             }
-            tracing::info!("phone server: this Mac's addresses are now {wanted:?}, were {routes:?}; starting again");
-            let _ = ws.update(cx, |ws, cx| {
-                ws.stop_remote(cx);
-                ws.sync_remote(cx);
-            });
-            break;
         }
     })
+}
+
+/// Whether Bonjour announces the server: only on Wi-Fi, where phones on this network can reach
+/// it; not this Mac alone, and not the tailnet (a phone there dials the addresses it was given).
+fn announced(addresses: &Addresses, reach: trek_core::settings::Reach) -> bool {
+    reach == trek_core::settings::Reach::Wifi && addresses.lan.is_some()
 }
 
 /// Push what changed, every tick, while the server runs.
@@ -1969,6 +2154,8 @@ pub(crate) mod tests {
         /// Changed files tests give turns, by (thread, turn end index), until the Mac works
         /// them out itself (`turn_changes`).
         pub(crate) static TURN_FILES: RefCell<HashMap<(String, usize), Vec<trek_remote::ChangedFile>>> = RefCell::default();
+        /// Snapshots `push_remote_changes` has pushed to phones.
+        pub(crate) static SNAPSHOTS_PUSHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
     #[test]

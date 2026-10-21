@@ -89,9 +89,11 @@ pub(crate) fn pages() -> impl Iterator<Item = SettingsPage> {
 }
 
 /// A settings page by its label, case-insensitive with dashes for spaces ("updates", "api-keys").
+/// A label with more than one part answers to its first too ("phone" for "Phone & Machines").
 pub fn page_named(name: &str) -> Option<SettingsPage> {
     let name = name.trim().to_lowercase();
-    pages().find(|p| p.label().to_lowercase().replace(' ', "-") == name)
+    let slug = |label: &str| label.to_lowercase().replace(' ', "-");
+    pages().find(|p| slug(p.label()) == name).or_else(|| pages().find(|p| p.label().split_once(" & ").is_some_and(|(first, _)| slug(first) == name)))
 }
 
 pub(crate) fn page_blurb(p: SettingsPage) -> std::borrow::Cow<'static, str> {

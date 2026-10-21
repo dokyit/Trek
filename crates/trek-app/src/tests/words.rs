@@ -59,7 +59,8 @@ fn windows_pages_say_windows() {
         assert!(has(&about, "Version, Windows and agent details, for a bug report."), "{about:?}");
 
         let mobile = said(&trek, cx, SettingsPage::Mobile);
-        assert!(mobile.iter().all(|s| !s.contains("Mac")), "{mobile:?}");
+        // "Machines" is no Mac.
+        assert!(mobile.iter().all(|s| !s.split(|c: char| !c.is_alphanumeric()).any(|w| w == "Mac")), "{mobile:?}");
 
         let snapshots = said(&trek, cx, SettingsPage::Snapshots);
         assert!(snapshots.iter().all(|s| !s.contains("macOS") && !s.contains("Finder")), "{snapshots:?}");

@@ -216,6 +216,8 @@ impl TrekWindow {
                     }
                 }
                 WorkspaceEvent::InsertIntoComposer(text) => this.composer.update(cx, |c, cx| c.insert_text(text, window, cx)),
+                WorkspaceEvent::SendDraft if this.workspace.read(cx).main_window == Some(window.window_handle()) => this.composer.update(cx, |c, cx| c.send_now(window, cx)),
+                WorkspaceEvent::SendDraft => {}
                 WorkspaceEvent::OpenEditor { path, line, preview } if this.workspace.read(cx).main_window == Some(window.window_handle()) => {
                     if this.workspace.read(cx).ide() {
                         let (path, line, preview) = (path.clone(), *line, *preview);
@@ -594,7 +596,8 @@ impl Render for WindowTitle {
             match &ws.route {
             Route::Thread(_) => match &thread {
                 // A thread without a project has a folder of its own, but no project to name.
-                Some(t) => (t.cwd.as_deref().filter(|c| !trek_core::paths::is_chat_dir(c)).map(project_name), t.title.clone(), t.cwd.clone()),
+                // A thread on another machine is under that machine's name.
+                Some(t) => (t.cwd.as_deref().filter(|c| !trek_core::paths::is_chat_dir(c)).map(project_name).or_else(|| ws.on_machine_in(&Scope::Main)), t.title.clone(), t.cwd.clone()),
                 None => (None, "Trek".into(), None),
             },
             Route::Draft { project } => (project.as_deref().map(project_name), "New thread".into(), project.clone()),

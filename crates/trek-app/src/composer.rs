@@ -23,6 +23,8 @@ use trek_core::orchestrate::{Consult, Consultant, Style};
 use trek_core::settings::FollowUp;
 use trek_core::{AgentId, Effort, HandHolding, RunState};
 
+mod machine_chip;
+pub(crate) use machine_chip::reach_dot;
 pub(crate) mod pickers;
 
 pub(crate) use pickers::{PickerHost, Pickers};
@@ -1825,6 +1827,10 @@ impl Composer {
         let is_draft = ws.is_draft_in(&self.scope);
         let draft_worktree = ws.prefs_in(&self.scope).worktree;
         let worktree = ws.thread_in(&self.scope).and_then(|t| t.worktree.clone());
+        // The main window's draft in a project picks the machine its thread starts on; a thread
+        // on another machine names it. On another machine, this Mac's branch is beside the point.
+        let draft_project = ws.draft_project_in(&self.scope).filter(|_| is_draft && with_project && self.scope == Scope::Main);
+        let elsewhere = draft_project.as_ref().is_some_and(|p| ws.draft_machine(p).is_some());
         let theme = cx.theme().clone();
         let chip = |id: &'static str| {
             h_flex().id(id).h(px(26.)).px(px(8.)).gap(px(6.)).rounded(px(7.)).text_sm().text_color(theme.foreground.opacity(0.82))
@@ -1940,11 +1946,15 @@ impl Composer {
             ),
             _ => None,
         };
+        let machine = draft_project.map(|p| self.machine_chip(p, cx));
+        let on_machine = self.on_machine_chip(cx);
         h_flex()
             .gap_1()
             .when(with_project, |el| el.child(self.project_chip(cx)))
+            .children(machine)
+            .children(on_machine)
             .child(place)
-            .children(branch)
+            .children(branch.filter(|_| !elsewhere))
             .into_any_element()
     }
 

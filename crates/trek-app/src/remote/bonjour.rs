@@ -1,8 +1,9 @@
 //! The phone server announced on the local network (Bonjour, `_trek._tcp`), so a paired phone
 //! finds this Mac again when its address changes: the router handed out another one, or the
 //! phone was paired on another network. The record carries this Mac's lasting id (`id=`), which
-//! the phone matches against the Mac it paired with; the connection is still TLS pinned to this
-//! Mac's certificate, so a record that lies gets nowhere.
+//! the phone matches against the Mac it paired with, and its name (`name=`), so another Mac on the
+//! same Wi-Fi can offer it by name when pairing a machine; the connection is still TLS pinned to
+//! this Mac's certificate, so a record that lies gets nowhere.
 
 // Only a Mac announces itself (DNSServiceRegister); elsewhere the record is built for the tests.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -10,13 +11,18 @@
 /// The service type phones browse for.
 pub const SERVICE: &str = "_trek._tcp";
 
-/// The TXT record: `id=<host id>`, as DNS-SD wants it (each entry led by its length).
-pub(crate) fn txt_record(host_id: &str) -> Vec<u8> {
-    let entry = format!("id={host_id}");
-    let entry = &entry.as_bytes()[..entry.len().min(255)];
-    let mut out = Vec::with_capacity(entry.len() + 1);
-    out.push(entry.len() as u8);
-    out.extend_from_slice(entry);
+/// The TXT record: `id=<host id>` and `name=<this Mac's name>`, as DNS-SD wants it (each entry
+/// led by its length, at most 255 bytes: a longer name is cut at a character boundary).
+pub(crate) fn txt_record(host_id: &str, name: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    for entry in [format!("id={host_id}"), format!("name={name}")] {
+        let mut end = entry.len().min(255);
+        while !entry.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.push(end as u8);
+        out.extend_from_slice(&entry.as_bytes()[..end]);
+    }
     out
 }
 
@@ -35,9 +41,9 @@ impl Advert {
     #[cfg(target_os = "macos")]
     pub fn new(name: &str, host_id: &str, port: u16) -> Option<Self> {
         use std::ffi::CString;
+        let txt = txt_record(host_id, name);
         let name = CString::new(name.replace('\0', "")).ok()?;
         let kind = CString::new(SERVICE).ok()?;
-        let txt = txt_record(host_id);
         let mut sd_ref: ffi::DNSServiceRef = std::ptr::null_mut();
         // SAFETY: every pointer is valid for the call; the responder copies what it keeps. No
         // callback: the registration stands (renamed on a clash) for as long as `sd_ref` lives.
@@ -107,8 +113,13 @@ mod ffi {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_txt_record_is_one_length_led_entry() {
-        assert_eq!(super::txt_record("abc"), b"\x06id=abc".to_vec());
-        assert_eq!(super::txt_record(&"x".repeat(300)).len(), 256);
+    fn the_txt_record_carries_the_id_and_the_name_length_led() {
+        assert_eq!(super::txt_record("abc", "Studio"), b"\x06id=abc\x0bname=Studio".to_vec());
+        assert_eq!(super::txt_record(&"x".repeat(300), "M").len(), 256 + 7);
+        // A long name is cut whole characters at a time ("é" is two bytes: 5 + 125 * 2 = 255).
+        let txt = super::txt_record("a", &"é".repeat(200));
+        let name = &txt[5..];
+        assert_eq!(name[0], 255);
+        assert!(std::str::from_utf8(&name[1..]).is_ok());
     }
 }

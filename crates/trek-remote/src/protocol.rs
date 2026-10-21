@@ -6,7 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
+mod machines;
 mod parity;
+pub use machines::*;
 pub use parity::*;
 
 /// The protocol version this crate speaks (`hello`/`pair` carry the phone's, `welcome`/`paired`
@@ -170,6 +172,14 @@ pub enum ClientMessage {
     NoteAsset(NoteAssetRequest),
     /// Keep a photo with the notes (answered with `note_image`, its link).
     AddNoteImage(AddNoteImageRequest),
+    // One Trek driving another (`machines.rs`; the Mac lists `machines` in `features`).
+    /// What this machine is (answered with `machine_info`).
+    MachineInfo,
+    /// `git clone` a repo into a new project (answered with `ack {project_id}`, after
+    /// `clone_progress` pushes; `error {code: "clone_failed"}` when git fails).
+    CloneProject(CloneProjectRequest),
+    /// Write files under a project's folder (answered with `ack`).
+    PutFiles(PutFilesRequest),
 }
 
 impl ClientMessage {
@@ -217,6 +227,9 @@ impl ClientMessage {
             Self::Icon(_) => "icon",
             Self::NoteAsset(_) => "note_asset",
             Self::AddNoteImage(_) => "add_note_image",
+            Self::MachineInfo => "machine_info",
+            Self::CloneProject(_) => "clone_project",
+            Self::PutFiles(_) => "put_files",
         }
     }
 }
@@ -241,6 +254,7 @@ impl ClientMessage {
                 | Self::BackgroundOutput { .. }
                 | Self::Icon(_)
                 | Self::NoteAsset(_)
+                | Self::MachineInfo
         )
     }
 }
@@ -455,6 +469,9 @@ pub mod feature {
     pub const BASECAMP_V2: &str = "basecamp_v2";
     /// `note_asset` and `add_note_image`: a note's pictures, and adding one.
     pub const NOTE_IMAGES: &str = "note_images";
+    /// `machine_info`, `clone_project` (with `clone_progress`) and `put_files`: another Trek
+    /// may run threads here (`docs/MULTI-MACHINE.md`).
+    pub const MACHINES: &str = "machines";
 
     /// Every feature above, for a Mac that serves them all.
     pub const ALL: &[&str] = &[
@@ -471,6 +488,7 @@ pub mod feature {
         ICON,
         BASECAMP_V2,
         NOTE_IMAGES,
+        MACHINES,
     ];
 }
 
@@ -724,6 +742,9 @@ pub enum ServerMessage {
         /// a message): its text, for the phone's composer.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
+        /// Set for `clone_project`: the id of the new project.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
     },
     /// The reply to `ping`.
     Pong,
@@ -762,6 +783,11 @@ pub enum ServerMessage {
     Unlisted { thread: ThreadSummary },
     /// The reply to `search`.
     SearchResults(SearchResults),
+    /// The reply to `machine_info`.
+    MachineInfo(MachineInfo),
+    /// A line of git's output while a `clone_project` runs, to the machine that asked (`folder`
+    /// as it asked for it).
+    CloneProgress { folder: String, line: String },
 }
 
 /// The reply to `search`: title matches first (best first), then message matches.
@@ -797,6 +823,8 @@ pub enum ErrorCode {
     /// E.g. the request was already answered.
     Conflict,
     HostError,
+    /// `clone_project`: git couldn't clone (the message says what git said).
+    CloneFailed,
 }
 
 impl ErrorCode {
@@ -810,6 +838,7 @@ impl ErrorCode {
             Self::NotFound => "not_found",
             Self::Conflict => "conflict",
             Self::HostError => "host_error",
+            Self::CloneFailed => "clone_failed",
         }
     }
 }
