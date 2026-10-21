@@ -475,7 +475,7 @@ fn mobile_dir() -> PathBuf {
 }
 
 /// The Mac as phones see it: a lasting id, its name, Trek's version.
-fn host_info() -> tr::HostInfo {
+pub(crate) fn host_info() -> tr::HostInfo {
     let id_file = mobile_dir().join("host-id");
     let id = std::fs::read_to_string(&id_file).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| {
         let id = uuid_like();

@@ -8,6 +8,8 @@ Pairs Trek with its iPhone companion so a user can view/start/steer threads and 
 
 Open **Settings → Phone**, enable the phone connection, and scan the pairing QR code in the iOS app. Choose push behavior on the same page.
 
+An iPhone can pair with several machines at once: all stay connected, their threads merge into one list (qualified `"<hostId>:<id>"` on the phone), and each is unpaired independently in Settings › Machines.
+
 ## Reach it with the CLI
 
 ```sh

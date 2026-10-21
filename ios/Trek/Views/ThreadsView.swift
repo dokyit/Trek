@@ -14,6 +14,7 @@ struct ThreadsView: View {
     @State private var showingAll: Set<String> = []
     @State private var settledOpen = Launch.folded.contains("-Settled")
     @State private var projectFilter: String?
+    @State private var machineFilter: String?
     @State private var deleteAsk: DeleteAsk?
     /// A thread whose swipe asked for the snooze menu, or a time of one's own.
     @State private var snoozeChoice: ThreadSummary?
@@ -31,19 +32,22 @@ struct ThreadsView: View {
         NavigationStack(path: $path.onSet { if Perf.enabled { Perf.navigated = Perf.now } }) {
             ScrollViewReader { proxy in
                 List {
-                    if model.mode == .live, model.connection != .connected {
-                        Group {
-                            if case .identityChanged(let expected, let seen) = model.connection {
-                                IdentityChangedCard(host: PairedMac.load()?.hostName, expected: expected, seen: seen) { model.leave() }
-                            } else {
-                                ConnectionBanner(state: model.connection, detail: model.connectionText,
-                                                 host: model.host?.name ?? PairedMac.load()?.hostName,
-                                                 retry: { model.retryNow() }) { model.leave() }
+                    if model.mode == .live {
+                        // Each machine that isn't connected says so under its own name.
+                        ForEach(model.links.filter { $0.connection != .connected }) { link in
+                            Group {
+                                if case .identityChanged(let expected, let seen) = link.connection {
+                                    IdentityChangedCard(host: link.name, expected: expected, seen: seen) { model.leave(link) }
+                                } else {
+                                    ConnectionBanner(state: link.connection, detail: link.connectionText,
+                                                     host: link.name,
+                                                     retry: { model.retryNow(link) }) { model.leave(link) }
+                                }
                             }
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 8, trailing: 16))
                         }
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 8, trailing: 16))
                     }
                     switch grouping {
                     case .project: byProject
@@ -82,7 +86,9 @@ struct ThreadsView: View {
                 .sheet(item: $snoozePicking) { SnoozePicker(thread: $0) }
                 .sheet(isPresented: $showingUsage) { UsageSheet() }
                 .task(id: model.connection == .connected || model.mode == .demo) {
-                    if model.connection == .connected || model.mode == .demo { model.loadUsage(quiet: true) }
+                    if model.connection == .connected || model.mode == .demo {
+                        for link in model.links { model.loadUsage(quiet: true, on: link) }
+                    }
                 }
                 .deleteConfirmation($deleteAsk, model: model)
                 .onChange(of: model.revealRequest) {
@@ -112,11 +118,21 @@ struct ThreadsView: View {
                         }
                     }
                 }
+                if model.links.count > 1 {
+                    Section("Machine") {
+                        Picker("Machine", selection: $machineFilter) {
+                            Text("All machines").tag(String?.none)
+                            ForEach(model.links) { l in
+                                Text(l.name).tag(Optional(l.id))
+                            }
+                        }
+                    }
+                }
                 Section("Project") {
                     Picker("Project", selection: $projectFilter) {
                         Text("All projects").tag(String?.none)
                         ForEach(model.projects) { p in
-                            Text(p.name).tag(Optional(p.id))
+                            Text(model.links.count > 1 ? "\(p.name) · \(model.hostName(of: p.id) ?? "")" : p.name).tag(Optional(p.id))
                         }
                     }
                 }
@@ -127,7 +143,7 @@ struct ThreadsView: View {
                     Button("New thread", systemImage: "plus") { showNew = true }
                 }
             } label: {
-                Image(systemName: projectFilter == nil ? "ellipsis" : "line.3.horizontal.decrease")
+                Image(systemName: projectFilter == nil && machineFilter == nil ? "ellipsis" : "line.3.horizontal.decrease")
             }
         }
     }
@@ -259,18 +275,30 @@ struct ThreadsView: View {
     // MARK: Rows
 
     private func filtered(_ list: [ThreadSummary]) -> [ThreadSummary] {
-        guard let projectFilter else { return list }
-        return list.filter { $0.project?.id == projectFilter }
+        var list = list
+        if let machineFilter { list = list.filter { model.link(for: $0.id)?.id == machineFilter } }
+        if let projectFilter { list = list.filter { $0.project?.id == projectFilter } }
+        return list
     }
 
     private func filtered(_ groups: [ProjectGroup]) -> [ProjectGroup] {
-        guard let projectFilter else { return groups }
-        return groups.filter { $0.id == projectFilter }
+        var groups = groups
+        if let machineFilter {
+            groups = groups.compactMap { g in
+                var g = g
+                g.active = g.active.filter { model.link(for: $0.id)?.id == machineFilter }
+                g.quiet = g.quiet.filter { model.link(for: $0.id)?.id == machineFilter }
+                return g.count > 0 ? g : nil
+            }
+        }
+        if let projectFilter { groups = groups.filter { $0.id == projectFilter } }
+        return groups
     }
 
     private func row(_ t: ThreadSummary, showsProject: Bool) -> some View {
         NavigationLink(value: t.id) {
-            ThreadRow(thread: t, showsProject: showsProject)
+            ThreadRow(thread: t, showsProject: showsProject,
+                      host: model.links.count > 1 ? model.hostName(of: t.id) : nil)
         }
         .id(t.id)
         .navigationLinkIndicatorVisibility(.hidden)
@@ -280,12 +308,12 @@ struct ThreadsView: View {
         .swipeActions(edge: .leading) {
             if t.unseen {
                 Button("Read", systemImage: "checkmark") { model.markSeen(t.id) }.tint(Trek.done)
-            } else if model.serves(.markUnread) {
+            } else if model.serves(.markUnread, on: t.id) {
                 Button("Unread", systemImage: "circlebadge.fill") { model.markUnread(t.id) }.tint(Trek.working)
             }
         }
         .swipeActions(edge: .trailing) {
-            if model.serves(.snooze) {
+            if model.serves(.snooze, on: t.id) {
                 if t.section == .snoozed {
                     Button("Wake", systemImage: "sun.max") { model.wake(t.id) }.tint(Trek.approval)
                 } else {
@@ -303,18 +331,18 @@ struct ThreadsView: View {
             } else if t.section != .pinned {
                 Button("Settle", systemImage: "checkmark.circle") { model.threadAction(t.id, .settle, done: "Settled") }
             }
-            if model.serves(.snooze) {
+            if model.serves(.snooze, on: t.id) {
                 SnoozeMenu(thread: t) { snoozePicking = t }
             }
             if t.unseen {
                 Button("Mark read", systemImage: "checkmark.circle") { model.markSeen(t.id) }
-            } else if model.serves(.markUnread) {
+            } else if model.serves(.markUnread, on: t.id) {
                 Button("Mark unread", systemImage: "circlebadge") { model.markUnread(t.id) }
             }
-            if model.serves(.regenerateTitle) {
+            if model.serves(.regenerateTitle, on: t.id) {
                 Button("Regenerate title", systemImage: "text.badge.star") { model.regenerateTitle(t.id) }
             }
-            if model.serves(.delete) {
+            if model.serves(.delete, on: t.id) {
                 Divider()
                 Button("Delete…", systemImage: "trash", role: .destructive) { model.askToDelete(t, into: $deleteAsk) }
             }
@@ -325,6 +353,7 @@ struct ThreadsView: View {
     private func reveal(_ id: String, proxy: ScrollViewProxy) {
         guard let t = model.thread(id) else { return }
         projectFilter = nil
+        machineFilter = nil
         withAnimation(.snappy) {
             collapsed.remove("project:\(t.project?.id ?? "")")
             for title in ["Pinned", "Needs you", "Working", "Snoozed", "Recent"] { collapsed.remove(title) }
@@ -454,6 +483,8 @@ struct ThreadRow: View {
     var thread: ThreadSummary
     /// Its project's badge and name: left out under the project's own header.
     var showsProject = true
+    /// Which machine it's on, when several are paired.
+    var host: String? = nil
     @Environment(\.compactRows) private var compact
 
     private var recedes: Bool { thread.runState == .idle && !thread.unseen && thread.needs == nil && thread.runningSubAgents.isEmpty }
@@ -468,6 +499,7 @@ struct ThreadRow: View {
             AgentGlyph(thread.agent, size: 18)
                 .opacity(recedes ? 0.7 : 1)
             if showsProject, let p = thread.project { ProjectBadge(project: p, size: 15) }
+            if let host { Text(host).font(.ui(.caption)).foregroundStyle(Trek.muted).lineLimit(1) }
             Text(thread.title)
                 .scaledFont(16, weight: thread.unseen ? .semibold : .regular)
                 .foregroundStyle(recedes ? Trek.foreground.opacity(0.72) : Trek.foreground)
@@ -549,6 +581,13 @@ struct ThreadRow: View {
     @ViewBuilder
     private var secondary: some View {
         HStack(spacing: 5) {
+            if let host {
+                Label(host, systemImage: "laptopcomputer")
+                    .labelStyle(BranchLabelStyle())
+                    .foregroundStyle(Trek.muted.opacity(0.9))
+                    .fixedSize()
+                Text("·").foregroundStyle(Trek.muted.opacity(0.6))
+            }
             if !showsProject || thread.runState == .working {
                 Text(thread.modelLabel ?? thread.agent.name)
                     .foregroundStyle(thread.runState == .working ? Trek.foreground.opacity(0.8) : Trek.muted)

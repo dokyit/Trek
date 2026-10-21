@@ -315,6 +315,16 @@ nonisolated enum GitTarget: Hashable {
         case .project(let id): ["project_id": id]
         }
     }
+
+    /// The id it carries, qualified or not.
+    var id: String {
+        switch self {
+        case .thread(let id), .project(let id): id
+        }
+    }
+
+    /// Whether the thread or project named is `link`'s.
+    @MainActor func owned(by link: HostLink) -> Bool { link.owns(id) }
 }
 
 /// A folder's git status, as the Mac's Git panel shows it. For a worktree thread: its changes

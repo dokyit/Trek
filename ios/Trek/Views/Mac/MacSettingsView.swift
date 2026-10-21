@@ -6,12 +6,16 @@ import UIKit
 /// shows at once and goes to the Mac, which puts it back (saying why) if it refuses. Full access
 /// is unlocked, and API keys and the phone server set, on the Mac only.
 struct MacSettingsView: View {
+    /// The machine whose settings these are (the selected one when it isn't handed in).
+    var machine: HostLink? = nil
     @Environment(AppModel.self) private var model
+
+    private var link: HostLink? { machine ?? model.selected }
 
     var body: some View {
         Form {
-            if let s = model.macSettings {
-                MacSettingsForm(s: s)
+            if let s = link?.macSettings {
+                MacSettingsForm(s: s, link: link)
             } else {
                 HStack(spacing: 10) {
                     ProgressView().controlSize(.small)
@@ -22,26 +26,27 @@ struct MacSettingsView: View {
         .scrollContentBackground(.hidden)
         .background(Trek.grouped)
         .navigationTitle("Mac settings")
-        .navigationSubtitle(model.host?.name ?? "")
-        .task { model.loadSettings() }
+        .navigationSubtitle(link?.name ?? "")
+        .task { model.loadSettings(on: link) }
     }
 }
 
 private struct MacSettingsForm: View {
     var s: MacSettings
+    var link: HostLink?
     @Environment(AppModel.self) private var model
 
-    private func set(_ change: SettingsChange) { model.changeSettings(change) }
+    private func set(_ change: SettingsChange) { model.changeSettings(change, on: link) }
 
-    private var agentName: String { model.agents.first { $0.key == s.defaultAgent }?.name ?? s.defaultAgent }
-    private var models: [ModelOption] { model.models(of: s.defaultAgent) }
-    private var efforts: [String] { model.efforts(agent: s.defaultAgent, model: s.defaultModel) }
+    private var agentName: String { link?.agents.first { $0.key == s.defaultAgent }?.name ?? s.defaultAgent }
+    private var models: [ModelOption] { link?.models(of: s.defaultAgent) ?? [] }
+    private var efforts: [String] { link?.efforts(agent: s.defaultAgent, model: s.defaultModel) ?? [] }
 
     var body: some View {
         Section {
             Picker("Agent", selection: Binding(get: { s.defaultAgent }, set: { set(SettingsChange(defaultAgent: $0)) })) {
-                ForEach(model.agents) { a in Text(a.name).tag(a.key) }
-                if !model.agents.contains(where: { $0.key == s.defaultAgent }) { Text(agentName).tag(s.defaultAgent) }
+                ForEach(link?.agents ?? []) { a in Text(a.name).tag(a.key) }
+                if link?.agents.contains(where: { $0.key == s.defaultAgent }) != true { Text(agentName).tag(s.defaultAgent) }
             }
             Picker("Model", selection: Binding(get: { s.defaultModel ?? "" }, set: { set(SettingsChange(defaultModel: $0)) })) {
                 Text("Agent's default").tag("")
@@ -181,12 +186,16 @@ private struct AccessPicker: View {
 /// Settings › Notifications: the Mac tells this iPhone when a thread needs the user, through
 /// the ntfy app. ntfy's iOS app opens no subscribe link, so the topic is copied and pasted.
 struct PhoneNotificationsSection: View {
+    /// The machine whose settings these are (the selected one when it isn't handed in).
+    var machine: HostLink? = nil
     @Environment(AppModel.self) private var model
     @State private var server = ""
     @State private var confirmNewTopic = false
 
+    private var link: HostLink? { machine ?? model.selected }
+
     var body: some View {
-        if let s = model.macSettings {
+        if let s = link?.macSettings {
             sections(s.push)
         } else {
             Section {
@@ -203,7 +212,7 @@ struct PhoneNotificationsSection: View {
     @ViewBuilder
     private func sections(_ push: PushSettings) -> some View {
         Section {
-            Toggle(isOn: Binding(get: { push.enabled }, set: { model.changeSettings(SettingsChange(push: $0)) })) {
+            Toggle(isOn: Binding(get: { push.enabled }, set: { model.changeSettings(SettingsChange(push: $0), on: link) })) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Tell my phone when a thread needs me")
                     Text("Also when one finishes or fails, through the free ntfy app")
@@ -213,7 +222,7 @@ struct PhoneNotificationsSection: View {
             }
             .tint(Trek.done)
             if push.enabled {
-                Picker("Send them", selection: Binding(get: { push.when }, set: { model.changeSettings(SettingsChange(pushWhen: $0)) })) {
+                Picker("Send them", selection: Binding(get: { push.when }, set: { model.changeSettings(SettingsChange(pushWhen: $0), on: link) })) {
                     ForEach(PushWhen.allCases) { Text($0.label).tag($0) }
                 }
             }
@@ -248,7 +257,7 @@ struct PhoneNotificationsSection: View {
                     model.show("Topic copied")
                 }
                 Button("Send a test", systemImage: "bell.badge") {
-                    model.changeSettings(SettingsChange(pushTest: true)) {
+                    model.changeSettings(SettingsChange(pushTest: true), on: link) {
                         model.show("Sent. It should arrive through ntfy in a moment.")
                     }
                 }
@@ -276,7 +285,7 @@ struct PhoneNotificationsSection: View {
                     .submitLabel(.done)
                     .onSubmit {
                         let value = server.trimmingCharacters(in: .whitespaces)
-                        if !value.isEmpty, value != push.server { model.changeSettings(SettingsChange(pushServer: value)) } else { server = push.server }
+                        if !value.isEmpty, value != push.server { model.changeSettings(SettingsChange(pushServer: value), on: link) } else { server = push.server }
                     }
                 Button("New topic", systemImage: "arrow.triangle.2.circlepath", role: .destructive) { confirmNewTopic = true }
             } header: {
@@ -288,7 +297,7 @@ struct PhoneNotificationsSection: View {
             .onAppear { server = push.server }
             .onChange(of: push.server) { server = push.server }
             .confirmationDialog("Make a new topic?", isPresented: $confirmNewTopic, titleVisibility: .visible) {
-                Button("New topic", role: .destructive) { model.changeSettings(SettingsChange(newPushTopic: true)) }
+                Button("New topic", role: .destructive) { model.changeSettings(SettingsChange(newPushTopic: true), on: link) }
             } message: {
                 Text("The old topic stops getting notifications. Subscribe to the new one in ntfy.")
             }

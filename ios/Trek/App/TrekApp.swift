@@ -25,10 +25,17 @@ struct TrekApp: App {
                     #endif
                 }
                 .onOpenURL { url in
-                    // A notification from the Mac: open its thread.
+                    // A notification from a Mac: open its thread, on the machine it names
+                    // (`host`); an old link without one opens on the picked machine.
                     if url.scheme == "trek", url.host == "open",
-                       let thread = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "thread" })?.value {
-                        model.openRequest = thread
+                       let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+                       let thread = items.first(where: { $0.name == "thread" })?.value {
+                        if let host = items.first(where: { $0.name == "host" })?.value,
+                           let link = model.link(id: host) {
+                            model.openRequest = link.qualified(thread)
+                        } else {
+                            model.openRequest = model.qualified(thread)
+                        }
                         return
                     }
                     // Never pairs by itself: the link waits in a confirmation sheet.
@@ -209,16 +216,16 @@ struct MainView: View {
                         DispatchQueue.main.asyncAfter(deadline: .now() + at - 1) { path = [] }
                         DispatchQueue.main.asyncAfter(deadline: .now() + at) {
                             Perf.navigated = Perf.now
-                            path = [tid]
+                            path = [model.qualified(tid)]
                         }
                     }
                 } else {
-                    path = [open]
+                    path = [model.qualified(open)]
                 }
             }
             if let note = Launch.note {
                 tab = .notes
-                notesPath = [note]
+                notesPath = [model.qualified(note)]
             }
             if Launch.sheet == "new" { showNew = true }
             openRequested()

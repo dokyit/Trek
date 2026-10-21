@@ -54,7 +54,7 @@ fn unnamed(message: &str, needs: bool, failed: bool) -> &'static str {
 
 /// The note for an alert the Mac raised (`message` as the Mac's banner words it). `names`: say
 /// it as the banner does, with the project in the title; else only what kind of news it is.
-pub fn note_for(topic: &str, message: &str, thread: Option<&str>, project: Option<&str>, names: bool) -> Note {
+pub fn note_for(topic: &str, message: &str, thread: Option<&str>, project: Option<&str>, names: bool, host: &str) -> Note {
     // By how the banner starts (or ends), never by words that may be the thread's own title:
     // "Finished: Fix waiting spinner" is a finish. A thread an agent started says "Thread
     // failed · …" when it fails.
@@ -74,7 +74,7 @@ pub fn note_for(topic: &str, message: &str, thread: Option<&str>, project: Optio
             None => "Trek".into(),
         },
         message: if names { message.to_string() } else { unnamed(message, needs, failed).to_string() },
-        click: thread.map(|t| format!("trek://open?thread={t}")),
+        click: thread.map(|t| format!("trek://open?thread={t}&host={host}")),
         tags,
         priority: if needs { 4 } else { 3 },
     }
@@ -202,7 +202,7 @@ impl Workspace {
             return;
         }
         let project = self.thread(thread).and_then(|t| t.project_id.as_deref()).and_then(|p| self.project(p)).map(|p| p.name.clone());
-        let note = note_for(&m.push_topic, message, Some(thread), project.as_deref(), m.push_names);
+        let note = note_for(&m.push_topic, message, Some(thread), project.as_deref(), m.push_names, &crate::remote::host_info().id);
         let job = publish(&m.push_server, note, 1 + RETRIES.len());
         trek_core::runtime().spawn(async move {
             if let Ok(Err(e)) = job.await {
@@ -226,7 +226,7 @@ impl Workspace {
         if m.push_topic.is_empty() {
             return;
         }
-        let mut note = note_for(&m.push_topic, &format!("Notifications from {} will come here.", crate::words::words().this_computer), None, None, true);
+        let mut note = note_for(&m.push_topic, &format!("Notifications from {} will come here.", crate::words::words().this_computer), None, None, true, &crate::remote::host_info().id);
         note.title = "Trek is connected".into();
         note.tags = vec!["tada".into()];
         // Once: the user is waiting to hear how it went.
@@ -249,12 +249,12 @@ mod tests {
 
     #[test]
     fn notes_say_what_the_banner_says_and_open_the_thread() {
-        let n = note_for("trek-abc", "Needs your approval: Run ./migrate.sh", Some("t1"), Some("api"), true);
+        let n = note_for("trek-abc", "Needs your approval: Run ./migrate.sh", Some("t1"), Some("api"), true, "m1");
         assert_eq!(n.title, "Trek · api");
         assert_eq!(n.message, "Needs your approval: Run ./migrate.sh");
-        assert_eq!(n.click.as_deref(), Some("trek://open?thread=t1"));
+        assert_eq!(n.click.as_deref(), Some("trek://open?thread=t1&host=m1"));
         assert_eq!(n.priority, 4, "needs you comes first");
-        let done = note_for("trek-abc", "Finished: Add a verbose flag", Some("t2"), None, true);
+        let done = note_for("trek-abc", "Finished: Add a verbose flag", Some("t2"), None, true, "m1");
         assert_eq!((done.title.as_str(), done.priority), ("Trek", 3));
         let json = serde_json::to_value(&done).unwrap();
         assert_eq!(json["topic"], "trek-abc");
@@ -263,11 +263,11 @@ mod tests {
 
     #[test]
     fn without_names_a_note_says_only_what_kind_of_news_it_is() {
-        let unnamed = |message: &str| note_for("trek-abc", message, Some("t1"), Some("api"), false);
+        let unnamed = |message: &str| note_for("trek-abc", message, Some("t1"), Some("api"), false, "m1");
         let n = unnamed("Needs your approval: Run ./migrate.sh --apply");
         // Neither the project nor what was asked leaves the Mac; the note still opens the thread.
         assert_eq!((n.title.as_str(), n.message.as_str(), n.priority), ("Trek", "A thread needs your approval", 4));
-        assert_eq!(n.click.as_deref(), Some("trek://open?thread=t1"));
+        assert_eq!(n.click.as_deref(), Some("trek://open?thread=t1&host=m1"));
         assert_eq!(unnamed("Finished: Rotate the signing key").message, "A thread finished");
         assert_eq!(unnamed("Failed: Rotate the signing key").message, "A thread failed");
         assert_eq!(unnamed("Paused until 2:10 AM: Rotate the signing key").message, "A thread is paused at its usage limit");
@@ -287,7 +287,7 @@ mod tests {
             assert_eq!((n.message.as_str(), n.priority), (said, 3), "{message}");
             assert_ne!(n.tags[0], "raised_hand", "{message}");
         }
-        let named = note_for("trek-abc", "Thread failed · Migrate the DB", Some("t1"), None, true);
+        let named = note_for("trek-abc", "Thread failed · Migrate the DB", Some("t1"), None, true, "m1");
         assert_eq!((named.tags[0].as_str(), named.priority), ("x", 3));
         let json = serde_json::to_string(&unnamed("Failed: Rotate the signing key")).unwrap();
         assert!(!json.contains("Rotate") && !json.contains("api"), "{json}");

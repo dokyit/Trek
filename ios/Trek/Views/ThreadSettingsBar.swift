@@ -10,7 +10,8 @@ struct ThreadSettingsBar: View {
 
     @State private var picking = false
 
-    private var agent: AgentOption? { model.agents.first { $0.key == thread.agent.key } }
+    private var agent: AgentOption? { model.link(for: thread.id)?.agents.first { $0.key == thread.agent.key } }
+    private var fullAccessAllowed: Bool { model.link(for: thread.id)?.fullAccessAllowed ?? false }
     private var current: ModelOption? { ModelNaming.current(thread.model, agent: agent) }
     private var access: Access { thread.access ?? .autoAcceptEdits }
     private var plan: Bool { thread.plan ?? false }
@@ -46,12 +47,12 @@ struct ThreadSettingsBar: View {
         .accessibilityLabel("Model: \(modelName)\(thread.effort.map { ", effort \(Effort.label($0))" } ?? "")")
         .sheet(isPresented: $picking) {
             ModelPickerSheet(
-                agents: model.agents,
+                agents: model.link(for: thread.id)?.agents ?? [],
                 agentKey: thread.agent.key,
                 modelID: thread.model ?? current?.id,
                 effort: thread.effort,
                 efforts: { agentKey, modelID in
-                    let a = model.agents.first { $0.key == agentKey }
+                    let a = model.link(for: thread.id)?.agents.first { $0.key == agentKey }
                     return ModelNaming.current(modelID, agent: a)?.efforts ?? []
                 },
                 pickModel: { agentKey, modelID in
@@ -74,12 +75,12 @@ struct ThreadSettingsBar: View {
                 } label: {
                     Label {
                         Text(level.label)
-                        Text(level == .fullAccess && !model.fullAccessAllowed ? "Locked on your Mac" : level.help)
+                        Text(level == .fullAccess && !fullAccessAllowed ? "Locked on your Mac" : level.help)
                     } icon: {
                         Image(systemName: level == access ? "checkmark" : level.icon)
                     }
                 }
-                .disabled(level == .fullAccess && !model.fullAccessAllowed)
+                .disabled(level == .fullAccess && !fullAccessAllowed)
             }
         } label: {
             chip {

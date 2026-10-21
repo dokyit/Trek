@@ -16,7 +16,9 @@ struct BasecampView: View {
     @Binding var showNew: Bool
     @AppStorage("basecampRange") private var range = BasecampRange.today
 
-    private var recap: Basecamp? { model.basecamp[range] }
+    /// The machine shown (the picked one, else the first connected).
+    private var link: HostLink? { model.selected }
+    private var recap: Basecamp? { link?.basecamp[range] }
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -28,7 +30,7 @@ struct BasecampView: View {
                     .pickerStyle(.segmented)
                     .padding(.bottom, 2)
 
-                    if let recap, model.serves(.basecampV2) {
+                    if let recap, link?.serves(.basecampV2) == true {
                         BasecampSections(recap: recap) { showNew = true }
                     } else if let recap {
                         // A Mac from before `basecamp_v2`: its recap, profile and tiles.
@@ -37,7 +39,7 @@ struct BasecampView: View {
                             EmptyTrekCard(recap: recap) { showNew = true }
                         } else {
                             if !recap.review.isEmpty { ReviewCard(rows: recap.review) }
-                            TrekCard(recap: recap, loading: model.basecampLoading.contains(range))
+                            TrekCard(recap: recap, loading: link?.basecampLoading.contains(range) == true)
                             TileGrid(tiles: recap.tiles)
                             if recap.review.isEmpty {
                                 Label("Nothing waiting on you. Every thread is read.", systemImage: "checkmark.circle")
@@ -64,7 +66,7 @@ struct BasecampView: View {
             .scrollEdgeEffectStyle(.hard, for: .bottom)
             .background(RidgeBackdrop(height: 300))
             .navigationTitle("Basecamp")
-            .navigationSubtitle(model.serves(.basecampV2) ? "" : recap?.greeting ?? "")
+            .navigationSubtitle(link?.serves(.basecampV2) == true ? "" : recap?.greeting ?? "")
             .refreshable { await reload() }
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
@@ -73,13 +75,14 @@ struct BasecampView: View {
                     if recap?.review.contains(where: { $0.unseen == true }) == true {
                         Button("Mark all read") {
                             for row in recap?.review ?? [] where row.unseen == true { model.markSeen(row.threadId) }
-                            model.loadBasecamp(range)
+                            model.loadBasecamp(range, on: link)
                         }
                     }
+                    MachinePicker()
                     UsageButton { path.append(.usage) }
                 }
             }
-            .task(id: range) { model.loadBasecamp(range) }
+            .task(id: "\(range)-\(link?.id ?? "")") { model.loadBasecamp(range, on: link) }
             .onAppear { if Launch.sheet == "usage", path.isEmpty { path.append(.usage) } }
             .navigationDestination(for: BasecampRoute.self) { route in
                 switch route {
@@ -92,8 +95,8 @@ struct BasecampView: View {
 
     /// Ask again and wait (a little) for the answer, for pull to refresh.
     private func reload() async {
-        model.loadBasecamp(range)
-        for _ in 0..<30 where model.basecampLoading.contains(range) {
+        model.loadBasecamp(range, on: link)
+        for _ in 0..<30 where link?.basecampLoading.contains(range) == true {
             try? await Task.sleep(for: .milliseconds(100))
         }
     }

@@ -15,7 +15,7 @@ struct UserBubble: View {
         HStack {
             Spacer(minLength: 48)
             VStack(alignment: .trailing, spacing: 6) {
-                if images > 0, model.serves(.attachment), !itemID.isEmpty {
+                if images > 0, model.serves(.attachment, on: threadID), !itemID.isEmpty {
                     MessageImages(threadID: threadID, itemID: itemID, count: images)
                 } else if images > 0 {
                     Label("\(images) image\(images == 1 ? "" : "s")", systemImage: "photo")

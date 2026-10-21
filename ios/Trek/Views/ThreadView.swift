@@ -89,20 +89,21 @@ private struct ThreadScreen: View {
             .sheet(isPresented: $snoozePicking) { if let t = thread { SnoozePicker(thread: t) } }
             .deleteConfirmation($deleteAsk, model: model) { _ in dismiss() }
             .sheet(item: $newThread) { request in
-                NewThreadSheet(project: request.project, prompt: request.prompt) { model.openRequest = $0 }
+                NewThreadSheet(project: request.project, prompt: request.prompt, on: request.link) { model.openRequest = $0 }
             }
             .onChange(of: model.newThreadPrompt) {
                 // `/new` was sent: the Mac asks for the new-thread sheet, in this project.
-                guard let project = model.newThreadPrompt else { return }
+                guard let prompt = model.newThreadPrompt else { return }
                 model.newThreadPrompt = nil
-                newThread = NewThreadRequest(project: project, prompt: composer.newPrompt)
+                newThread = NewThreadRequest(link: prompt.link, project: prompt.projectId, prompt: composer.newPrompt)
                 composer.newPrompt = ""
             }
             .onAppear {
                 composer.mode = model.followUpMode
                 if let draft = model.takeDraft(threadID) { composer.draft = draft }
                 model.subscribe(threadID)
-                if model.usage == nil { model.loadUsage(quiet: true) }
+                let link = model.link(for: threadID)
+                if link?.usage == nil { model.loadUsage(quiet: true, on: link) }
                 switch Launch.sheet {
                 case "git": showingGit = true
                 case "commands": composer.draft = "/"
@@ -119,7 +120,7 @@ private struct ThreadScreen: View {
     /// The models a turn can be retried with: the thread's agent's others.
     private func retryModels(_ t: ThreadSummary?) -> [ModelOption] {
         guard let t else { return [] }
-        let agent = model.agents.first { $0.key == t.agent.key }
+        let agent = model.link(for: threadID)?.agents.first { $0.key == t.agent.key }
         let current = ModelNaming.current(t.model, agent: agent)?.id
         return (agent?.models ?? []).filter { m in current.map { !ModelNaming.same($0, m.id) } ?? true }
     }
@@ -145,7 +146,7 @@ private struct ThreadScreen: View {
                         // The agent and model; with its plan's usage under it when the Mac shows
                         // that plan, and Usage behind it.
                         let name = t.agent.name + (t.modelLabel.map { " · \($0)" } ?? "")
-                        if let plan = model.usage?.providers.first(where: { $0.agent.key == t.agent.key }) {
+                        if let plan = model.link(for: threadID)?.usage?.providers.first(where: { $0.agent.key == t.agent.key }) {
                             // A menu reads its title, subtitle and icon straight from these.
                             Button { showingUsage = true } label: {
                                 AgentMenuIcon(agent: t.agent)
@@ -171,17 +172,17 @@ private struct ThreadScreen: View {
                             } else {
                                 Button("Settle", systemImage: "checkmark.circle") { model.threadAction(threadID, .settle, done: "Settled") }
                             }
-                            if model.serves(.snooze) {
+                            if model.serves(.snooze, on: threadID) {
                                 SnoozeMenu(thread: t) { snoozePicking = true }
                             }
                             Button("Rename…", systemImage: "pencil") {
                                 newTitle = t.title
                                 renaming = true
                             }
-                            if model.serves(.regenerateTitle) {
+                            if model.serves(.regenerateTitle, on: threadID) {
                                 Button("Regenerate title", systemImage: "text.badge.star") { model.regenerateTitle(threadID) }
                             }
-                            if model.serves(.markUnread) {
+                            if model.serves(.markUnread, on: threadID) {
                                 Button("Mark unread", systemImage: "circlebadge") { model.markUnread(threadID) }
                             }
                         }
@@ -193,7 +194,7 @@ private struct ThreadScreen: View {
                 }
                 if thread?.parentId == nil {
                     Button("Archive", systemImage: "archivebox", role: .destructive) { archiving = true }
-                    if model.serves(.delete), let t = thread {
+                    if model.serves(.delete, on: threadID), let t = thread {
                         Button("Delete…", systemImage: "trash", role: .destructive) { model.askToDelete(t, into: $deleteAsk) }
                     }
                 }
@@ -579,17 +580,17 @@ private struct ComposerArea: View {
         let query = CommandPicker.query(composer.draft)
         let commands = query.map { CommandPicker.matches(model.commands[threadID] ?? [], $0) } ?? []
         VStack(spacing: 10) {
-            if let kid = thread?.needsThread, model.serves(.subAgents) {
+            if let kid = thread?.needsThread, model.serves(.subAgents, on: threadID) {
                 SubAgentNeedsCard(threadID: kid, needs: thread?.needs)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
             ForEach(store.pending) { item in
-                PendingRequestCard(item: item, agentName: thread?.agent.name ?? "The agent") { response in
+                PendingRequestCard(item: item, agentName: thread?.agent.name ?? "The agent", threadID: threadID) { response in
                     if let rid = Self.requestId(item) { model.answer(threadID, requestId: rid, response) }
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            if let queued = thread?.queued, !queued.isEmpty, model.serves(.queueAction) {
+            if let queued = thread?.queued, !queued.isEmpty, model.serves(.queueAction, on: threadID) {
                 QueuedStrip(threadID: threadID, queued: queued) { text in
                     composer.draft = composer.draft.isEmpty ? text : composer.draft + "\n\n" + text
                     composer.focusRequest += 1
@@ -638,7 +639,7 @@ private struct ComposerArea: View {
         let text = composer.draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !composer.photos.isEmpty else { return }
         // Nothing can go while the Mac is out of reach: what's typed stays in the composer.
-        guard model.connection == .connected else {
+        guard model.link(for: threadID)?.connection == .connected else {
             model.show(AppModel.notConnected, error: true)
             return
         }
@@ -656,9 +657,11 @@ private struct ComposerArea: View {
     }
 }
 
-/// The Mac asked for the new-thread sheet from a thread (`/new`): in which project, with what.
+/// The Mac asked for the new-thread sheet from a thread (`/new`): on which machine, in which
+/// project, with what.
 struct NewThreadRequest: Identifiable {
     let id = UUID()
+    var link: HostLink
     var project: String
     var prompt: String
 }

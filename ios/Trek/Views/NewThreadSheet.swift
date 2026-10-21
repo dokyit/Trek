@@ -4,6 +4,8 @@ import SwiftUI
 /// "What are we building?": pick a project, an agent and model, worktree or local; then describe it.
 struct NewThreadSheet: View {
     var opened: (String) -> Void
+    /// The machine the thread starts on (the picked one when not handed in, e.g. by `/new`).
+    @State private var machine: HostLink?
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
@@ -23,14 +25,22 @@ struct NewThreadSheet: View {
 
     /// `project` and `prompt` start it filled in (`/new` sent from a thread: its project, and what
     /// was typed after the command).
-    init(project: String? = nil, prompt: String = "", opened: @escaping (String) -> Void) {
+    init(project: String? = nil, prompt: String = "", on machine: HostLink? = nil, opened: @escaping (String) -> Void) {
         self.opened = opened
+        _machine = State(initialValue: machine)
         _projectID = State(initialValue: project.flatMap { $0.isEmpty ? nil : $0 })
         _text = State(initialValue: prompt)
     }
 
-    private var project: ProjectSummary? { model.project(projectID) ?? model.projects.first }
-    private var agent: AgentOption? { model.agents.first { $0.key == agentKey } ?? model.agents.first }
+    private var link: HostLink? { machine ?? model.selected }
+    /// This machine's projects (their qualified ids, as the shared list carries them).
+    private var linkProjects: [ProjectSummary] {
+        guard let link else { return [] }
+        return model.projects.filter { link.owns($0.id) }
+    }
+    private var agents: [AgentOption] { link?.agents ?? [] }
+    private var project: ProjectSummary? { linkProjects.first { $0.id == projectID } ?? linkProjects.first }
+    private var agent: AgentOption? { agents.first { $0.key == agentKey } ?? agents.first }
     private var modelLabel: String {
         ModelNaming.current(modelID, agent: agent)?.label ?? agent?.name ?? "Agent"
     }
@@ -48,7 +58,7 @@ struct NewThreadSheet: View {
                     Text("What are we building?")
                         .font(.ui(size: 28, weight: .semibold))
                         .tracking(-0.5)
-                    if let host = model.host?.name {
+                    if let host = link?.name {
                         Text("Runs on \(host)").font(.ui(.subheadline)).foregroundStyle(Trek.muted)
                     }
                 }
@@ -69,8 +79,8 @@ struct NewThreadSheet: View {
             }
         }
         .onAppear {
-            projectID = projectID ?? model.projects.first?.id
-            agentKey = agentKey ?? model.agents.first?.key
+            projectID = linkProjects.contains(where: { $0.id == projectID }) ? projectID : linkProjects.first?.id
+            agentKey = agents.contains(where: { $0.key == agentKey }) ? agentKey : agents.first?.key
             focused = true
         }
     }
@@ -88,6 +98,7 @@ struct NewThreadSheet: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         photoChip
+                        if model.links.count > 1 { machineChip }
                         projectChip
                         agentChip
                         accessChip
@@ -134,7 +145,7 @@ struct NewThreadSheet: View {
         Menu {
             Picker("Access", selection: Binding(get: { access }, set: { access = $0 })) {
                 Text("Default").tag(Access?.none)
-                ForEach(Access.allCases.filter { $0 != .fullAccess || model.fullAccessAllowed }) { level in
+                ForEach(Access.allCases.filter { $0 != .fullAccess || link?.fullAccessAllowed == true }) { level in
                     Label(level.label, systemImage: level.icon).tag(Optional(level))
                 }
             }
@@ -161,10 +172,30 @@ struct NewThreadSheet: View {
 
     private var empty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
+    /// Which machine the thread runs on (several paired only).
+    private var machineChip: some View {
+        Menu {
+            Picker("Machine", selection: Binding(get: { link?.id }, set: { id in
+                machine = model.links.first { $0.id == id }
+                projectID = linkProjects.first?.id
+                agentKey = agents.first?.key
+            })) {
+                ForEach(model.links) { l in
+                    Text(l.name).tag(Optional(l.id))
+                }
+            }
+        } label: {
+            chip {
+                Image(systemName: "laptopcomputer").font(.system(size: 13, weight: .medium))
+                Text(link?.name ?? "Machine")
+            }
+        }
+    }
+
     private var projectChip: some View {
         Menu {
             Picker("Project", selection: Binding(get: { project?.id }, set: { projectID = $0 })) {
-                ForEach(model.projects) { p in
+                ForEach(linkProjects) { p in
                     Text(p.name).tag(Optional(p.id))
                 }
             }
@@ -189,11 +220,11 @@ struct NewThreadSheet: View {
         .accessibilityLabel("Model: \(modelLabel)")
         .sheet(isPresented: $choosingModel) {
             ModelPickerSheet(
-                agents: model.agents,
+                agents: agents,
                 agentKey: agent?.key ?? "",
                 modelID: modelID ?? ModelNaming.defaultModel(agent)?.id,
                 effort: effort,
-                efforts: { key, id in ModelNaming.current(id, agent: model.agents.first { $0.key == key })?.efforts ?? [] },
+                efforts: { key, id in ModelNaming.current(id, agent: agents.first { $0.key == key })?.efforts ?? [] },
                 pickModel: { key, id in
                     agentKey = key
                     modelID = id

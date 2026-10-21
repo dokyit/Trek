@@ -77,7 +77,7 @@ struct SubAgentsCard: View {
 
     @ViewBuilder
     private func row(_ s: SubAgent, now: Date) -> some View {
-        let opens = model.serves(.subAgents) ? s.threadId : nil
+        let opens = model.serves(.subAgents, on: s.threadId) ? s.threadId : nil
         Button {
             guard let kid = opens else { return }
             if let openThread { openThread(kid) } else { model.openRequest = kid }

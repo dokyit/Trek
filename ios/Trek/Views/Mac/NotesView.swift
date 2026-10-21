@@ -11,26 +11,33 @@ struct NotesView: View {
     /// Notes made here this visit: left empty, they go again.
     @State private var made: Set<String> = []
 
+    /// The machine whose notes these are (the picked one, else the first connected).
+    private var link: HostLink? { model.selected }
+
     private var shown: [NoteSummary] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return model.notes }
-        return model.notes.filter { $0.title.lowercased().contains(q) || $0.preview.lowercased().contains(q) }
+        guard !q.isEmpty else { return link?.notes ?? [] }
+        return (link?.notes ?? []).filter { $0.title.lowercased().contains(q) || $0.preview.lowercased().contains(q) }
     }
+
+    /// A note's id in the path is qualified (`"host:id"`), so its editor goes back to its own
+    /// machine even if the picked machine changes meanwhile.
+    private func qid(_ note: NoteSummary) -> String { link?.qualified(note.id) ?? note.id }
 
     var body: some View {
         NavigationStack(path: $path) {
             List {
                 ForEach(shown) { note in
-                    NavigationLink(value: note.id) { NoteRow(note: note) }
+                    NavigationLink(value: qid(note)) { NoteRow(note: note) }
                         .navigationLinkIndicatorVisibility(.hidden)
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
                         .listRowInsets(EdgeInsets(top: 10, leading: 20, bottom: 10, trailing: 18))
                         .swipeActions {
-                            Button("Delete", systemImage: "trash", role: .destructive) { model.deleteNote(note.id) }
+                            Button("Delete", systemImage: "trash", role: .destructive) { model.deleteNote(note.id, on: link) }
                         }
                         .contextMenu {
-                            Button("Delete", systemImage: "trash", role: .destructive) { model.deleteNote(note.id) }
+                            Button("Delete", systemImage: "trash", role: .destructive) { model.deleteNote(note.id, on: link) }
                         }
                 }
             }
@@ -55,13 +62,14 @@ struct NotesView: View {
             }
             .navigationTitle("Notes")
             .searchable(text: $query, placement: .navigationBarDrawer, prompt: "Search notes")
-            .refreshable { model.loadNotes() }
+            .refreshable { model.loadNotes(on: link) }
             .toolbar {
+                ToolbarItem(placement: .topBarTrailing) { MachinePicker() }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("New note", systemImage: "square.and.pencil", action: newNote)
                 }
             }
-            .task { model.loadNotes() }
+            .task(id: link?.id) { model.loadNotes(on: link) }
             .navigationDestination(for: String.self) { id in
                 NoteEditor(noteID: id, isNew: made.contains(id))
             }
@@ -69,9 +77,10 @@ struct NotesView: View {
     }
 
     private func newNote() {
-        model.createNote("") { note in
-            made.insert(note.id)
-            path.append(note.id)
+        model.createNote("", on: link) { note in
+            let qid = qid(NoteSummary(id: note.id, title: note.title, preview: "", modified: note.modified))
+            made.insert(qid)
+            path.append(qid)
         }
     }
 }
@@ -104,6 +113,8 @@ private struct NoteRow: View {
 /// If the note changed on the Mac since it was opened, the Mac refuses the save: the user then
 /// keeps their version (saved over the Mac's) or takes the Mac's.
 struct NoteEditor: View {
+    /// The note's qualified id (`"host:id"`): its machine is found from it, and a bare id (an
+    /// old path) opens on the selected machine.
     var noteID: String
     /// Made here just now: opens for writing, and goes again if left empty.
     var isNew = false
@@ -132,11 +143,15 @@ struct NoteEditor: View {
     @State private var fakedConflict = false
     #endif
 
+    /// The machine the note is on, and its id there.
+    private var link: HostLink? { model.link(for: noteID) ?? model.selected }
+    private var bare: String { link?.bare(noteID) ?? noteID }
+
     private var status: String {
         if adding { return "Adding photo…" }
         if saving { return "Saving…" }
         if text != saved { return "Edited" }
-        if let modified = model.openNotes[noteID]?.modified { return "Saved · \(Resets.clock(modified))" }
+        if let modified = link?.openNotes[bare]?.modified { return "Saved · \(Resets.clock(modified))" }
         return ""
     }
 
@@ -171,7 +186,7 @@ struct NoteEditor: View {
         .safeAreaInset(edge: .bottom) {
             // Over the keyboard while writing (and at the foot of the screen with a hardware one).
             if writing {
-                FormatBar(apply: format, photo: model.serves(.noteImages) ? $photo : nil)
+                FormatBar(apply: format, photo: model.serves(.noteImages, on: noteID) ? $photo : nil)
                     .padding(.vertical, 4)
                     .glassEffect(.regular, in: .capsule)
                     .padding(.horizontal, 12)
@@ -210,7 +225,7 @@ struct NoteEditor: View {
             Button("Delete", role: .destructive) {
                 deleted = true
                 pending?.cancel()
-                model.deleteNote(noteID)
+                model.deleteNote(bare, on: link)
                 dismiss()
             }
         } message: {
@@ -222,8 +237,8 @@ struct NoteEditor: View {
         .task { open() }
         .onChange(of: text) { old, new in changed(old, new) }
         .onChange(of: photo) { _, item in if let item { addPhoto(item) } }
-        // Back in touch with the Mac: what couldn't be read or saved meanwhile goes now.
-        .onChange(of: model.connection) { _, state in
+        // Back in touch with the note's Mac: what couldn't be read or saved meanwhile goes now.
+        .onChange(of: link?.connection) { _, state in
             guard state == .connected else { return }
             if loaded { scheduleSave() } else { open() }
         }
@@ -234,8 +249,8 @@ struct NoteEditor: View {
     // MARK: Loading and saving
 
     private func open() {
-        if let note = model.openNotes[noteID] { load(note) }
-        model.openNote(noteID) { note in
+        if let note = link?.openNotes[bare] { load(note) }
+        model.openNote(bare, on: link) { note in
             // Only while nothing's been typed: the text on screen is the user's.
             if text == saved { load(note) }
         }
@@ -272,24 +287,24 @@ struct NoteEditor: View {
     /// before the first came back would be refused as a change on the Mac.
     private func save() {
         // Offline, it waits for the connection to come back (as "Edited").
-        guard loaded, !deleted, !left, !saving, theirs == nil, text != saved, model.connection == .connected,
-              !model.savingNote(noteID) else { return }
+        guard loaded, !deleted, !left, !saving, theirs == nil, text != saved, link?.connection == .connected,
+              !model.savingNote(bare, on: link) else { return }
         let body = text
         saving = true
         #if DEBUG
         // Screenshots of the conflict: the Mac "changed" the note since it was opened.
         if UserDefaults.standard.bool(forKey: "TrekNoteConflict"), !fakedConflict {
             fakedConflict = true
-            model.openNotes[noteID]?.modified -= 1
+            link?.openNotes[bare]?.modified -= 1
         }
         #endif
-        model.saveNote(noteID, body: body, done: { _ in
+        model.saveNote(bare, body: body, on: link, done: { _ in
             saving = false
             saved = body
             if text != saved, !left { scheduleSave() }
         }, conflict: {
             saving = false
-            if !left { model.openNote(noteID) { theirs = $0 } }
+            if !left { model.openNote(bare, on: link) { theirs = $0 } }
         }, failed: {
             // Said in a toast; the next change, or the connection coming back, tries again.
             saving = false
@@ -318,11 +333,11 @@ struct NoteEditor: View {
         guard !deleted else { return }
         left = true
         if isNew, text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            model.deleteNote(noteID)
+            model.deleteNote(bare, on: link)
         } else if loaded, theirs == nil, text != saved {
             // The model saves it, after a save still out or once the Mac is back: this view, and
             // the text in it, may be gone by then.
-            model.saveNoteLeft(noteID, body: text)
+            model.saveNoteLeft(bare, body: text, on: link)
         }
     }
 
