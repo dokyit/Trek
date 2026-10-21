@@ -6,6 +6,9 @@
 //! first time each is needed; a build without the usage descriptions in its Info.plist — a bare
 //! `cargo run` binary — hides the button instead of asking (TCC ends processes that ask without
 //! declaring).
+// Dictation runs on macOS only; elsewhere the composer never starts a take, so the shared types
+// and the level maths go unused there (CI builds Windows with `-D warnings`).
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use async_channel::Sender;
 
@@ -16,8 +19,7 @@ pub enum Heard {
     Partial(String),
     /// The recognizer is done: the take's text.
     Final(String),
-    /// Why it stopped. Only macOS's recognizer reports one; elsewhere dictation never starts.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    /// Why it stopped.
     Failed(String),
 }
 
