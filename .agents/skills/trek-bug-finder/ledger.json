@@ -1825,6 +1825,295 @@
       "status": "fixed",
       "found": "2026-10-20",
       "verdicts": []
+    },
+    {
+      "id": "F-2026-10-20b-remote-01",
+      "slice": "remote",
+      "file": "crates/trek-app/src/remote.rs",
+      "line": 1179,
+      "title": "Projects, agents/models and full_access reach a phone only in its connect-time Snapshot; the Mac never pushes HostEvent::Snapshot",
+      "category": "wrong-behaviour",
+      "severity": "medium",
+      "summary": "`remote_snapshot()` is the only source of `projects`, `agents` (ready agents and their model lists) and `full_access`. It runs on connect (and on a lag resync) and nothing in trek-app ever pushes `HostEvent::Snapshot` afterwards. The phone has no request to ask for a snapshot, so it shows stale lists until it reconnects.",
+      "failure_scenario": "1) Trek relaunches, or the Mac restarts, with the phone server on. `Workspace::new` sets `agents: vec![]` and starts `detect_agents` asynchronously (workspace.rs:1342, 1476); `ready_agents()` stays empty or partial until CLIs are probed and Codex, API and ACP models are fetched. The phone's reconnect loop gets a Snapshot in that window, so its New thread sheet lists no Claude Code or Codex, or no models. It stays that way, because detect_agents ends with only `cx.notify()`. 2) With a phone connected, the user adds a project, signs an agent in, or unlocks Full access on the Mac. The phone's `projects`, `agents` and `fullAccessAllowed` (set only in `handle(.snapshot)`) never change until the phone is backgrounded or the network blips.",
+      "evidence": "remote.rs:1214 `tr::Snapshot { threads, projects, agents, full_access: ..., unlisted }` is built only from `HostRequest::Snapshot` (remote.rs:598). `rg 'HostEvent::Snapshot' crates/trek-app` finds nothing; push_remote_changes (remote.rs:1474-1519) pushes only Thread, ThreadRemoved, Unlisted and Item. The lib.rs docs promise 'a `Snapshot` when many things change at once (projects or agents added)'. workspace.rs:1476 `agents: vec![]`; detect_agents (workspace.rs:5669) is async.",
+      "suggested_fix": "Keep a hash or key of (projects, agents and models, full_access) in `Remote`. In push_remote_changes, push `HostEvent::Snapshot(self.remote_snapshot())` when it changes. Also push one when `detect_agents` or the model fetches finish.",
+      "status": "fixed",
+      "found": "2026-10-20b",
+      "verdicts": [
+        {
+          "real": true,
+          "confidence": 0.85,
+          "reasoning": "I traced every path that could deliver projects, agents or full_access to a phone. `remote_snapshot()` is called only from `HostRequest::Snapshot` (remote.rs:598). On the server side that request comes only from `request_snapshot`, which runs on connect (server.rs:1241) and on `resync` (server.rs:1170, after missed events). A grep of trek-app finds no `HostEvent::Snapshot` push. `push_remote_changes` pushes only Thread, ThreadRemoved, Unlisted and the per-thread watched events. The protocol has no client request for a snapshot. On the iOS side, `refresh()` is only a ping (AppModel.swift:601-603). `handle(.snapshot)` is the only place that sets `projects`, `agents` and `fullAccessAllowed`. A phone therefore keeps the lists from its last connect-time or resync Snapshot. The lib.rs doc comment promises a Snapshot push when projects or agents are added, and nothing implements it. I did not read the detect_agents code; I accepted the reporter's claim that it ends with only `cx.notify()`. I also did not look for a test asserting the current behaviour. The impact is limited: reconnecting fixes it, and the stale data does not corrupt anything."
+        },
+        {
+          "real": true,
+          "confidence": 0.85,
+          "reasoning": "I checked this by reading the code, not by running anything. In trek-app, `HostEvent::Snapshot` is never constructed. `remote_snapshot()` is called only from `HostRequest::Snapshot` (remote.rs:598). In the server, snapshots are requested only on connect (server.rs:1241) and on a lag resync (server.rs:1170). `push_remote_changes` pushes only Thread, ThreadRemoved, Unlisted and Item events. The phone sets `projects`, `agents` and `fullAccessAllowed` only in `handle(.snapshot)` (AppModel.swift:307-311). `refresh()` is just a ping, and its comment says the Mac pushes every change. So the phone has no way to re-fetch those lists. `detect_agents` is asynchronous and ends with `cx.notify()`, with no remote push. A phone that connects before detection finishes keeps an empty or partial agent list until it reconnects. Adding a project on the Mac while a phone is connected hits the same gap. I found no test that asserts this behaviour is intended. I did not run the app, so the timing window at launch is inferred from the code."
+        }
+      ]
+    },
+    {
+      "id": "F-2026-10-20b-ios-01",
+      "slice": "ios",
+      "file": "ios/Trek/Model/AppModel.swift",
+      "line": 187,
+      "title": "The client created by pair() is the live connection afterwards but has no hostId, onMoved or onRoutes, so Bonjour recovery and address persistence are off until relaunch",
+      "category": "wrong-behaviour",
+      "severity": "medium",
+      "summary": "startLive() builds TrekClient with hostId and wires onMoved and onRoutes. pair() builds a TrekClient with none of them, and on success that same client stays attached as the live backend (onPaired only saves the PairedMac and sets mode = .live). In TrekClient, look() returns immediately when hostId is nil, and answered() calls the nil onRoutes and onMoved.",
+      "failure_scenario": "The user pairs at home on Wi-Fi and keeps using the app for days without force-quitting it. The Mac's DHCP lease changes from .20 to .21. The phone cannot reach .20 (and has no tailnet route), shows 'Mac unreachable — retrying' and backs off forever, because look() never starts the Bonjour browse. Even if the Mac comes back at another known route, onMoved is nil, so the new address and the updated routes are not saved. Only killing and relaunching the app, which goes through startLive with hostId, finds the Mac again. A phone that is never relaunched stays offline.",
+      "evidence": "AppModel.swift:187-188: `let client = TrekClient(address: address, routes: [address] + alternates, auth: .pair(...), transport: transport)` with no hostId: or callbacks, then `attach(client, mode: .unpaired)`. TrekClient.swift:440: `guard finder == nil, let hostId, Self.isLocal(address) else { return }`. AppModel.swift:155-169 (startLive) is the only place hostId, onMoved and onRoutes are set.",
+      "suggested_fix": "After onPaired (host.id is known), give the live client its hostId (make it a var) and set onMoved and onRoutes as startLive does. Or restart via startLive(PairedMac.load()!) once pairing succeeds.",
+      "status": "fixed",
+      "found": "2026-10-20b",
+      "verdicts": [
+        {
+          "real": true,
+          "confidence": 0.85,
+          "reasoning": "I read pair() and startLive() in AppModel.swift, then TrekClient.swift (init, look, answered, dropped, handle). pair() builds a TrekClient with no hostId and sets no onMoved or onRoutes. The init default for hostId is nil. When onPaired fires, it only saves the PairedMac and sets mode = .live. It does not call attach() or startLive(), so the same client stays as the live backend. After .paired arrives, the client's auth becomes .hello with the token, so reconnects work. A search for startLive and PairedMac.load found no place that rebuilds the client while the app is running. Only boot() and the pairing-failure fallback call startLive. In dropped(), look() is called when attempt == 1 or attempt % 4 == 0. look() returns at `guard finder == nil, let hostId, ...` because hostId is nil, so Bonjour recovery never runs. In answered(), onRoutes?(named) and onMoved?(address) are nil-chained no-ops. The scenario holds: after pairing, a DHCP change to a new address leaves the client retrying the old address with no Bonjour browse. The new address and routes are never persisted until a relaunch goes through startLive. Two limits on the claim. First, if the Mac is still reachable on another route that was known at pairing time (the alternates or the routes from `paired`), the client falls back to it through nextRoute. Second, the pairing-time PairedMac already stores the routes from the paired message, so a relaunch recovers. The impact is therefore limited to the case where no known route answers, or to stale persisted addresses. I found no test or comment saying this is intended."
+        },
+        {
+          "real": true,
+          "confidence": 0.85,
+          "reasoning": "I read AppModel.pair() and startLive(), then TrekClient's init, look() and answered(). pair() builds a TrekClient with no hostId and sets no onMoved or onRoutes. The onPaired handler only saves the PairedMac and sets mode = .live, so the same client stays attached as the backend. The only other path that builds a TrekClient with hostId is startLive(), which runs from boot() at launch or when pairing fails and an earlier Mac is restored. A rg for TrekClient( and startLive found no call that rebuilds the client after a successful pair. In look(), hostId is nil so the guard returns and Bonjour never starts. In answered(), onRoutes and onMoved are nil, so a new address or route list is never saved. I did not run the app or any test, so this rests on reading the code. The reported effect holds, but the scenario overstates it. Direct dialling of the saved routes, including any route the pairing link supplied as an alternate, still works in the session. The loss is Bonjour rediscovery after a DHCP change and persistence of address changes until the next relaunch. Relaunch fixes it, so the impact is modest."
+        }
+      ]
+    },
+    {
+      "id": "F-2026-10-20b-ios-02",
+      "slice": "ios",
+      "file": "ios/Trek/Views/Mac/NotesView.swift",
+      "line": 265,
+      "title": "A failed note save leaves `saving` stuck for 10 s, so later saves and the save on leaving are skipped and offline edits are discarded",
+      "category": "data-loss",
+      "severity": "medium",
+      "summary": "NoteEditor.save() sets saving = true, and only the success and conflict callbacks reset it. AppModel.saveNote shows a toast for any other error, including 'Not connected' and the failPending 'connection dropped' error. save() has `guard ... !saving`, so every save in the next 10 s returns silently, including the one from leave() on disappear. Nothing re-schedules a save after the 10 s fallback clears the flag.",
+      "failure_scenario": "The phone loses the connection while the user is typing in a note. After the 1 s debounce, save() runs and request() fails at once with 'Not connected to your Mac.'. saving stays true. The user keeps typing: each scheduleSave() calls save(), which returns at the guard. They tap back or Done within 10 s. leave() and stopWriting() call save(), which is blocked, and the view goes away. Everything typed since the last successful save exists only in the dismissed view's @State and is lost. openNotes still holds the old body. If they leave after 10 s while still offline, the save fails again and the text is discarded the same way. If the first save did reach the Mac but its reply was lost, the stale `modified` also makes the next save conflict.",
+      "evidence": "NotesView.swift:266 `guard loaded, !deleted, !saving, theirs == nil, text != saved else { return }`; :286-288 `Task { try? await Task.sleep(for: .seconds(10)); if saving, saved != body { saving = false } }` (no re-save); :303-311 leave() calls save() on disappear; AppModel.swift saveNote `.error(_, let code, let text): if code == .conflict, let conflict { conflict() } else { self?.show(text, error: true) }` never calls back.",
+      "suggested_fix": "Give saveNote a failure callback that clears `saving`. Keep the draft and re-attempt on reconnect, and warn on leaving with unsaved edits. Do not let leave() be blocked by `saving`.",
+      "status": "fixed",
+      "found": "2026-10-20b",
+      "verdicts": [
+        {
+          "real": true,
+          "confidence": 0.7,
+          "reasoning": "I read NoteEditor.save(), scheduleSave(), leave() and stopWriting() in NotesView.swift. I also read AppModel.saveNote(), request(), failPending() and notConnected. The quoted evidence matches the code. save() sets saving = true before calling model.saveNote. saveNote's done and conflict callbacks are the only ones that reset saving. Any other .error only calls show(text, error: true) and never calls back. request() delivers 'Not connected to your Mac.' synchronously when backend.send fails. failPending() delivers the 'connection dropped' error. In both cases saving stays true. Every save() in the next 10 s returns at `!saving`, including the ones from leave(), stopWriting() and the debounce. The 10 s task only clears the flag. It does not re-save, and scheduleSave() only runs on the next text change. The code comment says 'let the next change try again', but the flag blocks that for 10 s. The note text is view @State, so leaving within the window discards the edits while openNotes keeps the old body. I found no test or guard that makes this intended. The reporter overstates it in one respect. If the phone is still offline when the user leaves, the save would fail even without the stuck flag, so that loss is inherent and the user did see an error toast. The real marginal bug is a transient failure, or a reconnect within a few seconds, followed by leaving within 10 s. The stuck flag then silently drops the final save. A save that reached the Mac but lost its reply also leaves a stale modified, which causes a conflict on the next save. That is plausible but secondary."
+        },
+        {
+          "real": true,
+          "confidence": 0.72,
+          "reasoning": "I read the code on disk and did not run it. The save path matches the report. save() sets saving = true and its guard returns early while saving is true. The only places that reset saving are the done callback, the conflict callback and a 10 s fallback Task. AppModel.saveNote handles every non-conflict .error by calling show(text, error: true) and never calls back to the view. request() answers immediately with notConnected when backend.send returns false, and failPending errors out all waiting requests when the connection drops. Both paths therefore leave saving stuck at true for 10 s. leave() (onDisappear) and stopWriting() (Done) both go through save(), so they return silently at the guard in that window. The 10 s fallback only clears the flag and does not call save() again. The code comment says 'let the next change try again', so this is a known design, but no retry exists for the case where the user leaves within the window. The reporter overstates part of it. If the user stays offline, the text is lost on leave even without the stuck flag, because a failed save has no local persistence either. The distinct defect is narrower. After a transient failure, such as a brief disconnect followed by a reconnect, or a lost reply, edits made in the next 10 s are not saved on back or Done even though the connection is fine. Those edits are then lost with the view's @State. The 'stale modified makes the next save conflict' claim is speculative and I did not check it."
+        }
+      ]
+    },
+    {
+      "id": "F-2026-10-20b-remote-02",
+      "slice": "remote",
+      "file": "crates/trek-app/src/remote.rs",
+      "line": 494,
+      "title": "A phone that connects before the app subscribes to server notices is never marked connected, so it gets no pushed updates",
+      "category": "race",
+      "severity": "medium",
+      "summary": "The server broadcasts `ServerNotice::Connected` on a broadcast channel whose initial receiver is dropped. The app subscribes (`handle.notices()`) only later, inside the main-thread `this.update` that builds `Remote`, and builds `connected` as an empty set. A Connected notice sent between `RemoteServer::start` returning and that update is discarded, and `connected_devices()` is never used to reconcile.",
+      "failure_scenario": "The Mac relaunches, or the server restarts after a network change. The phone's reconnect loop completes TLS and hello before the busy main thread runs the `this.update` closure. The server logs 'phone connected' and sends the Connected notice with no receivers, so it is dropped. `Remote.connected` stays empty, `push_remote_changes` returns at `if remote.connected.is_empty() { return; }`, and the phone gets its connect-time Snapshot but never a thread-row update, transcript item or approval card. Settings also shows the phone as not connected. It recovers only when some device reconnects and produces a fresh Connected notice.",
+      "evidence": "server.rs:159 `let (notices, _) = broadcast::channel(64);` (the receiver is dropped, so sends with no subscriber are lost); server.rs:575 `inner.notice(ServerNotice::Connected{..})`. remote.rs:488-501 builds `Remote { ..., connected: HashSet::new(), ... }` and subscribes via `hear_notices(..., handle.notices(), cx)` only inside the post-start update. remote.rs:1476 `if remote.connected.is_empty() { return; }`. `connected_devices` is used nowhere in trek-app.",
+      "suggested_fix": "Seed `connected` and `devices` from `handle.connected_devices()` and `handle.devices()` right after `handle.notices()` is subscribed. Alternatively create the notices receiver before the listener accepts, or drop the early return in push_remote_changes.",
+      "status": "fixed",
+      "found": "2026-10-20b",
+      "verdicts": [
+        {
+          "real": true,
+          "confidence": 0.6,
+          "reasoning": "I traced both sides. In server.rs:159 the initial broadcast receiver is dropped, so a notice with no subscriber is lost. `RemoteServer::start` spawns the accept loops and returns before the app does anything else. The app only calls `handle.notices()` later, inside the main-thread `this.update` closure (remote.rs:~494-501), and it builds `connected: HashSet::new()` in the same step. Authentication in `handle_conn` does not go through the main thread. The `Connected` notice at server.rs:575 is sent right after `authenticate`, and only the later snapshot request waits for `serve_requests`, which also starts in that closure. So a phone that completes TLS, websocket and hello between start returning and the closure running produces a `Connected` notice nobody receives.\n\nNothing reconciles afterwards. `connected_devices()` is only used in trek-remote tests. `remote_notice` is the only place that inserts into `connected` besides the test helper. `push_remote_changes` returns early while `connected` is empty, and the 1.5s tick keeps seeing an empty set. Settings reads `r.connected` too. The set is only fixed when a later `Connected` notice arrives, such as a reconnect.\n\nThe window is real but narrow. It is the gap between the background start task finishing and the main thread running the closure. That gap grows when the main thread is busy, for example at app launch, and the phone's reconnect loop is polling by then. I found no test that treats this behaviour as intended. The failure is a probabilistic race with a narrow window, and it clears on the next reconnect, so I rate it low to medium."
+        },
+        {
+          "real": true,
+          "confidence": 0.62,
+          "reasoning": "I read the code on disk and did not run it. In server.rs, `RemoteServer::start` creates the notices channel with `broadcast::channel(64)` and drops the initial receiver. It spawns `accept_loop` before returning, so the server accepts phones as soon as `start` returns. At server.rs:575, `inner.notice(Connected)` calls `self.notices.send(..)` and ignores the result. With no receiver, tokio's broadcast `send` returns Err and the message is gone. A later `subscribe()` only sees messages sent after it. In remote.rs:488-501, `handle.notices()` is called inside the `this.update` closure. That closure runs on the main thread after the background `start` task finishes, and it builds `Remote` with `connected: HashSet::new()`. `connected_devices()` has no caller in trek-app (rg finds no use). The only writers to `connected` are `remote_notice` (remote.rs:1530/1533) and a remove at line 589. Nothing seeds or reconciles the set. `push_remote_changes` returns early when `connected` is empty (remote.rs:1476), and settings/mobile.rs:137 reads the same set. So a phone whose TLS, WebSocket and hello all complete between `start` returning and the update closure running gets a dropped notice. It then stays out of `connected` until it reconnects. The race is real but the window is narrow: the phone needs a full TLS, WebSocket and auth round trip inside the gap between `start` returning and the main-thread update. That gap is only long if the main thread is busy, for example at app launch. I did not reproduce it with a timing run. No test asserts this behaviour as intended. The reporter's scenario holds, with one correction: the phone still gets its connect-time Snapshot, but it gets no later pushes while `connected` stays empty. This is a startup race, not a steady-state failure."
+        }
+      ]
+    },
+    {
+      "id": "F-2026-10-20b-ios-03",
+      "slice": "ios",
+      "file": "ios/Trek/Net/TrekClient.swift",
+      "line": 406,
+      "title": "Any drop of a working connection first dials the other route, so reconnects can take about 11 s and rewrite the saved home address",
+      "category": "wrong-behaviour",
+      "severity": "medium",
+      "summary": "dropped() treats a drop of an authenticated connection like a failed route: failedRoutes goes from 0 to 1, which is below routes.count when the Mac advertises Wi-Fi and tailnet addresses. nextRoute() then moves to the other address before the one that was just working is retried. silent() (the stale-heartbeat path used by wake()) goes through the same code.",
+      "failure_scenario": "The Mac names two routes [192.168.1.20:7420, 100.x.y.z:7420]. The phone is on home Wi-Fi with Tailscale off. After locking and unlocking the phone for more than 62 s, silent() runs, or the socket errors on resume. failedRoutes becomes 1, which is below 2, so nextRoute() picks the 100.x address and connect() runs 0.2 s later. That dial is black-holed until the 10 s request timeout. The second failure takes the full-failure path: the banner reads 'Mac unreachable — retrying', then a 1 s backoff, then Wi-Fi is dialled and succeeds. The user sees about 11 s offline after every sleep or Wi-Fi blip although the Mac is next to them. When Tailscale is on, the tailnet connect succeeds and answered() sets home to the tailnet address and calls onMoved(address). The persisted PairedMac.address is rewritten to the tailnet address after a single blip, and the next launch dials it first.",
+      "evidence": "TrekClient.swift:405-417: `failedRoutes += 1\\nif failedRoutes < routes.count {\\n    // Another way to the Mac ...\\n    nextRoute()\\n    onState?(.connecting)` ... `self.connect()`. answered() resets `failedRoutes = 0`, so the first drop after a good session always lands here. silent() at :496-501 calls dropped(URLError(.timedOut)). request.timeoutInterval = 10 at :262.",
+      "suggested_fix": "When the connection that dropped had authenticated, retry the same address once (or after a short delay) before nextRoute(). Count only failed connects as failed routes. Avoid onMoved flipping home on a transient fallback.",
+      "status": "fixed",
+      "found": "2026-10-20b",
+      "verdicts": [
+        {
+          "real": true,
+          "confidence": 0.85,
+          "reasoning": "I traced dropped() against answered(), connect(), silent(), wake() and the AppModel callbacks. answered() sets failedRoutes = 0 and leaves `address` as the route that just worked. A later drop of that session, whether from the receive error path or silent(), reaches dropped(). The TLS-pin and TLS-failure branches don't apply to an ordinary drop. failedRoutes then becomes 1. With two routes, 1 < 2 is true, so nextRoute() advances `address` to the other route and connect() runs 0.2 s later. The route that was just working is not retried first. The reporter's timing also holds. A black-holed dial hits the 10 s request.timeoutInterval, the second dropped() makes failedRoutes 2, and the full-failure branch runs. That branch calls nextRoute(), which wraps back to Wi-Fi, shows the offline banner, and retries after min(30, 2^1/2) = 1 s. That adds up to about 11 s plus the 1 s backoff. If the tailnet dial succeeds instead, answered() sees address != home and calls onMoved. AppModel's onMoved handler rewrites PairedMac.address and saves it, so the next launch dials the tailnet address first. I found no test or guard showing this is intended. The comment on the branch only talks about trying another way when a route fails, which is the case it was written for, not a drop of a working session. Only the exact delay depends on how the OS treats a 100.x dial with Tailscale off. The ordering bug and the address rewrite follow from the code alone."
+        },
+        {
+          "real": true,
+          "confidence": 0.6,
+          "reasoning": "I read the code on disk. I did not build or run it, because the iOS client can't be run in this environment. The control flow does what the reporter says. answered() sets failedRoutes = 0 (line 343). Any later drop of the authenticated socket reaches dropped() through receive()'s catch or through silent(). dropped() skips the TLS-pin and TLS-failure guards, since those only fire on a pin mismatch or on a TLS failure with a single route. It then does failedRoutes += 1, giving 1. With two routes, 1 < 2 holds, so nextRoute() moves address to the other route and connect() runs 0.2 s later. The address that was just working is not retried first. If that dial fails, failedRoutes reaches 2, so the full-failure path runs: the offline banner, nextRoute() back to the first address, and attempt = 1, which gives a 1 s backoff (2^1/2). The delay before Wi-Fi is retried is therefore 0.2 s + dial time + 1 s. connect() sets timeoutInterval = 10, so a black-holed dial can take up to about 10 s. The same flow applies to silent(), which calls dropped(URLError(.timedOut)). With Tailscale on, the tailnet dial succeeds. answered() then sets home to the tailnet address and calls onMoved(address), and AppModel.startLive's onMoved handler saves it as PairedMac.address. I found no test or doc that makes this fallback intentional. The comment on the branch (\"Another way to the Mac ... try it now\") shows it was written for a failed route, and applying it to a working connection that dropped looks like an unintended side effect. Two things limit the impact. The 11 s figure assumes the 100.x dial is black-holed rather than refused or unreachable at once. A fast failure shortens the delay to roughly 1.2 s. And wake() on a dead or missing task calls connect() on the same address, so the unlock path avoids this only when the socket was already seen as dead before the app resumed. Rewriting the saved address to the tailnet one after one blip does follow from the code. Its cost is mostly a slower first dial on the next launch when Tailscale is off."
+        }
+      ]
+    },
+    {
+      "id": "F-2026-10-20b-remote-03",
+      "slice": "remote",
+      "file": "crates/trek-app/src/remote.rs",
+      "line": 1901,
+      "title": "follow_addresses baselines on the interface list sampled after the server's own address lookup, so an address that appears in between is never acted on",
+      "category": "race",
+      "severity": "medium",
+      "summary": "The server picks its bind address from `Addresses::find()`, which samples the interface list first and then runs the tailscale CLI, binds and waits for the main thread. `follow_addresses` then starts with `seen = interface_addresses()`, taken later, and only re-evaluates when the list differs from `seen`. If Wi-Fi or Tailscale comes up between the two samples, `seen` already includes it, so the loop never notices the server is on the wrong address.",
+      "failure_scenario": "After wake, or at login, Wi-Fi is down when `start_remote` runs `Addresses::find()` (no LAN, so it binds 127.0.0.1 and advertises 127.0.0.1:7420). Wi-Fi joins 1-3 s later, before the follow task runs its first `interface_addresses()`. `seen` now contains en0's address, every later poll sees `now == seen` and `continue`s, and `Addresses::find()` is never called again. The server keeps listening on loopback and no phone can connect or pair until the interface list changes again or Trek restarts.",
+      "evidence": "remote.rs:1901 `let mut seen = interface_addresses();` runs when the task is first polled. In `start_remote` (remote.rs:452-458), `Addresses::find()` samples interfaces at its start (remote.rs:212) and then calls tailscale (remote.rs:213-216), before `RemoteServer::start` (with up to 20 AddrInUse retries) and the main-thread update. remote.rs:1905 `if now == seen { continue; }` is the only trigger for `wanted` to be compared with `routes`.",
+      "suggested_fix": "Compare against the addresses the server actually started with. Pass the interface list used by `find()` into follow_addresses as the initial `seen`, or run the `wanted` vs `routes` check once before the first sleep.",
+      "status": "fixed",
+      "found": "2026-10-20b",
+      "verdicts": [
+        {
+          "real": true,
+          "confidence": 0.55,
+          "reasoning": "I read start_remote (remote.rs ~438-530), Addresses::find, interface_addresses and follow_addresses. The quoted code is accurate. Addresses::find() samples interface_addresses() first (line 212). It then runs the tailscale CLI, up to 2 s per call and twice when Tailscale is up. After that come the AddrInUse retry loop (up to 20 x 100 ms) and the hop to the main thread. Only after that does follow_addresses get spawned, and its first statement is `let mut seen = interface_addresses();`. The loop then does `if now == seen { continue; }`, so the routes are never re-evaluated against a fresh Addresses::find() unless the interface list changes again. Nothing else compensates: sync_remote only restarts on a settings change (started_with != wanted_with), there is no periodic re-check, and no test asserts this behaviour. An interface that comes up inside that window (Wi-Fi after wake, a utun at login) is therefore baked into `seen` but not into `routes`. The server stays bound to loopback until some later interface change or a restart. The UDP-connect fallback in find() only helps if a default route already exists. The race is real, but the window is narrow: milliseconds without Tailscale, a few seconds with a slow Tailscale CLI. The impact is also limited, because any later interface change, such as a DHCP renewal that changes the address or Tailscale reconnecting, self-heals it. That is why I rate it low severity with moderate confidence. The fix is simple: sample `seen` inside Addresses::find, or return the sample with the addresses and seed `seen` from it."
+        },
+        {
+          "real": true,
+          "confidence": 0.6,
+          "reasoning": "I read the code and did not run it. The quoted lines are accurate, and I found nothing that guards the gap. In start_remote, Addresses::find() samples interface_addresses() at remote.rs:212, before the tailscale CLI calls and before RemoteServer::start. The follow_addresses task is spawned on the main thread only after the server is up (remote.rs:498). It takes its baseline `seen = interface_addresses()` when it is first polled, so that sample is later than the one find() used. The only trigger for comparing `wanted` with `routes` is `now != seen` (remote.rs:1905). The routes passed in come from the earlier find() sample. I checked three places that might compensate. Reach::Wifi falls back to 127.0.0.1 with no error (remote_endpoint), so the loopback bind scenario is valid. sync_remote only compares (port, reach), not addresses. The follow task also never compares routes against a fresh Addresses::find() before its first poll. So if the interface list gains a private LAN address between the two samples, the loop never re-evaluates. The server then stays on loopback until the interface list changes again or Trek restarts. The window is real but narrow. The reporter's \"1-3 s\" is only plausible if the tailscale CLI is slow, since each call is capped at 2 s. Normally the window is tens to hundreds of milliseconds plus the server start and main-thread hop. No test asserts this behaviour as intended. The impact is a stuck loopback server (the reporter's own failure scenario) that is hit rarely, which is why I rate it low."
+        }
+      ]
+    },
+    {
+      "id": "F-2026-10-20b-ios-04",
+      "slice": "ios",
+      "file": "ios/Trek/Net/TrekClient.swift",
+      "line": 398,
+      "title": "A single TLS-handshake error on a one-route Mac stops reconnecting for good",
+      "category": "wrong-behaviour",
+      "severity": "medium",
+      "summary": "For a pinned-TLS client with only one route, dropped() treats NSURLErrorSecureConnectionFailed (-1200) or CannotLoadFromNetwork as 'the Mac doesn't serve TLS' and sets stopped = true. It does not check that this client already connected over TLS. wake() then returns early on `stopped`, and no retry is scheduled.",
+      "failure_scenario": "The user is on a single route (Wi-Fi only, no Tailscale) and the app has been connected over wss:// for days. The Mac's Trek restarts, or the Mac wakes from sleep. A reconnect attempt lands while the listener is mid-handshake, or a RST arrives during the TLS handshake, and URLSession reports -1200. The client sets stopped = true and shows 'Couldn't open an encrypted connection to that Mac. Use its IP address, and check that Trek on the Mac is up to date.' It never retries and wake() is a no-op, so the phone stays offline until the app is relaunched, although the Mac is healthy and would accept the next attempt.",
+      "evidence": "TrekClient.swift:398-404: `} else if case .tls = transport, Self.isTLSFailure(error), !several {\\n    stopped = true\\n    onState?(.offline(\\\"Couldn't open an encrypted connection ...\\\"))\\n    return`. wake() guards on `!stopped` (:204). isTLSFailure (:473-477) matches -1200 and -2000 with no check that a TLS session was ever established.",
+      "suggested_fix": "Make this a permanent stop only for a client that has never authenticated over this transport (the pairing case). After a successful session, treat it as an ordinary drop and back off.",
+      "status": "fixed",
+      "found": "2026-10-20b",
+      "verdicts": [
+        {
+          "real": true,
+          "confidence": 0.55,
+          "reasoning": "I read dropped(), wake(), connect(), receive(), handle() and isTLSFailure in the working tree. The quoted code is accurate and unguarded. dropped() is reached from receive()'s catch, which is how a failed websocket handshake surfaces, and from silent(), which passes URLError.timedOut and so does not match. With transport .tls, no pin mismatch recorded by the delegate, and one route, a -1200 or -1008 error sets stopped = true and returns. wake() then returns at `guard !stopped`, and no retry is scheduled. Nothing records that a TLS session was ever established, such as a `wasConnected` flag. A search for one found nothing. No iOS test covers this path. Only start() or a re-pair clears `stopped`. start() is called from AppModel.swift:250, and wake() is the foreground path. Reachability is the weak point. -1200 needs a TLS-handshake-time failure. The Mac simply being down gives -1004 or -1001, which retry normally. A RST or abort mid-handshake as the Mac's listener restarts or the Mac wakes does map to errSSL* and so to -1200, though that is timing-dependent and uncommon. The failure is plausible, and the response is disproportionate: a permanent stop on an error that is ambiguous."
+        },
+        {
+          "real": true,
+          "confidence": 0.55,
+          "reasoning": "I read the current TrekClient.swift and AppModel.swift. I could not run any of it, because the code is Swift/iOS-only and the sandbox has no iOS runtime. The reporter's quote is accurate. In dropped(), a client with a .tls transport, no pin mismatch (pinning?.rejected is nil) and a single route reaches the branch at line 398 when isTLSFailure(error) is true. isTLSFailure matches NSURLErrorSecureConnectionFailed (-1200) and NSURLErrorCannotLoadFromNetwork. That branch sets stopped = true, sends .offline(\"Couldn't open an encrypted connection ...\"), and returns without scheduling a retry.\n\nOnce stopped is true, wake() returns at its first guard (`guard !stopped`). foregrounded() only calls backend?.wake(). The only code that starts the client again is attach() -> b.start(), which runs when the app is relaunched or the Mac is re-paired. So the phone stays offline until then. Nothing records that this client already connected over TLS, so a Mac that served TLS for days is treated as one that never has. A repo search found no test covering this path (no ios test target mentions it), so no test marks the behaviour as intended.\n\nThe one assumption left is that URLSession can return -1200 for a transient handshake failure, not only for a Mac that serves plain HTTP. As I remember it, the commonly reported -1200 cases carry underlying SSL errors like -9806 (closed abort), which fits a TCP reset or peer close during the handshake. The Mac restarting or waking from sleep is a plausible trigger. I could not confirm this here, so confidence is moderate. The impact is limited to a single-route phone, and the user can recover by relaunching the app."
+        }
+      ]
+    },
+    {
+      "id": "F-2026-10-20b-remote-04",
+      "slice": "remote",
+      "file": "crates/trek-app/src/push.rs",
+      "line": 58,
+      "title": "ntfy notes misclassify real alert messages: agent-started failures read 'finished', and any title containing 'waiting' turns a finish or failure into 'needs you'",
+      "category": "wrong-behaviour",
+      "severity": "low",
+      "summary": "`note_for` and `unnamed` classify the Mac's banner text by prefix and substring. The real messages 'Thread failed · {title}' (agent-started threads) do not start with 'Failed', so they are tagged and worded as finished. The `contains(\"waiting\")` check matches titles inside 'Finished/Failed/Paused: {title}', which flips them to high-priority 'needs you'.",
+      "failure_scenario": "Default settings (push_names off): a thread started by another agent fails, the Mac emits 'Thread failed · Migrate DB' (workspace.rs:4271-4272), and the phone gets 'A thread finished' with the white_check_mark tag at priority 3. Or the user's thread 'Fix waiting spinner' finishes: the message is 'Finished: Fix waiting spinner', so `needs` is true and the phone gets 'A thread needs you', tag raised_hand, priority 4 (the same flip applies to 'Failed:' and 'Paused until…' messages). With push_names on, the failure also carries the success tag and normal priority.",
+      "evidence": "push.rs:58 `let needs = message.starts_with(\"Needs\") || message.contains(\"waiting\") || message.contains(\"Waiting\");` and :59 `let failed = message.starts_with(\"Failed\");`. `unnamed` (push.rs:39-53) checks `needs` before the Paused and Finished branches and has no 'Thread failed' case. The emitters use `\"Thread failed · {}\"` and `\"Failed: {}\"` (workspace.rs:4271-4272). No emitter produces 'is waiting on your answer'; only a unit test does.",
+      "suggested_fix": "Have the Attention event carry a kind (needs, failed, finished, paused) instead of parsing prose, or match only the known prefixes, including 'Thread failed', and drop the substring test.",
+      "status": "fixed",
+      "found": "2026-10-20b",
+      "verdicts": [
+        {
+          "real": true,
+          "confidence": 0.9,
+          "reasoning": "I read push.rs note_for and unnamed, the emitter at workspace.rs:4240-4246, and the Attention event routing in root.rs:817-818. The emitter produces \"Thread failed · {title}\" for failed agent-started threads. It also produces \"Finished: {title}\" and \"Failed: {title}\" with the user's thread title embedded. These messages go straight to push_alert, which calls note_for. note_for sets `failed` only when the message starts with \"Failed\", so \"Thread failed · X\" gets the white_check_mark tag at priority 3. With names off, unnamed() returns \"A thread finished\". note_for sets `needs` if the message contains \"waiting\" or \"Waiting\" anywhere, so \"Finished: Fix waiting spinner\" becomes needs=true. That gives the raised_hand tag, priority 4, and \"A thread needs you\". The existing tests only use messages that start with the expected prefixes and \"X is waiting on your answer\". Nothing asserts the misclassification, and nothing guards against it. The impact is small: a wrong label or priority on a phone note. The scenario is reachable when push is on, the user is away, and the thread title contains \"waiting\" or the thread was agent-started and failed."
+        },
+        {
+          "real": true,
+          "confidence": 0.92,
+          "reasoning": "I read push.rs note_for and unnamed, the emitter in workspace.rs (about line 4240), and the path from the Attention event through root.rs to push_alert and note_for. Nothing guards or rewrites the message on the way. No test asserts the misclassified behaviour. The only test touching 'waiting' uses a message no emitter produces, so it does not make the flip intended. I did not run a scratch program. The result follows from plain string logic.\n\nFailed case: agent-started failures are emitted as 'Thread failed · {title}'. That string does not start with 'Failed', so failed is false. It does not start with 'Needs' and (without 'waiting' in the title) needs is false. The tags are therefore white_check_mark. With push_names off, unnamed() falls through to the else branch and returns 'A thread finished'. Priority is 3.\n\nWaiting case: any title containing 'waiting' or 'Waiting' makes message.contains(\"waiting\") true, for example 'Finished: Fix waiting spinner', 'Failed: …' or 'Paused until …: …'. needs is then true, so the tag is raised_hand and the priority is 4. Without names, unnamed() checks needs before the failed and Paused branches, so the text becomes 'A thread needs you'.\n\nBoth are real, user-visible misclassifications on the phone notification. The impact is limited to wrong wording, tag and priority on an opt-in feature, so severity is low."
+        }
+      ]
+    },
+    {
+      "id": "F-2026-10-20b-ios-05",
+      "slice": "ios",
+      "file": "ios/Trek/Model/AppModel.swift",
+      "line": 232,
+      "title": "Reconnecting reloads only subscribed threads and settings. Screens loaded once on appear stay on a spinner or stale until the user switches tabs or pulls",
+      "category": "wrong-behaviour",
+      "severity": "low",
+      "summary": "On `.connected`, AppModel resubscribes open threads and calls loadSettings(), nothing else. Basecamp, Usage, the Notes list, and thumbnails and icons are fetched once from .task or onAppear. Their failure handlers leave the state as 'not loaded', which these screens render as an endless spinner or an empty state.",
+      "failure_scenario": "The app starts, or the connection drops, while the user is on the Basecamp tab. loadBasecamp fails with 'Not connected', so basecamp[range] stays nil and the screen shows 'Reading the trail…' indefinitely. The same happens with Usage ('Asking your agents…' while usage == nil) and Notes (the empty 'No notes yet' view with a New note button). When the Mac comes back nothing re-triggers the .task, so the user must pull to refresh or switch tabs. Message thumbnails, note pictures and IconStore icons whose fetch failed offline stay as placeholders, because their .task is keyed only on the item id.",
+      "evidence": "AppModel.swift:232-236: `if state == .connected { for s in self.stores.values where s.subscribed { self.resubscribe(s) }; self.loadSettings() }`. BasecampView.swift:82 `.task(id: range) { model.loadBasecamp(range) }`, :52 'Reading the trail…' while recap == nil. UsageView.swift:51 `.task { model.loadUsage() }` and :33 `ProgressView(\\\"Asking your agents…\\\")` while usage == nil. MessageImages.swift:72 `.task(id: \\\"\\\\(threadID)/\\\\(itemID)/\\\\(index)\\\")`.",
+      "suggested_fix": "Bump a connection-epoch counter on `.connected` and include it in those .task ids, or have the connected handler reload whatever is currently shown (Basecamp range, Notes list, usage).",
+      "status": "fixed",
+      "found": "2026-10-20b",
+      "verdicts": [
+        {
+          "real": true,
+          "confidence": 0.6,
+          "reasoning": "I read AppModel.onState at line 232. On .connected it resubscribes the open threads and calls loadSettings(), nothing else. The quoted code is accurate. I then traced the screens. request() answers immediately with \"Not connected to your Mac.\" when backend.send returns false. send returns false unless the client is authenticated, so an offline call fails at once. loadBasecamp then only shows a toast and leaves basecamp[range] nil. BasecampView renders \"Reading the trail…\" while recap is nil. Its only loader is .task(id: range), which does not re-fire on reconnect, and nothing observes model.connection there. loadNotes ignores errors and leaves notes empty. NotesView shows \"No notes yet\" and loads only from .task on first appearance. The default tab is .threads, and TabView creates a tab's content when it is first selected. So the failure needs the user to open Basecamp or Notes for the first time while disconnected or still connecting, or after reset() cleared the data on a re-pair. That is reachable, and the screen stays stuck until a pull to refresh or a tab switch. Pull to refresh works, so it is recoverable.\n\nTwo parts of the claim are wrong. Usage is covered: ThreadsView has .task(id: connection == .connected) that calls loadUsage(quiet: true) on every reconnect, and the Threads tab stays alive, so usage refills. Thumbnails and message images do not hang on a spinner. MessageImages shows a \"photo\" placeholder when the load fails, and I did not trace the IconStore claim. The corrected scope is Basecamp and Notes only, and it is low severity."
+        },
+        {
+          "real": true,
+          "confidence": 0.6,
+          "reasoning": "I read the code and did not run it. The `onState` handler at AppModel.swift:230-236 does what the report says: on `.connected` it only resubscribes subscribed threads and calls loadSettings(). `request()` fails immediately with \"Not connected to your Mac.\" when the backend can't send, and `failPending()` fails requests already in flight. loadBasecamp then only shows a toast and leaves `basecamp[range]` nil. BasecampView renders the 'Reading the trail…' spinner whenever that value is nil, and its only trigger is `.task(id: range)`, which depends on nothing that changes when the connection comes back. NotesView is the same: loadNotes() ignores errors, so `notes` stays empty and 'No notes yet' with a New note button shows until something re-runs `.task`. The Usage part does not hold. ThreadsView has `.task(id: connection == .connected ...)` that calls loadUsage(quiet:) on every connect, and ThreadView loads usage if it is nil. Because TabView keeps the Threads tab mounted, model.usage is filled on reconnect and UsageView's spinner resolves. The cold-start wording is also wrong: the default tab is .threads (TrekApp.swift:146), so the app does not start on Basecamp, unless the TrekTab launch override is set. The failure still happens when the user opens Basecamp or Notes while the Mac is unreachable, for example while the app is still connecting or the Mac is asleep. A pull to refresh or a tab switch recovers it, so the cost is small. I did not check the thumbnail and IconStore claim. It looks like the same pattern, but I did not read those files."
+        }
+      ]
+    },
+    {
+      "id": "F-2026-10-20b-ios-06",
+      "slice": "ios",
+      "file": "ios/Trek/Net/TrekClient.swift",
+      "line": 203,
+      "title": "wake() trusts a connection last heard from up to 62 s ago, and send() reports success without checking the write, so a dead socket looks live",
+      "category": "wrong-behaviour",
+      "severity": "low",
+      "summary": "On foreground, wake() only calls silent() if `heard` is older than 2.5 ping intervals (62.5 s). Otherwise it sends a ping and does not wait for the pong. send() returns true after `task.send(...) { _ in }`, ignoring write errors. The periodic timer applies the same 62.5 s threshold, so a socket that died without a RST is noticed only about 65-90 s later.",
+      "failure_scenario": "The Wi-Fi network changes or the Mac drops the TCP session silently. The user unlocks the phone 30 s later. heard is under 62.5 s old, so wake() pings, and the ping goes nowhere. The UI says Connected for another one to one and a half minutes. In that time ComposerArea.send passes its `connection == .connected` check, the write fails silently, and the composer is cleared. The reply handler for the send, an approval answer or a note save waits until failPending runs when the drop is finally detected. The user taps Allow and nothing reaches the Mac.",
+      "evidence": "TrekClient.swift:211 `} else if Date().timeIntervalSince(heard) > Self.pingEvery * 2.5 { silent() } else { send(.ping, id: nil) }`; :222 `task.send(.string(text)) { _ in }` followed by `return true`; :485 uses the same threshold in the timer. The doc comment on wake() says the connection is dropped 'if the Mac hasn't been heard from for longer than a ping takes to come round'.",
+      "suggested_fix": "On wake, ping and require a pong within a few seconds (deadline timer), else silent(). Treat a failed send completion as a drop.",
+      "status": "rejected",
+      "found": "2026-10-20b",
+      "verdicts": [
+        {
+          "real": false,
+          "confidence": 0.7,
+          "reasoning": "The quotes are accurate. wake() at line 211 uses a 62.5 s threshold, the timer at line 485 uses the same one, and send() at line 222 ignores the write result. This is the normal limit of a heartbeat that has a tolerance, not a defect. Any liveness check that tolerates 2.5 missed pings (25 s each) leaves a window where a half-dead socket looks connected. That window is bounded at roughly 62 to 90 s. The comment at line 157 documents the tolerance (\"silence for two pings means the connection is dead\"). When the drop is detected, receive() or silent() calls dropped(), the state leaves .connected, and AppModel.swift:229 calls failPending(). Its message is \"The connection to your Mac dropped. Check that it went through before trying again.\" So the user is told that pending sends, approvals and notes may not have arrived. Nothing is lost silently for good. The only gap is that the UI shows Connected for up to about 90 s, and closing it would mean making wake() wait for a pong. I found no test or comment that asserts this exact behaviour, and the doc comment on wake() is a bit loose about the 62.5 s figure. The scenario also depends on a TCP session dying with no RST and no iOS path-change error within 62 s. That is possible but narrow. Net: a bounded, deliberate detection latency with a recovery path that surfaces the failure, so this is not a defect a user would reasonably report."
+        }
+      ],
+      "reason": "The quotes are accurate. wake() at line 211 uses a 62.5 s threshold, the timer at line 485 uses the same one, and send() at line 222 ignores the write result. This is the normal limit of a heartbeat that has a tolerance, not a defect. Any liveness check that tolerates 2.5 missed pings (25 s each) leaves a window where a half-dead socket looks connected. That window is bounded at roughly 62 to 90 s. The comment at line 157 documents the tolerance (\"silence for two pings means the connection is dead\"). When the drop is detected, receive() or silent() calls dropped(), the state leaves .connected, and AppModel.swift:229 calls failPending(). Its message is \"The connection to your Mac dropped. Check that it went through before trying again.\" So the user is told that pending sends, approvals and notes may not have arrived. Nothing is lost silently for good. The only gap is that the UI shows Connected for up to about 90 s, and closing it would mean making wake() wait for a pong. I found no test or comment that asserts this exact behaviour, and the doc comment on wake() is a bit loose about the 62.5 s figure. The scenario also depends on a TCP session dying with no RST and no iOS path-change error within 62 s. That is possible but narrow. Net: a bounded, deliberate detection latency with a recovery path that surfaces the failure, so this is not a defect a user would reasonably report."
+    },
+    {
+      "id": "F-2026-10-20b-remote-05",
+      "slice": "remote",
+      "file": "crates/trek-remote/src/server.rs",
+      "line": 1165,
+      "title": "A resume `subscribe` ignores `limit`, and the 10 s write timeout and 60 s silence check assume small messages, so a big catch-up can loop forever",
+      "category": "wrong-behaviour",
+      "severity": "low",
+      "summary": "When `after_seq` is in range, `transcript_message` returns every changed item since then with no cap, even if the phone sent a `limit`. Every outgoing message must finish within WRITE_TIMEOUT (10 s). The idle check counts only completed incoming frames, so a long upload is also cut at 60 s. On a slow link the same oversized reply fails and is regenerated on every reconnect.",
+      "failure_scenario": "A phone leaves a thread open, the agent works overnight (thousands of new or changed items), and the phone reconnects over cellular or Tailscale. Its resubscribe carries `after_seq` plus `limit`, and the Mac answers with all items newer than `after_seq`. If that is several MB, it either exceeds the 10 s `write()` deadline or exceeds the phone's 16 MiB maximum message size, so the connection drops. The phone reconnects and resubscribes with the same `after_seq` (it never applied the reply), producing the same message again. Separately, a 5 MB photo upload on a ~0.5 Mbps uplink takes more than 60 s: `last_heard` is updated only when `ws.next()` yields a frame, so the ping tick closes with 'No response' mid-upload.",
+      "evidence": "server.rs:1165-1171 `Some(after) if base <= after && after <= seq => ServerMessage::Transcript { ..., items: items.into_iter().filter(|item| item.seq > after).collect(), more: false }`, with `limit` unused on that arm (remote.rs:1393-1395 has the same behaviour). server.rs:839 `const WRITE_TIMEOUT: Duration = Duration::from_secs(10);` wrapping every `send`. server.rs:1227 `last_heard = Instant::now()` after `ws.next()` returns and 1251 `last_heard.elapsed() > ping_every * 3`.",
+      "suggested_fix": "When the delta exceeds `limit` (or a byte budget), answer with a `reset` page of the last `limit` items instead. Scale the write timeout with message size, or reset `last_heard` from the Capped reader's byte progress.",
+      "status": "rejected",
+      "found": "2026-10-20b",
+      "verdicts": [
+        {
+          "real": false,
+          "confidence": 0.85,
+          "reasoning": "Checked transcript_message and remote_transcript (remote.rs). A resume delta ignoring `limit` is deliberate: tests/server.rs:994-998 asserts \"What changed since a seq is unchanged by a limit\" (reset=false, more absent, ids c4,i9,rreq). Under the task rules, behaviour a passing test asserts is intended. The protocol doc says `limit` bounds only a full (reset) transcript. The delta holds each changed item once, at its latest body, so it is bounded by the thread's size, no larger than the unlimited full transcript the same path already sends. The \"loops forever\" scenario needs a multi-MB gap on a link that cannot move it in 10 s. The reporter has no evidence of that and gave 0.3 confidence. The phone's 16 MiB limit is outside this repo. The upload half is also unconvincing. The server's incoming max_message is 8 MiB, and the config comment says photos are \"a few of a megabyte each\". A 60 s cut needs about 3.75 MB or more on a 0.5 Mbps uplink, and last_heard does only update per complete frame. The timeout code matches the reporter's quotes, but the failure needs a very unlikely combination of photo size and link speed. It is a speculative edge case, not a demonstrable bug."
+        }
+      ],
+      "reason": "Checked transcript_message and remote_transcript (remote.rs). A resume delta ignoring `limit` is deliberate: tests/server.rs:994-998 asserts \"What changed since a seq is unchanged by a limit\" (reset=false, more absent, ids c4,i9,rreq). Under the task rules, behaviour a passing test asserts is intended. The protocol doc says `limit` bounds only a full (reset) transcript. The delta holds each changed item once, at its latest body, so it is bounded by the thread's size, no larger than the unlimited full transcript the same path already sends. The \"loops forever\" scenario needs a multi-MB gap on a link that cannot move it in 10 s. The reporter has no evidence of that and gave 0.3 confidence. The phone's 16 MiB limit is outside this repo. The upload half is also unconvincing. The server's incoming max_message is 8 MiB, and the config comment says photos are \"a few of a megabyte each\". A 60 s cut needs about 3.75 MB or more on a 0.5 Mbps uplink, and last_heard does only update per complete frame. The timeout code matches the reporter's quotes, but the failure needs a very unlikely combination of photo size and link speed. It is a speculative edge case, not a demonstrable bug."
     }
   ]
 }

@@ -5,6 +5,7 @@
 
 use super::harness::{Trek, launch, mock, new_project, open, open_with, run, settings};
 use super::worktrees::make_repo;
+use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{SharedString, TestAppContext};
 use std::process::Command;
 use trek_core::store::{Item, Store, ToolStatus};
@@ -175,6 +176,42 @@ fn review_opens_the_turns_diff_and_a_row_opens_its_file() {
         trek.click(cx, "git-turn-close");
         trek.render(cx);
         assert_eq!(cx.read(|cx| panel.read(cx).git_turn(cx)), None);
+    });
+}
+
+#[test]
+fn hovering_the_git_tools_counts_breaks_them_down_by_kind_of_file() {
+    run(async |cx| {
+        let trek = open(cx);
+        make_repo(&trek, cx);
+        let dir = trek.project.clone();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "fn main() {\n    run();\n}\n").unwrap();
+        std::fs::write(dir.join("tests/parse.rs"), "#[test]\nfn parses() {}\n").unwrap();
+        std::fs::write(dir.join("README.md"), "hi\nthere\n").unwrap();
+        let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
+        trek.window(cx, |window, cx| panel.update(cx, |p, cx| p.open_tool(crate::workspace::PanelTool::Git, window, cx)));
+        trek.render(cx);
+        assert_eq!(cx.read(|cx| panel.read(cx).git_lines(cx)), Some(vec!["Code +3 −0".to_string(), "Tests +2 −0".into(), "Docs +2 −1".into(), "Total +7 −1".into()]));
+        assert!(trek.visible(cx, "git-lines") && !trek.visible(cx, "git-lines-card"), "closed until hovered");
+
+        // Resting on the counts opens the card: a row per kind that changed, then the total.
+        trek.window(cx, |window, cx| window.hover("git-lines", cx));
+        cx.executor().advance_clock(std::time::Duration::from_millis(400));
+        trek.render(cx);
+        for id in ["git-lines-card", "git-lines-code", "git-lines-tests", "git-lines-docs", "git-lines-total"] {
+            assert!(trek.visible(cx, id), "{id} shows");
+        }
+        for id in ["git-lines-config", "git-lines-generated", "git-lines-other"] {
+            assert!(!trek.visible(cx, id), "{id} has nothing in it");
+        }
+
+        // Leaving closes it.
+        trek.window(cx, |window, cx| window.hover("git-refresh", cx));
+        cx.executor().advance_clock(std::time::Duration::from_millis(300));
+        trek.render(cx);
+        assert!(!trek.visible(cx, "git-lines-card"));
     });
 }
 

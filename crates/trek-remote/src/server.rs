@@ -23,7 +23,7 @@ use tokio_tungstenite::tungstenite::http::{StatusCode, header};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
 
-use crate::host::{HostError, HostEvent, HostResult, RemoteHost};
+use crate::host::{CloneProgress, HostError, HostEvent, HostResult, RemoteHost};
 use crate::pairing::{
     DeviceInfo, DeviceRegistry, MAX_DEVICE_FIELD, Pairing, PairingOffer, generate_code, now_ms,
     pairing_url_with_routes, source,
@@ -36,7 +36,8 @@ use crate::protocol::{
 /// How the server listens and behaves.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// Where to listen (`0.0.0.0:7420` by default; Trek binds the address it advertises).
+    /// Where to listen (`0.0.0.0:7420` by default; Trek listens on `[::]:7420`, every interface
+    /// and IPv4 too, and decides per connection with `admit`).
     pub bind: SocketAddr,
     /// The Mac, as phones see it.
     pub host: HostInfo,
@@ -48,7 +49,11 @@ pub struct ServerConfig {
     pub also_bind: Vec<SocketAddr>,
     /// Every `host:port` phones may dial, `advertise` first: in the pairing code (`alt`) and in
     /// `welcome`/`paired`, so a phone tries the next when one doesn't answer. Empty: `advertise` only.
+    /// [`RemoteHandle::set_routes`] changes both while the server runs.
     pub routes: Vec<String>,
+    /// Which connections to serve, by where they come from and which of this machine's addresses
+    /// they reached: one refused is closed at once, before TLS. `None` serves every one.
+    pub admit: Option<Admission>,
     /// Where paired devices are saved (`devices.json`); `None` keeps them in memory.
     pub devices_path: Option<PathBuf>,
     /// How long a new connection has to authenticate.
@@ -71,6 +76,46 @@ pub struct ServerConfig {
 /// The default port.
 pub const DEFAULT_PORT: u16 = 7420;
 
+/// Whether to serve a connection, from the address it comes from (`peer`) and the one of this
+/// machine's it reached (`local`), both with IPv4-mapped IPv6 turned back into IPv4. Asked once per
+/// connection, as it's accepted, on the accepting task: keep it quick.
+#[derive(Clone)]
+pub struct Admission(Arc<dyn Fn(SocketAddr, SocketAddr) -> bool + Send + Sync>);
+
+impl Admission {
+    pub fn new(admits: impl Fn(SocketAddr, SocketAddr) -> bool + Send + Sync + 'static) -> Self {
+        Self(Arc::new(admits))
+    }
+
+    /// Whether a connection from `peer` to `local` is served.
+    pub fn admits(&self, peer: SocketAddr, local: SocketAddr) -> bool {
+        (self.0)(canonical(peer), canonical(local))
+    }
+}
+
+impl std::fmt::Debug for Admission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Admission(..)")
+    }
+}
+
+/// `addr` with an IPv4-mapped IPv6 address (`[::ffff:192.168.1.2]`, what a dual-stack socket
+/// sees of IPv4) written as the IPv4 it is.
+fn canonical(addr: SocketAddr) -> SocketAddr {
+    SocketAddr::new(addr.ip().to_canonical(), addr.port())
+}
+
+/// The last device that authenticated: who, when, from where, and on which of this machine's
+/// addresses (the route it dialled, as far as the machine can tell).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastConnection {
+    pub device_id: String,
+    /// Unix ms.
+    pub at: i64,
+    pub peer: SocketAddr,
+    pub local: SocketAddr,
+}
+
 /// Connections that haven't authenticated yet, at most.
 pub const PRE_AUTH_TOTAL: usize = 16;
 /// ...and from one address (an IPv6 one by its /64), so one device on the network can't take
@@ -92,6 +137,7 @@ impl ServerConfig {
             advertise: None,
             also_bind: Vec::new(),
             routes: Vec::new(),
+            admit: None,
             devices_path: None,
             auth_timeout: Duration::from_secs(10),
             pairing_ttl: Duration::from_secs(10 * 60),
@@ -163,7 +209,6 @@ impl RemoteServer {
             Box::new(move |thread_id: &str| host.unwatch(thread_id))
         };
         let inner = Arc::new(Inner {
-            config,
             tls,
             local_addr,
             also,
@@ -172,7 +217,16 @@ impl RemoteServer {
             shutdown,
             pre_auth: PreAuthSlots::new(PRE_AUTH_TOTAL, PRE_AUTH_PER_ADDRESS),
             watchers: Watchers { counts: Mutex::new(HashMap::new()), unwatch },
-            state: Mutex::new(State { registry, pairing: Pairing::default(), connections: HashMap::new(), next_conn: 0 }),
+            state: Mutex::new(State {
+                registry,
+                pairing: Pairing::default(),
+                connections: HashMap::new(),
+                next_conn: 0,
+                advertise: config.advertise.clone(),
+                routes: config.routes.clone(),
+                last: None,
+            }),
+            config,
         });
         tracing::info!(%local_addr, "trek-remote listening");
         for (addr, l) in more {
@@ -225,16 +279,39 @@ impl RemoteHandle {
         let normalized = crate::pairing::normalize_code(code).expect("a valid pairing code");
         let code = format!("{}-{}", &normalized[..4], &normalized[4..]);
         let ttl = self.inner.config.pairing_ttl;
-        self.inner.lock().pairing.activate(&code, ttl).expect("normalized codes are valid");
+        let (advertise, routes) = {
+            let mut state = self.inner.lock();
+            state.pairing.activate(&code, ttl).expect("normalized codes are valid");
+            (state.advertise.clone(), state.routes.clone())
+        };
         let config = &self.inner.config;
-        let advertise = config.advertise.clone().unwrap_or_else(|| self.inner.local_addr.to_string());
-        let routes = if config.routes.is_empty() { vec![advertise] } else { config.routes.clone() };
+        let advertise = advertise.unwrap_or_else(|| self.inner.local_addr.to_string());
+        let routes = if routes.is_empty() { vec![advertise] } else { routes };
         PairingOffer {
             url: pairing_url_with_routes(&routes, &code, &config.host.name, &config.host.id, config.tls.as_ref().map(|t| t.fingerprint.as_str())),
             expires_at: now_ms() + ttl.as_millis() as i64,
             fingerprint: config.tls.as_ref().map(|t| t.short_fingerprint()),
             code,
         }
+    }
+
+    /// Change what phones are told to dial (`advertise` first, then the rest of `routes`): the
+    /// pairing codes offered from now on and every `welcome` and `paired` that follows carry it.
+    /// What's listening and who's connected stay as they are.
+    pub fn set_routes(&self, advertise: Option<String>, routes: Vec<String>) {
+        let mut state = self.inner.lock();
+        state.advertise = advertise;
+        state.routes = routes;
+    }
+
+    /// What phones are told to dial, as `welcome` gives it now.
+    pub fn routes(&self) -> Vec<String> {
+        self.inner.lock().routes.clone()
+    }
+
+    /// The last device that authenticated, since the server started.
+    pub fn last_connection(&self) -> Option<LastConnection> {
+        self.inner.lock().last.clone()
     }
 
     /// Withdraw the active pairing code.
@@ -350,6 +427,11 @@ struct State {
     /// The live connection of each device.
     connections: HashMap<String, LiveConn>,
     next_conn: u64,
+    /// What phones are told to dial (`config.advertise` and `config.routes` until
+    /// [`RemoteHandle::set_routes`]).
+    advertise: Option<String>,
+    routes: Vec<String>,
+    last: Option<LastConnection>,
 }
 
 struct LiveConn {
@@ -491,12 +573,18 @@ async fn accept_loop<H: RemoteHost>(listener: TcpListener, inner: Arc<Inner>, ho
         tokio::select! {
             accepted = listener.accept() => match accepted {
                 Ok((stream, peer)) => {
+                    let peer = canonical(peer);
+                    let local = stream.local_addr().map(canonical).unwrap_or(inner.local_addr);
+                    if inner.config.admit.as_ref().is_some_and(|admit| !admit.admits(peer, local)) {
+                        tracing::debug!(%peer, %local, "connection refused: not from a network this machine serves");
+                        continue;
+                    }
                     let _ = stream.set_nodelay(true);
                     let Some(slot) = inner.pre_auth.take(peer.ip()) else {
                         tracing::debug!(%peer, "too many unauthenticated connections");
                         continue;
                     };
-                    tokio::spawn(serve(stream, peer, inner.clone(), host.clone(), slot));
+                    tokio::spawn(serve(stream, peer, local, inner.clone(), host.clone(), slot));
                 }
                 Err(err) => {
                     tracing::warn!(%err, "accept failed");
@@ -531,7 +619,7 @@ fn refuse_browsers(req: &Request, resp: Response) -> Result<Response, ErrorRespo
     Ok(resp)
 }
 
-async fn serve<H: RemoteHost>(stream: TcpStream, peer: SocketAddr, inner: Arc<Inner>, host: Arc<H>, unauthenticated: PreAuth) {
+async fn serve<H: RemoteHost>(stream: TcpStream, peer: SocketAddr, local: SocketAddr, inner: Arc<Inner>, host: Arc<H>, unauthenticated: PreAuth) {
     let ws_config = WebSocketConfig::default()
         .max_message_size(Some(inner.config.max_message))
         .max_frame_size(Some(inner.config.max_message));
@@ -571,7 +659,8 @@ async fn serve<H: RemoteHost>(stream: TcpStream, peer: SocketAddr, inner: Arc<In
     drop(unauthenticated);
     let device_id = auth.device_id.clone();
     let conn_id = auth.conn_id;
-    tracing::info!(%peer, device_id, "phone connected");
+    inner.lock().last = Some(LastConnection { device_id: device_id.clone(), at: now_ms(), peer, local });
+    tracing::info!(%peer, %local, device_id, "phone connected");
     inner.notice(ServerNotice::Connected { device_id: device_id.clone() });
 
     run_session(&mut ws, &inner, host, auth).await;
@@ -671,7 +760,7 @@ async fn authenticate(
         }
 
         let (kick_tx, kick) = oneshot::channel();
-        let (host, features, routes) = (inner.config.host.clone(), inner.config.features.clone(), inner.config.routes.clone());
+        let (host, features, routes) = (inner.config.host.clone(), inner.config.features.clone(), inner.lock().routes.clone());
         return match msg {
             ClientMessage::Pair { code, device_name, .. } => {
                 let name = clean_name(&device_name);
@@ -804,6 +893,9 @@ const CLIENT_TYPES: &[&str] = &[
     "icon",
     "note_asset",
     "add_note_image",
+    "machine_info",
+    "clone_project",
+    "put_files",
 ];
 
 /// Parse a text frame: its `id` (for the reply's `re`, even when the rest is bad) and message.
@@ -891,6 +983,8 @@ enum Done {
         result: HostResult<Transcript>,
     },
     Reply { envelope: ServerEnvelope, query: bool },
+    /// A push for this connection alone, ahead of the reply it comes before (`clone_progress`).
+    Push(ServerEnvelope),
 }
 
 async fn worker<H: RemoteHost>(host: Arc<H>, mut jobs: mpsc::UnboundedReceiver<Job>, done: mpsc::UnboundedSender<Done>) {
@@ -904,31 +998,33 @@ async fn worker<H: RemoteHost>(host: Arc<H>, mut jobs: mpsc::UnboundedReceiver<J
                 Done::Transcript { re, thread_id, after_seq, limit, generation, result }
             }
             // Reads that may take a while (asking the agents for their usage, a recap of all
-            // time, git) don't hold up what the phone does next.
-            Job::Call { re, msg } if msg.is_query() => {
+            // time, git) don't hold up what the phone does next; nor does a clone, which may take
+            // minutes (the machine that asked waits for its `ack` before it sends files).
+            Job::Call { re, msg } if msg.is_query() || matches!(msg, ClientMessage::CloneProject(_)) => {
                 let (host, done) = (host.clone(), done.clone());
                 tokio::spawn(async move {
-                    let _ = done.send(Done::Reply { envelope: call(&*host, re, msg).await, query: true });
+                    let query = msg.is_query();
+                    let _ = done.send(Done::Reply { envelope: call(&*host, re, msg, &done).await, query });
                 });
                 continue;
             }
-            Job::Call { re, msg } => Done::Reply { envelope: call(&*host, re, msg).await, query: false },
+            Job::Call { re, msg } => Done::Reply { envelope: call(&*host, re, msg, &done).await, query: false },
         };
         let _ = done.send(finished);
     }
 }
 
-async fn call<H: RemoteHost>(host: &H, re: Option<String>, msg: ClientMessage) -> ServerEnvelope {
+async fn call<H: RemoteHost>(host: &H, re: Option<String>, msg: ClientMessage, done: &mpsc::UnboundedSender<Done>) -> ServerEnvelope {
     let kind = msg.kind();
-    let ack = |thread_id: Option<String>| ServerMessage::Ack { thread_id, open: None, text: None };
+    let ack = |thread_id: Option<String>| ServerMessage::Ack { thread_id, open: None, text: None, project_id: None };
     let result: HostResult<ServerMessage> = match msg {
-        ClientMessage::Send(req) => host.send(req).await.map(|open| ServerMessage::Ack { thread_id: None, open, text: None }),
+        ClientMessage::Send(req) => host.send(req).await.map(|open| ServerMessage::Ack { thread_id: None, open, text: None, project_id: None }),
         ClientMessage::TranscriptBefore { thread_id, before, limit } => host
             .transcript_before(&thread_id, &before, limit.min(MAX_PAGE))
             .await
             .map(|page| ServerMessage::TranscriptPage { thread_id, items: page.items, more: page.more }),
         ClientMessage::TurnAction(req) => {
-            host.turn_action(req).await.map(|done| ServerMessage::Ack { thread_id: done.thread_id, open: None, text: done.text })
+            host.turn_action(req).await.map(|done| ServerMessage::Ack { thread_id: done.thread_id, open: None, text: done.text, project_id: None })
         }
         ClientMessage::NewThread(req) => host.new_thread(req).await.map(|id| ack(Some(id))),
         ClientMessage::Answer(req) => host.answer(req).await.map(|()| ack(None)),
@@ -958,13 +1054,29 @@ async fn call<H: RemoteHost>(host: &H, re: Option<String>, msg: ClientMessage) -
         ClientMessage::SetSettings(change) => host.set_settings(change).await.map(ServerMessage::Settings),
         ClientMessage::Search(req) => host.search(req).await.map(ServerMessage::SearchResults),
         ClientMessage::UseReset { credit_id } => host.use_reset(&credit_id).await.map(|()| ack(None)),
-        ClientMessage::QueueAction(req) => host.queue_action(req).await.map(|text| ServerMessage::Ack { thread_id: None, open: None, text }),
+        ClientMessage::QueueAction(req) => host.queue_action(req).await.map(|text| ServerMessage::Ack { thread_id: None, open: None, text, project_id: None }),
         ClientMessage::Attachment(req) => host.attachment(req).await.map(ServerMessage::Attachment),
         ClientMessage::BackgroundOutput { thread_id, task_id } => host.background_output(&thread_id, &task_id).await.map(ServerMessage::BackgroundOutput),
         ClientMessage::StopBackground { thread_id, task_id } => host.stop_background(&thread_id, &task_id).await.map(|()| ack(None)),
         ClientMessage::Icon(req) => host.icon(req).await.map(ServerMessage::Icon),
         ClientMessage::NoteAsset(req) => host.note_asset(req).await.map(ServerMessage::NoteAsset),
         ClientMessage::AddNoteImage(req) => host.add_note_image(req).await.map(ServerMessage::NoteImage),
+        ClientMessage::MachineInfo => host.machine_info().await.map(ServerMessage::MachineInfo),
+        ClientMessage::CloneProject(req) => match req.check() {
+            Ok(()) => {
+                let done = done.clone();
+                let progress = CloneProgress::new(req.folder.clone(), move |msg| {
+                    let _ = done.send(Done::Push(ServerEnvelope::push(msg)));
+                });
+                host.clone_project(req, progress).await.map(|id| ServerMessage::Ack { thread_id: None, open: None, text: None, project_id: Some(id) })
+            }
+            Err(why) => Err(HostError::bad_request(why)),
+        },
+        // Checked here, whatever the host does: paths inside the project, the size in bounds.
+        ClientMessage::PutFiles(req) => match req.decode() {
+            Ok(files) => host.put_files(&req.project_id, files).await.map(|()| ack(None)),
+            Err(why) => Err(HostError::bad_request(why)),
+        },
         other => Err(HostError::bad_request(format!("Unexpected \"{}\"", other.kind()))),
     };
     match result {
@@ -1023,7 +1135,7 @@ impl Session {
                     watchers.remove(&thread_id);
                 }
                 match re {
-                    Some(re) => vec![ServerEnvelope::reply(Some(re), ServerMessage::Ack { thread_id: None, open: None, text: None })],
+                    Some(re) => vec![ServerEnvelope::reply(Some(re), ServerMessage::Ack { thread_id: None, open: None, text: None, project_id: None })],
                     None => Vec::new(),
                 }
             }
@@ -1061,6 +1173,7 @@ impl Session {
                 }
                 vec![envelope]
             }
+            Done::Push(envelope) => vec![envelope],
             Done::Snapshot(result) => {
                 self.snapshots_pending = self.snapshots_pending.saturating_sub(1);
                 let mut out = vec![match result {

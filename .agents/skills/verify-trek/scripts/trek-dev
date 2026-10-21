@@ -41,11 +41,16 @@ menu_bar_icon = false
 [updates]
 auto_check = false
 auto_download = false
+
+# Off until turned on (Settings › Phone & Machines); when it is, not on the port the user's own
+# Trek listens on, so the isolated app can be paired with itself as "machine B".
+[mobile]
+port = 7431
 """
 
 TOOLS = {"git", "explorer", "terminal", "browser", "sidechat", "simulator"}
 BASIC_ROUTES = {"draft", "no-project", "basecamp", "notes", "appearance", "first"}
-CONTROL_VERBS = {"range", "settled", "glass", "tint", "theme", "pace", "wait", "new", "diff", "tools", "editor", "ide", "artifacts", "scroll", "click", "rclick", "hover", "elements", "key", "note", "background-use", "terminal"}
+CONTROL_VERBS = {"range", "settled", "glass", "tint", "theme", "pace", "wait", "new", "diff", "tools", "editor", "ide", "artifacts", "scroll", "click", "rclick", "hover", "elements", "key", "note", "background-use", "terminal", "type", "pair"}
 
 
 class CliError(RuntimeError):

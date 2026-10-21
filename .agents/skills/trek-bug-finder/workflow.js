@@ -444,7 +444,7 @@ You are one investigator in a bug-finding workflow over Trek. You have a fresh c
 Your slice: ${slice.key}: ${slice.what}
 Paths (git pathspecs): ${slice.paths.join(' ')}
 List the files with: git ls-files -- ${slice.paths.map(p => `'${p}'`).join(' ')}
-${focusBlock(slice)}${knownBlock(slice)}
+${focusBlock(slice)}${args && args.focusHint ? `\nThis run cares most about: ${args.focusHint}\n` : ''}${knownBlock(slice)}
 Read every file in the slice in full. Do not sample. For each file, read it top to bottom before moving on; follow a call into another file only to settle a question about this slice. As you read, keep a running list of suspicious spots and come back to each one to decide.
 
 Report only defects with a concrete failure scenario and the code that proves it. Rank by severity, then confidence. Report at most 10; if you have more, keep the strongest and name the rest in coverage. Do not pad: an empty list with an honest coverage note is a good answer. Every finding will be sent to skeptics whose job is to refute it, so quote real lines.`

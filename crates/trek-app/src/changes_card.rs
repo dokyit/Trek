@@ -1,6 +1,6 @@
 //! The card under a finished turn's answer when the turn changed files
 //! (`Workspace::load_turn_changes`): "Edited N files" with the lines it added and removed in
-//! all, then a flat row per file — its folder muted, its name brighter, its own counts on the
+//! all (hovering them breaks them down by kind of file: `line_breakdown`), then a flat row per file — its folder muted, its name brighter, its own counts on the
 //! right — Undo (the turn-end confirmation) and Review (the turn's diff in the Git tool) on the
 //! header, and a "Show N more" row past the first few. Drawn with the theme's foreground at low
 //! opacities, like the rest of the transcript, so it sits right on Night, Paper and glass alike.
@@ -11,6 +11,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::rc::Rc;
 use trek_core::changes::{Counted, FileChange, FileStatus, TurnChanges};
+use trek_core::file_kind::LineBreakdown;
 
 /// What the card's controls do.
 pub struct Actions {
@@ -68,14 +69,16 @@ pub fn card(ix: usize, changes: &TurnChanges, shown_all: bool, actions: Actions,
                 .child(format!("Edited {n} {}", if n == 1 { "file" } else { "files" })),
         )
         .when(added > 0 || removed > 0, |el| {
-            el.child(
+            el.child(crate::line_breakdown::hover(
+                format!("changes-lines-{ix}"),
                 h_flex()
                     .gap(px(6.))
                     .font_family(theme.mono_font_family.clone())
                     .text_xs()
                     .child(div().text_color(green).child(format!("+{added}")))
                     .child(div().text_color(red).child(format!("−{removed}"))),
-            )
+                LineBreakdown::of_changes(&changes.files),
+            ))
         })
         .child(div().flex_1())
         .when_some(actions.undo.clone(), |el, undo| {

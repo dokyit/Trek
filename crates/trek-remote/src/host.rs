@@ -3,6 +3,7 @@
 //! drain on its own executor.
 
 use std::future::Future;
+use std::sync::Arc;
 
 use tokio::sync::oneshot;
 
@@ -13,6 +14,7 @@ use crate::protocol::{
     TurnActionDone, TurnActionRequest, Usage, WorktreeRemoveRequest,
 };
 use crate::protocol::{AddNoteImageRequest, NoteAsset, NoteAssetRequest, NoteImage};
+use crate::protocol::{CloneProjectRequest, FileUpload, MachineInfo, ServerMessage};
 
 pub type HostResult<T> = Result<T, HostError>;
 
@@ -47,6 +49,44 @@ impl HostError {
     /// Anything else that went wrong on the Mac.
     pub fn other(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::HostError, message)
+    }
+
+    /// `clone_project`: git couldn't clone; `detail` is what it said.
+    pub fn clone_failed(detail: impl Into<String>) -> Self {
+        Self::new(ErrorCode::CloneFailed, detail)
+    }
+}
+
+/// Where [`RemoteHost::clone_project`] reports git's progress: each line reaches the machine that
+/// asked as `clone_progress {folder, line}`, ahead of the reply. Cheap to clone; lines sent after
+/// the connection went away are dropped.
+#[derive(Clone)]
+pub struct CloneProgress {
+    folder: String,
+    sink: Arc<dyn Fn(ServerMessage) + Send + Sync>,
+}
+
+impl CloneProgress {
+    /// Progress for a clone into `folder`, handed to `sink` as `clone_progress` messages (the
+    /// server makes these; tests and other drivers may too).
+    pub fn new(folder: impl Into<String>, sink: impl Fn(ServerMessage) + Send + Sync + 'static) -> Self {
+        Self { folder: folder.into(), sink: Arc::new(sink) }
+    }
+
+    /// The folder being cloned into, as the request named it.
+    pub fn folder(&self) -> &str {
+        &self.folder
+    }
+
+    /// One line of git's output (`Receiving objects:  42% (420/1000)`).
+    pub fn line(&self, line: impl Into<String>) {
+        (self.sink)(ServerMessage::CloneProgress { folder: self.folder.clone(), line: line.into() });
+    }
+}
+
+impl std::fmt::Debug for CloneProgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CloneProgress").field("folder", &self.folder).finish_non_exhaustive()
     }
 }
 
@@ -224,6 +264,30 @@ pub trait RemoteHost: Send + Sync + 'static {
         let _ = req;
         unsupported("add pictures to notes")
     }
+
+    // Another Trek driving this one (`docs/MULTI-MACHINE.md`, feature `machines`).
+
+    /// What this machine is: its name, platform, Trek's version and the home folder.
+    fn machine_info(&self) -> impl Future<Output = HostResult<MachineInfo>> + Send {
+        unsupported("say what machine it is")
+    }
+    /// `git clone req.url req.folder` (already checked by the server: [`CloneProjectRequest::check`]),
+    /// expanding a leading `~/`; refuse (`conflict`) a folder that exists and isn't empty; report
+    /// git's output through `progress`; register the folder as a project named `req.name` and
+    /// return its id (then push a `Snapshot`). A failed clone is [`HostError::clone_failed`].
+    fn clone_project(&self, req: CloneProjectRequest, progress: CloneProgress) -> impl Future<Output = HostResult<String>> + Send {
+        let _ = (req, progress);
+        unsupported("clone projects")
+    }
+    /// Write `files` under the project's folder. The server has checked the paths
+    /// ([`crate::protocol::safe_relative_path`]) and the size; the host still writes under the
+    /// folder only, creating parent folders, replacing a file but never following a symbolic link
+    /// out of it, with each file's `mode`.
+    fn put_files(&self, project_id: &str, files: Vec<FileUpload>) -> impl Future<Output = HostResult<()>> + Send {
+        let _ = (project_id, files);
+        unsupported("receive files")
+    }
+
     /// No phone has `thread_id` open any more (its last subscriber unsubscribed or went away):
     /// the host can stop following its transcript. A `transcript` call for it after this starts
     /// following it again. Called as it happens, in order with the calls that follow.
@@ -307,6 +371,13 @@ pub enum HostRequest {
     Icon { req: IconRequest, reply: Reply<Icon> },
     NoteAsset { req: NoteAssetRequest, reply: Reply<NoteAsset> },
     AddNoteImage { req: AddNoteImageRequest, reply: Reply<NoteImage> },
+    /// See [`RemoteHost::machine_info`].
+    MachineInfo { reply: Reply<MachineInfo> },
+    /// See [`RemoteHost::clone_project`]: git's output goes to `progress` while it runs; the
+    /// reply is the new project's id.
+    CloneProject { req: CloneProjectRequest, progress: CloneProgress, reply: Reply<String> },
+    /// See [`RemoteHost::put_files`].
+    PutFiles { project_id: String, files: Vec<FileUpload>, reply: Reply<()> },
 }
 
 /// A [`RemoteHost`] that forwards every call as a [`HostRequest`] over an `async_channel`.
@@ -509,5 +580,18 @@ impl RemoteHost for ChannelHost {
 
     async fn add_note_image(&self, req: AddNoteImageRequest) -> HostResult<NoteImage> {
         self.call(|reply| HostRequest::AddNoteImage { req, reply }).await
+    }
+
+    async fn machine_info(&self) -> HostResult<MachineInfo> {
+        self.call(|reply| HostRequest::MachineInfo { reply }).await
+    }
+
+    async fn clone_project(&self, req: CloneProjectRequest, progress: CloneProgress) -> HostResult<String> {
+        self.call(|reply| HostRequest::CloneProject { req, progress, reply }).await
+    }
+
+    async fn put_files(&self, project_id: &str, files: Vec<FileUpload>) -> HostResult<()> {
+        let project_id = project_id.to_string();
+        self.call(|reply| HostRequest::PutFiles { project_id, files, reply }).await
     }
 }

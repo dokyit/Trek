@@ -13,6 +13,12 @@ protocol Backend: AnyObject {
     /// False when the message couldn't go (no connection to the Mac).
     @discardableResult func send(_ message: ClientMessage, id: String?) -> Bool
     func stop()
+    /// The connection doesn't answer: drop it and connect afresh now.
+    func reconnect()
+}
+
+extension Backend {
+    func reconnect() {}
 }
 
 enum ConnectionState: Equatable {
@@ -58,6 +64,9 @@ final class AppModel {
 
     var mode: AppMode = .unpaired
     var connection: ConnectionState = .idle
+    /// What the connection is doing, in words ("Looking for … on this Wi-Fi…", "Connected over
+    /// Tailscale"), while it's connecting, connected or offline.
+    var connectionDetail: String?
     var host: HostInfo?
     var threads: [ThreadSummary] = [] {
         didSet { threadsChanged() }
@@ -152,22 +161,27 @@ final class AppModel {
     func startLive(_ paired: PairedMac) {
         UserDefaults.standard.set(false, forKey: "demoMode")
         let transport = paired.transport
-        let client = TrekClient(address: paired.address, routes: paired.routes, auth: .hello(deviceId: Device.id, token: paired.token),
-                                transport: transport, hostId: paired.hostId)
-        // Answered at another address: kept, so the next launch dials it first.
-        client.onMoved = { address in
-            guard var moved = PairedMac.load(), moved.hostId == paired.hostId else { return }
-            moved.address = address
-            moved.save()
-        }
-        // The addresses the Mac answers on now (Wi-Fi, tailnet): kept, to try when one doesn't.
-        client.onRoutes = { routes in
-            guard var kept = PairedMac.load(), kept.hostId == paired.hostId else { return }
-            kept.routes = routes
-            kept.save()
-        }
+        let client = TrekClient(address: paired.address, routes: paired.routes, known: paired.known,
+                                auth: .hello(deviceId: Device.id, token: paired.token),
+                                transport: transport, hostId: paired.hostId, hostName: paired.hostName)
+        Self.keepAddresses(of: client, hostId: paired.hostId)
         attach(client, mode: .live)
         self.transport = transport
+    }
+
+    /// The paired Mac's client looks for it on this network (Bonjour, by its id), and the
+    /// addresses it answers at are kept for the next launch.
+    private static func keepAddresses(of client: TrekClient, hostId: String) {
+        client.hostId = hostId
+        // Where it answered (dialled first next time), the addresses it answers on now (Wi-Fi,
+        // tailnet), and those it answered at before: all dialled together next time.
+        client.onRemember = { address, routes, known in
+            guard var kept = PairedMac.load(), kept.hostId == hostId else { return }
+            kept.address = address
+            kept.routes = routes
+            kept.known = known
+            kept.save()
+        }
     }
 
     /// A `trek://pair` link arrived (deep link or QR code). Nothing happens until the user
@@ -187,10 +201,13 @@ final class AppModel {
         let client = TrekClient(address: address, routes: [address] + alternates,
                                 auth: .pair(code: code, deviceId: Device.id, deviceName: Device.name), transport: transport)
         client.onPaired = { [weak self, weak client] token, host, kept in
-            // Where it answered, and every address it says it answers on.
-            let at = client?.address ?? address
-            PairedMac(address: at, token: token, hostName: host.name, hostId: host.id, transport: kept,
-                      routes: client?.routes ?? [address] + alternates).save()
+            // Its id (Bonjour finds it by that on any network), the pinned fingerprint, where it
+            // answered and every address it says it answers on (the code's, from a Mac that
+            // names none): all there for the first launch after this one.
+            PairedMac(address: client?.address ?? address, token: token, hostName: host.name, hostId: host.id, transport: kept,
+                      routes: client?.routes ?? [address] + alternates, known: client?.known ?? []).save()
+            // This client stays the live one: from now on it's the paired Mac's, as at launch.
+            if let client { Self.keepAddresses(of: client, hostId: host.id) }
             UserDefaults.standard.set(false, forKey: "demoMode")
             self?.transport = kept
             self?.pairing = false
@@ -205,6 +222,20 @@ final class AppModel {
     /// The app came back to the front.
     func foregrounded() {
         backend?.wake()
+    }
+
+    /// The user asked to try now (the connection banner): the Mac is looked for afresh.
+    func retryNow() {
+        backend?.reconnect()
+    }
+
+    /// The connection in words: what it's doing while connecting, connected or offline, else
+    /// why it stopped.
+    var connectionText: String {
+        switch connection {
+        case .connecting, .connected, .offline: connectionDetail ?? connection.label
+        case .idle, .unauthorized, .identityChanged: connection.label
+        }
     }
 
     func leave() {
@@ -222,6 +253,7 @@ final class AppModel {
         self.mode = mode
         backend = b
         b.onMessage = { [weak self] in self?.handle($0) }
+        (b as? TrekClient)?.onDetail = { [weak self] in self?.connectionDetail = $0 }
         b.onState = { [weak self] state in
             guard let self else { return }
             let was = self.connection
@@ -232,6 +264,8 @@ final class AppModel {
                 for s in self.stores.values where s.subscribed { self.resubscribe(s) }
                 // What the Mac lets this phone do (allowing for a whole session, Full access).
                 self.loadSettings()
+                // What screens asked for while the Mac couldn't answer, asked again.
+                self.reloadAsked()
             }
             if self.pairing, let why = Self.pairingFailure(state) {
                 self.pairing = false
@@ -283,6 +317,7 @@ final class AppModel {
         host = nil
         transport = nil
         connection = .idle
+        connectionDetail = nil
         usage = nil
         basecamp = [:]
         basecampLoading = []
@@ -294,6 +329,10 @@ final class AppModel {
         commands = [:]
         macSettings = nil
         newThreadPrompt = nil
+        notesAsked = false
+        basecampAsked = []
+        notesSaving = []
+        notesToSave = [:]
     }
 
     // MARK: Incoming
@@ -598,14 +637,38 @@ final class AppModel {
         }
     }
 
+    /// Pull to refresh. The Mac pushes every change, but one missed (a dropped event, a link
+    /// that died quietly) stays missed: a link that answers is asked again for what the screens
+    /// show, one that doesn't is replaced at once (a new connection brings the list afresh).
     func refresh() async {
-        // The Mac pushes every change, so pull-to-refresh only proves the link is alive (a ping);
-        // a dead link shows in the connection banner and reconnects on its own.
-        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+        let alive = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
             var done = false
-            request(.ping) { _ in if !done { done = true; c.resume() } }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { if !done { done = true; c.resume() } }
+            request(.ping) { reply in
+                guard !done else { return }
+                done = true
+                if case .pong = reply { c.resume(returning: true) } else { c.resume(returning: false) }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { if !done { done = true; c.resume(returning: false) } }
         }
+        guard alive else {
+            backend?.reconnect()
+            return
+        }
+        // From where each open thread is: the Mac sends what came after.
+        for s in stores.values where s.subscribed { resubscribe(s) }
+        loadUsage(quiet: true)
+        loadSettings()
+    }
+
+    /// What the Notes and Basecamp screens asked for: on a reconnect, asked again where the
+    /// answer never came (or, for the notes list, may have changed meanwhile).
+    @ObservationIgnored private var notesAsked = false
+    @ObservationIgnored private var basecampAsked: Set<BasecampRange> = []
+
+    private func reloadAsked() {
+        for id in notesToSave.keys { saveLeftNote(id) }
+        if notesAsked { loadNotes() }
+        for range in basecampAsked where basecamp[range] == nil && !basecampLoading.contains(range) { loadBasecamp(range) }
     }
 
     // MARK: Usage and Basecamp
@@ -629,6 +692,7 @@ final class AppModel {
     }
 
     func loadBasecamp(_ range: BasecampRange) {
+        basecampAsked.insert(range)
         basecampLoading.insert(range)
         request(.basecamp(range)) { [weak self] reply in
             guard let self else { return }
@@ -644,6 +708,7 @@ final class AppModel {
     // MARK: Notes
 
     func loadNotes() {
+        notesAsked = true
         request(.notes) { [weak self] reply in
             if case .notes(_, let list) = reply { withAnimation(.snappy) { self?.notes = list } }
         }
@@ -676,10 +741,14 @@ final class AppModel {
     }
 
     /// Save a note's text. If it changed on the Mac since it was opened, the Mac refuses
-    /// and `conflict` runs (or, without one, the Mac's message shows as a toast).
-    func saveNote(_ id: String, body: String, done: ((Note) -> Void)? = nil, conflict: (() -> Void)? = nil) {
+    /// and `conflict` runs (or, without one, the Mac's message shows as a toast). Any other
+    /// failure shows as a toast and `failed` runs.
+    func saveNote(_ id: String, body: String, done: ((Note) -> Void)? = nil, conflict: (() -> Void)? = nil,
+                  failed: (() -> Void)? = nil) {
         let modified = openNotes[id]?.modified
+        notesSaving.insert(id)
         request(.saveNote(id: id, body: body, modified: modified)) { [weak self] reply in
+            self?.notesSaving.remove(id)
             switch reply {
             case .note(_, let n):
                 self?.openNotes[id] = n
@@ -688,11 +757,42 @@ final class AppModel {
                     self?.notes[i].modified = n.modified
                 }
                 done?(n)
+                self?.saveLeftNote(id)
             case .error(_, let code, let text):
-                if code == .conflict, let conflict { conflict() } else { self?.show(text, error: true) }
+                if code == .conflict, let conflict { conflict() } else {
+                    self?.show(text, error: true)
+                    failed?()
+                }
+                // What its closed editor left would be refused the same way.
+                if code == .conflict, self?.notesToSave.removeValue(forKey: id) != nil {
+                    self?.show("That note changed on your Mac, so your last changes to it weren't saved.", error: true)
+                }
             default: break
             }
         }
+    }
+
+    /// Notes with a save out, and text a closed editor left to save (sent after the save out
+    /// answers, as two out at once would carry the same version and the Mac would refuse the
+    /// second; kept, and sent again on a reconnect, when it can't go).
+    @ObservationIgnored private var notesSaving: Set<String> = []
+    @ObservationIgnored private var notesToSave: [String: String] = [:]
+
+    /// A save of this note is out, waiting for the Mac's answer.
+    func savingNote(_ id: String) -> Bool { notesSaving.contains(id) }
+
+    /// Save what a note's editor had when it closed: now, after the save out for it, or when the
+    /// connection comes back.
+    func saveNoteLeft(_ id: String, body: String) {
+        notesToSave[id] = body
+        saveLeftNote(id)
+    }
+
+    private func saveLeftNote(_ id: String) {
+        guard !notesSaving.contains(id), let body = notesToSave.removeValue(forKey: id), openNotes[id]?.body != body else { return }
+        saveNote(id, body: body, failed: { [weak self] in
+            if self?.notesToSave[id] == nil { self?.notesToSave[id] = body }
+        })
     }
 
     /// Delete a note: the Mac keeps it in the notes folder's Deleted.
@@ -700,6 +800,7 @@ final class AppModel {
         let before = notes
         withAnimation(.snappy) { notes.removeAll { $0.id == id } }
         openNotes[id] = nil
+        notesToSave[id] = nil
         request(.deleteNote(id: id)) { [weak self] reply in
             if case .error(_, _, let text) = reply {
                 self?.show(text, error: true)
@@ -869,20 +970,25 @@ struct PairedMac: Codable {
     var hostId: String
     /// Pinned TLS (the full fingerprint) or plain `ws://` (chosen by the user when pairing).
     var transport: Transport
-    /// Every address the Mac answers on, as it last said (its Wi-Fi and its tailnet); `address`
-    /// is dialled first, then these.
+    /// Every address the Mac answers on, as it last said (its Wi-Fi and its tailnet). All of
+    /// them are dialled together with `address`, where it answered last.
     var routes: [String] = []
+    /// Addresses it answered at before (the Wi-Fi it was paired on, another it was on since),
+    /// newest first: dialled too, and they tell its Wi-Fi from another.
+    var known: [String] = []
 
-    init(address: String, token: String, hostName: String, hostId: String, transport: Transport, routes: [String] = []) {
+    init(address: String, token: String, hostName: String, hostId: String, transport: Transport, routes: [String] = [],
+         known: [String] = []) {
         self.address = address
         self.token = token
         self.hostName = hostName
         self.hostId = hostId
         self.transport = transport
         self.routes = routes
+        self.known = known
     }
 
-    private enum CodingKeys: String, CodingKey { case address, token, hostName, hostId, transport, routes }
+    private enum CodingKeys: String, CodingKey { case address, token, hostName, hostId, transport, routes, known }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -894,6 +1000,7 @@ struct PairedMac: Codable {
         // "Unencrypted") until paired again.
         transport = try c.decodeIfPresent(Transport.self, forKey: .transport) ?? .plain
         routes = try c.decodeIfPresent([String].self, forKey: .routes) ?? []
+        known = try c.decodeIfPresent([String].self, forKey: .known) ?? []
     }
 
     /// The Keychain read once: views ask for it as they draw (the Settings tab, the connection

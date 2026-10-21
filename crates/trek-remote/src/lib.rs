@@ -3,7 +3,8 @@
 //! The Mac side of Trek Mobile: a WebSocket server the iPhone app talks to. It pairs phones with
 //! one-time codes, authenticates them with per-device tokens, answers their requests through a
 //! [`RemoteHost`] and pushes changes to them. It knows nothing about GPUI or Trek's own types; the
-//! protocol and its design live in `docs/MOBILE.md`.
+//! protocol and its design live in `docs/MOBILE.md`. [`client::Client`] speaks the same protocol
+//! from the other end, for one Trek driving another (`docs/MULTI-MACHINE.md`).
 //!
 //! ```ignore
 //! let config = ServerConfig { advertise: Some("192.168.1.20:7420".into()), ..ServerConfig::new(host_info) };
@@ -69,15 +70,20 @@
 //!   as a QR code, list [`RemoteHandle::devices`] with a Revoke button ([`RemoteHandle::revoke`]),
 //!   toast [`ServerNotice`]s from [`RemoteHandle::notices`], and [`RemoteHandle::shutdown`] when
 //!   the toggle goes off.
+//! - **Machines** (feature `machines`): `machine_info` (name, platform, version, home folder);
+//!   `clone_project` (`git clone` into a new folder, git's output through the
+//!   [`host::CloneProgress`] it's given, then a new project; [`HostError::clone_failed`] when git
+//!   fails); `put_files` (write the checked [`FileUpload`]s under the project's folder).
 
+pub mod client;
 pub mod host;
 pub mod pairing;
 pub mod protocol;
 pub mod server;
 pub mod tls;
 
-pub use host::{ChannelHost, HostError, HostEvent, HostRequest, HostResult, RemoteHost, Reply};
+pub use host::{ChannelHost, CloneProgress, HostError, HostEvent, HostRequest, HostResult, RemoteHost, Reply};
 pub use pairing::{DeviceInfo, DeviceRegistry, PairingError, PairingOffer};
 pub use protocol::*;
-pub use server::{DEFAULT_PORT, RemoteHandle, RemoteServer, ServerConfig, ServerNotice};
+pub use server::{Admission, DEFAULT_PORT, LastConnection, RemoteHandle, RemoteServer, ServerConfig, ServerNotice};
 pub use tls::TlsIdentity;

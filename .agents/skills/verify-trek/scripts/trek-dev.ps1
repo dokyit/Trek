@@ -20,11 +20,12 @@ $Settings = @(
     '[onboarding]', 'completed = true', '',
     '[import]', 'claude_code = false', 'codex = false', 'opencode = false', '',
     '[notifications]', 'mode = "off"', 'dock_badge = false', 'menu_bar_icon = false', '',
-    '[updates]', 'auto_check = false', 'auto_download = false'
+    '[updates]', 'auto_check = false', 'auto_download = false', '',
+    '[mobile]', 'port = 7431'
 ) -join "`n"
 $Tools = @('git', 'explorer', 'terminal', 'browser', 'sidechat', 'simulator')
 $BasicRoutes = @('draft', 'no-project', 'basecamp', 'notes', 'appearance', 'first')
-$ControlVerbs = @('range', 'settled', 'glass', 'tint', 'theme', 'pace', 'wait', 'new', 'diff', 'tools', 'editor', 'ide', 'artifacts', 'scroll', 'click', 'rclick', 'hover', 'elements', 'key', 'note', 'background-use', 'terminal')
+$ControlVerbs = @('range', 'settled', 'glass', 'tint', 'theme', 'pace', 'wait', 'new', 'diff', 'tools', 'editor', 'ide', 'artifacts', 'scroll', 'click', 'rclick', 'hover', 'elements', 'key', 'note', 'background-use', 'terminal', 'type', 'pair')
 $ValueFlags = @('--size', '--timeout', '--output', '--lines', '--grep')
 
 $script:Human = $args -contains '--human'

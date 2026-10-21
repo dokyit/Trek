@@ -1780,6 +1780,38 @@ impl Render for Sidebar {
             live_groups.push((format!("live-g-{pid}").into(), group.into_any_element()));
         }
         list = list.child(crate::motion::flip_stack(&flip, live_groups, now));
+        // Threads living on other machines, under each machine's name (`machines`).
+        let machines: Vec<(String, String, bool, Vec<Thread>)> = self
+            .workspace
+            .read(cx)
+            .machines
+            .list
+            .iter()
+            .map(|m| (m.id().to_string(), m.entry.name.clone(), m.reachable(), m.listed().into_iter().cloned().collect::<Vec<_>>()))
+            .filter(|(.., threads)| !threads.is_empty())
+            .collect();
+        for (host, name, reachable, threads) in machines {
+            let header = h_flex()
+                .id(SharedString::from(format!("machine-head-{host}")))
+                .test_support()
+                .mx_2()
+                .mt_2()
+                .px_3()
+                .h(px(28.))
+                .gap_2()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(crate::composer::reach_dot(reachable, cx))
+                .child(div().flex_1().min_w_0().truncate().font_medium().child(name))
+                .child(threads.len().to_string());
+            let mut group = v_flex().w_full().child(header);
+            for t in &threads {
+                let sel = selected.as_deref() == Some(t.id.as_str());
+                let row = if attention(t) { self.card(t, "", false, sel, cx) } else { self.live_line(t, sel, cx) };
+                group = group.child(row);
+            }
+            list = list.child(group);
+        }
         self.last_rows = last_rows;
         if !live_shown && !searching && !named_sections_busy {
             list = list.child(

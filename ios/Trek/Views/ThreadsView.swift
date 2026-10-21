@@ -36,7 +36,9 @@ struct ThreadsView: View {
                             if case .identityChanged(let expected, let seen) = model.connection {
                                 IdentityChangedCard(host: PairedMac.load()?.hostName, expected: expected, seen: seen) { model.leave() }
                             } else {
-                                ConnectionBanner(state: model.connection, host: model.host?.name ?? PairedMac.load()?.hostName) { model.leave() }
+                                ConnectionBanner(state: model.connection, detail: model.connectionText,
+                                                 host: model.host?.name ?? PairedMac.load()?.hostName,
+                                                 retry: { model.retryNow() }) { model.leave() }
                             }
                         }
                         .listRowBackground(Color.clear)
@@ -651,12 +653,19 @@ private struct BranchLabelStyle: LabelStyle {
     }
 }
 
-/// "Mac unreachable — retrying" above the list, with the cached threads still shown below it.
+/// What the connection is doing, above the list ("Looking for … on this Wi-Fi…", "This Wi-Fi
+/// may not let devices see each other. Trying Tailscale…"), with the cached threads still shown
+/// below it. While it waits to retry, "Try now" (or a tap on it) looks for the Mac at once.
 struct ConnectionBanner: View {
     var state: ConnectionState
+    /// The words; the state's own when nil.
+    var detail: String? = nil
     var host: String?
+    var retry: (() -> Void)? = nil
     /// Offered when the Mac refused this iPhone (revoked, or a code that didn't work).
     var pairAgain: (() -> Void)? = nil
+
+    private var waiting: Bool { if case .offline = state { true } else { false } }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -667,18 +676,27 @@ struct ConnectionBanner: View {
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text(host ?? "Your Mac").font(.ui(.subheadline).weight(.semibold))
-                Text(state.label).font(.ui(.caption)).foregroundStyle(Trek.muted)
+                Text(detail ?? state.label).font(.ui(.caption)).foregroundStyle(Trek.muted)
                     .fixedSize(horizontal: false, vertical: true)
+                    .contentTransition(.opacity)
+                    .animation(.smooth, value: detail ?? state.label)
             }
             Spacer()
             if case .unauthorized = state, let pairAgain {
                 Button("Pair again", action: pairAgain)
                     .font(.ui(.subheadline).weight(.semibold))
                     .buttonStyle(.glass)
+            } else if waiting, let retry {
+                Button("Try now", action: retry)
+                    .font(.ui(.subheadline).weight(.semibold))
+                    .buttonStyle(.glass)
             }
         }
         .padding(12)
+        .contentShape(Rectangle())
+        .onTapGesture { if waiting { retry?() } }
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .accessibilityElement(children: .combine)
     }
 }
 

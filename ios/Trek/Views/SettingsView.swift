@@ -23,14 +23,18 @@ struct SettingsView: View {
                             .background(Trek.foreground.opacity(0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                         VStack(alignment: .leading, spacing: 3) {
                             Text(model.host?.name ?? PairedMac.load()?.hostName ?? "Your Mac").font(.ui(.headline))
-                            HStack(spacing: 6) {
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
                                 Circle().fill(statusColor).frame(width: 7, height: 7)
-                                Text(model.mode == .demo ? "Demo · sample data" : model.connection.label)
+                                Text(model.mode == .demo ? "Demo · sample data" : model.connectionText)
                                     .font(.ui(.subheadline)).foregroundStyle(Trek.muted)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                     }
                     .padding(.vertical, 4)
+                    if model.mode == .live, case .offline = model.connection {
+                        Button("Try now") { model.retryNow() }
+                    }
                     NavigationLink {
                         MacSettingsView()
                     } label: {
@@ -40,7 +44,7 @@ struct SettingsView: View {
                         // Each way to the Mac, the one in use ticked: Wi-Fi at home, the tailnet
                         // anywhere Tailscale is on.
                         ForEach(([paired.address] + paired.routes).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }, id: \.self) { route in
-                            LabeledContent(TrekClient.isTailnet(route) ? "Tailscale" : "Wi-Fi") {
+                            LabeledContent(Self.routeLabel(route)) {
                                 HStack(spacing: 6) {
                                     Text(route).font(.code(.subheadline))
                                     if route == paired.address, model.connection == .connected {
@@ -130,6 +134,15 @@ struct SettingsView: View {
             } message: {
                 Text("You'll need a new code from the Mac to connect again. Revoke the device on the Mac too to be sure.")
             }
+        }
+    }
+
+    /// Which way to the Mac an address is.
+    private static func routeLabel(_ address: String) -> String {
+        switch Address.kind(address) {
+        case .local: "Wi-Fi"
+        case .tailnet: "Tailscale"
+        case .other: "Address"
         }
     }
 

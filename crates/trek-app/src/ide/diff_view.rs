@@ -602,8 +602,18 @@ impl DiffView {
             .text_color(theme.muted_foreground)
             .child(Icon::new(crate::assets::Lucide::FileDiff).size(px(13.)))
             .child(div().text_color(theme.foreground.opacity(0.85)).child(format!("{n} file{}", if n == 1 { "" } else { "s" })))
-            .when(added > 0, |el| el.child(div().font_family(theme.mono_font_family.clone()).text_size(px(11.5)).text_color(palette::emerald(cx)).child(format!("+{added}"))))
-            .when(removed > 0, |el| el.child(div().font_family(theme.mono_font_family.clone()).text_size(px(11.5)).text_color(palette::red(cx)).child(format!("−{removed}"))))
+            .when(added > 0 || removed > 0, |el| {
+                el.child(crate::line_breakdown::hover(
+                    "diff-lines",
+                    h_flex()
+                        .gap(px(6.))
+                        .font_family(theme.mono_font_family.clone())
+                        .text_size(px(11.5))
+                        .when(added > 0, |el| el.child(div().text_color(palette::emerald(cx)).child(format!("+{added}"))))
+                        .when(removed > 0, |el| el.child(div().text_color(palette::red(cx)).child(format!("−{removed}")))),
+                    trek_core::file_kind::LineBreakdown::of(self.files.iter().map(|f| (f.rel.as_str(), f.added, f.removed))),
+                ))
+            })
             .when(self.loading, |el| el.child(Spinner::new().xsmall().color(theme.muted_foreground)))
             .child(div().flex_1())
             .child(crate::ui::icon_button("diff-prev", IconName::ArrowUp, "Previous change").on_click(cx.listener(|this, _, _, cx| this.step(-1, cx))))

@@ -232,7 +232,7 @@ pub fn changes(ix: usize, changes: &TurnChanges, root: &std::path::Path, pending
         .bg(theme.foreground.opacity(0.03))
         .text_color(muted)
         .child(div().flex_1().min_w_0().truncate().font_medium().text_color(theme.foreground).child(format!("{n} file{} changed", if n == 1 { "" } else { "s" })))
-        .child(lines(added, removed, true))
+        .child(crate::line_breakdown::hover(format!("ai-changes-lines-{ix}"), lines(added, removed, true), trek_core::file_kind::LineBreakdown::of_changes(&changes.files)))
         .when(git && any_pending, |el| el.child(div().text_color(muted.opacity(0.5)).child("·")).child(review));
     let rows = changes.files.iter().enumerate().take(12).map(|(i, f)| {
         let on = pending(&f.path);

@@ -110,7 +110,7 @@ impl SettingsPage {
             SettingsPage::Shortcuts => "Keyboard Shortcuts",
             SettingsPage::Agents => "Agents & Subscriptions",
             SettingsPage::Tools => "Tools & MCP",
-            SettingsPage::Mobile => "Phone",
+            SettingsPage::Mobile => "Phone & Machines",
             SettingsPage::ApiKeys => "API Keys",
             SettingsPage::LocalModels => "Local Models",
             SettingsPage::Permissions => "Permissions",
@@ -899,6 +899,9 @@ pub enum WorkspaceEvent {
     OpenReview { thread: String },
     /// "Add to Chat" (the Explorer, the terminal): a chip for the editor's AI side bar.
     AddToChat(crate::ide::ai::context::ContextChip),
+    /// Send what the main window's composer holds, as its send button would (a project was just
+    /// cloned to another machine, and the draft starts its thread there).
+    SendDraft,
 }
 
 #[derive(Debug, Clone)]
@@ -1077,6 +1080,8 @@ pub struct Workspace {
     pub tabs: Vec<String>,
     /// The phone server, while Settings › Phone has it on (see `remote`).
     pub remote: Option<crate::remote::Remote>,
+    /// Other machines running Trek that this one drives, and their threads (`machines`).
+    pub machines: crate::machines::Machines,
     pub(crate) remote_starting: bool,
     /// Why the phone server last failed to start; it's tried again shortly (`remote::RETRY`).
     pub(crate) remote_error: Option<String>,
@@ -1492,6 +1497,7 @@ impl Workspace {
             sidebar_collapsed: false,
             tabs: if cfg!(test) { vec![] } else { tabs::load_tabs() },
             remote: None,
+            machines: Default::default(),
             remote_starting: false,
             remote_error: None,
             remote_retry: None,
@@ -1591,6 +1597,8 @@ impl Workspace {
             end_children_on_quit: (!cfg!(test)).then_some(trek_core::procs::end_all as fn(std::time::Duration)),
         };
         this.reload(cx);
+        // The machines paired before connect again.
+        this.start_machines(cx);
         // Agents the user added are known before any thread of theirs is shown or resumed.
         if !this.settings.added_agents.is_empty() {
             this.sync_added_agents(cx);
@@ -1656,6 +1664,8 @@ impl Workspace {
 
     pub fn thread(&self, id: &str) -> Option<&Thread> {
         self.threads.iter().find(|t| t.id == id)
+            // A thread on another machine, as its row there reads (`machines`).
+            .or_else(|| self.machines.thread(id))
     }
 
     pub fn project(&self, id: &str) -> Option<&Project> {
@@ -2173,6 +2183,18 @@ impl Workspace {
     }
 
     pub fn navigate(&mut self, route: Route, cx: &mut Context<Self>) {
+        // A thread on another machine is only followed here: never loaded from the store, given
+        // a tab, or kept (`machines`).
+        if let Route::Thread(id) = &route
+            && crate::machines::is_remote(id)
+        {
+            let id = id.clone();
+            self.follow_machine_thread(&id, cx);
+            self.route = route;
+            cx.emit(WorkspaceEvent::FocusComposer);
+            cx.notify();
+            return;
+        }
         // Screens only the harness draws (settings, Basecamp, notes) bring it back from the editor.
         if self.ide() && matches!(route, Route::Settings(_) | Route::Basecamp | Route::Notes | Route::Onboarding) {
             self.mode = Mode::Agents;
@@ -2544,6 +2566,10 @@ impl Workspace {
     /// transcript shows it loading meanwhile). Work that needs the history at once (forking, a
     /// resume, reports) still calls `ensure_loaded`.
     pub(crate) fn load_for_view(&mut self, id: &str, cx: &mut Context<Self>) {
+        // Another machine's thread comes from that machine (a thread window opened on it).
+        if crate::machines::is_remote(id) {
+            return self.follow_machine_thread(id, cx);
+        }
         if self.live.get(id).is_some_and(|l| l.loaded || l.loading) || self.thread(id).is_none() {
             return self.ensure_loaded(id, cx);
         }
@@ -2627,6 +2653,9 @@ impl Workspace {
     }
 
     pub(crate) fn ensure_loaded(&mut self, id: &str, cx: &mut Context<Self>) {
+        if crate::machines::is_remote(id) {
+            return;
+        }
         if self.live.get(id).is_none_or(|l| l.spend.is_none()) {
             let spend = self.load_spend(id);
             self.live.entry(id.to_string()).or_default().spend = Some(spend);
@@ -2742,6 +2771,9 @@ impl Workspace {
     }
 
     pub fn set_prefs_in(&mut self, scope: &Scope, prefs: Prefs, cx: &mut Context<Self>) {
+        if let Some(id) = self.thread_id_in(scope).filter(|id| crate::machines::is_remote(id)).map(str::to_string) {
+            return self.machine_set_prefs(&id, prefs, cx);
+        }
         match self.thread_id_in(scope).map(str::to_string) {
             Some(id) => {
                 let before = self.thread(&id).cloned();
@@ -3274,7 +3306,17 @@ impl Workspace {
     /// harness off what it shows).
     pub fn send_in(&mut self, scope: &Scope, text: String, images: Vec<PathBuf>, cx: &mut Context<Self>) {
         match scope {
-            Scope::Main => self.send(text, images, cx),
+            // A draft whose project is set to start on another machine starts its thread there.
+            Scope::Main => {
+                let machine = match &self.route {
+                    Route::Draft { project: Some(p) } => self.draft_machine(p).map(|host| (host, p.clone())),
+                    _ => None,
+                };
+                match machine {
+                    Some((host, project)) => self.machine_start_thread(&host, project, text, images, cx),
+                    None => self.send(text, images, cx),
+                }
+            }
             Scope::Thread(id) => {
                 let before = self.route.clone();
                 self.send_to(id, text, images, cx);
@@ -3298,6 +3340,9 @@ impl Workspace {
     /// `send_to`, saying how a message sent while a turn runs goes: queued for after it, or
     /// steering it now (`None`: as Settings › General has it).
     pub fn send_as(&mut self, id: &str, text: String, images: Vec<PathBuf>, follow: Option<FollowUp>, cx: &mut Context<Self>) {
+        if crate::machines::is_remote(id) {
+            return self.machine_send(id, text, images, follow, cx);
+        }
         let id = id.to_string();
         let text = text.trim().to_string();
         if text.is_empty() && images.is_empty() {
@@ -3476,6 +3521,9 @@ impl Workspace {
     }
 
     fn ensure_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        if crate::machines::is_remote(id) {
+            return;
+        }
         let Some(thread) = self.thread(id).cloned() else { return };
         if self.live.get(id).is_some_and(|l| l.commands.is_some() || l.preparing || l.removing) {
             return;
@@ -3598,7 +3646,8 @@ impl Workspace {
     pub fn warm_up(&mut self, cx: &mut Context<Self>) {
         match self.route.clone() {
             Route::Thread(id) => self.warm_thread(&id, cx),
-            Route::Draft { project: Some(cwd) } => {
+            // Not for a thread that starts on another machine.
+            Route::Draft { project: Some(cwd) } if self.draft_machine(&cwd).is_none() => {
                 let prefs = self.draft_prefs.clone();
                 self.warm_draft(cwd, prefs, cx);
             }
@@ -4378,7 +4427,8 @@ impl Workspace {
 
     /// Save every open transcript's unsaved changes (Trek is quitting).
     fn persist_all(&mut self) {
-        for (id, live) in self.live.iter_mut().filter(|(_, l)| !l.loading) {
+        // Another machine's threads are that machine's to keep.
+        for (id, live) in self.live.iter_mut().filter(|(id, l)| !l.loading && !crate::machines::is_remote(id)) {
             if let Err(e) = self.store.save_transcript(id, &mut live.items) {
                 tracing::warn!("save transcript {id}: {e}");
             }
@@ -4390,6 +4440,9 @@ impl Workspace {
     /// imported thread's history) is indexed for search in the background. Nothing is saved while
     /// the history is still being read: it has to be written first (`ensure_loaded`).
     fn persist_items(&mut self, id: &str, cx: &mut Context<Self>) {
+        if crate::machines::is_remote(id) {
+            return;
+        }
         let Some(live) = self.live.get_mut(id).filter(|l| !l.loading) else { return };
         let began = std::time::Instant::now();
         let saved = self.store.save_transcript(id, &mut live.items);
@@ -4405,6 +4458,9 @@ impl Workspace {
     }
 
     pub fn respond(&mut self, id: &str, request_id: &str, decision: Decision, cx: &mut Context<Self>) {
+        if crate::machines::is_remote(id) {
+            return self.machine_respond(id, request_id, decision, cx);
+        }
         let mut still_waiting = false;
         let mut running = false;
         if let Some(live) = self.live.get_mut(id) {
@@ -4433,6 +4489,10 @@ impl Workspace {
     /// answers go in the transcript as the user's message, as typed ones do (`send_to`); secret
     /// ones never do.
     pub fn answer(&mut self, id: &str, request_id: &str, answers: Vec<(String, String)>, cx: &mut Context<Self>) {
+        if crate::machines::is_remote(id) {
+            let answers = answers.into_iter().map(|(question, answer)| trek_remote::QA { question, answer }).collect();
+            return self.machine_answer(id, request_id, trek_remote::AnswerResponse::Questions { answers }, cx);
+        }
         let questions = self.live.get(id).and_then(|l| l.permissions.iter().find(|p| p.request_id == request_id)).and_then(|p| match &p.prompt {
             Some(trek_agents::Prompt::Questions(q)) => Some(q.clone()),
             _ => None,
@@ -4474,6 +4534,9 @@ impl Workspace {
 
     /// Approve the agent's plan: it leaves plan mode and starts the work.
     pub fn approve_plan(&mut self, id: &str, request_id: &str, cx: &mut Context<Self>) {
+        if crate::machines::is_remote(id) {
+            return self.machine_answer(id, request_id, trek_remote::AnswerResponse::Plan { approve: true, feedback: None }, cx);
+        }
         // A plan offered after its turn needs a session to take its approval: none starts while
         // the agent's CLI is being updated, so the plan stays offered until it's done.
         let after_turn = self.live.get(id).is_some_and(|l| l.permissions.iter().any(|p| p.request_id == request_id && p.after_turn));
@@ -4498,6 +4561,9 @@ impl Workspace {
     }
 
     pub fn interrupt(&mut self, id: &str, cx: &mut Context<Self>) {
+        if crate::machines::is_remote(id) {
+            return self.machine_interrupt(id, cx);
+        }
         // A sub-agent the user stops between turns, while it waits on sub-agents of its own, has
         // no turn whose end would report that: it reports now, stopped. (Stopped from above, it
         // ends silently, `stop_task`.)
@@ -4768,6 +4834,9 @@ impl Workspace {
     /// `restore` the files go back to the checkpoint taken as it was sent. Returns the message
     /// (text and images) for the composer; `None` when nothing was done (a turn is running).
     pub fn rewind(&mut self, id: &str, item: &str, restore: bool, cx: &mut Context<Self>) -> Option<(String, Vec<PathBuf>)> {
+        if self.machine_refuses(id, cx) {
+            return None;
+        }
         if self.turn_running(id) {
             cx.emit(WorkspaceEvent::Toast { message: "Stop the running turn first.".into(), undo: None });
             return None;
@@ -4910,6 +4979,9 @@ impl Workspace {
 
     /// Take back the turn a `TurnEnd` closes and send its message again, with `model` if given.
     pub fn retry(&mut self, id: &str, end: &str, model: Option<String>, restore: bool, cx: &mut Context<Self>) {
+        if self.machine_refuses(id, cx) {
+            return;
+        }
         let Some((text, images)) = self.undo_turn(id, end, restore, cx) else { return };
         if let Some(m) = model {
             self.mutate_thread(id, cx, |t| t.model = Some(m));
@@ -4922,6 +4994,9 @@ impl Workspace {
     /// Send an edited message in place of message `item`: the conversation is taken back to just
     /// before it (see `rewind`), then the new text goes out. False when nothing was done.
     pub fn edit_and_resend(&mut self, id: &str, item: &str, text: String, images: Vec<PathBuf>, restore: bool, cx: &mut Context<Self>) -> bool {
+        if self.machine_refuses(id, cx) {
+            return false;
+        }
         if self.rewind(id, item, restore, cx).is_none() {
             return false;
         }
@@ -4935,6 +5010,9 @@ impl Workspace {
     /// the new one gets a recap). The original is left as it is. The fork opens in the main
     /// window. Returns its id.
     pub fn fork_thread(&mut self, id: &str, at: ForkAt, scope: &Scope, cx: &mut Context<Self>) -> Option<String> {
+        if self.machine_refuses(id, cx) {
+            return None;
+        }
         if at == ForkAt::End && self.turn_running(id) {
             cx.emit(WorkspaceEvent::Toast { message: "Wait for the turn to finish, or fork from an earlier message.".into(), undo: None });
             return None;
@@ -5071,6 +5149,9 @@ impl Workspace {
     /// Out of the inbox. A failure settled stays Failed but no longer needs the user
     /// (`Thread::needs_you`); undone, it's back in the inbox as it was.
     pub fn settle(&mut self, id: &str, cx: &mut Context<Self>) {
+        if crate::machines::is_remote(id) {
+            return self.machine_thread_action(id, trek_remote::ThreadAction::Settle, cx);
+        }
         self.mutate_thread(id, cx, |t| {
             t.settled_at = Some(now_ms());
             t.pinned_at = None;
@@ -5091,6 +5172,9 @@ impl Workspace {
     /// look) or a merge of its branch would otherwise send an old thread straight back. Its last
     /// activity stays as it was, and an unread thread stays unread.
     pub fn unsettle(&mut self, id: &str, cx: &mut Context<Self>) {
+        if crate::machines::is_remote(id) {
+            return self.machine_thread_action(id, trek_remote::ThreadAction::Unsettle, cx);
+        }
         self.mutate_thread(id, cx, |t| {
             t.settled_at = None;
             t.branch = None;
@@ -5101,11 +5185,18 @@ impl Workspace {
     }
 
     pub fn toggle_pin(&mut self, id: &str, cx: &mut Context<Self>) {
+        if crate::machines::is_remote(id) {
+            let action = if self.thread(id).is_some_and(|t| t.pinned_at.is_some()) { trek_remote::ThreadAction::Unpin } else { trek_remote::ThreadAction::Pin };
+            return self.machine_thread_action(id, action, cx);
+        }
         self.mutate_thread(id, cx, |t| t.pinned_at = if t.pinned_at.is_some() { None } else { Some(now_ms()) });
     }
 
     /// Out of the inbox until then; when it wakes it's back in the inbox, settled or not before.
     pub fn snooze(&mut self, id: &str, hours: i64, cx: &mut Context<Self>) {
+        if self.machine_refuses(id, cx) {
+            return;
+        }
         self.mutate_thread(id, cx, |t| {
             t.snoozed_until = Some(now_ms() + hours * 3_600_000);
             t.settled_at = None;
@@ -5120,6 +5211,9 @@ impl Workspace {
     }
 
     pub fn mark_unread(&mut self, id: &str, cx: &mut Context<Self>) {
+        if crate::machines::is_remote(id) {
+            return self.machine_thread_action(id, trek_remote::ThreadAction::MarkUnread, cx);
+        }
         self.mutate_thread(id, cx, |t| t.last_seen_at = t.updated_at - 1);
     }
 
@@ -5127,6 +5221,9 @@ impl Workspace {
     /// the thread is out of sight, and nothing would save what it does. A turn under way ends
     /// here, saved as it stands.
     pub fn archive(&mut self, id: &str, cx: &mut Context<Self>) {
+        if crate::machines::is_remote(id) {
+            return self.machine_thread_action(id, trek_remote::ThreadAction::Archive, cx);
+        }
         self.archive_children(id, cx);
         // A sub-agent still at its task: its parent hears it was stopped, rather than wait on it.
         if self.delegations.contains_key(id) {
@@ -5176,6 +5273,9 @@ impl Workspace {
     }
 
     pub fn rename(&mut self, id: &str, title: String, cx: &mut Context<Self>) {
+        if crate::machines::is_remote(id) {
+            return self.machine_thread_action(id, trek_remote::ThreadAction::Rename { title }, cx);
+        }
         let title = title.trim().to_string();
         if !title.is_empty() {
             self.mutate_thread(id, cx, |t| t.title = title);
@@ -5206,6 +5306,9 @@ impl Workspace {
     /// Delete a thread from Trek. A thread imported from another agent stays in that agent's own
     /// history, so here it's archived and its copy of the transcript dropped (it won't come back).
     pub fn delete_thread(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.machine_refuses(id, cx) {
+            return;
+        }
         let Some(thread) = self.thread(id).cloned() else { return };
         // A sub-agent still at its task: its parent hears it was stopped, rather than wait on it.
         if self.delegations.contains_key(id) {
@@ -5352,6 +5455,9 @@ impl Workspace {
 
     /// Ask a small model for a short title (through the user's Claude Code login).
     pub fn regenerate_title(&mut self, id: &str, announce: bool, cx: &mut Context<Self>) {
+        if crate::machines::is_remote(id) {
+            return self.machine_thread_action(id, trek_remote::ThreadAction::RegenerateTitle, cx);
+        }
         // Not while Claude Code's CLI is being replaced: written once it's back.
         if self.agent_updating(&AgentId::ClaudeCode.key()) {
             self.agent_updates.titles.retain(|(t, _)| t != id);

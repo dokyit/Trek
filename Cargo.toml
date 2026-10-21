@@ -39,8 +39,11 @@ opt-level = 1
 opt-level = 3
 
 [profile.release]
+# Thin LTO with 16 codegen units: the trek-app crate alone took 365 s with one unit and takes
+# about 185 s with 16 (measured 2026-10-20), for a binary about a tenth bigger. One unit is not
+# worth the wait for a GUI app.
 lto = "thin"
-codegen-units = 1
+codegen-units = 16
 strip = true
 
 # Trek carries a small patch to gpui-base: semibold (not bold) emphasis, calmer heading sizes,

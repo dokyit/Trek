@@ -494,6 +494,106 @@ async fn a_second_address_and_the_routes_phones_keep() {
 }
 
 #[tokio::test]
+async fn routes_change_while_phones_stay_connected() {
+    let before = vec!["192.168.1.2:7420".to_string(), "100.101.1.2:7420".to_string()];
+    let (handle, _) = start_with(|c| {
+        c.advertise = Some(before[0].clone());
+        c.routes = before.clone();
+    })
+    .await;
+    let (mut phone, token) = pair(&handle, "dev-1").await;
+    let last = handle.last_connection().expect("the phone that paired");
+    assert_eq!((last.device_id.as_str(), last.local, last.peer.ip()), ("dev-1", handle.local_addr(), handle.local_addr().ip()));
+
+    // This Mac moved to another network: phones are told the new address, and nothing restarts.
+    let after = vec!["10.0.0.7:7420".to_string(), "100.101.1.2:7420".to_string()];
+    handle.set_routes(Some(after[0].clone()), after.clone());
+    assert_eq!(handle.routes(), after);
+    send(&mut phone, json!({"type": "ping", "id": "p"})).await;
+    assert_eq!(recv(&mut phone).await, json!({"type": "pong", "re": "p"}), "the phone that was connected still is");
+    assert_eq!(handle.connected_devices(), ["dev-1"]);
+
+    // The next welcome and pairing code carry the new routes.
+    let mut c = connect(&handle).await;
+    send(&mut c, json!({"type": "hello", "id": "h", "protocol": 1, "device_id": "dev-1", "token": token})).await;
+    let welcome = recv(&mut c).await;
+    assert_eq!((welcome["type"].as_str(), &welcome["routes"]), (Some("welcome"), &json!(after)));
+    let offer = handle.pairing_offer();
+    assert!(offer.url.contains("host=10.0.0.7:7420&") && offer.url.contains("&alt=100.101.1.2:7420"), "{}", offer.url);
+}
+
+#[tokio::test]
+async fn the_admission_decides_per_connection_from_both_addresses() {
+    // Listening on every interface (IPv4 too), refusing IPv6: what it's asked with is plain
+    // IPv4 for an IPv4 phone, not the IPv4-mapped IPv6 a dual-stack socket sees.
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let (handle, _) = start_with(|c| {
+        c.bind = "[::]:0".parse().unwrap();
+        let asked = asked.clone();
+        c.admit = Some(Admission::new(move |peer, local| {
+            asked.lock().unwrap().push((peer.ip(), local.ip()));
+            peer.is_ipv4()
+        }));
+    })
+    .await;
+    let port = handle.local_addr().port();
+    let offer = handle.pairing_offer();
+    let paired = try_pair(&format!("ws://127.0.0.1:{port}"), &offer.code, "v4").await;
+    assert_eq!(paired["type"], "paired", "{paired}");
+    let loopback: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+    assert_eq!(asked.lock().unwrap()[0], (loopback, loopback));
+    assert_eq!(handle.last_connection().unwrap().local, format!("127.0.0.1:{port}").parse().unwrap());
+
+    // Refused: closed before anything is said, and no place among the unauthenticated taken.
+    match tokio_tungstenite::connect_async(format!("ws://[::1]:{port}")).await {
+        Err(_) => {}
+        Ok((mut c, _)) => closed(&mut c).await,
+    }
+    assert_eq!(asked.lock().unwrap().len(), 2);
+    assert_eq!(handle.last_connection().unwrap().device_id, "v4");
+}
+
+#[tokio::test]
+async fn a_channel_host_forwards_what_another_machine_asks() {
+    let mut config = ServerConfig::new(host_info());
+    config.bind = "127.0.0.1:0".parse().unwrap();
+    let (host, requests) = ChannelHost::new();
+    let handle = RemoteServer::start(config, Arc::new(host)).await.unwrap();
+    tokio::spawn(async move {
+        while let Ok(req) = requests.recv().await {
+            match req {
+                HostRequest::Snapshot { reply } => drop(reply.send(Ok(Snapshot::default()))),
+                HostRequest::MachineInfo { reply } => {
+                    let info = MachineInfo { name: "Studio".into(), platform: "macos".into(), trek_version: "0.4.7".into(), home: "/Users/me".into() };
+                    drop(reply.send(Ok(info)));
+                }
+                HostRequest::CloneProject { req, progress, reply } => {
+                    progress.line(format!("Cloning into '{}'...", req.folder));
+                    drop(reply.send(Ok("p-new".into())));
+                }
+                HostRequest::PutFiles { project_id, files, reply } => {
+                    let said = files.iter().map(|f| format!("{} {:o} {}", f.path, f.mode, String::from_utf8_lossy(&f.bytes))).collect::<Vec<_>>();
+                    assert_eq!((project_id.as_str(), said), ("p-new", vec![".env 600 KEY=1".to_string()]));
+                    drop(reply.send(Ok(())));
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    });
+    let (mut c, _) = pair(&handle, "mac-a").await;
+    send(&mut c, json!({"type": "machine_info", "id": "1"})).await;
+    let info = recv(&mut c).await;
+    assert_eq!((info["type"].as_str(), info["name"].as_str(), info["re"].as_str()), (Some("machine_info"), Some("Studio"), Some("1")));
+    send(&mut c, json!({"type": "clone_project", "id": "2", "url": "https://github.com/dokyit/trek.git", "folder": "~/trek", "name": "trek"})).await;
+    assert_eq!(recv(&mut c).await, json!({"type": "clone_progress", "folder": "~/trek", "line": "Cloning into '~/trek'..."}));
+    let ack = recv(&mut c).await;
+    assert_eq!((ack["type"].as_str(), ack["re"].as_str(), ack["project_id"].as_str()), (Some("ack"), Some("2"), Some("p-new")));
+    let file = serde_json::to_value(PutFile::new(".env", b"KEY=1", Some(0o600))).unwrap();
+    send(&mut c, json!({"type": "put_files", "id": "3", "project_id": "p-new", "files": [file]})).await;
+    assert_eq!(recv(&mut c).await["type"], "ack");
+}
+
+#[tokio::test]
 async fn pairing_then_hello() {
     let (handle, _) = start().await;
     let mut notices = handle.notices();
@@ -1178,8 +1278,12 @@ async fn a_stopped_server_leaves_devices_json_to_the_one_that_replaced_it() {
     assert_eq!(file, r#"{"devices":[]}"#, "the old server's session wrote its stale list back");
 }
 
-fn rand_suffix() -> u128 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+/// Unique within the run: tests starting at once can read the same nanosecond, and two servers
+/// sharing a devices.json forget each other's devices.
+fn rand_suffix() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{n}-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos())
 }
 
 #[tokio::test]
@@ -1361,6 +1465,9 @@ async fn welcome_lists_the_features_and_a_host_without_them_says_so() {
         json!({"type": "stop_background", "thread_id": "t", "task_id": "b"}),
         json!({"type": "note_asset", "note_id": "n", "path": "attachments/a.png", "max_px": 960}),
         json!({"type": "add_note_image", "note_id": "n", "data": "/9j/", "name": "Whiteboard"}),
+        json!({"type": "machine_info"}),
+        json!({"type": "clone_project", "url": "https://github.com/dokyit/trek.git", "folder": "~/trek", "name": "trek"}),
+        json!({"type": "put_files", "project_id": "p", "files": [{"path": ".env", "bytes_b64": "S0VZPTE=", "mode": 384}]}),
     ]
     .into_iter()
     .enumerate()

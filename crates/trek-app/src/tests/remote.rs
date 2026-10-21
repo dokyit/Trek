@@ -29,13 +29,13 @@ async fn ask_later<T>(trek: &super::harness::Trek, cx: &mut gpui_kit::TestAppCon
 }
 
 #[test]
-fn tailscale_reach_requires_and_binds_its_address() {
+fn tailscale_reach_requires_and_points_at_its_address() {
     let none = crate::remote::Addresses { lan: Some("192.168.1.2".parse().unwrap()), tailscale: None, tailnet: None };
     assert_eq!(crate::remote::remote_endpoint(&none, trek_core::settings::Reach::Tailscale, 7420).unwrap_err().kind(), std::io::ErrorKind::AddrNotAvailable);
     let addresses = crate::remote::Addresses { lan: none.lan, tailscale: Some("100.64.1.2".parse().unwrap()), tailnet: None };
     let (bind, advertise) = crate::remote::remote_endpoint(&addresses, trek_core::settings::Reach::Tailscale, 7420).unwrap();
     assert_eq!((bind.to_string(), advertise.as_str()), ("100.64.1.2:7420".into(), "100.64.1.2:7420"));
-    // Chosen, the tailnet is all it listens on: not the Wi-Fi it's on as well.
+    // Chosen, the tailnet is all phones are told of: not the Wi-Fi it's on as well.
     assert_eq!(crate::remote::other_endpoint(&addresses, trek_core::settings::Reach::Tailscale, 7420), None);
     assert_eq!(crate::remote::remote_routes(&addresses, trek_core::settings::Reach::Tailscale, 7420).unwrap(), ["100.64.1.2:7420"]);
 }
@@ -46,7 +46,7 @@ fn on_wifi_the_tailnet_is_a_second_way_in() {
     use trek_core::settings::Reach;
     let lan = Some("192.168.1.2".parse().unwrap());
     let tailscale = Some("100.101.1.2".parse().unwrap());
-    // Both up: phones are told both, the Wi-Fi first, and it listens on both.
+    // Both up: phones are told both, the Wi-Fi first.
     let both = Addresses { lan, tailscale, tailnet: None };
     assert_eq!(other_endpoint(&both, Reach::Wifi, 7420).map(|a| a.to_string()).as_deref(), Some("100.101.1.2:7420"));
     assert_eq!(remote_routes(&both, Reach::Wifi, 7420).unwrap(), ["192.168.1.2:7420", "100.101.1.2:7420"]);
@@ -69,7 +69,7 @@ fn the_tailnet_says_whether_an_iphone_is_in_it() {
 }
 
 #[test]
-fn the_server_listens_only_where_phones_are_told_to_dial() {
+fn the_pairing_code_points_at_the_wifi_then_the_tailnet_then_this_mac() {
     use crate::remote::{Addresses, remote_endpoint};
     let wifi = |addresses: &Addresses| {
         let (bind, advertise) = remote_endpoint(addresses, trek_core::settings::Reach::Wifi, 7420).unwrap();
@@ -1615,5 +1615,390 @@ fn asides_are_marked_so_the_phone_offers_nothing_to_rewind_to() {
         assert_eq!(refused.unwrap_err().code, tr::ErrorCode::BadRequest);
         let wire = serde_json::to_value(&t.items.iter().find(|i| i.id == users[0].0).unwrap().body).unwrap();
         assert!(wire.get("aside").is_none(), "a prompt says nothing more than before");
+    });
+}
+
+#[test]
+fn projects_agents_and_full_access_reach_a_phone_connected_before_they_changed() {
+    use crate::remote::tests::SNAPSHOTS_PUSHED;
+    run(async |cx| {
+        let trek = open(cx);
+        trek.update(cx, |ws, _| ws.start_test_remote());
+        let pushed = || SNAPSHOTS_PUSHED.with(|n| n.get());
+        let tick = |trek: &super::harness::Trek, cx: &mut gpui_kit::TestAppContext| trek.update(cx, |ws, cx| ws.push_remote_changes(cx));
+        // The phone connected and read its snapshot: a tick has nothing more of it to send.
+        let first = ask(&trek, cx, |reply| tr::HostRequest::Snapshot { reply }).unwrap();
+        let start = pushed();
+        tick(&trek, cx);
+        assert_eq!(pushed(), start, "nothing changed");
+
+        // Claude Code is found after the phone connected (Trek just launched): a new snapshot, once.
+        assert!(!first.agents.iter().any(|a| a.key == trek_core::AgentId::ClaudeCode.key()));
+        trek.update(cx, |ws, _| {
+            ws.agents.push(trek_core::detect::DetectedAgent {
+                agent: trek_core::AgentId::ClaudeCode,
+                name: "Claude Code".into(),
+                path: None,
+                version: None,
+                availability: trek_core::detect::Availability::Ready,
+                models: vec![],
+                install_hint: None,
+            })
+        });
+        tick(&trek, cx);
+        assert_eq!(pushed(), start + 1, "agents found");
+        tick(&trek, cx);
+        assert_eq!(pushed(), start + 1, "once");
+
+        // A project added on the Mac, then Full access unlocked there.
+        let project = super::harness::new_project("added-later");
+        trek.update(cx, |ws, cx| ws.add_project(project, cx));
+        tick(&trek, cx);
+        assert_eq!(pushed(), start + 2, "a project added");
+        trek.update(cx, |ws, _| ws.settings.permissions.full_access_unlocked = true);
+        tick(&trek, cx);
+        assert_eq!(pushed(), start + 3, "full access unlocked");
+
+        let now = ask(&trek, cx, |reply| tr::HostRequest::Snapshot { reply }).unwrap();
+        assert!(now.full_access && now.agents.iter().any(|a| a.key == trek_core::AgentId::ClaudeCode.key()));
+        assert_eq!(now.projects.len(), first.projects.len() + 1);
+        // A second phone reading its snapshot hides nothing from the first.
+        tick(&trek, cx);
+        assert_eq!(pushed(), start + 3);
+    });
+}
+
+#[test]
+fn a_phone_that_connected_before_the_mac_listened_is_sent_changes() {
+    use std::sync::Arc;
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // A server as `start_remote` makes one (over TLS), and a phone pairing with it as soon as
+        // it listens, before the Mac has subscribed to its notices.
+        let rt = trek_core::runtime();
+        let identity = tr::TlsIdentity::load_or_create(&super::harness::new_project("phone-tls"), "Test Mac").unwrap();
+        let fingerprint = identity.fingerprint.clone();
+        let mut config = tr::ServerConfig::new(tr::HostInfo { id: "test".into(), name: "Test Mac".into(), version: "0".into() });
+        config.bind = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+        config.tls = Some(identity);
+        let (host, requests) = tr::ChannelHost::new();
+        rt.spawn(async move {
+            while let Ok(req) = requests.recv().await {
+                if let tr::HostRequest::Snapshot { reply } = req {
+                    let _ = reply.send(Ok(tr::Snapshot::default()));
+                }
+            }
+        });
+        let handle = rt.block_on(tr::RemoteServer::start(config, Arc::new(host))).unwrap();
+        let code = handle.pairing_offer().code;
+        let route = handle.local_addr().to_string();
+        let phone = {
+            let _rt = rt.enter();
+            tr::client::Client::connect(vec![route], &fingerprint, tr::client::Auth::Pair { code, device_id: "early-phone".into(), device_name: "iPhone".into() }).unwrap()
+        };
+        let deadline = std::time::Instant::now() + super::harness::REAL_TIME_LIMIT;
+        while handle.connected_devices().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "the phone never connected");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // Its `Connected` notice went to no one; the server knows it's there.
+        let remote = crate::remote::Remote::new(handle, Default::default(), String::new(), vec![], (0, trek_core::settings::Reach::Wifi), None, vec![]);
+        assert!(remote.connected.contains("early-phone"), "{:?}", remote.connected);
+        trek.update(cx, |ws, cx| {
+            ws.remote = Some(remote);
+            ws.push_remote_changes(cx);
+        });
+        assert!(trek.read(cx, |ws, _| ws.remote.as_ref().unwrap().sent.contains_key(&id)), "rows go to it");
+        phone.close();
+        trek.read(cx, |ws, _| ws.remote.as_ref().unwrap().handle.shutdown());
+    });
+}
+
+#[test]
+fn the_reach_setting_decides_per_connection() {
+    use crate::remote::link::{LinkPolicy, Via, via};
+    use trek_core::settings::Reach;
+    let ip = |s: &str| -> std::net::IpAddr { s.parse().unwrap() };
+    let tailscale = Some("100.101.1.2".parse().unwrap());
+    let (lan_mac, ts_mac) = (ip("192.168.1.2"), ip("100.101.1.2"));
+    // Which network a connection came over, from both ends.
+    assert_eq!(via(ip("192.168.1.30"), lan_mac, tailscale), Via::Wifi);
+    assert_eq!(via(ip("::ffff:192.168.1.30"), ip("::ffff:192.168.1.2"), tailscale), Via::Wifi, "as a dual-stack socket sees IPv4");
+    assert_eq!(via(ip("100.88.7.6"), ts_mac, tailscale), Via::Tailnet);
+    assert_eq!(via(ip("fd7a:115c:a1e0::5"), ip("fd7a:115c:a1e0::9"), tailscale), Via::Tailnet);
+    assert_eq!(via(ip("127.0.0.1"), ip("127.0.0.1"), None), Via::ThisMac);
+    assert_eq!(via(ip("fe80::1c2b"), ip("fe80::1"), None), Via::Wifi);
+    assert_eq!(via(ip("2a02:1:2:3::99"), ip("2a02:1:2:3::5"), None), Via::Wifi, "IPv6 on this Mac's own /64");
+    assert_eq!(via(ip("2a02:9:9:9::99"), ip("2a02:1:2:3::5"), None), Via::Elsewhere, "IPv6 from another network");
+    assert_eq!(via(ip("8.8.8.8"), lan_mac, tailscale), Via::Elsewhere);
+    // A carrier's shared addresses (a hotspot, an ISP) aren't the tailnet: only Tailscale's own is.
+    assert_eq!(via(ip("100.72.3.9"), ip("100.72.3.4"), tailscale), Via::Elsewhere);
+    assert_eq!(via(ip("100.88.7.6"), ts_mac, None), Via::Elsewhere, "Tailscale gone: its old address is no one's");
+    // Reaching the tailnet address from the Wi-Fi isn't coming over the tailnet.
+    assert_eq!(via(ip("192.168.1.30"), ts_mac, tailscale), Via::Elsewhere);
+
+    // "Wi-Fi": the local network and the tailnet (a phone paired at home finds the Mac away
+    // from it), never the internet.
+    let wifi = LinkPolicy { reach: Reach::Wifi, tailscale };
+    assert!(wifi.admits(ip("192.168.1.30"), lan_mac) && wifi.admits(ip("100.88.7.6"), ts_mac) && wifi.admits(ip("127.0.0.1"), ip("127.0.0.1")));
+    assert!(!wifi.admits(ip("8.8.8.8"), lan_mac) && !wifi.admits(ip("100.72.3.9"), ip("100.72.3.4")));
+    // "Tailscale": the tailnet alone. A phone on the same Wi-Fi is refused.
+    let tailnet = LinkPolicy { reach: Reach::Tailscale, tailscale };
+    assert!(tailnet.admits(ip("100.88.7.6"), ts_mac) && tailnet.admits(ip("127.0.0.1"), ip("127.0.0.1")));
+    assert!(!tailnet.admits(ip("192.168.1.30"), lan_mac) && !tailnet.admits(ip("fe80::1c2b"), ip("fe80::1")) && !tailnet.admits(ip("8.8.8.8"), lan_mac));
+}
+
+/// A server as `start_remote` makes one (over TLS, its reach policy in front), on the loopback,
+/// told to give phones `addresses`' routes; its fingerprint.
+fn tls_remote(addresses: crate::remote::Addresses, answer: impl Fn(tr::HostRequest) + Send + 'static) -> (crate::remote::Remote, String) {
+    use std::sync::{Arc, Mutex};
+    let rt = trek_core::runtime();
+    let identity = tr::TlsIdentity::load_or_create(&super::harness::new_project("link-tls"), "Test Mac").unwrap();
+    let fingerprint = identity.fingerprint.clone();
+    let reach = trek_core::settings::Reach::Wifi;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let routes = crate::remote::remote_routes(&addresses, reach, port).unwrap();
+    let policy = Arc::new(Mutex::new(crate::remote::link::LinkPolicy { reach, tailscale: addresses.tailscale }));
+    let mut config = tr::ServerConfig::new(tr::HostInfo { id: "test".into(), name: "Test Mac".into(), version: "0".into() });
+    config.bind = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    config.tls = Some(identity);
+    config.advertise = Some(routes[0].clone());
+    config.routes = routes.clone();
+    config.admit = Some({
+        let policy = policy.clone();
+        tr::Admission::new(move |peer, local| policy.lock().unwrap().admits(peer.ip(), local.ip()))
+    });
+    let (host, requests) = tr::ChannelHost::new();
+    rt.spawn(async move {
+        while let Ok(req) = requests.recv().await {
+            answer(req);
+        }
+    });
+    let handle = rt.block_on(tr::RemoteServer::start(config, Arc::new(host))).unwrap();
+    let mut remote = crate::remote::Remote::new(handle, addresses, routes[0].clone(), routes, (port, reach), None, vec![]);
+    remote.policy = policy;
+    (remote, fingerprint)
+}
+
+/// The next event from a phone, waiting in real time.
+fn next_event(events: &mut tokio::sync::mpsc::UnboundedReceiver<tr::client::Event>) -> tr::client::Event {
+    trek_core::runtime().block_on(async { tokio::time::timeout(std::time::Duration::from_secs(10), events.recv()).await }).expect("an event in time").expect("the phone's events")
+}
+
+#[test]
+fn the_mac_moving_networks_keeps_its_phones_and_tells_them_the_new_address() {
+    use crate::remote::{Addresses, link::Via};
+    run(async |cx| {
+        let trek = open(cx);
+        let home = Addresses { lan: Some("192.168.1.2".parse().unwrap()), tailscale: None, tailnet: None };
+        let (remote, fingerprint) = tls_remote(home, |req| {
+            if let tr::HostRequest::Snapshot { reply } = req {
+                let _ = reply.send(Ok(tr::Snapshot::default()));
+            }
+        });
+        let handle = remote.handle.clone();
+        let port = handle.local_addr().port();
+        assert_eq!(handle.routes(), [format!("192.168.1.2:{port}")]);
+        trek.update(cx, |ws, _| ws.remote = Some(remote));
+
+        let rt = trek_core::runtime();
+        let code = handle.pairing_offer().code;
+        let phone = {
+            let _rt = rt.enter();
+            tr::client::Client::connect(vec![handle.local_addr().to_string()], &fingerprint, tr::client::Auth::Pair { code, device_id: "phone".into(), device_name: "iPhone".into() }).unwrap()
+        };
+        let mut events = phone.events().unwrap();
+        let paired = match next_event(&mut events) {
+            tr::client::Event::Connected { paired, .. } => paired,
+            other => panic!("expected the phone to pair, got {other:?}"),
+        };
+        assert!(paired.routes.contains(&format!("192.168.1.2:{port}")), "{:?}", paired.routes);
+        trek.update(cx, |ws, cx| ws.remote_notice(tr::ServerNotice::Paired { device_id: "phone".into(), name: "iPhone".into() }, cx));
+
+        // Another Wi-Fi, and Tailscale came up.
+        let away = Addresses { lan: Some("10.0.0.7".parse().unwrap()), tailscale: Some("100.101.1.2".parse().unwrap()), tailnet: None };
+        trek.update(cx, |ws, cx| ws.remote_addresses_changed(away, cx));
+        let told = vec![format!("10.0.0.7:{port}"), format!("100.101.1.2:{port}")];
+        assert_eq!(handle.routes(), told, "the next welcome's");
+        trek.read(cx, |ws, _| {
+            let remote = ws.remote.as_ref().unwrap();
+            assert_eq!((remote.routes.clone(), remote.advertise.clone()), (told.clone(), told[0].clone()));
+            assert_eq!(remote.handle.local_addr(), handle.local_addr(), "the same server");
+            assert_eq!(remote.policy.lock().unwrap().tailscale, Some("100.101.1.2".parse().unwrap()), "the tailnet is let in");
+        });
+
+        // The phone that was connected still is: it's answered, and never heard it drop.
+        let pong = rt.block_on(async { tokio::time::timeout(std::time::Duration::from_secs(10), phone.request(tr::ClientMessage::Ping)).await });
+        assert!(matches!(pong, Ok(Ok(tr::ServerMessage::Pong))), "{pong:?}");
+        assert_eq!(*phone.state().borrow(), tr::client::State::Connected);
+        assert!(events.try_recv().into_iter().all(|e| !matches!(e, tr::client::Event::Disconnected { .. })));
+
+        // One connecting now hears the new routes.
+        let again = {
+            let _rt = rt.enter();
+            tr::client::Client::resume(&paired).unwrap()
+        };
+        let mut again_events = again.events().unwrap();
+        match next_event(&mut again_events) {
+            tr::client::Event::Connected { paired, .. } => assert!(told.iter().all(|r| paired.routes.contains(r)), "{:?}", paired.routes),
+            other => panic!("expected the phone to connect again, got {other:?}"),
+        }
+
+        // Settings › Phone can say how the link stands.
+        let link = trek.read(cx, |ws, _| ws.phone_link()).expect("the server runs");
+        assert_eq!((link.listening, link.routes), (vec![handle.local_addr()], told));
+        assert_eq!(link.advertised_name, None, "a test server isn't announced");
+        let last = link.last_connection.expect("a phone connected");
+        assert_eq!((last.device_id.as_str(), last.device_name.as_deref(), last.route, last.via), ("phone", Some("iPhone"), handle.local_addr().to_string(), Via::ThisMac));
+        phone.close();
+        again.close();
+        handle.shutdown();
+    });
+}
+
+#[test]
+fn machine_info_says_what_this_machine_is() {
+    run(async |cx| {
+        let trek = open(cx);
+        let info = ask_later(&trek, cx, |reply| tr::HostRequest::MachineInfo { reply }).await.unwrap();
+        assert!(!info.name.trim().is_empty());
+        assert_eq!((info.platform.as_str(), info.trek_version.as_str()), (std::env::consts::OS, env!("CARGO_PKG_VERSION")));
+        assert_eq!(info.home, trek_core::paths::home().display().to_string());
+    });
+}
+
+/// A bare repo with one commit (`README.md`, "hello"), to clone from.
+fn bare_repo() -> std::path::PathBuf {
+    let work = super::harness::new_project("clone-source");
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git").args(args).current_dir(dir).output().expect("git");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&work, &["init", "-q", "-b", "main"]);
+    for (k, v) in [("user.name", "t"), ("user.email", "t@t"), ("commit.gpgSign", "false")] {
+        git(&work, &["config", k, v]);
+    }
+    std::fs::write(work.join("README.md"), "hello\n").unwrap();
+    git(&work, &["add", "-A"]);
+    git(&work, &["commit", "-qm", "init"]);
+    let bare = work.with_extension("git");
+    git(&work, &["clone", "-q", "--bare", ".", bare.to_str().unwrap()]);
+    bare
+}
+
+fn clone_request(url: &std::path::Path, folder: &std::path::Path, name: &str) -> tr::CloneProjectRequest {
+    tr::CloneProjectRequest { url: url.display().to_string(), folder: folder.display().to_string(), name: name.into() }
+}
+
+#[test]
+fn a_clone_is_registered_as_a_project() {
+    use std::sync::{Arc, Mutex};
+    run(async |cx| {
+        let trek = open(cx);
+        let source = bare_repo();
+        let folder = super::harness::new_project("clones").join("nested").join("cloned");
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let progress = {
+            let lines = lines.clone();
+            tr::CloneProgress::new(folder.display().to_string(), move |msg| lines.lock().unwrap().push(msg))
+        };
+        let req = clone_request(&source, &folder, "From another Mac");
+        let route = trek.read(cx, |ws, _| ws.route.clone());
+        let id = ask_later(&trek, cx, |reply| tr::HostRequest::CloneProject { req, progress, reply }).await.unwrap();
+        assert_eq!(std::fs::read_to_string(folder.join("README.md")).unwrap(), "hello\n");
+        trek.read(cx, |ws, _| {
+            let project = ws.project(&id).expect("registered");
+            assert_eq!((project.path.clone(), project.name.as_str()), (super::harness::canonical(&folder), "From another Mac"));
+            assert!(ws.workspace_projects().iter().any(|p| p.id == id), "among the user's projects, offered to phones");
+            assert_eq!(ws.route, route, "this Mac's window stays where it was");
+        });
+        let lines = lines.lock().unwrap();
+        assert!(
+            lines.iter().any(|m| matches!(m, tr::ServerMessage::CloneProgress { line, .. } if line.starts_with("Cloning into"))),
+            "git's output goes to the machine that asked: {lines:?}"
+        );
+    });
+}
+
+#[test]
+fn a_clone_into_a_folder_with_files_in_it_is_refused() {
+    run(async |cx| {
+        let trek = open(cx);
+        let source = bare_repo();
+        let folder = super::harness::new_project("occupied");
+        std::fs::write(folder.join("notes.txt"), "mine\n").unwrap();
+        let before = trek.read(cx, |ws, _| ws.projects.len());
+        let req = clone_request(&source, &folder, "occupied");
+        let progress = tr::CloneProgress::new(folder.display().to_string(), |_| {});
+        let err = ask_later(&trek, cx, |reply| tr::HostRequest::CloneProject { req, progress, reply }).await.unwrap_err();
+        assert_eq!(err.code, tr::ErrorCode::Conflict, "{err}");
+        assert_eq!(std::fs::read_to_string(folder.join("notes.txt")).unwrap(), "mine\n", "left as it was");
+        assert!(!folder.join("README.md").exists());
+        assert_eq!(trek.read(cx, |ws, _| ws.projects.len()), before, "nothing registered");
+
+        // A clone git can't make says what git said.
+        let missing = super::harness::new_project("nowhere").join("missing.git");
+        let into = super::harness::new_project("failed").join("x");
+        let req = clone_request(&missing, &into, "x");
+        let progress = tr::CloneProgress::new(into.display().to_string(), |_| {});
+        let err = ask_later(&trek, cx, |reply| tr::HostRequest::CloneProject { req, progress, reply }).await.unwrap_err();
+        assert_eq!(err.code, tr::ErrorCode::CloneFailed, "{err}");
+        assert!(err.message.contains("fatal:"), "{err}");
+    });
+}
+
+#[test]
+fn put_files_writes_inside_the_project_and_never_through_a_symlink() {
+    run(async |cx| {
+        let trek = open(cx);
+        let root = super::harness::new_project("uploads");
+        let id = trek.update(cx, |ws, cx| ws.register_remote_project(&root, "Uploads", cx)).unwrap();
+        let file = |path: &str, bytes: &[u8], mode: u32| tr::FileUpload { path: path.into(), bytes: bytes.to_vec(), mode };
+        let files = vec![file(".env", b"KEY=1\n", 0o600), file("config/dev/local.toml", b"port = 1\n", 0o644)];
+        let project_id = id.clone();
+        ask_later(&trek, cx, |reply| tr::HostRequest::PutFiles { project_id, files, reply }).await.unwrap();
+        assert_eq!(std::fs::read_to_string(root.join(".env")).unwrap(), "KEY=1\n");
+        assert_eq!(std::fs::read_to_string(super::harness::join(&root, "config/dev/local.toml")).unwrap(), "port = 1\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(std::fs::metadata(root.join(".env")).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // Again: replaced.
+        let (project_id, files) = (id.clone(), vec![file(".env", b"KEY=2\n", 0o600)]);
+        ask_later(&trek, cx, |reply| tr::HostRequest::PutFiles { project_id, files, reply }).await.unwrap();
+        assert_eq!(std::fs::read_to_string(root.join(".env")).unwrap(), "KEY=2\n");
+
+        // A path out of the project, or an unknown project, is refused whatever the server checked.
+        let (project_id, files) = (id.clone(), vec![file("../escaped", b"x", 0o644)]);
+        let err = ask_later(&trek, cx, |reply| tr::HostRequest::PutFiles { project_id, files, reply }).await.unwrap_err();
+        assert_eq!(err.code, tr::ErrorCode::BadRequest, "{err}");
+        assert!(!root.parent().unwrap().join("escaped").exists());
+        let files = vec![file("a", b"x", 0o644)];
+        let err = ask_later(&trek, cx, |reply| tr::HostRequest::PutFiles { project_id: "nope".into(), files, reply }).await.unwrap_err();
+        assert_eq!(err.code, tr::ErrorCode::NotFound);
+
+        #[cfg(unix)]
+        {
+            let outside = super::harness::new_project("outside");
+            std::fs::write(outside.join("secret"), "untouched\n").unwrap();
+            std::os::unix::fs::symlink(outside.join("secret"), root.join("linked")).unwrap();
+            std::os::unix::fs::symlink(&outside, root.join("out")).unwrap();
+            for path in ["linked", "out/new", "out/secret"] {
+                // With a good file first: nothing is written when one can't be.
+                let (project_id, files) = (id.clone(), vec![file("first.txt", b"1", 0o644), file(path, b"overwritten\n", 0o644)]);
+                let err = ask_later(&trek, cx, |reply| tr::HostRequest::PutFiles { project_id, files, reply }).await.unwrap_err();
+                assert_eq!(err.code, tr::ErrorCode::Conflict, "{path}: {err}");
+                assert!(err.message.contains("symbolic link"), "{path}: {err}");
+                assert!(!root.join("first.txt").exists(), "{path}");
+            }
+            assert_eq!(std::fs::read_to_string(outside.join("secret")).unwrap(), "untouched\n");
+            assert!(!outside.join("new").exists());
+            assert!(std::fs::symlink_metadata(root.join("linked")).unwrap().file_type().is_symlink(), "the link itself stays");
+        }
     });
 }

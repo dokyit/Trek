@@ -32,8 +32,10 @@ mod integrations;
 mod ipc;
 mod keys;
 mod languages;
+mod line_breakdown;
 #[cfg(windows)]
 mod job;
+mod machines;
 mod mascot;
 mod artifact;
 mod math;

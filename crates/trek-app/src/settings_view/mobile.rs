@@ -1,5 +1,7 @@
-//! Settings › Phone: the switch for the phone server, which of this Mac's addresses phones use,
-//! the pairing code (a QR code, and the code and fingerprint to type), and the paired phones.
+//! Settings › Phone & Machines: the switch for the phone server, which of this Mac's addresses
+//! phones use, the pairing code (a QR code, the code and fingerprint to type, and the link another
+//! machine pastes), the paired phones; then the other machines this one drives (`machines`), with
+//! "Add a machine…".
 
 use super::SettingsView;
 use crate::palette;
@@ -171,6 +173,7 @@ impl SettingsView {
                 "Trek on iPhone shows every thread and what it needs from you, and lets you answer approvals and questions, review plans, send follow-ups and start threads, while the agents keep running here. Build it from ios/ in Trek's repository; it isn't on the App Store yet.",
                 cx,
             ));
+            out.extend(self.machines_section(cx));
             return out;
         };
 
@@ -255,6 +258,38 @@ impl SettingsView {
                                         }),
                                 )
                                 .child(div().text_xs().text_color(theme.muted_foreground).child(format!("Address {advertise} · works once, for about {left} min")))
+                                // Another computer running Trek pairs from the same code, pasted as a link.
+                                .child({
+                                    let url = offer.url.clone();
+                                    v_flex()
+                                        .gap(px(4.))
+                                        .pt(px(4.))
+                                        .child(div().text_size(px(12.5)).font_medium().child("Pair another machine"))
+                                        .child(div().text_xs().text_color(theme.muted_foreground).child("In Trek on the other machine, choose Add a machine… and paste this link:"))
+                                        .child(
+                                            h_flex()
+                                                .gap(px(8.))
+                                                .child(
+                                                    div()
+                                                        .id("pair-link")
+                                                        .test_support()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .px(px(8.))
+                                                        .py(px(5.))
+                                                        .rounded(px(6.))
+                                                        .bg(theme.foreground.opacity(0.06))
+                                                        .font_family(theme.mono_font_family.clone())
+                                                        .text_size(px(11.))
+                                                        .truncate()
+                                                        .child(offer.url.clone()),
+                                                )
+                                                .child(Button::new("pair-link-copy").small().ghost().label("Copy link").on_click(move |_, window, cx| {
+                                                    cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
+                                                    crate::toast::push(window, "Copied", cx);
+                                                })),
+                                        )
+                                })
                                 .child(
                                     h_flex()
                                         .gap(px(8.))
@@ -319,6 +354,71 @@ impl SettingsView {
             &format!("Connections are encrypted, and each phone checks it's talking to {this} (its certificate is in the pairing code). A phone can answer and steer threads but can't change how much agents may do or run Trek's own commands, and nothing is ever answered for you."),
             cx,
         ));
+        out.extend(self.machines_section(cx));
+        out
+    }
+
+    /// The other machines running Trek that this one drives: each with a dot while it's reachable,
+    /// when it was last seen, and Forget; then "Add a machine…".
+    fn machines_section(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.theme().clone();
+        let this = crate::words::words().this_computer;
+        let mut out = vec![Self::heading("Machines", cx)];
+        let ws = self.workspace.read(cx);
+        let machines: Vec<(String, String, crate::machines::Reach, Option<i64>, Vec<String>)> = ws
+            .machines
+            .list
+            .iter()
+            .map(|m| (m.id().to_string(), m.entry.name.clone(), m.reach.clone(), m.entry.last_seen, m.entry.paired.routes.clone()))
+            .collect();
+        if machines.is_empty() {
+            out.push(Self::note(&format!("Pair another computer running Trek to start threads on it from here: they run there, and show here in the sidebar under its name, as live as {this}'s own."), cx));
+        } else {
+            let rows = machines
+                .into_iter()
+                .map(|(id, name, reach, last_seen, routes)| {
+                    use crate::machines::Reach;
+                    let reachable = reach == Reach::Connected;
+                    let route = routes.first().cloned().unwrap_or_default();
+                    let seen = match (&reach, last_seen) {
+                        (Reach::Connected, _) => format!("Connected now · {route}"),
+                        (Reach::Stopped(why), _) => format!("Not connecting: {why}. Forget it and pair again."),
+                        (Reach::Connecting, Some(at)) => format!("Last seen {} · trying {route}", crate::time::relative(at)),
+                        (Reach::Connecting, None) => format!("Trying {route}"),
+                    };
+                    let ws = self.workspace.clone();
+                    let host = id.clone();
+                    Self::row(
+                        h_flex()
+                            .id(SharedString::from(format!("machine-row-{id}")))
+                            .test_support()
+                            .gap(px(8.))
+                            .child(crate::composer::reach_dot(reachable, cx).id(SharedString::from(format!("machine-dot-{id}"))).test_support())
+                            .child(name),
+                        seen,
+                        Button::new(SharedString::from(format!("machine-forget-{id}"))).small().ghost().label("Forget").on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.forget_machine(&host, cx))),
+                        cx,
+                    )
+                })
+                .collect();
+            out.push(ui::group(rows, cx));
+        }
+        let ws = self.workspace.clone();
+        out.push(
+            h_flex()
+                .pt(px(12.))
+                .child(
+                    Button::new("machine-add")
+                        .small()
+                        .outline()
+                        .icon(Icon::new(crate::assets::Lucide::Laptop))
+                        .label("Add a machine…")
+                        .on_click(move |_, window, cx| crate::machines::sheets::open_pair(ws.clone(), window, cx)),
+                )
+                .into_any_element(),
+        );
+        out.push(div().h(px(12.)).into_any_element());
+        out.push(div().text_size(px(12.)).text_color(theme.muted_foreground).child("A machine is paired like a phone: it lists this one among its paired devices, where it can be unpaired.").into_any_element());
         out
     }
 }

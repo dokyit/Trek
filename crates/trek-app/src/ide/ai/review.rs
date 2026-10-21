@@ -58,8 +58,18 @@ pub fn pending_bar(ws: &Entity<Workspace>, thread: &str, line: Hsla, cx: &App) -
                     .gap(px(5.))
                     .child(div().text_color(ember).child("✦"))
                     .child(div().text_color(theme.foreground.opacity(0.85)).child(format!("{n} file{}", if n == 1 { "" } else { "s" })))
-                    .when(added > 0, |el| el.child(div().font_family(theme.mono_font_family.clone()).text_size(px(11.)).text_color(palette::emerald(cx)).child(format!("+{added}"))))
-                    .when(removed > 0, |el| el.child(div().font_family(theme.mono_font_family.clone()).text_size(px(11.)).text_color(palette::red(cx)).child(format!("−{removed}")))),
+                    .when(added > 0 || removed > 0, |el| {
+                        el.child(crate::line_breakdown::hover(
+                            "ai-pending-lines",
+                            h_flex()
+                                .gap(px(5.))
+                                .font_family(theme.mono_font_family.clone())
+                                .text_size(px(11.))
+                                .when(added > 0, |el| el.child(div().text_color(palette::emerald(cx)).child(format!("+{added}"))))
+                                .when(removed > 0, |el| el.child(div().text_color(palette::red(cx)).child(format!("−{removed}")))),
+                            trek_core::file_kind::LineBreakdown::of_changes(&review.pending),
+                        ))
+                    }),
             )
             .when(git, |el| el.child(link("ai-review").child("Review").on_click(move |_, _, cx| ws_review.update(cx, |ws, cx| ws.open_review(&id_review, cx)))))
             .when(git, |el| {

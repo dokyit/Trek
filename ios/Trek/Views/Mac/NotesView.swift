@@ -122,6 +122,8 @@ struct NoteEditor: View {
     @State private var theirs: Note?
     @State private var confirmDelete = false
     @State private var deleted = false
+    /// Gone from the screen: what's unsaved is the model's to save now.
+    @State private var left = false
     /// A photo picked to put in the note, and whether it's on its way to the Mac.
     @State private var photo: PhotosPickerItem?
     @State private var adding = false
@@ -220,6 +222,12 @@ struct NoteEditor: View {
         .task { open() }
         .onChange(of: text) { old, new in changed(old, new) }
         .onChange(of: photo) { _, item in if let item { addPhoto(item) } }
+        // Back in touch with the Mac: what couldn't be read or saved meanwhile goes now.
+        .onChange(of: model.connection) { _, state in
+            guard state == .connected else { return }
+            if loaded { scheduleSave() } else { open() }
+        }
+        .onAppear { left = false }
         .onDisappear(perform: leave)
     }
 
@@ -263,7 +271,9 @@ struct NoteEditor: View {
     /// One save at a time: each carries the version it was made from, so a second one sent
     /// before the first came back would be refused as a change on the Mac.
     private func save() {
-        guard loaded, !deleted, !saving, theirs == nil, text != saved else { return }
+        // Offline, it waits for the connection to come back (as "Edited").
+        guard loaded, !deleted, !left, !saving, theirs == nil, text != saved, model.connection == .connected,
+              !model.savingNote(noteID) else { return }
         let body = text
         saving = true
         #if DEBUG
@@ -276,12 +286,15 @@ struct NoteEditor: View {
         model.saveNote(noteID, body: body, done: { _ in
             saving = false
             saved = body
-            if text != saved { scheduleSave() }
+            if text != saved, !left { scheduleSave() }
         }, conflict: {
             saving = false
-            model.openNote(noteID) { theirs = $0 }
+            if !left { model.openNote(noteID) { theirs = $0 } }
+        }, failed: {
+            // Said in a toast; the next change, or the connection coming back, tries again.
+            saving = false
         })
-        // Other failures say so in a toast and don't answer here: let the next change try again.
+        // A reply that never comes (the connection seemed up): let the next change try again.
         Task {
             try? await Task.sleep(for: .seconds(10))
             if saving, saved != body { saving = false }
@@ -303,10 +316,13 @@ struct NoteEditor: View {
     private func leave() {
         pending?.cancel()
         guard !deleted else { return }
+        left = true
         if isNew, text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             model.deleteNote(noteID)
-        } else {
-            save()
+        } else if loaded, theirs == nil, text != saved {
+            // The model saves it, after a save still out or once the Mac is back: this view, and
+            // the text in it, may be gone by then.
+            model.saveNoteLeft(noteID, body: text)
         }
     }
 

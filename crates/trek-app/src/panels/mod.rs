@@ -230,6 +230,15 @@ impl RightPanel {
         }
     }
 
+    /// The Git tool's lines by kind of file (`LineBreakdown::describe`), while it's the tab on show.
+    #[cfg(test)]
+    pub(crate) fn git_lines(&self, cx: &App) -> Option<Vec<String>> {
+        match self.active_tab().map(|t| &t.view) {
+            Some(View::Git(g)) => Some(g.read(cx).line_breakdown().describe()),
+            _ => None,
+        }
+    }
+
     /// The Git tool's diff scroll offset, while it's the tab on show.
     #[cfg(test)]
     pub(crate) fn git_diff_offset(&self, cx: &App) -> Option<Point<Pixels>> {
