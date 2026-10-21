@@ -16,7 +16,8 @@ pub enum Heard {
     Partial(String),
     /// The recognizer is done: the take's text.
     Final(String),
-    /// Why it stopped.
+    /// Why it stopped. Only macOS's recognizer reports one; elsewhere dictation never starts.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Failed(String),
 }
 
