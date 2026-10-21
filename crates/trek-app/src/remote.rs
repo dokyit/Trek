@@ -264,25 +264,12 @@ impl Tailnet {
 }
 
 impl Addresses {
-    /// This Mac's addresses, from `interfaces` as just read (`interface_addresses`). Off the
-    /// main thread: it may ask Tailscale.
-    fn find_in(interfaces: &[(String, Ipv4Addr)]) -> Self {
-        let mut out = Self::from_interfaces(interfaces, tailscale_ip());
+    /// This computer's addresses, from a fresh network snapshot. Off the main thread: it may ask
+    /// Tailscale.
+    fn find_in(input: &AddressInputs) -> Self {
+        let mut out = Self::from_interfaces_preferring(&input.interfaces, tailscale_ip(), input.default_route);
         if out.tailscale.is_some() {
             out.tailnet = tailscale(&["status", "--json"]).as_deref().and_then(Tailnet::parse);
-        }
-        // The address the default route leaves from, when the interface list didn't say: a private
-        // one only. An IPv6-only hotspot gives the Mac 192.0.0.2 (macOS's own translation), which
-        // no phone can dial.
-        if out.lan.is_none() {
-            out.lan = std::net::UdpSocket::bind("0.0.0.0:0")
-                .and_then(|s| s.connect("192.168.0.1:9").map(|_| s))
-                .and_then(|s| s.local_addr())
-                .ok()
-                .and_then(|a| match a.ip() {
-                    IpAddr::V4(v4) if Some(v4) != out.tailscale => Some(v4).filter(|ip| ip.is_private()),
-                    _ => None,
-                });
         }
         out
     }
@@ -291,18 +278,77 @@ impl Addresses {
     /// CLI names (`asked`), else a 100.64/10 address on a tunnel (`utun…`): that range alone is
     /// also carrier-grade NAT, which hotspots and some ISPs hand out on Wi-Fi.
     pub(crate) fn from_interfaces(interfaces: &[(String, Ipv4Addr)], asked: Option<Ipv4Addr>) -> Self {
-        // macOS names tunnels `utun…`; Tailscale's Windows adapter is called "Tailscale".
-        let tunnel = |name: &str| name.starts_with("utun") || name.get(..9).is_some_and(|n| n.eq_ignore_ascii_case("tailscale"));
+        Self::from_interfaces_preferring(interfaces, asked, None)
+    }
+
+    /// [`Self::from_interfaces`], preferring the address the default route actually leaves from.
+    /// Interface enumeration order is not meaningful: on Windows in particular a VirtualBox or
+    /// Hyper-V adapter can otherwise come before Wi-Fi and put its host-only address in the
+    /// pairing link.
+    pub(crate) fn from_interfaces_preferring(
+        interfaces: &[(String, Ipv4Addr)],
+        asked: Option<Ipv4Addr>,
+        default_route: Option<Ipv4Addr>,
+    ) -> Self {
         let shared = |ip: &Ipv4Addr| {
             let [a, b, ..] = ip.octets();
             a == 100 && (64..128).contains(&b)
         };
         let tailscale = asked
             .filter(|ip| interfaces.iter().any(|(_, a)| a == ip))
-            .or_else(|| interfaces.iter().find(|(name, ip)| tunnel(name) && shared(ip)).map(|(_, ip)| *ip));
-        let lan = interfaces.iter().find(|(name, ip)| !tunnel(name) && ip.is_private()).map(|(_, ip)| *ip);
+            .or_else(|| interfaces.iter().find(|(name, ip)| (is_tailscale(name) || name.starts_with("utun")) && shared(ip)).map(|(_, ip)| *ip));
+        let lan_candidate = |(name, ip): &&(String, Ipv4Addr)| !is_virtual_or_tunnel(name) && ip.is_private();
+        let lan = default_route
+            .and_then(|preferred| interfaces.iter().find(|entry| lan_candidate(entry) && entry.1 == preferred))
+            .or_else(|| interfaces.iter().find(lan_candidate))
+            .map(|(_, ip)| *ip);
         Self { lan, tailscale, tailnet: None }
     }
+}
+
+fn is_tailscale(name: &str) -> bool {
+    name.get(..9).is_some_and(|prefix| prefix.eq_ignore_ascii_case("tailscale"))
+}
+
+/// Interfaces whose private addresses belong to a tunnel, VM, or local virtual switch rather
+/// than the LAN a second physical computer shares. Friendly names vary by platform and client.
+fn is_virtual_or_tunnel(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let compact: String = lower.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    lower.starts_with("utun")
+        || lower.starts_with("tun")
+        || lower.starts_with("tap")
+        || lower.starts_with("wg")
+        || ["tailscale", "openvpn", "wireguard", "wintun", "zerotier", "vpn", "virtualbox", "vmware", "vethernet", "hyperv", "docker", "wsl", "loopback", "parallels"]
+            .iter()
+            .any(|kind| compact.contains(kind))
+}
+
+/// The network facts that decide the address put in pairing links. The default route belongs in
+/// the snapshot too: a VPN or adapter metric can change it without adding or removing an address.
+#[derive(Debug, Clone, PartialEq)]
+struct AddressInputs {
+    interfaces: Vec<(String, Ipv4Addr)>,
+    default_route: Option<Ipv4Addr>,
+}
+
+impl AddressInputs {
+    fn read() -> Self {
+        Self { interfaces: interface_addresses(), default_route: default_route_ipv4() }
+    }
+}
+
+/// The IPv4 address the operating system would use for its default route. UDP `connect` only
+/// asks the routing table for a source address; it sends no packet.
+fn default_route_ipv4() -> Option<Ipv4Addr> {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|socket| socket.connect("1.1.1.1:9").map(|_| socket))
+        .and_then(|socket| socket.local_addr())
+        .ok()
+        .and_then(|address| match address.ip() {
+            IpAddr::V4(ip) if !ip.is_loopback() => Some(ip),
+            _ => None,
+        })
 }
 
 /// This Mac's tailnet address as Tailscale gives it (`tailscale ip -4`), when it's running.
@@ -385,14 +431,13 @@ pub(crate) fn remote_routes(addresses: &Addresses, reach: trek_core::settings::R
 /// The IPv4 addresses of the interfaces that are up (not loopback), with the interfaces' names.
 #[cfg(windows)]
 fn interface_addresses() -> Vec<(String, Ipv4Addr)> {
-    // Adapters of virtual switches and machines: private addresses, but not ones a phone reaches
-    // this PC at (WSL and Hyper-V's `vEthernet (…)` would be taken for the Wi-Fi).
-    let virtual_adapter = |name: &str| ["vEthernet", "VMware", "VirtualBox", "Loopback"].iter().any(|v| name.starts_with(v));
+    // Keep tunnels in the snapshot: `from_interfaces_preferring` excludes them from the LAN but
+    // still needs Tailscale's adapter to discover the tailnet address when its CLI is unavailable.
     if_addrs::get_if_addrs()
         .unwrap_or_default()
         .into_iter()
         .filter_map(|i| match i.addr {
-            if_addrs::IfAddr::V4(a) if !a.ip.is_loopback() && !virtual_adapter(&i.name) => Some((i.name, a.ip)),
+            if_addrs::IfAddr::V4(a) if !a.ip.is_loopback() => Some((i.name, a.ip)),
             _ => None,
         })
         .collect()
@@ -509,8 +554,8 @@ impl Workspace {
                     let identity = tr::TlsIdentity::load_or_create(&mobile_dir(), &host.name)?;
                     // What the addresses were found from is what `follow_addresses` compares with
                     // later: an interface that comes up after this read is a change to act on.
-                    let interfaces = interface_addresses();
-                    let addresses = Addresses::find_in(&interfaces);
+                    let address_inputs = AddressInputs::read();
+                    let addresses = Addresses::find_in(&address_inputs);
                     let (_, advertise) = remote_endpoint(&addresses, reach, port)?;
                     let mut config = tr::ServerConfig::new(host);
                     config.advertise = Some(advertise.clone());
@@ -549,13 +594,13 @@ impl Workspace {
                         })
                         .await
                         .map_err(std::io::Error::other)??;
-                    anyhow::Ok((handle, requests, addresses, advertise, routes, interfaces, announce, policy))
+                    anyhow::Ok((handle, requests, addresses, advertise, routes, address_inputs, announce, policy))
                 })
                 .await;
             let _ = this.update(cx, |ws, cx| {
                 ws.remote_starting = false;
                 match started {
-                    Ok((handle, requests, addresses, advertise, routes, interfaces, (name, id), policy)) if ws.settings.mobile.enabled => {
+                    Ok((handle, requests, addresses, advertise, routes, address_inputs, (name, id), policy)) if ws.settings.mobile.enabled => {
                         ws.remote_error = None;
                         let advert = announced(&addresses, reach).then(|| bonjour::Advert::new(&name, &id, port)).flatten();
                         tracing::info!("phone server: listening on {:?}; phones are told {routes:?}", handle.listening());
@@ -563,7 +608,7 @@ impl Workspace {
                             serve_requests(cx.weak_entity(), requests, cx),
                             push_changes(cx.weak_entity(), cx),
                             hear_notices(cx.weak_entity(), handle.notices(), cx),
-                            follow_addresses(cx.weak_entity(), interfaces, cx),
+                            follow_addresses(cx.weak_entity(), address_inputs, cx),
                         ];
                         // After `hear_notices` subscribed: phones that connected before it did
                         // were announced to no one, and are taken from the server instead.
@@ -2080,19 +2125,19 @@ fn serve_requests(ws: WeakEntity<Workspace>, requests: async_channel::Receiver<t
 /// knows. The server listens on every interface and carries on: no phone is dropped. The
 /// interface list is cheap to read and is what changes first; Tailscale is asked only when it does.
 ///
-/// `seen` is the interface list the server's addresses were found from (not a fresh read: an
-/// address that came up since is a change to act on).
-fn follow_addresses(ws: WeakEntity<Workspace>, mut seen: Vec<(String, Ipv4Addr)>, cx: &mut Context<Workspace>) -> Task<()> {
+/// `seen` is the network snapshot the server's addresses were found from (not a fresh read: an
+/// address or default route that changed since is a change to act on).
+fn follow_addresses(ws: WeakEntity<Workspace>, mut seen: AddressInputs, cx: &mut Context<Workspace>) -> Task<()> {
     cx.spawn(async move |_, cx: &mut AsyncApp| {
         loop {
             cx.background_executor().timer(ADDRESSES_EVERY).await;
-            let now = cx.background_executor().spawn(async { interface_addresses() }).await;
+            let now = cx.background_executor().spawn(async { AddressInputs::read() }).await;
             if now == seen {
                 continue;
             }
             seen = now;
-            let interfaces = seen.clone();
-            let found = cx.background_executor().spawn(async move { Addresses::find_in(&interfaces) }).await;
+            let input = seen.clone();
+            let found = cx.background_executor().spawn(async move { Addresses::find_in(&input) }).await;
             if ws.update(cx, |ws, cx| ws.remote_addresses_changed(found, cx)).is_err() {
                 break;
             }
