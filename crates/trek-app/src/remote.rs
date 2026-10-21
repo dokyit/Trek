@@ -277,6 +277,7 @@ impl Addresses {
     /// Which of `interfaces` (name, address) phones reach this Mac at. Tailscale's is the one its
     /// CLI names (`asked`), else a 100.64/10 address on a tunnel (`utun…`): that range alone is
     /// also carrier-grade NAT, which hotspots and some ISPs hand out on Wi-Fi.
+    #[cfg(test)]
     pub(crate) fn from_interfaces(interfaces: &[(String, Ipv4Addr)], asked: Option<Ipv4Addr>) -> Self {
         Self::from_interfaces_preferring(interfaces, asked, None)
     }
