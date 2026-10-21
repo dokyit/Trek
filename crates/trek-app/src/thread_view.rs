@@ -329,9 +329,13 @@ fn layout(items: &[Item], live_reasoning: Option<usize>) -> (Vec<Slot>, Vec<usiz
 //
 // While a turn works, and once it has, the thread view shows what the agent did as a vertical
 // timeline: a header ("Thinking Ns", shimmering while it runs; "Thought for Ns" once done) and a
-// node per step — a thought, a tool call with its file chips, a fan-out of parallel calls that
-// merges back at a hollow node, a dashed dead end for a call that failed, and a closing blue
-// "Finished thinking" node. When the turn ends the whole thing collapses to its header.
+// node per step — a thought, a tool call with its file chips — each a small tinted tile whose
+// icon says what the step is (terminal for commands, file for reads, sparkles for thoughts).
+// Parallel calls fan out on curved elbows and merge back at a hollow node; a call that failed is
+// a red dead end, and a turn that ends closes with a blue "Finished thinking" node. Steps settle
+// in with a short rise-and-fade, staggered so a batch reads as one flow rather than a wall of
+// text. When the turn ends the whole thing collapses to its header, and Settings › Appearance's
+// "Thinking timeline" switch hides it entirely for those who don't want it.
 
 /// One step of the timeline.
 #[derive(Clone, PartialEq)]
@@ -339,6 +343,8 @@ struct ThinkingStep {
     kind: ThinkingKind,
     /// The active-form label ("Reading src/auth.rs"); `past` turns it past tense once done.
     label: String,
+    /// The tool's own title ("Run command"), for the tile's icon; empty for thoughts.
+    raw_title: String,
     /// Files the step read or edited, for file chips.
     files: Vec<String>,
     running: bool,
@@ -389,6 +395,8 @@ fn thinking(live: &crate::workspace::LiveThread) -> Option<Thinking> {
     struct Raw {
         key: String,
         label: String,
+        /// The tool's own title, for the step tile's icon.
+        title: String,
         files: Vec<String>,
         running: bool,
         dead: bool,
@@ -402,6 +410,7 @@ fn thinking(live: &crate::workspace::LiveThread) -> Option<Thinking> {
                 raw.push(Raw {
                     key: format!("thought-{ix}"),
                     label: crate::activity::headline(text).unwrap_or_else(|| "Thinking".to_string()),
+                    title: String::new(),
                     files: vec![],
                     running: live.reasoning == Some(ix),
                     dead: false,
@@ -421,6 +430,7 @@ fn thinking(live: &crate::workspace::LiveThread) -> Option<Thinking> {
                 raw.push(Raw {
                     key: id.clone(),
                     label: label.trim().to_string(),
+                    title: title.clone(),
                     files,
                     running: *status == ToolStatus::Running,
                     dead: matches!(status, ToolStatus::Failed | ToolStatus::Denied),
@@ -445,6 +455,7 @@ fn thinking(live: &crate::workspace::LiveThread) -> Option<Thinking> {
     let step = |r: &Raw, kind: ThinkingKind| ThinkingStep {
         kind,
         label: r.label.clone(),
+        raw_title: r.title.clone(),
         files: r.files.clone(),
         running: r.running,
         thought: r.thought.clone(),
@@ -469,6 +480,7 @@ fn thinking(live: &crate::workspace::LiveThread) -> Option<Thinking> {
                 steps.push(ThinkingStep {
                     kind: ThinkingKind::Merge,
                     label: "Merged".to_string(),
+                    raw_title: String::new(),
                     files: vec![],
                     running: false,
                     thought: None,
@@ -485,6 +497,7 @@ fn thinking(live: &crate::workspace::LiveThread) -> Option<Thinking> {
         steps.push(ThinkingStep {
             kind: ThinkingKind::Final,
             label: "Finished thinking".to_string(),
+            raw_title: String::new(),
             files: vec![],
             running: false,
             thought: None,
@@ -513,12 +526,17 @@ fn past(phrase: &str) -> String {
     if rest.is_empty() { done.to_string() } else { format!("{done} {rest}") }
 }
 
+/// How far a step slides up from as it fades in.
+const STEP_RISE: f32 = 5.;
+
 /// The timeline, from its header down: `open` draws the nodes, otherwise just the header.
-fn thinking_element(thinking: &Thinking, open: bool, clock: f32, toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, cx: &App) -> AnyElement {
+fn thinking_element(thinking: &Thinking, open: bool, animate: bool, clock: f32, toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let blue = crate::palette::sky(cx);
+    let red = crate::palette::failed(cx);
     let text_size = px(13.);
+    let rail = if thinking.running { blue.opacity(0.22) } else { theme.foreground.opacity(0.08) };
 
     let header = h_flex()
         .id("thinking-header")
@@ -537,38 +555,101 @@ fn thinking_element(thinking: &Thinking, open: bool, clock: f32, toggle: impl Fn
                 .into_any_element()
         } else {
             div().text_color(muted).child(format!("Thought for {}s", thinking.secs)).into_any_element()
-        });
+        })
+        .child(div().flex_1())
+        .child(div().text_size(px(11.5)).text_color(muted.opacity(0.8)).child(format!("{} {}", thinking.steps.len() + thinking.earlier, if thinking.steps.len() + thinking.earlier == 1 { "step" } else { "steps" })));
 
     let mut body = None;
     if open {
-        let node = |s: &ThinkingStep, cx: &App| -> AnyElement {
+        // A step's tile: the kind's icon on a tint saying how it went — accent while it works,
+        // neutral once done, red on a dead end.
+        let tile = |icon: AnyElement, bg: Hsla, fg: Hsla| -> AnyElement {
+            div()
+                .w(px(16.))
+                .h(px(16.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.))
+                .bg(bg)
+                .text_color(fg)
+                .child(icon)
+                .into_any_element()
+        };
+        let node = |ix: usize, s: &ThinkingStep, cx: &App| -> AnyElement {
             let shown = if s.running { s.label.clone() } else { past(&s.label) };
+            let failed = s.kind == ThinkingKind::DeadEnd;
+            let kind = if s.thought.is_some() { ToolKind::Thought } else { tool_kind(&s.raw_title) };
             let (id, icon): (String, AnyElement) = match s.kind {
-                ThinkingKind::Merge => (format!("thinking-merge-{}", s.key), div().size(px(9.)).rounded_full().border_2().border_color(muted.opacity(0.8)).into_any_element()),
-                ThinkingKind::DeadEnd => (
-                    format!("thinking-deadend-{}", s.key),
-                    h_flex().gap(px(3.)).child(div().w(px(8.)).border_b_1().border_dashed().border_color(muted.opacity(0.7))).child(Icon::new(IconName::CircleX).size(px(12.)).text_color(muted.opacity(0.7))).into_any_element(),
-                ),
-                ThinkingKind::Final => (
-                    "thinking-final".to_string(),
-                    div().size(px(15.)).rounded_full().bg(blue).flex().items_center().justify_center().child(Icon::new(IconName::Check).size(px(10.)).text_color(theme.background)).into_any_element(),
-                ),
-                ThinkingKind::Child if s.running => (format!("thinking-node-{}", s.key), Spinner::new().xsmall().color(muted).into_any_element()),
-                ThinkingKind::Child => (format!("thinking-node-{}", s.key), div().size(px(6.)).rounded_full().bg(muted.opacity(0.5)).into_any_element()),
-                ThinkingKind::Main if s.running => (format!("thinking-node-{}", s.key), Spinner::new().xsmall().color(theme.foreground).into_any_element()),
-                ThinkingKind::Main => (format!("thinking-node-{}", s.key), div().size(px(8.)).rounded_full().bg(muted.opacity(0.8)).into_any_element()),
+                ThinkingKind::Merge => (format!("thinking-merge-{}", s.key), tile(
+                    div().size(px(9.)).rounded_full().border_2().border_color(muted.opacity(0.9)).bg(theme.background).into_any_element(),
+                    gpui_kit::transparent_black(),
+                    muted,
+                )),
+                ThinkingKind::DeadEnd => (format!("thinking-deadend-{}", s.key), tile(
+                    Icon::new(IconName::CircleX).size(px(10.5)).into_any_element(),
+                    red.opacity(0.14),
+                    red,
+                )),
+                ThinkingKind::Final => ("thinking-final".to_string(), tile(
+                    Icon::new(IconName::Check).size(px(10.)).into_any_element(),
+                    blue,
+                    theme.background,
+                )),
+                ThinkingKind::Child if s.running => (format!("thinking-node-{}", s.key), tile(
+                    Spinner::new().xsmall().color(muted).into_any_element(),
+                    theme.foreground.opacity(0.07),
+                    muted,
+                )),
+                ThinkingKind::Child => (format!("thinking-node-{}", s.key), tile(
+                    crate::activity::kind_icon(kind).size(px(10.5)).into_any_element(),
+                    theme.foreground.opacity(0.06),
+                    muted.opacity(0.9),
+                )),
+                ThinkingKind::Main if s.running => (format!("thinking-node-{}", s.key), tile(
+                    crate::activity::kind_icon(kind).size(px(10.5)).into_any_element(),
+                    blue.opacity(0.16),
+                    blue,
+                )),
+                ThinkingKind::Main => (format!("thinking-node-{}", s.key), tile(
+                    crate::activity::kind_icon(kind).size(px(10.5)).into_any_element(),
+                    theme.foreground.opacity(0.06),
+                    muted,
+                )),
             };
             let mut text_colour = if s.running { theme.foreground } else { muted };
-            if s.kind == ThinkingKind::DeadEnd {
-                text_colour = muted.opacity(0.7);
+            if failed {
+                text_colour = red.opacity(0.85);
             }
-            h_flex()
-                .id(id)
+            // A parallel child hangs off the main rail on a curved elbow.
+            let elbow = (s.kind == ThinkingKind::Child).then(|| {
+                canvas(
+                    |_, _, _| {},
+                    move |b, _, window, _| {
+                        let mut path = PathBuilder::stroke(px(1.5));
+                        let x0 = b.origin.x.as_f32() - 8.5;
+                        let y_mid = b.origin.y.as_f32() + 10.;
+                        path.move_to(point(px(x0), px(b.origin.y.as_f32() - 6.)));
+                        path.curve_to(point(px(x0 + 8.5 + 6.), px(y_mid)), point(px(x0), px(y_mid)));
+                        if let Ok(p) = path.build() {
+                            window.paint_path(p, rail);
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0()
+                .into_any_element()
+            });
+            let row = h_flex()
+                .id(id.clone())
                 .test_support()
-                .gap_2()
-                .py(px(1.))
-                .when(s.kind == ThinkingKind::Child, |el| el.ml(px(16.)))
-                .child(div().w(px(15.)).flex_none().flex().items_center().justify_center().child(icon))
+                .relative()
+                .gap(px(9.))
+                .py(px(2.5))
+                .when(s.kind == ThinkingKind::Child, |el| el.ml(px(22.)))
+                .children(elbow)
+                .child(div().w(px(16.)).flex_none().flex().items_center().justify_center().child(icon))
                 .child(
                     v_flex()
                         .min_w_0()
@@ -579,17 +660,37 @@ fn thinking_element(thinking: &Thinking, open: bool, clock: f32, toggle: impl Fn
                                 .min_w_0()
                                 .text_size(text_size)
                                 .text_color(text_colour)
-                                .child(div().min_w_0().truncate().child(shown))
-                                .children(s.files.iter().map(|f| crate::file_icon::chip(format!("{}-file", if s.kind == ThinkingKind::DeadEnd { format!("thinking-deadend-{}", s.key) } else { format!("thinking-node-{}", s.key) }), f, file_name(f), px(10.5), cx))),
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .when(kind == ToolKind::Command, |el| el.text_size(px(12.)).font_family(theme.mono_font_family.clone()))
+                                        .child(shown),
+                                )
+                                .children(s.files.iter().map(|f| crate::file_icon::chip(format!("{}-file", if failed { format!("thinking-deadend-{}", s.key) } else { format!("thinking-node-{}", s.key) }), f, file_name(f), px(10.5), cx))),
                         )
                         .when_some(s.thought.clone().filter(|_| s.kind != ThinkingKind::Final), |el, t| {
-                            el.child(div().mt_1().pl_0().text_size(px(12.)).text_color(muted.opacity(0.85)).line_height(relative(1.45)).line_clamp(3).child(t.trim().to_string()))
+                            el.child(div().mt(px(2.)).pl_0().text_size(px(12.)).text_color(muted.opacity(0.85)).line_height(relative(1.45)).line_clamp(3).child(t.trim().to_string()))
                         }),
+                );
+            // Steps settle in from a touch below, staggered a breath so a batch flows in.
+            if !animate {
+                return row.into_any_element();
+            }
+            let delay = (ix.min(6) as u64) * 35;
+            let dur = 190 + delay;
+            row.with_animation(
+                    SharedString::from(format!("thinking-enter-{id}")),
+                    Animation::new(std::time::Duration::from_millis(dur)).with_easing(move |t| {
+                        let u = ((t * dur as f32 - delay as f32) / (dur - delay) as f32).clamp(0., 1.);
+                        ease_out_quint()(u)
+                    }),
+                    |el, t| el.opacity(t).mt(px(STEP_RISE * (1. - t))),
                 )
                 .into_any_element()
         };
         let summary = (thinking.earlier > 0).then(|| {
-            h_flex().id("thinking-earlier").test_support().gap_2().py(px(1.)).text_size(px(12.5)).text_color(muted).child(div().w(px(15.)).flex_none()).child(div().child(format!("…and {} earlier steps", thinking.earlier)))
+            h_flex().id("thinking-earlier").test_support().gap(px(9.)).py(px(2.)).text_size(px(12.5)).text_color(muted).child(div().w(px(16.)).flex_none()).child(div().child(format!("…and {} earlier steps", thinking.earlier)))
         });
         body = Some(
             v_flex()
@@ -598,9 +699,10 @@ fn thinking_element(thinking: &Thinking, open: bool, clock: f32, toggle: impl Fn
                 .relative()
                 .max_h(px(360.))
                 .overflow_y_scroll()
-                .child(div().absolute().top(px(6.)).bottom(px(6.)).left(px(7.)).w(px(2.)).bg(theme.foreground.opacity(0.07)))
+                .pl(px(2.))
+                .child(div().absolute().top(px(8.)).bottom(px(8.)).left(px(10.)).w(px(1.5)).rounded_full().bg(rail))
                 .children(summary)
-                .children(thinking.steps.iter().map(|s| node(s, cx))),
+                .children(thinking.steps.iter().enumerate().map(|(ix, s)| node(ix, s, cx))),
         );
     }
 
@@ -2955,7 +3057,7 @@ impl Render for ThreadView {
         let flash = self.flash;
         // The thinking timeline: shown open while the turn works, collapsed to its header once
         // it's over (a click or the chevron reopens it). Built before `jump` takes `cx` mutably.
-        let timeline = ws.live.get(&at.thread).and_then(thinking);
+        let timeline = ws.settings.appearance.show_thinking.then(|| ws.live.get(&at.thread).and_then(thinking)).flatten();
         let thinking_open = timeline.as_ref().is_some_and(|t| t.running) || self.thinking_open;
         let thinking_block = timeline.as_ref().map(|t| {
             let view = cx.entity().downgrade();
@@ -2967,7 +3069,7 @@ impl Render for ThreadView {
                     });
                 }
             };
-            thinking_element(t, thinking_open, at.clock, toggle, cx)
+            thinking_element(t, thinking_open, at.animate, at.clock, toggle, cx)
         });
         let jump = self.jump_to_latest(window, cx);
         v_flex()
