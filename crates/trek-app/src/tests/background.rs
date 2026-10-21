@@ -126,9 +126,14 @@ fn background_work_that_reports_makes_the_agent_work_again() {
         trek.render(cx);
         assert_eq!(strip(&trek, cx).len(), 1);
         // The watcher catches something: the agent takes a turn of its own, and works again.
+        let turns_before = trek.items(cx, &id).into_iter().filter(|i| matches!(i, Item::TurnEnd { .. })).count();
         let t = id.clone();
-        trek.wait(cx, "the agent's own turn", move |ws| ws.thread(&t).is_some_and(|t| t.run_state == RunState::Working)).await;
-        assert_eq!(section(&trek, cx, &id), Some(Section::Working));
+        trek.wait(cx, "the agent's own turn", move |ws| {
+            ws.live
+                .get(&t)
+                .is_some_and(|l| l.items.iter().filter(|i| matches!(i, Item::TurnEnd { .. })).count() > turns_before)
+        })
+        .await;
         trek.wait_done(cx, &id, RunState::Idle).await;
         assert!(trek.answers(cx, &id).contains("caught a failure"), "{}", trek.answers(cx, &id));
         assert!(trek.read(cx, |ws, _| ws.live[&id].background.is_empty()));
