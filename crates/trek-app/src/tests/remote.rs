@@ -123,6 +123,32 @@ fn windows_adapters_are_told_apart_by_their_friendly_names() {
 }
 
 #[test]
+fn the_default_route_wins_over_a_virtual_machine_adapter() {
+    use crate::remote::Addresses;
+    let ifs = |list: &[(&str, &str)]| -> Vec<(String, std::net::Ipv4Addr)> { list.iter().map(|(n, ip)| (n.to_string(), ip.parse().unwrap())).collect() };
+    // if_addrs does not consistently expose Windows' friendly adapter name. Even when the
+    // host-only adapter is simply called Ethernet and enumerated first, the address Windows uses
+    // for its default route is the one another computer on the LAN can reach.
+    let pc = ifs(&[("Ethernet", "192.168.56.1"), ("Wi-Fi", "192.168.1.20")]);
+    let found = Addresses::from_interfaces_preferring(&pc, None, Some("192.168.1.20".parse().unwrap()));
+    assert_eq!(found.lan, Some("192.168.1.20".parse().unwrap()));
+
+    // Friendly names are useful when the operating system does expose them, even without a
+    // usable default route. The full snapshot stays intact so Tailscale can still be found.
+    let named = ifs(&[("VirtualBox Host-Only Ethernet Adapter", "192.168.56.1"), ("Wi-Fi", "192.168.1.20"), ("Tailscale", "100.101.1.2")]);
+    let found = Addresses::from_interfaces_preferring(&named, None, None);
+    assert_eq!((found.lan, found.tailscale), (Some("192.168.1.20".parse().unwrap()), Some("100.101.1.2".parse().unwrap())));
+
+    // A full-tunnel VPN's default route is not mistaken for the LAN; the physical adapter stays
+    // the advertised route.
+    for tunnel in ["utun4", "OpenVPN Data Channel Offload", "wg0", "WireGuard Tunnel"] {
+        let vpn = ifs(&[(tunnel, "10.8.0.2"), ("Wi-Fi", "192.168.1.20")]);
+        let found = Addresses::from_interfaces_preferring(&vpn, None, Some("10.8.0.2".parse().unwrap()));
+        assert_eq!(found.lan, Some("192.168.1.20".parse().unwrap()), "{tunnel}");
+    }
+}
+
+#[test]
 fn tailscales_answer_is_the_first_address_it_prints() {
     use crate::remote::first_ipv4;
     assert_eq!(first_ipv4("100.101.1.2\r\n"), Some("100.101.1.2".parse().unwrap()));

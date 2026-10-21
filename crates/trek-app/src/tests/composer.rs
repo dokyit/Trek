@@ -213,6 +213,19 @@ fn a_models_own_efforts_replace_the_shared_ones() {
 }
 
 #[test]
+fn the_model_picker_calls_its_rail_an_agent_not_a_provider() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.render(cx);
+        trek.click(cx, "model-pill");
+        trek.render(cx);
+        trek.click(cx, "mm-model");
+        trek.render(cx);
+        assert!(trek.visible(cx, "model-source"));
+    });
+}
+
+#[test]
 fn a_first_message_whose_thread_couldnt_be_made_goes_back_to_the_composer() {
     run(async |cx| {
         let trek = open(cx);

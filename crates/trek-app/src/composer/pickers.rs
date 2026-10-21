@@ -281,6 +281,7 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
         )
         .child(
             ui::menu_row("mm-model", sub == Some(Sub::Model), cx)
+                .test_support()
                 .child(ui::agent_glyph(&prefs.agent, cx))
                 .child(div().flex_1().child("Model"))
                 .child(div().text_color(muted).max_w(px(120.)).truncate().child(current.as_deref().map(|c| model_name(&models, c)).unwrap_or_default()))
@@ -355,6 +356,13 @@ fn model_panel<H: PickerHost>(host: &mut H, prefs: &Prefs, current: Option<&str>
     let query_clean = query_raw.trim().to_string();
     let query = query_clean.to_lowercase();
     let theme = cx.theme().clone();
+    // The rail names the agent that runs a model, not necessarily its maker. GitHub Copilot,
+    // Devin and routed Codex setups can each offer models from several providers, so say
+    // "through" rather than making the rail look like a provider taxonomy.
+    let source = match &rail {
+        Rail::Favorites => "Favorite models".to_string(),
+        Rail::Agent(agent) => format!("Models through {}", agent.display_name()),
+    };
 
     // (agent, model) pairs for the selected rail entry.
     let list: Vec<(AgentId, ModelInfo)> = match &rail {
@@ -491,9 +499,15 @@ fn model_panel<H: PickerHost>(host: &mut H, prefs: &Prefs, current: Option<&str>
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .child(div().p(px(6.)).border_b_1().border_color(theme.border).child(
-                            Input::new(&search).small().appearance(false).prefix(Icon::new(IconName::Search).small().text_color(theme.muted_foreground)),
-                        ))
+                        .child(
+                            v_flex()
+                                .p(px(6.))
+                                .gap(px(4.))
+                                .border_b_1()
+                                .border_color(theme.border)
+                                .child(div().id("model-source").test_support().text_xs().text_color(theme.muted_foreground).child(source))
+                                .child(Input::new(&search).small().appearance(false).prefix(Icon::new(IconName::Search).small().text_color(theme.muted_foreground))),
+                        )
                         .child(
                             v_flex()
                                 .id("model-list")
