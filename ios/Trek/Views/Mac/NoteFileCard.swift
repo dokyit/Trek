@@ -14,6 +14,8 @@ import UIKit
 /// connected): the card just says it's on the Mac.
 struct NoteFileCard: View {
     var file: NoteFileRef
+    /// The note's qualified id: the file comes from its machine.
+    var noteID: String? = nil
     @Environment(AppModel.self) private var model
     @State private var url: URL?
     @State private var look: Look?
@@ -39,10 +41,13 @@ struct NoteFileCard: View {
     }
 
     private var loader: NoteFiles { NoteFiles.shared }
-    private var progress: Double? { phase == .loading ? loader.progress[file.path] ?? 0 : nil }
+    /// The machine the note is on.
+    private var link: HostLink? { noteID.flatMap { model.link(for: $0) } ?? model.selected }
+    private var key: String { loader.scoped(file.path, on: link) }
+    private var progress: Double? { phase == .loading ? loader.progress[key] ?? 0 : nil }
     private var size: Int64? {
         if let url, let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize { return Int64(bytes) }
-        return loader.sizes[file.path]
+        return loader.sizes[key]
     }
 
     var body: some View {
@@ -58,7 +63,7 @@ struct NoteFileCard: View {
         .accessibilityLabel(file.label)
         .accessibilityValue(accessibilityValue)
         .accessibilityHint(url == nil && phase == .onMac ? "" : "Opens it")
-        .task(id: Key(path: file.path, serves: model.serves(.noteFiles))) { await appear() }
+        .task(id: Key(path: key, serves: model.serves(.noteFiles, on: noteID))) { await appear() }
         .fullScreenCover(item: $reading) { shown in PDFSheet(url: shown.url, title: file.label) }
         .sheet(item: $playing) { shown in VideoSheet(url: shown.url) }
         .quickLookPreview($quickLook)
@@ -72,15 +77,15 @@ struct NoteFileCard: View {
     // MARK: Fetching
 
     private func appear() async {
-        if let here = loader.cached(file.path) {
+        if let here = loader.cached(file.path, on: link) {
             await arrived(here)
             return
         }
-        guard model.serves(.noteFiles) else { phase = .onMac; return }
+        guard model.serves(.noteFiles, on: noteID) else { phase = .onMac; return }
         // A page or a poster to show: fetched now when it's not too big.
         guard file.kind != .other else { phase = .idle; return }
         phase = .loading
-        await take(loader.fetch(file.path, model: model, upTo: NoteFiles.autoLimit))
+        await take(loader.fetch(file.path, model: model, on: link, upTo: NoteFiles.autoLimit))
     }
 
     private func tap() {
@@ -88,7 +93,7 @@ struct NoteFileCard: View {
         guard phase != .loading, phase != .onMac else { return }
         openWhenHere = true
         phase = .loading
-        Task { await take(loader.fetch(file.path, model: model)) }
+        Task { await take(loader.fetch(file.path, model: model, on: link)) }
     }
 
     private func take(_ outcome: NoteFiles.Outcome) async {

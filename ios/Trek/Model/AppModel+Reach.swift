@@ -4,7 +4,6 @@ import SwiftUI
 /// Sub-agents, the rest of the thread menu (snooze, wake, mark unread, regenerate the title,
 /// delete) and search on the Mac. Each is offered only where the Mac lists it (`features`).
 extension AppModel {
-    func serves(_ feature: MacFeature) -> Bool { features.contains(feature.rawValue) }
 
     /// A row the list leaves out came (or changed): kept by id, and its open thread follows it.
     func setUnlisted(_ t: ThreadSummary) {
@@ -65,15 +64,21 @@ extension AppModel {
 
     // MARK: Search
 
-    /// The Mac's search for `query`: `done` gets the threads that match (rows that aren't listed
-    /// are kept, so they open), or nil when it failed.
-    func search(_ query: String, done: @escaping ([SearchResult]?) -> Void) {
-        request(.search(query: query, limit: 60)) { [weak self] reply in
-            guard let self else { return }
+    /// A host's search for `query` (the selected one's without `link`): `done` gets the threads
+    /// that match, qualified (rows that aren't listed are kept, so they open), or nil on failure.
+    func search(_ query: String, on link: HostLink? = nil, done: @escaping ([SearchResult]?) -> Void) {
+        guard let link = link ?? selected else { return done(nil) }
+        link.request(.search(query: query, limit: 60)) { [weak self] reply in
+            guard let self else { return done(nil) }
             switch reply {
             case .searchResults(_, let found):
-                for r in found.results where !self.threads.contains(where: { $0.id == r.thread.id }) { self.setUnlisted(r.thread) }
-                done(found.results)
+                let results = found.results.map { r in
+                    var r = r
+                    r.thread = self.qualify(r.thread, on: link)
+                    return r
+                }
+                for r in results where !self.threads.contains(where: { $0.id == r.thread.id }) { self.setUnlisted(r.thread) }
+                done(results)
             default: done(nil)
             }
         }

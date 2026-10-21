@@ -245,9 +245,10 @@ nonisolated extension ClientMessage {
 // MARK: Requests
 
 extension AppModel {
-    /// Spend one of Codex's granted resets, then read usage again.
-    func useReset(_ credit: ResetCredit, done: @escaping (Bool) -> Void) {
-        request(.useReset(creditId: credit.id)) { [weak self] reply in
+    /// Spend one of Codex's granted resets on `link`'s host, then read its usage again.
+    func useReset(_ credit: ResetCredit, on link: HostLink? = nil, done: @escaping (Bool) -> Void) {
+        guard let link = link ?? selected else { return done(false) }
+        link.request(.useReset(creditId: credit.id)) { [weak self] reply in
             guard let self else { return }
             if case .error(_, _, let text) = reply {
                 self.show(text, error: true)
@@ -255,7 +256,7 @@ extension AppModel {
             } else {
                 self.show("Usage limits reset")
                 done(true)
-                self.loadUsage()
+                self.loadUsage(on: link)
             }
         }
     }
@@ -287,6 +288,7 @@ extension AppModel {
     }
 
     /// A note's picture (`attachments/…`), fitting `maxPx` a side; kept a while in memory.
+    /// `noteID` is qualified, so the ask goes to the note's own host.
     func noteAsset(_ noteID: String, path: String, maxPx: Int) async -> UIImage? {
         let key = "note:\(noteID)/\(path)@\(maxPx)" as NSString
         if let image = Attachments.cache.object(forKey: key) ?? Attachments.cache.object(forKey: "note:\(noteID)/\(path)@full" as NSString) {
@@ -302,8 +304,8 @@ extension AppModel {
         return image
     }
 
-    /// Keep `photo` with the Mac's notes, for note `noteID`; `done` gets the line that shows it
-    /// (nil when it couldn't be kept, which a toast says).
+    /// Keep `photo` with the Mac's notes, for note `noteID` (qualified, so it goes to the note's
+    /// own host); `done` gets the line that shows it (nil when it couldn't be kept, said in a toast).
     func addNoteImage(_ noteID: String, photo: PickedPhoto, name: String? = nil, done: @escaping (NoteImage?) -> Void) {
         guard let upload = photo.upload else {
             show("That photo couldn't be read", error: true)
@@ -350,7 +352,7 @@ extension AppModel {
             }
         }
         var byAgent: [String: String] = [:]
-        for a in agents { if let icon = a.icon { byAgent[a.key] = icon } }
+        for l in links { for a in l.agents { if let icon = a.icon { byAgent[a.key] = icon } } }
         for t in threads { if let icon = t.agent.icon { byAgent[t.agent.key] = icon } }
         if byAgent != store.agentIcons { store.agentIcons = byAgent }
     }

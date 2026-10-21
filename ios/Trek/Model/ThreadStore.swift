@@ -143,7 +143,10 @@ nonisolated struct Block: Identifiable, Equatable {
 /// views that show it, and a row update doesn't touch the transcript.
 @Observable
 final class ThreadStore {
+    /// The qualified id shared state knows this thread by (`"host:thread"`).
     let id: String
+    /// Its host's id, for the transcript cache (each host's same-named thread keeps its own).
+    let hostId: String
 
     /// The thread's row, as the Mac last sent it.
     private(set) var summary: ThreadSummary?
@@ -171,10 +174,14 @@ final class ThreadStore {
     /// Called after the items change (to save them to the cache).
     @ObservationIgnored var onChange: (() -> Void)?
 
-    init(id: String, summary: ThreadSummary?) {
+    init(id: String, host: String, summary: ThreadSummary?) {
         self.id = id
+        self.hostId = host
         self.summary = summary
     }
+
+    /// The id as its host knows it (the prefix off).
+    var bareId: String { id.hasPrefix("\(hostId):") ? String(id.dropFirst(hostId.count + 1)) : id }
 
     func setSummary(_ s: ThreadSummary?) {
         if s != summary { summary = s }

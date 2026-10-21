@@ -14,7 +14,9 @@ struct SearchView: View {
     @Environment(\.compactRows) private var compact
 
     private var trimmed: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var onMac: Bool { model.serves(.search) }
+    /// The machine searched (the picked one, else the first connected).
+    private var link: HostLink? { model.selected }
+    private var onMac: Bool { link?.serves(.search) == true }
 
     /// What the phone has that matches: titles, projects, agents, branches.
     private var local: [ThreadSummary] {
@@ -44,7 +46,7 @@ struct SearchView: View {
                 if searching {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("Searching messages on \(model.host?.name ?? "your Mac")…").font(.ui(.footnote)).foregroundStyle(Trek.muted)
+                        Text("Searching messages on \(link?.name ?? "your Mac")…").font(.ui(.footnote)).foregroundStyle(Trek.muted)
                     }
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
@@ -52,7 +54,8 @@ struct SearchView: View {
                 ForEach(results) { r in
                     NavigationLink(value: r.thread.id) {
                         VStack(alignment: .leading, spacing: 5) {
-                            ThreadRow(thread: model.thread(r.thread.id) ?? r.thread)
+                            ThreadRow(thread: model.thread(r.thread.id) ?? r.thread,
+                                      host: model.links.count > 1 ? model.hostName(of: r.thread.id) : nil)
                             SearchHitLine(result: r, parent: r.thread.parentId.flatMap { model.thread($0)?.title })
                                 .padding(.leading, compact ? 28 : 37)
                         }
@@ -72,10 +75,11 @@ struct SearchView: View {
                 }
             }
             .navigationTitle("Search")
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { MachinePicker() } }
             .searchable(text: $query, prompt: onMac ? "Threads and messages" : "Threads, projects, agents, branches")
             .navigationDestination(for: String.self) { ThreadView(threadID: $0) }
             // Typed: the Mac is asked once the typing pauses (and again once it says it can).
-            .task(id: "\(onMac) \(trimmed)") { await askTheMac(trimmed) }
+            .task(id: "\(onMac) \(link?.id ?? "") \(trimmed)") { await askTheMac(trimmed) }
             .onAppear { if let q = Launch.search, query.isEmpty { query = q } }
         }
         .environment(\.openThread, OpenThreadAction { path.append($0) })
@@ -90,7 +94,7 @@ struct SearchView: View {
         try? await Task.sleep(for: .milliseconds(300))
         guard !Task.isCancelled else { return }
         searching = true
-        model.search(q) { answer in
+        model.search(q, on: link) { answer in
             guard q == trimmed else { return }
             searching = false
             if let answer {

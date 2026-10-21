@@ -126,7 +126,7 @@ struct NoteImageView: View {
         .accessibilityLabel(image.alt.isEmpty ? "Picture" : image.alt)
         .accessibilityHint(loaded == nil ? "" : "Opens it full screen")
         .task(id: source) {
-            guard let source, model.serves(.noteImages) || source.isWeb else { return }
+            guard let source, model.serves(.noteImages, on: noteID) || source.isWeb else { return }
             let got = await source.load(model, maxPx: Self.thumbPx)
             withAnimation(.easeOut(duration: 0.2)) {
                 loaded = got
@@ -140,7 +140,7 @@ struct NoteImageView: View {
     private func placeholder(_ why: Placeholder) -> some View {
         VStack(spacing: 6) {
             switch why {
-            case .loading where model.serves(.noteImages) || image.web != nil:
+            case .loading where model.serves(.noteImages, on: noteID) || image.web != nil:
                 ProgressView().controlSize(.small)
             case .failed:
                 Image(systemName: "photo.badge.exclamationmark").font(.system(size: 20))

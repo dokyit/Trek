@@ -13,7 +13,7 @@ struct ThreadStatusStrip: View {
     private var background: [String] { thread.background ?? [] }
     /// Sub-agents done with their task, whose threads still open.
     private var earlier: Int {
-        guard model.serves(.subAgents) else { return 0 }
+        guard model.serves(.subAgents, on: thread.id) else { return 0 }
         let live = Set(agents.compactMap(\.threadId))
         return model.subAgentThreads(of: thread.id).count { !live.contains($0.id) }
     }
@@ -277,7 +277,7 @@ struct AtWorkSheet: View {
 
     private var thread: ThreadSummary? { model.thread(threadID) }
     /// Sub-agents' threads open from here (where the Mac says they can).
-    private var opens: Bool { model.serves(.subAgents) }
+    private var opens: Bool { model.serves(.subAgents, on: threadID) }
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -303,7 +303,7 @@ struct AtWorkSheet: View {
                         }
                     }
                 }
-                if let tasks = thread?.backgroundTasks, !tasks.isEmpty, model.serves(.background) {
+                if let tasks = thread?.backgroundTasks, !tasks.isEmpty, model.serves(.background, on: threadID) {
                     Section {
                         TimelineView(.periodic(from: .now, by: 1)) { ctx in
                             ForEach(tasks) { task in

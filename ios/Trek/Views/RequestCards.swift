@@ -5,11 +5,13 @@ import SwiftUI
 struct PendingRequestCard: View {
     var item: TItem
     var agentName: String
+    /// Its thread's qualified id: which machine's settings "Allow for this session" answers to.
+    var threadID: String
     var answer: (AnswerResponse) -> Void
 
     var body: some View {
         switch item.body {
-        case .approval(let a): ApprovalCard(request: a, agentName: agentName, answer: answer)
+        case .approval(let a): ApprovalCard(request: a, agentName: agentName, threadID: threadID, answer: answer)
         case .question(let q): QuestionCard(request: q, agentName: agentName, answer: answer)
         case .plan(let p): PlanCard(request: p, agentName: agentName, answer: answer)
         default: EmptyView()
@@ -61,6 +63,7 @@ private struct PrimaryLabel: View {
 struct ApprovalCard: View {
     var request: ApprovalRequest
     var agentName: String
+    var threadID: String
     var answer: (AnswerResponse) -> Void
     @Environment(AppModel.self) private var model
     @State private var expanded = false
@@ -132,7 +135,7 @@ struct ApprovalCard: View {
                 }
 
                 // Only where the Mac takes it (its Settings › Phone): it refuses otherwise.
-                if model.macSettings?.sessionApprovals != false {
+                if model.link(for: threadID)?.macSettings?.sessionApprovals != false {
                     Menu {
                         Button("Allow for this session…", systemImage: "checkmark.seal") { allowForSession() }
                     } label: {

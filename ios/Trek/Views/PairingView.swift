@@ -199,10 +199,6 @@ struct PairingConfirmSheet: View {
     @State private var height: CGFloat = 440
 
     private var macName: String { link.name ?? "this Mac" }
-    private var replacing: String? {
-        guard let paired = PairedMac.load(), paired.hostId != link.hostId else { return nil }
-        return paired.hostName
-    }
 
     var body: some View {
         VStack(spacing: 18) {
@@ -249,12 +245,6 @@ struct PairingConfirmSheet: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Trek.approval.opacity(0.1), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Trek.approval.opacity(0.4), lineWidth: 1))
-            }
-
-            if let replacing {
-                Text("This replaces the pairing with \(replacing).")
-                    .font(.ui(.footnote))
-                    .foregroundStyle(Trek.muted)
             }
 
             VStack(spacing: 10) {

@@ -3,6 +3,33 @@ import SwiftUI
 // Small pieces the Mac screens share: the card, the usage bar, reset times and a layout
 // that wraps words and chips like a paragraph.
 
+/// Which machine a host-wide screen (Notes, Basecamp, Usage, Search) shows: nothing with one
+/// paired, a menu of them all with more. Picking sets `selectedHostId`, and the screens bound
+/// to `model.selected` follow it.
+struct MachinePicker: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        if model.links.count > 1 {
+            Menu {
+                Picker("Machine", selection: Binding(
+                    get: { model.selected?.id },
+                    set: { model.selectedHostId = $0 })) {
+                    ForEach(model.links) { link in
+                        Label(link.name, systemImage: link.connection == .connected ? "laptopcomputer" : "laptopcomputer.slash")
+                            .tag(Optional(link.id))
+                    }
+                }
+            } label: {
+                Label(model.selected?.name ?? "Machine", systemImage: "laptopcomputer")
+                    .font(.ui(.subheadline).weight(.medium))
+                    .foregroundStyle(Trek.muted)
+            }
+            .accessibilityLabel("Machine")
+        }
+    }
+}
+
 extension View {
     /// The dashboard's surface, as the Mac draws its panels: the muted fill, a hairline edge.
     func card(radius: CGFloat = 16, padding: CGFloat = 16) -> some View {

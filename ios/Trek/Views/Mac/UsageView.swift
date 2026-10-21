@@ -6,15 +6,17 @@ import SwiftUI
 struct UsageView: View {
     @Environment(AppModel.self) private var model
 
-    private var providers: [ProviderUsage] { model.usage?.providers ?? [] }
-    private var asking: Bool { model.usageLoading || model.usage?.loading == true }
+    /// The machine shown (the picked one, else the first connected).
+    private var link: HostLink? { model.selected }
+    private var providers: [ProviderUsage] { link?.usage?.providers ?? [] }
+    private var asking: Bool { link?.usageLoading == true || link?.usage?.loading == true }
 
     var body: some View {
         ScrollView {
             GlassEffectContainer(spacing: 12) {
                 VStack(spacing: 12) {
-                    ForEach(providers) { ProviderCard(provider: $0) }
-                    if let picked = model.usage?.picked, !providers.isEmpty {
+                    ForEach(providers) { ProviderCard(provider: $0, link: link) }
+                    if let picked = link?.usage?.picked, !providers.isEmpty {
                         Text(picked ? "The providers you picked for the Usage card on your Mac. Change them there."
                                     : "The providers on your Mac's Usage card, picked by Trek. Choose others there.")
                             .font(.ui(.footnote))
@@ -29,11 +31,11 @@ struct UsageView: View {
         }
         .overlay {
             if providers.isEmpty {
-                if model.usage == nil {
+                if link?.usage == nil {
                     ProgressView("Asking your agents…").foregroundStyle(Trek.muted)
                 } else if !asking {
                     ContentUnavailableView("No plan usage", systemImage: "gauge.with.dots.needle.0percent",
-                                           description: Text(model.usage?.picked == true ? "No providers picked. Choose some on your Mac's Usage card."
+                                           description: Text(link?.usage?.picked == true ? "No providers picked. Choose some on your Mac's Usage card."
                                                                                        : "None of the agents on your Mac reported a plan."))
                 }
             }
@@ -43,17 +45,18 @@ struct UsageView: View {
         .navigationTitle("Usage")
         .navigationSubtitle(asking && !providers.isEmpty ? "Asking your agents…" : "")
         .toolbar {
+            ToolbarItem(placement: .topBarTrailing) { MachinePicker() }
             if asking {
                 ToolbarItem(placement: .topBarTrailing) { ProgressView().controlSize(.small) }
             }
         }
         .refreshable { await reload() }
-        .task { model.loadUsage() }
+        .task(id: link?.id) { model.loadUsage(on: link) }
     }
 
     private func reload() async {
-        model.loadUsage()
-        for _ in 0..<40 where model.usageLoading {
+        model.loadUsage(on: link)
+        for _ in 0..<40 where link?.usageLoading == true {
             try? await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -83,7 +86,8 @@ struct UsageButton: View {
     @Environment(AppModel.self) private var model
     var action: () -> Void
 
-    private var peak: Double { model.usage?.peak ?? 0 }
+    private var usage: Usage? { model.selected?.usage }
+    private var peak: Double { usage?.peak ?? 0 }
 
     private var symbol: String {
         switch peak {
@@ -100,13 +104,14 @@ struct UsageButton: View {
             Label("Usage", systemImage: symbol)
                 .foregroundStyle(peak >= 95 ? Trek.failed : peak >= 80 ? Trek.approval : Trek.foreground)
         }
-        .accessibilityValue(model.usage.map { _ in "\(Int(max(0, 100 - peak).rounded())) percent left on the tightest limit" } ?? "")
+        .accessibilityValue(usage.map { _ in "\(Int(max(0, 100 - peak).rounded())) percent left on the tightest limit" } ?? "")
     }
 }
 
 /// One agent's plan: its logo and name, the plan, then each limit as a bar, and its resets.
 private struct ProviderCard: View {
     var provider: ProviderUsage
+    var link: HostLink?
     @Environment(AppModel.self) private var model
 
     var body: some View {
@@ -147,8 +152,8 @@ private struct ProviderCard: View {
                 let ago = When.short(at)
                 Text(ago == "now" ? "As of just now" : "As of \(ago) ago").font(.ui(.caption)).foregroundStyle(Trek.muted)
             }
-            if let resets = provider.resets, !resets.isEmpty, model.serves(.useReset) {
-                ResetCredits(resets: resets)
+            if let resets = provider.resets, !resets.isEmpty, link?.serves(.useReset) == true {
+                ResetCredits(resets: resets, link: link)
             }
         }
         .card(padding: 18)
@@ -189,6 +194,7 @@ private struct LimitRow: View {
 /// reset" behind the Mac's own warning.
 private struct ResetCredits: View {
     var resets: [ResetCredit]
+    var link: HostLink?
     @Environment(AppModel.self) private var model
     @State private var confirming: ResetCredit?
     @State private var using: Set<String> = []
@@ -226,7 +232,7 @@ private struct ResetCredits: View {
                             titleVisibility: .visible, presenting: confirming) { r in
             Button("Use reset", role: .destructive) {
                 using.insert(r.id)
-                model.useReset(r) { _ in using.remove(r.id) }
+                model.useReset(r, on: link) { _ in using.remove(r.id) }
             }
             Button("Cancel", role: .cancel) {}
         } message: { _ in

@@ -94,6 +94,14 @@ pipe, not the messages. LAN/Tailscale is what power users already run.
 4. Every later connection starts with `hello {device_id, token}`, pinned to the same
    certificate. Tokens are compared in constant time. Settings › Mobile lists devices with last
    seen and a **Revoke** button; revoking drops the device's live connections at once.
+5. **Several machines can be paired at once.** The phone keeps one connection per paired host and
+   merges their threads into one list. Every thread and project id that enters shared phone state
+   is qualified `"<hostId>:<id>"` (stripped again on the way out), so two machines' ids never
+   collide; notifications carry `trek://open?thread=<id>&host=<hostId>` so a tap opens the thread
+   on the right machine. Each pairing is forgotten on its own (Settings › Machines › Unpair);
+   a pairing that fails or a link that drops leaves the others running. The phone's stored
+   pairings are a JSON array in the same Keychain item — a record written by an older phone as a
+   single object still reads as one pairing.
 
 ### TLS and pinning (phone side)
 

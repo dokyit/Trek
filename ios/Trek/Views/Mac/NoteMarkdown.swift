@@ -32,7 +32,7 @@ struct NoteMarkdown: View {
                         .padding(.vertical, 4)
                     }
                 } else if case .file(let file) = line.kind {
-                    NoteFileCard(file: file).padding(.vertical, 4)
+                    NoteFileCard(file: file, noteID: noteID).padding(.vertical, 4)
                 } else {
                     view(line, s)
                 }

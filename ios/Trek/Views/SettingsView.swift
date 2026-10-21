@@ -6,7 +6,7 @@ enum SettingsRoute: Hashable {
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
-    @State private var confirmUnpair = false
+    @State private var scanning = false
     @State private var path: [SettingsRoute] = Launch.tab == "appearance" ? [.appearance] : []
     @AppStorage(AppearanceKey.theme) private var theme = ThemeChoice.system.rawValue
 
@@ -15,59 +15,21 @@ struct SettingsView: View {
         NavigationStack(path: $path) {
             Form {
                 Section {
-                    HStack(spacing: 14) {
-                        Image(systemName: "laptopcomputer")
-                            .font(.system(size: 22, weight: .medium))
-                            .foregroundStyle(Trek.foreground)
-                            .frame(width: 46, height: 46)
-                            .background(Trek.foreground.opacity(0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(model.host?.name ?? PairedMac.load()?.hostName ?? "Your Mac").font(.ui(.headline))
-                            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                Circle().fill(statusColor).frame(width: 7, height: 7)
-                                Text(model.mode == .demo ? "Demo · sample data" : model.connectionText)
-                                    .font(.ui(.subheadline)).foregroundStyle(Trek.muted)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
+                    ForEach(model.links) { link in
+                        NavigationLink {
+                            MachineView(link: link)
+                        } label: {
+                            MachineLabel(link: link)
                         }
                     }
-                    .padding(.vertical, 4)
-                    if model.mode == .live, case .offline = model.connection {
-                        Button("Try now") { model.retryNow() }
-                    }
-                    NavigationLink {
-                        MacSettingsView()
-                    } label: {
-                        Label("Mac settings", systemImage: "slider.horizontal.3")
-                    }
-                    if model.mode == .live, let paired = PairedMac.load() {
-                        // Each way to the Mac, the one in use ticked: Wi-Fi at home, the tailnet
-                        // anywhere Tailscale is on.
-                        ForEach(([paired.address] + paired.routes).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }, id: \.self) { route in
-                            LabeledContent(Self.routeLabel(route)) {
-                                HStack(spacing: 6) {
-                                    Text(route).font(.code(.subheadline))
-                                    if route == paired.address, model.connection == .connected {
-                                        Image(systemName: "checkmark").font(.ui(.caption).weight(.semibold)).foregroundStyle(Trek.done)
-                                    }
-                                }
-                            }
-                        }
-                        SecurityRow(transport: model.transport ?? paired.transport)
-                        if case .tls(let pin) = model.transport ?? paired.transport {
-                            LabeledContent("Fingerprint") { Text(pin.short).font(.code(.body)) }
-                        }
-                    }
-                    if let host = model.host {
-                        LabeledContent("Trek", value: host.version)
-                    }
-                    if model.mode == .demo {
-                        Button("Pair with a Mac") { model.leave() }
-                    } else {
-                        Button("Unpair this iPhone", role: .destructive) { confirmUnpair = true }
-                    }
+                    Button("Add a machine…", systemImage: "plus") { scanning = true }
                 } header: {
-                    Text("Mac")
+                    Text(model.links.count > 1 ? "Machines" : "Mac")
+                } footer: {
+                    if !model.links.isEmpty {
+                        Text("Every machine stays connected at once; their threads share one list.")
+                            .font(.ui(.footnote))
+                    }
                 }
 
                 Section {
@@ -80,8 +42,6 @@ struct SettingsView: View {
                     Text("Steer adds your message to the running turn at its next step. Queue waits until the turn ends. You can switch per message from the composer.")
                         .font(.ui(.footnote))
                 }
-
-                PhoneNotificationsSection()
 
                 Section {
                     NavigationLink(value: SettingsRoute.appearance) {
@@ -127,13 +87,121 @@ struct SettingsView: View {
                 case .appearance: AppearanceView()
                 }
             }
-            .task { model.loadSettings() }
-            .onChange(of: model.connection) { if model.connection == .connected { model.loadSettings() } }
-            .confirmationDialog("Unpair this iPhone?", isPresented: $confirmUnpair, titleVisibility: .visible) {
-                Button("Unpair", role: .destructive) { model.leave() }
-            } message: {
-                Text("You'll need a new code from the Mac to connect again. Revoke the device on the Mac too to be sure.")
+            .sheet(isPresented: $scanning) {
+                ScannerSheet { link in
+                    scanning = false
+                    // Same confirmation as a deep link: name, address and fingerprint first.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { model.offer(link) }
+                }
             }
+        }
+    }
+}
+
+/// A machine's row in the Machines list: its badge, name, and whether it's connected.
+private struct MachineLabel: View {
+    var link: HostLink
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "laptopcomputer")
+                .font(.system(size: 20, weight: .medium))
+                .foregroundStyle(Trek.foreground)
+                .frame(width: 40, height: 40)
+                .background(Trek.foreground.opacity(0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(link.name).font(.ui(.headline))
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Circle().fill(statusColor).frame(width: 7, height: 7)
+                    Text(model.mode == .demo ? "Demo · sample data" : link.connectionText)
+                        .font(.ui(.subheadline)).foregroundStyle(Trek.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var statusColor: Color {
+        if model.mode == .demo { return Trek.plan }
+        switch link.connection {
+        case .connected: return Trek.done
+        case .connecting: return Trek.approval
+        default: return Trek.failed
+        }
+    }
+}
+
+/// One machine: how the phone reaches it (its addresses and the connection's security), its
+/// Trek version, its settings, what it tells this iPhone, and Unpair.
+struct MachineView: View {
+    var link: HostLink
+    @Environment(AppModel.self) private var model
+    @State private var confirmUnpair = false
+
+    private var paired: PairedMac { link.paired }
+    private var routes: [String] {
+        ([paired.address] + paired.routes).filter { !$0.isEmpty }.reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                if model.mode == .live {
+                    switch link.connection {
+                    case .offline:
+                        Button("Try now") { model.retryNow(link) }
+                    case .unauthorized, .identityChanged:
+                        Button("Pair again") { model.leave(link) }
+                    default: EmptyView()
+                    }
+                    // Each way to the Mac, the one in use ticked: Wi-Fi at home, the tailnet
+                    // anywhere Tailscale is on.
+                    ForEach(routes, id: \.self) { route in
+                        LabeledContent(Self.routeLabel(route)) {
+                            HStack(spacing: 6) {
+                                Text(route).font(.code(.subheadline))
+                                if route == paired.address, link.connection == .connected {
+                                    Image(systemName: "checkmark").font(.ui(.caption).weight(.semibold)).foregroundStyle(Trek.done)
+                                }
+                            }
+                        }
+                    }
+                    SecurityRow(transport: link.transport)
+                    if case .tls(let pin) = link.transport {
+                        LabeledContent("Fingerprint") { Text(pin.short).font(.code(.body)) }
+                    }
+                }
+                if let host = link.host {
+                    LabeledContent("Trek", value: host.version)
+                }
+                NavigationLink {
+                    MacSettingsView(machine: link)
+                } label: {
+                    Label("Mac settings", systemImage: "slider.horizontal.3")
+                }
+            }
+
+            PhoneNotificationsSection(machine: link)
+
+            Section {
+                if model.mode == .demo {
+                    Button("Pair with a Mac") { model.leave(link) }
+                } else {
+                    Button("Unpair this iPhone", role: .destructive) { confirmUnpair = true }
+                }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(Trek.grouped)
+        .navigationTitle(link.name)
+        .task { model.loadSettings(on: link) }
+        .onChange(of: link.connection) { if link.connection == .connected { model.loadSettings(on: link) } }
+        .confirmationDialog("Unpair this iPhone?", isPresented: $confirmUnpair, titleVisibility: .visible) {
+            Button("Unpair", role: .destructive) { model.leave(link) }
+        } message: {
+            Text("You'll need a new code from \(link.name) to connect again. Revoke the device on it too to be sure. Other machines stay paired.")
         }
     }
 
@@ -143,15 +211,6 @@ struct SettingsView: View {
         case .local: "Wi-Fi"
         case .tailnet: "Tailscale"
         case .other: "Address"
-        }
-    }
-
-    private var statusColor: Color {
-        if model.mode == .demo { return Trek.plan }
-        switch model.connection {
-        case .connected: return Trek.done
-        case .connecting: return Trek.approval
-        default: return Trek.failed
         }
     }
 }

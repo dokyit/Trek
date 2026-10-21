@@ -57,30 +57,33 @@ struct Toast: Identifiable, Equatable {
 
 @Observable
 final class AppModel {
-    /// A thread to bring up, from a notification's `trek://open?thread=…` link.
+    /// A thread to bring up, from a notification's `trek://open?thread=…&host=…` link.
     var openRequest: String?
     /// A thread to scroll the list to (and unfold whatever hides it), without opening it.
     var revealRequest: String?
 
     var mode: AppMode = .unpaired
-    var connection: ConnectionState = .idle
-    /// What the connection is doing, in words ("Looking for … on this Wi-Fi…", "Connected over
-    /// Tailscale"), while it's connecting, connected or offline.
-    var connectionDetail: String?
-    var host: HostInfo?
+    /// Every machine the phone is paired with, connected at once. Thread and project ids that
+    /// reach shared state are theirs prefixed (`"host:thread"`), so two machines' rows never mix.
+    var links: [HostLink] = []
+    /// The machine host-wide surfaces (Notes, Basecamp, Usage, Settings, Search) act on: the one
+    /// picked on that screen, else the first connected, else the first.
+    var selectedHostId: String? {
+        didSet { UserDefaults.standard.set(selectedHostId, forKey: "selectedHost") }
+    }
+    /// The client pairing right now, before it becomes a link (no host id until it pairs).
+    private var pairingClient: TrekClient?
+
+    /// Every host's threads (ids qualified), in each host's own order, links in pairing order.
     var threads: [ThreadSummary] = [] {
         didSet { threadsChanged() }
     }
+    /// Every host's projects, qualified ids. `projects(of:)` is a host's own, for its pickers.
     var projects: [ProjectSummary] = []
-    var agents: [AgentOption] = []
-    /// The Mac lets threads run with Full access (unlocked in its Permissions settings).
-    var fullAccessAllowed = false
-    /// The optional requests the Mac serves (`MacFeature`): what it doesn't list isn't offered.
-    var features: Set<String> = []
-    /// Rows the list leaves out, by id: sub-agents' threads, and threads opened from a search.
+    /// Rows the list leaves out, by qualified id: sub-agents' threads, threads from a search.
     var unlisted: [String: ThreadSummary] = [:]
-    /// Each opened thread's own store (its row, transcript and paging), so an update to one
-    /// thread redraws only what shows it. Not observed itself: views observe the stores.
+    /// Each opened thread's own store (its row, transcript and paging), keyed by qualified id, so
+    /// an update to one thread redraws only what shows it. Not observed: views observe the stores.
     @ObservationIgnored private var stores: [String: ThreadStore] = [:]
     /// The tab bar's counts, kept as values so views that show them don't redraw on every row update.
     private(set) var workingCount = 0
@@ -90,49 +93,96 @@ final class AppModel {
     var pairingError: String?
     /// A pairing link (deep link or QR code) waiting for the user to confirm it.
     var pendingLink: PairingLink?
-    /// How the live connection is carried, for the Settings indicator.
-    var transport: Transport?
+    /// The host that asked the phone to open its new-thread sheet (`/new` sent to a thread), and
+    /// its project there ("" for none). The view that shows the sheet sets it back to nil.
+    var newThreadPrompt: NewThreadPrompt?
 
-    // What the Mac has besides threads, as last read (each `load…` asks again).
+    /// What `newThreadPrompt` carries: the link that asked, and its project (qualified, "" for none).
+    struct NewThreadPrompt: Equatable {
+        var link: HostLink
+        var projectId: String
+    }
 
-    /// Plan usage, as the Mac's Usage popover shows it.
-    var usage: Usage?
-    var usageLoading = false
-    /// Basecamp's recap, by range.
-    var basecamp: [BasecampRange: Basecamp] = [:]
-    var basecampLoading: Set<BasecampRange> = []
-    /// Notes, newest first, and the ones opened whole, by id.
-    var notes: [NoteSummary] = []
-    var openNotes: [String: Note] = [:]
-    /// Git status and branches, by thread or project.
+    /// Git status and branches, by thread or project (qualified ids).
     var gitStatus: [GitTarget: GitStatus] = [:]
     var gitBranches: [GitTarget: GitBranches] = [:]
     /// Git work under way (commit, push, switch, merge, remove), by target: views show a spinner.
     var gitBusy: Set<GitTarget> = []
-    /// Each thread's slash commands, as the Mac's `/` picker lists them.
+    /// Each thread's slash commands, as its host's `/` picker lists them (qualified ids).
     var commands: [String: [CommandInfo]] = [:]
-    /// The Mac's settings the phone may change.
-    var macSettings: MacSettings?
-    /// The Mac asked the phone to open its new-thread sheet (`/new` sent to a thread), in this
-    /// project ("" for none). The view that shows the sheet sets it back to nil.
-    var newThreadPrompt: String?
 
     var followUpMode: SendMode {
         didSet { UserDefaults.standard.set(followUpMode.rawValue, forKey: "followUpMode") }
     }
 
-    private var backend: Backend?
-    private var nextRequest = 1
-    private var replies: [String: (ServerMessage) -> Void] = [:]
     /// How many items a thread opens with; earlier ones come a page at a time as the user scrolls up.
     static let firstPage = 60
     static let earlierPage = 200
-    /// Which Mac the transcript cache is for.
-    @ObservationIgnored private var cacheHost: String?
     @ObservationIgnored private var cacheSaves: Set<String> = []
 
     init() {
         followUpMode = SendMode(rawValue: UserDefaults.standard.string(forKey: "followUpMode") ?? "") ?? .steer
+        selectedHostId = UserDefaults.standard.string(forKey: "selectedHost")
+    }
+
+    // MARK: Links and qualified ids
+
+    /// The link `qid` is qualified with (`"host:…"`), or nil for a bare or unknown id.
+    func link(for qid: String) -> HostLink? { links.first { $0.owns(qid) } }
+    /// The link by host id.
+    func link(id: String) -> HostLink? { links.first { $0.id == id } }
+    /// Where host-scoped requests with no id of their own go.
+    var selected: HostLink? {
+        if let l = links.first(where: { $0.id == selectedHostId }) { return l }
+        return links.first { $0.connection == .connected } ?? links.first
+    }
+    /// The worst connection across the links, for chrome that asks about "the" connection.
+    var connection: ConnectionState {
+        var worst: ConnectionState = .idle
+        for l in links {
+            switch (worst, l.connection) {
+            case (_, .identityChanged): return l.connection
+            case (.identityChanged, _): return worst
+            case (_, .unauthorized): worst = l.connection
+            case (.unauthorized, _): break
+            case (_, .offline): worst = l.connection
+            case (.offline, _): break
+            case (_, .connecting): worst = .connecting
+            case (.connecting, _): break
+            case (_, .connected): worst = .connected
+            case (.connected, _): break
+            default: break
+            }
+        }
+        return worst
+    }
+    /// `name` on every link's host, one per line (for toasts and errors that span hosts).
+    var hostNames: String { links.map(\.name).joined(separator: ", ") }
+
+    /// The selected host, where a caller still speaks of "the" machine.
+    var host: HostInfo? { selected?.host }
+    /// The selected host's features (what it doesn't list isn't offered). `serves(_:on:)` is the
+    /// per-thread answer.
+    var features: Set<String> { selected?.features ?? [] }
+    /// The selected host's agents (merged across links wouldn't say whose models a key's are).
+    var agents: [AgentOption] { selected?.agents ?? links.first?.agents ?? [] }
+    /// Whether the selected host lets threads run with Full access.
+    var fullAccessAllowed: Bool { selected?.fullAccessAllowed ?? false }
+    /// The selected host's carry, for the Settings indicator.
+    var transport: Transport? { selected?.transport }
+    /// The thread's host's name, for a row's machine label (qualified ids only answer this).
+    func hostName(of qid: String) -> String? { link(for: qid)?.name }
+
+    /// `id` qualified with a host: itself when it already is, else the selected host's (for ids
+    /// that arrive bare: launch arguments, notifications from before `host` was in the link).
+    func qualified(_ id: String) -> String {
+        if link(for: id) != nil { return id }
+        return selected?.qualified(id) ?? id
+    }
+
+    /// `serves(feature)` on the host `qid` belongs to (bare callers get the selected host).
+    func serves(_ feature: MacFeature, on qid: String? = nil) -> Bool {
+        (qid.flatMap { link(for: $0) } ?? selected)?.features.contains(feature.rawValue) ?? false
     }
 
     // MARK: Lifecycle
@@ -143,30 +193,40 @@ final class AppModel {
             PairedMac.clear()
         }
         if forceDemo {
-            attach(MockHost(), mode: .demo)
+            attach(HostLink(paired: .demo, backend: MockHost()))
+            mode = .demo
         } else if UserDefaults.standard.bool(forKey: "demoMode") {
             startDemo()
-        } else if let paired = PairedMac.load() {
-            startLive(paired)
         } else {
-            mode = .unpaired
+            for paired in PairedMac.all() { startLive(paired) }
+            if links.isEmpty { mode = .unpaired }
         }
     }
 
     func startDemo() {
         UserDefaults.standard.set(true, forKey: "demoMode")
-        attach(MockHost(), mode: .demo)
+        leaveAll()
+        attach(HostLink(paired: .demo, backend: MockHost()))
+        mode = .demo
+    }
+
+    /// Leave demo for the real machines, and the machines for demo: the demo link is its own id
+    /// and never saved, but it shares the list with no one.
+    func endDemo() {
+        UserDefaults.standard.set(false, forKey: "demoMode")
+        leaveAll()
+        for paired in PairedMac.all() { startLive(paired) }
+        if links.isEmpty { mode = .unpaired }
     }
 
     func startLive(_ paired: PairedMac) {
         UserDefaults.standard.set(false, forKey: "demoMode")
-        let transport = paired.transport
         let client = TrekClient(address: paired.address, routes: paired.routes, known: paired.known,
                                 auth: .hello(deviceId: Device.id, token: paired.token),
-                                transport: transport, hostId: paired.hostId, hostName: paired.hostName)
+                                transport: paired.transport, hostId: paired.hostId, hostName: paired.hostName)
         Self.keepAddresses(of: client, hostId: paired.hostId)
-        attach(client, mode: .live)
-        self.transport = transport
+        attach(HostLink(paired: paired, backend: client))
+        mode = .live
     }
 
     /// The paired Mac's client looks for it on this network (Bonjour, by its id), and the
@@ -176,11 +236,11 @@ final class AppModel {
         // Where it answered (dialled first next time), the addresses it answers on now (Wi-Fi,
         // tailnet), and those it answered at before: all dialled together next time.
         client.onRemember = { address, routes, known in
-            guard var kept = PairedMac.load(), kept.hostId == hostId else { return }
+            guard var kept = PairedMac.all().first(where: { $0.hostId == hostId }) else { return }
             kept.address = address
             kept.routes = routes
             kept.known = known
-            kept.save()
+            PairedMac.save(kept)
         }
     }
 
@@ -191,9 +251,9 @@ final class AppModel {
         pendingLink = link
     }
 
-    /// Pairs with a Mac from its QR code or typed details; on success the token and the
-    /// certificate fingerprint are kept and the connection stays up as the live one. If pairing
-    /// fails, a Mac this phone was already paired with is reconnected.
+    /// Pairs with a machine from its QR code or typed details; on success the token and the
+    /// certificate fingerprint are kept and the connection joins the others as a link of its
+    /// own. A failed pairing touches nothing already connected.
     func pair(address: String, alternates: [String] = [], code: String, transport: Transport) {
         pendingLink = nil
         pairing = true
@@ -201,84 +261,118 @@ final class AppModel {
         let client = TrekClient(address: address, routes: [address] + alternates,
                                 auth: .pair(code: code, deviceId: Device.id, deviceName: Device.name), transport: transport)
         client.onPaired = { [weak self, weak client] token, host, kept in
+            guard let self, let client else { return }
+            self.pairing = false
+            self.pairingClient = nil
+            // Re-pairing a host this phone already knows swaps its record; the link is made fresh.
+            if let old = self.link(id: host.id) { self.detach(old) }
             // Its id (Bonjour finds it by that on any network), the pinned fingerprint, where it
             // answered and every address it says it answers on (the code's, from a Mac that
             // names none): all there for the first launch after this one.
-            PairedMac(address: client?.address ?? address, token: token, hostName: host.name, hostId: host.id, transport: kept,
-                      routes: client?.routes ?? [address] + alternates, known: client?.known ?? []).save()
-            // This client stays the live one: from now on it's the paired Mac's, as at launch.
-            if let client { Self.keepAddresses(of: client, hostId: host.id) }
+            let paired = PairedMac(address: client.address, token: token, hostName: host.name, hostId: host.id, transport: kept,
+                                   routes: client.routes, known: client.known)
+            PairedMac.save(paired)
+            Self.keepAddresses(of: client, hostId: host.id)
             UserDefaults.standard.set(false, forKey: "demoMode")
-            self?.transport = kept
-            self?.pairing = false
-            self?.mode = .live
-            self?.show("Paired with \(host.name)")
+            // The client that paired stays the link's: the welcome comes over it next.
+            let link = HostLink(paired: paired, backend: client)
+            link.host = host
+            self.attach(link)
+            self.mode = .live
+            self.show("Paired with \(host.name)")
         }
-        // The pairing screen (with its progress) stays up until the Mac says yes.
-        attach(client, mode: .unpaired)
-        self.transport = transport
+        client.onState = { [weak self, weak client] state in
+            guard let self, let client else { return }
+            if self.pairing, let why = Self.pairingFailure(state) {
+                self.pairing = false
+                self.pairingClient = nil
+                client.stop()
+                if self.links.isEmpty {
+                    self.pairingError = why
+                    self.mode = .unpaired
+                } else {
+                    self.show(why, error: true)
+                }
+            }
+        }
+        // The pairing screen (with its progress) stays up until the machine says yes. Its messages
+        // reach the link's handler once it becomes one; until then only the pairing matters.
+        client.onMessage = { _ in }
+        pairingClient = client
+        client.start()
     }
 
     /// The app came back to the front.
     func foregrounded() {
-        backend?.wake()
+        for link in links { link.backend.wake() }
     }
 
-    /// The user asked to try now (the connection banner): the Mac is looked for afresh.
-    func retryNow() {
-        backend?.reconnect()
+    /// The user asked to try a host again now (its connection banner).
+    func retryNow(_ link: HostLink) {
+        link.backend.reconnect()
     }
 
-    /// The connection in words: what it's doing while connecting, connected or offline, else
-    /// why it stopped.
-    var connectionText: String {
-        switch connection {
-        case .connecting, .connected, .offline: connectionDetail ?? connection.label
-        case .idle, .unauthorized, .identityChanged: connection.label
-        }
+    /// Forget one machine: its link closes, its rows leave the list, its pairing is dropped.
+    /// Others keep running.
+    func leave(_ link: HostLink) {
+        detach(link)
+        PairedMac.remove(hostId: link.id)
+        if links.isEmpty { mode = .unpaired }
     }
 
+    /// Every link down and forgotten (demo included): the state every one of them kept goes too.
+    func leaveAll() {
+        for link in links { link.backend.stop() }
+        links = []
+        pairingClient?.stop()
+        pairingClient = nil
+        reset()
+    }
+
+    /// Old name for the one-pairing flow's "unpair": drop the only (or selected) link.
     func leave() {
-        backend?.stop()
-        backend = nil
-        PairedMac.clear()
-        UserDefaults.standard.set(false, forKey: "demoMode")
-        reset()
-        mode = .unpaired
+        if let link = selected { leave(link) }
     }
 
-    private func attach(_ b: Backend, mode: AppMode) {
-        backend?.stop()
-        reset()
-        self.mode = mode
-        backend = b
-        b.onMessage = { [weak self] in self?.handle($0) }
-        (b as? TrekClient)?.onDetail = { [weak self] in self?.connectionDetail = $0 }
-        b.onState = { [weak self] state in
-            guard let self else { return }
-            let was = self.connection
-            self.connection = state
-            if was == .connected, state != .connected { self.failPending() }
+    /// Close a link and take back out what it put in shared state (its threads, unlisted rows,
+    /// stores) — other hosts' rows stay.
+    private func detach(_ link: HostLink) {
+        link.backend.stop()
+        links.removeAll { $0 === link }
+        threads = threads.filter { !link.owns($0.id) }
+        projects = projects.filter { !link.owns($0.id) }
+        unlisted = unlisted.filter { !link.owns($0.key) }
+        for s in stores.values where link.owns(s.id) { saveCache(s); s.subscribed = false }
+        stores = stores.filter { !link.owns($0.key) }
+        commands = commands.filter { !link.owns($0.key) }
+        gitStatus = gitStatus.filter { !$0.key.owned(by: link) }
+        gitBranches = gitBranches.filter { !$0.key.owned(by: link) }
+        gitBusy = gitBusy.filter { !$0.owned(by: link) }
+        link.failPending()
+    }
+
+    private func attach(_ link: HostLink) {
+        if let at = links.firstIndex(where: { $0.id == link.id }) {
+            links[at].backend.stop()
+            links[at] = link
+        } else {
+            links.append(link)
+        }
+        let b = link.backend
+        b.onMessage = { [weak self, weak link] in guard let link else { return }; self?.handle($0, from: link) }
+        (b as? TrekClient)?.onDetail = { [weak link] in link?.connectionDetail = $0 }
+        b.onState = { [weak self, weak link] state in
+            guard let self, let link else { return }
+            let was = link.connection
+            link.connection = state
+            if was == .connected, state != .connected { link.failPending() }
             if state == .connected {
                 // Resubscribe after a reconnect, from where we were.
-                for s in self.stores.values where s.subscribed { self.resubscribe(s) }
-                // What the Mac lets this phone do (allowing for a whole session, Full access).
-                self.loadSettings()
-                // What screens asked for while the Mac couldn't answer, asked again.
-                self.reloadAsked()
-            }
-            if self.pairing, let why = Self.pairingFailure(state) {
-                self.pairing = false
-                self.backend?.stop()
-                self.backend = nil
-                if let previous = PairedMac.load() {
-                    // Back to the Mac this phone was paired with before.
-                    self.startLive(previous)
-                    self.show(why, error: true)
-                } else {
-                    self.pairingError = why
-                    self.mode = .unpaired
-                }
+                for s in self.stores.values where s.subscribed && link.owns(s.id) { self.resubscribe(s, on: link) }
+                // What this host lets this phone do (allowing for a whole session, Full access).
+                self.loadSettings(on: link)
+                // What screens asked for while this host couldn't answer, asked again.
+                self.reloadAsked(link)
             }
         }
         b.start()
@@ -305,58 +399,73 @@ final class AppModel {
 
     private func reset() {
         // Whoever awaits an answer would otherwise wait for ever (a continuation never resumed).
-        failPending("Disconnected from your Mac.")
+        for link in links { link.failPending() }
         threads = []
         projects = []
-        agents = []
         stores = [:]
-        features = []
         unlisted = [:]
-        cacheHost = nil
-        replies = [:]
-        host = nil
-        transport = nil
-        connection = .idle
-        connectionDetail = nil
-        usage = nil
-        basecamp = [:]
-        basecampLoading = []
-        notes = []
-        openNotes = [:]
         gitStatus = [:]
         gitBranches = [:]
         gitBusy = []
         commands = [:]
-        macSettings = nil
         newThreadPrompt = nil
-        notesAsked = false
-        basecampAsked = []
-        notesSaving = []
-        notesToSave = [:]
     }
 
     // MARK: Incoming
 
-    func handle(_ message: ServerMessage) {
+    /// Every id `link`'s messages carry is bare to it: threads, projects, the threads a summary
+    /// links to (sub-agents, parents, forks) and rows that open one. All become `link.qualified`
+    /// the moment they enter shared state, and `bare` again on the way out (`stripped`).
+    func qualify(_ t: ThreadSummary, on link: HostLink) -> ThreadSummary {
+        var t = t
+        t.id = link.qualified(t.id)
+        if let pid = t.project?.id { t.project?.id = link.qualified(pid) }
+        t.parentId = t.parentId.map { link.qualified($0) }
+        t.startedBy = t.startedBy.map { link.qualified($0) }
+        t.continuedFrom = t.continuedFrom.map { link.qualified($0) }
+        t.needsThread = t.needsThread.map { link.qualified($0) }
+        t.subAgents = t.subAgents?.map { var s = $0; s.threadId = s.threadId.map { link.qualified($0) }; return s }
+        return t
+    }
+
+    func qualify(_ p: ProjectSummary, on link: HostLink) -> ProjectSummary {
+        var p = p
+        p.id = link.qualified(p.id)
+        return p
+    }
+
+    func qualify(_ i: TItem, on link: HostLink) -> TItem {
+        var i = i
+        if case .threadLink(var l) = i.body {
+            l.threadId = link.qualified(l.threadId)
+            i.body = .threadLink(l)
+        }
+        return i
+    }
+
+    func handle(_ message: ServerMessage, from link: HostLink) {
         switch message {
         case .paired(_, _, let host, let features, _), .welcome(_, let host, let features, _):
-            self.host = host
-            self.features = Set(features)
-            cacheHost = host.id
+            link.host = host
+            link.features = Set(features)
         case .snapshot(let s):
+            let rows = s.threads.map { qualify($0, on: link) }
+            let projs = s.projects.map { qualify($0, on: link) }
             withAnimation(.snappy) {
-                threads = s.threads
-                projects = s.projects
-                agents = s.agents
-                fullAccessAllowed = s.fullAccess ?? false
+                threads = threads.filter { !link.owns($0.id) } + rows
+                projects = projects.filter { !link.owns($0.id) } + projs
             }
-            // Rows the Mac no longer lists (a sub-agent deleted while this phone was away) go,
-            // unless a thread is open on one.
-            let kept = Set(s.unlisted.map(\.id))
-            unlisted = unlisted.filter { kept.contains($0.key) || stores[$0.key] != nil }
-            for t in s.unlisted { setUnlisted(t) }
+            link.projects = s.projects
+            link.agents = s.agents
+            link.fullAccessAllowed = s.fullAccess ?? false
+            // Rows the host no longer lists (a sub-agent deleted while this phone was away) go,
+            // unless a thread is open on one. Other hosts' unlisted rows are theirs alone.
+            let kept = Set(s.unlisted.map { link.qualified($0.id) })
+            unlisted = unlisted.filter { !link.owns($0.key) || kept.contains($0.key) || stores[$0.key] != nil }
+            for t in s.unlisted { setUnlisted(qualify(t, on: link)) }
             learnIcons()
-        case .thread(let t):
+        case .thread(let incoming):
+            let t = qualify(incoming, on: link)
             if unlisted[t.id] != nil { unlisted[t.id] = nil }
             if let i = threads.firstIndex(where: { $0.id == t.id }) {
                 let old = threads[i]
@@ -372,37 +481,40 @@ final class AppModel {
                 withAnimation(.snappy) { threads.insert(t, at: 0) }
             }
         case .threadRemoved(let id):
-            threads.removeAll { $0.id == id }
-            unlisted[id] = nil
-            if let host = cacheHost ?? currentCacheHost { TranscriptCache.remove(host: host, thread: id) }
+            let qid = link.qualified(id)
+            threads.removeAll { $0.id == qid }
+            unlisted[qid] = nil
+            TranscriptCache.remove(host: link.id, thread: id)
         case .transcript(let re, let tid, let reset, let seq, let items, let more):
-            if let s = stores[tid] {
-                s.applyReply(reset: reset, seq: seq, items: items, more: more)
-                if let start = openStarts.removeValue(forKey: tid) {
-                    Perf.report("open \(tid): reply after \(Perf.ms(Perf.now - start)), \(items.count) items\(reset ? "" : " since the cache")")
-                    Perf.untilFrame("open \(tid): on screen", from: start)
+            let qid = link.qualified(tid)
+            if let s = stores[qid] {
+                s.applyReply(reset: reset, seq: seq, items: items.map { qualify($0, on: link) }, more: more)
+                if let start = openStarts.removeValue(forKey: qid) {
+                    Perf.report("open \(qid): reply after \(Perf.ms(Perf.now - start)), \(items.count) items\(reset ? "" : " since the cache")")
+                    Perf.untilFrame("open \(qid): on screen", from: start)
                 }
             }
-            reply(re, message)
+            link.reply(re, message)
         case .transcriptPage(let re, _, _, _):
-            reply(re, message)
+            link.reply(re, message)
         case .item(let tid, let item):
-            guard let s = stores[tid], s.subscribed else { return }
-            s.enqueue(item)
+            guard let s = stores[link.qualified(tid)], s.subscribed else { return }
+            s.enqueue(qualify(item, on: link))
         case .transcriptReset(let tid):
-            // Rewound or rewritten on the Mac: the whole (last page of the) transcript again.
-            if let s = stores[tid], s.subscribed { request(.subscribe(threadId: tid, afterSeq: nil, limit: Self.firstPage)) }
+            // Rewound or rewritten on the host: the whole (last page of the) transcript again.
+            let qid = link.qualified(tid)
+            if let s = stores[qid], s.subscribed { request(.subscribe(threadId: qid, afterSeq: nil, limit: Self.firstPage)) }
         case .ack(let re, _, _, _), .pong(let re):
-            reply(re, message)
+            link.reply(re, message)
         case .usage(let re, _), .basecamp(let re, _), .notes(let re, _), .note(let re, _), .gitStatus(let re, _),
              .gitDiff(let re, _), .gitBranches(let re, _), .commands(let re, _, _), .settings(let re, _),
              .searchResults(let re, _), .attachment(let re, _), .backgroundOutput(let re, _), .icon(let re, _),
              .noteAsset(let re, _), .noteImage(let re, _), .noteFileChunk(let re, _):
-            reply(re, message)
+            link.reply(re, message)
         case .unlisted(let t):
-            setUnlisted(t)
+            setUnlisted(qualify(t, on: link))
         case .error(let re, let code, let text):
-            if let re, replies[re] != nil { reply(re, message) } else if code != .unauthorized { show(text, error: true) }
+            if let re, link.hasReply(re) { link.reply(re, message) } else if code != .unauthorized { show(text, error: true) }
         case .unknown:
             break
         }
@@ -421,46 +533,107 @@ final class AppModel {
         learnIcons()
     }
 
-    private func reply(_ re: String?, _ message: ServerMessage) {
-        guard let re, let f = replies.removeValue(forKey: re) else { return }
-        f(message)
-    }
-
     // MARK: Outgoing
 
+    /// The host a message goes to: the one its thread or project id is qualified with, or the
+    /// selected host for asks that name nothing (usage, notes, search).
+    func route(_ m: ClientMessage) -> HostLink? {
+        func t(_ qid: String) -> HostLink? { link(for: qid) }
+        switch m {
+        case .subscribe(let tid, _, _), .transcriptBefore(let tid, _, _), .unsubscribe(let tid),
+             .send(let tid, _, _, _), .threadAction(let tid, _), .answer(let tid, _, _),
+             .interrupt(let tid), .markSeen(let tid), .worktreeMerge(let tid),
+             .commands(let tid), .turnAction(let tid, _, _, _, _), .queueAction(let tid, _, _, _, _),
+             .attachment(let tid, _, _, _), .backgroundOutput(let tid, _), .stopBackground(let tid, _):
+            return t(tid)
+        case .setPrefs(let tid, _, _, _, _, _):
+            return t(tid)
+        case .worktreeRemove(let tid, _, _):
+            return t(tid)
+        case .newThread(let pid, _, _, _, _, _, _, _, _):
+            return t(pid)
+        case .gitStatus(let g), .gitDiff(let g, _), .gitCommit(let g, _), .gitPush(let g),
+             .gitBranches(let g), .gitSwitch(let g, _):
+            switch g {
+            case .thread(let qid), .project(let qid): return t(qid)
+            }
+        case .noteAsset(let nid, _, _), .addNoteImage(let nid, _, _):
+            return t(nid)
+        case .icon(_, let pid):
+            return pid.flatMap(t) ?? selected
+        default:
+            return selected
+        }
+    }
+
+    /// `m` as its destination host expects it: ids it carries back to bare (`link.bare`).
+    private func stripped(_ m: ClientMessage, on link: HostLink) -> ClientMessage {
+        let b = link.bare
+        switch m {
+        case .subscribe(let tid, let after, let limit): return .subscribe(threadId: b(tid), afterSeq: after, limit: limit)
+        case .transcriptBefore(let tid, let before, let limit): return .transcriptBefore(threadId: b(tid), before: before, limit: limit)
+        case .unsubscribe(let tid): return .unsubscribe(threadId: b(tid))
+        case .send(let tid, let text, let mode, let images): return .send(threadId: b(tid), text: text, mode: mode, images: images)
+        case .newThread(let pid, let agent, let model, let text, let worktree, let effort, let access, let plan, let images):
+            return .newThread(projectId: b(pid), agent: agent, model: model, text: text, worktree: worktree,
+                              effort: effort, access: access, plan: plan, images: images)
+        case .setPrefs(let tid, let a, let m2, let e, let ac, let p2):
+            return .setPrefs(threadId: b(tid), agent: a, model: m2, effort: e, access: ac, plan: p2)
+        case .threadAction(let tid, let action): return .threadAction(threadId: b(tid), action: action)
+        case .answer(let tid, let rid, let r): return .answer(threadId: b(tid), requestId: rid, response: r)
+        case .interrupt(let tid): return .interrupt(threadId: b(tid))
+        case .markSeen(let tid): return .markSeen(threadId: b(tid))
+        case .gitStatus(let g): return .gitStatus(bareTarget(g, on: link))
+        case .gitDiff(let g, let path): return .gitDiff(bareTarget(g, on: link), path: path)
+        case .gitCommit(let g, let msg): return .gitCommit(bareTarget(g, on: link), message: msg)
+        case .gitPush(let g): return .gitPush(bareTarget(g, on: link))
+        case .gitBranches(let g): return .gitBranches(bareTarget(g, on: link))
+        case .gitSwitch(let g, let br): return .gitSwitch(bareTarget(g, on: link), branch: br)
+        case .worktreeMerge(let tid): return .worktreeMerge(threadId: b(tid))
+        case .worktreeRemove(let tid, let db, let f): return .worktreeRemove(threadId: b(tid), deleteBranch: db, force: f)
+        case .commands(let tid): return .commands(threadId: b(tid))
+        case .queueAction(let tid, let ix, let reset, let text, let edit):
+            return .queueAction(threadId: b(tid), index: ix, reset: reset, text: text, edit: edit)
+        case .attachment(let tid, let iid, let ix, let px): return .attachment(threadId: b(tid), itemId: iid, index: ix, maxPx: px)
+        case .backgroundOutput(let tid, let task): return .backgroundOutput(threadId: b(tid), taskId: task)
+        case .stopBackground(let tid, let task): return .stopBackground(threadId: b(tid), taskId: task)
+        case .turnAction(let tid, let iid, let a, let mo, let rf):
+            return .turnAction(threadId: b(tid), itemId: iid, action: a, model: mo, restoreFiles: rf)
+        case .noteAsset(let nid, let path, let px): return .noteAsset(noteId: b(nid), path: path, maxPx: px)
+        case .addNoteImage(let nid, let data, let name): return .addNoteImage(noteId: b(nid), data: data, name: name)
+        case .icon(let a, let pid): return .icon(agent: a, projectId: pid.map(b))
+        default: return m
+        }
+    }
+
+    private func bareTarget(_ g: GitTarget, on link: HostLink) -> GitTarget {
+        switch g {
+        case .thread(let qid): return .thread(link.bare(qid))
+        case .project(let qid): return .project(link.bare(qid))
+        }
+    }
+
     @discardableResult
-    func request(_ message: ClientMessage, then: ((ServerMessage) -> Void)? = nil) -> String {
-        let id = "\(nextRequest)"
-        nextRequest += 1
-        if let then { replies[id] = then }
-        // Not connected: nothing went, and whoever waits for the answer hears so now.
-        if backend?.send(message, id: id) != true { reply(id, .error(re: id, code: .unknown, message: Self.notConnected)) }
-        return id
+    func request(_ message: ClientMessage, on explicit: HostLink? = nil, then: ((ServerMessage) -> Void)? = nil) -> String {
+        guard let link = explicit ?? route(message) else { return "" }
+        return link.request(stripped(message, on: link), then: then)
     }
 
-    static let notConnected = "Not connected to your Mac."
-
-    /// The connection went: the answers still awaited aren't coming (a request isn't sent again
-    /// by itself, the Mac may have done it already), so what waits on them stops waiting.
-    private func failPending(_ why: String = "The connection to your Mac dropped. Check that it went through before trying again.") {
-        let waiting = replies
-        replies.removeAll()
-        for (id, f) in waiting { f(.error(re: id, code: .unknown, message: why)) }
-    }
+    static let notConnected = "Not connected to that machine."
 
     /// Failures of an action become a toast; `ok` runs on success.
-    func act(_ message: ClientMessage, ok: ((ServerMessage) -> Void)? = nil) {
-        request(message) { [weak self] reply in
+    func act(_ message: ClientMessage, on link: HostLink? = nil, ok: ((ServerMessage) -> Void)? = nil) {
+        request(message, on: link) { [weak self] reply in
             if case .error(_, _, let text) = reply { self?.show(text, error: true) } else { ok?(reply) }
         }
     }
 
     @ObservationIgnored private var openStarts: [String: Double] = [:]
 
-    /// The thread's store, made on first use.
+    /// The thread's store, made on first use (`tid` qualified, as the list carries it).
     func store(_ tid: String) -> ThreadStore {
         if let s = stores[tid] { return s }
-        let s = ThreadStore(id: tid, summary: thread(tid))
+        let s = ThreadStore(id: tid, host: link(for: tid)?.id ?? "demo", summary: thread(tid))
         s.onChange = { [weak self, weak s] in if let s { self?.scheduleCacheSave(s) } }
         stores[tid] = s
         return s
@@ -469,14 +642,14 @@ final class AppModel {
     /// The thread's store, if it has one.
     func existingStore(_ tid: String) -> ThreadStore? { stores[tid] }
 
-    /// Opens a thread's transcript: what the cache has shows at once, and the Mac sends what's
+    /// Opens a thread's transcript: what the cache has shows at once, and the host sends what's
     /// newer (or the last page, when it's the first time).
     func subscribe(_ tid: String) {
         let s = store(tid)
         guard !s.subscribed else { return }
         if Perf.enabled { openStarts[tid] = Perf.navigated ?? Perf.now; Perf.navigated = nil }
-        if !s.loaded, let host = cacheHost ?? currentCacheHost,
-           let cached = Perf.measure("cache load", tid, { TranscriptCache.load(host: host, thread: tid) }) {
+        if !s.loaded,
+           let cached = Perf.measure("cache load", tid, { TranscriptCache.load(host: s.hostId, thread: s.bareId) }) {
             s.restore(items: cached.items, seq: cached.seq, more: cached.more)
             if let start = openStarts[tid] { Perf.untilFrame("open \(tid): cache on screen (\(cached.items.count) items)", from: start) }
         }
@@ -485,8 +658,8 @@ final class AppModel {
         markSeen(tid)
     }
 
-    private func resubscribe(_ s: ThreadStore) {
-        request(.subscribe(threadId: s.id, afterSeq: s.loaded ? s.seq : nil, limit: Self.firstPage))
+    private func resubscribe(_ s: ThreadStore, on link: HostLink? = nil) {
+        request(.subscribe(threadId: s.id, afterSeq: s.loaded ? s.seq : nil, limit: Self.firstPage), on: link)
     }
 
     func unsubscribe(_ tid: String) {
@@ -495,7 +668,7 @@ final class AppModel {
         s.flushQueued()
         saveCache(s)
         s.trim(to: TranscriptCache.keepItems)
-        backend?.send(.unsubscribe(threadId: tid), id: nil)
+        link(for: tid)?.backend.send(.unsubscribe(threadId: s.bareId), id: nil)
     }
 
     /// The page before the earliest item loaded, when there is one.
@@ -517,15 +690,6 @@ final class AppModel {
         }
     }
 
-    /// The Mac whose transcripts the cache holds: the one answering, else the one paired with.
-    private var currentCacheHost: String? {
-        switch mode {
-        case .demo: host?.id ?? "demo-mac"
-        case .live: host?.id ?? PairedMac.load()?.hostId
-        case .unpaired: nil
-        }
-    }
-
     private func scheduleCacheSave(_ s: ThreadStore) {
         guard !cacheSaves.contains(s.id) else { return }
         cacheSaves.insert(s.id)
@@ -536,9 +700,11 @@ final class AppModel {
         }
     }
 
+    /// Transcript caches sit under their host, so a thread's items are this host's forever
+    /// whatever else is paired: same thread id on two machines stays two transcripts.
     private func saveCache(_ s: ThreadStore) {
-        guard s.loaded, let host = cacheHost ?? currentCacheHost else { return }
-        TranscriptCache.save(host: host, thread: s.id, items: s.items, seq: s.seq, more: s.more)
+        guard s.loaded else { return }
+        TranscriptCache.save(host: s.hostId, thread: s.bareId, items: s.items, seq: s.seq, more: s.more)
     }
 
     // MARK: Turn actions
@@ -552,14 +718,16 @@ final class AppModel {
     /// (its `user` item). A fork opens the new thread; a rewind puts the message in `compose`.
     func turnAction(_ tid: String, item: String, _ action: TurnAction, model: String? = nil, restoreFiles: Bool = true,
                     compose: ((String) -> Void)? = nil) {
-        act(.turnAction(threadId: tid, itemId: item, action: action, model: model, restoreFiles: restoreFiles)) { [weak self] reply in
-            guard case .ack(_, let newThread, _, let text) = reply else { return }
+        let link = route(.turnAction(threadId: tid, itemId: item, action: action, model: model, restoreFiles: restoreFiles))
+        act(.turnAction(threadId: tid, itemId: item, action: action, model: model, restoreFiles: restoreFiles)) { [weak self, weak link] reply in
+            guard case .ack(_, let newThread, _, let text) = reply, let link else { return }
             switch action {
             case .fork:
                 guard let self, let newThread else { self?.show("Forked"); return }
                 // Forked from a message: it waits in the new thread's composer.
-                if let text { self.drafts[newThread] = text }
-                self.openRequest = newThread
+                let qid = link.qualified(newThread)
+                if let text { self.drafts[qid] = text }
+                self.openRequest = qid
             case .rewind, .undo:
                 if let text { compose?(text) }
             case .retry:
@@ -570,20 +738,25 @@ final class AppModel {
 
     func markSeen(_ tid: String) {
         if let i = threads.firstIndex(where: { $0.id == tid }), threads[i].unseen { threads[i].unseen = false }
-        backend?.send(.markSeen(threadId: tid), id: nil)
+        if let link = link(for: tid) { link.backend.send(.markSeen(threadId: link.bare(tid)), id: nil) }
     }
 
     func send(_ text: String, to tid: String, mode: SendMode?, images: [ImageUpload] = []) {
-        act(.send(threadId: tid, text: text, mode: mode, images: images)) { [weak self] reply in
-            // `/new`: the Mac leaves its own screen be and asks the phone to open its sheet.
-            if case .ack(_, _, let open?, _) = reply, open.screen == "new_thread" { self?.newThreadPrompt = open.projectId ?? "" }
+        let link = route(.send(threadId: tid, text: text, mode: mode, images: images))
+        act(.send(threadId: tid, text: text, mode: mode, images: images)) { [weak self, weak link] reply in
+            // `/new`: the host leaves its own screen be and asks the phone to open its sheet.
+            guard let self, let link else { return }
+            if case .ack(_, _, let open?, _) = reply, open.screen == "new_thread" {
+                self.newThreadPrompt = NewThreadPrompt(link: link, projectId: open.projectId.map { link.qualified($0) } ?? "")
+            }
         }
     }
 
     /// Change a thread's agent, model, effort, access or plan mode. The row changes here at once;
-    /// the Mac's own row follows (and puts it back if it refused).
+    /// the host's own row follows (and puts it back if it refused).
     func setPrefs(_ tid: String, agent: String? = nil, model: String? = nil, effort: String? = nil, access: Access? = nil, plan: Bool? = nil) {
         let before = thread(tid)
+        let agents = link(for: tid)?.agents ?? []
         if let i = threads.firstIndex(where: { $0.id == tid }) {
             if let agent, let a = agents.first(where: { $0.key == agent }) {
                 threads[i].agent = AgentRef(key: a.key, name: a.name)
@@ -599,7 +772,7 @@ final class AppModel {
             if let plan { threads[i].plan = plan }
         }
         request(.setPrefs(threadId: tid, agent: agent, model: model, effort: effort, access: access, plan: plan)) { [weak self] reply in
-            // Refused: say why, and put the row back as the Mac has it.
+            // Refused: say why, and put the row back as the host has it.
             guard case .error(_, _, let text) = reply, let self else { return }
             self.show(text, error: true)
             if let before, let i = self.threads.firstIndex(where: { $0.id == tid }) { self.threads[i] = before }
@@ -612,10 +785,13 @@ final class AppModel {
         }
     }
 
-    /// The models `agentKey` offers, and the efforts `modelId` takes.
-    func models(of agentKey: String) -> [ModelOption] { agents.first { $0.key == agentKey }?.models ?? [] }
-    func efforts(agent agentKey: String, model modelId: String?) -> [String] {
-        let models = models(of: agentKey)
+    /// The models `agentKey` offers on `tid`'s host, and the efforts `modelId` takes.
+    func models(of agentKey: String, on qid: String? = nil) -> [ModelOption] {
+        (qid.flatMap { link(for: $0) }?.agents ?? selected?.agents ?? []).first { $0.key == agentKey }?.models ?? []
+    }
+    func efforts(agent agentKey: String, model modelId: String?, on qid: String? = nil) -> [String] {
+        let agents = qid.flatMap { link(for: $0) }?.agents ?? selected?.agents ?? []
+        let models = agents.first { $0.key == agentKey }?.models ?? []
         let id = modelId ?? agents.first { $0.key == agentKey }?.defaultModel
         return models.first { $0.id == id }?.efforts ?? []
     }
@@ -631,74 +807,79 @@ final class AppModel {
     func newThread(project: String, agent: String, model: String?, text: String, worktree: Bool,
                    effort: String? = nil, access: Access? = nil, plan: Bool = false, images: [ImageUpload] = [],
                    opened: @escaping (String) -> Void) {
+        let link = route(.newThread(projectId: project, agent: agent, model: model, text: text, worktree: worktree, effort: effort, access: access, plan: plan, images: images))
         act(.newThread(projectId: project, agent: agent, model: model, text: text, worktree: worktree,
-                       effort: effort, access: access, plan: plan, images: images)) { reply in
-            if case .ack(_, let tid?, _, _) = reply { opened(tid) }
+                       effort: effort, access: access, plan: plan, images: images)) { [weak link] reply in
+            if case .ack(_, let tid?, _, _) = reply, let link { opened(link.qualified(tid)) }
         }
     }
 
-    /// Pull to refresh. The Mac pushes every change, but one missed (a dropped event, a link
+    /// Pull to refresh. Each host pushes every change, but one missed (a dropped event, a link
     /// that died quietly) stays missed: a link that answers is asked again for what the screens
     /// show, one that doesn't is replaced at once (a new connection brings the list afresh).
     func refresh() async {
-        let alive = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
-            var done = false
-            request(.ping) { reply in
-                guard !done else { return }
-                done = true
-                if case .pong = reply { c.resume(returning: true) } else { c.resume(returning: false) }
+        for link in links {
+            let alive = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
+                var done = false
+                link.request(.ping) { reply in
+                    guard !done else { return }
+                    done = true
+                    if case .pong = reply { c.resume(returning: true) } else { c.resume(returning: false) }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { if !done { done = true; c.resume(returning: false) } }
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { if !done { done = true; c.resume(returning: false) } }
+            guard alive else {
+                link.backend.reconnect()
+                continue
+            }
+            // From where each open thread is: the host sends what came after.
+            for s in stores.values where s.subscribed && link.owns(s.id) { resubscribe(s, on: link) }
+            loadUsage(quiet: true, on: link)
+            loadSettings(on: link)
         }
-        guard alive else {
-            backend?.reconnect()
-            return
-        }
-        // From where each open thread is: the Mac sends what came after.
-        for s in stores.values where s.subscribed { resubscribe(s) }
-        loadUsage(quiet: true)
-        loadSettings()
     }
 
-    /// What the Notes and Basecamp screens asked for: on a reconnect, asked again where the
+    /// What the Notes and Basecamp screens asked of `link`: on a reconnect, asked again where the
     /// answer never came (or, for the notes list, may have changed meanwhile).
-    @ObservationIgnored private var notesAsked = false
-    @ObservationIgnored private var basecampAsked: Set<BasecampRange> = []
-
-    private func reloadAsked() {
-        for id in notesToSave.keys { saveLeftNote(id) }
-        if notesAsked { loadNotes() }
-        for range in basecampAsked where basecamp[range] == nil && !basecampLoading.contains(range) { loadBasecamp(range) }
+    private func reloadAsked(_ link: HostLink) {
+        for id in link.notesToSave.keys { saveLeftNote(id, on: link) }
+        if link.notesAsked { loadNotes(on: link) }
+        for range in link.basecampAsked where link.basecamp[range] == nil && !link.basecampLoading.contains(range) { loadBasecamp(range, on: link) }
     }
 
     // MARK: Usage and Basecamp
 
-    /// Ask for plan usage (the Mac asks its agents, at most every 30 seconds). Quiet: in the
+    /// Ask for plan usage (`on`'s asks its agents, at most every 30 seconds). Quiet: in the
     /// background, for the Threads toolbar, so a failure isn't worth a toast.
-    func loadUsage(quiet: Bool = false) {
-        usageLoading = true
-        request(.usage) { [weak self] reply in
-            guard let self else { return }
-            self.usageLoading = false
+    func loadUsage(quiet: Bool = false, on link: HostLink? = nil) {
+        guard let link = link ?? selected else { return }
+        link.usageLoading = true
+        link.request(.usage) { [weak self, weak link] reply in
+            guard let self, let link else { return }
+            link.usageLoading = false
             switch reply {
             case .usage(_, let u):
-                self.usage = u
+                link.usage = u
                 // Some agent was still answering: ask again shortly for the rest.
-                if u.loading == true { DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.loadUsage(quiet: quiet) } }
+                if u.loading == true { DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self, weak link] in self?.loadUsage(quiet: quiet, on: link) } }
             case .error(_, _, let text): if !quiet { self.show(text, error: true) }
             default: break
             }
         }
     }
 
-    func loadBasecamp(_ range: BasecampRange) {
-        basecampAsked.insert(range)
-        basecampLoading.insert(range)
-        request(.basecamp(range)) { [weak self] reply in
-            guard let self else { return }
-            self.basecampLoading.remove(range)
+    func loadBasecamp(_ range: BasecampRange, on link: HostLink? = nil) {
+        guard let link = link ?? selected else { return }
+        link.basecampAsked.insert(range)
+        link.basecampLoading.insert(range)
+        link.request(.basecamp(range)) { [weak self, weak link] reply in
+            guard let self, let link else { return }
+            link.basecampLoading.remove(range)
             switch reply {
-            case .basecamp(_, let b): withAnimation(.snappy) { self.basecamp[range] = b }
+            case .basecamp(_, var b):
+                // Its review rows open threads and mark them seen: their ids join shared state.
+                for i in b.review.indices { b.review[i].threadId = link.qualified(b.review[i].threadId) }
+                withAnimation(.snappy) { link.basecamp[range] = b }
             case .error(_, _, let text): self.show(text, error: true)
             default: break
             }
@@ -707,19 +888,22 @@ final class AppModel {
 
     // MARK: Notes
 
-    func loadNotes() {
-        notesAsked = true
-        request(.notes) { [weak self] reply in
-            if case .notes(_, let list) = reply { withAnimation(.snappy) { self?.notes = list } }
+    func loadNotes(on link: HostLink? = nil) {
+        guard let link = link ?? selected else { return }
+        link.notesAsked = true
+        link.request(.notes) { [weak link] reply in
+            if case .notes(_, let list) = reply { withAnimation(.snappy) { link?.notes = list } }
         }
     }
 
     /// Read a note whole; `done` gets it.
-    func openNote(_ id: String, done: ((Note) -> Void)? = nil) {
-        request(.note(id: id)) { [weak self] reply in
+    func openNote(_ id: String, on link: HostLink? = nil, done: ((Note) -> Void)? = nil) {
+        guard let link = link ?? selected else { return }
+        link.request(.note(id: id)) { [weak self, weak link] reply in
+            guard let link else { return }
             switch reply {
             case .note(_, let n):
-                self?.openNotes[id] = n
+                link.openNotes[id] = n
                 done?(n)
             case .error(_, _, let text): self?.show(text, error: true)
             default: break
@@ -727,12 +911,14 @@ final class AppModel {
         }
     }
 
-    func createNote(_ body: String = "", done: ((Note) -> Void)? = nil) {
-        request(.createNote(body: body)) { [weak self] reply in
+    func createNote(_ body: String = "", on link: HostLink? = nil, done: ((Note) -> Void)? = nil) {
+        guard let link = link ?? selected else { return }
+        link.request(.createNote(body: body)) { [weak self, weak link] reply in
+            guard let link else { return }
             switch reply {
             case .note(_, let n):
-                self?.openNotes[n.id] = n
-                self?.loadNotes()
+                link.openNotes[n.id] = n
+                self?.loadNotes(on: link)
                 done?(n)
             case .error(_, _, let text): self?.show(text, error: true)
             default: break
@@ -740,71 +926,69 @@ final class AppModel {
         }
     }
 
-    /// Save a note's text. If it changed on the Mac since it was opened, the Mac refuses
-    /// and `conflict` runs (or, without one, the Mac's message shows as a toast). Any other
+    /// Save a note's text. If it changed on the host since it was opened, the host refuses
+    /// and `conflict` runs (or, without one, the host's message shows as a toast). Any other
     /// failure shows as a toast and `failed` runs.
-    func saveNote(_ id: String, body: String, done: ((Note) -> Void)? = nil, conflict: (() -> Void)? = nil,
-                  failed: (() -> Void)? = nil) {
-        let modified = openNotes[id]?.modified
-        notesSaving.insert(id)
-        request(.saveNote(id: id, body: body, modified: modified)) { [weak self] reply in
-            self?.notesSaving.remove(id)
+    func saveNote(_ id: String, body: String, on link: HostLink? = nil, done: ((Note) -> Void)? = nil,
+                  conflict: (() -> Void)? = nil, failed: (() -> Void)? = nil) {
+        guard let link = link ?? selected else { return }
+        let modified = link.openNotes[id]?.modified
+        link.notesSaving.insert(id)
+        link.request(.saveNote(id: id, body: body, modified: modified)) { [weak self, weak link] reply in
+            guard let link else { return }
+            link.notesSaving.remove(id)
             switch reply {
             case .note(_, let n):
-                self?.openNotes[id] = n
-                if let i = self?.notes.firstIndex(where: { $0.id == id }) {
-                    self?.notes[i].title = n.title
-                    self?.notes[i].modified = n.modified
+                link.openNotes[id] = n
+                if let i = link.notes.firstIndex(where: { $0.id == id }) {
+                    link.notes[i].title = n.title
+                    link.notes[i].modified = n.modified
                 }
                 done?(n)
-                self?.saveLeftNote(id)
+                self?.saveLeftNote(id, on: link)
             case .error(_, let code, let text):
                 if code == .conflict, let conflict { conflict() } else {
                     self?.show(text, error: true)
                     failed?()
                 }
                 // What its closed editor left would be refused the same way.
-                if code == .conflict, self?.notesToSave.removeValue(forKey: id) != nil {
-                    self?.show("That note changed on your Mac, so your last changes to it weren't saved.", error: true)
+                if code == .conflict, link.notesToSave.removeValue(forKey: id) != nil {
+                    self?.show("That note changed on \(link.name), so your last changes to it weren't saved.", error: true)
                 }
             default: break
             }
         }
     }
 
-    /// Notes with a save out, and text a closed editor left to save (sent after the save out
-    /// answers, as two out at once would carry the same version and the Mac would refuse the
-    /// second; kept, and sent again on a reconnect, when it can't go).
-    @ObservationIgnored private var notesSaving: Set<String> = []
-    @ObservationIgnored private var notesToSave: [String: String] = [:]
-
-    /// A save of this note is out, waiting for the Mac's answer.
-    func savingNote(_ id: String) -> Bool { notesSaving.contains(id) }
+    /// A save of this note is out, waiting for the host's answer.
+    func savingNote(_ id: String, on link: HostLink? = nil) -> Bool { (link ?? selected)?.notesSaving.contains(id) ?? false }
 
     /// Save what a note's editor had when it closed: now, after the save out for it, or when the
     /// connection comes back.
-    func saveNoteLeft(_ id: String, body: String) {
-        notesToSave[id] = body
-        saveLeftNote(id)
+    func saveNoteLeft(_ id: String, body: String, on link: HostLink? = nil) {
+        guard let link = link ?? selected else { return }
+        link.notesToSave[id] = body
+        saveLeftNote(id, on: link)
     }
 
-    private func saveLeftNote(_ id: String) {
-        guard !notesSaving.contains(id), let body = notesToSave.removeValue(forKey: id), openNotes[id]?.body != body else { return }
-        saveNote(id, body: body, failed: { [weak self] in
-            if self?.notesToSave[id] == nil { self?.notesToSave[id] = body }
+    private func saveLeftNote(_ id: String, on link: HostLink) {
+        guard !link.notesSaving.contains(id), let body = link.notesToSave.removeValue(forKey: id), link.openNotes[id]?.body != body else { return }
+        saveNote(id, body: body, on: link, failed: { [weak link] in
+            if link?.notesToSave[id] == nil { link?.notesToSave[id] = body }
         })
     }
 
-    /// Delete a note: the Mac keeps it in the notes folder's Deleted.
-    func deleteNote(_ id: String) {
-        let before = notes
-        withAnimation(.snappy) { notes.removeAll { $0.id == id } }
-        openNotes[id] = nil
-        notesToSave[id] = nil
-        request(.deleteNote(id: id)) { [weak self] reply in
+    /// Delete a note: the host keeps it in the notes folder's Deleted.
+    func deleteNote(_ id: String, on link: HostLink? = nil) {
+        guard let link = link ?? selected else { return }
+        let before = link.notes
+        withAnimation(.snappy) { link.notes.removeAll { $0.id == id } }
+        link.openNotes[id] = nil
+        link.notesToSave[id] = nil
+        link.request(.deleteNote(id: id)) { [weak self, weak link] reply in
             if case .error(_, _, let text) = reply {
                 self?.show(text, error: true)
-                self?.notes = before
+                link?.notes = before
             }
         }
     }
@@ -897,25 +1081,27 @@ final class AppModel {
         }
     }
 
-    func loadSettings() {
-        request(.settings) { [weak self] reply in
-            if case .settings(_, let s) = reply { self?.macSettings = s }
+    func loadSettings(on link: HostLink? = nil) {
+        guard let link = link ?? selected else { return }
+        link.request(.settings) { [weak link] reply in
+            if case .settings(_, let s) = reply { link?.macSettings = s }
         }
     }
 
-    /// Change the Mac's settings. Shown at once; the Mac's answer replaces it (or puts it back,
+    /// Change a host's settings. Shown at once; its answer replaces it (or puts it back,
     /// saying why, when it refuses).
-    func changeSettings(_ change: SettingsChange, done: (() -> Void)? = nil) {
-        let before = macSettings
-        if let s = macSettings { macSettings = change.applied(to: s) }
-        request(.setSettings(change)) { [weak self] reply in
+    func changeSettings(_ change: SettingsChange, on link: HostLink? = nil, done: (() -> Void)? = nil) {
+        guard let link = link ?? selected else { return }
+        let before = link.macSettings
+        if let s = link.macSettings { link.macSettings = change.applied(to: s) }
+        link.request(.setSettings(change)) { [weak self, weak link] reply in
             switch reply {
             case .settings(_, let s):
-                self?.macSettings = s
+                link?.macSettings = s
                 done?()
             case .error(_, _, let text):
                 self?.show(text, error: true)
-                self?.macSettings = before
+                link?.macSettings = before
             default: break
             }
         }
@@ -1003,25 +1189,49 @@ struct PairedMac: Codable {
         known = try c.decodeIfPresent([String].self, forKey: .known) ?? []
     }
 
+    /// The demo's stand-in pairing (never saved): the demo host answers to "demo".
+    static var demo: PairedMac { PairedMac(address: "", token: "", hostName: "Demo", hostId: "demo", transport: .plain) }
+
     /// The Keychain read once: views ask for it as they draw (the Settings tab, the connection
     /// banner), and a Keychain query on every redraw made them slow to appear.
-    private static var cached: PairedMac??
+    private static var cached: [PairedMac]?
 
-    static func load() -> PairedMac? {
+    /// Every machine this phone is paired with, oldest pairing first.
+    static func all() -> [PairedMac] {
         if let cached { return cached }
-        let paired = Keychain.read("paired-mac").flatMap { try? JSONDecoder().decode(PairedMac.self, from: $0) }
-        cached = .some(paired)
-        return paired
+        var out: [PairedMac] = []
+        if let data = Keychain.read("paired-mac") {
+            // The record was one pairing until the phone could hold several: a bare object
+            // reading as one entry keeps it.
+            if let list = try? JSONDecoder().decode([PairedMac].self, from: data) { out = list }
+            else if let one = try? JSONDecoder().decode(PairedMac.self, from: data) { out = [one] }
+        }
+        cached = out
+        return out
     }
 
-    func save() {
-        if let data = try? JSONEncoder().encode(self) { Keychain.write("paired-mac", data) }
-        Self.cached = .some(self)
+    /// The first pairing, where a caller still speaks of "the" machine.
+    static func load() -> PairedMac? { all().first }
+
+    /// Insert or replace the pairing for `paired.hostId`.
+    static func save(_ paired: PairedMac) {
+        var all = all()
+        if let i = all.firstIndex(where: { $0.hostId == paired.hostId }) { all[i] = paired } else { all.append(paired) }
+        persist(all)
+    }
+
+    static func remove(hostId: String) {
+        persist(all().filter { $0.hostId != hostId })
     }
 
     static func clear() {
+        persist([])
         Keychain.delete("paired-mac")
-        cached = .some(nil)
+    }
+
+    private static func persist(_ all: [PairedMac]) {
+        cached = all
+        if let data = try? JSONEncoder().encode(all) { Keychain.write("paired-mac", data) }
     }
 }
 
