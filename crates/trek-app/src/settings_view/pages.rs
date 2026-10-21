@@ -1230,6 +1230,14 @@ impl SettingsView {
             let rows = group.into_iter().enumerate().map(|(i, skill)| self.skill_row(i, skill, cx)).collect();
             out.push(ui::group(rows, cx));
         }
+        // Skills from elsewhere worth having, until they're installed: Install runs the skill's
+        // own installer in a terminal, as an agent install does.
+        let suggested: Vec<_> = trek_core::skills::suggestions(&all).into_iter().filter(|s| q.is_empty() || s.title.to_lowercase().contains(&q) || s.description.to_lowercase().contains(&q)).collect();
+        if !suggested.is_empty() {
+            out.push(Self::heading("Suggested", cx));
+            let rows = suggested.into_iter().map(|s| Self::suggestion_row(s, cx)).collect();
+            out.push(ui::group(rows, cx));
+        }
         if shown.is_empty() {
             out.push(div().py(px(24.)).text_size(px(13.)).text_color(theme.muted_foreground).child(if all.is_empty() { "No skills yet. Create one, or add a folder that contains a SKILL.md." } else { "No skills match." }).into_any_element());
         }
@@ -1299,6 +1307,27 @@ impl SettingsView {
             div().text_size(px(12.)).text_color(theme.muted_foreground).child("Read-only").into_any_element()
         };
         Self::row(title, desc, h_flex().gap(px(6.)).child(more).child(div().pl(px(4.)).child(trailing)), cx)
+    }
+
+    /// A suggested skill: what it does, who made it, and Install, which runs its command
+    /// (`npx skills add …`) in the dock; it's listed among the skills once it's in.
+    fn suggestion_row(s: trek_core::skills::Suggestion, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let title = h_flex()
+            .gap(px(8.))
+            .child(div().text_size(px(13.5)).font_medium().child(s.title))
+            .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(format!("by {}", s.author)));
+        let install = Button::new(SharedString::from(format!("skill-suggest-{}", s.name)))
+            .small()
+            .outline()
+            .icon(IconName::ArrowDown)
+            .label("Install")
+            .tooltip(s.command)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.skills.invalidate();
+                this.workspace.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::RunInTerminal { command: s.command.into(), cwd: None }));
+            }));
+        Self::row(title, format!("{} Installs with {}.", s.description, s.command), install, cx)
     }
 
     /// Rescan, and have the agents' command lists (the `$` picker) pick the change up.

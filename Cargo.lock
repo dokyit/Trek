@@ -9227,9 +9227,13 @@ name = "trek-mcp"
 version = "0.4.8"
 dependencies = [
  "base64 0.22.1",
+ "block2 0.6.2",
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
  "foreign-types",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-speech",
  "png 0.18.1",
  "serde_json",
  "tokio",

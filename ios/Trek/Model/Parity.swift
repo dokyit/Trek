@@ -234,6 +234,8 @@ nonisolated extension ClientMessage {
             var o: [String: Any] = ["type": "add_note_image", "note_id": noteId, "data": data]
             if let name { o["name"] = name }
             return o
+        case .noteFile(let path, let offset, let length):
+            return ["type": "note_file", "path": path, "offset": offset, "length": length]
         default:
             return [:]
         }

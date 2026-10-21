@@ -603,6 +603,20 @@ fn notes_pictures() {
 }
 
 #[test]
+fn notes_files_in_pieces() {
+    let line = r#"{"type":"note_file","id":"3","path":"attachments/9c1e.pdf","offset":1048576,"length":1048576}"#;
+    let env = client_round_trip(line);
+    assert_eq!(env.msg.kind(), "note_file");
+    assert!(env.msg.is_query());
+    let ClientMessage::NoteFile(req) = serde_json::from_str::<ClientEnvelope>(r#"{"type":"note_file","path":"attachments/a.mp4"}"#).unwrap().msg else { panic!() };
+    assert_eq!((req.offset, req.length), (0, None), "from the start, a whole piece");
+    let reply = r#"{"type":"note_file_chunk","re":"3","path":"attachments/9c1e.pdf","offset":1048576,"total":2500000,"bytes_b64":"JVBERg==","mime":"application/pdf"}"#;
+    server_round_trip(reply);
+    let ServerMessage::NoteFileChunk(c) = serde_json::from_str::<ServerEnvelope>(reply).unwrap().msg else { panic!() };
+    assert_eq!(c.bytes().unwrap(), b"%PDF");
+}
+
+#[test]
 fn a_turn_s_changed_files() {
     let item = item_round_trip(
         r#"{"id":"c12","seq":40,"at":null,"kind":"changes","files":[
@@ -814,7 +828,7 @@ fn parity_requests_and_replies() {
         r#"{"type":"background_output","re":"5","thread_id":"t","task_id":"b1"}"#,
         r#"{"type":"icon","re":"7","agent":"acp:mistral-vibe","hash":"0f3a","png":"iVBORw0K","template":true}"#,
         r#"{"type":"ack","re":"2","text":"and open a PR"}"#,
-        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines"]}"#,
+        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files"]}"#,
         r#"{"type":"usage","re":"9","providers":[{"agent":{"key":"codex","name":"Codex","logo":"codex"},"plan":"ChatGPT Pro","limits":[],
             "resets":[{"id":"rc-1","title":"Full reset (Weekly + 5 hr)","expires_at":1791030000000}]},
             {"agent":{"key":"acp:devin","name":"Devin"},"limits":[],"no_limits":true,"as_of":1791020000000,"today":"Today in Trek: 12K tokens"}],"picked":true}"#,

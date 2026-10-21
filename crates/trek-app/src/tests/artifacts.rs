@@ -239,3 +239,33 @@ fn the_mock_answers_with_two_artifacts() {
         assert!(titles.iter().any(|t| t == "Desk with a monitor clamp"), "{titles:?}");
     });
 }
+
+#[test]
+fn a_cards_send_goes_to_its_thread_and_copy_reaches_the_clipboard() {
+    // (One send a second per page is `trek_core::artifact`'s `a_page_sends_at_most_once_a_second`.)
+    run(async |cx| {
+        let _log = fake_web(true).unwrap();
+        let trek = open(cx);
+        let id = answered(&trek, cx, &answer(PAGE), true);
+        let users = |trek: &Trek, cx: &mut TestAppContext| -> Vec<String> {
+            trek.items(cx, &id).into_iter().filter_map(|i| if let trek_core::store::Item::User { text, .. } = i { Some(text) } else { None }).collect()
+        };
+        let before = users(&trek, cx).len();
+        let post = |trek: &Trek, cx: &mut TestAppContext, body: &str| {
+            trek.window(cx, |window, cx| crate::artifact::post(window, body, cx));
+            settle(trek, cx);
+        };
+        // Another secret: nothing is sent.
+        post(&trek, cx, r#"{"n":"not-the-secret","t":"send","text":"forged"}"#);
+        assert_eq!(users(&trek, cx).len(), before);
+        // A copy goes to the clipboard as it is.
+        post(&trek, cx, r#"{"n":"{nonce}","t":"copy","text":"SELECT 1;\n"}"#);
+        assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some("SELECT 1;\n"));
+        // With the card's own secret, a send becomes the user's next message in its thread.
+        assert!(one(&trek, cx).has_view);
+        post(&trek, cx, r#"{"n":"{nonce}","t":"send","text":"  Resolve src/main.rs: keep mine  "}"#);
+        let after = users(&trek, cx);
+        assert_eq!(after.len(), before + 1, "{after:?}");
+        assert_eq!(after.last().map(|t| t.trim()), Some("Resolve src/main.rs: keep mine"));
+    });
+}

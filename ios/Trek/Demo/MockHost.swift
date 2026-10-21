@@ -143,7 +143,7 @@ final class MockHost: Backend {
             update(tid, push: false) { $0.unseen = false }
         case .ping:
             deliver(.pong(re: id))
-        case .useReset, .queueAction, .attachment, .backgroundOutput, .stopBackground, .icon, .noteAsset, .addNoteImage:
+        case .useReset, .queueAction, .attachment, .backgroundOutput, .stopBackground, .icon, .noteAsset, .addNoteImage, .noteFile:
             takeParity(message, id: id)
         case .interrupt(let tid):
             ack(id)

@@ -33,6 +33,12 @@
 	</array>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Trek asks for Face ID before letting an agent skip approvals for the rest of a session.</string>
+	<!-- Dictation in the composer: the mic hears the message, Speech Recognition turns it into
+	     words on this iPhone. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Trek listens while you hold a message to say, so you can speak a follow-up instead of typing it.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Trek turns what you say into the words of your message, on this iPhone when it can.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

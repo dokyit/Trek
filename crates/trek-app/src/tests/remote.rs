@@ -692,6 +692,57 @@ fn a_note_s_pictures_go_to_the_phone_and_its_photos_come_back() {
 }
 
 #[test]
+fn a_note_s_pdfs_and_videos_go_to_the_phone_in_pieces_byte_for_byte() {
+    run(async |cx| {
+        let trek = open(cx);
+        let dir = trek_core::notes::notes_dir();
+        let kept = trek_core::notes::attachments_dir(&dir);
+        std::fs::create_dir_all(&kept).unwrap();
+        // Bigger than a piece, and not a whole number of them.
+        let pattern = |len: usize, seed: u8| (0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed) ^ (i >> 11) as u8).collect::<Vec<u8>>();
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        pdf.extend(pattern(2_500_000, 7));
+        let mp4 = pattern(1_048_576 + 3, 91);
+        std::fs::write(kept.join("report.pdf"), &pdf).unwrap();
+        std::fs::write(kept.join("clip.mp4"), &mp4).unwrap();
+        let piece = |path: &str, offset: u64, length: Option<u64>| {
+            let req = tr::NoteFileRequest { path: path.into(), offset, length };
+            move |reply| tr::HostRequest::NoteFile { req, reply }
+        };
+        for (path, bytes, mime, pieces) in [("attachments/report.pdf", &pdf, "application/pdf", 3), ("./attachments/clip.mp4", &mp4, "video/mp4", 2)] {
+            let mut got = vec![];
+            let mut asked = 0;
+            loop {
+                let c = ask_later(&trek, cx, piece(path, got.len() as u64, None)).await.unwrap();
+                asked += 1;
+                assert_eq!((c.path.as_str(), c.offset, c.total, c.mime.as_str()), (path, got.len() as u64, bytes.len() as u64, mime));
+                let data = c.bytes().unwrap();
+                assert!(!data.is_empty() && data.len() as u64 <= tr::MAX_NOTE_FILE_CHUNK, "{}", data.len());
+                got.extend(data);
+                if got.len() as u64 >= c.total {
+                    break;
+                }
+            }
+            assert_eq!(asked, pieces, "{path}");
+            assert!(got == *bytes, "{path} came back different");
+        }
+        // A piece asked for too big is cut to the most one carries; past the end is refused.
+        let c = ask_later(&trek, cx, piece("attachments/report.pdf", 10, Some(50 << 20))).await.unwrap();
+        assert_eq!(c.bytes_b64.len(), tr::base64(&pdf[10..10 + (1 << 20)]).len());
+        let c = ask_later(&trek, cx, piece("attachments/clip.mp4", mp4.len() as u64, None)).await.unwrap();
+        assert!(c.bytes_b64.is_empty());
+        let past = ask_later(&trek, cx, piece("attachments/clip.mp4", mp4.len() as u64 + 1, None)).await.unwrap_err();
+        assert_eq!(past.code, tr::ErrorCode::BadRequest);
+        // Nothing but the notes' own files.
+        std::fs::write(dir.join("private.pdf"), &pdf).unwrap();
+        for path in ["attachments/../private.pdf", "/etc/hosts", "../notes/private.pdf", "private.pdf", "attachments/sub/clip.mp4"] {
+            assert_eq!(ask_later(&trek, cx, piece(path, 0, None)).await.unwrap_err().code, tr::ErrorCode::BadRequest, "{path}");
+        }
+        assert_eq!(ask_later(&trek, cx, piece("attachments/gone.pdf", 0, None)).await.unwrap_err().code, tr::ErrorCode::NotFound);
+    });
+}
+
+#[test]
 fn links_between_threads_open_on_the_phone_with_how_they_re_doing() {
     run(async |cx| {
         let trek = open(cx);
@@ -1909,7 +1960,8 @@ fn a_clone_is_registered_as_a_project() {
         let req = clone_request(&source, &folder, "From another Mac");
         let route = trek.read(cx, |ws, _| ws.route.clone());
         let id = ask_later(&trek, cx, |reply| tr::HostRequest::CloneProject { req, progress, reply }).await.unwrap();
-        assert_eq!(std::fs::read_to_string(folder.join("README.md")).unwrap(), "hello\n");
+        // git on Windows checks the file out with CRLF line endings by default.
+        assert_eq!(std::fs::read_to_string(folder.join("README.md")).unwrap().replace("\r\n", "\n"), "hello\n");
         trek.read(cx, |ws, _| {
             let project = ws.project(&id).expect("registered");
             assert_eq!((project.path.clone(), project.name.as_str()), (super::harness::canonical(&folder), "From another Mac"));

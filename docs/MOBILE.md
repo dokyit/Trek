@@ -222,7 +222,7 @@ Both may carry `features`, the optional requests this Mac serves; a phone offers
 listed, so an older Mac (no list) simply doesn't show them. The protocol version stays 1:
 
 ```json
-{"type":"welcome","re":"1","protocol":1,"host":{…},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images"]}
+{"type":"welcome","re":"1","protocol":1,"host":{…},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files"]}
 ```
 
 | Feature | What it adds |
@@ -240,9 +240,10 @@ listed, so an older Mac (no list) simply doesn't show them. The protocol version
 | `icon` | `icon`: an added agent's or a project's icon |
 | `basecamp_v2` | `basecamp` carries `totals`, `chart`, `projects`, `models` and `review[].needs_you` |
 | `note_images` | `note_asset` and `add_note_image`: a note's pictures, and adding one |
+| `note_files` | `note_file`: any other file kept with the notes (a PDF, a video), as it is, in pieces |
 
 `use_reset` to `icon` are described under "Keeping up with the Mac" below, `basecamp_v2` under
-Basecamp, `note_images` under Notes.
+Basecamp, `note_images` and `note_files` under Notes.
 
 Names are added as features are (`trek_remote::feature`, `MacFeature` on the phone); a phone
 ignores names it doesn't know. Failures: `error` with code `unauthorized` (bad or revoked
@@ -605,6 +606,32 @@ The phone draws a line that's only pictures as the pictures (a tap shows them fu
 stepping through the note's others), fetches `https:` ones itself, and names a file elsewhere on
 the Mac in a placeholder; Write's format bar has a photo button that puts the line at the cursor.
 
+Any other file the Mac keeps there (a dropped PDF or video, linked `[name](attachments/<name>)`)
+comes with `note_files` as it is on disk, a piece at a time: `note_file` asks for `length` bytes
+from `offset` (a mebibyte at most, `trek_remote::MAX_NOTE_FILE_CHUNK`, and that when `length` is
+missing), and `note_file_chunk` carries them as base64 with the file's whole length and its type
+from the extension. The phone asks for the next piece at `offset` + what came until it has
+`total`; an empty piece is the end, an `offset` past it `bad_request`. Paths are checked as for
+`note_asset` (no `note_id`: the folder is the notes', whichever note links the file).
+
+```json
+{"type":"note_file","id":"10","path":"attachments/9c1e….pdf","offset":0,"length":1048576}
+  → {"type":"note_file_chunk","re":"10","path":"attachments/9c1e….pdf","offset":0,"total":2500000,"bytes_b64":"JVBERi0x…","mime":"application/pdf"}
+{"type":"note_file","id":"11","path":"attachments/9c1e….pdf","offset":1048576,"length":1048576} → the next piece
+```
+
+On the phone a line that's only such a link is a card (`NoteFileCard`): a PDF shows its first page
+with its name and page count and opens full screen in PDFKit; an MP4, M4V or MOV shows its first
+frame with a play badge and plays in a sheet; anything else (WebM too, which AVPlayer can't play)
+is a chip that opens in Quick Look. The file is fetched into the app's caches (`NoteFileStore`:
+one file per link, named by the SHA-256 of its path, so a link in two notes is one download;
+trimmed to 200 MB, least recently opened first), with a progress ring; a PDF or video up to 24 MB
+is fetched as the card appears, a bigger one on a tap (its first piece kept, so the tap carries
+on). A file already there opens without the Mac; one that isn't, from a Mac without `note_files`
+or with none connected, is a plain "On your Mac" card. Threads have no such hook: an agent's
+files in a transcript are paths in its project, not files kept with the notes, and a message
+carries only its images (`attachment`).
+
 **Git** for a thread's folder (its worktree, for one in a worktree) or a project, as the Mac's Git
 panel does it; git runs off the Mac's main thread.
 
@@ -814,7 +841,7 @@ SwiftUI, iOS 26 (Liquid Glass), bundle id `dev.trek.TrekMobile`, no third-party 
 - **Thread**: transcript with Markdown assistant text, collapsed tool groups ("Thought 2 times · ran
   4 commands · edited 1 file"), expandable rows with file chips coloured by file type, approval /
   question / plan cards pinned at the bottom while pending, a "Working… 1m 12s" line. Floating glass
-  composer: text, Steer/Queue toggle while working, send, stop.
+  composer: text, photos, voice input, Steer/Queue toggle while working, send, stop.
 - **New thread** sheet: "What are we building?", project chip, agent/model chip, worktree chip.
 - **Pairing**: scan QR (camera) or type host:port + code + short fingerprint; links and scans go
   through the "Pair with <Mac>?" confirmation. **Demo mode** runs the whole app on realistic
@@ -823,6 +850,21 @@ SwiftUI, iOS 26 (Liquid Glass), bundle id `dev.trek.TrekMobile`, no third-party 
   not let devices see each other. Trying Tailscale…") with Try now while it waits, its addresses
   (Wi-Fi, Tailscale), "Encrypted · pinned" / "Unencrypted", fingerprint, follow-up default, demo
   mode, unpair.
+
+### Voice input
+
+The composer's microphone button speaks a message instead of typing it (`Speech.swift`,
+`Composer.swift`). First use asks for the microphone and for Speech Recognition; the audio never
+leaves the phone as a message — it becomes text in the composer, and the Mac only sees it when the
+message is sent like any other. `SFSpeechRecognizer` runs on an `SFSpeechAudioBufferRecognitionRequest`
+fed by an `AVAudioEngine` tap, on-device when `supportsOnDeviceRecognition` says it can.
+
+While it listens the field swaps for a Text run — typed words plain, interim words italic grey,
+revised as each partial result arrives — and the toolbar's place is taken by a waveform of the
+tap's levels. ✓ keeps the words after whatever was typed, ✕ drops them. Listening doesn't stop on
+silence: when the recognizer closes a round it gets a fresh request and keeps the round's words.
+Only ✓, ✕, backgrounding (which keeps the words) or an error — shown as a toast — ends it. It works
+with no Mac connected at all.
 
 ### Finding the Mac (phone side)
 

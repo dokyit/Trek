@@ -5,7 +5,8 @@
 //! text and saves them back untouched, and the list's titles and previews read an image as its
 //! alt text. It asks for a picture to draw (`note_asset`, scaled down as a message's images
 //! are), only ever from the notes' `attachments/`, and keeps a photo of its own there
-//! (`add_note_image`) to link from a note as the Mac's Write does.
+//! (`add_note_image`) to link from a note as the Mac's Write does. Any other file kept there (a
+//! PDF, a video) goes as it is, a mebibyte at a time (`note_file`), for the phone to keep and open.
 
 use crate::workspace::Workspace;
 use gpui_kit::Context;
@@ -37,18 +38,18 @@ pub(super) fn get(id: &str) -> tr::HostResult<tr::Note> {
     find(id).map(whole).ok_or_else(|| tr::HostError::not_found("No such note"))
 }
 
-/// The picture a note links as `path`, in the notes folder `dir`: only `attachments/<name>` (or
-/// `./attachments/<name>`), never an absolute path, one with `..` in it, or a symlink out of the
-/// folder.
+/// The file (a picture, a PDF, a video) a note links as `path`, in the notes folder `dir`: only
+/// `attachments/<name>` (or `./attachments/<name>`), never an absolute path, one with `..` in it,
+/// or a symlink out of the folder.
 fn asset_path(dir: &Path, path: &str) -> tr::HostResult<PathBuf> {
-    let refused = || tr::HostError::bad_request("Only pictures kept with the notes can be sent");
+    let refused = || tr::HostError::bad_request("Only files kept with the notes can be sent");
     let prefix = format!("{}/", notes::ATTACHMENTS);
     let name = path.strip_prefix("./").unwrap_or(path).strip_prefix(prefix.as_str()).ok_or_else(refused)?;
     if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\', ':']) || name.contains("..") {
         return Err(refused());
     }
     let folder = notes::attachments_dir(dir);
-    let gone = || tr::HostError::not_found(format!("That picture isn't on {} any more", crate::words::words().this_computer));
+    let gone = || tr::HostError::not_found(format!("That file isn't on {} any more", crate::words::words().this_computer));
     let (folder, file) = (folder.canonicalize().map_err(|_| gone())?, folder.join(name).canonicalize().map_err(|_| gone())?);
     if !file.starts_with(&folder) || !file.is_file() {
         return Err(refused());
@@ -68,6 +69,59 @@ pub(super) fn asset(req: tr::NoteAssetRequest, reply: tr::Reply<tr::NoteAsset>, 
         let _ = reply.send(made.map(|(data, width, height)| tr::NoteAsset { note_id: req.note_id, path: req.path, mime: "image/jpeg".into(), data: tr::base64(&data), width, height }));
     })
     .detach();
+}
+
+/// `note_file`: a piece of one of the notes' files as it is on disk, read off the main thread.
+pub(super) fn file(req: tr::NoteFileRequest, reply: tr::Reply<tr::NoteFileChunk>, cx: &mut Context<Workspace>) {
+    let file = asset_path(&notes::notes_dir(), &req.path);
+    cx.spawn(async move |_, cx| {
+        let read = match file {
+            Ok(file) => cx.background_executor().spawn(async move { chunk(&file, req) }).await,
+            Err(e) => Err(e),
+        };
+        let _ = reply.send(read);
+    })
+    .detach();
+}
+
+/// `req.length` bytes (a mebibyte at most) of `file` from `req.offset`.
+fn chunk(file: &Path, req: tr::NoteFileRequest) -> tr::HostResult<tr::NoteFileChunk> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let failed = |e: std::io::Error| tr::HostError::other(format!("Couldn't read that file: {e}"));
+    let mut f = std::fs::File::open(file).map_err(failed)?;
+    let total = f.metadata().map_err(failed)?.len();
+    if req.offset > total {
+        return Err(tr::HostError::bad_request(format!("That file is only {total} bytes long")));
+    }
+    let length = req.length.unwrap_or(tr::MAX_NOTE_FILE_CHUNK).min(tr::MAX_NOTE_FILE_CHUNK).min(total - req.offset);
+    f.seek(SeekFrom::Start(req.offset)).map_err(failed)?;
+    let mut bytes = Vec::with_capacity(length as usize);
+    f.take(length).read_to_end(&mut bytes).map_err(failed)?;
+    Ok(tr::NoteFileChunk { mime: mime(file).into(), path: req.path, offset: req.offset, total, bytes_b64: tr::base64(&bytes) })
+}
+
+/// What a file kept with the notes is, from its extension.
+fn mime(file: &Path) -> &'static str {
+    match file.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("pdf") => "application/pdf",
+        Some("mp4") => "video/mp4",
+        Some("m4v") => "video/x-m4v",
+        Some("mov") => "video/quicktime",
+        Some("webm") => "video/webm",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("heic") => "image/heic",
+        Some("webp") => "image/webp",
+        Some("txt" | "md") => "text/plain",
+        Some("csv") => "text/csv",
+        Some("json") => "application/json",
+        Some("zip") => "application/zip",
+        Some("mp3") => "audio/mpeg",
+        Some("m4a") => "audio/mp4",
+        Some("wav") => "audio/wav",
+        _ => "application/octet-stream",
+    }
 }
 
 /// The most a photo from the phone may weigh, as for a message's.

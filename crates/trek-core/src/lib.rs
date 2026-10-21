@@ -19,6 +19,7 @@ pub mod inline_edit;
 pub mod limit;
 pub mod lineage;
 pub mod mcp;
+pub mod media;
 pub mod notes;
 pub mod open_in;
 pub mod orchestrate;

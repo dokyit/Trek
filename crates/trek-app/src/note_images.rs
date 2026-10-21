@@ -299,14 +299,7 @@ impl MarkdownPlugin for NoteVideos {
         let path = attached_file(&link.url, &self.dir).filter(|p| trek_core::notes::is_video(&p.to_string_lossy()))?;
         let name = markdown_ast::Node::Link(link.clone()).to_string();
         let name = if name.trim().is_empty() { path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default() } else { name };
-        let doc = crate::artifact::Doc {
-            html: trek_core::artifact::VIDEO_HTML.into(),
-            hash: trek_core::artifact::content_hash(&path.to_string_lossy()),
-            title: Some(name.clone()),
-            hosts: Vec::new(),
-            source: link.url.as_str().into(),
-            media: Some(path),
-        };
+        let doc = crate::artifact::Doc::video(path, name.clone(), &link.url);
         Some(MarkdownNode::new("trek-note-video", ParsedVideo { doc: Arc::new(doc) }).text(name))
     }
 

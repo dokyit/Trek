@@ -26,6 +26,7 @@ use trek_core::{AgentId, Effort, HandHolding, RunState};
 mod machine_chip;
 pub(crate) use machine_chip::reach_dot;
 pub(crate) mod pickers;
+pub(crate) mod voice;
 
 pub(crate) use pickers::{PickerHost, Pickers};
 
@@ -70,8 +71,14 @@ pub struct Composer {
     /// Ask the agent to restate the next message in its own words before it does anything
     /// (`trek_core::restate`). Clears once that message is sent.
     restate: bool,
-    /// A dictation take in flight: recording while `recording()`, transcribing after.
+    /// Voice mode (`voice`): the toolbar row while dictating, the text heard so far, the levels.
+    voice: voice::Voice,
+    /// The take in flight: the mic and the Speech task.
     dictation: Option<dictate::Dictation>,
+    /// While a take is open: what reads its results, the waveform's 20 fps tick, the wait after ✓.
+    voice_tasks: Vec<Task<()>>,
+    /// Holds the keyboard while the waveform is up (esc is ✕, ↩ is ✓).
+    voice_focus: FocusHandle,
     /// Where the text on screen belongs (`Attaching::target`): a thread, or a new one in a project.
     draft_key: String,
     /// The prompt's placeholder as last set (`placeholder`).
@@ -268,6 +275,12 @@ impl Composer {
             cx.observe(pickers.model_search(), |_, _, cx| cx.notify()),
             // The cursor blinks and moves without an input event; this view is cached, so redraw.
             cx.observe(&input, |_, _, cx| cx.notify()),
+            // A take ends when Trek goes to the background (what was heard stays, with a toast).
+            cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() {
+                    this.voice_step(voice::Event::Background, window, cx);
+                }
+            }),
         ];
         let mut this = Self {
             workspace,
@@ -291,7 +304,10 @@ impl Composer {
             consult_effort: None,
             consult_judge: false,
             restate: false,
+            voice: voice::Voice::default(),
             dictation: None,
+            voice_tasks: Vec::new(),
+            voice_focus: cx.focus_handle(),
             draft_key: String::new(),
             placeholder: placeholder(None),
             drafts: Default::default(),
@@ -537,6 +553,10 @@ impl Composer {
         // A message being edited belongs to its thread: leaving it puts the draft it replaced back first.
         if self.editing.as_ref().is_some_and(|e| format!("thread:{}", e.thread) != key) {
             self.cancel_edit(window, cx);
+        }
+        // A take in progress ends unconfirmed: its words don't follow into a draft put away.
+        if self.voice.phase != voice::Phase::Idle {
+            self.voice_step(voice::Event::Cancel, window, cx);
         }
         let text = self.input.read(cx).value().to_string();
         let cursor = self.input.read(cx).cursor();
@@ -795,6 +815,12 @@ impl Composer {
         pickers::picker_items(self, cx).into_iter().map(|i| i.label).collect()
     }
 
+    #[cfg(test)]
+    pub(crate) fn slash_completion(&self, cx: &App) -> (Option<String>, usize, usize) {
+        let s = self.input.read(cx);
+        (pickers::slash_ghost(self, cx), s.tokens().len(), s.cursor())
+    }
+
     /// The consultants picked for the next message (`agent/model/effort`), and whether they stay.
     #[cfg(test)]
     pub(crate) fn consultants(&self) -> (Vec<String>, bool) {
@@ -865,66 +891,160 @@ impl Composer {
         cx.notify();
     }
 
-    /// The mic button: start a take, or stop the one in flight and transcribe it into the text.
+    /// The mic button: open voice mode (a take), or confirm the one that's open.
     pub(crate) fn dictate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(d) = self.dictation.as_mut() {
-            if !d.recording() {
-                return;
-            }
-            let (tx, rx) = async_channel::bounded(1);
-            d.finish(tx);
-            cx.notify();
-            self.await_dictation(rx, window, cx);
-            return;
+        self.voice_step(voice::Event::Mic, window, cx);
+    }
+
+    /// Move voice mode on (`voice::Voice::step`) and do what that calls for.
+    pub(crate) fn voice_step(&mut self, event: voice::Event, window: &mut Window, cx: &mut Context<Self>) {
+        let effect = self.voice.step(event);
+        if effect.ask {
+            self.ask_to_dictate(window, cx);
         }
+        if effect.finish {
+            if let Some(d) = self.dictation.as_mut() {
+                d.finish();
+            }
+            // A live take has its words on screen already: if the recognizer is slow to settle
+            // them, they go in as shown.
+            if self.voice.live {
+                self.voice_tasks.push(cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(voice::GRACE).await;
+                    let _ = this.update_in(cx, |c, window, cx| c.voice_step(voice::Event::GraceOver, window, cx));
+                }));
+            }
+        }
+        if effect.end {
+            self.dictation = None;
+            // Not dropped here: this can run inside one of them (the listener's own update).
+            let tasks = std::mem::take(&mut self.voice_tasks);
+            cx.spawn(async move |_, _| drop(tasks)).detach();
+            if let Some(text) = effect.commit.as_deref() {
+                self.insert_dictated(text, window, cx);
+            } else if self.voice_focus.is_focused(window) {
+                self.focus(window, cx);
+            }
+        }
+        if let Some(message) = effect.toast {
+            self.toast(message, cx);
+        }
+        cx.notify();
+    }
+
+    /// Ask for the mic and Speech; once both are allowed, open the take (unless it was
+    /// abandoned while macOS asked).
+    fn ask_to_dictate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let take = self.voice.take;
         let (tx, rx) = async_channel::bounded(1);
         dictate::ensure_permission(tx);
         cx.spawn_in(window, async move |this, cx| {
             let allowed = rx.recv().await.unwrap_or_else(|_| Err("Dictation ended.".into()));
-            let _ = this.update_in(cx, |c, _, cx| {
-                match allowed {
-                    Ok(()) => match dictate::start() {
-                        Ok(d) => c.dictation = Some(d),
-                        Err(e) => c.toast(e, cx),
-                    },
-                    Err(e) => c.toast(e, cx),
+            let _ = this.update_in(cx, |c, window, cx| {
+                if c.voice.take != take || c.voice.phase != voice::Phase::Asking {
+                    return;
                 }
-                cx.notify();
+                let (heard, results) = async_channel::unbounded();
+                match allowed.and_then(|()| dictate::start(heard)) {
+                    Ok(d) => {
+                        let live = d.live();
+                        c.dictation = Some(d);
+                        c.begin_voice(live, results, window, cx);
+                    }
+                    Err(e) => c.voice_step(voice::Event::Failed(e), window, cx),
+                }
             });
         })
         .detach();
     }
 
-    /// The Speech reply lands in the composer: the take's text at the cursor, or the failure.
-    fn await_dictation(&mut self, rx: async_channel::Receiver<Result<String, String>>, window: &mut Window, cx: &mut Context<Self>) {
-        cx.spawn_in(window, async move |this, cx| {
-            let text = rx.recv().await.unwrap_or_else(|_| Err("Dictation ended.".into()));
-            let _ = this.update_in(cx, |c, window, cx| {
-                c.dictation = None;
-                match text {
-                    Ok(text) if !text.trim().is_empty() => c.insert_dictated(&text, window, cx),
-                    Ok(_) => c.toast("Nothing heard.".into(), cx),
-                    Err(e) => c.toast(e, cx),
+    /// The take is open: the waveform row replaces the toolbar, results feed the preview, and
+    /// the levels tick at 20 fps.
+    pub(crate) fn begin_voice(&mut self, live: bool, results: async_channel::Receiver<dictate::Heard>, window: &mut Window, cx: &mut Context<Self>) {
+        let (value, cursor) = {
+            let s = self.input.read(cx);
+            (s.value().to_string(), s.cursor())
+        };
+        self.voice_step(voice::Event::Started { live, value, cursor }, window, cx);
+        self.voice_tasks.push(cx.spawn_in(window, async move |this, cx| {
+            while let Ok(heard) = results.recv().await {
+                let event = match heard {
+                    dictate::Heard::Partial(t) => voice::Event::Partial(t),
+                    dictate::Heard::Final(t) => voice::Event::Final(t),
+                    dictate::Heard::Failed(e) => voice::Event::Failed(e),
+                };
+                if this.update_in(cx, |c, window, cx| c.voice_step(event, window, cx)).is_err() {
+                    break;
                 }
+            }
+        }));
+        self.voice_tasks.push(cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(voice::TICK).await;
+            let going = this.update(cx, |c, cx| {
+                if !c.voice.active() {
+                    return false;
+                }
+                let level = c.dictation.as_ref().map_or(0., |d| d.level());
+                c.voice.levels.push(level);
                 cx.notify();
+                true
             });
-        })
-        .detach();
+            if !going.unwrap_or(false) {
+                break;
+            }
+        }));
+        self.voice_focus.focus(window, cx);
     }
 
     /// Transcribe an audio file as if it were a dictated take — the shots harness's
-    /// `dictate-file` verb, exercising Speech and the insert path without the mic.
+    /// `dictate-file` verb, exercising Speech and the insert path without the mic: voice mode
+    /// opens already settling (✓ spinning) and the text goes in when Speech is done.
     #[cfg(feature = "shots")]
     pub(crate) fn dictate_file(&mut self, file: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let (tx, rx) = async_channel::bounded(1);
-        match dictate::transcribe_file(file, tx) {
+        let (heard, results) = async_channel::unbounded();
+        match dictate::transcribe_file(file, heard) {
             Ok(d) => {
                 self.dictation = Some(d);
-                cx.notify();
-                self.await_dictation(rx, window, cx);
+                self.begin_voice(false, results, window, cx);
+                self.voice_step(voice::Event::Confirm, window, cx);
             }
             Err(e) => self.toast(e, cx),
         }
+    }
+
+    /// The text area while the waveform is up: what's typed, with what's heard so far at the
+    /// caret in italic and muted (it's still being revised).
+    fn voice_preview(&self, window: &Window, cx: &App) -> AnyElement {
+        let theme = cx.theme();
+        let (text, interim) = self.voice.preview();
+        let body = if text.trim().is_empty() {
+            div().text_color(theme.muted_foreground).child("Listening…").into_any_element()
+        } else {
+            let style = HighlightStyle { font_style: Some(FontStyle::Italic), color: Some(theme.muted_foreground), ..Default::default() };
+            let ranges = (!interim.is_empty()).then_some((interim, style));
+            StyledText::new(text).with_highlights(ranges).into_any_element()
+        };
+        div()
+            .id("voice-preview")
+            .test_support()
+            .track_focus(&self.voice_focus)
+            .min_h(window.line_height() * 2.)
+            .max_h(window.line_height() * 12.)
+            .overflow_y_scroll()
+            .text_color(theme.foreground)
+            .child(body)
+            .into_any_element()
+    }
+
+    /// The text heard so far as the preview shows it, and where the interim part is.
+    #[cfg(test)]
+    pub(crate) fn voice_preview_text(&self) -> (String, std::ops::Range<usize>) {
+        self.voice.preview()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn voice_phase(&self) -> voice::Phase {
+        self.voice.phase
     }
 
     /// A note for the user (dictation problems, mostly) up as a workspace toast.
@@ -935,11 +1055,8 @@ impl Composer {
     /// What the mic heard, at the cursor — space-separated from the text it lands in.
     fn insert_dictated(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |s, cx| {
-            let value = s.value().to_string();
-            let cursor = s.cursor().min(value.len());
-            let left = cursor > 0 && !value[..cursor].ends_with(char::is_whitespace);
-            let right = cursor < value.len() && !value[cursor..].starts_with(char::is_whitespace);
-            s.insert(format!("{}{}{}", if left { " " } else { "" }, text.trim(), if right { " " } else { "" }), window, cx);
+            let padded = voice::spaced(&s.value(), s.cursor(), text);
+            s.insert(padded, window, cx);
         });
         self.focus(window, cx);
         cx.notify();
@@ -2063,7 +2180,7 @@ impl Attaching for Composer {
 const NARROW: f32 = 440.;
 
 impl Render for Composer {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         crate::tests::rendered("Composer");
         let ws = self.workspace.read(cx);
@@ -2144,32 +2261,61 @@ impl Render for Composer {
                 .into_any_element()
         };
 
-        // The mic takes dictation when the bundle can ask for it (see dictate::available). Windows
+        // The mic opens voice mode when the bundle can ask for it (see dictate::available). Windows
         // has no mic button: Win+H is its own dictation, which types into the input.
-        let dictating = self.dictation.as_ref();
+        let asking = self.voice.phase == voice::Phase::Asking;
         let mic = dictate::available().then(|| {
-            let recording = dictating.is_some_and(|d| d.recording());
-            let transcribing = dictating.is_some_and(|d| !d.recording());
             square("dictate")
                 .test_support()
                 .cursor_pointer()
-                .when(recording, |el| el.bg(palette::red(cx)))
-                .tooltip({
-                    let tip = if recording { "Stop and transcribe" } else if transcribing { "Transcribing…" } else { crate::words::words().dictate_tip };
-                    move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
-                })
-                .child(if transcribing {
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(if asking { "Starting dictation…" } else { crate::words::words().dictate_tip }).build(window, cx))
+                .child(if asking {
                     gpui_kit::component::spinner::Spinner::new().xsmall().color(theme.muted_foreground).into_any_element()
                 } else {
-                    Icon::new(if recording { crate::assets::Lucide::Square } else { crate::assets::Lucide::Mic })
-                        .small()
-                        .text_color(if recording { theme.background } else { theme.muted_foreground })
-                        .into_any_element()
+                    Icon::new(crate::assets::Lucide::Mic).small().text_color(theme.muted_foreground).into_any_element()
                 })
-                .when(!transcribing, |el| {
-                    el.on_click(cx.listener(|this, _, window, cx| this.dictate(window, cx)))
-                })
+                .when(!asking, |el| el.on_click(cx.listener(|this, _, window, cx| this.dictate(window, cx))))
                 .into_any_element()
+        });
+        // Voice mode: the waveform, ✕ and ✓ in place of the toolbar.
+        let voice_row = self.voice.active().then(|| {
+            let finishing = self.voice.phase == voice::Phase::Finishing;
+            let cancel = square("voice-cancel")
+                .test_support()
+                .rounded_full()
+                .cursor_pointer()
+                .bg(theme.foreground.opacity(0.08))
+                .hover(|s| s.bg(theme.foreground.opacity(0.14)))
+                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared("Discard (esc)")).build(window, cx))
+                .child(Icon::new(IconName::Close).small().text_color(theme.muted_foreground))
+                .on_click(cx.listener(|this, _, window, cx| this.voice_step(voice::Event::Cancel, window, cx)));
+            let confirm = square("voice-confirm")
+                .test_support()
+                .rounded_full()
+                .bg(theme.foreground)
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared(if finishing { "Finishing…" } else { "Insert the text (↩)" })).build(window, cx))
+                .child(if finishing {
+                    gpui_kit::component::spinner::Spinner::new().xsmall().color(theme.background).into_any_element()
+                } else {
+                    Icon::new(IconName::Check).small().text_color(theme.background).into_any_element()
+                })
+                .when(!finishing, |el| {
+                    el.cursor_pointer()
+                        .hover(|s| s.opacity(0.85))
+                        .on_click(cx.listener(|this, _, window, cx| this.voice_step(voice::Event::Confirm, window, cx)))
+                })
+                // Fades in as the take opens.
+                .with_animation(("voice-confirm-in", self.voice.take), Animation::new(std::time::Duration::from_millis(800)), |el, t| el.opacity(0.6 + 0.4 * t));
+            h_flex()
+                .id("voice-row")
+                .test_support()
+                .p(px(8.))
+                .pl(px(14.))
+                .gap(px(8.))
+                .min_w_0()
+                .child(voice::waveform(self.voice.levels.bars().collect(), theme.muted_foreground))
+                .child(cancel)
+                .child(confirm)
         });
 
         // Record the card's width; crossing the compact threshold re-renders the pills.
@@ -2234,7 +2380,10 @@ impl Render for Composer {
             .when_some(missing, |el, (wt, id)| el.child(self.missing_worktree(&wt, id, cx)))
             .children(self.edit_banner(cx))
             .children(self.attachment_strip(cx))
-            .child(div().px(px(14.)).pt(px(if is_draft || !self.outbox.paths.is_empty() || self.editing.is_some() { 12. } else { 2. })).child(Textarea::new(&self.input).appearance(false).on_paste({
+            .child(div().px(px(14.)).pt(px(if is_draft || !self.outbox.paths.is_empty() || self.editing.is_some() { 12. } else { 2. })).when(self.voice.active(), |el| el.pb(px(6.))).map(|el| if self.voice.active() { el.child(self.voice_preview(window, cx)) } else { el.relative().child(Textarea::new(&self.input).appearance(false).token(|token, _, cx| {
+                let accent = cx.theme().primary;
+                div().px(px(7.)).rounded_full().bg(accent.opacity(0.12)).text_color(accent).child(token.token().label().clone())
+            }).on_paste({
                 let me = cx.entity().downgrade();
                 move |item, window, cx| match attachments::pasted(item) {
                     Some(p) => me
@@ -2245,8 +2394,9 @@ impl Render for Composer {
                         .is_ok(),
                     None => false,
                 }
-            })))
-            .child(
+            })).children(pickers::slash_ghost_overlay(self, cx)) }))
+            .when_some(voice_row, |el, row| el.child(row))
+            .when(!self.voice.active(), |el| el.child(
                 h_flex()
                     .p(px(8.))
                     .gap(px(6.))
@@ -2282,7 +2432,7 @@ impl Render for Composer {
                     .when_some(context, |el, (used, window)| el.child(pickers::context_ring(used, window, cx)))
                     .children(mic)
                     .child(send),
-            );
+            ));
 
         let limit_bar = thread.as_ref().and_then(|t| self.limit_bar(&t.id, compact, cx));
         // Capy-style context chips above the card on a new thread.
@@ -2405,6 +2555,13 @@ impl Render for Composer {
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 // ⌥↩ sends the other way from the default while a turn runs (steer ⇄ queue).
                 let k = &ev.keystroke;
+                // Voice mode: esc is ✕ and ↩ is ✓.
+                if this.voice.active() && !k.modifiers.modified() && matches!(k.key.as_str(), "escape" | "enter") {
+                    cx.stop_propagation();
+                    let event = if k.key == "escape" { voice::Event::Cancel } else { voice::Event::Confirm };
+                    this.voice_step(event, window, cx);
+                    return;
+                }
                 if k.key == "enter" && k.modifiers.alt && !k.modifiers.secondary() && !k.modifiers.shift && this.pickers.trigger.is_none() {
                     cx.stop_propagation();
                     let other = match this.workspace.read(cx).settings.general.follow_up {

@@ -8,7 +8,7 @@ use crate::mentions::{self, PickIcon, PickItem, PickKind, Trigger};
 use crate::palette;
 use crate::ui::{self, Pill};
 use crate::workspace::{Prefs, Route, Scope, Workspace};
-use gpui_kit::component::input::{Input, InputState, TextareaState};
+use gpui_kit::component::input::{InlineToken, Input, InputState, TextareaState};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex};
@@ -721,6 +721,46 @@ pub(crate) fn picker_items<H: PickerHost>(host: &H, cx: &App) -> Vec<PickItem> {
     items
 }
 
+/// The first prefix match supplies display-only text, never document content. A substring
+/// match can still be picked with Enter, but cannot be appended as a ghost suffix.
+pub(crate) fn slash_ghost<H: PickerHost>(host: &H, cx: &App) -> Option<String> {
+    let t = host.pickers_ref().trigger.as_ref()?;
+    let state = host.input().read(cx);
+    if t.kind != PickKind::Slash || t.query.is_empty() || !state.selected_range().is_empty()
+        || state.cursor() != state.value().len()
+        || mentions::trigger_at(&state.value(), state.cursor()).as_ref() != Some(t)
+    {
+        return None;
+    }
+    let first = picker_items(host, cx).into_iter().next()?;
+    let typed_len = 1 + t.query.len();
+    let suffix = first.insert.get(typed_len..)?;
+    (first.insert[..typed_len].eq_ignore_ascii_case(&format!("/{}", t.query)) && !suffix.is_empty())
+        .then(|| suffix.to_string())
+}
+
+/// Paint after the textarea, using its current caret geometry (including wrapping and scroll).
+/// The canvas owns no text, selection or hitbox, so drafts, copy and send cannot include it.
+pub(crate) fn slash_ghost_overlay<H: PickerHost>(host: &H, cx: &App) -> Option<AnyElement> {
+    let ghost = slash_ghost(host, cx)?;
+    let input = host.input().clone();
+    let color = cx.theme().muted_foreground;
+    let family = cx.theme().font_family.clone();
+    Some(canvas(|_, _, _| {}, move |_, _, window, cx| {
+        let s = input.read(cx);
+        if !s.focus_handle(cx).is_focused(window) { return; }
+        let Some((caret, height)) = s.cursor_layout() else { return };
+        let bounds = s.input_bounds();
+        let origin = point(caret.right(), caret.top() - (height - caret.size.height) / 2. + s.scroll_offset().y);
+        let run = TextRun { len: ghost.len(), font: font(family.clone()), color, background_color: None, underline: None, strikethrough: None };
+        // Textarea's default (Medium) uses text_sm, i.e. 0.875 rem.
+        let line = window.text_system().shape_line(ghost.clone().into(), window.rem_size() * 0.875, &[run], None);
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            let _ = line.paint(origin, height, TextAlign::Left, None, window, cx);
+        });
+    }).absolute().size_full().into_any_element())
+}
+
 /// Put row `ix` in place of the token being completed.
 pub(crate) fn accept_pick<H: PickerHost>(host: &mut H, ix: usize, window: &mut Window, cx: &mut Context<H>) {
     let Some(t) = host.pickers_ref().trigger.clone() else { return };
@@ -739,9 +779,16 @@ pub(crate) fn accept_pick<H: PickerHost>(host: &mut H, ix: usize, window: &mut W
     let folder = item.icon == PickIcon::Folder;
     host.input().update(cx, |s, cx| {
         let cursor = s.cursor();
-        s.set_selected_range(t.start..cursor, cx);
-        // Folders keep the picker open so you can keep drilling down.
-        s.replace(if folder { item.insert.clone() } else { format!("{} ", item.insert) }, window, cx);
+        if t.kind == PickKind::Slash {
+            let token = InlineToken::new(item.insert.clone(), item.insert.clone());
+            if s.replace_range_with_token(t.start..cursor, token, window, cx).is_ok() {
+                s.insert(" ", window, cx);
+            }
+        } else {
+            s.set_selected_range(t.start..cursor, cx);
+            // Folders keep the picker open so you can keep drilling down.
+            s.replace(if folder { item.insert.clone() } else { format!("{} ", item.insert) }, window, cx);
+        }
     });
     host.pickers().picked = 0;
     update_trigger(host, cx);
@@ -766,6 +813,7 @@ pub(crate) fn picker_action<H: PickerHost>(host: &mut H, key: &str, window: &mut
         "down" => p.picked = (p.picked + 1) % n,
         _ => {
             let at = p.picked.min(n - 1);
+            let at = if key == "tab" && slash_ghost(host, cx).is_some() { 0 } else { at };
             accept_pick(host, at, window, cx)
         }
     }
@@ -798,6 +846,7 @@ pub(crate) fn picker_key<H: PickerHost>(host: &mut H, ev: &KeyDownEvent, window:
                 p.swallow_enter = Some(std::time::Instant::now());
             }
             let at = p.picked.min(n - 1);
+            let at = if ks.key == "tab" && slash_ghost(host, cx).is_some() { 0 } else { at };
             accept_pick(host, at, window, cx)
         }
         _ => return,

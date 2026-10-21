@@ -6,9 +6,10 @@
 //! runs fenced in: served from an origin of its own, under a Content-Security-Policy that lets it
 //! load scripts, styles, images and fonts over https (CDNs such as jsdelivr and unpkg: that's what
 //! makes it useful) and nothing over http, from `file:` or from the machine; it may not navigate
-//! away from itself, and it can tell Trek exactly one thing besides its height: that it wants a
-//! link opened in the user's browser. Messages carry a per-view secret only Trek's own bootstrap
-//! script knows, so the page's scripts can't speak for it.
+//! away from itself, and besides its height it can tell Trek only that it wants a link opened in the
+//! user's browser, or, right after the user clicked in it, that it has text to send as their next
+//! message or to copy (`Action`: `trek.send`, `trek.copy`). Messages carry a per-view secret only
+//! Trek's own bootstrap script knows, so the page's scripts can't speak for it.
 //!
 //! This module holds the parts that are plain data and text (fence and title, the document as
 //! served, the theme's CSS variables, the bootstrap script, message and navigation checks); the
@@ -31,12 +32,21 @@ pub const DEFAULT_HEIGHT: f32 = 360.;
 const MAX_TITLE_CHARS: usize = 80;
 /// A link the page asks to open: longer is refused.
 const MAX_URL_CHARS: usize = 2048;
-/// A message from the page: longer is refused unread.
-const MAX_MESSAGE_BYTES: usize = 4096;
+/// A message from the page: longer is refused unread. Room for an action's text, escaped.
+const MAX_MESSAGE_BYTES: usize = 16 * 1024;
+/// The text of `trek.send` or `trek.copy`, in UTF-8 bytes: longer is ignored.
+pub const MAX_ACTION_BYTES: usize = 4096;
+/// A page sends at most one message this often (`SendGate`); more are ignored.
+pub const SEND_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+/// `trek.send` and `trek.copy` count only this soon after the user's own click or key in the page.
+pub const GESTURE_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+/// What a card's "Send to iPhone" sends (`skills::MAP_CARD`): besides posting it, Trek may put
+/// the thread on the user's phone.
+pub const OPEN_ON_PHONE: &str = "Open this on my iPhone";
 
 /// Told to every session while interactive artifacts are on, after the `trek-viz` note. Terse:
 /// every session carries it (`instructions_stay_compact`).
-pub const AGENT_INSTRUCTIONS: &str = "When an interactive or rich visual genuinely helps (a 3D model, a simulation, an explorable diagram, a tabbed report), add one fenced `trek-html` block holding a complete, self-contained HTML document with a <title>, then state its takeaway in prose; prefer `trek-viz` for simple charts. Trek runs it in a sandboxed web view inline in the answer, as tall as its content (160-720 px, scrolling past that) and as wide as the answer. Inline your CSS and JS; scripts, styles, images and fonts may load over https from CDNs such as cdn.jsdelivr.net or unpkg.com, but nothing over http or from local files, and it can't navigate away (links open in the user's browser). Style it with Trek's CSS variables --trek-bg, --trek-fg, --trek-muted, --trek-accent, --trek-border, --trek-surface, --trek-font, --trek-mono and --trek-radius, and leave the page background transparent so it sits in Night and Paper alike. Keep it under 200 KB.";
+pub const AGENT_INSTRUCTIONS: &str = "When an interactive or rich visual genuinely helps (a 3D model, a simulation, an explorable diagram, a tabbed report), add one fenced `trek-html` block holding a complete, self-contained HTML document with a <title>, then state its takeaway in prose; prefer `trek-viz` for simple charts. Trek runs it in a sandboxed web view inline in the answer, as tall as its content (160-720 px, scrolling past that) and as wide as the answer. Inline your CSS and JS; scripts, styles, images and fonts may load over https from CDNs such as cdn.jsdelivr.net or unpkg.com, but nothing over http or from local files, and it can't navigate away (links open in the user's browser). Style it with Trek's CSS variables --trek-bg, --trek-fg, --trek-muted, --trek-accent, --trek-border, --trek-surface, --trek-font, --trek-mono and --trek-radius, and leave the page background transparent so it sits in Night and Paper alike. Keep it under 200 KB. A button may call trek.send(text), sent as the user's next message here, or trek.copy(text). For a map, pull request or database migration card, follow Trek's built-in skill map-card, pull-request-card or database-migration-card.";
 
 /// The Content-Security-Policy the document is served with. Scripts, styles, images, fonts,
 /// media and `fetch` over https only (CDNs); inline code and `eval` (it's the agent's own
@@ -267,6 +277,24 @@ pub const MEDIA_PATH: &str = "/media";
 /// the card and as tall as the video (`MAX_HEIGHT` at most; it fits inside that).
 pub const VIDEO_HTML: &str = "<style>html,body{margin:0;background:transparent}video{display:block;width:100%;height:auto;max-height:720px;background:#000;object-fit:contain}</style><video src=\"/media#t=0.001\" controls controlslist=\"nodownload\" disablepictureinpicture preload=\"metadata\" playsinline></video>";
 
+/// What a video from the web plays under: as `VIDEO_CSP`, its media from https only.
+pub const REMOTE_VIDEO_CSP: &str = "default-src 'none'; media-src https:; style-src 'unsafe-inline'; form-action 'none'; object-src 'none'; base-uri 'none'";
+
+/// The page a video from the web (`url`, an https link `media::remote_video` took) plays in: as
+/// `VIDEO_HTML`, from there.
+pub fn remote_video_html(url: &str) -> String {
+    let src = if url.contains('#') { url.to_string() } else { format!("{url}#t=0.001") };
+    let escaped = src.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;");
+    VIDEO_HTML.replacen(&format!("src=\"{MEDIA_PATH}#t=0.001\""), &format!("src=\"{escaped}\""), 1)
+}
+
+/// A script that takes a video's page to `secs` and plays it (a frame clicked in the strip under
+/// it), once it knows how long the video is.
+pub fn seek_script(secs: f64) -> String {
+    let t = if secs.is_finite() { secs.max(0.) } else { 0. };
+    format!("(()=>{{const v=document.querySelector('video');if(!v)return;const go=()=>{{v.currentTime={t:.3};v.play().catch(()=>{{}});}};if(v.readyState>=1)go();else v.addEventListener('loadedmetadata',go,{{once:true}});}})();")
+}
+
 /// `document` under another policy (`csp`).
 pub fn document_with(html: &str, theme_css: &str, csp: &str) -> String {
     let ours = format!(
@@ -301,10 +329,33 @@ pub fn document_with(html: &str, theme_css: &str, csp: &str) -> String {
 /// the page took the pointer or the keys (`focus`, so Trek's shortcuts stand aside), an Esc the
 /// page didn't use (`esc`, so the keys go back to Trek), and a click on a link to elsewhere
 /// (`open`, for the user's browser; the frame itself never leaves the document), and a wheel it
-/// had no use for (`w`, so the answer scrolls on past it).
+/// had no use for (`w`, so the answer scrolls on past it). It also gives the page `trek.send` and
+/// `trek.copy` (`ACTIONS_JS`), heard only within `GESTURE_WINDOW` of the user's own click or key.
 pub fn bootstrap(nonce: &str) -> String {
-    BOOTSTRAP.replace("__NONCE__", nonce)
+    BOOTSTRAP.replace("__ACTIONS__", ACTIONS_JS).replace("__NONCE__", nonce)
 }
+
+/// The page's `trek.send(text)` and `trek.copy(text)`, as a function of `post` (how a message
+/// reaches Trek) and `live` (whether the user just clicked or typed in the page). Both platforms
+/// run this same text: the Mac inside its bootstrap, the phone in the page's own world
+/// (`ios/Trek/Views/LivePage.swift`, `the_phone_runs_the_same_page_helper`). Each returns whether
+/// the message went: not for text that is blank, over `MAX_ACTION_BYTES` or holds control
+/// characters (other than tab and line breaks), nor a second send within `SEND_INTERVAL`. Trek
+/// checks all of it again (`parse_action`, `SendGate`).
+pub const ACTIONS_JS: &str = r#"((post, live) => {
+  const MAX = 4096;
+  const bytes = (s) => { try { return new TextEncoder().encode(s).length; } catch (_) { return s.length * 3; } };
+  const fit = (s) => typeof s === 'string' && s.trim() !== '' && bytes(s) <= MAX && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(s);
+  let sent = 0;
+  const act = (t) => (text) => {
+    if (!fit(text) || !live()) return false;
+    if (t === 'send') { const now = Date.now(); if (now - sent < 1000) return false; sent = now; }
+    post({ t, text });
+    return true;
+  };
+  const api = Object.freeze({ send: act('send'), copy: act('copy') });
+  try { Object.defineProperty(window, 'trek', { value: api, enumerable: true }); } catch (_) {}
+})"#;
 
 const BOOTSTRAP: &str = r#"(() => {
   if (window.__trekArtifact) return;
@@ -315,6 +366,12 @@ const BOOTSTRAP: &str = r#"(() => {
   const raw = wk ? wk.postMessage.bind(wk) : wv ? wv.postMessage.bind(wv) : null;
   const str = JSON.stringify.bind(JSON);
   const post = (o) => { if (!raw) return; o.n = N; try { raw(str(o)); } catch (_) {} };
+  // `trek.send` and `trek.copy`, only just after the user's own click or key.
+  let touched = 0;
+  const touch = (e) => { if (e.isTrusted) touched = Date.now(); };
+  window.addEventListener('pointerup', touch, true);
+  window.addEventListener('keydown', touch, true);
+  (__ACTIONS__)(post, () => Date.now() - touched < 5000);
   let last = -1, queued = false;
   const measure = () => {
     queued = false;
@@ -413,6 +470,62 @@ pub fn parse_message(body: &str, nonce: &str) -> Option<Message> {
     }
 }
 
+/// What the page asked Trek to do with some text (`ACTIONS_JS`), once checked (`parse_action`).
+/// Kept apart from `Message`: a handler that doesn't take them yet goes on ignoring them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// `trek.send(text)`: post `text` (trimmed) as the user's next message in the card's thread,
+    /// marked as from the card. At most one per `SEND_INTERVAL` per page (`SendGate`).
+    Send(String),
+    /// `trek.copy(text)`: put `text` on the clipboard, as it is.
+    Copy(String),
+}
+
+/// `body`, a message from the page, if it's an action Trek's bootstrap sent with `nonce`:
+/// `{"t":"send"|"copy","text":…}` whose text passes `action_text`. Anything else is `None`
+/// (`parse_message` reads the rest, and ignores these).
+pub fn parse_action(body: &str, nonce: &str) -> Option<Action> {
+    if body.len() > MAX_MESSAGE_BYTES || nonce.is_empty() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let object = value.as_object()?;
+    if object.get("n")?.as_str()? != nonce {
+        return None;
+    }
+    let text = action_text(object.get("text")?.as_str()?)?;
+    match object.get("t")?.as_str()? {
+        "send" => Some(Action::Send(text.trim().to_string())),
+        "copy" => Some(Action::Copy(text.to_string())),
+        _ => None,
+    }
+}
+
+/// `text` if a page may send or copy it: not blank, at most `MAX_ACTION_BYTES`, and no control
+/// characters but tab, `\n` and `\r`.
+pub fn action_text(text: &str) -> Option<&str> {
+    let fits = !text.trim().is_empty() && text.len() <= MAX_ACTION_BYTES && !text.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'));
+    fits.then_some(text)
+}
+
+/// One page's sends, at most one per `SEND_INTERVAL`: a page that loops on `trek.send` (or a
+/// user clicking fast) reaches the thread once a second at most.
+#[derive(Debug, Clone, Default)]
+pub struct SendGate {
+    last: Option<std::time::Instant>,
+}
+
+impl SendGate {
+    /// Whether a send at `now` may go; if so it counts.
+    pub fn allow(&mut self, now: std::time::Instant) -> bool {
+        if self.last.is_some_and(|last| now.saturating_duration_since(last) < SEND_INTERVAL) {
+            return false;
+        }
+        self.last = Some(now);
+        true
+    }
+}
+
 /// `url` if it's one to hand the user's browser (or mail app): http, https or mailto, no longer
 /// than 2 KB, with nothing in it a URL can't hold.
 pub fn external(url: &str) -> Option<String> {
@@ -487,6 +600,12 @@ mod tests {
         let doc = document_with(VIDEO_HTML, "", VIDEO_CSP);
         assert!(doc.contains(&format!("content=\"{VIDEO_CSP}\"")) && !doc.contains(&format!("content=\"{CSP}\"")));
         assert!(VIDEO_HTML.contains(&format!("src=\"{MEDIA_PATH}")));
+        let remote = remote_video_html("https://cdn.example.com/a.mp4?x=1&y=\"2");
+        assert!(remote.contains("src=\"https://cdn.example.com/a.mp4?x=1&amp;y=&quot;2#t=0.001\""), "{remote}");
+        assert!(!remote.contains(MEDIA_PATH));
+        assert!(REMOTE_VIDEO_CSP.contains("media-src https:") && !REMOTE_VIDEO_CSP.contains("script-src"));
+        assert!(seek_script(12.5).contains("currentTime=12.500"));
+        assert!(seek_script(f64::NAN).contains("currentTime=0.000"));
     }
 
     #[test]
@@ -551,6 +670,76 @@ mod tests {
         assert_eq!(parse_message(r#"["n","3f9a"]"#, n), None);
         let huge = format!(r#"{{"n":"3f9a","t":"focus","pad":"{}"}}"#, "x".repeat(MAX_MESSAGE_BYTES));
         assert_eq!(parse_message(&huge, n), None, "too long to read");
+    }
+
+    #[test]
+    fn a_page_may_send_or_copy_text_and_nothing_else() {
+        let n = "3f9a";
+        assert_eq!(parse_action(r#"{"n":"3f9a","t":"send","text":"  Resolve auth.ts: keep mine \n"}"#, n), Some(Action::Send("Resolve auth.ts: keep mine".into())));
+        assert_eq!(parse_action(r#"{"n":"3f9a","t":"copy","text":"  let x = 1;\n"}"#, n), Some(Action::Copy("  let x = 1;\n".into())), "a copy is kept as it is");
+        assert_eq!(parse_action(r#"{"n":"3f9a","t":"send","text":"Ein Café\tdraußen"}"#, n), Some(Action::Send("Ein Café\tdraußen".into())));
+        // The other messages aren't actions, and actions aren't other messages: a handler that
+        // reads only `parse_message` ignores them.
+        assert_eq!(parse_action(r#"{"n":"3f9a","t":"h","v":412}"#, n), None);
+        assert_eq!(parse_message(r#"{"n":"3f9a","t":"send","text":"Apply the migration"}"#, n), None);
+        // Without the secret, or with another.
+        assert_eq!(parse_action(r#"{"t":"send","text":"hi"}"#, n), None);
+        assert_eq!(parse_action(r#"{"n":"0000","t":"send","text":"hi"}"#, n), None);
+        assert_eq!(parse_action(r#"{"n":"","t":"send","text":"hi"}"#, ""), None);
+        // Blank, not text, or with control characters.
+        for bad in [r#""""#, r#""  \n ""#, "42", "null", r#"["hi"]"#, r#""a\u0000b""#, r#""a\u001bb""#, r#""a\u0085b""#] {
+            assert_eq!(parse_action(&format!(r#"{{"n":"3f9a","t":"send","text":{bad}}}"#), n), None, "{bad}");
+        }
+        assert_eq!(parse_action(r#"{"n":"3f9a","t":"send"}"#, n), None);
+        assert_eq!(parse_action(r#"{"n":"3f9a","t":"run","text":"rm -rf /"}"#, n), None);
+        // 4 KiB of text, in bytes, and no more.
+        let most = "é".repeat(MAX_ACTION_BYTES / 2);
+        assert_eq!(parse_action(&format!(r#"{{"n":"3f9a","t":"copy","text":"{most}"}}"#), n), Some(Action::Copy(most.clone())));
+        assert_eq!(parse_action(&format!(r#"{{"n":"3f9a","t":"copy","text":"{most}x"}}"#), n), None);
+        // Escaped, the message is longer than its text, and still read.
+        let quoted = r#"\""#.repeat(MAX_ACTION_BYTES);
+        assert!(matches!(parse_action(&format!(r#"{{"n":"3f9a","t":"copy","text":"{quoted}"}}"#), n), Some(Action::Copy(t)) if t.len() == MAX_ACTION_BYTES));
+    }
+
+    #[test]
+    fn a_page_sends_at_most_once_a_second() {
+        let t0 = std::time::Instant::now();
+        let mut gate = SendGate::default();
+        assert!(gate.allow(t0));
+        assert!(!gate.allow(t0 + std::time::Duration::from_millis(400)));
+        assert!(!gate.allow(t0 + std::time::Duration::from_millis(999)), "a refused send doesn't restart the second");
+        assert!(gate.allow(t0 + SEND_INTERVAL));
+        assert!(!gate.allow(t0), "a clock read late counts as the same second");
+        // Each page has its own.
+        assert!(SendGate::default().allow(t0));
+    }
+
+    #[test]
+    fn the_page_helper_checks_what_trek_checks() {
+        // The Mac runs it inside the bootstrap, with the channel and the user's last click.
+        let js = bootstrap("c0ffee");
+        assert!(js.contains(ACTIONS_JS) && !js.contains("__ACTIONS__"), "{js}");
+        assert!(js.contains(&format!("(post, () => Date.now() - touched < {})", GESTURE_WINDOW.as_millis())));
+        // The page sees `trek.send` and `trek.copy`, posting `{t, text}` as `parse_action` reads.
+        for part in ["send: act('send')", "copy: act('copy')", "post({ t, text })", "Object.defineProperty(window, 'trek'"] {
+            assert!(ACTIONS_JS.contains(part), "{part}");
+        }
+        assert!(ACTIONS_JS.contains(&format!("const MAX = {MAX_ACTION_BYTES};")));
+        assert!(ACTIONS_JS.contains(&format!("now - sent < {}", SEND_INTERVAL.as_millis())));
+        // The same control characters as `action_text`: C0 but tab and line breaks, DEL, C1.
+        assert!(ACTIONS_JS.contains(r"[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]"));
+        for c in (0u32..0xa0).filter_map(char::from_u32) {
+            let blocked = c.is_control() && !matches!(c, '\n' | '\r' | '\t');
+            assert_eq!(action_text(&format!("a{c}b")).is_none(), blocked, "{:#x}", c as u32);
+        }
+    }
+
+    #[test]
+    fn the_phone_runs_the_same_page_helper() {
+        let swift = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ios/Trek/Views/LivePage.swift")).expect("LivePage.swift");
+        let theirs: Vec<&str> = swift.lines().map(str::trim).collect();
+        let ours: Vec<&str> = ACTIONS_JS.lines().map(str::trim).collect();
+        assert!(theirs.windows(ours.len()).any(|w| w == ours), "LivePage.swift's `LivePage.actions` should hold `artifact::ACTIONS_JS` line for line");
     }
 
     #[test]
@@ -644,6 +833,11 @@ mod tests {
     #[test]
     fn instructions_stay_compact() {
         assert!(AGENT_INSTRUCTIONS.chars().count() < 1_200, "{} chars", AGENT_INSTRUCTIONS.chars().count());
+        // What a page can do, and the card recipes Trek ships (`skills::CARD_RECIPES`).
+        assert!(AGENT_INSTRUCTIONS.contains("trek.send(text)") && AGENT_INSTRUCTIONS.contains("trek.copy(text)"));
+        for recipe in crate::skills::CARD_RECIPES {
+            assert!(AGENT_INSTRUCTIONS.contains(recipe), "{recipe}");
+        }
         assert!(AGENT_INSTRUCTIONS.contains("`trek-html`") && AGENT_INSTRUCTIONS.contains("trek-viz") && AGENT_INSTRUCTIONS.contains("200 KB"));
         // The mock agent finds a verification CLI by "(`": the note mustn't look like one.
         assert!(!AGENT_INSTRUCTIONS.contains("(`"));

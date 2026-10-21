@@ -638,6 +638,7 @@ nonisolated enum ServerMessage {
     case icon(re: String?, IconReply)
     case noteAsset(re: String?, NoteAsset)
     case noteImage(re: String?, NoteImage)
+    case noteFileChunk(re: String?, NoteFileChunk)
     case unknown(String)
 
     private struct Raw: Decodable {
@@ -725,6 +726,7 @@ nonisolated enum ServerMessage {
         case "icon": return .icon(re: r.re, try decoder.decode(IconReply.self, from: data))
         case "note_asset": return .noteAsset(re: r.re, try decoder.decode(NoteAsset.self, from: data))
         case "note_image": return .noteImage(re: r.re, try decoder.decode(NoteImage.self, from: data))
+        case "note_file_chunk": return .noteFileChunk(re: r.re, try decoder.decode(NoteFileChunk.self, from: data))
         default: return .unknown(r.type)
         }
     }
@@ -819,6 +821,8 @@ nonisolated enum ClientMessage {
     case noteAsset(noteId: String, path: String, maxPx: Int?)
     /// Keep a photo (a base64 JPEG) with the notes; the Mac answers with its link.
     case addNoteImage(noteId: String, data: String, name: String?)
+    /// `length` bytes from `offset` of a file kept with the notes (`attachments/…`), as it is.
+    case noteFile(path: String, offset: Int64, length: Int)
 
     static let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
 
@@ -912,7 +916,7 @@ nonisolated enum ClientMessage {
         case .search(let query, let limit):
             o = ["type": "search", "query": query]
             if let limit { o["limit"] = limit }
-        case .useReset, .queueAction, .attachment, .backgroundOutput, .stopBackground, .icon, .noteAsset, .addNoteImage:
+        case .useReset, .queueAction, .attachment, .backgroundOutput, .stopBackground, .icon, .noteAsset, .addNoteImage, .noteFile:
             o = parityJSON
         }
         if let id { o["id"] = id }

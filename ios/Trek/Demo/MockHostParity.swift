@@ -68,6 +68,8 @@ extension MockHost {
             let path = DemoMac.addNoteImage(bytes)
             let alt = (name ?? "").filter { !"[]\\".contains($0) }
             deliver(.noteImage(re: id, NoteImage(noteId: noteId, path: path, markdown: "![\(alt)](\(path))")), after: 0.4)
+        case .noteFile:
+            deliver(.error(re: id, code: .notFound, message: "That file isn't on the Mac any more"))
         default:
             break
         }

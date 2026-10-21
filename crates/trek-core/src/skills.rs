@@ -94,22 +94,78 @@ pub const CREATE_VERIFICATION: &str = "create-verification-skill";
 /// The guide that brings one up to date.
 pub const MAINTAIN_VERIFICATION: &str = "maintain-verification-skill";
 
+/// Card recipes (`artifact::AGENT_INSTRUCTIONS` names them): a `trek-html` card for places on a
+/// map, a pull request, a database migration.
+pub const MAP_CARD: &str = "map-card";
+pub const PULL_REQUEST_CARD: &str = "pull-request-card";
+pub const MIGRATION_CARD: &str = "database-migration-card";
+pub const CARD_RECIPES: [&str; 3] = [MAP_CARD, PULL_REQUEST_CARD, MIGRATION_CARD];
+
 /// Skills Trek ships: (folder name, SKILL.md).
-pub const SHIPPED: [(&str, &str); 2] = [
+pub const SHIPPED: [(&str, &str); 5] = [
     (CREATE_VERIFICATION, include_str!("../skills/create-verification-skill/SKILL.md")),
     (MAINTAIN_VERIFICATION, include_str!("../skills/maintain-verification-skill/SKILL.md")),
+    (MAP_CARD, include_str!("../skills/map-card/SKILL.md")),
+    (PULL_REQUEST_CARD, include_str!("../skills/pull-request-card/SKILL.md")),
+    (MIGRATION_CARD, include_str!("../skills/database-migration-card/SKILL.md")),
 ];
 
+/// Writes every skill Trek ships into `shipped_root` (or brings it up to this version), so an
+/// agent pointed there finds them all. Best effort: one that can't be written is left out.
+pub fn write_shipped() {
+    for (name, _) in SHIPPED {
+        let _ = shipped(name);
+    }
+}
+
+/// A skill from elsewhere the Skills page suggests, with the command that installs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Suggestion {
+    /// Its name once installed (what `discover` lists it as).
+    pub name: &'static str,
+    pub title: &'static str,
+    pub author: &'static str,
+    pub description: &'static str,
+    /// Run in a terminal: it asks where to install, as the tool does.
+    pub command: &'static str,
+}
+
+/// Skills worth having, shown under "Suggested" until they're installed.
+pub const SUGGESTED: [Suggestion; 1] = [Suggestion {
+    name: "anatomy",
+    title: "Anatomy",
+    author: "wheresryan22",
+    description: "Name an idea and the agent draws the machine that explains it: interactive isometric wireframes to rotate, inspect and run, with WebGL fire, water and plasma.",
+    command: "npx skills add wheresryan22/anatomy",
+}];
+
+/// The suggestions not among `installed` (by name, any case).
+pub fn suggestions(installed: &[Skill]) -> Vec<Suggestion> {
+    SUGGESTED.into_iter().filter(|s| !installed.iter().any(|i| i.name.eq_ignore_ascii_case(s.name))).collect()
+}
+
 /// Where Trek keeps the skills it ships. Not one of the agents' own skill folders: Trek points an
-/// agent at one when it starts work that follows it, and the user's agents are left as they are.
+/// agent at one when it starts work that follows it (every session may read it), and the user's
+/// agents are left as they are. The first ask in a process (per data folder) writes them all there
+/// (`write_shipped`), so an agent told of a card recipe finds it.
 pub fn shipped_root() -> PathBuf {
+    static WRITTEN: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+    let root = shipped_home();
+    let first = WRITTEN.lock().map(|mut done| !done.contains(&root) && { done.push(root.clone()); true }).unwrap_or(false);
+    if first {
+        write_shipped();
+    }
+    root
+}
+
+fn shipped_home() -> PathBuf {
     paths::data_dir().join("skills")
 }
 
 /// The SKILL.md of shipped skill `name`, written (or brought up to this version) first.
 pub fn shipped(name: &str) -> anyhow::Result<PathBuf> {
     let (_, text) = SHIPPED.iter().find(|(n, _)| *n == name).ok_or_else(|| anyhow::anyhow!("Trek ships no skill called {name}"))?;
-    let md = shipped_root().join(name).join("SKILL.md");
+    let md = shipped_home().join(name).join("SKILL.md");
     if std::fs::read_to_string(&md).ok().as_deref() != Some(*text) {
         std::fs::create_dir_all(md.parent().unwrap_or(&md))?;
         std::fs::write(&md, text)?;
@@ -201,9 +257,7 @@ pub fn discover(project: Option<&Path>) -> Vec<Skill> {
         }
     }
     scan(&codex_skills.join(".system"), SkillSource::CodexSystem, &mut out);
-    for (name, _) in SHIPPED {
-        let _ = shipped(name);
-    }
+    write_shipped();
     scan(&shipped_root(), SkillSource::Trek, &mut out);
     for (plugin, dir) in plugin_dirs() {
         scan(&dir.join("skills"), SkillSource::Plugin(plugin), &mut out);
@@ -434,9 +488,78 @@ mod tests {
         shipped(CREATE_VERIFICATION).unwrap();
         assert!(std::fs::read_to_string(&md).unwrap().contains("metadata:\n  trek: verification"));
         let listed: Vec<Skill> = discover(None).into_iter().filter(|s| s.source == SkillSource::Trek).collect();
-        assert_eq!(listed.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), [CREATE_VERIFICATION, MAINTAIN_VERIFICATION]);
+        assert_eq!(listed.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), [CREATE_VERIFICATION, MIGRATION_CARD, MAINTAIN_VERIFICATION, MAP_CARD, PULL_REQUEST_CARD]);
         assert!(!SkillSource::Trek.editable(), "read-only");
         assert!(shipped("nope").is_err());
+    }
+
+    /// The card in a recipe: its one `trek-html` block.
+    fn recipe_card(md: &str) -> &str {
+        let open = format!("```{}\n", crate::artifact::FENCE);
+        assert_eq!(md.matches(&open).count(), 1, "one card per recipe");
+        let start = md.find(&open).unwrap() + open.len();
+        let len = md[start..].find("\n```").expect("closed");
+        &md[start..start + len]
+    }
+
+    #[test]
+    fn each_card_recipe_is_a_skill_with_a_card_that_runs_within_the_limits() {
+        use crate::artifact;
+        for name in CARD_RECIPES {
+            let (_, md) = SHIPPED.iter().find(|(n, _)| *n == name).expect("shipped");
+            let front = md.strip_prefix("---\n").and_then(|rest| rest.split_once("\n---\n")).map(|(front, _)| front).expect("front matter");
+            assert!(front.contains(&format!("name: {name}\n")), "{name}");
+            let description = front.lines().find_map(|l| l.strip_prefix("description: ")).expect("a description");
+            assert!(description.contains("Use when") && !description.contains(": "), "{name}: says when, and stays plain YAML");
+            assert!(md.contains("## What you fill in") && md.contains("## Rules"), "{name}");
+
+            let html = recipe_card(md);
+            // A whole document with a title, as the fence takes it, well under what agents are
+            // asked to keep to (and what Trek runs at all).
+            let block = format!("```{}\n{html}\n```", artifact::FENCE);
+            assert!(artifact::fence_closed(&block), "{name}");
+            assert!(html.len() < artifact::ADVISED_BYTES / 4 && html.len() < artifact::MAX_BYTES, "{name}: {} bytes", html.len());
+            assert!(html.starts_with("<!doctype html>") && html.trim_end().ends_with("</html>"), "{name}");
+            assert!(artifact::title(html).is_some_and(|t| !t.is_empty()), "{name}: a title");
+            let doc = artifact::document(html, ":root{}");
+            assert!(doc.contains(artifact::CSP) && doc.contains("const DATA = {"), "{name}");
+            // Nothing the policy blocks: https only.
+            assert!(!html.contains("http://") && !html.contains("file://"), "{name}");
+            for host in artifact::hosts(html, 8) {
+                assert!(["unpkg.com", "tile.openstreetmap.org", "basemaps.cartocdn.com", "github.com"].iter().any(|h| host.ends_with(h)), "{name}: {host}");
+            }
+            // Themed by Trek, in Night and Paper alike.
+            for var in ["var(--trek-fg", "var(--trek-muted", "var(--trek-border", "var(--trek-surface", "var(--trek-font"] {
+                assert!(html.contains(var), "{name}: {var}");
+            }
+            // It acts only through the page's helper, and only when that's there.
+            assert!(html.contains("window.trek.send(") && html.contains("!window.trek"), "{name}");
+            for banned in ["window.webkit", "chrome.webview", "postMessage", "localStorage", "document.cookie"] {
+                assert!(!html.contains(banned), "{name}: {banned}");
+            }
+        }
+        // What each one sends.
+        let card = |n: &str| recipe_card(SHIPPED.iter().find(|(name, _)| *name == n).unwrap().1);
+        assert!(card(MAP_CARD).contains(&format!("send: \"{}\"", artifact::OPEN_ON_PHONE)) && card(MAP_CARD).contains("leaflet@1.9.4") && card(MAP_CARD).contains("tile.openstreetmap.org"));
+        assert!(card(PULL_REQUEST_CARD).contains(r#""Resolve " + keep.dataset.name + ": keep " + b.dataset.keep"#));
+        assert!(card(MIGRATION_CARD).contains(r#"window.trek.send("Apply the migration")"#) && card(MIGRATION_CARD).contains("Applied in"));
+    }
+
+    #[test]
+    fn the_folder_agents_may_read_holds_the_card_recipes_once_asked_for() {
+        crate::paths::isolate_thread(std::env::temp_dir().join(format!("trek-shipped-root-{}", std::process::id())));
+        let root = shipped_root();
+        for name in CARD_RECIPES {
+            assert!(root.join(name).join("SKILL.md").is_file(), "{name}");
+        }
+    }
+
+    #[test]
+    fn suggestions_go_once_installed() {
+        assert_eq!(SUGGESTED[0].command, "npx skills add wheresryan22/anatomy");
+        assert_eq!(suggestions(&[]), SUGGESTED);
+        let installed = Skill { name: "Anatomy".into(), description: String::new(), dir: PathBuf::from("/x/anatomy"), source: SkillSource::ClaudeCode, enabled: true };
+        assert!(suggestions(&[installed]).is_empty());
     }
 
     #[test]

@@ -5,7 +5,8 @@ import WebKit
 /// An interactive artifact (a `trek-html` block): the agent's own HTML page, which the Mac runs live
 /// in the answer. The phone shows its title and runs it on a tap, so a long transcript with a few of
 /// them stays light; then it runs inline in a sandboxed web view (`LivePageView`), styled with
-/// Trek's `--trek-*` variables and as tall as its content.
+/// Trek's `--trek-*` variables and as tall as its content. A button on the page may send text to
+/// the thread (`trek.send`) or copy it (`trek.copy`).
 struct LivePageCard: View {
     var title: String?
     var html: String
@@ -16,6 +17,7 @@ struct LivePageCard: View {
     @State private var height: CGFloat
     @Environment(\.colorScheme) private var scheme
     @Environment(\.dynamicTypeSize) private var dynamicType
+    @Environment(\.liveThreadID) private var threadID
     @Environment(AppModel.self) private var model: AppModel?
 
     init(title: String?, html: String, size: CGFloat) {
@@ -30,10 +32,10 @@ struct LivePageCard: View {
             header
             if running {
                 Rectangle().fill(Trek.border).frame(height: 0.5)
-                LivePageView(html: html, theme: theme) { h in
+                LivePageView(html: html, theme: theme, onHeight: { h in
                     LivePage.heights[html.hashValue] = h
                     height = h
-                }
+                }, onAction: perform)
                 .frame(height: height)
                 .background(Trek.background)
                 .transition(.opacity)
@@ -95,6 +97,26 @@ struct LivePageCard: View {
         .padding(12)
     }
 
+    /// What a button on the page asked for (already checked: `LivePageView.Coordinator`). A send
+    /// goes into the thread as the user's next message, steering the turn if one is running.
+    private func perform(_ action: LivePageAction) {
+        switch action {
+        case .send(let text):
+            guard let model else { return }
+            guard let threadID else {
+                model.show("Open the thread to send from this page", error: true)
+                return
+            }
+            model.send(text, to: threadID, mode: .steer)
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            model.show("Sent from \(title ?? "the page")")
+        case .copy(let text):
+            UIPasteboard.general.string = text
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            model?.show("Copied")
+        }
+    }
+
     private var theme: LivePageTheme {
         // The Mac's page text is its transcript's, a shade smaller.
         let px = size * 0.93 * TextScale.factor(dynamicType)
@@ -111,6 +133,13 @@ enum LivePage {
     static let defaultHeight: CGFloat = 360
     /// A page that keeps changing its height is let be at this many changes.
     static let maxHeightChanges = 60
+
+    /// `trek.send` and `trek.copy`: their text in UTF-8 bytes at most, a page's sends at most this
+    /// often, and only this soon after the user touched or typed in the page (the Mac's limits:
+    /// `artifact::MAX_ACTION_BYTES`, `SEND_INTERVAL`, `GESTURE_WINDOW`).
+    static let maxActionBytes = 4096
+    static let sendInterval: TimeInterval = 1
+    static let gestureWindow: TimeInterval = 5
 
     /// Pages' heights as they last said, so a card made again (scrolled back to, the thread shown
     /// again) takes its height at once and the transcript doesn't jump.
@@ -149,6 +178,25 @@ enum LivePage {
     /// over https (CDNs), inline code; nothing over http or from files, no forms, no plugins.
     static let csp = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https: blob:; style-src 'unsafe-inline' https:; img-src https: data: blob:; font-src https: data:; media-src https: data: blob:; connect-src https: data: blob:; worker-src blob: https:; child-src blob: data:; frame-src blob: data:; object-src 'none'; form-action 'none'; base-uri 'none'"
 
+    /// `text` if a page may send or copy it: not blank, at most `maxActionBytes`, and no control
+    /// characters but tab and line breaks (`artifact::action_text`).
+    static func actionText(_ text: String) -> String? {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.utf8.count <= maxActionBytes else { return nil }
+        let control = text.unicodeScalars.contains { $0.properties.generalCategory == .control && !["\n", "\r", "\t"].contains($0) }
+        return control ? nil : text
+    }
+
+    /// What the page asked for, if it's a send or a copy within bounds.
+    static func action(_ body: Any) -> LivePageAction? {
+        guard let body = body as? [String: Any], let kind = body["t"] as? String,
+              let raw = body["text"] as? String, let text = actionText(raw) else { return nil }
+        switch kind {
+        case "send": return .send(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        case "copy": return .copy(text)
+        default: return nil
+        }
+    }
+
     /// The id of the stylesheet the theme goes in.
     static let themeStyleID = "trek-theme"
 
@@ -174,11 +222,16 @@ enum LivePage {
     }
 
     /// Run first, in a world of its own the page can't see (so it can't post as Trek): reports the
-    /// content's height as it changes (`h`), and sends a tapped link to elsewhere to Safari (`open`);
-    /// the page itself never leaves its document.
+    /// content's height as it changes (`h`), sends a tapped link to elsewhere to Safari (`open`),
+    /// and says when the user touched or typed in the page (`tap`), which `trek.send` and
+    /// `trek.copy` need; the page itself never leaves its document.
     static let bootstrap = #"""
     (() => {
       const post = (o) => { try { window.webkit.messageHandlers.trek.postMessage(o); } catch (_) {} };
+      let tapped = 0;
+      const tap = (e) => { if (e.isTrusted && Date.now() - tapped > 250) { tapped = Date.now(); post({ t: 'tap' }); } };
+      window.addEventListener('pointerup', tap, true);
+      window.addEventListener('keydown', tap, true);
       let last = -1, queued = false;
       const measure = () => {
         queued = false;
@@ -212,6 +265,48 @@ enum LivePage {
       });
     })();
     """#
+
+    /// The page's `trek.send(text)` and `trek.copy(text)`, run in the page's own world so its
+    /// scripts can call them. The helper in the middle is the Mac's, line for line
+    /// (`artifact::ACTIONS_JS` in trek-core, whose test reads this file); what it posts is checked
+    /// again here (`action`) and heard only just after a touch (`Coordinator`).
+    static let actions = #"""
+    (() => {
+      const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.trekAction;
+      if (!h) return;
+      const send = (o) => { try { h.postMessage(o); } catch (_) {} };
+      const helper = (
+      ((post, live) => {
+        const MAX = 4096;
+        const bytes = (s) => { try { return new TextEncoder().encode(s).length; } catch (_) { return s.length * 3; } };
+        const fit = (s) => typeof s === 'string' && s.trim() !== '' && bytes(s) <= MAX && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(s);
+        let sent = 0;
+        const act = (t) => (text) => {
+          if (!fit(text) || !live()) return false;
+          if (t === 'send') { const now = Date.now(); if (now - sent < 1000) return false; sent = now; }
+          post({ t, text });
+          return true;
+        };
+        const api = Object.freeze({ send: act('send'), copy: act('copy') });
+        try { Object.defineProperty(window, 'trek', { value: api, enumerable: true }); } catch (_) {}
+      })
+      );
+      helper(send, () => true);
+    })();
+    """#
+}
+
+/// What a page asked Trek to do with some text (`trek.send`, `trek.copy`).
+enum LivePageAction: Equatable {
+    /// Post it as the user's next message in the page's thread.
+    case send(String)
+    /// Put it on the pasteboard.
+    case copy(String)
+}
+
+extension EnvironmentValues {
+    /// The thread whose transcript a page is in: where its `trek.send` goes.
+    @Entry var liveThreadID: String? = nil
 }
 
 /// Trek's look as a page sees it: the `--trek-*` variables for Night or Paper, and quiet defaults
@@ -260,6 +355,7 @@ struct LivePageView: UIViewRepresentable {
     var html: String
     var theme: LivePageTheme
     var onHeight: (CGFloat) -> Void
+    var onAction: (LivePageAction) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -276,6 +372,10 @@ struct LivePageView: UIViewRepresentable {
         controller.addUserScript(WKUserScript(source: LivePage.bootstrap, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: Coordinator.world))
         // The controller keeps its handlers: a weak go-between, so it doesn't keep the coordinator.
         controller.add(WeakScriptHandler(coordinator), contentWorld: Coordinator.world, name: "trek")
+        // `trek.send` and `trek.copy` live in the page's world, with a channel of their own that
+        // carries nothing else.
+        controller.addUserScript(WKUserScript(source: LivePage.actions, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page))
+        controller.add(WeakScriptHandler(coordinator), contentWorld: .page, name: Coordinator.actionChannel)
 
         let web = WKWebView(frame: .zero, configuration: config)
         web.isOpaque = false
@@ -294,6 +394,7 @@ struct LivePageView: UIViewRepresentable {
         #endif
         coordinator.web = web
         coordinator.onHeight = onHeight
+        coordinator.onAction = onAction
         coordinator.load(html, theme: theme)
         return web
     }
@@ -301,6 +402,7 @@ struct LivePageView: UIViewRepresentable {
     func updateUIView(_ web: WKWebView, context: Context) {
         let coordinator = context.coordinator
         coordinator.onHeight = onHeight
+        coordinator.onAction = onAction
         if html != coordinator.html {
             coordinator.load(html, theme: theme)
         } else if theme != coordinator.theme {
@@ -321,9 +423,15 @@ struct LivePageView: UIViewRepresentable {
         /// Where Trek's script runs and hears from: the page shares the document with it but not
         /// its variables, nor its message channel.
         static let world = WKContentWorld.world(name: "trek")
+        /// The page's own channel, for `trek.send` and `trek.copy` only.
+        static let actionChannel = "trekAction"
 
         weak var web: WKWebView?
         var onHeight: (CGFloat) -> Void = { _ in }
+        var onAction: (LivePageAction) -> Void = { _ in }
+        /// When the user last touched or typed in the page, as Trek's script saw it.
+        private var touched: Date?
+        private var lastSend: Date?
         private(set) var html = ""
         var theme = LivePageTheme(dark: true, fontSize: 15)
         /// The page's own load is under way and may go ahead; anything after it may not.
@@ -335,13 +443,20 @@ struct LivePageView: UIViewRepresentable {
             self.html = html
             self.theme = theme
             heightChanges = 0
+            touched = nil
             loading = true
             web?.loadHTMLString(LivePage.document(html, theme: theme), baseURL: nil)
         }
 
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == Coordinator.actionChannel {
+                act(message.body)
+                return
+            }
             guard let body = message.body as? [String: Any], let kind = body["t"] as? String else { return }
             switch kind {
+            case "tap":
+                touched = Date()
             case "h":
                 guard let v = body["v"] as? Double, v.isFinite else { return }
                 let h = min(max(CGFloat(v), LivePage.minHeight), LivePage.maxHeight)
@@ -358,6 +473,18 @@ struct LivePageView: UIViewRepresentable {
             default:
                 break
             }
+        }
+
+        /// A send or a copy from the page: only within bounds, only just after the user touched
+        /// the page, and a send at most once a second.
+        private func act(_ body: Any) {
+            guard let action = LivePage.action(body), let touched, Date().timeIntervalSince(touched) < LivePage.gestureWindow else { return }
+            if case .send = action {
+                let now = Date()
+                if let lastSend, now.timeIntervalSince(lastSend) < LivePage.sendInterval { return }
+                lastSend = now
+            }
+            onAction(action)
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {

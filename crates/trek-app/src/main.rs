@@ -68,6 +68,7 @@ mod toast;
 mod tray;
 mod ui;
 mod updater;
+mod video;
 mod visualization;
 mod window_place;
 mod winlook;

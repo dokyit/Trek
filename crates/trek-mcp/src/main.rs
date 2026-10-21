@@ -1,8 +1,9 @@
 //! `trek-mcp` — a Model Context Protocol server over stdio.
 //!
 //! Usage: `trek-mcp computer` (computer use on macOS and Windows), `trek-mcp simulator`
-//! (iOS Simulator via `xcrun simctl` + AXe) or `trek-mcp orchestrate` (sub-agents,
-//! run by the Trek that started the agent). JSON-RPC 2.0 messages are read
+//! (iOS Simulator via `xcrun simctl` + AXe), `trek-mcp video` (`watch_video`: frames and a
+//! transcript of a video, through ffmpeg) or `trek-mcp orchestrate` (sub-agents, run by the Trek
+//! that started the agent). JSON-RPC 2.0 messages are read
 //! from stdin and written to stdout, one per line. Logs go to stderr only.
 
 #[cfg(any(target_os = "macos", windows))]
@@ -17,6 +18,8 @@ mod rpc;
 mod simulator;
 #[cfg(any(target_os = "macos", windows))]
 mod util;
+#[cfg(any(target_os = "macos", windows))]
+mod video;
 
 const USAGE: &str = "\
 trek-mcp — Trek's MCP server (stdio, JSON-RPC 2.0, newline-delimited)
@@ -24,6 +27,7 @@ trek-mcp — Trek's MCP server (stdio, JSON-RPC 2.0, newline-delimited)
 USAGE:
     trek-mcp computer     computer use (screenshot, click, type, keys, windows)
     trek-mcp simulator    iOS Simulator control (simctl + AXe), macOS only
+    trek-mcp video        watch_video: a video's frames and transcript (needs ffmpeg)
     trek-mcp orchestrate  sub-agents: delegate work to other agents and models in Trek
     trek-mcp --version
 ";
@@ -45,6 +49,22 @@ fn main() {
         }
         #[cfg(target_os = "macos")]
         "simulator" | "sim" => serve(Box::new(simulator::Simulator::default())),
+        #[cfg(any(target_os = "macos", windows))]
+        "video" => serve(Box::new(video::Video::default())),
+        #[cfg(not(any(target_os = "macos", windows)))]
+        "video" => {
+            eprintln!("trek-mcp: the video tools run only on macOS and Windows");
+            std::process::exit(2);
+        }
+        // `watch_video`'s Speech pass, in a process of its own (see `video::speech_child`).
+        #[cfg(target_os = "macos")]
+        "transcribe" => match std::env::args().nth(2) {
+            Some(file) => video::transcribe_cli(&file),
+            None => {
+                eprintln!("trek-mcp transcribe <audio file>");
+                std::process::exit(2);
+            }
+        },
         "orchestrate" => {
             eprintln!("trek-mcp {} (orchestrate) ready on stdio", env!("CARGO_PKG_VERSION"));
             orchestrate::serve(orchestrate::Orchestrate::from_env());
