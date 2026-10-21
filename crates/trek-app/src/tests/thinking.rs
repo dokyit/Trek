@@ -132,3 +132,23 @@ fn long_turns_summarise_earlier_steps() {
         assert!(trek.visible(cx, "thinking-earlier"), "older steps fold into a summary");
     });
 }
+#[test]
+fn the_timeline_can_be_turned_off() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = working_thread(&trek, cx);
+        trek.update(cx, |ws, _| ws.settings.appearance.show_thinking = false);
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![AgentEvent::ToolStarted { id: "a".into(), title: "Read".into(), detail: "src/a.rs".into() }],
+                cx,
+            );
+        });
+        trek.render(cx);
+        assert!(!trek.visible(cx, "thinking-header"), "the whole timeline is gone with the setting off");
+        trek.update(cx, |ws, _| ws.settings.appearance.show_thinking = true);
+        trek.render(cx);
+        assert!(trek.visible(cx, "thinking-header"), "and back on");
+    });
+}

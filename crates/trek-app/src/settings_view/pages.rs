@@ -494,6 +494,16 @@ impl SettingsView {
                 ],
                 cx,
             ),
+            Self::heading("Transcript", cx),
+            ui::group(
+                vec![Self::row(
+                    "Thinking timeline",
+                    "The steps a turn takes — its thoughts, calls and file touches — over the transcript. Off, a turn shows only its messages.",
+                    self.switch("show-thinking", s.appearance.show_thinking, |s, v| s.appearance.show_thinking = v),
+                    cx,
+                )],
+                cx,
+            ),
             Self::heading("Text size", cx),
             ui::group(
                 vec![

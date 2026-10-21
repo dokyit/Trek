@@ -678,6 +678,9 @@ pub struct Appearance {
     pub reduce_motion: bool,
     /// Scales every animation duration (0 = instant, 1 = designed timing).
     pub motion_scale: f32,
+    /// The thinking timeline over a transcript: what the agent did, step by step. Off, a turn
+    /// shows only its messages.
+    pub show_thinking: bool,
     /// `builtin:<name>` or an absolute path to a copied image; `None` = no image (the default:
     /// art is opt-in, in Settings › Appearance).
     pub background: Option<String>,
@@ -750,6 +753,7 @@ impl Default for Appearance {
             code_font_size: 12.5,
             reduce_motion: false,
             motion_scale: 1.0,
+            show_thinking: true,
             background: None,
             background_placement: BackgroundPlacement::NewThread,
             background_dim: 0.35,

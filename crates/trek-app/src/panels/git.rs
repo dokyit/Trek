@@ -287,6 +287,9 @@ pub struct GitPanel {
     diff_scroll: UniformListScrollHandle,
     message: Entity<InputState>,
     busy: Option<&'static str>,
+    /// (branch, when) the branch card started drawing on; a change of branch or a new merge
+    /// starts the draw-in over.
+    graph_at: Option<(String, std::time::Instant)>,
     turns_seen: u64,
     /// The thread's worktree is being made (or made again): nothing to review yet.
     preparing: bool,
@@ -336,6 +339,7 @@ impl GitPanel {
             diff_scroll: UniformListScrollHandle::new(),
             message,
             busy: None,
+            graph_at: None,
             turns_seen: 0,
             preparing: false,
             ide,
@@ -755,6 +759,7 @@ impl GitPanel {
 
     fn merge(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(t) = self.target.clone() else { return };
+        self.graph_at = Some((t.wt.branch.clone(), std::time::Instant::now()));
         self.busy = Some("Merge");
         cx.notify();
         let task = self.workspace.update(cx, |ws, cx| ws.merge_worktree(&t.thread, cx));
@@ -1064,6 +1069,40 @@ impl GitPanel {
         let base = t.wt.base.clone();
         let (ws, id) = (self.workspace.clone(), t.thread.clone());
 
+        let graph = {
+            let end = super::branch_graph::end_state(review.ahead, block.as_ref(), busy.is_some());
+            let label = match busy {
+                Some(l) => match l {
+                    "Merge" => format!("Merging into {base}…"),
+                    "Pull request" => "Creating pull request…".to_string(),
+                    other => format!("{other}…"),
+                },
+                None => super::branch_graph::end_label(end, &base),
+            };
+            let since = match &self.graph_at {
+                Some((b, at)) if *b == t.wt.branch => *at,
+                _ => {
+                    self.graph_at = Some((t.wt.branch.clone(), std::time::Instant::now()));
+                    std::time::Instant::now()
+                }
+            };
+            let clock = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() % 1_000_000).unwrap_or(0) as f32) / 1000.;
+            super::branch_graph::card(
+                super::branch_graph::GraphArgs {
+                    base: &base,
+                    branch: &t.wt.branch,
+                    ahead: review.ahead,
+                    behind: review.behind,
+                    end,
+                    label,
+                    since,
+                    animate: self.workspace.read(cx).motion(cx),
+                    clock,
+                },
+                cx,
+            )
+        };
+
         let commit = v_flex()
             .p_3()
             .gap_2()
@@ -1171,6 +1210,7 @@ impl GitPanel {
         v_flex()
             .size_full()
             .child(self.header(cx))
+            .child(graph)
             .child(self.file_list(parts.join(" · "), cx))
             .child(div().flex_1().min_h_0().border_t_1().border_color(theme.border).child(self.diff_view("No changes yet against the base branch.", cx)))
             .child(commit)
