@@ -13,7 +13,7 @@ use crate::protocol::{
     QueueActionRequest, SaveNoteRequest, SearchRequest, SearchResults, SendRequest, SettingsChange, Snapshot, ThreadActionRequest, ThreadSummary, Transcript, TranscriptPage,
     TurnActionDone, TurnActionRequest, Usage, WorktreeRemoveRequest,
 };
-use crate::protocol::{AddNoteImageRequest, NoteAsset, NoteAssetRequest, NoteImage};
+use crate::protocol::{AddNoteImageRequest, NoteAsset, NoteAssetRequest, NoteFileChunk, NoteFileRequest, NoteImage};
 use crate::protocol::{CloneProjectRequest, FileUpload, MachineInfo, ServerMessage};
 
 pub type HostResult<T> = Result<T, HostError>;
@@ -264,6 +264,11 @@ pub trait RemoteHost: Send + Sync + 'static {
         let _ = req;
         unsupported("add pictures to notes")
     }
+    /// A piece of a file kept with the notes, as it is on disk.
+    fn note_file(&self, req: NoteFileRequest) -> impl Future<Output = HostResult<NoteFileChunk>> + Send {
+        let _ = req;
+        unsupported("send notes' files")
+    }
 
     // Another Trek driving this one (`docs/MULTI-MACHINE.md`, feature `machines`).
 
@@ -371,6 +376,7 @@ pub enum HostRequest {
     Icon { req: IconRequest, reply: Reply<Icon> },
     NoteAsset { req: NoteAssetRequest, reply: Reply<NoteAsset> },
     AddNoteImage { req: AddNoteImageRequest, reply: Reply<NoteImage> },
+    NoteFile { req: NoteFileRequest, reply: Reply<NoteFileChunk> },
     /// See [`RemoteHost::machine_info`].
     MachineInfo { reply: Reply<MachineInfo> },
     /// See [`RemoteHost::clone_project`]: git's output goes to `progress` while it runs; the
@@ -580,6 +586,10 @@ impl RemoteHost for ChannelHost {
 
     async fn add_note_image(&self, req: AddNoteImageRequest) -> HostResult<NoteImage> {
         self.call(|reply| HostRequest::AddNoteImage { req, reply }).await
+    }
+
+    async fn note_file(&self, req: NoteFileRequest) -> HostResult<NoteFileChunk> {
+        self.call(|reply| HostRequest::NoteFile { req, reply }).await
     }
 
     async fn machine_info(&self) -> HostResult<MachineInfo> {

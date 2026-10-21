@@ -3,7 +3,7 @@ name = "trek-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Model Context Protocol server (stdio) giving coding agents computer use (macOS and Windows), iOS Simulator control and sub-agents"
+description = "Model Context Protocol server (stdio) giving coding agents computer use (macOS and Windows), iOS Simulator control, a video watcher and sub-agents"
 
 [[bin]]
 name = "trek-mcp"
@@ -26,6 +26,12 @@ core-graphics = { version = "0.24", features = ["highsierra", "elcapitan"] }
 core-foundation = "0.10"
 # `ForeignType::as_ptr`, to hand CGEvents to the window server's private calls (desktop/skylight.rs).
 foreign-types = "0.5"
+# `watch_video`'s transcripts: the Speech framework (`trek-mcp transcribe`); already in the lockfile
+# via trek-app.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL", "NSError", "NSArray", "NSEnumerator"] }
+objc2-speech = "0.3"
+block2 = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 # Input (SendInput), the window list (EnumWindows, DWM), screenshots (GDI) and app launch (ShellExecuteW).

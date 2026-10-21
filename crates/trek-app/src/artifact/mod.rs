@@ -61,14 +61,39 @@ pub(crate) struct Doc {
     pub hosts: Vec<String>,
     /// The block as written, fences and all (shown as code when artifacts are off).
     pub source: Arc<str>,
-    /// A video file from a note this plays (`html` is the player's page, `core::VIDEO_HTML`).
+    /// A video file this plays (`html` is the player's page, `core::VIDEO_HTML`): a note's, one
+    /// an answer links, one a message attached, one `watch_video` watched.
     pub media: Option<std::path::PathBuf>,
+    /// A video from the web this plays (`html` is `core::remote_video_html`).
+    pub remote: Option<String>,
 }
 
 impl Doc {
     /// The policy it's served under.
     fn csp(&self) -> &'static str {
-        if self.media.is_some() { core::VIDEO_CSP } else { core::CSP }
+        if self.media.is_some() {
+            core::VIDEO_CSP
+        } else if self.remote.is_some() {
+            core::REMOTE_VIDEO_CSP
+        } else {
+            core::CSP
+        }
+    }
+
+    /// The player for the video file at `path`, titled `title`; `source` is what named it.
+    pub fn video(path: std::path::PathBuf, title: String, source: &str) -> Self {
+        Self { html: core::VIDEO_HTML.into(), hash: core::content_hash(&path.to_string_lossy()), title: Some(title), hosts: Vec::new(), source: source.into(), media: Some(path), remote: None }
+    }
+
+    /// The player for a video on the web (`url`, from `trek_core::media::remote_video`).
+    pub fn remote_video(url: String, title: String) -> Self {
+        let html = core::remote_video_html(&url);
+        let hosts = core::hosts(&html, 1);
+        Self { hash: core::content_hash(&html), html: html.into(), title: Some(title), hosts, source: url.as_str().into(), media: None, remote: Some(url) }
+    }
+
+    fn is_video(&self) -> bool {
+        self.media.is_some() || self.remote.is_some()
     }
 }
 
@@ -113,7 +138,7 @@ impl MarkdownPlugin for ArtifactPlugin {
         } else if html.len() > core::MAX_BYTES {
             Block::TooBig { bytes: html.len(), source: source.into() }
         } else {
-            Block::Ready(Arc::new(Doc { html: html.into(), hash: core::content_hash(html), title: title.clone(), hosts: core::hosts(html, 3), source: source.into(), media: None }))
+            Block::Ready(Arc::new(Doc { html: html.into(), hash: core::content_hash(html), title: title.clone(), hosts: core::hosts(html, 3), source: source.into(), media: None, remote: None }))
         };
         let text = format!("Interactive artifact{}", title.map(|t| format!(": {t}")).unwrap_or_default());
         Some(MarkdownNode::new(PLUGIN, block).text(text.clone()).markdown(source.to_string()).accessibility_label(text))
@@ -231,6 +256,12 @@ fn summary_of(doc: &Doc) -> String {
         let size = std::fs::metadata(file).ok().map(|m| crate::image_preview::file_size(m.len()));
         return ["Video".to_string(), kind].into_iter().filter(|p| !p.is_empty()).chain(size).collect::<Vec<_>>().join(" · ");
     }
+    if doc.remote.is_some() {
+        return match doc.hosts.first() {
+            Some(host) => format!("Video · from {host}"),
+            None => "Video · from the web".to_string(),
+        };
+    }
     match doc.hosts.as_slice() {
         [] => "Interactive · self-contained, in a sandbox".to_string(),
         hosts => format!("Interactive · loads from {}", hosts.join(", ")),
@@ -254,19 +285,24 @@ fn card(doc: &Arc<Doc>, key: usize, window: &mut Window, cx: &mut App) -> AnyEle
     let status = s.status();
     let focus = s.focus.clone();
     let video = doc.media.clone();
-    let title = doc.title.clone().unwrap_or_else(|| if video.is_some() { "Video" } else { "Interactive artifact" }.to_string());
+    let remote = doc.remote.clone();
+    let title = doc.title.clone().unwrap_or_else(|| if doc.is_video() { "Video" } else { "Interactive artifact" }.to_string());
     let group = SharedString::from(format!("artifact-group-{key}"));
     let actions = {
         let (reload, expand, html) = (state.clone(), doc.clone(), doc.html.to_string());
         let bar = h_flex().flex_none().gap(px(2.)).opacity(0.72).group_hover(group.clone(), |s| s.opacity(1.));
         let expand_button = action(SharedString::from(format!("artifact-expand-{key}")), Lucide::Maximize2, "Expand", &look, move |window, cx| expand_artifact(&expand, window, cx));
-        match video {
+        match (video, remote) {
             // A video: open it in its own app, or expand it. No reload or source to copy.
-            Some(file) => bar
+            (Some(file), _) => bar
                 .child(action(SharedString::from(format!("artifact-open-{key}")), Lucide::SquareArrowOutUpRight, "Open in the default app", &look, move |_, cx| cx.open_with_system(&file)))
                 .child(expand_button)
                 .into_any_element(),
-            None => bar
+            (None, Some(url)) => bar
+                .child(action(SharedString::from(format!("artifact-open-{key}")), Lucide::SquareArrowOutUpRight, "Open in the browser", &look, move |_, cx| cx.open_url(&url)))
+                .child(expand_button)
+                .into_any_element(),
+            (None, None) => bar
                 .child(action(SharedString::from(format!("artifact-reload-{key}")), Lucide::RefreshCw, "Reload", &look, move |_, cx| reload.update(cx, |s, cx| s.reload(cx))))
                 .child(action(SharedString::from(format!("artifact-copy-{key}")), Lucide::Copy, "Copy source", &look, move |window, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(html.clone()));
@@ -290,10 +326,10 @@ fn card(doc: &Arc<Doc>, key: usize, window: &mut Window, cx: &mut App) -> AnyEle
         .child(status_layer(status, &look))
         .child(SurfaceElement { state: state.clone() });
     shell(SharedString::from(format!("trek-artifact-{key}")), &look, cx)
-        .aria_label(if doc.media.is_some() { format!("Video: {title}") } else { format!("Interactive artifact: {title}") })
+        .aria_label(if doc.is_video() { format!("Video: {title}") } else { format!("Interactive artifact: {title}") })
         .test_support()
         .group(group)
-        .child(header(if doc.media.is_some() { Lucide::Play } else { Lucide::Box }, title_text(title, &look), actions, summary_text(summary_of(doc), &look), &look))
+        .child(header(if doc.is_video() { Lucide::Play } else { Lucide::Box }, title_text(title, &look), actions, summary_text(summary_of(doc), &look), &look))
         .child(body)
         .into_any_element()
 }
@@ -374,7 +410,7 @@ fn expand_artifact(doc: &Arc<Doc>, window: &mut Window, cx: &mut App) {
     let css = theme_css(cx);
     let background = card_rgb(cx);
     state.update(cx, |s, cx| s.sync_doc(doc, css, background, cx));
-    let title = doc.title.clone().unwrap_or_else(|| "Interactive artifact".to_string());
+    let title = doc.title.clone().unwrap_or_else(|| if doc.is_video() { "Video" } else { "Interactive artifact" }.to_string());
     window.open_dialog(cx, move |dialog, window, cx| {
         let size = window.viewport_size();
         let (w, h) = ((size.width - px(96.)).max(px(420.)), (size.height - px(220.)).max(px(280.)));
@@ -517,7 +553,11 @@ pub(crate) struct ArtifactState {
     has_keys: bool,
     had_focus: Option<FocusHandle>,
     opened_at: Option<Instant>,
+    /// The page's `trek.send` calls, one a second at most (`core::SendGate`).
+    sends: core::SendGate,
     height_changes: u32,
+    /// A video's page goes here (seconds) once it has loaded: a frame clicked before it had.
+    pending_seek: Option<f64>,
     _events: Option<Task<()>>,
 }
 
@@ -548,7 +588,9 @@ impl ArtifactState {
             has_keys: false,
             had_focus: None,
             opened_at: None,
+            sends: core::SendGate::default(),
             height_changes: 0,
+            pending_seek: None,
             _events: None,
         }
     }
@@ -590,6 +632,14 @@ impl ArtifactState {
             }
         }
         self.background = background;
+    }
+
+    /// Take a video's page to `secs` and play it: now, or once it has loaded.
+    fn seek(&mut self, secs: f64) {
+        match &self.surface {
+            Some(surface) if self.loaded => surface.eval(&core::seek_script(secs)),
+            _ => self.pending_seek = Some(secs),
+        }
     }
 
     /// Load the document again (Reload).
@@ -652,6 +702,9 @@ impl ArtifactState {
         match event {
             native::Event::Loaded => {
                 self.loaded = true;
+                if let (Some(t), Some(surface)) = (self.pending_seek.take(), &self.surface) {
+                    surface.eval(&core::seek_script(t));
+                }
                 cx.notify();
                 self.settle_then_snap(cx);
             }
@@ -676,8 +729,36 @@ impl ArtifactState {
                 }
                 Some(core::Message::Open(url)) => self.open_link(&url, cx),
                 Some(core::Message::Wheel(dx, dy)) => self.scroll_around(dx, dy, window, cx),
-                None => tracing::debug!("artifact: message ignored"),
+                None => match core::parse_action(&body, &self.nonce) {
+                    Some(core::Action::Send(text)) => self.send(text, window, cx),
+                    Some(core::Action::Copy(text)) => {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        crate::toast::push(window, "Copied", cx);
+                    }
+                    None => tracing::debug!("artifact: message ignored"),
+                },
             },
+        }
+    }
+
+    /// `trek.send(text)`: `text` goes to the thread whose answer holds this card, as the user's own
+    /// next message (steered or queued as the follow-up setting says). One a second at most; a card
+    /// in no thread (a note) or an archived one says why instead.
+    fn send(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.sends.allow(Instant::now()) {
+            return;
+        }
+        let title = self.doc.title.clone().unwrap_or_else(|| "Interactive page".to_string());
+        let ws = crate::workspace::workspace_global(cx);
+        let html = self.doc.html.clone();
+        let thread = ws.read(cx).card_thread(&html);
+        match thread {
+            Some((id, false)) => {
+                ws.update(cx, |ws, cx| ws.send_as(&id, text, Vec::new(), None, cx));
+                crate::toast::push(window, format!("Sent from {title}"), cx);
+            }
+            Some((_, true)) => crate::toast::push(window, "This card's thread is archived, so it can't send.", cx),
+            None => crate::toast::push(window, "This card isn't in a thread, so it has nowhere to send.", cx),
         }
     }
 
@@ -1058,6 +1139,23 @@ fn sync_window(window: &mut Window, cx: &mut App) {
     }
 }
 
+/// Take the video playing `hash` in `window` (its card in the transcript) to `secs`. False when no
+/// card plays it there.
+pub(crate) fn seek(hash: u64, secs: f64, window: &Window, cx: &mut App) -> bool {
+    let Some(entry) = cx.try_global::<Registry>().and_then(|r| r.windows.get(&window.window_handle().window_id())) else { return false };
+    let states: Vec<_> = entry.states.iter().filter_map(|s| s.upgrade()).collect();
+    let mut found = false;
+    for state in states {
+        state.update(cx, |s, _| {
+            if s.doc.hash == hash && s.mode == Mode::Inline && s.doc.media.is_some() {
+                s.seek(secs);
+                found = true;
+            }
+        });
+    }
+    found
+}
+
 // ---------- making views ----------
 
 fn make_surface(spec: native::Spec, window: &mut Window) -> Result<Box<dyn Surface>, String> {
@@ -1194,6 +1292,20 @@ pub(crate) fn post(window: &mut Window, body: &str, cx: &mut App) {
             if s.surface.is_some() {
                 let message = body.replace("{nonce}", &s.nonce);
                 s.on_event(native::Event::Message(message), window, cx);
+            }
+        });
+    }
+}
+
+/// Tell every test view in the window that its page has loaded, as the engine would.
+#[cfg(test)]
+pub(crate) fn load_all(window: &mut Window, cx: &mut App) {
+    let Some(entry) = cx.try_global::<Registry>().and_then(|r| r.windows.get(&window.window_handle().window_id())) else { return };
+    let states: Vec<_> = entry.states.iter().filter_map(|s| s.upgrade()).collect();
+    for state in states {
+        state.update(cx, |s, cx| {
+            if s.surface.is_some() {
+                s.on_event(native::Event::Loaded, window, cx);
             }
         });
     }

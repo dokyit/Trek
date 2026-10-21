@@ -12,6 +12,7 @@ Start the isolated app before using a CLI route. Each page below describes the u
 - [Inline visualizations](inline-visualizations.md) — render safe, themed charts, heatmaps, treemaps, and UI treatment previews inside an agent answer.
 - [Math rendering](math-rendering.md) — typeset the TeX math in answers, inline and display, while money, shell and code dollars stay as written.
 - [Interactive artifacts](interactive-artifacts.md) — run an agent's self-contained HTML (3D models, simulations, tabbed reports) live in a sandboxed, themed web view inside its answer.
+- [Video watcher and player](video.md) — agents watch a video file or link with `watch_video` (frames and a transcript); videos linked in answers, attached to messages or watched play inline, with the frames the agent saw under the player.
 
 ## Tools
 

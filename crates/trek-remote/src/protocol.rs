@@ -172,6 +172,8 @@ pub enum ClientMessage {
     NoteAsset(NoteAssetRequest),
     /// Keep a photo with the notes (answered with `note_image`, its link).
     AddNoteImage(AddNoteImageRequest),
+    /// A piece of a file kept with the notes, as it is (answered with `note_file_chunk`).
+    NoteFile(NoteFileRequest),
     // One Trek driving another (`machines.rs`; the Mac lists `machines` in `features`).
     /// What this machine is (answered with `machine_info`).
     MachineInfo,
@@ -227,6 +229,7 @@ impl ClientMessage {
             Self::Icon(_) => "icon",
             Self::NoteAsset(_) => "note_asset",
             Self::AddNoteImage(_) => "add_note_image",
+            Self::NoteFile(_) => "note_file",
             Self::MachineInfo => "machine_info",
             Self::CloneProject(_) => "clone_project",
             Self::PutFiles(_) => "put_files",
@@ -254,6 +257,7 @@ impl ClientMessage {
                 | Self::BackgroundOutput { .. }
                 | Self::Icon(_)
                 | Self::NoteAsset(_)
+                | Self::NoteFile(_)
                 | Self::MachineInfo
         )
     }
@@ -469,6 +473,8 @@ pub mod feature {
     pub const BASECAMP_V2: &str = "basecamp_v2";
     /// `note_asset` and `add_note_image`: a note's pictures, and adding one.
     pub const NOTE_IMAGES: &str = "note_images";
+    /// `note_file`: any file kept with the notes (a PDF, a video), as it is, in pieces.
+    pub const NOTE_FILES: &str = "note_files";
     /// `machine_info`, `clone_project` (with `clone_progress`) and `put_files`: another Trek
     /// may run threads here (`docs/MULTI-MACHINE.md`).
     pub const MACHINES: &str = "machines";
@@ -489,7 +495,46 @@ pub mod feature {
         BASECAMP_V2,
         NOTE_IMAGES,
         MACHINES,
+        NOTE_FILES,
     ];
+}
+
+/// The most one `note_file` piece carries (a mebibyte: well under a frame once in base64).
+pub const MAX_NOTE_FILE_CHUNK: u64 = 1 << 20;
+
+/// `note_file`: `length` bytes from `offset` of a file kept with the notes (`attachments/<name>`,
+/// as a note links it), as they are on disk, for a PDF or a video the phone keeps to open. Only
+/// files in the notes' `attachments/` folder are sent, as for `note_asset`. `length` is capped at
+/// [`MAX_NOTE_FILE_CHUNK`] (and is that when missing); the phone asks for the next piece at
+/// `offset + length` until it has `total`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoteFileRequest {
+    pub path: String,
+    #[serde(default)]
+    pub offset: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<u64>,
+}
+
+/// The reply to `note_file`: the piece, and how long the whole file is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoteFileChunk {
+    pub path: String,
+    pub offset: u64,
+    /// The whole file's length in bytes.
+    pub total: u64,
+    /// Base64 of the piece (empty past the end).
+    pub bytes_b64: String,
+    /// What the file is, from its extension (`application/pdf`, `video/mp4`, …).
+    pub mime: String,
+}
+
+impl NoteFileChunk {
+    /// The piece's bytes.
+    pub fn bytes(&self) -> Result<Vec<u8>, String> {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.decode(self.bytes_b64.trim()).map_err(|e| format!("not base64: {e}"))
+    }
 }
 
 /// `save_note`: a note's new text.
@@ -776,6 +821,8 @@ pub enum ServerMessage {
     NoteAsset(NoteAsset),
     /// The reply to `add_note_image`.
     NoteImage(NoteImage),
+    /// The reply to `note_file`.
+    NoteFileChunk(NoteFileChunk),
     /// A request failed.
     Error { code: ErrorCode, message: String },
     /// Upsert of a thread the list leaves out: a sub-agent's (its parent's row names it), or one a

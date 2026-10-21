@@ -504,7 +504,7 @@ fn fold_eased(until: Instant, still: bool) -> f32 {
 /// The highlight is the same text again in brighter colours, painted only inside a band that
 /// moves along the line, rather than a colour per character: GPUI shapes a line again whenever
 /// its colour runs change, which on every frame costs more than the rest of the bar together.
-fn shimmer(text: SharedString, clock: f32, still: bool, base: Hsla, hi: Hsla) -> AnyElement {
+pub(crate) fn shimmer(text: SharedString, clock: f32, still: bool, base: Hsla, hi: Hsla) -> AnyElement {
     let plain = div().text_color(base).child(text.clone());
     if still {
         return plain.into_any_element();

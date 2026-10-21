@@ -893,6 +893,7 @@ const CLIENT_TYPES: &[&str] = &[
     "icon",
     "note_asset",
     "add_note_image",
+    "note_file",
     "machine_info",
     "clone_project",
     "put_files",
@@ -1061,6 +1062,7 @@ async fn call<H: RemoteHost>(host: &H, re: Option<String>, msg: ClientMessage, d
         ClientMessage::Icon(req) => host.icon(req).await.map(ServerMessage::Icon),
         ClientMessage::NoteAsset(req) => host.note_asset(req).await.map(ServerMessage::NoteAsset),
         ClientMessage::AddNoteImage(req) => host.add_note_image(req).await.map(ServerMessage::NoteImage),
+        ClientMessage::NoteFile(req) => host.note_file(req).await.map(ServerMessage::NoteFileChunk),
         ClientMessage::MachineInfo => host.machine_info().await.map(ServerMessage::MachineInfo),
         ClientMessage::CloneProject(req) => match req.check() {
             Ok(()) => {

@@ -47,6 +47,48 @@ nonisolated struct NoteImageRef: Hashable {
     }
 }
 
+/// A file kept with the notes, linked on a line of its own: `[name](attachments/<file>)`, as the
+/// Mac's Write puts in a dropped PDF or video. Its bytes come from the Mac (`note_file`).
+nonisolated struct NoteFileRef: Hashable {
+    var name: String
+    /// `attachments/<file>`.
+    var path: String
+
+    enum Kind { case pdf, video, other }
+
+    private static var pattern: Regex<(Substring, Substring, Substring?, Substring?)> { /\[([^\]\n]*)\]\(\s*(?:<([^>\n]+)>|([^)\s]+))(?:\s+"[^"\n]*")?\s*\)/ }
+
+    /// The file a line links, when the line is that link and nothing else, and the link is to a
+    /// file kept with the notes.
+    static func only(_ line: String) -> NoteFileRef? {
+        guard let m = line.wholeMatch(of: pattern) else { return nil }
+        let link = String(m.2 ?? m.3 ?? "")
+        let path = link.hasPrefix("./") ? String(link.dropFirst(2)) : link
+        guard path.hasPrefix("attachments/") else { return nil }
+        let file = path.dropFirst("attachments/".count)
+        guard !file.isEmpty, !file.hasPrefix("."), !file.contains("/"), !file.contains("..") else { return nil }
+        return NoteFileRef(name: String(m.1), path: path)
+    }
+
+    var ext: String { (path as NSString).pathExtension.lowercased() }
+
+    /// What it shows as: a PDF's first page, a video's poster (what AVPlayer plays; WebM it
+    /// doesn't, so that's a file like any other), else a chip.
+    var kind: Kind {
+        switch ext {
+        case "pdf": .pdf
+        case "mp4", "m4v", "mov": .video
+        default: .other
+        }
+    }
+
+    /// Its link text, else its file's name.
+    var label: String {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? (path as NSString).lastPathComponent : trimmed
+    }
+}
+
 /// One of a note's pictures, fit to the note's width in its own proportions (a tall one no taller
 /// than `tallest`); a tap opens it full screen.
 struct NoteImageView: View {

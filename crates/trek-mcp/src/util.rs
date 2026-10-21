@@ -171,6 +171,18 @@ pub fn find_executable(name: &str, extra_dirs: &[&str]) -> Option<PathBuf> {
     dirs.into_iter().map(|d| d.join(name)).find(|p| is_executable(p))
 }
 
+/// Find an executable by name (`.exe` added) on PATH plus `extra_dirs` and winget's links folder.
+#[cfg(windows)]
+pub fn find_executable(name: &str, extra_dirs: &[&str]) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    dirs.extend(extra_dirs.iter().map(PathBuf::from));
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        dirs.push(Path::new(&local).join("Microsoft").join("WinGet").join("Links"));
+    }
+    let file = format!("{name}.exe");
+    dirs.into_iter().map(|d| d.join(&file)).find(|p| p.is_file())
+}
+
 #[cfg(unix)]
 fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;

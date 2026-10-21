@@ -31,6 +31,8 @@ nonisolated enum MacFeature: String, CaseIterable {
     case basecampV2 = "basecamp_v2"
     /// A note's pictures, and adding one from the phone.
     case noteImages = "note_images"
+    /// A note's other files (PDFs, videos, anything) as they are, a piece at a time.
+    case noteFiles = "note_files"
 }
 
 /// The Mac's snooze menu.

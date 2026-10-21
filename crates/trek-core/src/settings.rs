@@ -317,6 +317,8 @@ pub struct Tools {
     pub background_pip: bool,
     /// Give agents the iOS Simulator MCP tools.
     pub simulator: bool,
+    /// Give agents Trek's video watcher (`watch_video`: frames and a transcript, through ffmpeg).
+    pub video: bool,
     /// Give agents Trek's sub-agent tools (`delegate_task` and friends): they can hand work to
     /// other agents and models, which Trek runs as child threads.
     pub orchestration: bool,
@@ -329,7 +331,7 @@ pub struct Tools {
 
 impl Default for Tools {
     fn default() -> Self {
-        Self { computer_use: false, computer_background: true, background_pip: true, simulator: true, orchestration: true, mcp_servers: vec![], figma_desktop: false }
+        Self { computer_use: false, computer_background: true, background_pip: true, simulator: true, video: true, orchestration: true, mcp_servers: vec![], figma_desktop: false }
     }
 }
 

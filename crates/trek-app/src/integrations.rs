@@ -56,6 +56,13 @@ pub fn axe_path() -> Option<PathBuf> {
 
 pub const AXE_INSTALL: &str = "brew install cameroncooke/axe/axe";
 
+/// ffmpeg and ffprobe, which `watch_video` reads videos with (not bundled), both installed.
+pub fn ffmpeg_installed() -> bool {
+    trek_core::detect::which("ffmpeg").is_some() && trek_core::detect::which("ffprobe").is_some()
+}
+
+pub const FFMPEG_INSTALL: &str = if cfg!(windows) { "winget install ffmpeg" } else { "brew install ffmpeg" };
+
 /// MCP servers each agent already loads from its own config: `(agent, server names)`.
 pub fn agent_mcp_servers() -> Vec<(&'static str, Vec<String>)> {
     let home = trek_core::paths::agents_home();

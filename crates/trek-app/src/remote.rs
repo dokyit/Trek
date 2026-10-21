@@ -773,6 +773,7 @@ impl Workspace {
             tr::HostRequest::AddNoteImage { req, reply } => {
                 let _ = reply.send(notes::add_image(req));
             }
+            tr::HostRequest::NoteFile { req, reply } => notes::file(req, reply, cx),
             // Another Trek driving this one (`docs/MULTI-MACHINE.md`).
             tr::HostRequest::MachineInfo { reply } => machines::machine_info(reply, cx),
             tr::HostRequest::CloneProject { req, progress, reply } => self.remote_clone_project(req, progress, reply, cx),

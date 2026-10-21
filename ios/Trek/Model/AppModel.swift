@@ -397,7 +397,7 @@ final class AppModel {
         case .usage(let re, _), .basecamp(let re, _), .notes(let re, _), .note(let re, _), .gitStatus(let re, _),
              .gitDiff(let re, _), .gitBranches(let re, _), .commands(let re, _, _), .settings(let re, _),
              .searchResults(let re, _), .attachment(let re, _), .backgroundOutput(let re, _), .icon(let re, _),
-             .noteAsset(let re, _), .noteImage(let re, _):
+             .noteAsset(let re, _), .noteImage(let re, _), .noteFileChunk(let re, _):
             reply(re, message)
         case .unlisted(let t):
             setUnlisted(t)

@@ -2,9 +2,10 @@ import SwiftUI
 
 /// A note as it reads, line by line as the Mac's preview draws it: headings, bullets, numbered
 /// and check lists, quotes, code, and inline bold, italics, underline, strikethrough, `code`,
-/// text colour and highlights (`<span style="color: …">`, `<mark>`, `<u>`), and pictures on lines
+/// text colour and highlights (`<span style="color: …">`, `<mark>`, `<u>`), pictures on lines
 /// of their own (`NoteImageView`; a tap shows them full screen, stepping through the note's
-/// others). Ticking a box changes that line in the note.
+/// others), and other files kept with the notes on lines of their own (`NoteFileCard`: a PDF's
+/// first page, a video's poster, a chip for the rest). Ticking a box changes that line in the note.
 struct NoteMarkdown: View {
     var text: String
     var size: CGFloat = 17
@@ -30,6 +31,8 @@ struct NoteMarkdown: View {
                         }
                         .padding(.vertical, 4)
                     }
+                } else if case .file(let file) = line.kind {
+                    NoteFileCard(file: file).padding(.vertical, 4)
                 } else {
                     view(line, s)
                 }
@@ -102,7 +105,7 @@ struct NoteMarkdown: View {
             .background(Trek.foreground.opacity(0.05), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         case .rule:
             Divider().padding(.vertical, 4)
-        case .images:
+        case .images, .file:
             EmptyView()
         }
     }
@@ -125,6 +128,8 @@ struct NoteLine: Identifiable {
         case check(Bool, indent: Int)
         /// A line of nothing but pictures.
         case images([NoteImageRef])
+        /// A line that's only a link to a file kept with the notes: `[name](attachments/…)`.
+        case file(NoteFileRef)
     }
 
     /// The first line it came from (0-based), for ticking boxes.
@@ -160,6 +165,7 @@ struct NoteLine: Identifiable {
         if s.isEmpty { return NoteLine(index: i, kind: .blank, text: "") }
         if s == "---" || s == "***" { return NoteLine(index: i, kind: .rule, text: "") }
         if s.hasPrefix("!["), let images = NoteImageRef.only(s) { return NoteLine(index: i, kind: .images(images), text: s) }
+        if s.hasPrefix("["), let file = NoteFileRef.only(s) { return NoteLine(index: i, kind: .file(file), text: s) }
         if let m = s.wholeMatch(of: /(#{1,6})\s+(.*)/) { return NoteLine(index: i, kind: .heading(m.1.count), text: String(m.2)) }
         if let m = s.wholeMatch(of: /[-*+]\s+\[([ xX])\]\s?(.*)/) {
             return NoteLine(index: i, kind: .check(m.1 != " ", indent: indent), text: String(m.2))

@@ -218,6 +218,9 @@ pub struct LiveThread {
     /// Sub-agents launched this turn (and those still out from earlier ones), keyed by the tool
     /// call that started them.
     pub tasks: Vec<SubTask>,
+    /// Tool call ids that ran alongside another (a `ToolStarted` arrived while an earlier call
+    /// was still running). The thinking timeline draws these as one parallel fan-out.
+    pub parallel: HashSet<String>,
     /// What the agent has running in the background (`AgentEvent::Background`): shells, monitors
     /// and its own sub-agents. They outlive the turn that started them; the session ending ends
     /// them.
@@ -1660,6 +1663,24 @@ impl Workspace {
         self.reload(cx);
         // Its messages become searchable like the rest of the import's.
         self.index_for_search(cx);
+    }
+
+    /// The thread whose transcript has an answer holding the `trek-html` page `html` (the latest
+    /// one when several do), and whether that thread is archived: where a card's `trek.send` goes.
+    pub fn card_thread(&self, html: &str) -> Option<(String, bool)> {
+        let mut best: Option<(&String, usize)> = None;
+        for (id, live) in &self.live {
+            let at = live.items.iter().rposition(|i| matches!(i, Item::Assistant { text } if text.contains(html)));
+            if let Some(at) = at {
+                let newer = best.is_none_or(|(_, b)| at > b);
+                if newer {
+                    best = Some((id, at));
+                }
+            }
+        }
+        let (id, _) = best?;
+        let archived = self.thread(id).is_some_and(|t| t.archived_at.is_some());
+        Some((id.clone(), archived))
     }
 
     pub fn thread(&self, id: &str) -> Option<&Thread> {
@@ -3636,7 +3657,9 @@ impl Workspace {
     pub(crate) fn session_notes(&self, project: Option<&std::path::Path>, cwd: &std::path::Path, recaps: bool) -> Option<String> {
         let recap = (recaps && self.settings.general.ask_recap).then(|| trek_core::changes::RECAP.to_string());
         let artifacts = self.settings.general.interactive_artifacts.then(|| trek_core::artifact::AGENT_INSTRUCTIONS.to_string());
-        let notes: Vec<String> = std::iter::once(trek_core::visualization::AGENT_INSTRUCTIONS.to_string()).chain(artifacts).chain(self.project_notes(project, cwd)).chain(recap).collect();
+        // Only where the watcher is handed over (`mcp_servers`): a build without trek-mcp has none.
+        let video = (self.settings.tools.video && trek_mcp_binary().is_some()).then(|| trek_core::media::AGENT_INSTRUCTIONS.to_string());
+        let notes: Vec<String> = std::iter::once(trek_core::visualization::AGENT_INSTRUCTIONS.to_string()).chain(artifacts).chain(video).chain(self.project_notes(project, cwd)).chain(recap).collect();
         (!notes.is_empty()).then(|| notes.join("\n\n"))
     }
 
@@ -3987,6 +4010,20 @@ impl Workspace {
                     AgentEvent::ToolStarted { id: tid, title, detail } => {
                         live.streaming = None;
                         live.reasoning = None;
+                        // A call that starts while another is still running ran in parallel with
+                        // it: the thinking timeline draws those together as one fan-out.
+                        let overlap: Vec<String> = live
+                            .items
+                            .iter()
+                            .filter_map(|i| match i {
+                                Item::Tool { id, status: ToolStatus::Running, .. } => Some(id.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        if !overlap.is_empty() {
+                            live.parallel.insert(tid.clone());
+                            live.parallel.extend(overlap);
+                        }
                         live.items.push(Item::Tool { id: tid, title, detail, output: String::new(), status: ToolStatus::Running });
                         // A sub-agent row waiting for this call goes right after it, before any
                         // text later in the batch opens a new message.
@@ -6185,6 +6222,9 @@ impl Workspace {
             for family in trek_mcp_families(tools.computer_use, tools.simulator, windows) {
                 out.push(McpServer::stdio(format!("trek-{family}"), bin.clone(), vec![family.into()], trek_mcp_env(family, tools.computer_background, windows)));
             }
+            if tools.video {
+                out.push(video_server(&bin));
+            }
         }
         // Figma's own server in its desktop app: local and without a login, so every agent can
         // have it (one that can't take HTTP servers says so when its session starts).
@@ -7006,6 +7046,17 @@ fn trek_mcp_families(computer_use: bool, simulator: bool, windows: bool) -> Vec<
     [(computer_use, "computer"), (simulator && !windows, "simulator")].into_iter().filter(|(on, _)| *on).map(|(_, family)| family).collect()
 }
 
+/// Trek's video watcher (`trek-mcp video`): it keeps what it watches in Trek's cache, and a call
+/// may take minutes (a download, a transcript), past what agents give a tool by default.
+fn video_server(bin: &str) -> McpServer {
+    let dir = trek_core::media::video_cache_dir();
+    let env = vec![(trek_core::media::ENV_VIDEO_DIR.to_string(), dir.display().to_string())];
+    McpServer { tool_timeout_secs: Some(VIDEO_TIMEOUT_SECS), ..McpServer::stdio(trek_core::media::VIDEO_SERVER, bin, vec!["video".into()], env) }
+}
+
+/// How long a `watch_video` call may take.
+const VIDEO_TIMEOUT_SECS: u64 = 1800;
+
 /// The environment Trek's own MCP server `family` starts with: the computer's works in the
 /// background where asked, on a Mac (Windows' works in front).
 fn trek_mcp_env(family: &str, background: bool, windows: bool) -> Vec<(String, String)> {
@@ -7062,6 +7113,22 @@ mod tests {
         assert_eq!(trek_mcp_families(true, true, true), ["computer"], "its switch may still be on in settings that came from a Mac");
         assert!(trek_mcp_families(false, true, true).is_empty());
         assert!(trek_mcp_families(false, false, false).is_empty());
+    }
+
+    #[test]
+    fn the_video_watcher_keeps_its_videos_in_treks_cache_and_has_time() {
+        let s = video_server("/Applications/Trek.app/Contents/Resources/trek-mcp");
+        assert_eq!(s.name, "trek-video");
+        assert_eq!(s.tool_timeout_secs, Some(VIDEO_TIMEOUT_SECS));
+        match &s.transport {
+            trek_agents::McpTransport::Stdio { args, env, .. } => {
+                assert_eq!(args, &["video".to_string()]);
+                assert_eq!(env[0].0, "TREK_VIDEO_DIR");
+                assert!(std::path::Path::new(&env[0].1).ends_with("videos"), "{env:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(trek_core::settings::Tools::default().video, "on unless turned off");
     }
 
     #[test]

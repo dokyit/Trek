@@ -213,6 +213,7 @@ pub fn streaming() -> TextViewMotion {
 #[allow(clippy::too_many_arguments)]
 fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixels, tone: Tone, visualizations: Option<bool>, note_images: Option<crate::note_images::NoteImages>, images_within: Option<Pixels>, cx: &App) -> TextView {
     let link_cwd = cwd.clone();
+    let video_cwd = cwd.clone();
     let theme = cx.theme();
     let ink = Ink::new(theme.foreground, theme.muted_foreground, theme.mode.is_dark(), tone).body;
     let view = view.selectable(true).style(style(size, tone, cx)).text_size(size).line_height(relative(LINE_HEIGHT));
@@ -246,9 +247,12 @@ fn dress(view: TextView, cwd: Option<PathBuf>, folder: Option<Hsla>, size: Pixel
         });
     // Liveness is read only when rendering, so the answer finishing doesn't reparse it.
     // Interactive artifacts (`trek-html`) go where visualizations do: answers and the side chat,
-    // never reasoning, tool output or notes.
+    // never reasoning, tool output or notes. So do videos an answer links (`video`).
     let view = match visualizations {
-        Some(live) => view.plugin(crate::visualization::VisualizationPlugin { live, size }).plugin(crate::artifact::ArtifactPlugin { live, size }),
+        Some(live) => view
+            .plugin(crate::video::AnswerVideos { cwd: video_cwd })
+            .plugin(crate::visualization::VisualizationPlugin { live, size })
+            .plugin(crate::artifact::ArtifactPlugin { live, size }),
         None => view,
     };
     view
@@ -288,7 +292,7 @@ struct PathRef {
 
 /// The file a link points at on disk, if it does: absolute and `~` paths as written, `file://`
 /// unwrapped, and relative links resolved against the answer's folder. Only real paths count.
-fn link_path(url: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn link_path(url: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     let raw = url.strip_prefix("file://").unwrap_or(url);
     let path = if let Some(rest) = raw.strip_prefix("~/") {
         trek_core::paths::home().join(rest)

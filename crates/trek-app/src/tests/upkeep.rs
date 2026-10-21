@@ -98,6 +98,43 @@ fn settings_skills_stay_inside_an_isolated_data_folder() {
 }
 
 #[test]
+fn the_skills_page_suggests_anatomy_until_it_is_installed_and_lists_the_card_recipes() {
+    run(async |cx| {
+        let trek = open(cx);
+        let ran = super::screens::runs(&trek, cx);
+        trek.update(cx, |ws, cx| ws.navigate(Route::Settings(SettingsPage::Skills), cx));
+        trek.render(cx);
+        // Trek's own card recipes are listed, read-only, with the rest it ships.
+        let shipped: Vec<String> = trek_core::skills::discover(None).into_iter().filter(|s| s.source == trek_core::skills::SkillSource::Trek).map(|s| s.name).collect();
+        for recipe in trek_core::skills::CARD_RECIPES {
+            assert!(shipped.iter().any(|s| s == recipe), "{recipe} in {shipped:?}");
+        }
+        // One click runs the installer in a terminal, as an agent install does.
+        // Suggestions come after the skills: scroll down to them.
+        let page = trek.bounds(cx, "skill-add").expect("the toolbar");
+        let wheel = gpui_kit::ScrollWheelEvent {
+            position: gpui_kit::point(page.center().x, page.bottom() + gpui_kit::px(80.)),
+            delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(-4000.))),
+            ..Default::default()
+        };
+        trek.window(cx, |window, cx| _ = window.dispatch_event(gpui_kit::InputEvent::to_platform_input(wheel), cx));
+        trek.render(cx);
+        assert!(trek.visible(cx, "skill-suggest-anatomy"));
+        trek.click(cx, "skill-suggest-anatomy");
+        assert_eq!(*ran.borrow(), [("npx skills add wheresryan22/anatomy".to_string(), None)]);
+        // Once it's in, it's one of the skills, not a suggestion.
+        let home = trek_core::skills::SkillHome::Shared.dir().join("anatomy");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("SKILL.md"), "---\nname: anatomy\ndescription: Isometric machines.\n---\n").unwrap();
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: None }, cx));
+        trek.update(cx, |ws, cx| ws.navigate(Route::Settings(SettingsPage::Skills), cx));
+        trek.render(cx);
+        assert!(trek.window(cx, |window, _| window.try_find("skill-suggest-anatomy").is_none()), "not drawn at all");
+        assert!(trek_core::skills::discover(None).iter().any(|s| s.name == "anatomy"));
+    });
+}
+
+#[test]
 fn a_thread_view_keeps_the_same_subscriptions_however_often_it_switches() {
     run(async |cx| {
         let trek = open(cx);

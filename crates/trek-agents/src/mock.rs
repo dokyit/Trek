@@ -46,6 +46,9 @@
 //! | [app]                        | of app `app`), telling Trek each step as `trek-mcp computer`  |
 //! |                              | would, so its picture-in-picture window shows it; nothing is  |
 //! |                              | clicked for real                                              |
+//! | `mock:video`                 | makes a 6-second test clip with ffmpeg in Trek's data folder, |
+//! |                              | watches it with Trek's `watch_video` (for real, through the   |
+//! |                              | session's `trek-video` server) and links the clip in its answer|
 //! | `mock:consult` [prompt]      | asks a mock sub-agent (Trek's `delegate_task`) and waits      |
 //! | `mock:delegate` [prompt]     | starts a mock sub-agent and ends its turn; Trek wakes it      |
 //! | `mock:pair` [prompt]         | starts two mock sub-agents on the same task and ends its turn |
@@ -213,6 +216,8 @@ enum Script {
     Mcp,
     /// Use the computer in the background, as far as Trek can tell (`mock:background`).
     Background,
+    /// Watch a test clip with Trek's `watch_video`, and link it (`mock:video`).
+    Video,
     Limit(Duration),
     /// A 5-hour window nearly used up partway through, resetting after a while (`mock:nearlimit`).
     NearLimit(Duration),
@@ -333,6 +338,7 @@ impl Script {
                 "told" if w.starts_with("mock:") => Script::Told,
                 "mcp" if w.starts_with("mock:") => Script::Mcp,
                 "background" if w.starts_with("mock:") => Script::Background,
+                "video" if w.starts_with("mock:") => Script::Video,
                 _ => return None,
             })
         });
@@ -384,6 +390,7 @@ pub fn title(request: &str) -> String {
         Script::Told => "What Trek said",
         Script::Mcp => "List the MCP servers",
         Script::Background => "Check the page in the background",
+        Script::Video => "Watch the demo clip",
         Script::Limit(_) | Script::NearLimit(_) => "Refactor the parser",
         Script::Deaf(_) => "Run the long migration",
         Script::Delegate { .. } => "Get a second opinion",
@@ -466,6 +473,64 @@ struct Session {
     instructions: Option<String>,
     /// The MCP servers it was given, one line each (`mock:mcp` lists them).
     mcp: Vec<String>,
+    /// Trek's video watcher, when Trek gave the session it (`mock:video` calls it).
+    video: Option<crate::McpServer>,
+}
+
+/// A six-second test pattern with a tone, at `clip`.
+async fn make_clip(ffmpeg: &std::path::Path, clip: &std::path::Path) -> Result<(), String> {
+    if let Some(dir) = clip.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let out = trek_core::procs::async_command(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-f", "lavfi", "-i", "testsrc=duration=6:size=960x540:rate=24", "-f", "lavfi", "-i", "sine=frequency=330:duration=6", "-shortest"])
+        .args(["-c:v", "mpeg4", "-q:v", "4", "-c:a", "aac", "-y"])
+        .arg(clip)
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    if out.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&out.stderr).trim().to_string()) }
+}
+
+/// Call `watch_video` on `clip` through `server` (stdio, as the session would start it): its
+/// text blocks, or why it failed.
+async fn call_watch_video(server: &crate::McpServer, clip: &std::path::Path) -> Result<String, String> {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    let crate::McpTransport::Stdio { command, args, env } = &server.transport else { return Err("the video watcher isn't a local server".into()) };
+    let mut child = trek_core::procs::async_command(command)
+        .args(args)
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("couldn't start {command}: {e}"))?;
+    let mut stdin = child.stdin.take().ok_or("no stdin")?;
+    let mut lines = tokio::io::BufReader::new(child.stdout.take().ok_or("no stdout")?).lines();
+    let call = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "watch_video", "arguments": {"source": clip, "fps": 1, "transcript": false}}});
+    let script = format!(
+        "{}\n{}\n{call}\n",
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "trek-mock", "version": "0"}}}),
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+    );
+    stdin.write_all(script.as_bytes()).await.map_err(|e| e.to_string())?;
+    let answer = tokio::time::timeout(Duration::from_secs(120), async {
+        while let Ok(Some(line)) = lines.next_line().await {
+            let v: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+            if v["id"] == 2 {
+                return Some(v);
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten()
+    .ok_or("the video watcher didn't answer")?;
+    drop(stdin);
+    let text = answer["result"]["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n");
+    if answer["result"]["isError"] == true { Err(text) } else { Ok(text) }
 }
 
 /// Background work's news, for a turn the agent takes on its own (as Claude Code does on a
@@ -600,6 +665,7 @@ pub async fn run(
         model: config.model.clone().unwrap_or_else(|| "mock-swift".into()),
         orchestrate: config.mcp_servers.iter().find(|m| m.name == ORCHESTRATE_SERVER).and_then(|m| trek_ipc::Client::from_pairs(m.env())),
         instructions: config.instructions.clone(),
+        video: config.mcp_servers.iter().find(|m| m.name == trek_core::media::VIDEO_SERVER).cloned(),
         mcp: config
             .mcp_servers
             .iter()
@@ -733,6 +799,7 @@ impl Session {
             Script::StartThread { worktree, wait } => self.start_thread(text, worktree, wait).await?,
             Script::Handoff => self.handoff(text).await?,
             Script::Background => self.background_use(text).await?,
+            Script::Video => self.watch_video().await?,
             Script::Server(until) => self.server(until).await?,
             Script::Watch(after) => self.watch(after).await?,
             Script::Dev => {
@@ -1626,6 +1693,39 @@ impl Session {
         self.say(&format!("Done: I worked in {app}'s window behind yours.")).await
     }
 
+    /// `mock:video`: a test clip (made once, with ffmpeg, in Trek's data folder) watched through the
+    /// session's own `trek-video` server, as an agent would call it, and linked in the answer so
+    /// it plays inline.
+    async fn watch_video(&mut self) -> Step {
+        let Some(ffmpeg) = trek_core::detect::which("ffmpeg") else {
+            return self.say("`mock:video` makes its clip with ffmpeg, which isn't installed (`brew install ffmpeg`).").await;
+        };
+        let clip = trek_core::paths::data_dir().join("mock-video").join("clip.mp4");
+        if !clip.is_file() {
+            let made = make_clip(&ffmpeg, &clip).await;
+            if let Err(e) = made {
+                return self.say(&format!("Couldn't make the test clip: {e}")).await;
+            }
+        }
+        self.think("I can't see video myself, so I'll have Trek's watcher take frames and a transcript.").await?;
+        let id = self.id("tool");
+        self.tool_start(&id, "mcp__trek-video__watch_video", &clip.display().to_string()).await?;
+        let (output, ok) = match &self.video {
+            Some(server) => match call_watch_video(server, &clip).await {
+                Ok(text) => (text, true),
+                Err(e) => (e, false),
+            },
+            None => ("Trek gave this session no video watcher (Settings › Tools › Video watcher is off).".to_string(), false),
+        };
+        self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
+        let answer = if ok {
+            format!("I watched the clip: a test pattern with a running counter and a steady tone, six seconds long.\n\n[The test clip]({})", clip.display())
+        } else {
+            format!("I couldn't watch it. The clip is here:\n\n[The test clip]({})", clip.display())
+        };
+        self.say(&answer).await
+    }
+
     /// `mock:server`: a dev server left running in the background, printing as it goes. It runs
     /// for `until` (or until stopped, or the session ends), and says nothing to the agent.
     async fn server(&mut self, until: Option<Duration>) -> Step {
@@ -2333,6 +2433,7 @@ mod tests {
         assert_eq!(Script::parse("mock:judge these: Design A has an error path", false), Script::Judge);
         assert_eq!(Script::parse("mock:told", false), Script::Told);
         assert_eq!(Script::parse("mock:mcp", false), Script::Mcp);
+        assert_eq!(Script::parse("mock:video", false), Script::Video);
         assert_eq!(Script::parse("what were you told", false), Script::Answer, "bare `told` is just a word");
     }
 

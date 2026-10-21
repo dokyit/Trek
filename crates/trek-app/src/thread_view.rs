@@ -291,7 +291,8 @@ fn layout(items: &[Item], live_reasoning: Option<usize>) -> (Vec<Slot>, Vec<usiz
     };
     for (ix, item) in items.iter().enumerate() {
         match item {
-            Item::Tool { .. } => match placement(item) {
+            // What `watch_video` saw shows under its row, so it has one of its own.
+            Item::Tool { title, status, .. } => match if trek_core::media::is_watch_call(title) && *status == ToolStatus::Done { Place::Own } else { placement(item) } {
                 Place::Group => {
                     // The group's row is the next one pushed.
                     resolve(&mut hidden, &mut item_row, slots.len());
@@ -324,6 +325,299 @@ fn layout(items: &[Item], live_reasoning: Option<usize>) -> (Vec<Slot>, Vec<usiz
     (slots, item_row)
 }
 
+// ----- Thinking process timeline -------------------------------------------
+//
+// While a turn works, and once it has, the thread view shows what the agent did as a vertical
+// timeline: a header ("Thinking Ns", shimmering while it runs; "Thought for Ns" once done) and a
+// node per step — a thought, a tool call with its file chips, a fan-out of parallel calls that
+// merges back at a hollow node, a dashed dead end for a call that failed, and a closing blue
+// "Finished thinking" node. When the turn ends the whole thing collapses to its header.
+
+/// One step of the timeline.
+#[derive(Clone, PartialEq)]
+struct ThinkingStep {
+    kind: ThinkingKind,
+    /// The active-form label ("Reading src/auth.rs"); `past` turns it past tense once done.
+    label: String,
+    /// Files the step read or edited, for file chips.
+    files: Vec<String>,
+    running: bool,
+    /// The agent's own reasoning text (the existing collapsed "Thought" content), when the step
+    /// is a thought.
+    thought: Option<String>,
+    /// Stable key for the node's id (a tool call's id, or `thought-<ix>`).
+    key: String,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ThinkingKind {
+    Main,
+    Child,
+    DeadEnd,
+    Merge,
+    Final,
+}
+
+/// A turn's thinking, ready to draw.
+struct Thinking {
+    steps: Vec<ThinkingStep>,
+    /// Older steps folded away (`…and N earlier steps`), so a long turn stays cheap to draw.
+    earlier: usize,
+    /// The turn is still running.
+    running: bool,
+    /// Whole seconds the turn took (or has run for).
+    secs: u64,
+}
+
+/// The most timeline nodes a turn shows; older steps fold into "…and N earlier steps".
+const TIMELINE_CAP: usize = 40;
+
+/// The current turn's thinking, `None` when the agent hasn't thought or called anything yet.
+fn thinking(live: &crate::workspace::LiveThread) -> Option<Thinking> {
+    let start = live.items.iter().rposition(|i| matches!(i, Item::User { aside: false, .. }))?;
+    if start + 1 >= live.items.len() {
+        return None;
+    }
+    let running = live.turn_started.is_some();
+    let finished = live.items[start + 1..].iter().any(|i| matches!(i, Item::TurnEnd { .. }));
+    let secs = live.items[start + 1..]
+        .iter()
+        .find_map(|i| if let Item::TurnEnd { took_secs, .. } = i { Some(*took_secs as u64) } else { None })
+        .or_else(|| live.turn_started.map(|t| t.elapsed().as_secs()))
+        .unwrap_or(0);
+
+    struct Raw {
+        key: String,
+        label: String,
+        files: Vec<String>,
+        running: bool,
+        dead: bool,
+        parallel: bool,
+        thought: Option<String>,
+    }
+    let mut raw: Vec<Raw> = Vec::new();
+    for (ix, item) in live.items.iter().enumerate().skip(start + 1) {
+        match item {
+            Item::Reasoning { text } if !text.trim().is_empty() => {
+                raw.push(Raw {
+                    key: format!("thought-{ix}"),
+                    label: crate::activity::headline(text).unwrap_or_else(|| "Thinking".to_string()),
+                    files: vec![],
+                    running: live.reasoning == Some(ix),
+                    dead: false,
+                    parallel: false,
+                    thought: Some(text.clone()),
+                });
+            }
+            Item::Tool { id, title, detail, status, .. } => {
+                let op = crate::activity::op(title, detail, None);
+                let kind = tool_kind(title);
+                let files: Vec<String> = if matches!(kind, ToolKind::Read | ToolKind::Edit) {
+                    detail.split(", ").filter(|p| !p.is_empty()).map(str::to_string).collect()
+                } else {
+                    vec![]
+                };
+                let label = if op.verb.is_empty() { op.text.clone() } else { format!("{} {}", op.verb, op.text) };
+                raw.push(Raw {
+                    key: id.clone(),
+                    label: label.trim().to_string(),
+                    files,
+                    running: *status == ToolStatus::Running,
+                    dead: matches!(status, ToolStatus::Failed | ToolStatus::Denied),
+                    parallel: live.parallel.contains(id),
+                    thought: None,
+                });
+            }
+            _ => {}
+        }
+    }
+    if raw.is_empty() {
+        return None;
+    }
+    let earlier = raw.len().saturating_sub(TIMELINE_CAP);
+    if earlier > 0 {
+        raw.drain(..earlier);
+    }
+
+    // Fan out runs of parallel calls and merge back after each.
+    let mut steps: Vec<ThinkingStep> = Vec::new();
+    let mut i = 0;
+    let step = |r: &Raw, kind: ThinkingKind| ThinkingStep {
+        kind,
+        label: r.label.clone(),
+        files: r.files.clone(),
+        running: r.running,
+        thought: r.thought.clone(),
+        key: r.key.clone(),
+    };
+    while i < raw.len() {
+        let r = &raw[i];
+        if r.dead {
+            steps.push(step(r, ThinkingKind::DeadEnd));
+            i += 1;
+            continue;
+        }
+        if r.parallel {
+            let mut j = i;
+            while j < raw.len() && raw[j].parallel && !raw[j].dead {
+                j += 1;
+            }
+            if j - i >= 2 {
+                for k in i..j {
+                    steps.push(step(&raw[k], ThinkingKind::Child));
+                }
+                steps.push(ThinkingStep {
+                    kind: ThinkingKind::Merge,
+                    label: "Merged".to_string(),
+                    files: vec![],
+                    running: false,
+                    thought: None,
+                    key: raw[i].key.clone(),
+                });
+                i = j;
+                continue;
+            }
+        }
+        steps.push(step(r, ThinkingKind::Main));
+        i += 1;
+    }
+    if finished {
+        steps.push(ThinkingStep {
+            kind: ThinkingKind::Final,
+            label: "Finished thinking".to_string(),
+            files: vec![],
+            running: false,
+            thought: None,
+            key: "final".to_string(),
+        });
+    }
+    Some(Thinking { steps, earlier, running, secs })
+}
+
+/// A leading gerund to its past tense, so a done step reads "Ran" where a running one reads
+/// "Running". Anything unknown is left alone.
+fn past(phrase: &str) -> String {
+    let mut it = phrase.splitn(2, ' ');
+    let Some(first) = it.next() else { return phrase.to_string() };
+    let rest = it.next().unwrap_or("");
+    let done = match first {
+        "Searching" => "Searched", "Reading" => "Read", "Writing" => "Wrote", "Editing" => "Edited",
+        "Running" => "Ran", "Exploring" => "Explored", "Fetching" => "Fetched", "Calling" => "Called",
+        "Building" => "Built", "Committing" => "Committed", "Checking" => "Checked", "Formatting" => "Formatted",
+        "Sending" => "Sent", "Using" => "Used", "Working" => "Worked", "Planning" => "Planned",
+        "Asking" => "Asked", "Thinking" => "Thought", "Merging" => "Merged", "Drafting" => "Drafted",
+        "Spotting" => "Spotted", "Mapping" => "Mapped", "Installing" => "Installed", "Pushing" => "Pushed",
+        "Pulling" => "Pulled", "Reviewing" => "Reviewed", "Starting" => "Started",
+        _ => first,
+    };
+    if rest.is_empty() { done.to_string() } else { format!("{done} {rest}") }
+}
+
+/// The timeline, from its header down: `open` draws the nodes, otherwise just the header.
+fn thinking_element(thinking: &Thinking, open: bool, clock: f32, toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let muted = theme.muted_foreground;
+    let blue = crate::palette::sky(cx);
+    let text_size = px(13.);
+
+    let header = h_flex()
+        .id("thinking-header")
+        .test_support()
+        .gap_1()
+        .py_1()
+        .text_size(text_size)
+        .cursor_pointer()
+        .on_click(toggle)
+        .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(muted))
+        .child(if thinking.running {
+            h_flex()
+                .gap_1()
+                .child(crate::working_bar::shimmer("Thinking".into(), clock, false, theme.foreground, theme.foreground))
+                .child(div().text_color(muted).child(format!("{}s", thinking.secs)))
+                .into_any_element()
+        } else {
+            div().text_color(muted).child(format!("Thought for {}s", thinking.secs)).into_any_element()
+        });
+
+    let mut body = None;
+    if open {
+        let node = |s: &ThinkingStep, cx: &App| -> AnyElement {
+            let shown = if s.running { s.label.clone() } else { past(&s.label) };
+            let (id, icon): (String, AnyElement) = match s.kind {
+                ThinkingKind::Merge => (format!("thinking-merge-{}", s.key), div().size(px(9.)).rounded_full().border_2().border_color(muted.opacity(0.8)).into_any_element()),
+                ThinkingKind::DeadEnd => (
+                    format!("thinking-deadend-{}", s.key),
+                    h_flex().gap(px(3.)).child(div().w(px(8.)).border_b_1().border_dashed().border_color(muted.opacity(0.7))).child(Icon::new(IconName::CircleX).size(px(12.)).text_color(muted.opacity(0.7))).into_any_element(),
+                ),
+                ThinkingKind::Final => (
+                    "thinking-final".to_string(),
+                    div().size(px(15.)).rounded_full().bg(blue).flex().items_center().justify_center().child(Icon::new(IconName::Check).size(px(10.)).text_color(theme.background)).into_any_element(),
+                ),
+                ThinkingKind::Child if s.running => (format!("thinking-node-{}", s.key), Spinner::new().xsmall().color(muted).into_any_element()),
+                ThinkingKind::Child => (format!("thinking-node-{}", s.key), div().size(px(6.)).rounded_full().bg(muted.opacity(0.5)).into_any_element()),
+                ThinkingKind::Main if s.running => (format!("thinking-node-{}", s.key), Spinner::new().xsmall().color(theme.foreground).into_any_element()),
+                ThinkingKind::Main => (format!("thinking-node-{}", s.key), div().size(px(8.)).rounded_full().bg(muted.opacity(0.8)).into_any_element()),
+            };
+            let mut text_colour = if s.running { theme.foreground } else { muted };
+            if s.kind == ThinkingKind::DeadEnd {
+                text_colour = muted.opacity(0.7);
+            }
+            h_flex()
+                .id(id)
+                .test_support()
+                .gap_2()
+                .py(px(1.))
+                .when(s.kind == ThinkingKind::Child, |el| el.ml(px(16.)))
+                .child(div().w(px(15.)).flex_none().flex().items_center().justify_center().child(icon))
+                .child(
+                    v_flex()
+                        .min_w_0()
+                        .flex_1()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .min_w_0()
+                                .text_size(text_size)
+                                .text_color(text_colour)
+                                .child(div().min_w_0().truncate().child(shown))
+                                .children(s.files.iter().map(|f| crate::file_icon::chip(format!("{}-file", if s.kind == ThinkingKind::DeadEnd { format!("thinking-deadend-{}", s.key) } else { format!("thinking-node-{}", s.key) }), f, file_name(f), px(10.5), cx))),
+                        )
+                        .when_some(s.thought.clone().filter(|_| s.kind != ThinkingKind::Final), |el, t| {
+                            el.child(div().mt_1().pl_0().text_size(px(12.)).text_color(muted.opacity(0.85)).line_height(relative(1.45)).line_clamp(3).child(t.trim().to_string()))
+                        }),
+                )
+                .into_any_element()
+        };
+        let summary = (thinking.earlier > 0).then(|| {
+            h_flex().id("thinking-earlier").test_support().gap_2().py(px(1.)).text_size(px(12.5)).text_color(muted).child(div().w(px(15.)).flex_none()).child(div().child(format!("…and {} earlier steps", thinking.earlier)))
+        });
+        body = Some(
+            v_flex()
+                .id("thinking-body")
+                .test_support()
+                .relative()
+                .max_h(px(360.))
+                .overflow_y_scroll()
+                .child(div().absolute().top(px(6.)).bottom(px(6.)).left(px(7.)).w(px(2.)).bg(theme.foreground.opacity(0.07)))
+                .children(summary)
+                .children(thinking.steps.iter().map(|s| node(s, cx))),
+        );
+    }
+
+    v_flex()
+        .id("thinking")
+        .test_support()
+        .pb_1()
+        .child(header)
+        .when_some(body, |el, b| el.child(b))
+        .into_any_element()
+}
+
+/// The last component of `path`, for a chip's label.
+fn file_name(path: &str) -> &str {
+    path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
 pub struct ThreadView {
     workspace: Entity<Workspace>,
     /// The main window's transcript follows its route; a thread window's shows one thread.
@@ -339,6 +633,9 @@ pub struct ThreadView {
     draws: u64,
     /// Items (by id) opened by the user: long messages, thoughts, tool groups, tool output.
     expanded: HashSet<String>,
+    /// The thinking timeline is expanded (a finished turn starts collapsed; a running one is
+    /// always shown).
+    thinking_open: bool,
     /// What a thread off screen kept: documents, expansion, scroll. Cycling back to it restores
     /// this instead of parsing and measuring again. `stash_order` is oldest first, capped.
     stashed: HashMap<String, Stashed>,
@@ -437,6 +734,7 @@ const STASH_KEPT: usize = 12;
 struct Stashed {
     md: HashMap<String, Markdown>,
     expanded: HashSet<String>,
+    thinking_open: bool,
     expanded_gen: u64,
     count: usize,
     revision: u64,
@@ -538,6 +836,7 @@ impl ThreadView {
             md: HashMap::new(),
             draws: 0,
             expanded: HashSet::new(),
+            thinking_open: false,
             stashed: HashMap::new(),
             stash_order: Default::default(),
             secrets: (None, vec![]),
@@ -581,6 +880,7 @@ impl ThreadView {
             Stashed {
                 md: std::mem::take(&mut self.md),
                 expanded: std::mem::take(&mut self.expanded),
+                thinking_open: self.thinking_open,
                 expanded_gen: self.expanded_gen,
                 count: self.count,
                 revision: self.revision,
@@ -611,6 +911,7 @@ impl ThreadView {
         self.stash_order.retain(|t| t != id);
         self.md = s.md;
         self.expanded = s.expanded;
+        self.thinking_open = s.thinking_open;
         self.expanded_gen = s.expanded_gen;
         self.count = s.count;
         self.revision = s.revision;
@@ -655,7 +956,7 @@ impl ThreadView {
             folder: id.as_ref().and_then(|id| ws.thread(id)).and_then(|t| ws.thread_project_tint(t, cx)),
         };
         let end = shown.end;
-        let ticking = ws.any_task_live_in(&self.scope);
+        let ticking = ws.any_task_live_in(&self.scope) || ws.thread_id_in(&self.scope).is_some_and(|id| ws.turn_running(&id));
         // Text added to messages already streaming moves no row: the rows built for the last
         // revision stand for this one (building them reads every item, and this runs for each
         // batch of tokens).
@@ -711,6 +1012,7 @@ impl ThreadView {
             self.confirm = None;
             self.md.clear();
             self.expanded.clear();
+            self.thinking_open = false;
             self.expanded_gen += 1;
             self.count = 0;
             self.revision = 0;
@@ -817,7 +1119,8 @@ impl ThreadView {
             self.activity_lines.clear();
             return;
         }
-        let shimmer = !self.open_activity(cx).is_empty();
+        let thinking_live = self.current.as_ref().is_some_and(|id| self.workspace.read(cx).turn_running(id));
+        let shimmer = !self.open_activity(cx).is_empty() || thinking_live;
         if self._ticker.as_ref().is_some_and(|(s, _)| *s == shimmer) {
             return;
         }
@@ -1046,6 +1349,7 @@ impl ThreadView {
                         Item::User { text, .. } if orch::is_wake(text) => Row::Wake { ix, key: key.clone().into(), open: self.expanded.contains(key) },
                         Item::User { .. } => Row::User { ix, key: key.clone().into(), open: self.expanded.contains(key) },
                         Item::Tool { id, .. } if trek_core::lineage::of_row(id).is_some() => Row::Lineage { ix },
+                        Item::Tool { title, .. } if trek_core::media::is_watch_call(title) => Row::Tool { ix, key: key.clone().into(), open: self.expanded.contains(key), activity: None },
                         // `TREK_OPEN_BACKGROUND=1` (design review) opens them all.
                         Item::Tool { .. } => Row::SubAgent { ix, key: key.clone().into(), open: self.expanded.contains(key) || review_open() },
                         Item::TurnEnd { .. } => Row::TurnEnd { ix },
@@ -1274,6 +1578,8 @@ impl ThreadView {
                     };
                     (c.consultants.iter().chain(c.judge.iter()).map(|k| k.agent.clone()).collect::<Vec<_>>(), line)
                 });
+                // Videos attached to it (`@path`) play under it.
+                let videos = trek_core::media::mentioned_videos(said, at.cwd.as_deref());
                 let text = SharedString::from(said.to_string());
                 let long = text.len() > 700 || text.lines().count() > 10;
                 let has_text = !text.trim().is_empty();
@@ -1376,6 +1682,7 @@ impl ThreadView {
                                 )
                             }),
                     ))
+                    .when(!videos.is_empty(), |el| el.child(crate::video::AttachedVideos { paths: videos, ix }))
                     .when_some(consulting, |el, (agents, line)| {
                         el.child(
                             h_flex()
@@ -1612,6 +1919,8 @@ impl ThreadView {
                     ToolStatus::Failed | ToolStatus::Denied => Icon::new(IconName::CircleX).xsmall().text_color(palette::red(cx)).into_any_element(),
                 };
                 let has_output = !output.is_empty();
+                // A finished `watch_video` row has the video and its frames under it.
+                let watched = (trek_core::media::is_watch_call(&title) && status == ToolStatus::Done).then(|| crate::video::WatchedVideo { output: output.clone(), ix });
                 let subagent = title == "Subagent";
                 // Trek's own orchestration tools read as what they did; their arguments are noise.
                 let ours = orch::tool_label(&title).or_else(|| orch::spawn_failed_label(&title));
@@ -1626,7 +1935,7 @@ impl ThreadView {
                     None if subagent || ours.is_some() => SharedString::default(),
                     None => detail.into(),
                 };
-                v_flex()
+                let row = v_flex()
                     .py(px(1.))
                     .child(
                         h_flex()
@@ -1676,8 +1985,11 @@ impl ThreadView {
                                 .whitespace_normal()
                                 .child(output),
                         )
-                    })
-                    .into_any_element()
+                    });
+                match watched {
+                    Some(video) => column(row.child(video)).into_any_element(),
+                    None => row.into_any_element(),
+                }
             }
             (Row::SubAgent { ix, key, open }, Item::Tool { id: row_id, detail, output, status, .. }) => {
                 let ws = at.workspace.read(cx);
@@ -2641,12 +2953,29 @@ impl Render for ThreadView {
             streaming,
         };
         let flash = self.flash;
+        // The thinking timeline: shown open while the turn works, collapsed to its header once
+        // it's over (a click or the chevron reopens it). Built before `jump` takes `cx` mutably.
+        let timeline = ws.live.get(&at.thread).and_then(thinking);
+        let thinking_open = timeline.as_ref().is_some_and(|t| t.running) || self.thinking_open;
+        let thinking_block = timeline.as_ref().map(|t| {
+            let view = cx.entity().downgrade();
+            let toggle = move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                if let Some(view) = view.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.thinking_open = !this.thinking_open;
+                        cx.notify();
+                    });
+                }
+            };
+            thinking_element(t, thinking_open, at.clock, toggle, cx)
+        });
         let jump = self.jump_to_latest(window, cx);
         v_flex()
             .size_full()
             .relative()
             .child(forget)
             .child(room)
+            .children(thinking_block)
             .child(
                 div().relative().flex_1().min_h_0().child(
                     MessageScroller::new("transcript", self.scroller.clone(), move |ix, _, cx| match rows.rows.get(ix).cloned() {
@@ -2734,6 +3063,13 @@ impl ThreadView {
     /// Scroll the transcript to its first row, as a reader going back up would.
     pub(crate) fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
         self.scroller.update(cx, |s, cx| _ = s.scroll_to_item(0, cx));
+    }
+
+    /// The thinking timeline's header text ("Thinking Ns" or "Thought for Ns"), for tests.
+    pub(crate) fn thinking_header(&self, cx: &App) -> Option<String> {
+        let ws = self.workspace.read(cx);
+        let t = thinking(ws.live.get(self.current.as_ref()?)?)?;
+        Some(if t.running { format!("Thinking {}s", t.secs) } else { format!("Thought for {}s", t.secs) })
     }
 
     /// Whether the transcript redraws on a ticker, and at the working bar's rate if so.

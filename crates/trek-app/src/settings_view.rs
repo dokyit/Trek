@@ -288,6 +288,7 @@ pub(super) struct ToolsProbe {
     accessibility: bool,
     screen_recording: bool,
     axe: bool,
+    ffmpeg: bool,
     mcp_bundled: bool,
     agent_mcp: Vec<(&'static str, Vec<String>)>,
     plugins: Vec<String>,
@@ -304,6 +305,7 @@ impl ToolsProbe {
             accessibility: crate::integrations::accessibility_allowed(),
             screen_recording: crate::integrations::screen_recording_allowed(),
             axe: crate::integrations::axe_path().is_some(),
+            ffmpeg: crate::integrations::ffmpeg_installed(),
             mcp_bundled: crate::workspace::trek_mcp_binary().is_some(),
             agent_mcp,
             plugins,
@@ -1234,6 +1236,32 @@ impl SettingsView {
                 cx,
             ));
         }
+        out.push(Self::heading("Video", cx));
+        let ffmpeg_control: AnyElement = match probe.as_ref().map(|p| p.ffmpeg) {
+            None => checking("install-ffmpeg"),
+            Some(true) => Self::status_dot(palette::emerald(cx), "Installed"),
+            Some(false) => Button::new("install-ffmpeg")
+                .small()
+                .outline()
+                .icon(IconName::ArrowDown)
+                .label("Install ffmpeg")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: crate::integrations::FFMPEG_INSTALL.into(), cwd: None }))
+                }))
+                .into_any_element(),
+        };
+        out.push(ui::group(
+            vec![
+                Self::row(
+                    "Video watcher",
+                    "Agents can watch a video file or link: they get its frames and a transcript of its audio, and you get a player with the frames they saw. YouTube and X links need yt-dlp; transcripts use whisper when it's installed, else the Mac's speech recognition. Applies to new sessions.",
+                    self.switch("video-tools", s.tools.video, |s, v| s.tools.video = v),
+                    cx,
+                ),
+                Self::row("ffmpeg", "Reads the video, takes its frames and its audio. Trek doesn't bundle it.", ffmpeg_control, cx),
+            ],
+            cx,
+        ));
         out.push(Self::heading("Sub-agents", cx));
         out.push(ui::group(
             vec![Self::row(

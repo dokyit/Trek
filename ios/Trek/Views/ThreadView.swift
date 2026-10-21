@@ -54,6 +54,7 @@ private struct ThreadScreen: View {
                        projectName: t?.project?.name ?? "Project", retryModels: retryModels(t))
             .equatable()
             .environment(\.projectHue, t?.project?.hue)
+            .environment(\.liveThreadID, threadID)
             .background(Trek.background)
             .safeAreaBar(edge: .top, spacing: 0) {
                 if let t {
