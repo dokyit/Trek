@@ -144,7 +144,11 @@ impl Group {
 /// sub-agent `child`'s latest turn (one Trek runs), its newest ones as rows.
 pub(crate) fn child_group(ws: &Workspace, child: &str) -> Option<Group> {
     let live = ws.live.get(child)?;
-    let start = live.items.iter().rposition(|i| matches!(i, Item::User { aside: false, .. })).map_or(0, |u| u + 1);
+    let start = live
+        .items
+        .iter()
+        .rposition(|i| matches!(i, Item::User { aside: false, .. }))
+        .map_or(0, |u| u + 1);
     let tools: Vec<usize> = (start..live.items.len()).filter(|ix| matches!(live.items.get(*ix), Some(i @ Item::Tool { .. }) if activity::placement(i) == activity::Place::Group)).collect();
     group(ws, child, &tools, None)
 }
@@ -152,14 +156,26 @@ pub(crate) fn child_group(ws: &Workspace, child: &str) -> Option<Group> {
 /// The same for one of the agent's own sub-agents, from the calls it reported
 /// (`SubTask::steps`, the newest last; `earlier` more before them). The last is under way while
 /// it runs.
-pub(crate) fn steps_group(steps: &[(String, String)], earlier: usize, running: bool, cwd: Option<&std::path::Path>) -> Option<Group> {
+pub(crate) fn steps_group(
+    steps: &[(String, String)],
+    earlier: usize,
+    running: bool,
+    cwd: Option<&std::path::Path>,
+) -> Option<Group> {
     let (title, detail) = steps.last()?;
     let kinds: Vec<ToolKind> = steps.iter().map(|(t, _)| activity::tool_kind(t)).collect();
     let rows = steps
         .iter()
         .enumerate()
         .skip(steps.len().saturating_sub(ROWS))
-        .map(|(n, (t, d))| LiveRow { id: format!("step-{}", earlier + n), op: activity::op(t, d, cwd), lines: None, running: running && n + 1 == steps.len(), failed: false, activity: None })
+        .map(|(n, (t, d))| LiveRow {
+            id: format!("step-{}", earlier + n),
+            op: activity::op(t, d, cwd),
+            lines: None,
+            running: running && n + 1 == steps.len(),
+            failed: false,
+            activity: None,
+        })
         .collect();
     Some(Group {
         summary: activity::summarize(&kinds),
@@ -181,15 +197,40 @@ impl Group {
     pub(crate) fn element(&self, clock: f32, still: bool, cx: &App) -> AnyElement {
         let live = self.rows.iter().any(|r| r.running);
         v_flex()
-            .child(WorkingBar::summary_line(self, clock, None, still || !live, 1., false, cx))
-            .child(rows_rail(cx).when(self.earlier > 0, |el| el.child(earlier_line(self.earlier, None, cx))).children(self.rows.iter().map(|r| row(r, None, clock, still, None, cx))))
+            .child(WorkingBar::summary_line(
+                self,
+                clock,
+                None,
+                still || !live,
+                1.,
+                false,
+                cx,
+            ))
+            .child(
+                rows_rail(cx)
+                    .when(self.earlier > 0, |el| {
+                        el.child(earlier_line(self.earlier, None, cx))
+                    })
+                    .children(
+                        self.rows
+                            .iter()
+                            .map(|r| row(r, None, clock, still, None, cx)),
+                    ),
+            )
             .into_any_element()
     }
 
     #[cfg(test)]
     pub(crate) fn describe(&self) -> Vec<String> {
         let mut out = vec![format!("{} · {}", self.summary, self.phrase)];
-        out.extend(self.rows.iter().map(|r| [r.op.verb.as_str(), r.op.text.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" ")));
+        out.extend(self.rows.iter().map(|r| {
+            [r.op.verb.as_str(), r.op.text.as_str()]
+                .iter()
+                .filter(|s| !s.is_empty())
+                .copied()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }));
         out
     }
 }
@@ -202,23 +243,47 @@ fn group(ws: &Workspace, id: &str, tools: &[usize], headline: Option<&str>) -> O
     let mut rows = Vec::with_capacity(tools.len().min(ROWS));
     let mut last = None;
     for (n, &ix) in tools.iter().enumerate() {
-        let Some(Item::Tool { id: call, title, detail, status, .. }) = live.items.get(ix) else { continue };
+        let Some(Item::Tool {
+            id: call,
+            title,
+            detail,
+            status,
+            ..
+        }) = live.items.get(ix)
+        else {
+            continue;
+        };
         kinds.push(activity::tool_kind(title));
         last = Some((title, detail));
         if n + ROWS < tools.len() {
             continue;
         }
-        let task = live.tasks.iter().find(|t| &t.id == call && t.done.is_none());
+        let task = live
+            .tasks
+            .iter()
+            .find(|t| &t.id == call && t.done.is_none());
         rows.push(LiveRow {
             id: live.items.id_at(ix).unwrap_or_default().to_string(),
             op: activity::op(title, detail, cwd.as_deref()),
             // A failed or denied change changed nothing.
-            lines: live.lines.get(call).copied().filter(|_| !matches!(status, ToolStatus::Failed | ToolStatus::Denied)),
+            lines: live
+                .lines
+                .get(call)
+                .copied()
+                .filter(|_| !matches!(status, ToolStatus::Failed | ToolStatus::Denied)),
             running: *status == ToolStatus::Running,
             failed: matches!(status, ToolStatus::Failed | ToolStatus::Denied),
             activity: task.map(|t| {
-                let steps = if t.tool_uses == 1 { "1 step".to_string() } else { format!("{} steps", t.tool_uses) };
-                if t.activity.is_empty() { steps } else { format!("{} · {steps}", t.activity) }
+                let steps = if t.tool_uses == 1 {
+                    "1 step".to_string()
+                } else {
+                    format!("{} steps", t.tool_uses)
+                };
+                if t.activity.is_empty() {
+                    steps
+                } else {
+                    format!("{} · {steps}", t.activity)
+                }
             }),
         });
     }
@@ -237,7 +302,12 @@ fn ease_out(t: f32) -> f32 {
 }
 
 impl WorkingBar {
-    pub fn new(workspace: Entity<Workspace>, scope: Scope, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: Entity<Workspace>,
+        scope: Scope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subscriptions = vec![
             cx.observe(&workspace, |this, _, cx| this.sync(cx)),
             // Tool calls change only the transcript: no notify, an event.
@@ -249,7 +319,9 @@ impl WorkingBar {
                 }
             }),
             // Background computer use: the bar says where, and brings its picture back.
-            cx.observe(&workspace.read(cx).background_use.clone(), |this, _, cx| this.sync(cx)),
+            cx.observe(&workspace.read(cx).background_use.clone(), |this, _, cx| {
+                this.sync(cx)
+            }),
             cx.observe_window_activation(window, |this, window, cx| {
                 this.active = window.is_window_active() || crate::mascot::force_active();
                 // Restart the ticker at the new rate rather than after its current wait.
@@ -264,9 +336,18 @@ impl WorkingBar {
             scope,
             shown: None,
             active: window.is_window_active() || crate::mascot::force_active(),
-            walk: Cell::new(Walk { gait: 0., phase: 0., last: None }),
+            walk: Cell::new(Walk {
+                gait: 0.,
+                phase: 0.,
+                last: None,
+            }),
             arrived: HashMap::new(),
-            settled: cx.new(|_| SettledRows { rows: vec![], earlier: 0, width: px(0.), open: None }),
+            settled: cx.new(|_| SettledRows {
+                rows: vec![],
+                earlier: 0,
+                width: px(0.),
+                open: None,
+            }),
             settled_len: 0,
             _ticker: None,
             _subscriptions: subscriptions,
@@ -296,12 +377,26 @@ impl WorkingBar {
         // The wait's clock is the longest-waited one's, to the second. Worked out afresh, it'd
         // land a hair off each time and redraw the bar on every workspace change: the one shown
         // stands while it's within a second.
-        let shown = self.shown.as_ref().filter(|s| s.thread == id).and_then(|s| s.header.as_ref()).filter(|h| h.waiting.is_some()).and_then(|h| h.started);
-        let since = waited.iter().map(|w| w.elapsed).max().map(|d| steady(Instant::now() - Duration::from_secs(d.as_secs()), shown));
+        let shown = self
+            .shown
+            .as_ref()
+            .filter(|s| s.thread == id)
+            .and_then(|s| s.header.as_ref())
+            .filter(|h| h.waiting.is_some())
+            .and_then(|h| h.started);
+        let since = waited
+            .iter()
+            .map(|w| w.elapsed)
+            .max()
+            .map(|d| steady(Instant::now() - Duration::from_secs(d.as_secs()), shown));
         let working = thread.run_state == RunState::Working || ws.waiting(id);
         let header = (working && live.permissions.is_empty()).then(|| Header {
             agent: thread.agent.clone(),
-            started: if waiting.is_some() { since } else { live.turn_started },
+            started: if waiting.is_some() {
+                since
+            } else {
+                live.turn_started
+            },
             agents: live.active_tasks().max(live.background_agents().count()),
             waiting,
             behind: {
@@ -309,21 +404,33 @@ impl WorkingBar {
                 b.session(id).map(|s| (s.window.app.clone(), b.showing()))
             },
         });
-        let current = activity::live(ws, id).and_then(|t| group(ws, id, &t.tools, t.headline.as_deref()));
+        let current =
+            activity::live(ws, id).and_then(|t| group(ws, id, &t.tools, t.headline.as_deref()));
         // The transcript holds a folding group back wherever it's shown, so every bar on it shows
         // the group until then: folding, or as it was when the bar is still.
-        let folding = live.fold.as_ref().filter(|f| f.until > Instant::now()).and_then(|f| {
-            let start = live.items.position(&f.first)?;
-            let tools: Vec<usize> = live.items[start..]
-                .iter()
-                .enumerate()
-                .take_while(|(_, i)| matches!(i, Item::Tool { .. } | Item::Reasoning { .. }))
-                .filter(|(_, i)| matches!(i, Item::Tool { .. }))
-                .map(|(n, _)| start + n)
-                .collect();
-            Some((group(ws, id, &tools, None)?, f.until))
-        });
-        (header.is_some() || folding.is_some()).then(|| Shown { thread: id.to_string(), header, group: current, folding, still, width: ws.column() })
+        let folding = live
+            .fold
+            .as_ref()
+            .filter(|f| f.until > Instant::now())
+            .and_then(|f| {
+                let start = live.items.position(&f.first)?;
+                let tools: Vec<usize> = live.items[start..]
+                    .iter()
+                    .enumerate()
+                    .take_while(|(_, i)| matches!(i, Item::Tool { .. } | Item::Reasoning { .. }))
+                    .filter(|(_, i)| matches!(i, Item::Tool { .. }))
+                    .map(|(n, _)| start + n)
+                    .collect();
+                Some((group(ws, id, &tools, None)?, f.until))
+            });
+        (header.is_some() || folding.is_some()).then(|| Shown {
+            thread: id.to_string(),
+            header,
+            group: current,
+            folding,
+            still,
+            width: ws.column(),
+        })
     }
 
     /// The height of the part above the settled rows: a folding group (shrinking frame by frame)
@@ -334,7 +441,13 @@ impl WorkingBar {
             let left = 1. - fold_eased(*until, s.still);
             GROUP_PAD + SUMMARY + (g.rows_height() + GROUP_PAD) * left
         });
-        (folding + if s.group.is_some() { GROUP_PAD + SUMMARY } else { 0. }).round()
+        (folding
+            + if s.group.is_some() {
+                GROUP_PAD + SUMMARY
+            } else {
+                0.
+            })
+        .round()
     }
 
     fn settled_height(&self) -> f32 {
@@ -347,14 +460,20 @@ impl WorkingBar {
     /// The bar's own part: the live rows below the settled ones, and the header.
     fn bottom_height(&self) -> f32 {
         let Some(s) = &self.shown else { return 0. };
-        let rows = s.group.as_ref().map_or(0., |g| g.rows.len().saturating_sub(self.settled_len) as f32 * ROW + GROUP_PAD);
+        let rows = s.group.as_ref().map_or(0., |g| {
+            g.rows.len().saturating_sub(self.settled_len) as f32 * ROW + GROUP_PAD
+        });
         rows + if s.header.is_some() { HEIGHT } else { 0. }
     }
 
     /// Redraw the bar's animated parts.
     fn redraw(&mut self, cx: &mut Context<Self>) {
         cx.notify();
-        if self.shown.as_ref().is_some_and(|s| s.group.is_some() || s.folding.is_some()) {
+        if self
+            .shown
+            .as_ref()
+            .is_some_and(|s| s.group.is_some() || s.folding.is_some())
+        {
             self.top.update(cx, |_, cx| cx.notify());
         }
     }
@@ -364,8 +483,16 @@ impl WorkingBar {
         // Calls that weren't on show in this thread a moment ago slide in.
         if let Some(new) = shown.as_ref().filter(|s| !s.still) {
             let before: HashSet<&str> = match &self.shown {
-                Some(old) if old.thread == new.thread => old.group.iter().flat_map(|g| g.rows.iter().map(|r| r.id.as_str())).collect(),
-                _ => new.group.iter().flat_map(|g| g.rows.iter().map(|r| r.id.as_str())).collect(),
+                Some(old) if old.thread == new.thread => old
+                    .group
+                    .iter()
+                    .flat_map(|g| g.rows.iter().map(|r| r.id.as_str()))
+                    .collect(),
+                _ => new
+                    .group
+                    .iter()
+                    .flat_map(|g| g.rows.iter().map(|r| r.id.as_str()))
+                    .collect(),
             };
             let now = Instant::now();
             for row in new.group.iter().flat_map(|g| &g.rows) {
@@ -391,7 +518,11 @@ impl WorkingBar {
         let width = self.shown.as_ref().map_or(px(0.), |s| s.width);
         let (rows, earlier) = match self.shown.as_ref().and_then(|s| s.group.as_ref()) {
             Some(g) => {
-                let n = g.rows.iter().position(|r| r.running || self.arrived.contains_key(&r.id)).unwrap_or(g.rows.len());
+                let n = g
+                    .rows
+                    .iter()
+                    .position(|r| r.running || self.arrived.contains_key(&r.id))
+                    .unwrap_or(g.rows.len());
                 (g.rows[..n].to_vec(), g.earlier)
             }
             None => (vec![], 0),
@@ -399,7 +530,11 @@ impl WorkingBar {
         self.settled_len = rows.len();
         let open = self.opener();
         self.settled.update(cx, |s, cx| {
-            if s.rows != rows || s.earlier != earlier || s.width != width || s.open.as_ref().map(|o| &o.thread) != open.as_ref().map(|o| &o.thread) {
+            if s.rows != rows
+                || s.earlier != earlier
+                || s.width != width
+                || s.open.as_ref().map(|o| &o.thread) != open.as_ref().map(|o| &o.thread)
+            {
                 s.rows = rows;
                 s.earlier = earlier;
                 s.width = width;
@@ -454,25 +589,29 @@ impl WorkingBar {
             return;
         }
         self._ticker = rate.map(|every| {
-            let task = cx.spawn(async move |this, cx| loop {
-                cx.background_executor().timer(every).await;
-                let Ok(()) = this.update(cx, |this, cx| {
-                    this.redraw(cx);
-                    // Slides end and folds finish between workspace changes.
-                    let sliding = this.arrived.len();
-                    this.arrived.retain(|_, at| at.elapsed() < SLIDE);
-                    if this.arrived.len() != sliding {
-                        this.settle(cx);
-                    }
-                    if let Some(s) = this.shown.as_mut()
-                        && s.folding.as_ref().is_some_and(|(_, until)| *until <= Instant::now())
-                    {
-                        s.folding = None;
-                    }
-                    this.tick(cx);
-                }) else {
-                    break;
-                };
+            let task = cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(every).await;
+                    let Ok(()) = this.update(cx, |this, cx| {
+                        this.redraw(cx);
+                        // Slides end and folds finish between workspace changes.
+                        let sliding = this.arrived.len();
+                        this.arrived.retain(|_, at| at.elapsed() < SLIDE);
+                        if this.arrived.len() != sliding {
+                            this.settle(cx);
+                        }
+                        if let Some(s) = this.shown.as_mut()
+                            && s.folding
+                                .as_ref()
+                                .is_some_and(|(_, until)| *until <= Instant::now())
+                        {
+                            s.folding = None;
+                        }
+                        this.tick(cx);
+                    }) else {
+                        break;
+                    };
+                }
             });
             (every, task)
         });
@@ -489,13 +628,19 @@ fn steady(at: Instant, shown: Option<Instant>) -> Instant {
 
 /// How far a fold ending at `until` has got, 0 to 1.
 fn fold_progress(until: Instant) -> f32 {
-    let left = until.saturating_duration_since(Instant::now()).as_secs_f32();
+    let left = until
+        .saturating_duration_since(Instant::now())
+        .as_secs_f32();
     1. - left / activity::FOLD.as_secs_f32()
 }
 
 /// The fold's progress, eased; a still bar holds the group as it is until it goes.
 fn fold_eased(until: Instant, still: bool) -> f32 {
-    if still { 0. } else { ease_out(fold_progress(until)) }
+    if still {
+        0.
+    } else {
+        ease_out(fold_progress(until))
+    }
 }
 
 /// `text` with a soft highlight sweeping across it, from `base` to `hi` at its peak. Still, it's
@@ -504,13 +649,35 @@ fn fold_eased(until: Instant, still: bool) -> f32 {
 /// The highlight is the same text again in brighter colours, painted only inside a band that
 /// moves along the line, rather than a colour per character: GPUI shapes a line again whenever
 /// its colour runs change, which on every frame costs more than the rest of the bar together.
-pub(crate) fn shimmer(text: SharedString, clock: f32, still: bool, base: Hsla, hi: Hsla) -> AnyElement {
+pub(crate) fn shimmer(
+    text: SharedString,
+    clock: f32,
+    still: bool,
+    base: Hsla,
+    hi: Hsla,
+) -> AnyElement {
     let plain = div().text_color(base).child(text.clone());
     if still {
         return plain.into_any_element();
     }
-    let copies = BAND.iter().map(|(half, k)| (*half, div().text_color(mix(base, hi, *k)).child(text.clone()).into_any_element())).collect();
-    Sweep { clock, base: plain.into_any_element(), copies }.into_any_element()
+    let copies = BAND
+        .iter()
+        .map(|(half, k)| {
+            (
+                *half,
+                div()
+                    .text_color(mix(base, hi, *k))
+                    .child(text.clone())
+                    .into_any_element(),
+            )
+        })
+        .collect();
+    Sweep {
+        clock,
+        base: plain.into_any_element(),
+        copies,
+    }
+    .into_any_element()
 }
 
 /// The shimmer's band: half-widths (px) and how far towards the highlight each step goes, widest
@@ -522,7 +689,12 @@ const SPEED: f32 = 240.;
 /// `a` blended `k` of the way to `b` (in `b`'s hue: the highlight is a brighter `a`).
 fn mix(a: Hsla, b: Hsla, k: f32) -> Hsla {
     let m = |x: f32, y: f32| x + (y - x) * k;
-    Hsla { h: b.h, s: m(a.s, b.s), l: m(a.l, b.l), a: m(a.a, b.a) }
+    Hsla {
+        h: b.h,
+        s: m(a.s, b.s),
+        l: m(a.l, b.l),
+        a: m(a.a, b.a),
+    }
 }
 
 /// Where the band's centre is after `clock` seconds over a line `width` px wide: it comes in
@@ -550,7 +722,10 @@ impl IntoElement for Sweep {
 impl Sweep {
     fn band(&self, bounds: Bounds<Pixels>, half: f32) -> Bounds<Pixels> {
         let centre = band_centre(self.clock, bounds.size.width.as_f32());
-        Bounds::new(point(bounds.origin.x + px(centre - half), bounds.origin.y), size(px(half * 2.), bounds.size.height))
+        Bounds::new(
+            point(bounds.origin.x + px(centre - half), bounds.origin.y),
+            size(px(half * 2.), bounds.size.height),
+        )
     }
 }
 
@@ -566,26 +741,58 @@ impl Element for Sweep {
         None
     }
 
-    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
         (self.base.request_layout(window, cx), ())
     }
 
-    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) {
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         self.base.prepaint(window, cx);
         // Laid out at the line's own size, the copies truncate where it does, and their lines
         // come from the text system's cache: the same text in a single colour.
-        let space = size(AvailableSpace::Definite(bounds.size.width), AvailableSpace::Definite(bounds.size.height));
+        let space = size(
+            AvailableSpace::Definite(bounds.size.width),
+            AvailableSpace::Definite(bounds.size.height),
+        );
         for (_, copy) in &mut self.copies {
             copy.layout_as_root(space, window, cx);
             copy.prepaint_at(bounds.origin, window, cx);
         }
     }
 
-    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) {
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         self.base.paint(window, cx);
-        let bands: Vec<Bounds<Pixels>> = self.copies.iter().map(|(half, _)| self.band(bounds, *half)).collect();
+        let bands: Vec<Bounds<Pixels>> = self
+            .copies
+            .iter()
+            .map(|(half, _)| self.band(bounds, *half))
+            .collect();
         for ((_, copy), band) in self.copies.iter_mut().zip(bands) {
-            window.with_content_mask(Some(ContentMask { bounds: band }), |window| copy.paint(window, cx));
+            window.with_content_mask(Some(ContentMask { bounds: band }), |window| {
+                copy.paint(window, cx)
+            });
         }
     }
 }
@@ -611,8 +818,15 @@ struct Opener {
 }
 
 impl Opener {
-    fn on_click(&self, call: Option<&str>) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
-        let (workspace, thread, call) = (self.workspace.clone(), self.thread.clone(), call.map(str::to_string));
+    fn on_click(
+        &self,
+        call: Option<&str>,
+    ) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+        let (workspace, thread, call) = (
+            self.workspace.clone(),
+            self.thread.clone(),
+            call.map(str::to_string),
+        );
         move |_, _, cx| workspace.update(cx, |ws, cx| ws.open_live_group(&thread, call.clone(), cx))
     }
 }
@@ -621,7 +835,15 @@ impl WorkingBar {
     /// The group's summary line: kind icon, counts, and what it's about (shimmering while live).
     /// `open`: it opens the group in the transcript (the live one does; a folding one is going).
     /// `chevron`: it reads as one that opens (not in a sub-agent's row, which opens itself).
-    fn summary_line(g: &Group, clock: f32, open: Option<&Opener>, still: bool, phrase_opacity: f32, chevron: bool, cx: &App) -> AnyElement {
+    fn summary_line(
+        g: &Group,
+        clock: f32,
+        open: Option<&Opener>,
+        still: bool,
+        phrase_opacity: f32,
+        chevron: bool,
+        cx: &App,
+    ) -> AnyElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let live = open.is_some();
@@ -633,7 +855,13 @@ impl WorkingBar {
             .text_sm()
             .text_color(muted)
             .child(activity::group_icon(g.kind).small())
-            .child(div().min_w_0().truncate().text_color(theme.foreground.opacity(0.85)).child(g.summary.clone()))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.foreground.opacity(0.85))
+                    .child(g.summary.clone()),
+            )
             .child(
                 h_flex()
                     .flex_none()
@@ -641,27 +869,53 @@ impl WorkingBar {
                     .gap_2()
                     .opacity(phrase_opacity)
                     .child(div().child("·"))
-                    .child(div().min_w_0().truncate().child(shimmer(g.phrase.clone().into(), clock, still || !live, muted, theme.foreground))),
+                    .child(div().min_w_0().truncate().child(shimmer(
+                        g.phrase.clone().into(),
+                        clock,
+                        still || !live,
+                        muted,
+                        theme.foreground,
+                    ))),
             )
             // As the transcript's summary rows do: it opens (a sub-agent's, shown in its row, doesn't).
-            .when(chevron, |el| el.child(Icon::new(IconName::ChevronRight).xsmall().opacity(0.6 * phrase_opacity)))
-            .when_some(open, |el, o| el.cursor_pointer().hover(|s| s.text_color(theme.foreground)).on_click(o.on_click(None)))
+            .when(chevron, |el| {
+                el.child(
+                    Icon::new(IconName::ChevronRight)
+                        .xsmall()
+                        .opacity(0.6 * phrase_opacity),
+                )
+            })
+            .when_some(open, |el, o| {
+                el.cursor_pointer()
+                    .hover(|s| s.text_color(theme.foreground))
+                    .on_click(o.on_click(None))
+            })
             .into_any_element()
     }
 
     /// How far `r` has slid in, while it does.
     fn slide(&self, r: &LiveRow, still: bool) -> Option<f32> {
-        self.arrived.get(&r.id).filter(|_| !still).map(|at| ease_out(at.elapsed().as_secs_f32() / SLIDE.as_secs_f32()))
+        self.arrived
+            .get(&r.id)
+            .filter(|_| !still)
+            .map(|at| ease_out(at.elapsed().as_secs_f32() / SLIDE.as_secs_f32()))
     }
 
     fn opener(&self) -> Option<Opener> {
-        Some(Opener { workspace: self.workspace.clone(), thread: self.shown.as_ref()?.thread.clone() })
+        Some(Opener {
+            workspace: self.workspace.clone(),
+            thread: self.shown.as_ref()?.thread.clone(),
+        })
     }
 }
 
 /// The hairline the rows hang from.
 fn rows_rail(cx: &App) -> Div {
-    v_flex().ml(px(7.)).pl_3().border_l_1().border_color(cx.theme().border)
+    v_flex()
+        .ml(px(7.))
+        .pl_3()
+        .border_l_1()
+        .border_color(cx.theme().border)
 }
 
 fn earlier_line(n: usize, open: Option<&Opener>, cx: &App) -> AnyElement {
@@ -674,17 +928,32 @@ fn earlier_line(n: usize, open: Option<&Opener>, cx: &App) -> AnyElement {
         .text_xs()
         .text_color(theme.muted_foreground)
         .child(format!("+{n} earlier"))
-        .when_some(open, |el, o| el.cursor_pointer().hover(|s| s.text_color(theme.foreground)).on_click(o.on_click(None)))
+        .when_some(open, |el, o| {
+            el.cursor_pointer()
+                .hover(|s| s.text_color(theme.foreground))
+                .on_click(o.on_click(None))
+        })
         .into_any_element()
 }
 
 /// A whole group's rows, drawn as they are (a group folding away).
 fn all_rows(g: &Group, cx: &App) -> Div {
-    rows_rail(cx).when(g.earlier > 0, |el| el.child(earlier_line(g.earlier, None, cx))).children(g.rows.iter().map(|r| row(r, None, 0., true, None, cx)))
+    rows_rail(cx)
+        .when(g.earlier > 0, |el| {
+            el.child(earlier_line(g.earlier, None, cx))
+        })
+        .children(g.rows.iter().map(|r| row(r, None, 0., true, None, cx)))
 }
 
 /// One call's row. `slide`: how far in it has slid (0 to 1), while it does.
-fn row(r: &LiveRow, slide: Option<f32>, clock: f32, still: bool, open: Option<&Opener>, cx: &App) -> AnyElement {
+fn row(
+    r: &LiveRow,
+    slide: Option<f32>,
+    clock: f32,
+    still: bool,
+    open: Option<&Opener>,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let text = theme.foreground.opacity(0.85);
@@ -696,8 +965,12 @@ fn row(r: &LiveRow, slide: Option<f32>, clock: f32, still: bool, open: Option<&O
         .gap(px(6.))
         .rounded(px(4.))
         .text_size(px(12.5))
-        .when_some(slide, |el, t| el.relative().top(px(5. * (1. - t))).opacity(t))
-        .when(!r.op.verb.is_empty(), |el| el.child(div().flex_none().text_color(muted).child(r.op.verb.clone())))
+        .when_some(slide, |el, t| {
+            el.relative().top(px(5. * (1. - t))).opacity(t)
+        })
+        .when(!r.op.verb.is_empty(), |el| {
+            el.child(div().flex_none().text_color(muted).child(r.op.verb.clone()))
+        })
         .map(|el| {
             let label = div()
                 .min_w_0()
@@ -719,16 +992,48 @@ fn row(r: &LiveRow, slide: Option<f32>, clock: f32, still: bool, open: Option<&O
                             .border_color(t.edge)
                             .bg(t.fill)
                             .child(crate::file_icon::badge(f, px(13.), cx))
-                            .child(label.child(shimmer(r.op.text.clone().into(), clock, still || !r.running, if r.running { t.ink.opacity(0.7) } else { t.ink }, theme.foreground))),
+                            .child(label.child(shimmer(
+                                r.op.text.clone().into(),
+                                clock,
+                                still || !r.running,
+                                if r.running { t.ink.opacity(0.7) } else { t.ink },
+                                theme.foreground,
+                            ))),
                     )
                 }
-                None => el.child(label.child(shimmer(r.op.text.clone().into(), clock, still || !r.running, if r.running { muted } else { text }, theme.foreground))),
+                None => el.child(label.child(shimmer(
+                    r.op.text.clone().into(),
+                    clock,
+                    still || !r.running,
+                    if r.running { muted } else { text },
+                    theme.foreground,
+                ))),
             }
         })
-        .when_some(r.activity.clone(), |el, a| el.child(div().flex_none().max_w(relative(0.4)).truncate().text_xs().text_color(muted).child(a)))
+        .when_some(r.activity.clone(), |el, a| {
+            el.child(
+                div()
+                    .flex_none()
+                    .max_w(relative(0.4))
+                    .truncate()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(a),
+            )
+        })
         .when_some(r.lines, |el, (a, d)| el.child(lines_chip(a, d, cx)))
-        .when(r.failed, |el| el.child(Icon::new(IconName::CircleX).xsmall().text_color(crate::palette::red(cx))))
-        .when_some(open, |el, o| el.cursor_pointer().hover(|s| s.bg(theme.list_hover)).on_click(o.on_click(Some(&r.id))))
+        .when(r.failed, |el| {
+            el.child(
+                Icon::new(IconName::CircleX)
+                    .xsmall()
+                    .text_color(crate::palette::red(cx)),
+            )
+        })
+        .when_some(open, |el, o| {
+            el.cursor_pointer()
+                .hover(|s| s.bg(theme.list_hover))
+                .on_click(o.on_click(Some(&r.id)))
+        })
         .into_any_element()
 }
 
@@ -746,7 +1051,14 @@ impl Render for SettledRows {
         #[cfg(test)]
         crate::tests::rendered("SettledRows");
         let open = self.open.as_ref();
-        column(self.width, rows_rail(cx).when(self.earlier > 0, |el| el.child(earlier_line(self.earlier, open, cx))).children(self.rows.iter().map(|r| row(r, None, 0., true, open, cx))))
+        column(
+            self.width,
+            rows_rail(cx)
+                .when(self.earlier > 0, |el| {
+                    el.child(earlier_line(self.earlier, open, cx))
+                })
+                .children(self.rows.iter().map(|r| row(r, None, 0., true, open, cx))),
+        )
     }
 }
 
@@ -760,8 +1072,18 @@ impl Render for BarTop {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         crate::tests::rendered("BarTop");
-        let Some((shown, open)) = self.bar.upgrade().and_then(|b| Some((b.read(cx).shown.clone()?, b.read(cx).opener()))) else { return div().into_any_element() };
-        let clock = shown.header.as_ref().and_then(|h| h.started).map_or(0., |t| t.elapsed().as_secs_f32());
+        let Some((shown, open)) = self
+            .bar
+            .upgrade()
+            .and_then(|b| Some((b.read(cx).shown.clone()?, b.read(cx).opener())))
+        else {
+            return div().into_any_element();
+        };
+        let clock = shown
+            .header
+            .as_ref()
+            .and_then(|h| h.started)
+            .map_or(0., |t| t.elapsed().as_secs_f32());
         let still = shown.still;
         let folding = shown.folding.as_ref().map(|(g, until)| {
             let t = fold_eased(*until, still);
@@ -771,95 +1093,194 @@ impl Render for BarTop {
                     .id("live-fold")
                     .test_support()
                     .pt(px(GROUP_PAD))
-                    .child(WorkingBar::summary_line(g, clock, None, still, 1. - t, true, cx))
-                    .child(div().h(px((g.rows_height() + GROUP_PAD) * (1. - t))).overflow_hidden().opacity(1. - t).child(all_rows(g, cx))),
+                    .child(WorkingBar::summary_line(
+                        g,
+                        clock,
+                        None,
+                        still,
+                        1. - t,
+                        true,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .h(px((g.rows_height() + GROUP_PAD) * (1. - t)))
+                            .overflow_hidden()
+                            .opacity(1. - t)
+                            .child(all_rows(g, cx)),
+                    ),
             )
         });
         let group = shown.group.as_ref().map(|g| {
-            column(shown.width, div().id("live-group").test_support().pt(px(GROUP_PAD)).child(WorkingBar::summary_line(g, clock, open.as_ref(), still, 1., true, cx)))
+            column(
+                shown.width,
+                div()
+                    .id("live-group")
+                    .test_support()
+                    .pt(px(GROUP_PAD))
+                    .child(WorkingBar::summary_line(
+                        g,
+                        clock,
+                        open.as_ref(),
+                        still,
+                        1.,
+                        true,
+                        cx,
+                    )),
+            )
         });
-        v_flex().size_full().overflow_hidden().justify_end().children(folding).children(group).into_any_element()
+        v_flex()
+            .size_full()
+            .overflow_hidden()
+            .justify_end()
+            .children(folding)
+            .children(group)
+            .into_any_element()
     }
 }
 
 /// The transcript's column, `width` at its widest, as the bar's parts line up with it.
 fn column(width: Pixels, el: impl IntoElement) -> Div {
-    h_flex().w_full().flex_none().justify_center().px_6().child(div().w_full().max_w(width).child(el))
+    h_flex()
+        .w_full()
+        .flex_none()
+        .justify_center()
+        .px_6()
+        .child(div().w_full().max_w(width).child(el))
 }
 
 impl Render for WorkingBar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         crate::tests::rendered("WorkingBar");
-        let Some(shown) = self.shown.clone() else { return div().into_any_element() };
+        let Some(shown) = self.shown.clone() else {
+            return div().into_any_element();
+        };
         let theme = cx.theme();
         let muted = theme.muted_foreground.opacity(0.85);
-        let elapsed = shown.header.as_ref().and_then(|h| h.started).map(|t| t.elapsed());
+        let elapsed = shown
+            .header
+            .as_ref()
+            .and_then(|h| h.started)
+            .map(|t| t.elapsed());
         let clock = elapsed.map(|d| d.as_secs_f32()).unwrap_or(0.);
         let still = shown.still;
         // The live rows past the settled ones (running, or sliding in).
         let rows = shown.group.as_ref().map(|g| {
             let settled = self.settled_len.min(g.rows.len());
             let open = self.opener();
-            column(shown.width, rows_rail(cx).children(g.rows[settled..].iter().map(|r| row(r, self.slide(r, still), clock, still, open.as_ref(), cx)))).pb(px(GROUP_PAD))
+            column(
+                shown.width,
+                rows_rail(cx).children(
+                    g.rows[settled..]
+                        .iter()
+                        .map(|r| row(r, self.slide(r, still), clock, still, open.as_ref(), cx)),
+                ),
+            )
+            .pb(px(GROUP_PAD))
         });
-        let header = shown.header.as_ref().map(|h| {
-            let who = match &h.waiting {
-                // Their logos, stacked, and who they are; no shimmer: nothing to see here but time.
-                Some((logos, label)) => h_flex()
-                    .min_w_0()
-                    .gap(px(6.))
-                    .child(h_flex().flex_none().children(logos.iter().enumerate().map(|(i, a)| {
-                        div().when(i > 0, |el| el.ml(px(-4.))).p(px(1.)).rounded(px(4.)).bg(theme.background).child(crate::ui::agent_logo(a, px(13.), cx))
-                    })))
-                    .child(div().id("waiting-on").test_support().min_w_0().truncate().text_color(theme.foreground.opacity(0.88)).child(label.clone()))
-                    .children(elapsed.map(|d| div().flex_none().text_color(muted).child(format!("· {}", crate::time::elapsed(d)))))
-                    .into_any_element(),
-                None => h_flex()
-                    .min_w_0()
-                    .gap(px(6.))
-                    // The logo says which agent; the composer's pill names the model.
-                    .child(crate::ui::agent_logo(&h.agent, px(14.), cx))
-                    .child(div().min_w_0().truncate().child(shimmer(trail_word(&shown.thread, elapsed).into(), clock, still, theme.foreground.opacity(0.88), theme.foreground)))
-                    .children(elapsed.map(|d| div().flex_none().text_color(muted).child(crate::time::elapsed(d))))
-                    .when(h.agents > 0, |el| el.child(div().flex_none().text_color(muted).child(agents_out(h.agents))))
-                    .into_any_element(),
-            };
-            // Working or waiting on its sub-agents, the hiker walks the whole trail on the bar's
-            // own clock: it paces while it waits (`mascot::PACE`), strolls while it works — and a
-            // change between them moves its pace, never its place.
-            let lap = if h.waiting.is_some() { crate::mascot::PACE } else { crate::mascot::LAP };
-            let walk = self.step_walk(still, lap);
-            let trail = crate::mascot::trail(walk.phase, walk.gait, still, cx);
-            h_flex()
-                .id("working-bar")
-                .test_support()
-                .w_full()
-                .h(px(HEIGHT))
-                .flex_none()
-                .justify_center()
-                .px_6()
-                .pb(px(6.))
-                .child(
-                    h_flex()
-                        .w_full()
-                        .max_w(shown.width)
-                        .px(px(4.))
-                        .gap(px(14.))
-                        .items_end()
+        let header =
+            shown.header.as_ref().map(|h| {
+                let who = match &h.waiting {
+                    // Their logos, stacked, and who they are; no shimmer: nothing to see here but time.
+                    Some((logos, label)) => h_flex()
+                        .min_w_0()
+                        .gap(px(6.))
+                        .child(h_flex().flex_none().children(logos.iter().enumerate().map(
+                            |(i, a)| {
+                                div()
+                                    .when(i > 0, |el| el.ml(px(-4.)))
+                                    .p(px(1.))
+                                    .rounded(px(4.))
+                                    .bg(theme.background)
+                                    .child(crate::ui::agent_logo(a, px(13.), cx))
+                            },
+                        )))
                         .child(
-                            h_flex()
-                                .flex_none()
-                                // Fixed width so the trail doesn't jump as the clock grows.
-                                .w(px(300.))
-                                .pb(px(4.))
-                                .text_size(px(13.))
-                                .child(who),
+                            div()
+                                .id("waiting-on")
+                                .test_support()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.foreground.opacity(0.88))
+                                .child(label.clone()),
                         )
-                        .child(div().flex_1().min_w_0().child(trail))
-                        .children(h.behind.clone().map(|(app, showing)| behind_chip(&app, showing, &self.workspace, cx))),
-                )
-        });
+                        .children(elapsed.map(|d| {
+                            div()
+                                .flex_none()
+                                .text_color(muted)
+                                .child(format!("· {}", crate::time::elapsed(d)))
+                        }))
+                        .into_any_element(),
+                    None => h_flex()
+                        .min_w_0()
+                        .gap(px(6.))
+                        // The logo says which agent; the composer's pill names the model.
+                        .child(crate::ui::agent_logo(&h.agent, px(14.), cx))
+                        .child(div().min_w_0().truncate().child(shimmer(
+                            trail_word(&shown.thread, elapsed).into(),
+                            clock,
+                            still,
+                            theme.foreground.opacity(0.88),
+                            theme.foreground,
+                        )))
+                        .children(elapsed.map(|d| {
+                            div()
+                                .flex_none()
+                                .text_color(muted)
+                                .child(crate::time::elapsed(d))
+                        }))
+                        .when(h.agents > 0, |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(muted)
+                                    .child(agents_out(h.agents)),
+                            )
+                        })
+                        .into_any_element(),
+                };
+                // Working or waiting on its sub-agents, the hiker walks the whole trail on the bar's
+                // own clock: it paces while it waits (`mascot::PACE`), strolls while it works — and a
+                // change between them moves its pace, never its place.
+                let lap = if h.waiting.is_some() {
+                    crate::mascot::PACE
+                } else {
+                    crate::mascot::LAP
+                };
+                let walk = self.step_walk(still, lap);
+                let trail = crate::mascot::trail(walk.phase, walk.gait, still, cx);
+                h_flex()
+                    .id("working-bar")
+                    .test_support()
+                    .w_full()
+                    .h(px(HEIGHT))
+                    .flex_none()
+                    .justify_center()
+                    .px_6()
+                    .pb(px(6.))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .max_w(shown.width)
+                            .px(px(4.))
+                            .gap(px(14.))
+                            .items_end()
+                            .child(
+                                h_flex()
+                                    .flex_none()
+                                    // Fixed width so the trail doesn't jump as the clock grows.
+                                    .w(px(300.))
+                                    .pb(px(4.))
+                                    .text_size(px(13.))
+                                    .child(who),
+                            )
+                            .child(div().flex_1().min_w_0().child(trail))
+                            .children(h.behind.clone().map(|(app, showing)| {
+                                behind_chip(&app, showing, &self.workspace, cx)
+                            })),
+                    )
+            });
         v_flex()
             .w_full()
             .h(px(self.bottom_height()))
@@ -886,8 +1307,19 @@ fn behind_chip(app: &str, showing: bool, workspace: &Entity<Workspace>, cx: &App
         .gap(px(6.))
         .text_size(px(12.))
         .text_color(theme.muted_foreground)
-        .child(div().flex_none().size(px(6.)).rounded_full().bg(crate::palette::emerald(cx)))
-        .child(div().min_w_0().truncate().child(format!("{app} in the background")))
+        .child(
+            div()
+                .flex_none()
+                .size(px(6.))
+                .rounded_full()
+                .bg(crate::palette::emerald(cx)),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .child(format!("{app} in the background")),
+        )
         .child(
             div()
                 .id("background-use-toggle")
@@ -907,7 +1339,10 @@ fn behind_chip(app: &str, showing: bool, workspace: &Entity<Workspace>, cx: &App
 /// "Breaking trail…": what the turn in `thread` is doing after `elapsed` (the first word before
 /// its clock starts).
 pub fn trail_word(thread: &str, elapsed: Option<Duration>) -> String {
-    format!("{}…", crate::mascot::word(thread, elapsed.map_or(0, |d| d.as_secs())))
+    format!(
+        "{}…",
+        crate::mascot::word(thread, elapsed.map_or(0, |d| d.as_secs()))
+    )
 }
 
 /// The bar as a window lays it out: its three parts each cached at their current height (zero
@@ -923,7 +1358,11 @@ pub fn cached(bar: &Entity<WorkingBar>, tail: Rc<Cell<Option<Pixels>>>, cx: &App
         .child(b.top.clone().cached(style(b.top_height())))
         .child(b.settled.clone().cached(style(b.settled_height())))
         .child(bar.clone().cached(style(b.bottom_height())));
-    Lift { tail, child: parts.into_any_element() }.into_any_element()
+    Lift {
+        tail,
+        child: parts.into_any_element(),
+    }
+    .into_any_element()
 }
 
 /// How far the bar is lifted to sit under a transcript ending at `tail` (the bar's own place
@@ -961,23 +1400,50 @@ impl Element for Lift {
         None
     }
 
-    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
         (self.child.request_layout(window, cx), ())
     }
 
-    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) {
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let up = lift(bounds.top(), self.tail.get());
         window.with_element_offset(point(px(0.), -up), |window| self.child.prepaint(window, cx));
     }
 
-    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) {
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         self.child.paint(window, cx);
     }
 }
 
 /// "· 1 agent out", "· 3 agents out".
 pub fn agents_out(n: usize) -> String {
-    if n == 1 { "· 1 agent out".into() } else { format!("· {n} agents out") }
+    if n == 1 {
+        "· 1 agent out".into()
+    } else {
+        format!("· {n} agents out")
+    }
 }
 
 #[cfg(test)]
@@ -1015,7 +1481,12 @@ impl WorkingBar {
             out.push(format!("+{} earlier", g.earlier));
         }
         for r in &g.rows {
-            let mut line = [r.op.verb.as_str(), r.op.text.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" ");
+            let mut line = [r.op.verb.as_str(), r.op.text.as_str()]
+                .iter()
+                .filter(|s| !s.is_empty())
+                .copied()
+                .collect::<Vec<_>>()
+                .join(" ");
             if let Some((a, d)) = r.lines {
                 line.push_str(&format!(" +{a} −{d}"));
             }
@@ -1029,7 +1500,11 @@ impl WorkingBar {
 
     /// The summary line of the group folding away, if one is.
     pub(crate) fn folding(&self) -> Option<String> {
-        self.shown.as_ref()?.folding.as_ref().map(|(g, _)| g.summary.clone())
+        self.shown
+            .as_ref()?
+            .folding
+            .as_ref()
+            .map(|(g, _)| g.summary.clone())
     }
 
     /// How often the bar redraws now (`None`: it doesn't).
@@ -1045,16 +1520,30 @@ impl WorkingBar {
 
 #[cfg(test)]
 mod tests {
-    use super::{BAND, EARLIER, Group, LiveRow, ROW, ROWS, SPEED, ToolKind, Walk, activity, band_centre, ease_out, lift, mix, steady, trail_word};
+    use super::{
+        BAND, EARLIER, Group, LiveRow, ROW, ROWS, SPEED, ToolKind, Walk, activity, band_centre,
+        ease_out, lift, mix, steady, trail_word,
+    };
     use gpui_kit::{Hsla, px};
     use std::time::{Duration, Instant};
 
     #[test]
     fn the_wait_s_clock_holds_still_between_reads() {
         let t = Instant::now();
-        assert_eq!(steady(t + Duration::from_millis(400), Some(t)), t, "a hair off: the one shown stands");
-        assert_eq!(steady(t, Some(t + Duration::from_millis(900))), t + Duration::from_millis(900));
-        assert_eq!(steady(t + Duration::from_secs(3), Some(t)), t + Duration::from_secs(3), "another wait");
+        assert_eq!(
+            steady(t + Duration::from_millis(400), Some(t)),
+            t,
+            "a hair off: the one shown stands"
+        );
+        assert_eq!(
+            steady(t, Some(t + Duration::from_millis(900))),
+            t + Duration::from_millis(900)
+        );
+        assert_eq!(
+            steady(t + Duration::from_secs(3), Some(t)),
+            t + Duration::from_secs(3),
+            "another wait"
+        );
         assert_eq!(steady(t, None), t);
     }
 
@@ -1073,13 +1562,27 @@ mod tests {
         assert!(band_centre(0.1, 0.).is_finite());
         // Its steps grow brighter towards the middle and narrower.
         assert!(BAND.windows(2).all(|w| w[0].0 > w[1].0 && w[0].1 < w[1].1));
-        assert_eq!(BAND[BAND.len() - 1].1, 1., "the peak is the highlight itself");
+        assert_eq!(
+            BAND[BAND.len() - 1].1,
+            1.,
+            "the peak is the highlight itself"
+        );
     }
 
     #[test]
     fn mixing_runs_from_one_colour_to_the_other() {
-        let a = Hsla { h: 0.1, s: 0.2, l: 0.4, a: 0.5 };
-        let b = Hsla { h: 0.6, s: 0.4, l: 0.9, a: 1. };
+        let a = Hsla {
+            h: 0.1,
+            s: 0.2,
+            l: 0.4,
+            a: 0.5,
+        };
+        let b = Hsla {
+            h: 0.6,
+            s: 0.4,
+            l: 0.9,
+            a: 1.,
+        };
         assert_eq!(mix(a, b, 1.), b);
         assert_eq!(mix(a, b, 0.).l, a.l);
         assert!((mix(a, b, 0.5).l - 0.65).abs() < 1e-6);
@@ -1087,16 +1590,37 @@ mod tests {
 
     #[test]
     fn the_bar_lifts_to_a_short_transcript_only() {
-        assert_eq!(lift(px(700.), Some(px(300.))), px(400.), "up to where the transcript ends");
+        assert_eq!(
+            lift(px(700.), Some(px(300.))),
+            px(400.),
+            "up to where the transcript ends"
+        );
         assert_eq!(lift(px(700.), Some(px(700.))), px(0.));
-        assert_eq!(lift(px(700.), Some(px(760.))), px(0.), "a long one: never down over the composer");
+        assert_eq!(
+            lift(px(700.), Some(px(760.))),
+            px(0.),
+            "a long one: never down over the composer"
+        );
         assert_eq!(lift(px(700.), None), px(0.), "its end out of view");
     }
 
     #[test]
     fn heights_add_up() {
-        let row = |id: &str| LiveRow { id: id.into(), op: activity::op("Read", "a.rs", None), lines: None, running: false, failed: false, activity: None };
-        let mut g = Group { summary: "Read 1 file".into(), kind: ToolKind::Read, phrase: "Exploring the project".into(), rows: vec![row("a")], earlier: 0 };
+        let row = |id: &str| LiveRow {
+            id: id.into(),
+            op: activity::op("Read", "a.rs", None),
+            lines: None,
+            running: false,
+            failed: false,
+            activity: None,
+        };
+        let mut g = Group {
+            summary: "Read 1 file".into(),
+            kind: ToolKind::Read,
+            phrase: "Exploring the project".into(),
+            rows: vec![row("a")],
+            earlier: 0,
+        };
         assert_eq!(g.rows_height(), ROW);
         g.rows = (0..ROWS).map(|i| row(&i.to_string())).collect();
         g.earlier = 3;
@@ -1106,10 +1630,16 @@ mod tests {
     #[test]
     fn the_header_says_a_trail_word_that_moves_on() {
         let word = trail_word("t1", Some(Duration::from_secs(17)));
-        assert!(word.ends_with('…') && crate::mascot::WORDS.contains(&word.trim_end_matches('…')), "{word}");
+        assert!(
+            word.ends_with('…') && crate::mascot::WORDS.contains(&word.trim_end_matches('…')),
+            "{word}"
+        );
         // It holds within a step and the clock not having started reads as its first second.
         assert_eq!(trail_word("t1", Some(Duration::from_millis(16_100))), word);
-        assert_eq!(trail_word("t1", None), trail_word("t1", Some(Duration::ZERO)));
+        assert_eq!(
+            trail_word("t1", None),
+            trail_word("t1", Some(Duration::ZERO))
+        );
         assert!(!word.contains("working"), "no generic \"working\"");
     }
 
@@ -1121,7 +1651,11 @@ mod tests {
         // lap, the left end of a wait's.)
         let frame = Duration::from_millis(62).as_secs_f32();
         for switch_at in [0.06, 0.25, 0.51, 0.75, 0.98] {
-            let mut walk = Walk { gait: 0., phase: 0., last: None };
+            let mut walk = Walk {
+                gait: 0.,
+                phase: 0.,
+                last: None,
+            };
             while walk.phase < switch_at {
                 walk.step(frame, crate::mascot::LAP);
             }
@@ -1134,12 +1668,19 @@ mod tests {
             walk.step(frame, crate::mascot::LAP);
             let working = at(walk);
             for (a, b) in [(before, waiting), (waiting, working)] {
-                assert!((b.0 - a.0).abs() < 0.05 && a.2 == b.2, "at {switch_at}, {a:?} -> {b:?}: it carries on");
+                assert!(
+                    (b.0 - a.0).abs() < 0.05 && a.2 == b.2,
+                    "at {switch_at}, {a:?} -> {b:?}: it carries on"
+                );
             }
             // Mid-crossing, where it's striding: the same step lands the legs on the same pose
             // whichever lap is current — the gait has its own clock.
             if matches!(switch_at, 0.25 | 0.75) {
-                assert_eq!(waiting.1, at(strolled).1, "at {switch_at}: the legs don't notice a wait");
+                assert_eq!(
+                    waiting.1,
+                    at(strolled).1,
+                    "at {switch_at}: the legs don't notice a wait"
+                );
             }
         }
     }

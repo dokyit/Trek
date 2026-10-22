@@ -22,7 +22,10 @@ fn answered(trek: &Trek, cx: &mut TestAppContext, text: &str, done: bool) -> Str
     let id = trek.quiet_thread(cx);
     let mut events = vec![AgentEvent::TextDelta(text.into())];
     if done {
-        events.extend([AgentEvent::TextDone(text.into()), AgentEvent::TurnComplete { error: None }]);
+        events.extend([
+            AgentEvent::TextDone(text.into()),
+            AgentEvent::TurnComplete { error: None },
+        ]);
     }
     trek.update(cx, |ws, cx| ws.apply_events(&id, events, cx));
     settle(trek, cx);
@@ -40,10 +43,13 @@ fn settle(trek: &Trek, cx: &mut TestAppContext) {
 /// The first element on screen whose id starts with `prefix`.
 fn on_screen(trek: &Trek, cx: &mut TestAppContext, prefix: &str) -> Option<gpui_kit::SharedString> {
     trek.window(cx, |window, _| {
-        gpui_kit::base::test_support::snapshots(window).into_iter().filter(|s| s.visible()).find_map(|s| match s.path().last()? {
-            gpui_kit::ElementId::Name(n) if n.starts_with(prefix) => Some(n.clone()),
-            _ => None,
-        })
+        gpui_kit::base::test_support::snapshots(window)
+            .into_iter()
+            .filter(|s| s.visible())
+            .find_map(|s| match s.path().last()? {
+                gpui_kit::ElementId::Name(n) if n.starts_with(prefix) => Some(n.clone()),
+                _ => None,
+            })
     })
 }
 
@@ -65,13 +71,29 @@ fn a_finished_block_runs_in_a_card_and_an_open_one_waits() {
         // Still being written: a placeholder, and nothing runs.
         let open_fence = format!("Here it is:\n\n```trek-html\n{}", &PAGE[..60]);
         let id = answered(&trek, cx, &open_fence, false);
-        assert!(on_screen(&trek, cx, "artifact-building-").is_some(), "a Building… card");
-        assert_eq!(log.borrow().made, 0, "no view for a block still being written");
+        assert!(
+            on_screen(&trek, cx, "artifact-building-").is_some(),
+            "a Building… card"
+        );
+        assert_eq!(
+            log.borrow().made,
+            0,
+            "no view for a block still being written"
+        );
         assert!(cards(&trek, cx).is_empty());
 
         // Finished: a card, a view, placed where the card is.
         let text = answer(PAGE);
-        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![AgentEvent::TextDone(text.clone()), AgentEvent::TurnComplete { error: None }], cx));
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![
+                    AgentEvent::TextDone(text.clone()),
+                    AgentEvent::TurnComplete { error: None },
+                ],
+                cx,
+            )
+        });
         trek.wait_done(cx, &id, RunState::Idle).await;
         settle(&trek, cx);
         assert_eq!(log.borrow().made, 1);
@@ -80,7 +102,12 @@ fn a_finished_block_runs_in_a_card_and_an_open_one_waits() {
         assert!(card.has_view && card.live, "{card:?}");
         let (placed, body, mask) = (card.placed.unwrap(), card.body.unwrap(), card.mask.unwrap());
         assert_eq!(placed.body, body);
-        assert!(mask.contains(&placed.clip.origin) && placed.clip.bottom() <= mask.bottom() && placed.clip.top() >= body.top(), "{placed:?} in {mask:?}");
+        assert!(
+            mask.contains(&placed.clip.origin)
+                && placed.clip.bottom() <= mask.bottom()
+                && placed.clip.top() >= body.top(),
+            "{placed:?} in {mask:?}"
+        );
         // Its bootstrap carries a secret of its own.
         let bootstrap = log.borrow().bootstraps[0].clone();
         assert!(!bootstrap.contains("__NONCE__") && bootstrap.contains("const N = '"));
@@ -101,9 +128,17 @@ fn the_page_sets_its_cards_height_within_bounds_and_only_the_page_can() {
         post(&trek, cx, r#"{"n":"{nonce}","t":"h","v":480}"#);
         assert_eq!(one(&trek, cx).height, 480.);
         let body = one(&trek, cx).body.unwrap();
-        assert_eq!(body.size.height, px(480.), "the card is as tall as the page says");
+        assert_eq!(
+            body.size.height,
+            px(480.),
+            "the card is as tall as the page says"
+        );
         post(&trek, cx, r#"{"n":"{nonce}","t":"h","v":9000}"#);
-        assert_eq!(one(&trek, cx).height, trek_core::artifact::MAX_HEIGHT, "it scrolls inside past the most");
+        assert_eq!(
+            one(&trek, cx).height,
+            trek_core::artifact::MAX_HEIGHT,
+            "it scrolls inside past the most"
+        );
         post(&trek, cx, r#"{"n":"{nonce}","t":"h","v":12}"#);
         assert_eq!(one(&trek, cx).height, trek_core::artifact::MIN_HEIGHT);
         // The page's own scripts don't know the secret.
@@ -122,9 +157,18 @@ fn a_card_partly_scrolled_away_shows_only_what_the_transcript_shows() {
         answered(&trek, cx, &answer(PAGE), true);
         let card = one(&trek, cx);
         let (body, mask) = (card.body.unwrap(), card.mask.unwrap());
-        assert!(body.size.height > mask.size.height || body.top() < mask.top() || body.bottom() > mask.bottom(), "the card should be cut: {body:?} in {mask:?}");
+        assert!(
+            body.size.height > mask.size.height
+                || body.top() < mask.top()
+                || body.bottom() > mask.bottom(),
+            "the card should be cut: {body:?} in {mask:?}"
+        );
         let placed = card.placed.expect("live");
-        assert_eq!(placed.clip, body.intersect(&mask), "the clip is what shows, the body keeps its size");
+        assert_eq!(
+            placed.clip,
+            body.intersect(&mask),
+            "the clip is what shows, the body keeps its size"
+        );
         assert!(placed.clip.size.height < body.size.height);
         assert!(!placed.round_bottom || placed.clip.bottom() == body.bottom());
     });
@@ -167,11 +211,20 @@ fn a_theme_switch_reaches_the_running_page() {
         assert!(log.borrow().scripts.is_empty());
         // Whichever theme the test starts in, the other.
         let dark = cx.update(|cx| gpui_kit::component::ActiveTheme::theme(cx).mode.is_dark());
-        let (other, scheme) = if dark { (ThemeChoice::Paper, "color-scheme:light") } else { (ThemeChoice::Night, "color-scheme:dark") };
+        let (other, scheme) = if dark {
+            (ThemeChoice::Paper, "color-scheme:light")
+        } else {
+            (ThemeChoice::Night, "color-scheme:dark")
+        };
         cx.update(|cx| crate::apply_theme(other, None, cx));
         settle(&trek, cx);
         let scripts = log.borrow().scripts.clone();
-        assert!(scripts.iter().any(|s| s.contains("trek-theme") && s.contains(scheme)), "{scripts:?}");
+        assert!(
+            scripts
+                .iter()
+                .any(|s| s.contains("trek-theme") && s.contains(scheme)),
+            "{scripts:?}"
+        );
         assert_eq!(log.borrow().reloads, 0, "restyled in place, not reloaded");
         cx.update(|cx| crate::apply_theme(ThemeChoice::Night, None, cx));
     });
@@ -211,8 +264,14 @@ fn with_artifacts_off_the_block_is_code_and_agents_arent_told() {
         let id = trek.send(cx, "mock:told");
         trek.wait_done(cx, &id, RunState::Idle).await;
         let told = trek.answers(cx, &id);
-        assert!(!told.contains(trek_core::artifact::AGENT_INSTRUCTIONS), "{told}");
-        assert!(told.contains(trek_core::visualization::AGENT_INSTRUCTIONS), "visualizations stay on");
+        assert!(
+            !told.contains(trek_core::artifact::AGENT_INSTRUCTIONS),
+            "{told}"
+        );
+        assert!(
+            told.contains(trek_core::visualization::AGENT_INSTRUCTIONS),
+            "visualizations stay on"
+        );
     });
 }
 
@@ -222,7 +281,10 @@ fn agents_are_told_about_artifacts_by_default() {
         let trek = open(cx);
         let id = trek.send(cx, "mock:told");
         trek.wait_done(cx, &id, RunState::Idle).await;
-        assert!(trek.answers(cx, &id).contains(trek_core::artifact::AGENT_INSTRUCTIONS));
+        assert!(
+            trek.answers(cx, &id)
+                .contains(trek_core::artifact::AGENT_INSTRUCTIONS)
+        );
     });
 }
 
@@ -236,7 +298,10 @@ fn the_mock_answers_with_two_artifacts() {
         settle(&trek, cx);
         let all = cards(&trek, cx);
         let titles: Vec<_> = all.iter().filter_map(|c| c.title.clone()).collect();
-        assert!(titles.iter().any(|t| t == "Desk with a monitor clamp"), "{titles:?}");
+        assert!(
+            titles.iter().any(|t| t == "Desk with a monitor clamp"),
+            "{titles:?}"
+        );
     });
 }
 
@@ -248,7 +313,16 @@ fn a_cards_send_goes_to_its_thread_and_copy_reaches_the_clipboard() {
         let trek = open(cx);
         let id = answered(&trek, cx, &answer(PAGE), true);
         let users = |trek: &Trek, cx: &mut TestAppContext| -> Vec<String> {
-            trek.items(cx, &id).into_iter().filter_map(|i| if let trek_core::store::Item::User { text, .. } = i { Some(text) } else { None }).collect()
+            trek.items(cx, &id)
+                .into_iter()
+                .filter_map(|i| {
+                    if let trek_core::store::Item::User { text, .. } = i {
+                        Some(text)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         };
         let before = users(&trek, cx).len();
         let post = |trek: &Trek, cx: &mut TestAppContext, body: &str| {
@@ -256,16 +330,34 @@ fn a_cards_send_goes_to_its_thread_and_copy_reaches_the_clipboard() {
             settle(trek, cx);
         };
         // Another secret: nothing is sent.
-        post(&trek, cx, r#"{"n":"not-the-secret","t":"send","text":"forged"}"#);
+        post(
+            &trek,
+            cx,
+            r#"{"n":"not-the-secret","t":"send","text":"forged"}"#,
+        );
         assert_eq!(users(&trek, cx).len(), before);
         // A copy goes to the clipboard as it is.
-        post(&trek, cx, r#"{"n":"{nonce}","t":"copy","text":"SELECT 1;\n"}"#);
-        assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some("SELECT 1;\n"));
+        post(
+            &trek,
+            cx,
+            r#"{"n":"{nonce}","t":"copy","text":"SELECT 1;\n"}"#,
+        );
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+            Some("SELECT 1;\n")
+        );
         // With the card's own secret, a send becomes the user's next message in its thread.
         assert!(one(&trek, cx).has_view);
-        post(&trek, cx, r#"{"n":"{nonce}","t":"send","text":"  Resolve src/main.rs: keep mine  "}"#);
+        post(
+            &trek,
+            cx,
+            r#"{"n":"{nonce}","t":"send","text":"  Resolve src/main.rs: keep mine  "}"#,
+        );
         let after = users(&trek, cx);
         assert_eq!(after.len(), before + 1, "{after:?}");
-        assert_eq!(after.last().map(|t| t.trim()), Some("Resolve src/main.rs: keep mine"));
+        assert_eq!(
+            after.last().map(|t| t.trim()),
+            Some("Resolve src/main.rs: keep mine")
+        );
     });
 }

@@ -29,8 +29,8 @@ use crate::pairing::{
     pairing_url_with_routes, source,
 };
 use crate::protocol::{
-    ClientEnvelope, ClientMessage, ErrorCode, HostInfo, Item, MAX_PAGE, PROTOCOL_VERSION, ServerEnvelope, ServerMessage,
-    Snapshot, Transcript,
+    ClientEnvelope, ClientMessage, ErrorCode, HostInfo, Item, MAX_PAGE, PROTOCOL_VERSION,
+    ServerEnvelope, ServerMessage, Snapshot, Transcript,
 };
 
 /// How the server listens and behaves.
@@ -185,7 +185,10 @@ pub struct RemoteServer;
 impl RemoteServer {
     /// Bind `config.bind` and serve phones until [`RemoteHandle::shutdown`]. Must be called within a
     /// tokio runtime.
-    pub async fn start<H: RemoteHost>(config: ServerConfig, host: Arc<H>) -> io::Result<RemoteHandle> {
+    pub async fn start<H: RemoteHost>(
+        config: ServerConfig,
+        host: Arc<H>,
+    ) -> io::Result<RemoteHandle> {
         let registry = match &config.devices_path {
             Some(path) => DeviceRegistry::load(path.clone())?,
             None => DeviceRegistry::in_memory(),
@@ -216,7 +219,10 @@ impl RemoteServer {
             notices,
             shutdown,
             pre_auth: PreAuthSlots::new(PRE_AUTH_TOTAL, PRE_AUTH_PER_ADDRESS),
-            watchers: Watchers { counts: Mutex::new(HashMap::new()), unwatch },
+            watchers: Watchers {
+                counts: Mutex::new(HashMap::new()),
+                unwatch,
+            },
             state: Mutex::new(State {
                 registry,
                 pairing: Pairing::default(),
@@ -246,7 +252,9 @@ pub struct RemoteHandle {
 
 impl std::fmt::Debug for RemoteHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RemoteHandle").field("local_addr", &self.inner.local_addr).finish()
+        f.debug_struct("RemoteHandle")
+            .field("local_addr", &self.inner.local_addr)
+            .finish()
     }
 }
 
@@ -258,7 +266,9 @@ impl RemoteHandle {
 
     /// Every address it listens on: `local_addr`, then those of `also_bind` it could bind.
     pub fn listening(&self) -> Vec<SocketAddr> {
-        std::iter::once(self.inner.local_addr).chain(self.inner.also.iter().copied()).collect()
+        std::iter::once(self.inner.local_addr)
+            .chain(self.inner.also.iter().copied())
+            .collect()
     }
 
     /// Push a change to connected phones: snapshots and thread changes to every authenticated
@@ -281,14 +291,27 @@ impl RemoteHandle {
         let ttl = self.inner.config.pairing_ttl;
         let (advertise, routes) = {
             let mut state = self.inner.lock();
-            state.pairing.activate(&code, ttl).expect("normalized codes are valid");
+            state
+                .pairing
+                .activate(&code, ttl)
+                .expect("normalized codes are valid");
             (state.advertise.clone(), state.routes.clone())
         };
         let config = &self.inner.config;
         let advertise = advertise.unwrap_or_else(|| self.inner.local_addr.to_string());
-        let routes = if routes.is_empty() { vec![advertise] } else { routes };
+        let routes = if routes.is_empty() {
+            vec![advertise]
+        } else {
+            routes
+        };
         PairingOffer {
-            url: pairing_url_with_routes(&routes, &code, &config.host.name, &config.host.id, config.tls.as_ref().map(|t| t.fingerprint.as_str())),
+            url: pairing_url_with_routes(
+                &routes,
+                &code,
+                &config.host.name,
+                &config.host.id,
+                config.tls.as_ref().map(|t| t.fingerprint.as_str()),
+            ),
             expires_at: now_ms() + ttl.as_millis() as i64,
             fingerprint: config.tls.as_ref().map(|t| t.short_fingerprint()),
             code,
@@ -392,7 +415,9 @@ impl Watchers {
 
     fn remove(&self, thread_id: &str) {
         let mut counts = self.counts();
-        let Some(n) = counts.get_mut(thread_id) else { return };
+        let Some(n) = counts.get_mut(thread_id) else {
+            return;
+        };
         *n -= 1;
         if *n == 0 {
             counts.remove(thread_id);
@@ -475,19 +500,30 @@ struct PreAuth {
 
 impl PreAuthSlots {
     fn new(total: usize, per_address: usize) -> Self {
-        Self { total: Arc::new(Semaphore::new(total)), per_address, by_address: Counts::default() }
+        Self {
+            total: Arc::new(Semaphore::new(total)),
+            per_address,
+            by_address: Counts::default(),
+        }
     }
 
     /// A place for a connection from `ip`, unless its address or everyone has used them up.
     fn take(&self, ip: IpAddr) -> Option<PreAuth> {
         let address = source(ip);
         let mut by_address = counts(&self.by_address);
-        if by_address.get(&address).is_some_and(|n| *n >= self.per_address) {
+        if by_address
+            .get(&address)
+            .is_some_and(|n| *n >= self.per_address)
+        {
             return None;
         }
         let permit = self.total.clone().try_acquire_owned().ok()?;
         *by_address.entry(address).or_default() += 1;
-        Some(PreAuth { _permit: permit, address, by_address: self.by_address.clone() })
+        Some(PreAuth {
+            _permit: permit,
+            address,
+            by_address: self.by_address.clone(),
+        })
     }
 }
 
@@ -525,14 +561,21 @@ struct Capped<S> {
 }
 
 impl<S: AsyncRead + Unpin> AsyncRead for Capped<S> {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         let left = this.allowance.0.load(Ordering::Relaxed);
         if left == usize::MAX {
             return Pin::new(&mut this.inner).poll_read(cx, buf);
         }
         if left == 0 {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, "too much sent before authenticating")));
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "too much sent before authenticating",
+            )));
         }
         let n = left.min(buf.remaining());
         let mut limited = ReadBuf::new(&mut buf.initialize_unfilled()[..n]);
@@ -546,11 +589,19 @@ impl<S: AsyncRead + Unpin> AsyncRead for Capped<S> {
 }
 
 impl<S: AsyncWrite + Unpin> AsyncWrite for Capped<S> {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
     }
 
-    fn poll_write_vectored(self: Pin<&mut Self>, cx: &mut Context<'_>, bufs: &[io::IoSlice<'_>]) -> Poll<io::Result<usize>> {
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
     }
 
@@ -619,7 +670,14 @@ fn refuse_browsers(req: &Request, resp: Response) -> Result<Response, ErrorRespo
     Ok(resp)
 }
 
-async fn serve<H: RemoteHost>(stream: TcpStream, peer: SocketAddr, local: SocketAddr, inner: Arc<Inner>, host: Arc<H>, unauthenticated: PreAuth) {
+async fn serve<H: RemoteHost>(
+    stream: TcpStream,
+    peer: SocketAddr,
+    local: SocketAddr,
+    inner: Arc<Inner>,
+    host: Arc<H>,
+    unauthenticated: PreAuth,
+) {
     let ws_config = WebSocketConfig::default()
         .max_message_size(Some(inner.config.max_message))
         .max_frame_size(Some(inner.config.max_message));
@@ -640,8 +698,12 @@ async fn serve<H: RemoteHost>(stream: TcpStream, peer: SocketAddr, local: Socket
         None => Box::new(stream),
     };
     let allowance = Allowance::new(MAX_UPGRADE);
-    let stream: Box<dyn Io> = Box::new(Capped { inner: stream, allowance: allowance.clone() });
-    let handshake = tokio_tungstenite::accept_hdr_async_with_config(stream, refuse_browsers, Some(ws_config));
+    let stream: Box<dyn Io> = Box::new(Capped {
+        inner: stream,
+        allowance: allowance.clone(),
+    });
+    let handshake =
+        tokio_tungstenite::accept_hdr_async_with_config(stream, refuse_browsers, Some(ws_config));
     let mut ws = match tokio::time::timeout_at(deadline, handshake).await {
         Ok(Ok(ws)) => ws,
         Ok(Err(err)) => {
@@ -654,25 +716,39 @@ async fn serve<H: RemoteHost>(stream: TcpStream, peer: SocketAddr, local: Socket
         }
     };
     allowance.set(MAX_PRE_AUTH);
-    let Some(auth) = authenticate(&mut ws, peer, &inner, deadline).await else { return };
+    let Some(auth) = authenticate(&mut ws, peer, &inner, deadline).await else {
+        return;
+    };
     allowance.set(usize::MAX);
     drop(unauthenticated);
     let device_id = auth.device_id.clone();
     let conn_id = auth.conn_id;
-    inner.lock().last = Some(LastConnection { device_id: device_id.clone(), at: now_ms(), peer, local });
+    inner.lock().last = Some(LastConnection {
+        device_id: device_id.clone(),
+        at: now_ms(),
+        peer,
+        local,
+    });
     tracing::info!(%peer, %local, device_id, "phone connected");
-    inner.notice(ServerNotice::Connected { device_id: device_id.clone() });
+    inner.notice(ServerNotice::Connected {
+        device_id: device_id.clone(),
+    });
 
     run_session(&mut ws, &inner, host, auth).await;
 
     {
         let mut state = inner.lock();
-        let current = state.connections.get(&device_id).is_some_and(|c| c.conn_id == conn_id);
+        let current = state
+            .connections
+            .get(&device_id)
+            .is_some_and(|c| c.conn_id == conn_id);
         if current {
             state.connections.remove(&device_id);
             // Keep the notice ordered with registration: a replacement cannot become current
             // between this check and the old connection saying it went away.
-            inner.notice(ServerNotice::Disconnected { device_id: device_id.clone() });
+            inner.notice(ServerNotice::Disconnected {
+                device_id: device_id.clone(),
+            });
         }
         // A stopped server (restarted with a new port or address) leaves devices.json to the
         // one that replaced it: its list here may be stale by now.
@@ -740,9 +816,16 @@ async fn authenticate(
             }
         };
         let (protocol, device_id) = match &msg {
-            ClientMessage::Pair { protocol, device_id, .. } | ClientMessage::Hello { protocol, device_id, .. } => {
-                (*protocol, device_id.clone())
+            ClientMessage::Pair {
+                protocol,
+                device_id,
+                ..
             }
+            | ClientMessage::Hello {
+                protocol,
+                device_id,
+                ..
+            } => (*protocol, device_id.clone()),
             _ => {
                 tracing::debug!(%peer, kind = msg.kind(), "unauthenticated request refused");
                 reject(ws, re, ErrorCode::Unauthorized, "Pair or say hello first").await;
@@ -750,7 +833,8 @@ async fn authenticate(
             }
         };
         if protocol != PROTOCOL_VERSION {
-            let message = format!("This Mac speaks protocol {PROTOCOL_VERSION}, the app speaks {protocol}");
+            let message =
+                format!("This Mac speaks protocol {PROTOCOL_VERSION}, the app speaks {protocol}");
             reject(ws, re, ErrorCode::UnsupportedProtocol, &message).await;
             return None;
         }
@@ -760,25 +844,55 @@ async fn authenticate(
         }
 
         let (kick_tx, kick) = oneshot::channel();
-        let (host, features, routes) = (inner.config.host.clone(), inner.config.features.clone(), inner.lock().routes.clone());
+        let (host, features, routes) = (
+            inner.config.host.clone(),
+            inner.config.features.clone(),
+            inner.lock().routes.clone(),
+        );
         return match msg {
-            ClientMessage::Pair { code, device_name, .. } => {
+            ClientMessage::Pair {
+                code, device_name, ..
+            } => {
                 let name = clean_name(&device_name);
                 let outcome: HostResult<(String, u64)> = {
                     let mut state = inner.lock();
-                    state.pairing.check(&code, peer.ip()).map_err(|err| HostError::new(ErrorCode::PairingFailed, err.to_string())).and_then(|()| {
-                        let token = state.registry.register(&device_id, &name, now_ms()).map_err(|err| HostError::other(format!("Couldn't save the paired device: {err}")))?;
-                        state.pairing.cancel();
-                        Ok((token, register_conn(&mut state, &device_id, kick_tx)))
-                    })
+                    state
+                        .pairing
+                        .check(&code, peer.ip())
+                        .map_err(|err| HostError::new(ErrorCode::PairingFailed, err.to_string()))
+                        .and_then(|()| {
+                            let token = state
+                                .registry
+                                .register(&device_id, &name, now_ms())
+                                .map_err(|err| {
+                                    HostError::other(format!(
+                                        "Couldn't save the paired device: {err}"
+                                    ))
+                                })?;
+                            state.pairing.cancel();
+                            Ok((token, register_conn(&mut state, &device_id, kick_tx)))
+                        })
                 };
                 match outcome {
                     Ok((token, conn_id)) => {
                         tracing::info!(%peer, device_id, name, "device paired");
-                        inner.notice(ServerNotice::Paired { device_id: device_id.clone(), name });
-                        let paired = ServerMessage::Paired { protocol: PROTOCOL_VERSION, token, host, features, routes };
+                        inner.notice(ServerNotice::Paired {
+                            device_id: device_id.clone(),
+                            name,
+                        });
+                        let paired = ServerMessage::Paired {
+                            protocol: PROTOCOL_VERSION,
+                            token,
+                            host,
+                            features,
+                            routes,
+                        };
                         let _ = send(ws, ServerEnvelope::reply(re, paired)).await;
-                        Some(Authenticated { device_id, conn_id, kick })
+                        Some(Authenticated {
+                            device_id,
+                            conn_id,
+                            kick,
+                        })
                     }
                     Err(err) => {
                         tracing::warn!(%peer, %err, "pairing refused");
@@ -799,13 +913,28 @@ async fn authenticate(
                 };
                 match conn_id {
                     Some(conn_id) => {
-                        let welcome = ServerMessage::Welcome { protocol: PROTOCOL_VERSION, host, features, routes };
+                        let welcome = ServerMessage::Welcome {
+                            protocol: PROTOCOL_VERSION,
+                            host,
+                            features,
+                            routes,
+                        };
                         let _ = send(ws, ServerEnvelope::reply(re, welcome)).await;
-                        Some(Authenticated { device_id, conn_id, kick })
+                        Some(Authenticated {
+                            device_id,
+                            conn_id,
+                            kick,
+                        })
                     }
                     None => {
                         tracing::warn!(%peer, device_id, "hello with an unknown device or a wrong token");
-                        reject(ws, re, ErrorCode::Unauthorized, "Unknown device or revoked token; pair again").await;
+                        reject(
+                            ws,
+                            re,
+                            ErrorCode::Unauthorized,
+                            "Unknown device or revoked token; pair again",
+                        )
+                        .await;
                         None
                     }
                 }
@@ -819,7 +948,10 @@ async fn authenticate(
 fn register_conn(state: &mut State, device_id: &str, kick: oneshot::Sender<Kick>) -> u64 {
     state.next_conn += 1;
     let conn_id = state.next_conn;
-    if let Some(old) = state.connections.insert(device_id.to_string(), LiveConn { conn_id, kick }) {
+    if let Some(old) = state
+        .connections
+        .insert(device_id.to_string(), LiveConn { conn_id, kick })
+    {
         let _ = old.kick.send(Kick::Replaced);
     }
     conn_id
@@ -830,9 +962,17 @@ fn valid_device_id(id: &str) -> bool {
 }
 
 fn clean_name(name: &str) -> String {
-    let name: String = name.chars().filter(|c| !c.is_control()).take(MAX_DEVICE_FIELD).collect();
+    let name: String = name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_DEVICE_FIELD)
+        .collect();
     let name = name.trim();
-    if name.is_empty() { "iPhone".to_string() } else { name.to_string() }
+    if name.is_empty() {
+        "iPhone".to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -903,45 +1043,101 @@ const CLIENT_TYPES: &[&str] = &[
 fn parse_client(text: &str) -> (Option<String>, Result<ClientMessage, BadMessage>) {
     let value: serde_json::Value = match serde_json::from_str(text) {
         Ok(value) => value,
-        Err(err) => return (None, Err(BadMessage { kind: None, message: format!("Malformed JSON: {err}") })),
+        Err(err) => {
+            return (
+                None,
+                Err(BadMessage {
+                    kind: None,
+                    message: format!("Malformed JSON: {err}"),
+                }),
+            );
+        }
     };
     let Some(object) = value.as_object() else {
-        return (None, Err(BadMessage { kind: None, message: "Expected a JSON object".into() }));
+        return (
+            None,
+            Err(BadMessage {
+                kind: None,
+                message: "Expected a JSON object".into(),
+            }),
+        );
     };
-    let re = object.get("id").and_then(|id| id.as_str()).map(str::to_string);
-    let Some(kind) = object.get("type").and_then(|t| t.as_str()).map(str::to_string) else {
-        return (re, Err(BadMessage { kind: None, message: "Missing \"type\"".into() }));
+    let re = object
+        .get("id")
+        .and_then(|id| id.as_str())
+        .map(str::to_string);
+    let Some(kind) = object
+        .get("type")
+        .and_then(|t| t.as_str())
+        .map(str::to_string)
+    else {
+        return (
+            re,
+            Err(BadMessage {
+                kind: None,
+                message: "Missing \"type\"".into(),
+            }),
+        );
     };
     if !CLIENT_TYPES.contains(&kind.as_str()) {
         let message = format!("Unknown message type \"{kind}\"");
-        return (re, Err(BadMessage { kind: Some(kind), message }));
+        return (
+            re,
+            Err(BadMessage {
+                kind: Some(kind),
+                message,
+            }),
+        );
     }
     match serde_json::from_value::<ClientEnvelope>(value) {
         Ok(envelope) => (re, Ok(envelope.msg)),
         Err(err) => {
             let message = format!("Bad \"{kind}\": {err}");
-            (re, Err(BadMessage { kind: Some(kind), message }))
+            (
+                re,
+                Err(BadMessage {
+                    kind: Some(kind),
+                    message,
+                }),
+            )
         }
     }
 }
 
 fn error(re: Option<String>, code: ErrorCode, message: impl Into<String>) -> ServerEnvelope {
-    ServerEnvelope::reply(re, ServerMessage::Error { code, message: message.into() })
+    ServerEnvelope::reply(
+        re,
+        ServerMessage::Error {
+            code,
+            message: message.into(),
+        },
+    )
 }
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
-async fn write_before<T>(deadline: Duration, future: impl Future<Output = Result<T, tokio_tungstenite::tungstenite::Error>>) -> Result<T, tokio_tungstenite::tungstenite::Error> {
-    tokio::time::timeout(deadline, future).await.unwrap_or_else(|_| {
-        Err(tokio_tungstenite::tungstenite::Error::Io(io::Error::new(io::ErrorKind::TimedOut, "socket write timed out")))
-    })
+async fn write_before<T>(
+    deadline: Duration,
+    future: impl Future<Output = Result<T, tokio_tungstenite::tungstenite::Error>>,
+) -> Result<T, tokio_tungstenite::tungstenite::Error> {
+    tokio::time::timeout(deadline, future)
+        .await
+        .unwrap_or_else(|_| {
+            Err(tokio_tungstenite::tungstenite::Error::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "socket write timed out",
+            )))
+        })
 }
 
 async fn write(ws: &mut Ws, message: Message) -> Result<(), tokio_tungstenite::tungstenite::Error> {
     write_before(WRITE_TIMEOUT, ws.send(message)).await
 }
 
-async fn send(ws: &mut Ws, envelope: ServerEnvelope) -> Result<(), tokio_tungstenite::tungstenite::Error> {
+async fn send(
+    ws: &mut Ws,
+    envelope: ServerEnvelope,
+) -> Result<(), tokio_tungstenite::tungstenite::Error> {
     write(ws, Message::text(envelope.to_json())).await
 }
 
@@ -953,7 +1149,10 @@ async fn reject(ws: &mut Ws, re: Option<String>, code: ErrorCode, message: &str)
 
 /// Close the socket, giving the phone a moment to answer the close frame.
 async fn close(ws: &mut Ws, code: CloseCode, reason: &str) {
-    let frame = CloseFrame { code, reason: reason.to_string().into() };
+    let frame = CloseFrame {
+        code,
+        reason: reason.to_string().into(),
+    };
     let _ = tokio::time::timeout(WRITE_TIMEOUT, ws.close(Some(frame))).await;
     let drain = async { while let Some(Ok(_)) = ws.next().await {} };
     let _ = tokio::time::timeout(Duration::from_secs(2), drain).await;
@@ -967,8 +1166,17 @@ async fn close(ws: &mut Ws, code: CloseCode, reason: &str) {
 /// them, off the connection's loop (so a slow host never stalls pings or pushes).
 enum Job {
     Snapshot,
-    Transcript { re: Option<String>, thread_id: String, after_seq: Option<u64>, limit: Option<u32>, generation: u64 },
-    Call { re: Option<String>, msg: ClientMessage },
+    Transcript {
+        re: Option<String>,
+        thread_id: String,
+        after_seq: Option<u64>,
+        limit: Option<u32>,
+        generation: u64,
+    },
+    Call {
+        re: Option<String>,
+        msg: ClientMessage,
+    },
 }
 
 /// A finished [`Job`].
@@ -983,85 +1191,192 @@ enum Done {
         generation: u64,
         result: HostResult<Transcript>,
     },
-    Reply { envelope: ServerEnvelope, query: bool },
+    Reply {
+        envelope: ServerEnvelope,
+        query: bool,
+    },
     /// A push for this connection alone, ahead of the reply it comes before (`clone_progress`).
     Push(ServerEnvelope),
 }
 
-async fn worker<H: RemoteHost>(host: Arc<H>, mut jobs: mpsc::UnboundedReceiver<Job>, done: mpsc::UnboundedSender<Done>) {
+async fn worker<H: RemoteHost>(
+    host: Arc<H>,
+    mut jobs: mpsc::UnboundedReceiver<Job>,
+    done: mpsc::UnboundedSender<Done>,
+) {
     while let Some(job) = jobs.recv().await {
         let finished = match job {
             // Reads are only worth doing for a live connection; actions the phone sent still run.
             Job::Snapshot | Job::Transcript { .. } if done.is_closed() => continue,
             Job::Snapshot => Done::Snapshot(host.snapshot().await),
-            Job::Transcript { re, thread_id, after_seq, limit, generation } => {
+            Job::Transcript {
+                re,
+                thread_id,
+                after_seq,
+                limit,
+                generation,
+            } => {
                 let result = host.transcript_for(&thread_id, after_seq, limit).await;
-                Done::Transcript { re, thread_id, after_seq, limit, generation, result }
+                Done::Transcript {
+                    re,
+                    thread_id,
+                    after_seq,
+                    limit,
+                    generation,
+                    result,
+                }
             }
             // Reads that may take a while (asking the agents for their usage, a recap of all
             // time, git) don't hold up what the phone does next; nor does a clone, which may take
             // minutes (the machine that asked waits for its `ack` before it sends files).
-            Job::Call { re, msg } if msg.is_query() || matches!(msg, ClientMessage::CloneProject(_)) => {
+            Job::Call { re, msg }
+                if msg.is_query() || matches!(msg, ClientMessage::CloneProject(_)) =>
+            {
                 let (host, done) = (host.clone(), done.clone());
                 tokio::spawn(async move {
                     let query = msg.is_query();
-                    let _ = done.send(Done::Reply { envelope: call(&*host, re, msg, &done).await, query });
+                    let _ = done.send(Done::Reply {
+                        envelope: call(&*host, re, msg, &done).await,
+                        query,
+                    });
                 });
                 continue;
             }
-            Job::Call { re, msg } => Done::Reply { envelope: call(&*host, re, msg, &done).await, query: false },
+            Job::Call { re, msg } => Done::Reply {
+                envelope: call(&*host, re, msg, &done).await,
+                query: false,
+            },
         };
         let _ = done.send(finished);
     }
 }
 
-async fn call<H: RemoteHost>(host: &H, re: Option<String>, msg: ClientMessage, done: &mpsc::UnboundedSender<Done>) -> ServerEnvelope {
+async fn call<H: RemoteHost>(
+    host: &H,
+    re: Option<String>,
+    msg: ClientMessage,
+    done: &mpsc::UnboundedSender<Done>,
+) -> ServerEnvelope {
     let kind = msg.kind();
-    let ack = |thread_id: Option<String>| ServerMessage::Ack { thread_id, open: None, text: None, project_id: None };
+    let ack = |thread_id: Option<String>| ServerMessage::Ack {
+        thread_id,
+        open: None,
+        text: None,
+        project_id: None,
+    };
     let result: HostResult<ServerMessage> = match msg {
-        ClientMessage::Send(req) => host.send(req).await.map(|open| ServerMessage::Ack { thread_id: None, open, text: None, project_id: None }),
-        ClientMessage::TranscriptBefore { thread_id, before, limit } => host
+        ClientMessage::Send(req) => host.send(req).await.map(|open| ServerMessage::Ack {
+            thread_id: None,
+            open,
+            text: None,
+            project_id: None,
+        }),
+        ClientMessage::TranscriptBefore {
+            thread_id,
+            before,
+            limit,
+        } => host
             .transcript_before(&thread_id, &before, limit.min(MAX_PAGE))
             .await
-            .map(|page| ServerMessage::TranscriptPage { thread_id, items: page.items, more: page.more }),
+            .map(|page| ServerMessage::TranscriptPage {
+                thread_id,
+                items: page.items,
+                more: page.more,
+            }),
         ClientMessage::TurnAction(req) => {
-            host.turn_action(req).await.map(|done| ServerMessage::Ack { thread_id: done.thread_id, open: None, text: done.text, project_id: None })
+            host.turn_action(req).await.map(|done| ServerMessage::Ack {
+                thread_id: done.thread_id,
+                open: None,
+                text: done.text,
+                project_id: None,
+            })
         }
         ClientMessage::NewThread(req) => host.new_thread(req).await.map(|id| ack(Some(id))),
         ClientMessage::Answer(req) => host.answer(req).await.map(|()| ack(None)),
-        ClientMessage::Interrupt { thread_id } => host.interrupt(&thread_id).await.map(|()| ack(None)),
-        ClientMessage::MarkSeen { thread_id } => host.mark_seen(&thread_id).await.map(|()| ack(None)),
+        ClientMessage::Interrupt { thread_id } => {
+            host.interrupt(&thread_id).await.map(|()| ack(None))
+        }
+        ClientMessage::MarkSeen { thread_id } => {
+            host.mark_seen(&thread_id).await.map(|()| ack(None))
+        }
         ClientMessage::SetPrefs(req) => host.set_prefs(req).await.map(|()| ack(None)),
         ClientMessage::ThreadAction(req) => host.thread_action(req).await.map(|()| ack(None)),
         ClientMessage::Usage => host.usage().await.map(ServerMessage::Usage),
-        ClientMessage::Basecamp { range } => host.basecamp(range).await.map(ServerMessage::Basecamp),
-        ClientMessage::Notes => host.notes().await.map(|notes| ServerMessage::Notes { notes }),
-        ClientMessage::Note { note_id } => host.note(&note_id).await.map(|note| ServerMessage::Note { note }),
-        ClientMessage::CreateNote { body } => host.create_note(body).await.map(|note| ServerMessage::Note { note }),
-        ClientMessage::SaveNote(req) => host.save_note(req).await.map(|note| ServerMessage::Note { note }),
-        ClientMessage::DeleteNote { note_id } => host.delete_note(&note_id).await.map(|()| ack(None)),
-        ClientMessage::GitStatus(target) => host.git_status(target).await.map(ServerMessage::GitStatus),
+        ClientMessage::Basecamp { range } => {
+            host.basecamp(range).await.map(ServerMessage::Basecamp)
+        }
+        ClientMessage::Notes => host
+            .notes()
+            .await
+            .map(|notes| ServerMessage::Notes { notes }),
+        ClientMessage::Note { note_id } => host
+            .note(&note_id)
+            .await
+            .map(|note| ServerMessage::Note { note }),
+        ClientMessage::CreateNote { body } => host
+            .create_note(body)
+            .await
+            .map(|note| ServerMessage::Note { note }),
+        ClientMessage::SaveNote(req) => host
+            .save_note(req)
+            .await
+            .map(|note| ServerMessage::Note { note }),
+        ClientMessage::DeleteNote { note_id } => {
+            host.delete_note(&note_id).await.map(|()| ack(None))
+        }
+        ClientMessage::GitStatus(target) => {
+            host.git_status(target).await.map(ServerMessage::GitStatus)
+        }
         ClientMessage::GitDiff(req) => host.git_diff(req).await.map(ServerMessage::GitDiff),
         ClientMessage::GitCommit(req) => host.git_commit(req).await.map(|()| ack(None)),
         ClientMessage::GitPush(target) => host.git_push(target).await.map(|()| ack(None)),
-        ClientMessage::GitBranches(target) => host.git_branches(target).await.map(ServerMessage::GitBranches),
+        ClientMessage::GitBranches(target) => host
+            .git_branches(target)
+            .await
+            .map(ServerMessage::GitBranches),
         ClientMessage::GitSwitch(req) => host.git_switch(req).await.map(|()| ack(None)),
-        ClientMessage::WorktreeMerge { thread_id } => host.worktree_merge(&thread_id).await.map(|()| ack(None)),
+        ClientMessage::WorktreeMerge { thread_id } => {
+            host.worktree_merge(&thread_id).await.map(|()| ack(None))
+        }
         ClientMessage::WorktreeRemove(req) => host.worktree_remove(req).await.map(|()| ack(None)),
         ClientMessage::Commands { thread_id } => {
-            host.commands(&thread_id).await.map(|commands| ServerMessage::Commands { thread_id, commands })
+            host.commands(&thread_id)
+                .await
+                .map(|commands| ServerMessage::Commands {
+                    thread_id,
+                    commands,
+                })
         }
         ClientMessage::Settings => host.settings().await.map(ServerMessage::Settings),
-        ClientMessage::SetSettings(change) => host.set_settings(change).await.map(ServerMessage::Settings),
+        ClientMessage::SetSettings(change) => {
+            host.set_settings(change).await.map(ServerMessage::Settings)
+        }
         ClientMessage::Search(req) => host.search(req).await.map(ServerMessage::SearchResults),
-        ClientMessage::UseReset { credit_id } => host.use_reset(&credit_id).await.map(|()| ack(None)),
-        ClientMessage::QueueAction(req) => host.queue_action(req).await.map(|text| ServerMessage::Ack { thread_id: None, open: None, text, project_id: None }),
+        ClientMessage::UseReset { credit_id } => {
+            host.use_reset(&credit_id).await.map(|()| ack(None))
+        }
+        ClientMessage::QueueAction(req) => {
+            host.queue_action(req).await.map(|text| ServerMessage::Ack {
+                thread_id: None,
+                open: None,
+                text,
+                project_id: None,
+            })
+        }
         ClientMessage::Attachment(req) => host.attachment(req).await.map(ServerMessage::Attachment),
-        ClientMessage::BackgroundOutput { thread_id, task_id } => host.background_output(&thread_id, &task_id).await.map(ServerMessage::BackgroundOutput),
-        ClientMessage::StopBackground { thread_id, task_id } => host.stop_background(&thread_id, &task_id).await.map(|()| ack(None)),
+        ClientMessage::BackgroundOutput { thread_id, task_id } => host
+            .background_output(&thread_id, &task_id)
+            .await
+            .map(ServerMessage::BackgroundOutput),
+        ClientMessage::StopBackground { thread_id, task_id } => host
+            .stop_background(&thread_id, &task_id)
+            .await
+            .map(|()| ack(None)),
         ClientMessage::Icon(req) => host.icon(req).await.map(ServerMessage::Icon),
         ClientMessage::NoteAsset(req) => host.note_asset(req).await.map(ServerMessage::NoteAsset),
-        ClientMessage::AddNoteImage(req) => host.add_note_image(req).await.map(ServerMessage::NoteImage),
+        ClientMessage::AddNoteImage(req) => {
+            host.add_note_image(req).await.map(ServerMessage::NoteImage)
+        }
         ClientMessage::NoteFile(req) => host.note_file(req).await.map(ServerMessage::NoteFileChunk),
         ClientMessage::MachineInfo => host.machine_info().await.map(ServerMessage::MachineInfo),
         ClientMessage::CloneProject(req) => match req.check() {
@@ -1070,16 +1385,29 @@ async fn call<H: RemoteHost>(host: &H, re: Option<String>, msg: ClientMessage, d
                 let progress = CloneProgress::new(req.folder.clone(), move |msg| {
                     let _ = done.send(Done::Push(ServerEnvelope::push(msg)));
                 });
-                host.clone_project(req, progress).await.map(|id| ServerMessage::Ack { thread_id: None, open: None, text: None, project_id: Some(id) })
+                host.clone_project(req, progress)
+                    .await
+                    .map(|id| ServerMessage::Ack {
+                        thread_id: None,
+                        open: None,
+                        text: None,
+                        project_id: Some(id),
+                    })
             }
             Err(why) => Err(HostError::bad_request(why)),
         },
         // Checked here, whatever the host does: paths inside the project, the size in bounds.
         ClientMessage::PutFiles(req) => match req.decode() {
-            Ok(files) => host.put_files(&req.project_id, files).await.map(|()| ack(None)),
+            Ok(files) => host
+                .put_files(&req.project_id, files)
+                .await
+                .map(|()| ack(None)),
             Err(why) => Err(HostError::bad_request(why)),
         },
-        other => Err(HostError::bad_request(format!("Unexpected \"{}\"", other.kind()))),
+        other => Err(HostError::bad_request(format!(
+            "Unexpected \"{}\"",
+            other.kind()
+        ))),
     };
     match result {
         Ok(reply) => ServerEnvelope::reply(re, reply),
@@ -1093,7 +1421,11 @@ async fn call<H: RemoteHost>(host: &H, re: Option<String>, msg: ClientMessage, d
 /// A transcript subscription.
 enum Sub {
     /// Waiting for the host's transcript; items pushed meanwhile are held until it's sent.
-    Pending { generation: u64, held: Vec<Item>, reset: bool },
+    Pending {
+        generation: u64,
+        held: Vec<Item>,
+        reset: bool,
+    },
     /// Items are forwarded as they come.
     Active,
 }
@@ -1122,14 +1454,28 @@ impl Session {
                 vec![error(re, ErrorCode::BadRequest, "Already authenticated")]
             }
             ClientMessage::Ping => vec![ServerEnvelope::reply(re, ServerMessage::Pong)],
-            ClientMessage::Subscribe { thread_id, after_seq, limit } => {
+            ClientMessage::Subscribe {
+                thread_id,
+                after_seq,
+                limit,
+            } => {
                 self.next_generation += 1;
                 let generation = self.next_generation;
-                let sub = Sub::Pending { generation, held: Vec::new(), reset: false };
+                let sub = Sub::Pending {
+                    generation,
+                    held: Vec::new(),
+                    reset: false,
+                };
                 if self.subs.insert(thread_id.clone(), sub).is_none() {
                     watchers.add(&thread_id);
                 }
-                let _ = jobs.send(Job::Transcript { re, thread_id, after_seq, limit, generation });
+                let _ = jobs.send(Job::Transcript {
+                    re,
+                    thread_id,
+                    after_seq,
+                    limit,
+                    generation,
+                });
                 Vec::new()
             }
             ClientMessage::Unsubscribe { thread_id } => {
@@ -1137,12 +1483,24 @@ impl Session {
                     watchers.remove(&thread_id);
                 }
                 match re {
-                    Some(re) => vec![ServerEnvelope::reply(Some(re), ServerMessage::Ack { thread_id: None, open: None, text: None, project_id: None })],
+                    Some(re) => vec![ServerEnvelope::reply(
+                        Some(re),
+                        ServerMessage::Ack {
+                            thread_id: None,
+                            open: None,
+                            text: None,
+                            project_id: None,
+                        },
+                    )],
                     None => Vec::new(),
                 }
             }
             msg if msg.is_query() && self.queries_in_flight >= 8 => {
-                vec![error(re, ErrorCode::RateLimited, "Too many queries in flight")]
+                vec![error(
+                    re,
+                    ErrorCode::RateLimited,
+                    "Too many queries in flight",
+                )]
             }
             // Everything else is the host's to answer, in the order sent.
             msg => {
@@ -1189,9 +1547,15 @@ impl Session {
                 }
                 out
             }
-            Done::Transcript { re, thread_id, after_seq, limit, generation, result } => {
-                let current =
-                    matches!(self.subs.get(&thread_id), Some(Sub::Pending { generation: g, .. }) if *g == generation);
+            Done::Transcript {
+                re,
+                thread_id,
+                after_seq,
+                limit,
+                generation,
+                result,
+            } => {
+                let current = matches!(self.subs.get(&thread_id), Some(Sub::Pending { generation: g, .. }) if *g == generation);
                 if !self.subs.contains_key(&thread_id) {
                     // Unsubscribed while the host read it (and so started following it again).
                     watchers.recheck(&thread_id);
@@ -1210,13 +1574,19 @@ impl Session {
                 let reply = transcript_message(thread_id.clone(), after_seq, limit, transcript);
                 let mut out = vec![ServerEnvelope::reply(re, reply)];
                 if current
-                    && let Some(Sub::Pending { held, reset, .. }) = self.subs.insert(thread_id.clone(), Sub::Active)
+                    && let Some(Sub::Pending { held, reset, .. }) =
+                        self.subs.insert(thread_id.clone(), Sub::Active)
                 {
                     for item in held.into_iter().filter(|item| item.seq > seq) {
-                        out.push(ServerEnvelope::push(ServerMessage::Item { thread_id: thread_id.clone(), item }));
+                        out.push(ServerEnvelope::push(ServerMessage::Item {
+                            thread_id: thread_id.clone(),
+                            item,
+                        }));
                     }
                     if reset {
-                        out.push(ServerEnvelope::push(ServerMessage::TranscriptReset { thread_id }));
+                        out.push(ServerEnvelope::push(ServerMessage::TranscriptReset {
+                            thread_id,
+                        }));
                     }
                 }
                 out
@@ -1226,7 +1596,10 @@ impl Session {
 
     fn on_event(&mut self, event: HostEvent) -> Vec<ServerEnvelope> {
         let msg = match event {
-            HostEvent::Snapshot(_) | HostEvent::Thread(_) | HostEvent::Unlisted(_) | HostEvent::ThreadRemoved(_)
+            HostEvent::Snapshot(_)
+            | HostEvent::Thread(_)
+            | HostEvent::Unlisted(_)
+            | HostEvent::ThreadRemoved(_)
                 if self.snapshots_pending > 0 =>
             {
                 self.held_events.push(event);
@@ -1262,9 +1635,9 @@ impl Session {
         let mut out = Vec::new();
         for (thread_id, sub) in &mut self.subs {
             match sub {
-                Sub::Active => {
-                    out.push(ServerEnvelope::push(ServerMessage::TranscriptReset { thread_id: thread_id.clone() }))
-                }
+                Sub::Active => out.push(ServerEnvelope::push(ServerMessage::TranscriptReset {
+                    thread_id: thread_id.clone(),
+                })),
                 Sub::Pending { reset, .. } => *reset = true,
             }
         }
@@ -1274,8 +1647,18 @@ impl Session {
 
 /// The reply to `subscribe`: only what's after `after_seq` when the host can serve it, else all
 /// (or, with a `limit`, the last `limit` items with what follows them, and every open request).
-fn transcript_message(thread_id: String, after_seq: Option<u64>, limit: Option<u32>, transcript: Transcript) -> ServerMessage {
-    let Transcript { seq, items, base, more } = transcript;
+fn transcript_message(
+    thread_id: String,
+    after_seq: Option<u64>,
+    limit: Option<u32>,
+    transcript: Transcript,
+) -> ServerMessage {
+    let Transcript {
+        seq,
+        items,
+        base,
+        more,
+    } = transcript;
     match after_seq {
         Some(after) if base <= after && after <= seq => ServerMessage::Transcript {
             thread_id,
@@ -1286,7 +1669,13 @@ fn transcript_message(thread_id: String, after_seq: Option<u64>, limit: Option<u
         },
         _ => {
             let (items, cut) = last_items(items, limit);
-            ServerMessage::Transcript { thread_id, reset: true, seq, items, more: more || cut }
+            ServerMessage::Transcript {
+                thread_id,
+                reset: true,
+                seq,
+                items,
+                more: more || cut,
+            }
         }
     }
 }
@@ -1294,8 +1683,11 @@ fn transcript_message(thread_id: String, after_seq: Option<u64>, limit: Option<u
 /// The last `limit` items (those standing on their own: a turn's changed files go with the turn
 /// end they follow) and every open request; and whether any were left out.
 fn last_items(items: Vec<Item>, limit: Option<u32>) -> (Vec<Item>, bool) {
-    let Some(limit) = limit else { return (items, false) };
-    let (requests, mut rest): (Vec<Item>, Vec<Item>) = items.into_iter().partition(|i| i.body.is_request());
+    let Some(limit) = limit else {
+        return (items, false);
+    };
+    let (requests, mut rest): (Vec<Item>, Vec<Item>) =
+        items.into_iter().partition(|i| i.body.is_request());
     let mut kept = 0;
     let mut start = rest.len();
     for (ix, item) in rest.iter().enumerate().rev() {
@@ -1319,8 +1711,18 @@ async fn run_session<H: RemoteHost>(ws: &mut Ws, inner: &Inner, host: Arc<H>, au
     session.close(&inner.watchers);
 }
 
-async fn session_loop<H: RemoteHost>(ws: &mut Ws, inner: &Inner, host: Arc<H>, auth: Authenticated, session: &mut Session) {
-    let Authenticated { device_id, mut kick, .. } = auth;
+async fn session_loop<H: RemoteHost>(
+    ws: &mut Ws,
+    inner: &Inner,
+    host: Arc<H>,
+    auth: Authenticated,
+    session: &mut Session,
+) {
+    let Authenticated {
+        device_id,
+        mut kick,
+        ..
+    } = auth;
     let watchers = &inner.watchers;
     // Listen for events before asking for the snapshot, so nothing falls between the two.
     let mut events = inner.events.subscribe();
@@ -1404,13 +1806,19 @@ mod tests {
     #[test]
     fn pre_auth_places_are_capped_per_address() {
         let slots = PreAuthSlots::new(6, 4);
-        let (a, b) = (IpAddr::from([192, 168, 1, 66]), IpAddr::from([192, 168, 1, 7]));
+        let (a, b) = (
+            IpAddr::from([192, 168, 1, 66]),
+            IpAddr::from([192, 168, 1, 7]),
+        );
         let held: Vec<PreAuth> = (0..4).map(|_| slots.take(a).expect("a place")).collect();
         assert!(slots.take(a).is_none(), "a fifth from one address waits");
         // Another device still gets in, up to the total.
         let b1 = slots.take(b).expect("another address isn't held up");
         let _b2 = slots.take(b).expect("another address isn't held up");
-        assert!(slots.take(IpAddr::from([10, 0, 0, 1])).is_none(), "six in all");
+        assert!(
+            slots.take(IpAddr::from([10, 0, 0, 1])).is_none(),
+            "six in all"
+        );
         drop(b1);
         assert!(slots.take(IpAddr::from([10, 0, 0, 1])).is_some());
         // An IPv6 device is one address, however many it has in its /64.
@@ -1419,18 +1827,28 @@ mod tests {
         assert!(v6.take("fd00::2:3".parse().unwrap()).is_none());
         drop(held);
         assert!(slots.take(a).is_some());
-        assert_eq!(counts(&slots.by_address).get(&a), None, "places given back are forgotten");
+        assert_eq!(
+            counts(&slots.by_address).get(&a),
+            None,
+            "places given back are forgotten"
+        );
     }
 
     #[tokio::test]
     async fn capped_reads_stop_at_the_allowance() {
         let (mut phone, server) = tokio::io::duplex(1 << 16);
         let allowance = Allowance::new(10);
-        let mut capped = Capped { inner: server, allowance: allowance.clone() };
+        let mut capped = Capped {
+            inner: server,
+            allowance: allowance.clone(),
+        };
         phone.write_all(&[7; 32]).await.unwrap();
         let mut buf = [0; 64];
         assert_eq!(capped.read(&mut buf).await.unwrap(), 10);
-        assert_eq!(capped.read(&mut buf).await.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            capped.read(&mut buf).await.unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
         allowance.set(usize::MAX);
         assert_eq!(capped.read(&mut buf).await.unwrap(), 22);
     }
@@ -1438,7 +1856,11 @@ mod tests {
     #[tokio::test]
     async fn socket_write_deadline_expires() {
         let pending = std::future::pending::<Result<(), tokio_tungstenite::tungstenite::Error>>();
-        let err = write_before(Duration::from_millis(1), pending).await.unwrap_err();
-        assert!(matches!(err, tokio_tungstenite::tungstenite::Error::Io(ref err) if err.kind() == io::ErrorKind::TimedOut));
+        let err = write_before(Duration::from_millis(1), pending)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, tokio_tungstenite::tungstenite::Error::Io(ref err) if err.kind() == io::ErrorKind::TimedOut)
+        );
     }
 }

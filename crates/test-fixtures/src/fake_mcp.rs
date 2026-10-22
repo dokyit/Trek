@@ -26,7 +26,9 @@ pub fn run(mode: Option<String>) {
         if line.is_empty() {
             continue;
         }
-        let Ok(msg) = serde_json::from_slice::<Value>(&line) else { continue };
+        let Ok(msg) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
         if mode == "silent" {
             continue;
         }
@@ -34,17 +36,26 @@ pub fn run(mode: Option<String>) {
         let id = msg["id"].clone();
         if method == "initialize" {
             if mode == "refuse" {
-                say(&mut out, json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32602, "message": "Unsupported protocol version" } }));
+                say(
+                    &mut out,
+                    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32602, "message": "Unsupported protocol version" } }),
+                );
                 continue;
             }
             // A request of the server's own first; the client must answer it and carry on.
-            say(&mut out, json!({ "jsonrpc": "2.0", "id": "srv-1", "method": "ping" }));
+            say(
+                &mut out,
+                json!({ "jsonrpc": "2.0", "id": "srv-1", "method": "ping" }),
+            );
             let reply = lines
                 .next()
                 .and_then(|l| l.ok())
                 .and_then(|l| serde_json::from_slice::<Value>(&l).ok())
                 .unwrap_or_else(|| json!({}));
-            assert!(reply["id"] == json!("srv-1") && truthy(&reply["result"]), "no ping reply");
+            assert!(
+                reply["id"] == json!("srv-1") && truthy(&reply["result"]),
+                "no ping reply"
+            );
             say(
                 &mut out,
                 json!({ "jsonrpc": "2.0", "id": id, "result": {
@@ -57,17 +68,29 @@ pub fn run(mode: Option<String>) {
             // Nothing to say.
         } else if method == "tools/list" {
             if msg["params"]["cursor"].is_null() {
-                say(&mut out, json!({ "jsonrpc": "2.0", "method": "notifications/message", "params": { "level": "info", "data": "listing" } }));
-                say(&mut out, json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": [{ "name": "echo" }, { "name": "add" }], "nextCursor": "page2" } }));
+                say(
+                    &mut out,
+                    json!({ "jsonrpc": "2.0", "method": "notifications/message", "params": { "level": "info", "data": "listing" } }),
+                );
+                say(
+                    &mut out,
+                    json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": [{ "name": "echo" }, { "name": "add" }], "nextCursor": "page2" } }),
+                );
             } else {
                 let mut tools = vec![json!({ "name": "get_time" })];
                 if std::env::var("FAKE_TOKEN").as_deref() == Ok("abc") {
                     tools.push(json!({ "name": "env_ok" }));
                 }
-                say(&mut out, json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": tools } }));
+                say(
+                    &mut out,
+                    json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": tools } }),
+                );
             }
         } else if !id.is_null() {
-            say(&mut out, json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "Method not found" } }));
+            say(
+                &mut out,
+                json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "Method not found" } }),
+            );
         }
     }
 }

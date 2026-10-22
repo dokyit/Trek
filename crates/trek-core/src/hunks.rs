@@ -39,8 +39,16 @@ impl FileDiff {
         for line in patch.split_inclusive('\n') {
             if line.starts_with("@@ ") {
                 out.hunks.extend(current.take());
-                let Some((os, oc, ns, nc)) = parse_range(line) else { continue };
-                current = Some(Hunk { old_start: os, old_count: oc, new_start: ns, new_count: nc, body: ensure_newline(line) });
+                let Some((os, oc, ns, nc)) = parse_range(line) else {
+                    continue;
+                };
+                current = Some(Hunk {
+                    old_start: os,
+                    old_count: oc,
+                    new_start: ns,
+                    new_count: nc,
+                    body: ensure_newline(line),
+                });
             } else if let Some(h) = current.as_mut() {
                 if line.starts_with([' ', '+', '-', '\\']) || line == "\n" {
                     h.body.push_str(&ensure_newline(line));
@@ -59,7 +67,9 @@ impl FileDiff {
 
     /// The patch of hunk `ix` alone, to hand to `git apply`.
     pub fn patch(&self, ix: usize) -> Option<String> {
-        self.hunks.get(ix).map(|h| format!("{}{}", self.header, h.body))
+        self.hunks
+            .get(ix)
+            .map(|h| format!("{}{}", self.header, h.body))
     }
 
     /// Every hunk's marks, in row order.
@@ -75,18 +85,26 @@ impl Hunk {
         let mut out = vec![];
         // The new file's row of the line being read (0-based). A pure deletion's `+start` names
         // the line before the gap.
-        let mut row = if self.new_count == 0 { self.new_start } else { self.new_start.saturating_sub(1) };
+        let mut row = if self.new_count == 0 {
+            self.new_start
+        } else {
+            self.new_start.saturating_sub(1)
+        };
         // The run of changed lines under way: where its additions start, and lines taken away.
         let mut added: Option<u32> = None;
         let mut removed = 0u32;
-        let end_run = |out: &mut Vec<Mark>, added: &mut Option<u32>, removed: &mut u32, row: u32| {
-            match added.take() {
-                Some(start) => out.push(Mark::Added { start, end: row }),
-                None if *removed > 0 => out.push(Mark::Deleted { at: row, lines: *removed }),
-                None => {}
-            }
-            *removed = 0;
-        };
+        let end_run =
+            |out: &mut Vec<Mark>, added: &mut Option<u32>, removed: &mut u32, row: u32| {
+                match added.take() {
+                    Some(start) => out.push(Mark::Added { start, end: row }),
+                    None if *removed > 0 => out.push(Mark::Deleted {
+                        at: row,
+                        lines: *removed,
+                    }),
+                    None => {}
+                }
+                *removed = 0;
+            };
         for line in self.body.lines().skip(1) {
             match line.as_bytes().first() {
                 Some(b'+') => {
@@ -125,21 +143,33 @@ impl Hunk {
 
     /// Lines added and removed.
     pub fn counts(&self) -> (u32, u32) {
-        self.body.lines().skip(1).fold((0, 0), |(a, r), l| match l.as_bytes().first() {
-            Some(b'+') => (a + 1, r),
-            Some(b'-') => (a, r + 1),
-            _ => (a, r),
-        })
+        self.body
+            .lines()
+            .skip(1)
+            .fold((0, 0), |(a, r), l| match l.as_bytes().first() {
+                Some(b'+') => (a + 1, r),
+                Some(b'-') => (a, r + 1),
+                _ => (a, r),
+            })
     }
 
     /// The lines it took away, as they were.
     pub fn removed_text(&self) -> String {
-        self.body.lines().skip(1).filter_map(|l| l.strip_prefix('-')).map(|l| format!("{l}\n")).collect()
+        self.body
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.strip_prefix('-'))
+            .map(|l| format!("{l}\n"))
+            .collect()
     }
 }
 
 fn ensure_newline(line: &str) -> String {
-    if line.ends_with('\n') { line.to_string() } else { format!("{line}\n") }
+    if line.ends_with('\n') {
+        line.to_string()
+    } else {
+        format!("{line}\n")
+    }
 }
 
 /// `@@ -a[,b] +c[,d] @@` → (a, b, c, d); a missing count is 1.
@@ -167,11 +197,26 @@ mod tests {
     #[test]
     fn a_diff_splits_into_hunks_that_patch_on_their_own() {
         let d = FileDiff::parse(PATCH);
-        assert_eq!(d.header, "diff --git a/f.txt b/f.txt\nindex 1111111..2222222 100644\n--- a/f.txt\n+++ b/f.txt\n");
+        assert_eq!(
+            d.header,
+            "diff --git a/f.txt b/f.txt\nindex 1111111..2222222 100644\n--- a/f.txt\n+++ b/f.txt\n"
+        );
         assert_eq!(d.hunks.len(), 3);
-        assert_eq!((d.hunks[1].old_start, d.hunks[1].old_count, d.hunks[1].new_start, d.hunks[1].new_count), (8, 3, 8, 5));
+        assert_eq!(
+            (
+                d.hunks[1].old_start,
+                d.hunks[1].old_count,
+                d.hunks[1].new_start,
+                d.hunks[1].new_count
+            ),
+            (8, 3, 8, 5)
+        );
         let p = d.patch(1).unwrap();
-        assert!(p.starts_with("diff --git a/f.txt b/f.txt\n") && p.ends_with("+nine and three quarters\n ten\n"), "{p}");
+        assert!(
+            p.starts_with("diff --git a/f.txt b/f.txt\n")
+                && p.ends_with("+nine and three quarters\n ten\n"),
+            "{p}"
+        );
         assert!(!p.contains("thirteen"), "one hunk only: {p}");
         assert_eq!(d.hunks[1].counts(), (2, 0));
         assert_eq!(d.hunks[2].removed_text(), "thirteen\n");
@@ -180,9 +225,17 @@ mod tests {
     #[test]
     fn hunks_mark_the_rows_they_add_change_and_take_away() {
         let d = FileDiff::parse(PATCH);
-        assert_eq!(d.hunks[0].marks(), [Mark::Added { start: 0, end: 1 }], "a changed line");
+        assert_eq!(
+            d.hunks[0].marks(),
+            [Mark::Added { start: 0, end: 1 }],
+            "a changed line"
+        );
         assert_eq!(d.hunks[1].marks(), [Mark::Added { start: 9, end: 11 }]);
-        assert_eq!(d.hunks[2].marks(), [Mark::Deleted { at: 14, lines: 1 }], "the gap sits above `fourteen`");
+        assert_eq!(
+            d.hunks[2].marks(),
+            [Mark::Deleted { at: 14, lines: 1 }],
+            "the gap sits above `fourteen`"
+        );
         assert_eq!((d.hunks[1].first_row(), d.hunks[1].last_row()), (9, 10));
         // A zero-context deletion at the end of the file, and a new file.
         let gone = FileDiff::parse("--- a/x\n+++ b/x\n@@ -3,2 +2,0 @@\n-c\n-d\n");

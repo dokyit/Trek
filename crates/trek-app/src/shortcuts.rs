@@ -58,7 +58,17 @@ impl Report {
 
     /// What couldn't be changed, in words, when anything couldn't: the user's to fix by hand.
     pub fn left_sentence(&self) -> Option<String> {
-        let named: Vec<String> = self.left.iter().map(|l| format!("\"{}\" {}", l.lnk.file_stem().unwrap_or_default().to_string_lossy(), l.place)).collect();
+        let named: Vec<String> = self
+            .left
+            .iter()
+            .map(|l| {
+                format!(
+                    "\"{}\" {}",
+                    l.lnk.file_stem().unwrap_or_default().to_string_lossy(),
+                    l.place
+                )
+            })
+            .collect();
         let list = match named.as_slice() {
             [] => return None,
             [one] => one.clone(),
@@ -66,27 +76,55 @@ impl Report {
             [a, b, rest @ ..] => format!("{a}, {b} and {} more", rest.len()),
         };
         let many = named.len() > 1;
-        let who = if self.left.iter().all(|l| l.refused) { "Windows wouldn't let Trek change" } else { "Trek couldn't change" };
-        Some(format!("{who} the shortcut{} {list}, so {} still start{} the old copy.", if many { "s" } else { "" }, if many { "they" } else { "it" }, if many { "" } else { "s" }))
+        let who = if self.left.iter().all(|l| l.refused) {
+            "Windows wouldn't let Trek change"
+        } else {
+            "Trek couldn't change"
+        };
+        Some(format!(
+            "{who} the shortcut{} {list}, so {} still start{} the old copy.",
+            if many { "s" } else { "" },
+            if many { "they" } else { "it" },
+            if many { "" } else { "s" }
+        ))
     }
 }
 
 /// Point every shortcut under `folders` that starts `old_exe` at `new_exe`.
-pub fn retarget_in(folders: &[ShortcutFolder], old_exe: &Path, new_exe: &Path, links: &dyn Links) -> Report {
+pub fn retarget_in(
+    folders: &[ShortcutFolder],
+    old_exe: &Path,
+    new_exe: &Path,
+    links: &dyn Links,
+) -> Report {
     let mut report = Report::default();
     for folder in folders {
         for lnk in shortcut_files(folder) {
             // A file that isn't a shortcut Windows can read starts nothing of ours.
             let Ok(link) = links.read(&lnk) else { continue };
-            let Some(moved) = moved_link(&link, old_exe, new_exe) else { continue };
+            let Some(moved) = moved_link(&link, old_exe, new_exe) else {
+                continue;
+            };
             match links.write(&lnk, &moved) {
                 Ok(()) => {
-                    tracing::info!("relocation: the shortcut {} starts {} now", lnk.display(), new_exe.display());
+                    tracing::info!(
+                        "relocation: the shortcut {} starts {} now",
+                        lnk.display(),
+                        new_exe.display()
+                    );
                     report.changed.push(lnk);
                 }
                 Err(e) => {
-                    tracing::warn!("relocation: couldn't change the shortcut {}: {e}", lnk.display());
-                    report.left.push(Left { lnk, place: folder.place, refused: e.kind() == std::io::ErrorKind::PermissionDenied, why: e.to_string() });
+                    tracing::warn!(
+                        "relocation: couldn't change the shortcut {}: {e}",
+                        lnk.display()
+                    );
+                    report.left.push(Left {
+                        lnk,
+                        place: folder.place,
+                        refused: e.kind() == std::io::ErrorKind::PermissionDenied,
+                        why: e.to_string(),
+                    });
                 }
             }
         }
@@ -99,13 +137,22 @@ pub fn retarget_in(folders: &[ShortcutFolder], old_exe: &Path, new_exe: &Path, l
 fn shortcut_files(folder: &ShortcutFolder) -> Vec<PathBuf> {
     let (mut found, mut pending) = (vec![], vec![(folder.dir.clone(), 0u32)]);
     while let Some((dir, depth)) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
-            let Ok(kind) = entry.file_type() else { continue };
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
             let path = entry.path();
             if kind.is_dir() && depth < folder.depth {
                 pending.push((path, depth + 1));
-            } else if kind.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("lnk")) && !is_in_the_cloud(&entry) {
+            } else if kind.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("lnk"))
+                && !is_in_the_cloud(&entry)
+            {
                 found.push(path);
             }
         }
@@ -120,7 +167,9 @@ fn is_in_the_cloud(entry: &std::fs::DirEntry) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt as _;
-        entry.metadata().is_ok_and(|m| is_online_only(m.file_attributes()))
+        entry
+            .metadata()
+            .is_ok_and(|m| is_online_only(m.file_attributes()))
     }
     #[cfg(not(windows))]
     {
@@ -147,9 +196,22 @@ fn moved_link(link: &Link, old_exe: &Path, new_exe: &Path) -> Option<Link> {
         return None;
     }
     let (old_dir, new_dir) = (old_exe.parent()?, new_exe.parent()?);
-    let dir = if link.dir.as_os_str().is_empty() || same_path(&link.dir, old_dir) { new_dir.to_path_buf() } else { link.dir.clone() };
-    let icon = if same_path(&link.icon, old_exe) { new_exe.to_path_buf() } else { link.icon.clone() };
-    Some(Link { target: new_exe.to_path_buf(), dir, icon, icon_index: link.icon_index })
+    let dir = if link.dir.as_os_str().is_empty() || same_path(&link.dir, old_dir) {
+        new_dir.to_path_buf()
+    } else {
+        link.dir.clone()
+    };
+    let icon = if same_path(&link.icon, old_exe) {
+        new_exe.to_path_buf()
+    } else {
+        link.icon.clone()
+    };
+    Some(Link {
+        target: new_exe.to_path_buf(),
+        dir,
+        icon,
+        icon_index: link.icon_index,
+    })
 }
 
 /// Paths as Windows compares them: without the `\\?\` prefix, either slash, any case, and a
@@ -178,13 +240,24 @@ pub fn retarget_user_shortcuts(old_exe: &Path, new_exe: &Path) -> Report {
         let (old, new) = (old_exe.to_path_buf(), new_exe.to_path_buf());
         let (tx, rx) = std::sync::mpsc::channel();
         // COM is for the thread that starts it: one of its own, in the apartment shortcuts want.
-        let started = std::thread::Builder::new().name("shortcuts".into()).spawn(move || {
-            let report = com::with_com(|| retarget_in(&trek_core::update::relocate::shortcut_folders(), &old, &new, &com::ShellLinks));
-            let _ = tx.send(report);
-        });
+        let started = std::thread::Builder::new()
+            .name("shortcuts".into())
+            .spawn(move || {
+                let report = com::with_com(|| {
+                    retarget_in(
+                        &trek_core::update::relocate::shortcut_folders(),
+                        &old,
+                        &new,
+                        &com::ShellLinks,
+                    )
+                });
+                let _ = tx.send(report);
+            });
         match started.map(|_| rx.recv_timeout(std::time::Duration::from_secs(20))) {
             Ok(Ok(report)) => return report,
-            Ok(Err(e)) => tracing::warn!("relocation: the shortcuts weren't looked through in time: {e}"),
+            Ok(Err(e)) => {
+                tracing::warn!("relocation: the shortcuts weren't looked through in time: {e}")
+            }
             Err(e) => tracing::warn!("relocation: couldn't look through the shortcuts: {e}"),
         }
     }
@@ -198,7 +271,10 @@ mod com {
     use std::ffi::OsString;
     use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
     use std::path::{Path, PathBuf};
-    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, STGM, STGM_READ, STGM_READWRITE};
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        CoUninitialize, IPersistFile, STGM, STGM_READ, STGM_READWRITE,
+    };
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
     use windows::core::{HRESULT, HSTRING, Interface as _};
 
@@ -223,7 +299,11 @@ mod com {
     fn open(lnk: &Path, mode: STGM) -> windows::core::Result<(IShellLinkW, IPersistFile)> {
         // SAFETY: COM calls on a thread `with_com` started; the objects are released on drop.
         unsafe {
-            let link: IShellLinkW = CoCreateInstance(&ShellLink, None::<&windows::core::IUnknown>, CLSCTX_INPROC_SERVER)?;
+            let link: IShellLinkW = CoCreateInstance(
+                &ShellLink,
+                None::<&windows::core::IUnknown>,
+                CLSCTX_INPROC_SERVER,
+            )?;
             let file: IPersistFile = link.cast()?;
             file.Load(&HSTRING::from(lnk.as_os_str()), mode)?;
             Ok((link, file))
@@ -249,27 +329,41 @@ mod com {
     impl Links for ShellLinks {
         fn read(&self, lnk: &Path) -> std::io::Result<Link> {
             let (link, _file) = open(lnk, STGM_READ).map_err(io_error)?;
-            let (mut target, mut dir, mut icon) = (vec![0u16; PATH_CHARS], vec![0u16; PATH_CHARS], vec![0u16; PATH_CHARS]);
+            let (mut target, mut dir, mut icon) = (
+                vec![0u16; PATH_CHARS],
+                vec![0u16; PATH_CHARS],
+                vec![0u16; PATH_CHARS],
+            );
             let mut icon_index = 0;
             // SAFETY: buffers as long as they say; no find data asked for.
             unsafe {
-                link.GetPath(&mut target, std::ptr::null_mut(), 0).map_err(io_error)?;
+                link.GetPath(&mut target, std::ptr::null_mut(), 0)
+                    .map_err(io_error)?;
                 link.GetWorkingDirectory(&mut dir).map_err(io_error)?;
-                link.GetIconLocation(&mut icon, &mut icon_index).map_err(io_error)?;
+                link.GetIconLocation(&mut icon, &mut icon_index)
+                    .map_err(io_error)?;
             }
-            Ok(Link { target: text(&target), dir: text(&dir), icon: text(&icon), icon_index })
+            Ok(Link {
+                target: text(&target),
+                dir: text(&dir),
+                icon: text(&icon),
+                icon_index,
+            })
         }
 
         fn write(&self, lnk: &Path, to: &Link) -> std::io::Result<()> {
             let (link, file) = open(lnk, STGM_READWRITE).map_err(io_error)?;
-            let wide = |p: &Path| HSTRING::from_wide(&p.as_os_str().encode_wide().collect::<Vec<u16>>());
+            let wide =
+                |p: &Path| HSTRING::from_wide(&p.as_os_str().encode_wide().collect::<Vec<u16>>());
             // SAFETY: strings that outlive the calls. Everything else the shortcut holds (its
             // arguments, hotkey, window state, properties) stays as it was loaded.
             unsafe {
                 link.SetPath(&wide(&to.target)).map_err(io_error)?;
                 link.SetWorkingDirectory(&wide(&to.dir)).map_err(io_error)?;
-                link.SetIconLocation(&wide(&to.icon), to.icon_index).map_err(io_error)?;
-                file.Save(&HSTRING::from(lnk.as_os_str()), true).map_err(io_error)?;
+                link.SetIconLocation(&wide(&to.icon), to.icon_index)
+                    .map_err(io_error)?;
+                file.Save(&HSTRING::from(lnk.as_os_str()), true)
+                    .map_err(io_error)?;
             }
             Ok(())
         }
@@ -284,14 +378,22 @@ mod tests {
 
     fn scratch(name: &str) -> PathBuf {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let dir = std::env::temp_dir().join(format!("trek-shortcuts-test-{name}-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let dir = std::env::temp_dir().join(format!(
+            "trek-shortcuts-test-{name}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
     fn folder(dir: &Path, depth: u32) -> ShortcutFolder {
-        ShortcutFolder { place: "on your Desktop", dir: dir.to_path_buf(), depth }
+        ShortcutFolder {
+            place: "on your Desktop",
+            dir: dir.to_path_buf(),
+            depth,
+        }
     }
 
     /// Shortcuts as a map: what each starts, and which Windows would turn away.
@@ -305,7 +407,15 @@ mod tests {
         fn make(&self, lnk: &Path, target: &Path) {
             std::fs::write(lnk, "lnk").unwrap();
             let dir = target.parent().unwrap().to_path_buf();
-            self.links.borrow_mut().insert(lnk.to_path_buf(), Link { target: target.to_path_buf(), dir, icon: PathBuf::new(), icon_index: 0 });
+            self.links.borrow_mut().insert(
+                lnk.to_path_buf(),
+                Link {
+                    target: target.to_path_buf(),
+                    dir,
+                    icon: PathBuf::new(),
+                    icon_index: 0,
+                },
+            );
         }
         fn target(&self, lnk: &Path) -> PathBuf {
             self.links.borrow()[lnk].target.clone()
@@ -314,14 +424,20 @@ mod tests {
 
     impl Links for Fake {
         fn read(&self, lnk: &Path) -> std::io::Result<Link> {
-            self.links.borrow().get(lnk).cloned().ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))
+            self.links
+                .borrow()
+                .get(lnk)
+                .cloned()
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))
         }
         fn write(&self, lnk: &Path, link: &Link) -> std::io::Result<()> {
             if self.refuses.iter().any(|r| r == lnk) {
                 // What `io_error` makes of Windows' access-denied; raw code 5 is EIO on Unix.
                 return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
             }
-            self.links.borrow_mut().insert(lnk.to_path_buf(), link.clone());
+            self.links
+                .borrow_mut()
+                .insert(lnk.to_path_buf(), link.clone());
             Ok(())
         }
     }
@@ -329,7 +445,10 @@ mod tests {
     #[test]
     fn a_shortcut_to_the_old_exe_points_at_the_new_one_and_no_other_is_touched() {
         let dir = scratch("retarget");
-        let (old, new) = (dir.join("Documents").join("Trek").join("trek.exe"), dir.join("Programs").join("Trek").join("trek.exe"));
+        let (old, new) = (
+            dir.join("Documents").join("Trek").join("trek.exe"),
+            dir.join("Programs").join("Trek").join("trek.exe"),
+        );
         let other = dir.join("Elsewhere").join("trek.exe");
         let (desktop, sub) = (dir.join("Desktop"), dir.join("Desktop").join("Agents"));
         std::fs::create_dir_all(&sub).unwrap();
@@ -339,55 +458,112 @@ mod tests {
         fake.make(&sub.join("Trek again.LNK"), &old);
         // Another Trek's, and another program's: left as they are.
         fake.make(&desktop.join("Trek (other).lnk"), &other);
-        fake.make(&desktop.join("Notes.lnk"), &dir.join("Notes").join("notes.exe"));
+        fake.make(
+            &desktop.join("Notes.lnk"),
+            &dir.join("Notes").join("notes.exe"),
+        );
         // Not a shortcut at all, and a file that isn't named like one.
         std::fs::write(desktop.join("Trek.txt"), "x").unwrap();
         fake.make(&desktop.join("Trek.url"), &old);
 
         let report = retarget_in(&[folder(&desktop, 1)], &old, &new, &fake);
-        assert_eq!(report.changed, [sub.join("Trek again.LNK"), desktop.join("Trek.lnk")], "in path order");
+        assert_eq!(
+            report.changed,
+            [sub.join("Trek again.LNK"), desktop.join("Trek.lnk")],
+            "in path order"
+        );
         assert!(report.left.is_empty());
         assert_eq!(fake.target(&desktop.join("Trek.lnk")), new);
         assert_eq!(fake.target(&sub.join("Trek again.LNK")), new);
         assert_eq!(fake.target(&desktop.join("Trek (other).lnk")), other);
-        assert_eq!(fake.target(&desktop.join("Notes.lnk")), dir.join("Notes").join("notes.exe"));
-        assert_eq!(fake.target(&desktop.join("Trek.url")), old, "only .lnk files");
+        assert_eq!(
+            fake.target(&desktop.join("Notes.lnk")),
+            dir.join("Notes").join("notes.exe")
+        );
+        assert_eq!(
+            fake.target(&desktop.join("Trek.url")),
+            old,
+            "only .lnk files"
+        );
         // The folder it starts in follows the exe.
-        assert_eq!(fake.links.borrow()[&desktop.join("Trek.lnk")].dir, new.parent().unwrap());
-        assert_eq!(report.changed_clause().as_deref(), Some("2 shortcuts now point at the new copy"));
+        assert_eq!(
+            fake.links.borrow()[&desktop.join("Trek.lnk")].dir,
+            new.parent().unwrap()
+        );
+        assert_eq!(
+            report.changed_clause().as_deref(),
+            Some("2 shortcuts now point at the new copy")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn folders_are_searched_only_as_deep_as_they_say() {
         let dir = scratch("depth");
-        let (old, new) = (dir.join("a").join("trek.exe"), dir.join("b").join("trek.exe"));
+        let (old, new) = (
+            dir.join("a").join("trek.exe"),
+            dir.join("b").join("trek.exe"),
+        );
         let deep = dir.join("Programs").join("Vendor").join("Trek");
         std::fs::create_dir_all(&deep).unwrap();
         let fake = Fake::default();
-        let (top, middle, bottom) = (dir.join("Programs").join("Trek.lnk"), dir.join("Programs").join("Vendor").join("Trek.lnk"), deep.join("Trek.lnk"));
+        let (top, middle, bottom) = (
+            dir.join("Programs").join("Trek.lnk"),
+            dir.join("Programs").join("Vendor").join("Trek.lnk"),
+            deep.join("Trek.lnk"),
+        );
         for lnk in [&top, &middle, &bottom] {
             fake.make(lnk, &old);
         }
         let report = retarget_in(&[folder(&dir.join("Programs"), 1)], &old, &new, &fake);
-        assert_eq!(report.changed.len(), 2, "the folder and the one inside it: {:?}", report.changed);
+        assert_eq!(
+            report.changed.len(),
+            2,
+            "the folder and the one inside it: {:?}",
+            report.changed
+        );
         assert_eq!(fake.target(&bottom), old, "one level too deep");
         let report = retarget_in(&[folder(&dir.join("Programs"), 2)], &old, &new, &fake);
         assert_eq!(report.changed, [bottom.clone()]);
         assert_eq!(fake.target(&bottom), new);
         // A folder that isn't there (no taskbar pins yet) is nothing to say.
-        assert_eq!(retarget_in(&[folder(&dir.join("Nowhere"), 2)], &old, &new, &fake), Report::default());
+        assert_eq!(
+            retarget_in(&[folder(&dir.join("Nowhere"), 2)], &old, &new, &fake),
+            Report::default()
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn targets_are_compared_as_windows_does() {
-        let (old, new) = (Path::new(r"C:\Users\Me\Documents\Trek\trek.exe"), Path::new(r"C:\Users\Me\AppData\Local\Programs\Trek\trek.exe"));
-        let link = |target: &str| Link { target: PathBuf::from(target), dir: PathBuf::new(), icon: PathBuf::new(), icon_index: 0 };
-        for same in [r"c:\users\me\documents\trek\TREK.EXE", r"\\?\C:\Users\Me\Documents\Trek\trek.exe", "C:/Users/Me/Documents/Trek/trek.exe"] {
-            assert_eq!(moved_link(&link(same), old, new).map(|l| l.target), Some(new.to_path_buf()), "{same}");
+        let (old, new) = (
+            Path::new(r"C:\Users\Me\Documents\Trek\trek.exe"),
+            Path::new(r"C:\Users\Me\AppData\Local\Programs\Trek\trek.exe"),
+        );
+        let link = |target: &str| Link {
+            target: PathBuf::from(target),
+            dir: PathBuf::new(),
+            icon: PathBuf::new(),
+            icon_index: 0,
+        };
+        for same in [
+            r"c:\users\me\documents\trek\TREK.EXE",
+            r"\\?\C:\Users\Me\Documents\Trek\trek.exe",
+            "C:/Users/Me/Documents/Trek/trek.exe",
+        ] {
+            assert_eq!(
+                moved_link(&link(same), old, new).map(|l| l.target),
+                Some(new.to_path_buf()),
+                "{same}"
+            );
         }
-        for other in [r"C:\Users\Me\Documents\Trek\trek-mcp.exe", r"C:\Users\Me\Documents\Trek 2\trek.exe", r"C:\Users\Me\Documents\Trek\trek.exe.bak", r"C:\Users\Me\Documents\Trek", ""] {
+        for other in [
+            r"C:\Users\Me\Documents\Trek\trek-mcp.exe",
+            r"C:\Users\Me\Documents\Trek 2\trek.exe",
+            r"C:\Users\Me\Documents\Trek\trek.exe.bak",
+            r"C:\Users\Me\Documents\Trek",
+            "",
+        ] {
             assert_eq!(moved_link(&link(other), old, new), None, "{other:?}");
         }
         // Nothing to compare when the old exe is no path at all.
@@ -396,10 +572,16 @@ mod tests {
 
     #[test]
     fn a_shortcut_kept_online_only_is_not_downloaded_to_be_looked_at() {
-        assert!(is_online_only(0x0040_0020), "a OneDrive placeholder (recall on data access, archive)");
+        assert!(
+            is_online_only(0x0040_0020),
+            "a OneDrive placeholder (recall on data access, archive)"
+        );
         assert!(is_online_only(0x0004_0000) && is_online_only(0x1000));
         assert!(!is_online_only(0x20), "an ordinary file (archive)");
-        assert!(!is_online_only(0x0000_0001 | 0x0000_0020 | 0x0020_0000), "read-only, pinned and kept on the disk: it's there");
+        assert!(
+            !is_online_only(0x0000_0001 | 0x0000_0020 | 0x0020_0000),
+            "read-only, pinned and kept on the disk: it's there"
+        );
         // A file that is on the disk is looked at (the walk asks the real attributes).
         let dir = scratch("online");
         std::fs::write(dir.join("Trek.lnk"), "x").unwrap();
@@ -412,14 +594,32 @@ mod tests {
     fn the_start_folder_and_icon_follow_only_when_they_were_the_old_copys() {
         // Paths of the machine the test runs on: what is a folder's path is the platform's to say.
         let root = std::env::temp_dir();
-        let (old, new) = (root.join("Docs").join("Trek").join("trek.exe"), root.join("Programs").join("Trek").join("trek.exe"));
-        let (old_dir, new_dir) = (old.parent().unwrap().to_path_buf(), new.parent().unwrap().to_path_buf());
-        let link = |dir: &Path, icon: &Path| Link { target: old.clone(), dir: dir.to_path_buf(), icon: icon.to_path_buf(), icon_index: 3 };
+        let (old, new) = (
+            root.join("Docs").join("Trek").join("trek.exe"),
+            root.join("Programs").join("Trek").join("trek.exe"),
+        );
+        let (old_dir, new_dir) = (
+            old.parent().unwrap().to_path_buf(),
+            new.parent().unwrap().to_path_buf(),
+        );
+        let link = |dir: &Path, icon: &Path| Link {
+            target: old.clone(),
+            dir: dir.to_path_buf(),
+            icon: icon.to_path_buf(),
+            icon_index: 3,
+        };
         let shouting = PathBuf::from(old.to_string_lossy().to_uppercase());
         let moved = moved_link(&link(&old_dir, &shouting), &old, &new).unwrap();
-        assert_eq!((moved.dir, moved.icon, moved.icon_index), (new_dir.clone(), new.clone(), 3));
+        assert_eq!(
+            (moved.dir, moved.icon, moved.icon_index),
+            (new_dir.clone(), new.clone(), 3)
+        );
         let moved = moved_link(&link(Path::new(""), Path::new("")), &old, &new).unwrap();
-        assert_eq!((moved.dir, moved.icon), (new_dir, PathBuf::new()), "no icon of its own: the target's");
+        assert_eq!(
+            (moved.dir, moved.icon),
+            (new_dir, PathBuf::new()),
+            "no icon of its own: the target's"
+        );
         // A folder or icon the user chose is theirs.
         let (projects, icon) = (root.join("Projects"), root.join("Icons").join("trek.ico"));
         let moved = moved_link(&link(&projects, &icon), &old, &new).unwrap();
@@ -429,38 +629,88 @@ mod tests {
     #[test]
     fn a_change_windows_refuses_is_reported_in_words_and_the_rest_go_on() {
         let dir = scratch("refused");
-        let (old, new) = (dir.join("a").join("trek.exe"), dir.join("b").join("trek.exe"));
+        let (old, new) = (
+            dir.join("a").join("trek.exe"),
+            dir.join("b").join("trek.exe"),
+        );
         let (desktop, start) = (dir.join("Desktop"), dir.join("Start"));
         std::fs::create_dir_all(&desktop).unwrap();
         std::fs::create_dir_all(&start).unwrap();
-        let fake = Fake { refuses: vec![desktop.join("Trek.lnk")], ..Fake::default() };
+        let fake = Fake {
+            refuses: vec![desktop.join("Trek.lnk")],
+            ..Fake::default()
+        };
         fake.make(&desktop.join("Trek.lnk"), &old);
         fake.make(&start.join("Trek.lnk"), &old);
 
-        let report = retarget_in(&[folder(&desktop, 1), ShortcutFolder { place: "in your Start menu", dir: start.clone(), depth: 0 }], &old, &new, &fake);
+        let report = retarget_in(
+            &[
+                folder(&desktop, 1),
+                ShortcutFolder {
+                    place: "in your Start menu",
+                    dir: start.clone(),
+                    depth: 0,
+                },
+            ],
+            &old,
+            &new,
+            &fake,
+        );
         assert_eq!(report.changed, [start.join("Trek.lnk")]);
         assert_eq!(report.left.len(), 1);
-        assert!(report.left[0].refused && report.left[0].place == "on your Desktop", "{:?}", report.left);
+        assert!(
+            report.left[0].refused && report.left[0].place == "on your Desktop",
+            "{:?}",
+            report.left
+        );
         assert_eq!(fake.target(&desktop.join("Trek.lnk")), old, "as it was");
-        assert_eq!(report.left_sentence().as_deref(), Some("Windows wouldn't let Trek change the shortcut \"Trek\" on your Desktop, so it still starts the old copy."));
-        assert_eq!(report.changed_clause().as_deref(), Some("1 shortcut now points at the new copy"));
+        assert_eq!(
+            report.left_sentence().as_deref(),
+            Some(
+                "Windows wouldn't let Trek change the shortcut \"Trek\" on your Desktop, so it still starts the old copy."
+            )
+        );
+        assert_eq!(
+            report.changed_clause().as_deref(),
+            Some("1 shortcut now points at the new copy")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn what_could_not_be_changed_is_listed_in_a_sentence() {
-        let left = |name: &str, place: &'static str, refused: bool| Left { lnk: PathBuf::from(name), place, refused, why: String::new() };
+        let left = |name: &str, place: &'static str, refused: bool| Left {
+            lnk: PathBuf::from(name),
+            place,
+            refused,
+            why: String::new(),
+        };
         assert_eq!(Report::default().left_sentence(), None);
         assert_eq!(Report::default().changed_clause(), None);
-        let two = Report { changed: vec![], left: vec![left("Trek.lnk", "on your Desktop", true), left("Trek beta.lnk", "pinned to your taskbar", true)] };
+        let two = Report {
+            changed: vec![],
+            left: vec![
+                left("Trek.lnk", "on your Desktop", true),
+                left("Trek beta.lnk", "pinned to your taskbar", true),
+            ],
+        };
         assert_eq!(
             two.left_sentence().as_deref(),
-            Some("Windows wouldn't let Trek change the shortcuts \"Trek\" on your Desktop and \"Trek beta\" pinned to your taskbar, so they still start the old copy.")
+            Some(
+                "Windows wouldn't let Trek change the shortcuts \"Trek\" on your Desktop and \"Trek beta\" pinned to your taskbar, so they still start the old copy."
+            )
         );
-        let four = Report { changed: vec![], left: (0..4).map(|i| left(&format!("T{i}.lnk"), "on your Desktop", i != 2)).collect() };
+        let four = Report {
+            changed: vec![],
+            left: (0..4)
+                .map(|i| left(&format!("T{i}.lnk"), "on your Desktop", i != 2))
+                .collect(),
+        };
         assert_eq!(
             four.left_sentence().as_deref(),
-            Some("Trek couldn't change the shortcuts \"T0\" on your Desktop, \"T1\" on your Desktop and 2 more, so they still start the old copy."),
+            Some(
+                "Trek couldn't change the shortcuts \"T0\" on your Desktop, \"T1\" on your Desktop and 2 more, so they still start the old copy."
+            ),
             "one that failed another way changes who says it"
         );
     }
@@ -474,31 +724,55 @@ mod tests {
         /// A shortcut file made the way Explorer makes one.
         fn make(lnk: &Path, target: &Path, dir: &Path, icon: &Path) {
             use std::os::windows::ffi::OsStrExt as _;
-            use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile};
+            use windows::Win32::System::Com::{
+                CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile,
+            };
             use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
             use windows::core::{HSTRING, Interface as _};
-            let wide = |p: &Path| HSTRING::from_wide(&p.as_os_str().encode_wide().collect::<Vec<u16>>());
+            let wide =
+                |p: &Path| HSTRING::from_wide(&p.as_os_str().encode_wide().collect::<Vec<u16>>());
             // SAFETY: COM on a thread `with_com` started, strings that outlive the calls.
             unsafe {
-                let link: IShellLinkW = CoCreateInstance(&ShellLink, None::<&windows::core::IUnknown>, CLSCTX_INPROC_SERVER).unwrap();
+                let link: IShellLinkW = CoCreateInstance(
+                    &ShellLink,
+                    None::<&windows::core::IUnknown>,
+                    CLSCTX_INPROC_SERVER,
+                )
+                .unwrap();
                 link.SetPath(&wide(target)).unwrap();
                 link.SetWorkingDirectory(&wide(dir)).unwrap();
                 link.SetArguments(&HSTRING::from("--on-purpose")).unwrap();
                 link.SetIconLocation(&wide(icon), 1).unwrap();
-                link.cast::<IPersistFile>().unwrap().Save(&wide(lnk), true).unwrap();
+                link.cast::<IPersistFile>()
+                    .unwrap()
+                    .Save(&wide(lnk), true)
+                    .unwrap();
             }
         }
 
         fn arguments(lnk: &Path) -> String {
             use std::os::windows::ffi::OsStrExt as _;
-            use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile, STGM_READ};
+            use windows::Win32::System::Com::{
+                CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile, STGM_READ,
+            };
             use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
             use windows::core::{HSTRING, Interface as _};
             let mut buf = vec![0u16; 1024];
             // SAFETY: as in `make`.
             unsafe {
-                let link: IShellLinkW = CoCreateInstance(&ShellLink, None::<&windows::core::IUnknown>, CLSCTX_INPROC_SERVER).unwrap();
-                link.cast::<IPersistFile>().unwrap().Load(&HSTRING::from_wide(&lnk.as_os_str().encode_wide().collect::<Vec<u16>>()), STGM_READ).unwrap();
+                let link: IShellLinkW = CoCreateInstance(
+                    &ShellLink,
+                    None::<&windows::core::IUnknown>,
+                    CLSCTX_INPROC_SERVER,
+                )
+                .unwrap();
+                link.cast::<IPersistFile>()
+                    .unwrap()
+                    .Load(
+                        &HSTRING::from_wide(&lnk.as_os_str().encode_wide().collect::<Vec<u16>>()),
+                        STGM_READ,
+                    )
+                    .unwrap();
                 link.GetArguments(&mut buf).unwrap();
             }
             String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap()])
@@ -511,7 +785,10 @@ mod tests {
         /// Trek's old and new folders, with an exe in each, and `lnk` shortcuts' folders beside them.
         fn places(name: &str) -> (PathBuf, PathBuf, PathBuf) {
             let dir = scratch(name);
-            let (old, new) = (dir.join("Documents").join("Trek"), dir.join("Programs").join("Trek"));
+            let (old, new) = (
+                dir.join("Documents").join("Trek"),
+                dir.join("Programs").join("Trek"),
+            );
             std::fs::create_dir_all(&old).unwrap();
             std::fs::create_dir_all(&new).unwrap();
             std::fs::write(old.join("trek.exe"), "old").unwrap();
@@ -527,7 +804,11 @@ mod tests {
             let other = dir.join("Elsewhere").join("tool.exe");
             std::fs::create_dir_all(other.parent().unwrap()).unwrap();
             std::fs::write(&other, "tool").unwrap();
-            let folders = [ShortcutFolder { place: "in your Start menu", dir: start.clone(), depth: 2 }];
+            let folders = [ShortcutFolder {
+                place: "in your Start menu",
+                dir: start.clone(),
+                depth: 2,
+            }];
             let old_dir = old.parent().unwrap();
             let report = with_com(|| {
                 make(&start.join("Trek.lnk"), &old, old_dir, &old);
@@ -546,17 +827,33 @@ mod tests {
                 let new_dir = new.parent().unwrap();
                 for name in [start.join("Trek.lnk"), sub.join("Trek (sub).lnk")] {
                     let l = links.read(&name).unwrap();
-                    assert!(same(&l.target, &new) && same(&l.dir, new_dir) && same(&l.icon, &new), "{name:?}: {l:?}");
+                    assert!(
+                        same(&l.target, &new) && same(&l.dir, new_dir) && same(&l.icon, &new),
+                        "{name:?}: {l:?}"
+                    );
                     assert_eq!(l.icon_index, 1, "which icon in the file");
-                    assert_eq!(arguments(&name), "--on-purpose", "what else it held is kept");
+                    assert_eq!(
+                        arguments(&name),
+                        "--on-purpose",
+                        "what else it held is kept"
+                    );
                 }
                 let mine = links.read(&start.join("Trek in my project.lnk")).unwrap();
-                assert!(same(&mine.target, &new) && same(&mine.dir, &dir) && same(&mine.icon, &other), "{mine:?}");
+                assert!(
+                    same(&mine.target, &new) && same(&mine.dir, &dir) && same(&mine.icon, &other),
+                    "{mine:?}"
+                );
                 let tool = links.read(&start.join("Tool.lnk")).unwrap();
-                assert!(same(&tool.target, &other) && same(&tool.dir, &dir) && same(&tool.icon, &other), "{tool:?}");
+                assert!(
+                    same(&tool.target, &other) && same(&tool.dir, &dir) && same(&tool.icon, &other),
+                    "{tool:?}"
+                );
             });
             // Said once: a second run finds nothing that starts the old copy.
-            assert_eq!(with_com(|| retarget_in(&folders, &old, &new, &ShellLinks)), Report::default());
+            assert_eq!(
+                with_com(|| retarget_in(&folders, &old, &new, &ShellLinks)),
+                Report::default()
+            );
             let _ = std::fs::remove_dir_all(dir);
         }
 
@@ -565,7 +862,11 @@ mod tests {
             let (dir, old, new) = places("com-refused");
             let desktop = dir.join("Desktop");
             std::fs::create_dir_all(&desktop).unwrap();
-            let folders = [ShortcutFolder { place: "on your Desktop", dir: desktop.clone(), depth: 1 }];
+            let folders = [ShortcutFolder {
+                place: "on your Desktop",
+                dir: desktop.clone(),
+                depth: 1,
+            }];
             let (guarded, free) = (desktop.join("Guarded.lnk"), desktop.join("Free.lnk"));
             // What ransomware protection does to a write is a refusal; a read-only file is one too.
             let report = with_com(|| {
@@ -578,9 +879,16 @@ mod tests {
             });
             assert_eq!(report.changed, [free.clone()]);
             assert_eq!(report.left.len(), 1, "{:?}", report.left);
-            assert!(report.left[0].refused && report.left[0].lnk == guarded, "{:?}", report.left[0]);
+            assert!(
+                report.left[0].refused && report.left[0].lnk == guarded,
+                "{:?}",
+                report.left[0]
+            );
             with_com(|| {
-                assert!(same(&ShellLinks.read(&guarded).unwrap().target, &old), "left as it was");
+                assert!(
+                    same(&ShellLinks.read(&guarded).unwrap().target, &old),
+                    "left as it was"
+                );
                 assert!(same(&ShellLinks.read(&free).unwrap().target, &new));
             });
             // (A read-only file goes with its folder on Windows.)
@@ -594,23 +902,43 @@ mod tests {
             use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
             use windows::Win32::Storage::FileSystem::GetShortPathNameW;
             let (dir, old, new) = places("com-short");
-            let wide: Vec<u16> = old.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+            let wide: Vec<u16> = old
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
             let mut buf = vec![0u16; 1024];
             // SAFETY: a NUL-terminated path and a buffer of the length given.
-            let len = unsafe { GetShortPathNameW(windows::core::PCWSTR(wide.as_ptr()), Some(&mut buf)) } as usize;
+            let len =
+                unsafe { GetShortPathNameW(windows::core::PCWSTR(wide.as_ptr()), Some(&mut buf)) }
+                    as usize;
             assert!(len > 0 && len < buf.len(), "a short name for {old:?}");
             let short = PathBuf::from(std::ffi::OsString::from_wide(&buf[..len]));
             // (A volume with 8.3 names off gives the long name back: the test then only shows
             // nothing breaks.)
             let desktop = dir.join("Desktop");
             std::fs::create_dir_all(&desktop).unwrap();
-            let folders = [ShortcutFolder { place: "on your Desktop", dir: desktop.clone(), depth: 0 }];
+            let folders = [ShortcutFolder {
+                place: "on your Desktop",
+                dir: desktop.clone(),
+                depth: 0,
+            }];
             let report = with_com(|| {
                 make(&desktop.join("Trek.lnk"), &old, old.parent().unwrap(), &old);
                 retarget_in(&folders, &short, &new, &ShellLinks)
             });
-            assert_eq!(report.changed, [desktop.join("Trek.lnk")], "{:?}", report.left);
-            with_com(|| assert!(same(&ShellLinks.read(&desktop.join("Trek.lnk")).unwrap().target, &new)));
+            assert_eq!(
+                report.changed,
+                [desktop.join("Trek.lnk")],
+                "{:?}",
+                report.left
+            );
+            with_com(|| {
+                assert!(same(
+                    &ShellLinks.read(&desktop.join("Trek.lnk")).unwrap().target,
+                    &new
+                ))
+            });
             let _ = std::fs::remove_dir_all(dir);
         }
 
@@ -620,9 +948,19 @@ mod tests {
             let desktop = dir.join("Desktop");
             std::fs::create_dir_all(&desktop).unwrap();
             std::fs::write(desktop.join("Broken.lnk"), "this is not a shortcut").unwrap();
-            let folders = [ShortcutFolder { place: "on your Desktop", dir: desktop.clone(), depth: 0 }];
-            assert_eq!(with_com(|| retarget_in(&folders, &old, &new, &ShellLinks)), Report::default());
-            assert_eq!(std::fs::read_to_string(desktop.join("Broken.lnk")).unwrap(), "this is not a shortcut");
+            let folders = [ShortcutFolder {
+                place: "on your Desktop",
+                dir: desktop.clone(),
+                depth: 0,
+            }];
+            assert_eq!(
+                with_com(|| retarget_in(&folders, &old, &new, &ShellLinks)),
+                Report::default()
+            );
+            assert_eq!(
+                std::fs::read_to_string(desktop.join("Broken.lnk")).unwrap(),
+                "this is not a shortcut"
+            );
             let _ = std::fs::remove_dir_all(dir);
         }
     }

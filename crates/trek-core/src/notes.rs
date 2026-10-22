@@ -43,15 +43,29 @@ pub fn notes_dir() -> PathBuf {
 
 /// Every note in `dir`, the most recently changed first.
 pub fn list_in(dir: &Path) -> Vec<Note> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
     let mut notes: Vec<Note> = entries
         .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
         .filter_map(|e| {
             let path = e.path();
             let body = std::fs::read_to_string(&path).ok()?;
-            let modified = e.metadata().ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as i64;
-            Some(Note { id: path.file_stem()?.to_string_lossy().to_string(), path, body, modified })
+            let modified = e
+                .metadata()
+                .ok()?
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_millis() as i64;
+            Some(Note {
+                id: path.file_stem()?.to_string_lossy().to_string(),
+                path,
+                body,
+                modified,
+            })
         })
         .collect();
     notes.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| b.id.cmp(&a.id)));
@@ -64,7 +78,12 @@ pub fn create_in(dir: &Path) -> std::io::Result<Note> {
     let id = uuid::Uuid::now_v7().simple().to_string();
     let path = dir.join(format!("{id}.md"));
     std::fs::write(&path, "")?;
-    Ok(Note { id, path, body: String::new(), modified: crate::store::now_ms() })
+    Ok(Note {
+        id,
+        path,
+        body: String::new(),
+        modified: crate::store::now_ms(),
+    })
 }
 
 /// Move `note` out of the list into `Deleted/` beside it, where it can still be got back. Its
@@ -79,7 +98,11 @@ pub fn delete(note: &Note) -> std::io::Result<PathBuf> {
     std::fs::rename(&note.path, &to)?;
     let mine = attachment_names(&note.body);
     if !mine.is_empty() {
-        let others: Vec<String> = list_in(dir).into_iter().filter(|n| n.id != note.id).flat_map(|n| attachment_names(&n.body)).collect();
+        let others: Vec<String> = list_in(dir)
+            .into_iter()
+            .filter(|n| n.id != note.id)
+            .flat_map(|n| attachment_names(&n.body))
+            .collect();
         let (from, into) = (attachments_dir(dir), attachments_dir(&bin));
         for name in mine {
             let src = from.join(&name);
@@ -129,10 +152,16 @@ pub const IMAGE_KINDS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg"];
 pub fn add_image(notes_dir: &Path, bytes: &[u8], kind: &str) -> std::io::Result<String> {
     let kind = kind.to_ascii_lowercase();
     if !IMAGE_KINDS.contains(&kind.as_str()) {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("a .{kind} file isn't an image a note can show")));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("a .{kind} file isn't an image a note can show"),
+        ));
     }
     if bytes.is_empty() {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "the image is empty"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the image is empty",
+        ));
     }
     let dir = attachments_dir(notes_dir);
     std::fs::create_dir_all(&dir)?;
@@ -159,7 +188,8 @@ pub const VIDEO_KINDS: &[&str] = &["mp4", "m4v", "mov", "webm"];
 
 /// Whether `link` (or a file name) is a video a note plays.
 pub fn is_video(link: &str) -> bool {
-    link.rsplit_once('.').is_some_and(|(_, kind)| VIDEO_KINDS.contains(&kind.to_ascii_lowercase().as_str()))
+    link.rsplit_once('.')
+        .is_some_and(|(_, kind)| VIDEO_KINDS.contains(&kind.to_ascii_lowercase().as_str()))
 }
 
 /// The longest extension an attached file keeps in its name.
@@ -173,13 +203,25 @@ pub fn add_file(notes_dir: &Path, src: &Path) -> std::io::Result<String> {
     use std::io::{Read as _, Write as _};
     let mut from = std::fs::File::open(src)?;
     if !from.metadata()?.is_file() {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "it isn't a file"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "it isn't a file",
+        ));
     }
     let dir = attachments_dir(notes_dir);
     std::fs::create_dir_all(&dir)?;
-    let tmp = dir.join(format!(".{}-{}.tmp", std::process::id(), crate::store::now_ms()));
+    let tmp = dir.join(format!(
+        ".{}-{}.tmp",
+        std::process::id(),
+        crate::store::now_ms()
+    ));
     let kept = (|| {
-        let (mut hasher, mut to, mut buf, mut len) = (sha2::Sha256::new(), std::fs::File::create(&tmp)?, vec![0u8; 1 << 20], 0u64);
+        let (mut hasher, mut to, mut buf, mut len) = (
+            sha2::Sha256::new(),
+            std::fs::File::create(&tmp)?,
+            vec![0u8; 1 << 20],
+            0u64,
+        );
         loop {
             let n = from.read(&mut buf)?;
             if n == 0 {
@@ -190,7 +232,10 @@ pub fn add_file(notes_dir: &Path, src: &Path) -> std::io::Result<String> {
             len += n as u64;
         }
         if len == 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "the file is empty"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the file is empty",
+            ));
         }
         Ok(hex::encode(hasher.finalize()))
     })();
@@ -201,8 +246,19 @@ pub fn add_file(notes_dir: &Path, src: &Path) -> std::io::Result<String> {
             return Err(e);
         }
     };
-    let kind: String = src.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
-    let kind = if !kind.is_empty() && kind.len() <= EXTENSION_MAX && kind.chars().all(|c| c.is_ascii_alphanumeric()) { format!(".{kind}") } else { String::new() };
+    let kind: String = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let kind = if !kind.is_empty()
+        && kind.len() <= EXTENSION_MAX
+        && kind.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        format!(".{kind}")
+    } else {
+        String::new()
+    };
     let name = format!("{}{kind}", &hash[..32]);
     let path = dir.join(&name);
     if path.is_file() {
@@ -216,12 +272,21 @@ pub fn add_file(notes_dir: &Path, src: &Path) -> std::io::Result<String> {
 /// `text` as it can stand in a markdown link's brackets: no brackets or backslashes, no
 /// control characters.
 fn bracketed(text: &str) -> String {
-    text.chars().filter(|c| !matches!(c, '[' | ']' | '\\')).map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().trim().to_string()
+    text.chars()
+        .filter(|c| !matches!(c, '[' | ']' | '\\'))
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 /// `link` as a markdown destination: in `<>` when it has spaces or brackets.
 fn destination(link: &str) -> String {
-    if link.contains([' ', '(', ')', '<', '>']) { format!("<{link}>") } else { link.to_string() }
+    if link.contains([' ', '(', ')', '<', '>']) {
+        format!("<{link}>")
+    } else {
+        link.to_string()
+    }
 }
 
 /// The markdown that shows the image at `link`, described by `alt`.
@@ -240,11 +305,18 @@ pub fn file_markdown(name: &str, link: &str) -> String {
 pub fn insert_lines(text: &str, sel: Range<usize>, block: &str) -> Edit {
     let sel = clamp(text, sel);
     let (before, after) = (&text[..sel.start], &text[sel.end..]);
-    let lead = if before.is_empty() || before.ends_with('\n') { "" } else { "\n" };
+    let lead = if before.is_empty() || before.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
     let tail = if after.starts_with('\n') { "" } else { "\n" };
     let new = format!("{before}{lead}{block}{tail}{after}");
     let cursor = before.len() + lead.len() + block.len() + 1;
-    Edit { text: new, selection: cursor..cursor }
+    Edit {
+        text: new,
+        selection: cursor..cursor,
+    }
 }
 
 /// An image a note shows: `![alt](link)`, and where that is in the note.
@@ -262,8 +334,14 @@ pub fn images(body: &str) -> Vec<ImageRef> {
     while let Some(i) = body[from..].find("![") {
         let start = from + i;
         from = start + 2;
-        let Some((alt, link, end)) = image_at(body, start) else { continue };
-        out.push(ImageRef { alt, link, range: start..end });
+        let Some((alt, link, end)) = image_at(body, start) else {
+            continue;
+        };
+        out.push(ImageRef {
+            alt,
+            link,
+            range: start..end,
+        });
         from = end;
     }
     out
@@ -289,11 +367,20 @@ pub fn files(body: &str) -> Vec<FileRef> {
         if body[..open].ends_with('!') {
             continue;
         }
-        let Some((name, link, end)) = link_at(body, open) else { continue };
+        let Some((name, link, end)) = link_at(body, open) else {
+            continue;
+        };
         let shown = link.strip_prefix("./").unwrap_or(&link);
-        let kind = shown.rsplit_once('.').map(|(_, k)| k.to_ascii_lowercase()).unwrap_or_default();
+        let kind = shown
+            .rsplit_once('.')
+            .map(|(_, k)| k.to_ascii_lowercase())
+            .unwrap_or_default();
         if shown.starts_with(&prefix) && !IMAGE_KINDS.contains(&kind.as_str()) {
-            out.push(FileRef { name, link, range: open..end });
+            out.push(FileRef {
+                name,
+                link,
+                range: open..end,
+            });
             from = end;
         }
     }
@@ -319,8 +406,15 @@ fn link_at(body: &str, open: usize) -> Option<(String, String, usize)> {
         let end = inner.find('>')?;
         (inner[..end].to_string(), end + 2)
     } else {
-        let link: String = line.trim_start().chars().take_while(|c| !c.is_whitespace() && *c != ')').collect();
-        (link.clone(), line.len() - line.trim_start().len() + link.len())
+        let link: String = line
+            .trim_start()
+            .chars()
+            .take_while(|c| !c.is_whitespace() && *c != ')')
+            .collect();
+        (
+            link.clone(),
+            line.len() - line.trim_start().len() + link.len(),
+        )
     };
     let paren = line[used..].find(')')?;
     let end = open + 1 + close + 2 + used + paren + 1;
@@ -338,9 +432,17 @@ pub fn attachment_names(body: &str) -> Vec<String> {
         from = at;
         // The link starts there (or at `./` before it): not `old-attachments/`, nor some other
         // folder's `…/attachments/`.
-        let before = body[..at - prefix.len()].strip_suffix("./").unwrap_or(&body[..at - prefix.len()]);
-        let begins = before.chars().next_back().is_none_or(|c| c.is_whitespace() || matches!(c, '(' | '<' | '"' | '\'' | '='));
-        let name: String = body[at..].chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).collect();
+        let before = body[..at - prefix.len()]
+            .strip_suffix("./")
+            .unwrap_or(&body[..at - prefix.len()]);
+        let begins = before
+            .chars()
+            .next_back()
+            .is_none_or(|c| c.is_whitespace() || matches!(c, '(' | '<' | '"' | '\'' | '='));
+        let name: String = body[at..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            .collect();
         if begins && !name.is_empty() && !name.starts_with('.') && !names.contains(&name) {
             names.push(name);
         }
@@ -349,13 +451,18 @@ pub fn attachment_names(body: &str) -> Vec<String> {
 }
 
 fn title_of(body: &str) -> String {
-    body.lines().map(plain).find(|l| !l.is_empty()).map(|l| l.chars().take(80).collect()).unwrap_or_else(|| "Untitled".into())
+    body.lines()
+        .map(plain)
+        .find(|l| !l.is_empty())
+        .map(|l| l.chars().take(80).collect())
+        .unwrap_or_else(|| "Untitled".into())
 }
 
 /// `![alt](link)` as its alt text and `[name](attachments/…)` as its name, for a line read as
 /// text.
 fn images_as_alt(line: &str) -> std::borrow::Cow<'_, str> {
-    let mut found: Vec<(Range<usize>, String)> = images(line).into_iter().map(|i| (i.range, i.alt)).collect();
+    let mut found: Vec<(Range<usize>, String)> =
+        images(line).into_iter().map(|i| (i.range, i.alt)).collect();
     found.extend(files(line).into_iter().map(|f| (f.range, f.name)));
     if found.is_empty() {
         return line.into();
@@ -435,34 +542,76 @@ pub fn wrap(text: &str, sel: Range<usize>, open: &str, close: &str) -> Edit {
         let inner = &text[start..end];
         if before.min(after) % 2 == 1 {
             let new = format!("{}{}{}", &text[..start - 1], inner, &text[end + 1..]);
-            return Edit { text: new, selection: start - 1..end - 1 };
+            return Edit {
+                text: new,
+                selection: start - 1..end - 1,
+            };
         }
         let new = format!("{}{c}{inner}{c}{}", &text[..start], &text[end..]);
-        return Edit { text: new, selection: start + 1..end + 1 };
+        return Edit {
+            text: new,
+            selection: start + 1..end + 1,
+        };
     }
     // Selected with its marks: unwrap.
-    if inner.len() >= open.len() + close.len() && inner.starts_with(open) && inner.ends_with(close) {
+    if inner.len() >= open.len() + close.len() && inner.starts_with(open) && inner.ends_with(close)
+    {
         let body = &inner[open.len()..inner.len() - close.len()];
         let new = format!("{}{}{}", &text[..sel.start], body, &text[sel.end..]);
-        return Edit { text: new, selection: sel.start..sel.start + body.len() };
+        return Edit {
+            text: new,
+            selection: sel.start..sel.start + body.len(),
+        };
     }
     // Marks just outside the selection: unwrap.
-    if sel.start >= open.len() && text[..sel.start].ends_with(open) && text[sel.end..].starts_with(close) && !sel.is_empty() {
+    if sel.start >= open.len()
+        && text[..sel.start].ends_with(open)
+        && text[sel.end..].starts_with(close)
+        && !sel.is_empty()
+    {
         let start = sel.start - open.len();
-        let new = format!("{}{}{}", &text[..start], inner, &text[sel.end + close.len()..]);
-        return Edit { text: new, selection: start..start + inner.len() };
+        let new = format!(
+            "{}{}{}",
+            &text[..start],
+            inner,
+            &text[sel.end + close.len()..]
+        );
+        return Edit {
+            text: new,
+            selection: start..start + inner.len(),
+        };
     }
-    let new = format!("{}{}{}{}{}", &text[..sel.start], open, inner, close, &text[sel.end..]);
+    let new = format!(
+        "{}{}{}{}{}",
+        &text[..sel.start],
+        open,
+        inner,
+        close,
+        &text[sel.end..]
+    );
     let start = sel.start + open.len();
-    Edit { text: new, selection: start..start + inner.len() }
+    Edit {
+        text: new,
+        selection: start..start + inner.len(),
+    }
 }
 
 /// Colour the selection's text, or highlight it (`background`), in `css` (`#rrggbb`).
 pub fn color(text: &str, sel: Range<usize>, css: &str, background: bool) -> Edit {
     if background {
-        wrap(text, sel, &format!("<mark style=\"background: {css}\">"), "</mark>")
+        wrap(
+            text,
+            sel,
+            &format!("<mark style=\"background: {css}\">"),
+            "</mark>",
+        )
     } else {
-        wrap(text, sel, &format!("<span style=\"color: {css}\">"), "</span>")
+        wrap(
+            text,
+            sel,
+            &format!("<span style=\"color: {css}\">"),
+            "</span>",
+        )
     }
 }
 
@@ -492,12 +641,18 @@ fn marker_len(line: &str, block: Block) -> Option<usize> {
     let indent = line.len() - line.trim_start().len();
     let l = &line[indent..];
     let len = match block {
-        Block::Bullets => ["- ", "* ", "+ "].iter().find(|m| l.starts_with(**m) && !l.starts_with("- [")).map(|m| m.len()),
+        Block::Bullets => ["- ", "* ", "+ "]
+            .iter()
+            .find(|m| l.starts_with(**m) && !l.starts_with("- ["))
+            .map(|m| m.len()),
         Block::Numbers => {
             let digits = l.chars().take_while(char::is_ascii_digit).count();
             (digits > 0 && l[digits..].starts_with(". ")).then_some(digits + 2)
         }
-        Block::Checklist => ["- [ ] ", "- [x] ", "- [X] "].iter().find(|m| l.starts_with(**m)).map(|m| m.len()),
+        Block::Checklist => ["- [ ] ", "- [x] ", "- [X] "]
+            .iter()
+            .find(|m| l.starts_with(**m))
+            .map(|m| m.len()),
         Block::Heading(level) => {
             let hashes = l.chars().take_while(|c| *c == '#').count();
             (hashes == level as usize && l[hashes..].starts_with(' ')).then_some(hashes + 1)
@@ -509,11 +664,16 @@ fn marker_len(line: &str, block: Block) -> Option<usize> {
 
 /// Any block marker `line` starts with (another list, a heading…), to swap for a new one.
 fn any_marker_len(line: &str) -> usize {
-    [Block::Checklist, Block::Bullets, Block::Numbers, Block::Quote]
-        .into_iter()
-        .chain((1..=6).map(Block::Heading))
-        .find_map(|b| marker_len(line, b))
-        .unwrap_or(0)
+    [
+        Block::Checklist,
+        Block::Bullets,
+        Block::Numbers,
+        Block::Quote,
+    ]
+    .into_iter()
+    .chain((1..=6).map(Block::Heading))
+    .find_map(|b| marker_len(line, b))
+    .unwrap_or(0)
 }
 
 /// Make the selected lines a `block`, or plain lines again when they all already are one.
@@ -521,11 +681,22 @@ pub fn toggle_block(text: &str, sel: Range<usize>, block: Block) -> Edit {
     let sel = clamp(text, sel);
     let start = text[..sel.start].rfind('\n').map(|i| i + 1).unwrap_or(0);
     // A selection ending at the start of a line doesn't take that line in.
-    let end_at = if sel.end > sel.start && text[..sel.end].ends_with('\n') { sel.end - 1 } else { sel.end };
-    let end = text[end_at..].find('\n').map(|i| end_at + i).unwrap_or(text.len());
+    let end_at = if sel.end > sel.start && text[..sel.end].ends_with('\n') {
+        sel.end - 1
+    } else {
+        sel.end
+    };
+    let end = text[end_at..]
+        .find('\n')
+        .map(|i| end_at + i)
+        .unwrap_or(text.len());
     let lines: Vec<&str> = text[start..end].split('\n').collect();
     // Blank lines alone aren't a block already: they get the marker.
-    let all = lines.iter().any(|l| !l.trim().is_empty()) && lines.iter().filter(|l| !l.trim().is_empty()).all(|l| marker_len(l, block).is_some());
+    let all = lines.iter().any(|l| !l.trim().is_empty())
+        && lines
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .all(|l| marker_len(l, block).is_some());
     let mut n = 0;
     let changed: Vec<String> = lines
         .iter()
@@ -553,12 +724,16 @@ pub fn toggle_block(text: &str, sel: Range<usize>, block: Block) -> Edit {
     // One line and nothing selected: the cursor keeps its place in the words.
     let selection = if lines.len() == 1 && sel.is_empty() {
         let shift = block_text.len() as isize - (end - start) as isize;
-        let at = (sel.start as isize + shift).clamp(start as isize, (start + block_text.len()) as isize) as usize;
+        let at = (sel.start as isize + shift)
+            .clamp(start as isize, (start + block_text.len()) as isize) as usize;
         at..at
     } else {
         start..start + block_text.len()
     };
-    Edit { text: new, selection }
+    Edit {
+        text: new,
+        selection,
+    }
 }
 
 /// Return pressed at `at`: a new line that carries the list on (the next number, an unticked
@@ -569,15 +744,31 @@ pub fn newline(text: &str, sel: Range<usize>) -> Edit {
     let line_start = text[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
     let line = &text[line_start..at];
     let indent = &line[..line.len() - line.trim_start().len()];
-    let carried = [Block::Checklist, Block::Bullets, Block::Numbers, Block::Quote].into_iter().find_map(|b| marker_len(line, b).map(|len| (b, len)));
+    let carried = [
+        Block::Checklist,
+        Block::Bullets,
+        Block::Numbers,
+        Block::Quote,
+    ]
+    .into_iter()
+    .find_map(|b| marker_len(line, b).map(|len| (b, len)));
     let insert = match carried {
         // An empty item: Return ends the list, leaving a blank line.
         Some((_, len)) if line[len..].trim().is_empty() => {
             let new = format!("{}{}", &text[..line_start], &text[sel.end..]);
-            return Edit { text: new, selection: line_start..line_start };
+            return Edit {
+                text: new,
+                selection: line_start..line_start,
+            };
         }
         Some((Block::Numbers, _)) => {
-            let n: usize = line.trim_start().chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0);
+            let n: usize = line
+                .trim_start()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0);
             format!("\n{indent}{}", marker(Block::Numbers, n + 1))
         }
         Some((Block::Checklist, _)) => format!("\n{indent}- [ ] "),
@@ -587,7 +778,10 @@ pub fn newline(text: &str, sel: Range<usize>) -> Edit {
     };
     let new = format!("{}{}{}", &text[..at], insert, &text[sel.end..]);
     let cursor = at + insert.len();
-    Edit { text: new, selection: cursor..cursor }
+    Edit {
+        text: new,
+        selection: cursor..cursor,
+    }
 }
 
 /// Tick or untick the checklist item on line `line` (0-based).
@@ -599,7 +793,9 @@ pub fn toggle_check(text: &str, line: usize) -> Option<String> {
     let swapped = if let Some(r) = rest.strip_prefix("- [ ] ") {
         format!("- [x] {r}")
     } else {
-        let r = rest.strip_prefix("- [x] ").or_else(|| rest.strip_prefix("- [X] "))?;
+        let r = rest
+            .strip_prefix("- [x] ")
+            .or_else(|| rest.strip_prefix("- [X] "))?;
         format!("- [ ] {r}")
     };
     *l = format!("{}{}", &l[..indent], swapped);
@@ -638,7 +834,11 @@ mod tests {
         // Italic on bold text adds italics; it doesn't eat one of bold's stars.
         let both = wrap("**bold**", 2..6, "*", "*");
         assert_eq!(both.text, "***bold***");
-        assert_eq!(wrap(&both.text, both.selection.clone(), "*", "*").text, "**bold**", "and takes them off again");
+        assert_eq!(
+            wrap(&both.text, both.selection.clone(), "*", "*").text,
+            "**bold**",
+            "and takes them off again"
+        );
         assert_eq!(wrap("**bold**", 0..8, "*", "*").text, "***bold***");
         // Nothing selected: the cursor between the marks.
         let empty = wrap("ab", 1..1, "*", "*");
@@ -672,7 +872,10 @@ mod tests {
         assert_eq!(h.text, "# Title\nbody");
         assert_eq!(h.selection, 4..4, "the cursor stays in the word");
         let h2 = toggle_block(&h.text, 3..3, Block::Heading(2));
-        assert_eq!(h2.text, "## Title\nbody", "one heading level swaps for another");
+        assert_eq!(
+            h2.text, "## Title\nbody",
+            "one heading level swaps for another"
+        );
     }
 
     #[test]
@@ -687,7 +890,10 @@ mod tests {
         let text = "one\n\ntwo";
         let on = toggle_block(text, 4..4, Block::Numbers);
         assert_eq!(on.text, "one\n1. \ntwo");
-        assert_eq!(toggle_block(&on.text, on.selection.clone(), Block::Numbers).text, text);
+        assert_eq!(
+            toggle_block(&on.text, on.selection.clone(), Block::Numbers).text,
+            text
+        );
     }
 
     #[test]
@@ -708,23 +914,39 @@ mod tests {
 
     #[test]
     fn checking_items_off() {
-        assert_eq!(toggle_check("- [ ] a\n- [x] b", 0).as_deref(), Some("- [x] a\n- [x] b"));
-        assert_eq!(toggle_check("- [ ] a\n- [x] b", 1).as_deref(), Some("- [ ] a\n- [ ] b"));
+        assert_eq!(
+            toggle_check("- [ ] a\n- [x] b", 0).as_deref(),
+            Some("- [x] a\n- [x] b")
+        );
+        assert_eq!(
+            toggle_check("- [ ] a\n- [x] b", 1).as_deref(),
+            Some("- [ ] a\n- [ ] b")
+        );
         assert_eq!(toggle_check("plain", 0), None);
     }
 
     #[test]
     fn titles_and_previews_read_as_text() {
-        let n = Note { id: "x".into(), path: PathBuf::new(), body: "\n# **Ideas** for <span style=\"color: red\">Trek</span>\n- tabs\n- [ ] notes".into(), modified: 0 };
+        let n = Note {
+            id: "x".into(),
+            path: PathBuf::new(),
+            body: "\n# **Ideas** for <span style=\"color: red\">Trek</span>\n- tabs\n- [ ] notes"
+                .into(),
+            modified: 0,
+        };
         assert_eq!(n.title(), "Ideas for Trek");
         assert_eq!(n.preview(), "tabs notes");
-        let empty = Note { body: "  \n".into(), ..n };
+        let empty = Note {
+            body: "  \n".into(),
+            ..n
+        };
         assert_eq!(empty.title(), "Untitled");
     }
 
     #[test]
     fn notes_are_files() {
-        let dir = std::env::temp_dir().join(format!("trek-notes-{}", uuid::Uuid::now_v7().simple()));
+        let dir =
+            std::env::temp_dir().join(format!("trek-notes-{}", uuid::Uuid::now_v7().simple()));
         let mut a = create_in(&dir).unwrap();
         a.body = "first".into();
         save(&a).unwrap();
@@ -733,12 +955,19 @@ mod tests {
         assert_eq!(listed[0].body, "first");
         let kept = delete(&a).unwrap();
         assert!(list_in(&dir).is_empty(), "out of the list");
-        assert_eq!(std::fs::read_to_string(kept).unwrap(), "first", "but not gone");
+        assert_eq!(
+            std::fs::read_to_string(kept).unwrap(),
+            "first",
+            "but not gone"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     fn temp_notes(what: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("trek-notes-{what}-{}", uuid::Uuid::now_v7().simple()))
+        std::env::temp_dir().join(format!(
+            "trek-notes-{what}-{}",
+            uuid::Uuid::now_v7().simple()
+        ))
     }
 
     #[test]
@@ -746,7 +975,10 @@ mod tests {
         let dir = temp_notes("images");
         let png = b"\x89PNG\r\n\x1a\nnot really";
         let link = add_image(&dir, png, "PNG").unwrap();
-        assert!(link.starts_with("attachments/") && link.ends_with(".png"), "{link}");
+        assert!(
+            link.starts_with("attachments/") && link.ends_with(".png"),
+            "{link}"
+        );
         assert_eq!(std::fs::read(dir.join(&link)).unwrap(), png);
         // The same picture again is the same file; another is another.
         assert_eq!(add_image(&dir, png, "png").unwrap(), link);
@@ -758,8 +990,15 @@ mod tests {
         // What isn't an image a note shows (or is empty) isn't kept.
         assert!(add_image(&dir, b"x", "exe").is_err());
         assert!(add_image(&dir, b"", "png").is_err());
-        let names: Vec<_> = std::fs::read_dir(attachments_dir(&dir)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
-        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "nothing half-written left: {names:?}");
+        let names: Vec<_> = std::fs::read_dir(attachments_dir(&dir))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            names.iter().all(|n| !n.ends_with(".tmp")),
+            "nothing half-written left: {names:?}"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -770,9 +1009,16 @@ mod tests {
         let clip = dir.join("Trip Clip.MOV");
         std::fs::write(&clip, b"movie bytes").unwrap();
         let link = add_file(&dir, &clip).unwrap();
-        assert!(link.starts_with("attachments/") && link.ends_with(".mov"), "{link}");
+        assert!(
+            link.starts_with("attachments/") && link.ends_with(".mov"),
+            "{link}"
+        );
         assert_eq!(std::fs::read(dir.join(&link)).unwrap(), b"movie bytes");
-        assert_eq!(add_file(&dir, &clip).unwrap(), link, "the same content is the same file");
+        assert_eq!(
+            add_file(&dir, &clip).unwrap(),
+            link,
+            "the same content is the same file"
+        );
         // No extension: just the hash. A strange one isn't carried into the name.
         let bare = dir.join("LICENSE");
         std::fs::write(&bare, b"words").unwrap();
@@ -781,20 +1027,33 @@ mod tests {
         let empty = dir.join("empty.pdf");
         std::fs::write(&empty, b"").unwrap();
         assert!(add_file(&dir, &empty).is_err() && add_file(&dir, &dir).is_err());
-        let names: Vec<_> = std::fs::read_dir(attachments_dir(&dir)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        let names: Vec<_> = std::fs::read_dir(attachments_dir(&dir))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
         assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
         // Linked by name, found again in the note, and its copy goes with the note's attachments.
         let md = file_markdown("Trip [Clip].MOV", &link);
         assert_eq!(md, format!("[Trip Clip.MOV]({link})"));
-        let body = format!("Notes\n{md}\n![pic](attachments/a.png)\n[web](https://example.com) [other](docs/x.pdf)\n");
+        let body = format!(
+            "Notes\n{md}\n![pic](attachments/a.png)\n[web](https://example.com) [other](docs/x.pdf)\n"
+        );
         let found = files(&body);
         assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!((found[0].name.as_str(), found[0].link.as_str()), ("Trip Clip.MOV", link.as_str()));
+        assert_eq!(
+            (found[0].name.as_str(), found[0].link.as_str()),
+            ("Trip Clip.MOV", link.as_str())
+        );
         assert_eq!(&body[found[0].range.clone()], md);
         assert_eq!(attachment_names(&body).len(), 2);
         assert_eq!(images(&body).len(), 1);
         assert!(is_video(&link) && !is_video("attachments/a.pdf") && !is_video("mov"));
-        assert_eq!(plain(&format!("see {md} and ![pic](attachments/a.png)")), "see Trip Clip.MOV and pic", "the list reads names, not links");
+        assert_eq!(
+            plain(&format!("see {md} and ![pic](attachments/a.png)")),
+            "see Trip Clip.MOV and pic",
+            "the list reads names, not links"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -802,7 +1061,10 @@ mod tests {
     fn an_image_goes_in_on_lines_of_its_own() {
         let md = image_markdown("Screen [shot]", "attachments/a.png");
         assert_eq!(md, "![Screen shot](attachments/a.png)");
-        assert_eq!(image_markdown("x", "/Users/me/My Pics/a.png"), "![x](</Users/me/My Pics/a.png>)");
+        assert_eq!(
+            image_markdown("x", "/Users/me/My Pics/a.png"),
+            "![x](</Users/me/My Pics/a.png>)"
+        );
         // Mid-line: it breaks the line, and the cursor lands after it.
         let e = insert_lines("before after", 7..7, &md);
         assert_eq!(e.text, format!("before \n{md}\nafter"));
@@ -820,13 +1082,37 @@ mod tests {
     fn a_notes_images_are_found_and_read_as_text() {
         let body = "# Trip\n![The view](attachments/abc.png) and ![](https://x.y/a.jpg \"t\")\n![odd](<My Pics/b.png>)\n![not\nan image](x)";
         let found = images(body);
-        assert_eq!(found.iter().map(|i| (i.alt.as_str(), i.link.as_str())).collect::<Vec<_>>(), [("The view", "attachments/abc.png"), ("", "https://x.y/a.jpg"), ("odd", "My Pics/b.png")]);
-        assert_eq!(&body[found[0].range.clone()], "![The view](attachments/abc.png)");
-        assert_eq!(&body[found[1].range.clone()], "![](https://x.y/a.jpg \"t\")");
+        assert_eq!(
+            found
+                .iter()
+                .map(|i| (i.alt.as_str(), i.link.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("The view", "attachments/abc.png"),
+                ("", "https://x.y/a.jpg"),
+                ("odd", "My Pics/b.png")
+            ]
+        );
+        assert_eq!(
+            &body[found[0].range.clone()],
+            "![The view](attachments/abc.png)"
+        );
+        assert_eq!(
+            &body[found[1].range.clone()],
+            "![](https://x.y/a.jpg \"t\")"
+        );
         // In the list, an image is its description.
-        let n = Note { id: "x".into(), path: PathBuf::new(), body: "![Whiteboard](attachments/w.png)\nmore".into(), modified: 0 };
+        let n = Note {
+            id: "x".into(),
+            path: PathBuf::new(),
+            body: "![Whiteboard](attachments/w.png)\nmore".into(),
+            modified: 0,
+        };
         assert_eq!(n.title(), "Whiteboard");
-        let n = Note { body: "Plan\n![](attachments/w.png)\nsteps".into(), ..n };
+        let n = Note {
+            body: "Plan\n![](attachments/w.png)\nsteps".into(),
+            ..n
+        };
         assert_eq!(n.preview(), "steps");
     }
 
@@ -843,7 +1129,11 @@ mod tests {
         let only = add_image(&dir, b"only mine", "png").unwrap();
         let shared = add_image(&dir, b"shared", "png").unwrap();
         let mut a = create_in(&dir).unwrap();
-        a.body = format!("A\n{}\n{}", image_markdown("", &only), image_markdown("", &shared));
+        a.body = format!(
+            "A\n{}\n{}",
+            image_markdown("", &only),
+            image_markdown("", &shared)
+        );
         save(&a).unwrap();
         let mut b = create_in(&dir).unwrap();
         b.body = format!("B\n{}", image_markdown("", &shared));
@@ -858,10 +1148,23 @@ mod tests {
 
         delete(&a).unwrap();
         let bin = dir.join("Deleted");
-        assert!(!dir.join(&only).exists(), "its own image left the list's folder");
-        assert_eq!(std::fs::read(bin.join(&only)).unwrap(), b"only mine", "and went with it to Deleted, still showing there");
-        assert!(dir.join(&shared).exists(), "the other note still shows the shared one");
-        assert!(bin.join(&shared).exists(), "and the deleted note keeps a copy");
+        assert!(
+            !dir.join(&only).exists(),
+            "its own image left the list's folder"
+        );
+        assert_eq!(
+            std::fs::read(bin.join(&only)).unwrap(),
+            b"only mine",
+            "and went with it to Deleted, still showing there"
+        );
+        assert!(
+            dir.join(&shared).exists(),
+            "the other note still shows the shared one"
+        );
+        assert!(
+            bin.join(&shared).exists(),
+            "and the deleted note keeps a copy"
+        );
         assert!(outside.exists(), "nothing outside attachments/ is touched");
         // The other note goes too: now nothing else shows the shared one.
         delete(&b).unwrap();

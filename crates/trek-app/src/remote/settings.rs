@@ -58,12 +58,20 @@ impl Workspace {
     }
 
     /// Apply what the phone changed, all or nothing: one value the Mac won't take refuses the lot.
-    pub(super) fn remote_set_settings(&mut self, change: tr::SettingsChange, cx: &mut Context<Self>) -> tr::HostResult<tr::MacSettings> {
+    pub(super) fn remote_set_settings(
+        &mut self,
+        change: tr::SettingsChange,
+        cx: &mut Context<Self>,
+    ) -> tr::HostResult<tr::MacSettings> {
         let mut s = self.settings.clone();
         if let Some(key) = &change.default_agent {
             let agent = AgentId::from_key(key);
             if !self.ready_agents().contains(&agent) {
-                return Err(tr::HostError::not_found(format!("{} isn't set up on {}", agent.display_name(), crate::words::words().this_computer)));
+                return Err(tr::HostError::not_found(format!(
+                    "{} isn't set up on {}",
+                    agent.display_name(),
+                    crate::words::words().this_computer
+                )));
             }
             if s.general.default_agent != *key {
                 s.general.default_agent = key.clone();
@@ -75,12 +83,16 @@ impl Workspace {
             let agent = AgentId::from_key(&s.general.default_agent);
             let models = self.models_for(&agent);
             if !model.is_empty() && !models.is_empty() && !models.iter().any(|m| &m.id == model) {
-                return Err(tr::HostError::not_found(format!("{model} isn't one of {}'s models", agent.display_name())));
+                return Err(tr::HostError::not_found(format!(
+                    "{model} isn't one of {}'s models",
+                    agent.display_name()
+                )));
             }
             s.general.default_model = Some(model.clone()).filter(|m| !m.is_empty());
         }
         if let Some(effort) = &change.default_effort {
-            s.general.default_effort = trek_core::Effort::parse(effort).ok_or_else(|| tr::HostError::bad_request(format!("No effort called {effort}")))?;
+            s.general.default_effort = trek_core::Effort::parse(effort)
+                .ok_or_else(|| tr::HostError::bad_request(format!("No effort called {effort}")))?;
         }
         if let Some(access) = change.default_access {
             s.general.hand_holding = hand_holding(access, &self.settings)?;
@@ -115,10 +127,17 @@ impl Workspace {
         if let Some(server) = &change.push_server {
             let server = server.trim().trim_end_matches('/');
             // Only https: what goes there says what the agents are doing.
-            let host = server.get(..8).filter(|scheme| scheme.eq_ignore_ascii_case("https://")).map(|_| &server[8..]);
-            let ok = host.is_some_and(|h| !h.is_empty()) && server.len() <= 200 && !server.chars().any(|c| c.is_whitespace() || c.is_control());
+            let host = server
+                .get(..8)
+                .filter(|scheme| scheme.eq_ignore_ascii_case("https://"))
+                .map(|_| &server[8..]);
+            let ok = host.is_some_and(|h| !h.is_empty())
+                && server.len() <= 200
+                && !server.chars().any(|c| c.is_whitespace() || c.is_control());
             if !ok {
-                return Err(tr::HostError::bad_request("The ntfy server must be an https:// address: https://ntfy.sh, or your own"));
+                return Err(tr::HostError::bad_request(
+                    "The ntfy server must be an https:// address: https://ntfy.sh, or your own",
+                ));
             }
             s.mobile.push_server = server.to_string();
         }
@@ -127,7 +146,9 @@ impl Workspace {
         }
         if let Some(days) = change.auto_settle_days {
             if days > 365 {
-                return Err(tr::HostError::bad_request("Settle after a year at most (0 never settles)"));
+                return Err(tr::HostError::bad_request(
+                    "Settle after a year at most (0 never settles)",
+                ));
             }
             s.inbox.auto_settle_days = days;
         }
@@ -140,7 +161,9 @@ impl Workspace {
             s.appearance.theme = t;
         }
         if change.push_test && !s.mobile.push {
-            return Err(tr::HostError::bad_request("Turn on notifications to your phone first"));
+            return Err(tr::HostError::bad_request(
+                "Turn on notifications to your phone first",
+            ));
         }
         // Only these sections can have changed; the rest stays as the Mac has it.
         self.settings.general = s.general;

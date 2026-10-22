@@ -21,7 +21,10 @@ fn tabs_file() -> PathBuf {
 
 /// The tabs saved at the last change, oldest first.
 pub(super) fn load_tabs() -> Vec<String> {
-    std::fs::read_to_string(tabs_file()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    std::fs::read_to_string(tabs_file())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 impl Workspace {
@@ -36,7 +39,12 @@ impl Workspace {
         match &self.route {
             Route::Thread(id) => self.thread(id).map(Self::tab_group),
             Route::Draft { project: None } => Some(None),
-            Route::Draft { project: Some(p) } => Some(self.projects.iter().find(|x| &x.path == p).map(|x| x.id.clone())),
+            Route::Draft { project: Some(p) } => Some(
+                self.projects
+                    .iter()
+                    .find(|x| &x.path == p)
+                    .map(|x| x.id.clone()),
+            ),
             _ => None,
         }
     }
@@ -44,8 +52,14 @@ impl Workspace {
     /// The tabs in the strip on screen, in order: threads still listed (archived or deleted ones
     /// drop out).
     pub fn tabs_here(&self) -> Vec<&Thread> {
-        let Some(group) = self.tab_group_here() else { return vec![] };
-        self.tabs.iter().filter_map(|id| self.thread(id)).filter(|t| Self::tab_group(t) == group).collect()
+        let Some(group) = self.tab_group_here() else {
+            return vec![];
+        };
+        self.tabs
+            .iter()
+            .filter_map(|id| self.thread(id))
+            .filter(|t| Self::tab_group(t) == group)
+            .collect()
     }
 
     /// Give the thread `id` a tab, beside the tab in front when that's in the same strip.
@@ -53,9 +67,14 @@ impl Workspace {
         if self.tabs.iter().any(|t| t == id) {
             return;
         }
-        let Some(group) = self.thread(id).map(Self::tab_group) else { return };
+        let Some(group) = self.thread(id).map(Self::tab_group) else {
+            return;
+        };
         let beside = match &self.route {
-            Route::Thread(front) => self.tabs.iter().position(|t| t == front).filter(|_| self.thread(front).is_some_and(|t| Self::tab_group(t) == group)),
+            Route::Thread(front) => self.tabs.iter().position(|t| t == front).filter(|_| {
+                self.thread(front)
+                    .is_some_and(|t| Self::tab_group(t) == group)
+            }),
             _ => None,
         };
         match beside {
@@ -67,9 +86,18 @@ impl Workspace {
             Route::Thread(f) => Some(f.clone()),
             _ => None,
         };
-        let strip: Vec<&Thread> = self.tabs.iter().filter_map(|t| self.thread(t)).filter(|t| Self::tab_group(t) == group).collect();
+        let strip: Vec<&Thread> = self
+            .tabs
+            .iter()
+            .filter_map(|t| self.thread(t))
+            .filter(|t| Self::tab_group(t) == group)
+            .collect();
         if strip.len() > MAX_TABS {
-            let oldest = strip.iter().filter(|t| t.id != id && Some(&t.id) != front.as_ref()).min_by_key(|t| t.last_seen_at).map(|t| t.id.clone());
+            let oldest = strip
+                .iter()
+                .filter(|t| t.id != id && Some(&t.id) != front.as_ref())
+                .min_by_key(|t| t.last_seen_at)
+                .map(|t| t.id.clone());
             if let Some(oldest) = oldest {
                 self.tabs.retain(|t| *t != oldest);
             }
@@ -85,7 +113,12 @@ impl Workspace {
             self.save_tabs();
             return;
         };
-        let strip: Vec<String> = self.tabs.iter().filter(|t| self.thread(t).is_some_and(|x| Self::tab_group(x) == group)).cloned().collect();
+        let strip: Vec<String> = self
+            .tabs
+            .iter()
+            .filter(|t| self.thread(t).is_some_and(|x| Self::tab_group(x) == group))
+            .cloned()
+            .collect();
         let at = strip.iter().position(|t| t == id);
         self.tabs.retain(|t| t != id);
         self.save_tabs();
@@ -93,11 +126,23 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let next = at.and_then(|i| strip.get(i + 1).or_else(|| i.checked_sub(1).and_then(|j| strip.get(j)))).cloned();
+        let next = at
+            .and_then(|i| {
+                strip
+                    .get(i + 1)
+                    .or_else(|| i.checked_sub(1).and_then(|j| strip.get(j)))
+            })
+            .cloned();
         match next {
             Some(next) => self.navigate(Route::Thread(next), cx),
             None => {
-                let project = self.thread(id).and_then(|t| if t.project_id.is_none() { None } else { self.draft_folder(t) });
+                let project = self.thread(id).and_then(|t| {
+                    if t.project_id.is_none() {
+                        None
+                    } else {
+                        self.draft_folder(t)
+                    }
+                });
                 self.navigate(Route::Draft { project }, cx)
             }
         }
@@ -125,11 +170,15 @@ impl Workspace {
     /// Move the tab `id` to sit at `to` in its strip (a drag).
     pub fn move_tab(&mut self, id: &str, to: usize, cx: &mut Context<Self>) {
         let strip: Vec<String> = self.tabs_here().into_iter().map(|t| t.id.clone()).collect();
-        let Some(target) = strip.get(to.min(strip.len().saturating_sub(1))).cloned() else { return };
+        let Some(target) = strip.get(to.min(strip.len().saturating_sub(1))).cloned() else {
+            return;
+        };
         if target == id {
             return;
         }
-        let Some(from) = self.tabs.iter().position(|t| t == id) else { return };
+        let Some(from) = self.tabs.iter().position(|t| t == id) else {
+            return;
+        };
         let moving = self.tabs.remove(from);
         let Some(at) = self.tabs.iter().position(|t| *t == target) else {
             self.tabs.insert(from, moving);

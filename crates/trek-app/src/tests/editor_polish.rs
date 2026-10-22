@@ -18,28 +18,54 @@ fn route(trek: &Trek, cx: &TestAppContext) -> Route {
     trek.read(cx, |ws, _| ws.route.clone())
 }
 
-pub(super) async fn loaded(trek: &Trek, cx: &mut TestAppContext) -> Entity<crate::editor::EditorView> {
+pub(super) async fn loaded(
+    trek: &Trek,
+    cx: &mut TestAppContext,
+) -> Entity<crate::editor::EditorView> {
     let deadline = std::time::Instant::now() + REAL_TIME_LIMIT;
     loop {
         trek.render(cx);
-        if let Some(e) = trek.root.read_with(cx, |r, cx| r.editor(cx)).filter(|e| e.read_with(cx, |e, _| !e.loading())) {
+        if let Some(e) = trek
+            .root
+            .read_with(cx, |r, cx| r.editor(cx))
+            .filter(|e| e.read_with(cx, |e, _| !e.loading()))
+        {
             return e;
         }
-        assert!(std::time::Instant::now() < deadline, "timed out reading the file");
-        cx.background_executor.timer(std::time::Duration::from_millis(5)).await;
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out reading the file"
+        );
+        cx.background_executor
+            .timer(std::time::Duration::from_millis(5))
+            .await;
     }
 }
 
 /// A file opened on its own from a draft in the project: Agents mode, the harness's lone editor.
-async fn file_on_its_own(trek: &Trek, cx: &mut TestAppContext, name: &str) -> (std::path::PathBuf, Route, Entity<crate::editor::EditorView>) {
+async fn file_on_its_own(
+    trek: &Trek,
+    cx: &mut TestAppContext,
+    name: &str,
+) -> (std::path::PathBuf, Route, Entity<crate::editor::EditorView>) {
     let file = trek.project.join(name);
     std::fs::write(&file, "[a]\nb = 1\n").unwrap();
     let project = trek.project.clone();
-    trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project) }, cx));
+    trek.update(cx, |ws, cx| {
+        ws.navigate(
+            Route::Draft {
+                project: Some(project),
+            },
+            cx,
+        )
+    });
     let from = route(trek, cx);
     trek.update(cx, |ws, cx| ws.open_editor(file.clone(), None, cx));
     let editor = loaded(trek, cx).await;
-    assert!(matches!(route(trek, cx), Route::Editor { .. }), "the file is on its own");
+    assert!(
+        matches!(route(trek, cx), Route::Editor { .. }),
+        "the file is on its own"
+    );
     (file, from, editor)
 }
 
@@ -54,7 +80,10 @@ fn a_file_shown_on_its_own_has_a_close_button_that_goes_back_to_where_it_came_fr
         assert!(trek.visible(cx, "editor-save") && trek.visible(cx, "editor-open-default"));
         trek.click(cx, "editor-close");
         trek.render(cx);
-        assert!(route(&trek, cx) == from, "back on the draft it was opened from");
+        assert!(
+            route(&trek, cx) == from,
+            "back on the draft it was opened from"
+        );
         assert_eq!(open_tabs(&trek, cx), 0, "closed, not parked behind");
         assert!(!trek.visible(cx, "editor-close"));
     });
@@ -74,7 +103,10 @@ fn the_shortcuts_and_the_palette_close_a_file_shown_on_its_own() {
         assert!(matches!(route(&trek, cx), Route::Editor { .. }));
         trek.press(cx, "secondary-w");
         trek.render(cx);
-        assert!(route(&trek, cx) == Route::Thread(id.clone()), "⌘W / Ctrl+W: back to the thread");
+        assert!(
+            route(&trek, cx) == Route::Thread(id.clone()),
+            "⌘W / Ctrl+W: back to the thread"
+        );
         assert_eq!(open_tabs(&trek, cx), 0);
 
         // Ctrl+F4 as well, on Windows.
@@ -103,20 +135,31 @@ fn closing_a_file_shown_on_its_own_asks_about_unsaved_edits_and_stays_when_cance
     run(async |cx| {
         let trek = open(cx);
         let (file, from, editor) = file_on_its_own(&trek, cx, "edited.ini").await;
-        trek.window(cx, |window, cx| editor.update(cx, |e, cx| e.text_state().update(cx, |s, cx| s.insert("x", window, cx))));
+        trek.window(cx, |window, cx| {
+            editor.update(cx, |e, cx| {
+                e.text_state().update(cx, |s, cx| s.insert("x", window, cx))
+            })
+        });
         cx.run_until_parked();
         trek.click(cx, "editor-close");
         assert!(cx.has_pending_prompt(), "unsaved edits: asks first");
         cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
-        assert!(matches!(route(&trek, cx), Route::Editor { .. }) && open_tabs(&trek, cx) == 1, "Cancel keeps it");
+        assert!(
+            matches!(route(&trek, cx), Route::Editor { .. }) && open_tabs(&trek, cx) == 1,
+            "Cancel keeps it"
+        );
         trek.press(cx, "secondary-w");
         assert!(cx.has_pending_prompt());
         cx.simulate_prompt_answer("Don't Save");
         cx.run_until_parked();
         trek.render(cx);
         assert!(route(&trek, cx) == from);
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "[a]\nb = 1\n", "nothing written");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "[a]\nb = 1\n",
+            "nothing written"
+        );
     });
 }
 
@@ -128,15 +171,30 @@ fn a_picture_shown_on_its_own_closes_like_a_file_does() {
     run(async |cx| {
         let trek = open(cx);
         let png = trek.project.join("chart.png");
-        image::RgbaImage::from_pixel(40, 30, image::Rgba([200, 80, 40, 255])).save(&png).unwrap();
+        image::RgbaImage::from_pixel(40, 30, image::Rgba([200, 80, 40, 255]))
+            .save(&png)
+            .unwrap();
         let project = trek.project.clone();
-        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project) }, cx));
+        trek.update(cx, |ws, cx| {
+            ws.navigate(
+                Route::Draft {
+                    project: Some(project),
+                },
+                cx,
+            )
+        });
         let from = route(&trek, cx);
         for close in ["the ×", "⌘W / Ctrl+W", "the palette"] {
             trek.update(cx, |ws, cx| ws.open_editor(png.clone(), None, cx));
             trek.render(cx);
-            assert!(matches!(route(&trek, cx), Route::Editor { .. }), "{close}: the picture is on its own");
-            assert!(trek.visible(cx, "ide-preview-image") && trek.visible(cx, "editor-close"), "{close}: the picture, and the way out");
+            assert!(
+                matches!(route(&trek, cx), Route::Editor { .. }),
+                "{close}: the picture is on its own"
+            );
+            assert!(
+                trek.visible(cx, "ide-preview-image") && trek.visible(cx, "editor-close"),
+                "{close}: the picture, and the way out"
+            );
             match close {
                 "the ×" => trek.click(cx, "editor-close"),
                 "⌘W / Ctrl+W" => trek.press(cx, "secondary-w"),
@@ -160,7 +218,14 @@ fn the_last_tab_closed_in_the_editor_offers_the_way_back_to_agents() {
         let file = trek.project.join("only.rs");
         std::fs::write(&file, "fn only() {}\n").unwrap();
         let project = trek.project.clone();
-        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project) }, cx));
+        trek.update(cx, |ws, cx| {
+            ws.navigate(
+                Route::Draft {
+                    project: Some(project),
+                },
+                cx,
+            )
+        });
         trek.update(cx, |ws, cx| ws.set_mode(Mode::Editor, cx));
         trek.update(cx, |ws, cx| ws.open_editor(file.clone(), None, cx));
         trek.render(cx);
@@ -206,11 +271,14 @@ fn toasts(trek: &Trek, cx: &mut TestAppContext) -> Rc<RefCell<Vec<String>>> {
     let seen = Rc::new(RefCell::new(vec![]));
     let sink = seen.clone();
     cx.update(|cx| {
-        cx.subscribe(&trek.ws, move |_, event: &crate::workspace::WorkspaceEvent, _| {
-            if let crate::workspace::WorkspaceEvent::Toast { message, .. } = event {
-                sink.borrow_mut().push(message.clone());
-            }
-        })
+        cx.subscribe(
+            &trek.ws,
+            move |_, event: &crate::workspace::WorkspaceEvent, _| {
+                if let crate::workspace::WorkspaceEvent::Toast { message, .. } = event {
+                    sink.borrow_mut().push(message.clone());
+                }
+            },
+        )
         .detach()
     });
     seen
@@ -220,26 +288,46 @@ fn buffer_of(editor: &Entity<crate::editor::EditorView>, cx: &TestAppContext) ->
     editor.read_with(cx, |e, cx| e.text_state().read(cx).value().to_string())
 }
 
-fn focus_editor_text(trek: &Trek, cx: &mut TestAppContext, editor: &Entity<crate::editor::EditorView>) {
-    trek.window(cx, |window, cx| editor.update(cx, |e, cx| e.focus(window, cx)));
+fn focus_editor_text(
+    trek: &Trek,
+    cx: &mut TestAppContext,
+    editor: &Entity<crate::editor::EditorView>,
+) {
+    trek.window(cx, |window, cx| {
+        editor.update(cx, |e, cx| e.focus(window, cx))
+    });
     cx.run_until_parked();
 }
 
 /// Wait (the formatter is a real process) until `until` says the buffer or the toasts show its answer.
-async fn wait_for(cx: &mut TestAppContext, editor: &Entity<crate::editor::EditorView>, toasts: &Rc<RefCell<Vec<String>>>, until: impl Fn(&str, &[String]) -> bool) {
+async fn wait_for(
+    cx: &mut TestAppContext,
+    editor: &Entity<crate::editor::EditorView>,
+    toasts: &Rc<RefCell<Vec<String>>>,
+    until: impl Fn(&str, &[String]) -> bool,
+) {
     let deadline = std::time::Instant::now() + REAL_TIME_LIMIT;
     loop {
         cx.run_until_parked();
         if until(&buffer_of(editor, cx), &toasts.borrow()) {
             return;
         }
-        assert!(std::time::Instant::now() < deadline, "timed out waiting for the formatter: buffer {:?}, toasts {:?}", buffer_of(editor, cx), toasts.borrow());
-        cx.background_executor.timer(std::time::Duration::from_millis(5)).await;
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for the formatter: buffer {:?}, toasts {:?}",
+            buffer_of(editor, cx),
+            toasts.borrow()
+        );
+        cx.background_executor
+            .timer(std::time::Duration::from_millis(5))
+            .await;
     }
 }
 
 fn format(trek: &Trek, cx: &mut TestAppContext, editor: &Entity<crate::editor::EditorView>) {
-    trek.window(cx, |window, cx| editor.update(cx, |e, cx| e.format(window, cx)));
+    trek.window(cx, |window, cx| {
+        editor.update(cx, |e, cx| e.format(window, cx))
+    });
 }
 
 #[test]
@@ -254,18 +342,37 @@ fn format_document_replaces_the_text_with_what_the_formatter_prints_and_undo_tak
         let editor = loaded(&trek, cx).await;
         // The caret after `main`, to see it kept near.
         let at = "fn  main".len();
-        trek.window(cx, |_, cx| editor.update(cx, |e, cx| e.text_state().update(cx, |s, cx| s.set_selected_range(at..at, cx))));
+        trek.window(cx, |_, cx| {
+            editor.update(cx, |e, cx| {
+                e.text_state()
+                    .update(cx, |s, cx| s.set_selected_range(at..at, cx))
+            })
+        });
         format(&trek, cx, &editor);
         wait_for(cx, &editor, &toasts, |text, _| text == "FN  MAIN( ) {}\n").await;
-        assert!(editor.read_with(cx, |e, _| e.dirty()), "it's an edit, saved when the user says so");
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "fn  main( ) {}\n", "nothing written to the file");
-        assert_eq!(editor.read_with(cx, |e, cx| e.text_state().read(cx).cursor()), at, "the caret stays after `main`");
+        assert!(
+            editor.read_with(cx, |e, _| e.dirty()),
+            "it's an edit, saved when the user says so"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "fn  main( ) {}\n",
+            "nothing written to the file"
+        );
+        assert_eq!(
+            editor.read_with(cx, |e, cx| e.text_state().read(cx).cursor()),
+            at,
+            "the caret stays after `main`"
+        );
         assert!(toasts.borrow().is_empty(), "{:?}", toasts.borrow());
         // One edit: undo puts the text back.
         focus_editor_text(&trek, cx, &editor);
         trek.press(cx, "secondary-z");
         assert_eq!(buffer_of(&editor, cx), "fn  main( ) {}\n");
-        assert!(!editor.read_with(cx, |e, _| e.dirty()), "undone, so as saved");
+        assert!(
+            !editor.read_with(cx, |e, _| e.dirty()),
+            "undone, so as saved"
+        );
     });
 }
 
@@ -286,7 +393,10 @@ fn format_document_runs_from_its_shortcut_and_leaves_a_file_a_formatter_refused_
         let failing = Formatting::with(&["fail", "1", "error: expected `;`", "more"]);
         trek.press(cx, "alt-shift-f");
         wait_for(cx, &editor, &toasts, |_, t| !t.is_empty()).await;
-        assert_eq!(*toasts.borrow(), vec!["fixture couldn't format it: error: expected `;`".to_string()]);
+        assert_eq!(
+            *toasts.borrow(),
+            vec!["fixture couldn't format it: error: expected `;`".to_string()]
+        );
         assert_eq!(buffer_of(&editor, cx), "fn main( ) {}\n");
         assert!(!editor.read_with(cx, |e, _| e.dirty()));
         drop(failing);
@@ -311,7 +421,10 @@ fn format_document_says_when_there_is_no_formatter_and_when_it_is_not_installed(
         trek.update(cx, |ws, cx| ws.open_editor(cs.clone(), None, cx));
         let editor = loaded(&trek, cx).await;
         format(&trek, cx, &editor);
-        assert_eq!(*toasts.borrow(), vec!["No formatter for .cs on this computer".to_string()]);
+        assert_eq!(
+            *toasts.borrow(),
+            vec!["No formatter for .cs on this computer".to_string()]
+        );
         // One that has, but not on this computer.
         let rs = trek.project.join("main.rs");
         std::fs::write(&rs, "fn main() {}\n").unwrap();
@@ -319,7 +432,10 @@ fn format_document_says_when_there_is_no_formatter_and_when_it_is_not_installed(
         trek.update(cx, |ws, cx| ws.open_editor(rs.clone(), None, cx));
         let editor = loaded(&trek, cx).await;
         format(&trek, cx, &editor);
-        assert_eq!(toasts.borrow()[1], "Format Document needs rustfmt for .rs files, and it isn't on this computer");
+        assert_eq!(
+            toasts.borrow()[1],
+            "Format Document needs rustfmt for .rs files, and it isn't on this computer"
+        );
         assert_eq!(buffer_of(&editor, cx), "fn main() {}\n");
     });
 }
@@ -336,9 +452,20 @@ fn text_typed_while_the_formatter_ran_is_not_overwritten() {
         trek.update(cx, |ws, cx| ws.open_editor(file.clone(), None, cx));
         let editor = loaded(&trek, cx).await;
         format(&trek, cx, &editor);
-        trek.window(cx, |window, cx| editor.update(cx, |e, cx| e.text_state().update(cx, |s, cx| s.insert("// mine\n", window, cx))));
+        trek.window(cx, |window, cx| {
+            editor.update(cx, |e, cx| {
+                e.text_state()
+                    .update(cx, |s, cx| s.insert("// mine\n", window, cx))
+            })
+        });
         wait_for(cx, &editor, &toasts, |_, t| !t.is_empty()).await;
-        assert_eq!(*toasts.borrow(), vec!["The file changed while it was being formatted, so nothing was replaced".to_string()]);
+        assert_eq!(
+            *toasts.borrow(),
+            vec![
+                "The file changed while it was being formatted, so nothing was replaced"
+                    .to_string()
+            ]
+        );
         assert_eq!(buffer_of(&editor, cx), "// mine\nfn main() {}\n");
     });
 }
@@ -355,9 +482,23 @@ fn format_document_is_in_the_palette_beside_its_keys() {
         trek.type_text(cx, "Format document");
         trek.render(cx);
         let palette = cx.read(|cx| trek.root.read(cx).palette.clone());
-        let rows: Vec<(String, String)> = palette.read_with(cx, |p, cx| p.entries(cx).iter().map(|e| (e.label.to_string(), e.hint.as_ref().map(|h| h.to_string()).unwrap_or_default())).collect());
+        let rows: Vec<(String, String)> = palette.read_with(cx, |p, cx| {
+            p.entries(cx)
+                .iter()
+                .map(|e| {
+                    (
+                        e.label.to_string(),
+                        e.hint.as_ref().map(|h| h.to_string()).unwrap_or_default(),
+                    )
+                })
+                .collect()
+        });
         let want = crate::keys::hint(crate::keys::Id::FormatDocument);
-        assert!(rows.iter().any(|(label, hint)| label == "Format document" && *hint == want), "{rows:?}");
+        assert!(
+            rows.iter()
+                .any(|(label, hint)| label == "Format document" && *hint == want),
+            "{rows:?}"
+        );
     });
 }
 
@@ -374,7 +515,11 @@ fn the_tab_key_types_a_tab_in_a_makefile_and_go_and_spaces_elsewhere() {
             let editor = loaded(&trek, cx).await;
             focus_editor_text(&trek, cx, &editor);
             trek.press(cx, "tab");
-            assert_eq!(buffer_of(&editor, cx), format!("{typed}x\n"), "Tab in {name}");
+            assert_eq!(
+                buffer_of(&editor, cx),
+                format!("{typed}x\n"),
+                "Tab in {name}"
+            );
         }
     });
 }

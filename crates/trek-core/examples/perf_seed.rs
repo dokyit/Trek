@@ -17,16 +17,43 @@ use trek_core::store::{Item, Store, ToolStatus};
 use trek_core::{AgentId, Effort, HandHolding, TokenUsage};
 
 const PROJECTS: [&str; 4] = ["atlas-api", "harbor-web", "lumen-cli", "orbit-mobile"];
-const VERBS: [&str; 10] = ["Fix", "Add", "Refactor", "Speed up", "Document", "Test", "Clean up", "Migrate", "Profile", "Review"];
-const NOUNS: [&str; 10] = ["the login flow", "pagination", "the build cache", "retry backoff", "the settings page", "CSV export", "the websocket client", "search ranking", "error toasts", "the release script"];
+const VERBS: [&str; 10] = [
+    "Fix", "Add", "Refactor", "Speed up", "Document", "Test", "Clean up", "Migrate", "Profile",
+    "Review",
+];
+const NOUNS: [&str; 10] = [
+    "the login flow",
+    "pagination",
+    "the build cache",
+    "retry backoff",
+    "the settings page",
+    "CSV export",
+    "the websocket client",
+    "search ranking",
+    "error toasts",
+    "the release script",
+];
 
 fn main() {
-    let dir = std::env::var_os("TREK_DATA_DIR").filter(|d| !d.is_empty()).map(PathBuf::from).expect("set TREK_DATA_DIR to a new, empty folder");
+    let dir = std::env::var_os("TREK_DATA_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .expect("set TREK_DATA_DIR to a new, empty folder");
     trek_core::paths::isolate(dir.clone());
     let db = trek_core::paths::database_file();
-    assert!(!db.exists(), "{} already has a database: give a new folder", dir.display());
-    let n: usize = std::env::var("SEED_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
-    let long: usize = std::env::var("SEED_LONG").ok().and_then(|v| v.parse().ok()).unwrap_or(400);
+    assert!(
+        !db.exists(),
+        "{} already has a database: give a new folder",
+        dir.display()
+    );
+    let n: usize = std::env::var("SEED_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200);
+    let long: usize = std::env::var("SEED_LONG")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(400);
     let store = Store::open(&db).unwrap();
     let t = Instant::now();
     let folders: Vec<PathBuf> = PROJECTS
@@ -50,17 +77,55 @@ fn main() {
         // Newest first, more of them recent: (i/n)² of four months back.
         let f = i as f64 / n as f64;
         let last = now - 300_000 - (span as f64 * f * f) as i64 - i as i64 * 60_000;
-        let (title, rounds) = if i == 0 { ("Long transcript".to_string(), long) } else { (format!("{} {} #{i}", VERBS[i % 10], NOUNS[(i / 10) % 10]), 4) };
-        let model = if i % 2 == 0 { "mock-swift" } else { "mock-deep" };
-        let th = store.create_thread(Some(&folders[i % folders.len()]), agent.clone(), Some(model.into()), Effort::High, HandHolding::Auto).unwrap();
+        let (title, rounds) = if i == 0 {
+            ("Long transcript".to_string(), long)
+        } else {
+            (
+                format!("{} {} #{i}", VERBS[i % 10], NOUNS[(i / 10) % 10]),
+                4,
+            )
+        };
+        let model = if i % 2 == 0 {
+            "mock-swift"
+        } else {
+            "mock-deep"
+        };
+        let th = store
+            .create_thread(
+                Some(&folders[i % folders.len()]),
+                agent.clone(),
+                Some(model.into()),
+                Effort::High,
+                HandHolding::Auto,
+            )
+            .unwrap();
         let mut items = Vec::with_capacity(rounds * 5);
         for k in 0..rounds {
             let at = last - (rounds - k) as i64 * 150_000;
             items.extend(round(i, k, at));
-            store.record_usage(&th.id, at + 90_000, &agent, Some(model), &TokenUsage { input: 1_200 + k as u64, output: 800, cache_read: 12_000, cache_write: 400 }, None).unwrap();
+            store
+                .record_usage(
+                    &th.id,
+                    at + 90_000,
+                    &agent,
+                    Some(model),
+                    &TokenUsage {
+                        input: 1_200 + k as u64,
+                        output: 800,
+                        cache_read: 12_000,
+                        cache_write: 400,
+                    },
+                    None,
+                )
+                .unwrap();
         }
         items_made += items.len();
-        store.save_transcript(&th.id, &mut trek_core::transcript::Transcript::unsaved(items)).unwrap();
+        store
+            .save_transcript(
+                &th.id,
+                &mut trek_core::transcript::Transcript::unsaved(items),
+            )
+            .unwrap();
         store
             .update_thread(&th.id, |t| {
                 t.title = title;
@@ -71,13 +136,25 @@ fn main() {
             })
             .unwrap();
     }
-    println!("seeded {n} threads ({items_made} items) in {} projects under {} in {:?}", PROJECTS.len(), dir.display(), t.elapsed());
+    println!(
+        "seeded {n} threads ({items_made} items) in {} projects under {} in {:?}",
+        PROJECTS.len(),
+        dir.display(),
+        t.elapsed()
+    );
 }
 
 /// Round `k` of thread `i`, asked at `at`: the five items of a turn.
 fn round(i: usize, k: usize, at: i64) -> [Item; 5] {
-    let file = ["src/lib.rs", "src/server/routes.rs", "web/app.tsx", "scripts/release.sh"][(i + k) % 4];
-    let output: String = (1..=30).map(|l| format!("{l:>4} | let value_{l} = compute(input, {l});\n")).collect();
+    let file = [
+        "src/lib.rs",
+        "src/server/routes.rs",
+        "web/app.tsx",
+        "scripts/release.sh",
+    ][(i + k) % 4];
+    let output: String = (1..=30)
+        .map(|l| format!("{l:>4} | let value_{l} = compute(input, {l});\n"))
+        .collect();
     let answer = format!(
         "## Round {k}\n\nI read `{file}` and changed **three** things:\n\n\
          1. The retry loop now backs off exponentially, capped at 30 s.\n\
@@ -88,10 +165,29 @@ fn round(i: usize, k: usize, at: i64) -> [Item; 5] {
          Next I'd look at the cache headers in {file}."
     );
     [
-        Item::User { text: format!("Round {k}: look at {file} and make the retries saner (thread {i})."), images: vec![], at: Some(at), resume: None, aside: false },
-        Item::Reasoning { text: format!("The retries in {file} hammer the server when it's down; an exponential backoff with a cap fixes that, and the tests need a case for an empty page.") },
-        Item::Tool { id: format!("t{i}-{k}"), title: "Read".into(), detail: file.into(), output, status: ToolStatus::Done },
+        Item::User {
+            text: format!("Round {k}: look at {file} and make the retries saner (thread {i})."),
+            images: vec![],
+            at: Some(at),
+            resume: None,
+            aside: false,
+        },
+        Item::Reasoning {
+            text: format!(
+                "The retries in {file} hammer the server when it's down; an exponential backoff with a cap fixes that, and the tests need a case for an empty page."
+            ),
+        },
+        Item::Tool {
+            id: format!("t{i}-{k}"),
+            title: "Read".into(),
+            detail: file.into(),
+            output,
+            status: ToolStatus::Done,
+        },
         Item::Assistant { text: answer },
-        Item::TurnEnd { at: at + 90_000, took_secs: 90 },
+        Item::TurnEnd {
+            at: at + 90_000,
+            took_secs: 90,
+        },
     ]
 }

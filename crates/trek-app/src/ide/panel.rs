@@ -33,7 +33,12 @@ pub enum PanelTab {
 }
 
 impl PanelTab {
-    const ALL: [PanelTab; 4] = [PanelTab::Problems, PanelTab::Output, PanelTab::Terminal, PanelTab::Tasks];
+    const ALL: [PanelTab; 4] = [
+        PanelTab::Problems,
+        PanelTab::Output,
+        PanelTab::Terminal,
+        PanelTab::Tasks,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -58,8 +63,14 @@ impl PanelTab {
 /// each side: their first and last (0-based) and the text.
 fn problem_lines(text: &str, line: u32, end: u32) -> (u32, u32, String) {
     let lines: Vec<&str> = text.lines().collect();
-    let (a, b) = (line.saturating_sub(PROBLEM_CONTEXT), (end + PROBLEM_CONTEXT).min(lines.len().saturating_sub(1) as u32));
-    let snippet = lines.get(a as usize..=b as usize).map(|l| l.join("\n")).unwrap_or_default();
+    let (a, b) = (
+        line.saturating_sub(PROBLEM_CONTEXT),
+        (end + PROBLEM_CONTEXT).min(lines.len().saturating_sub(1) as u32),
+    );
+    let snippet = lines
+        .get(a as usize..=b as usize)
+        .map(|l| l.join("\n"))
+        .unwrap_or_default();
     (a, b, snippet)
 }
 
@@ -94,7 +105,13 @@ impl IdeWorkbench {
 
     /// Run a command (an agent install or sign-in, a project action) in a terminal of its own
     /// in the panel; agents are looked for again when it exits.
-    pub fn run_command(&mut self, job: Job, cwd: Option<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn run_command(
+        &mut self,
+        job: Job,
+        cwd: Option<std::path::PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let cwd = cwd.or_else(|| self.workspace.read(cx).ide_root.clone());
         let shell = self.workspace.read(cx).settings.terminal.shell.clone();
         let ws = self.workspace.downgrade();
@@ -105,7 +122,8 @@ impl IdeWorkbench {
             });
             t
         });
-        cx.subscribe(&term, |_, _, _: &TitleChanged, cx| cx.notify()).detach();
+        cx.subscribe(&term, |_, _, _: &TitleChanged, cx| cx.notify())
+            .detach();
         self.terminals.push(term);
         self.terminal = self.terminals.len() - 1;
         self.show_panel(PanelTab::Terminal, window, cx);
@@ -114,22 +132,36 @@ impl IdeWorkbench {
     /// The terminal in front, while the bottom panel shows terminals (the shots harness's `terminal`).
     #[cfg(feature = "shots")]
     pub fn shown_terminal(&self) -> Option<Entity<TerminalPanel>> {
-        (self.layout.panel_open && self.panel_tab == PanelTab::Terminal).then(|| self.terminals.get(self.terminal).cloned()).flatten()
+        (self.layout.panel_open && self.panel_tab == PanelTab::Terminal)
+            .then(|| self.terminals.get(self.terminal).cloned())
+            .flatten()
     }
 
     /// The terminal's latest output goes to the AI side bar as a chip.
     pub fn terminal_to_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(t) = self.terminals.get(self.terminal) else { return };
+        let Some(t) = self.terminals.get(self.terminal) else {
+            return;
+        };
         let text = t.read(cx).recent_output(TERMINAL_LINES);
         if text.trim().is_empty() {
             return;
         }
-        self.add_chip(crate::ide::ai::context::ContextChip::Terminal { text }, window, cx);
+        self.add_chip(
+            crate::ide::ai::context::ContextChip::Terminal { text },
+            window,
+            cx,
+        );
     }
 
     /// "Fix with Agent": the problem, with the lines around it, goes to the AI side bar's chat
     /// as a request to fix it (a new chat when it's on none).
-    pub fn fix_problem(&mut self, path: std::path::PathBuf, d: lsp_types::Diagnostic, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn fix_problem(
+        &mut self,
+        path: std::path::PathBuf,
+        d: lsp_types::Diagnostic,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let line = d.range.start.line;
         // The server judged the buffer, which may hold edits the file on disk doesn't.
         let open = self.editors().into_iter().find(|e| e.read(cx).path == path);
@@ -143,7 +175,14 @@ impl IdeWorkbench {
             Some(DiagnosticSeverity::WARNING) => "warning",
             _ => "note",
         };
-        let chip = crate::ide::ai::context::ContextChip::Problem { path, line: line + 1, severity: severity.into(), message: d.message.clone(), lines: (a + 1, b + 1), text: snippet };
+        let chip = crate::ide::ai::context::ContextChip::Problem {
+            path,
+            line: line + 1,
+            severity: severity.into(),
+            message: d.message.clone(),
+            lines: (a + 1, b + 1),
+            text: snippet,
+        };
         if !self.layout.ai_open {
             self.layout.ai_open = true;
             self.save_layout(cx);
@@ -158,7 +197,8 @@ impl IdeWorkbench {
         let shell = self.workspace.read(cx).settings.terminal.shell.clone();
         let ws = self.workspace.downgrade();
         let term = cx.new(|cx| TerminalPanel::new(ws, cwd, shell, cx));
-        cx.subscribe(&term, |_, _, _: &TitleChanged, cx| cx.notify()).detach();
+        cx.subscribe(&term, |_, _, _: &TitleChanged, cx| cx.notify())
+            .detach();
         self.terminals.push(term);
         self.terminal = self.terminals.len() - 1;
         cx.notify();
@@ -176,12 +216,23 @@ impl IdeWorkbench {
         cx.notify();
     }
 
-    pub(super) fn bottom_panel(&self, height: f32, glass: Option<f32>, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn bottom_panel(
+        &self,
+        height: f32,
+        glass: Option<f32>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme().clone();
         let line = Self::line(glass, cx);
         let ws = self.workspace.read(cx);
         let (errors, warnings) = ws.diagnostic_counts();
-        let tasks: usize = ws.ide_threads().iter().filter_map(|t| ws.live.get(&t.id)).map(|l| l.background.len()).sum();
+        let tasks: usize = ws
+            .ide_threads()
+            .iter()
+            .filter_map(|t| ws.live.get(&t.id))
+            .map(|l| l.background.len())
+            .sum();
         let tab = self.panel_tab;
         let ember = crate::palette::ember(cx);
         let tabs = h_flex()
@@ -207,29 +258,75 @@ impl IdeWorkbench {
                     .cursor_pointer()
                     .text_size(px(11.))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if on { theme.foreground } else { theme.muted_foreground })
+                    .text_color(if on {
+                        theme.foreground
+                    } else {
+                        theme.muted_foreground
+                    })
                     .when(!on, |el| el.hover(|s| s.text_color(theme.foreground)))
                     .child(t.label().to_uppercase())
                     .when(count > 0, |el| {
-                        el.child(div().px(px(5.)).rounded_full().bg(theme.foreground.opacity(0.1)).text_size(px(10.)).child(count.to_string()))
+                        el.child(
+                            div()
+                                .px(px(5.))
+                                .rounded_full()
+                                .bg(theme.foreground.opacity(0.1))
+                                .text_size(px(10.))
+                                .child(count.to_string()),
+                        )
                     })
-                    .when(on, |el| el.child(div().absolute().bottom(px(4.)).left(px(8.)).right(px(8.)).h(px(1.5)).bg(ember)))
-                    .on_click(cx.listener(move |this, _, window, cx| this.show_panel(t, window, cx)))
+                    .when(on, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .bottom(px(4.))
+                                .left(px(8.))
+                                .right(px(8.))
+                                .h(px(1.5))
+                                .bg(ember),
+                        )
+                    })
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.show_panel(t, window, cx)),
+                    )
             }))
             .child(div().flex_1())
-            .when(tab == PanelTab::Terminal && !self.terminals.is_empty(), |el| {
+            .when(
+                tab == PanelTab::Terminal && !self.terminals.is_empty(),
+                |el| {
+                    el.child(
+                        crate::ui::icon_button(
+                            "ide-terminal-chat",
+                            crate::assets::Lucide::MessageSquarePlus,
+                            "Add to Chat: the latest output",
+                        )
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.terminal_to_chat(window, cx)),
+                        ),
+                    )
+                },
+            )
+            .when(tab == PanelTab::Terminal, |el| {
                 el.child(
-                    crate::ui::icon_button("ide-terminal-chat", crate::assets::Lucide::MessageSquarePlus, "Add to Chat: the latest output").on_click(cx.listener(|this, _, window, cx| this.terminal_to_chat(window, cx))),
+                    crate::ui::icon_button("ide-terminal-new", IconName::Plus, "New terminal")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.new_terminal(cx);
+                            this.show_panel(PanelTab::Terminal, window, cx);
+                        })),
+                )
+                .child(
+                    crate::ui::icon_button(
+                        "ide-terminal-kill",
+                        crate::assets::Lucide::Trash,
+                        "Kill terminal",
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.kill_terminal(cx))),
                 )
             })
-            .when(tab == PanelTab::Terminal, |el| {
-                el.child(crate::ui::icon_button("ide-terminal-new", IconName::Plus, "New terminal").on_click(cx.listener(|this, _, window, cx| {
-                    this.new_terminal(cx);
-                    this.show_panel(PanelTab::Terminal, window, cx);
-                })))
-                .child(crate::ui::icon_button("ide-terminal-kill", crate::assets::Lucide::Trash, "Kill terminal").on_click(cx.listener(|this, _, _, cx| this.kill_terminal(cx))))
-            })
-            .child(crate::ui::icon_button("ide-panel-close", IconName::Close, "Hide panel (⌘J)").on_click(cx.listener(|this, _, window, cx| this.toggle_panel(window, cx))));
+            .child(
+                crate::ui::icon_button("ide-panel-close", IconName::Close, "Hide panel (⌘J)")
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_panel(window, cx))),
+            );
 
         let body: AnyElement = match tab {
             PanelTab::Terminal => self.terminal_body(cx),
@@ -256,37 +353,64 @@ impl IdeWorkbench {
         let fill = StyleRefinement::default().size_full();
         if self.terminals.len() > 1 {
             // More than one: their names down the right, as VS Code lists them.
-            let shell = crate::panels::terminal::shell_name(&self.workspace.read(cx).settings.terminal.shell);
+            let shell = crate::panels::terminal::shell_name(
+                &self.workspace.read(cx).settings.terminal.shell,
+            );
             return h_flex()
                 .size_full()
-                .child(div().flex_1().min_w_0().h_full().children(self.terminals.get(self.terminal).map(|t| t.clone().cached(fill.clone()))))
                 .child(
-                    v_flex().w(px(140.)).h_full().flex_none().border_l_1().border_color(theme.border).py_1().children(self.terminals.iter().enumerate().map(|(ix, t)| {
-                        // The title its shell or program set, else the shell's name.
-                        let name = t.read(cx).title().map(str::to_string).unwrap_or_else(|| format!("{shell} {}", ix + 1));
-                        let on = ix == self.terminal;
-                        h_flex()
-                            .id(("ide-terminal", ix))
-                            .h(px(24.))
-                            .px(px(10.))
-                            .gap(px(6.))
-                            .text_size(px(12.))
-                            .cursor_pointer()
-                            .when(on, |el| el.bg(theme.list_active))
-                            .when(!on, |el| el.text_color(theme.muted_foreground).hover(|s| s.bg(theme.list_hover)))
-                            .child(Icon::new(IconName::SquareTerminal).xsmall())
-                            .child(div().min_w_0().truncate().child(name))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.terminal = ix;
-                                cx.notify();
-                            }))
-                    })),
+                    div().flex_1().min_w_0().h_full().children(
+                        self.terminals
+                            .get(self.terminal)
+                            .map(|t| t.clone().cached(fill.clone())),
+                    ),
+                )
+                .child(
+                    v_flex()
+                        .w(px(140.))
+                        .h_full()
+                        .flex_none()
+                        .border_l_1()
+                        .border_color(theme.border)
+                        .py_1()
+                        .children(self.terminals.iter().enumerate().map(|(ix, t)| {
+                            // The title its shell or program set, else the shell's name.
+                            let name = t
+                                .read(cx)
+                                .title()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| format!("{shell} {}", ix + 1));
+                            let on = ix == self.terminal;
+                            h_flex()
+                                .id(("ide-terminal", ix))
+                                .h(px(24.))
+                                .px(px(10.))
+                                .gap(px(6.))
+                                .text_size(px(12.))
+                                .cursor_pointer()
+                                .when(on, |el| el.bg(theme.list_active))
+                                .when(!on, |el| {
+                                    el.text_color(theme.muted_foreground)
+                                        .hover(|s| s.bg(theme.list_hover))
+                                })
+                                .child(Icon::new(IconName::SquareTerminal).xsmall())
+                                .child(div().min_w_0().truncate().child(name))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.terminal = ix;
+                                    cx.notify();
+                                }))
+                        })),
                 )
                 .into_any_element();
         }
         match self.terminals.first() {
-            Some(t) => div().size_full().pl(px(10.)).child(t.clone().cached(fill)).into_any_element(),
-            None => crate::panels::empty("No terminal. + starts one in this folder.", cx).into_any_element(),
+            Some(t) => div()
+                .size_full()
+                .pl(px(10.))
+                .child(t.clone().cached(fill))
+                .into_any_element(),
+            None => crate::panels::empty("No terminal. + starts one in this folder.", cx)
+                .into_any_element(),
         }
     }
 
@@ -296,16 +420,35 @@ impl IdeWorkbench {
         let ember = crate::palette::ember(cx);
         let ws = self.workspace.read(cx);
         let root = ws.ide_root.clone();
-        let mut files: Vec<_> = ws.diagnostics.iter().map(|(p, d)| (p.clone(), d.clone())).collect();
+        let mut files: Vec<_> = ws
+            .diagnostics
+            .iter()
+            .map(|(p, d)| (p.clone(), d.clone()))
+            .collect();
         files.sort_by(|a, b| a.0.cmp(&b.0));
         if files.is_empty() {
             return crate::panels::empty("No problems in the open files.", cx).into_any_element();
         }
-        let mut list = v_flex().id("ide-problems").size_full().overflow_y_scroll().py_1();
+        let mut list = v_flex()
+            .id("ide-problems")
+            .size_full()
+            .overflow_y_scroll()
+            .py_1();
         let mut row_ix = 0usize;
         for (path, diags) in files {
-            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let dir = path.parent().map(|d| root.as_ref().and_then(|r| d.strip_prefix(r).ok()).map(|r| r.display().to_string()).unwrap_or_else(|| trek_core::paths::tildify(d))).unwrap_or_default();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let dir = path
+                .parent()
+                .map(|d| {
+                    root.as_ref()
+                        .and_then(|r| d.strip_prefix(r).ok())
+                        .map(|r| r.display().to_string())
+                        .unwrap_or_else(|| trek_core::paths::tildify(d))
+                })
+                .unwrap_or_default();
             list = list.child(
                 h_flex()
                     .h(px(22.))
@@ -314,13 +457,27 @@ impl IdeWorkbench {
                     .text_size(px(12.5))
                     .child(crate::file_icon::badge(&name, px(13.), cx))
                     .child(name)
-                    .child(div().text_size(px(11.5)).text_color(theme.muted_foreground).child(dir))
-                    .child(div().px(px(5.)).rounded_full().bg(theme.foreground.opacity(0.08)).text_size(px(10.)).child(diags.len().to_string())),
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(theme.muted_foreground)
+                            .child(dir),
+                    )
+                    .child(
+                        div()
+                            .px(px(5.))
+                            .rounded_full()
+                            .bg(theme.foreground.opacity(0.08))
+                            .text_size(px(10.))
+                            .child(diags.len().to_string()),
+                    ),
             );
             for d in diags {
                 let (icon, color) = match d.severity {
                     Some(DiagnosticSeverity::ERROR) => (IconName::CircleX, crate::palette::red(cx)),
-                    Some(DiagnosticSeverity::WARNING) => (IconName::TriangleAlert, crate::palette::amber(cx)),
+                    Some(DiagnosticSeverity::WARNING) => {
+                        (IconName::TriangleAlert, crate::palette::amber(cx))
+                    }
                     _ => (IconName::Info, crate::palette::sky(cx)),
                 };
                 let line = d.range.start.line + 1;
@@ -328,44 +485,57 @@ impl IdeWorkbench {
                 let p = path.clone();
                 let (fix_path, fix) = (path.clone(), d.clone());
                 let group = SharedString::from(format!("ide-problem-{row_ix}"));
-                list = list.child(
-                    h_flex()
-                        .id(("ide-problem", row_ix))
-                        .test_support()
-                        .group(group.clone())
-                        .h(px(22.))
-                        .pl(px(32.))
-                        .pr(px(12.))
-                        .gap(px(8.))
-                        .text_size(px(12.5))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.list_hover))
-                        .child(Icon::new(icon).size(px(13.)).text_color(color))
-                        .child(div().flex_1().min_w_0().truncate().child(d.message.lines().next().unwrap_or_default().to_string()))
-                        .child(div().flex_none().text_size(px(11.5)).text_color(theme.muted_foreground).child(format!("[Ln {line}, Col {col}]")))
-                        .child(
-                            h_flex()
-                                .id(("ide-problem-fix", row_ix))
-                                .test_support()
-                                .flex_none()
-                                .h(px(18.))
-                                .px(px(7.))
-                                .gap(px(4.))
-                                .items_center()
-                                .rounded(px(4.))
-                                .text_size(px(11.5))
-                                .text_color(theme.muted_foreground)
-                                .group_hover(group, |s| s.text_color(ember))
-                                .hover(|s| s.bg(ember.opacity(0.12)))
-                                .child(Icon::new(crate::assets::Lucide::Sparkles).size(px(11.)))
-                                .child("Fix with Agent")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.fix_problem(fix_path.clone(), fix.clone(), window, cx);
-                                })),
-                        )
-                        .on_click(cx.listener(move |this, _, window, cx| this.open(p.clone(), Some(line), false, window, cx))),
-                );
+                list =
+                    list.child(
+                        h_flex()
+                            .id(("ide-problem", row_ix))
+                            .test_support()
+                            .group(group.clone())
+                            .h(px(22.))
+                            .pl(px(32.))
+                            .pr(px(12.))
+                            .gap(px(8.))
+                            .text_size(px(12.5))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.list_hover))
+                            .child(Icon::new(icon).size(px(13.)).text_color(color))
+                            .child(
+                                div().flex_1().min_w_0().truncate().child(
+                                    d.message.lines().next().unwrap_or_default().to_string(),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(11.5))
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("[Ln {line}, Col {col}]")),
+                            )
+                            .child(
+                                h_flex()
+                                    .id(("ide-problem-fix", row_ix))
+                                    .test_support()
+                                    .flex_none()
+                                    .h(px(18.))
+                                    .px(px(7.))
+                                    .gap(px(4.))
+                                    .items_center()
+                                    .rounded(px(4.))
+                                    .text_size(px(11.5))
+                                    .text_color(theme.muted_foreground)
+                                    .group_hover(group, |s| s.text_color(ember))
+                                    .hover(|s| s.bg(ember.opacity(0.12)))
+                                    .child(Icon::new(crate::assets::Lucide::Sparkles).size(px(11.)))
+                                    .child("Fix with Agent")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.fix_problem(fix_path.clone(), fix.clone(), window, cx);
+                                    })),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open(p.clone(), Some(line), false, window, cx)
+                            })),
+                    );
                 row_ix += 1;
             }
         }
@@ -378,19 +548,40 @@ impl IdeWorkbench {
     fn output(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
-        let threads: Vec<(String, String, Option<trek_agents::SessionLog>)> =
-            ws.ide_threads().into_iter().map(|t| (t.id.clone(), format!("{} · {}", t.agent.display_name(), t.title), ws.live.get(&t.id).and_then(|l| l.stderr.clone()))).collect();
+        let threads: Vec<(String, String, Option<trek_agents::SessionLog>)> = ws
+            .ide_threads()
+            .into_iter()
+            .map(|t| {
+                (
+                    t.id.clone(),
+                    format!("{} · {}", t.agent.display_name(), t.title),
+                    ws.live.get(&t.id).and_then(|l| l.stderr.clone()),
+                )
+            })
+            .collect();
         // The chat in front's channel unless another was picked.
         let channel = match &self.output_channel {
             Some(c) => c.clone(),
-            None => ws.ide_chat.active_thread().filter(|id| threads.iter().any(|(t, _, _)| t == *id)).map_or(OutputChannel::Servers, |id| OutputChannel::Thread(id.to_string())),
+            None => ws
+                .ide_chat
+                .active_thread()
+                .filter(|id| threads.iter().any(|(t, _, _)| t == *id))
+                .map_or(OutputChannel::Servers, |id| {
+                    OutputChannel::Thread(id.to_string())
+                }),
         };
         let label = match &channel {
             OutputChannel::Servers => "Language Servers".to_string(),
-            OutputChannel::Thread(id) => threads.iter().find(|(t, _, _)| t == id).map_or_else(|| "Agent".into(), |(_, l, _)| l.clone()),
+            OutputChannel::Thread(id) => threads
+                .iter()
+                .find(|(t, _, _)| t == id)
+                .map_or_else(|| "Agent".into(), |(_, l, _)| l.clone()),
         };
         let me = cx.weak_entity();
-        let listed: Vec<(String, String)> = threads.iter().map(|(id, label, _)| (id.clone(), label.clone())).collect();
+        let listed: Vec<(String, String)> = threads
+            .iter()
+            .map(|(id, label, _)| (id.clone(), label.clone()))
+            .collect();
         let picker = gpui_kit::component::button::Button::new("ide-output-channel")
             .ghost()
             .xsmall()
@@ -406,12 +597,17 @@ impl IdeWorkbench {
                         });
                     }
                 };
-                menu = menu.min_w(px(240.)).item(PopupMenuItem::new("Language Servers").on_click(pick(OutputChannel::Servers)));
+                menu = menu.min_w(px(240.)).item(
+                    PopupMenuItem::new("Language Servers").on_click(pick(OutputChannel::Servers)),
+                );
                 if !listed.is_empty() {
                     menu = menu.separator().label("Agents");
                 }
                 for (id, label) in &listed {
-                    menu = menu.item(PopupMenuItem::new(label.clone()).on_click(pick(OutputChannel::Thread(id.clone()))));
+                    menu = menu.item(
+                        PopupMenuItem::new(label.clone())
+                            .on_click(pick(OutputChannel::Thread(id.clone()))),
+                    );
                 }
                 menu
             });
@@ -422,14 +618,22 @@ impl IdeWorkbench {
                 for e in self.editors() {
                     let e = e.read(cx);
                     let Some(name) = e.lsp_name else { continue };
-                    let file = e.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let file = e
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
                     match servers.iter_mut().find(|(n, _)| *n == name) {
                         Some((_, files)) => files.push(file),
                         None => servers.push((name, vec![file])),
                     }
                 }
                 if servers.is_empty() {
-                    crate::panels::empty("No language server is running. They start as files open.", cx).into_any_element()
+                    crate::panels::empty(
+                        "No language server is running. They start as files open.",
+                        cx,
+                    )
+                    .into_any_element()
                 } else {
                     v_flex()
                         .id("ide-output-servers")
@@ -439,15 +643,32 @@ impl IdeWorkbench {
                         .overflow_y_scroll()
                         .gap(px(4.))
                         .children(servers.into_iter().map(|(name, files)| {
-                            h_flex().gap(px(8.)).child(div().text_color(crate::palette::emerald(cx)).child("●")).child(name).child(div().text_color(theme.muted_foreground).child(format!("· {}", files.join(", "))))
+                            h_flex()
+                                .gap(px(8.))
+                                .child(div().text_color(crate::palette::emerald(cx)).child("●"))
+                                .child(name)
+                                .child(
+                                    div()
+                                        .text_color(theme.muted_foreground)
+                                        .child(format!("· {}", files.join(", "))),
+                                )
                         }))
                         .into_any_element()
                 }
             }
             OutputChannel::Thread(id) => {
-                let lines = threads.iter().find(|(t, _, _)| t == id).and_then(|(_, _, l)| l.as_ref()).map(|l| l.lines()).unwrap_or_default();
+                let lines = threads
+                    .iter()
+                    .find(|(t, _, _)| t == id)
+                    .and_then(|(_, _, l)| l.as_ref())
+                    .map(|l| l.lines())
+                    .unwrap_or_default();
                 if lines.is_empty() {
-                    crate::panels::empty("Nothing on stderr from this chat's agent in its current session.", cx).into_any_element()
+                    crate::panels::empty(
+                        "Nothing on stderr from this chat's agent in its current session.",
+                        cx,
+                    )
+                    .into_any_element()
                 } else {
                     v_flex()
                         .id("ide-output-log")
@@ -455,7 +676,11 @@ impl IdeWorkbench {
                         .size_full()
                         .overflow_y_scroll()
                         .font_family(mono.clone())
-                        .children(lines.into_iter().map(|l| div().whitespace_normal().child(l)))
+                        .children(
+                            lines
+                                .into_iter()
+                                .map(|l| div().whitespace_normal().child(l)),
+                        )
                         .into_any_element()
                 }
             }
@@ -465,7 +690,15 @@ impl IdeWorkbench {
             .test_support()
             .size_full()
             .child(h_flex().h(px(26.)).flex_none().px(px(8.)).child(picker))
-            .child(div().flex_1().min_h_0().px(px(14.)).py(px(4.)).text_size(px(12.)).child(body))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .px(px(14.))
+                    .py(px(4.))
+                    .text_size(px(12.))
+                    .child(body),
+            )
             .into_any_element()
     }
 
@@ -478,35 +711,83 @@ impl IdeWorkbench {
             .ide_threads()
             .into_iter()
             .filter_map(|t| ws.live.get(&t.id).map(|l| (t, l)))
-            .flat_map(|(t, l)| l.background.iter().map(move |b| (t.id.clone(), t.title.clone(), b.task.id.clone(), b.task.title.clone(), b.task.stoppable && !b.stopping, b.started.elapsed())))
+            .flat_map(|(t, l)| {
+                l.background.iter().map(move |b| {
+                    (
+                        t.id.clone(),
+                        t.title.clone(),
+                        b.task.id.clone(),
+                        b.task.title.clone(),
+                        b.task.stoppable && !b.stopping,
+                        b.started.elapsed(),
+                    )
+                })
+            })
             .collect();
         if rows.is_empty() {
-            return crate::panels::empty("No agent is running anything in the background.", cx).into_any_element();
+            return crate::panels::empty("No agent is running anything in the background.", cx)
+                .into_any_element();
         }
         v_flex()
             .id("ide-tasks")
             .size_full()
             .overflow_y_scroll()
             .py_1()
-            .children(rows.into_iter().enumerate().map(|(ix, (thread, title, task, what, stoppable, took))| {
-                h_flex()
-                    .id(("ide-task", ix))
-                    .h(px(26.))
-                    .px(px(12.))
-                    .gap(px(8.))
-                    .text_size(px(12.5))
-                    .hover(|s| s.bg(theme.list_hover))
-                    .child(gpui_kit::component::spinner::Spinner::new().xsmall().color(theme.muted_foreground))
-                    .child(div().flex_1().min_w_0().truncate().font_family(cx.theme().mono_font_family.clone()).child(what))
-                    .child(div().flex_none().max_w(px(220.)).truncate().text_color(theme.muted_foreground).child(title))
-                    .child(div().flex_none().text_color(theme.muted_foreground).child(crate::time::elapsed(took)))
-                    .when(stoppable, |el| {
-                        el.child(crate::ui::icon_button(("ide-task-stop", ix), crate::assets::Lucide::Square, "Stop").on_click(cx.listener(move |this, _, _, cx| {
-                            let (thread, task) = (thread.clone(), task.clone());
-                            this.workspace.update(cx, |ws, cx| ws.stop_background(&thread, &task, cx));
-                        })))
-                    })
-            }))
+            .children(rows.into_iter().enumerate().map(
+                |(ix, (thread, title, task, what, stoppable, took))| {
+                    h_flex()
+                        .id(("ide-task", ix))
+                        .h(px(26.))
+                        .px(px(12.))
+                        .gap(px(8.))
+                        .text_size(px(12.5))
+                        .hover(|s| s.bg(theme.list_hover))
+                        .child(
+                            gpui_kit::component::spinner::Spinner::new()
+                                .xsmall()
+                                .color(theme.muted_foreground),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .child(what),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .max_w(px(220.))
+                                .truncate()
+                                .text_color(theme.muted_foreground)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(theme.muted_foreground)
+                                .child(crate::time::elapsed(took)),
+                        )
+                        .when(stoppable, |el| {
+                            el.child(
+                                crate::ui::icon_button(
+                                    ("ide-task-stop", ix),
+                                    crate::assets::Lucide::Square,
+                                    "Stop",
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        let (thread, task) = (thread.clone(), task.clone());
+                                        this.workspace.update(cx, |ws, cx| {
+                                            ws.stop_background(&thread, &task, cx)
+                                        });
+                                    },
+                                )),
+                            )
+                        })
+                },
+            ))
             .into_any_element()
     }
 }

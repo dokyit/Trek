@@ -10,7 +10,11 @@
 
 /// (resource id, file in `assets/brand`).
 #[cfg_attr(not(windows), allow(dead_code))]
-const ICONS: [(u16, &str); 3] = [(1, "trek.ico"), (2, "trek-night.ico"), (3, "trek-glass.ico")];
+const ICONS: [(u16, &str); 3] = [
+    (1, "trek.ico"),
+    (2, "trek-night.ico"),
+    (3, "trek-glass.ico"),
+];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -27,15 +31,26 @@ fn windows() {
     let icons: String = ICONS
         .iter()
         .map(|(id, file)| {
-            let ico = manifest.join("../../assets/brand").join(file).canonicalize().unwrap_or_else(|e| panic!("assets/brand/{file}: {e}"));
+            let ico = manifest
+                .join("../../assets/brand")
+                .join(file)
+                .canonicalize()
+                .unwrap_or_else(|e| panic!("assets/brand/{file}: {e}"));
             println!("cargo:rerun-if-changed={}", ico.display());
-            format!("{id} ICON \"{}\"\n", ico.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/"))
+            format!(
+                "{id} ICON \"{}\"\n",
+                ico.to_string_lossy()
+                    .trim_start_matches(r"\\?\")
+                    .replace('\\', "/")
+            )
         })
         .collect();
 
     let version = std::env::var("CARGO_PKG_VERSION").unwrap();
     // 1.2.3-beta.4 → 1,2,3,0: the numeric fields take the numbers only.
-    let mut numbers = version.split(['.', '-']).map(|p| p.parse::<u32>().unwrap_or(0));
+    let mut numbers = version
+        .split(['.', '-'])
+        .map(|p| p.parse::<u32>().unwrap_or(0));
     let [major, minor, patch] = std::array::from_fn(|_| numbers.next().unwrap_or(0));
     let rc = format!(
         r#"{icons}1 VERSIONINFO
@@ -63,7 +78,9 @@ END
     );
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("trek.rc");
     std::fs::write(&out, rc).unwrap();
-    embed_resource::compile(&out, embed_resource::NONE).manifest_required().unwrap();
+    embed_resource::compile(&out, embed_resource::NONE)
+        .manifest_required()
+        .unwrap();
 }
 
 #[cfg(not(windows))]

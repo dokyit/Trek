@@ -19,7 +19,13 @@ pub struct ModelInfo {
 
 impl ModelInfo {
     pub(crate) fn new(id: &str, name: &str, tier: u8, efforts: &[Effort]) -> Self {
-        Self { id: id.into(), name: name.into(), efforts: efforts.to_vec(), tier, fast: None }
+        Self {
+            id: id.into(),
+            name: name.into(),
+            efforts: efforts.to_vec(),
+            tier,
+            fast: None,
+        }
     }
 }
 
@@ -44,14 +50,28 @@ const CODEX_EFFORTS: &[Effort] = &[Low, Medium, High, XHigh, Max];
 pub fn default_models(agent: &AgentId) -> Vec<ModelInfo> {
     match agent {
         AgentId::ClaudeCode => vec![
-            ModelInfo::new("claude-haiku-4-5", "Haiku 4.5", 0, &[Off, Low, Medium, High]),
+            ModelInfo::new(
+                "claude-haiku-4-5",
+                "Haiku 4.5",
+                0,
+                &[Off, Low, Medium, High],
+            ),
             ModelInfo::new("claude-sonnet-5-5", "Sonnet 5.5", 1, CLAUDE_EFFORTS),
-            ModelInfo { fast: Some("settings".into()), ..ModelInfo::new("claude-opus-5-5", "Opus 5.5", 2, CLAUDE_EFFORTS) },
+            ModelInfo {
+                fast: Some("settings".into()),
+                ..ModelInfo::new("claude-opus-5-5", "Opus 5.5", 2, CLAUDE_EFFORTS)
+            },
             ModelInfo::new("claude-fable-5-1", "Fable 5.1", 3, CLAUDE_EFFORTS),
             ModelInfo::new("claude-sonnet-5", "Sonnet 5", 1, CLAUDE_EFFORTS),
-            ModelInfo { fast: Some("settings".into()), ..ModelInfo::new("claude-opus-5", "Opus 5", 2, CLAUDE_EFFORTS) },
+            ModelInfo {
+                fast: Some("settings".into()),
+                ..ModelInfo::new("claude-opus-5", "Opus 5", 2, CLAUDE_EFFORTS)
+            },
             ModelInfo::new("claude-fable-5", "Fable 5", 3, CLAUDE_EFFORTS),
-            ModelInfo { fast: Some("settings".into()), ..ModelInfo::new("claude-opus-4-8", "Opus 4.8", 2, CLAUDE_EFFORTS) },
+            ModelInfo {
+                fast: Some("settings".into()),
+                ..ModelInfo::new("claude-opus-4-8", "Opus 4.8", 2, CLAUDE_EFFORTS)
+            },
         ],
         AgentId::Codex => vec![
             ModelInfo::new("gpt-5.6-luna", "Luna", 0, CODEX_EFFORTS),
@@ -63,7 +83,12 @@ pub fn default_models(agent: &AgentId) -> Vec<ModelInfo> {
             ModelInfo::new("mock-swift", "Mock Swift", 0, &[Low, Medium, High]),
             ModelInfo::new("mock-deep", "Mock Deep", 1, &[Low, Medium, High, Max]),
         ],
-        AgentId::Direct(p) if p == MOCK_RELAY_PROVIDER => vec![ModelInfo::new("relay-swift", "Relay Swift", 0, &[Low, Medium, High])],
+        AgentId::Direct(p) if p == MOCK_RELAY_PROVIDER => vec![ModelInfo::new(
+            "relay-swift",
+            "Relay Swift",
+            0,
+            &[Low, Medium, High],
+        )],
         AgentId::Direct(p) if p == "ollama" || p == "lmstudio" || p == "llamacpp" => vec![],
         _ => vec![],
     }
@@ -77,7 +102,11 @@ pub fn power_presets(models: &[ModelInfo]) -> Vec<PowerPreset> {
     let mut out = Vec::new();
     let n = sorted.len();
     for (i, m) in sorted.iter().enumerate() {
-        let efforts: Vec<Effort> = if m.efforts.is_empty() { vec![Medium] } else { m.efforts.clone() };
+        let efforts: Vec<Effort> = if m.efforts.is_empty() {
+            vec![Medium]
+        } else {
+            m.efforts.clone()
+        };
         let pick = |e: Effort| e.clamp_to(&efforts);
         let stops: Vec<Effort> = if i + 1 == n {
             // Strongest model: medium, high, max.
@@ -88,7 +117,11 @@ pub fn power_presets(models: &[ModelInfo]) -> Vec<PowerPreset> {
             vec![pick(Medium)]
         };
         for e in stops {
-            let p = PowerPreset { model: m.id.clone(), model_name: m.name.clone(), effort: e };
+            let p = PowerPreset {
+                model: m.id.clone(),
+                model_name: m.name.clone(),
+                effort: e,
+            };
             if !out.contains(&p) {
                 out.push(p);
             }
@@ -117,17 +150,94 @@ pub enum Wire {
 }
 
 pub const DIRECT_PROVIDERS: &[DirectProvider] = &[
-    DirectProvider { id: "anthropic", name: "Anthropic API", base_url: "https://api.anthropic.com", wire: Wire::Anthropic, env_key: Some("ANTHROPIC_API_KEY"), local: false },
-    DirectProvider { id: "openai", name: "OpenAI API", base_url: "https://api.openai.com/v1", wire: Wire::OpenAiChat, env_key: Some("OPENAI_API_KEY"), local: false },
-    DirectProvider { id: "google", name: "Google Gemini API", base_url: "https://generativelanguage.googleapis.com/v1beta/openai", wire: Wire::OpenAiChat, env_key: Some("GEMINI_API_KEY"), local: false },
-    DirectProvider { id: "openrouter", name: "OpenRouter", base_url: "https://openrouter.ai/api/v1", wire: Wire::OpenAiChat, env_key: Some("OPENROUTER_API_KEY"), local: false },
-    DirectProvider { id: "deepseek", name: "DeepSeek", base_url: "https://api.deepseek.com/v1", wire: Wire::OpenAiChat, env_key: Some("DEEPSEEK_API_KEY"), local: false },
-    DirectProvider { id: "xai", name: "xAI", base_url: "https://api.x.ai/v1", wire: Wire::OpenAiChat, env_key: Some("XAI_API_KEY"), local: false },
-    DirectProvider { id: "mistral", name: "Mistral", base_url: "https://api.mistral.ai/v1", wire: Wire::OpenAiChat, env_key: Some("MISTRAL_API_KEY"), local: false },
-    DirectProvider { id: "groq", name: "Groq", base_url: "https://api.groq.com/openai/v1", wire: Wire::OpenAiChat, env_key: Some("GROQ_API_KEY"), local: false },
-    DirectProvider { id: "ollama", name: "Ollama", base_url: "http://127.0.0.1:11434/v1", wire: Wire::OpenAiChat, env_key: None, local: true },
-    DirectProvider { id: "lmstudio", name: "LM Studio", base_url: "http://127.0.0.1:1234/v1", wire: Wire::OpenAiChat, env_key: None, local: true },
-    DirectProvider { id: "llamacpp", name: "llama.cpp / MLX", base_url: "http://127.0.0.1:8080/v1", wire: Wire::OpenAiChat, env_key: None, local: true },
+    DirectProvider {
+        id: "anthropic",
+        name: "Anthropic API",
+        base_url: "https://api.anthropic.com",
+        wire: Wire::Anthropic,
+        env_key: Some("ANTHROPIC_API_KEY"),
+        local: false,
+    },
+    DirectProvider {
+        id: "openai",
+        name: "OpenAI API",
+        base_url: "https://api.openai.com/v1",
+        wire: Wire::OpenAiChat,
+        env_key: Some("OPENAI_API_KEY"),
+        local: false,
+    },
+    DirectProvider {
+        id: "google",
+        name: "Google Gemini API",
+        base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+        wire: Wire::OpenAiChat,
+        env_key: Some("GEMINI_API_KEY"),
+        local: false,
+    },
+    DirectProvider {
+        id: "openrouter",
+        name: "OpenRouter",
+        base_url: "https://openrouter.ai/api/v1",
+        wire: Wire::OpenAiChat,
+        env_key: Some("OPENROUTER_API_KEY"),
+        local: false,
+    },
+    DirectProvider {
+        id: "deepseek",
+        name: "DeepSeek",
+        base_url: "https://api.deepseek.com/v1",
+        wire: Wire::OpenAiChat,
+        env_key: Some("DEEPSEEK_API_KEY"),
+        local: false,
+    },
+    DirectProvider {
+        id: "xai",
+        name: "xAI",
+        base_url: "https://api.x.ai/v1",
+        wire: Wire::OpenAiChat,
+        env_key: Some("XAI_API_KEY"),
+        local: false,
+    },
+    DirectProvider {
+        id: "mistral",
+        name: "Mistral",
+        base_url: "https://api.mistral.ai/v1",
+        wire: Wire::OpenAiChat,
+        env_key: Some("MISTRAL_API_KEY"),
+        local: false,
+    },
+    DirectProvider {
+        id: "groq",
+        name: "Groq",
+        base_url: "https://api.groq.com/openai/v1",
+        wire: Wire::OpenAiChat,
+        env_key: Some("GROQ_API_KEY"),
+        local: false,
+    },
+    DirectProvider {
+        id: "ollama",
+        name: "Ollama",
+        base_url: "http://127.0.0.1:11434/v1",
+        wire: Wire::OpenAiChat,
+        env_key: None,
+        local: true,
+    },
+    DirectProvider {
+        id: "lmstudio",
+        name: "LM Studio",
+        base_url: "http://127.0.0.1:1234/v1",
+        wire: Wire::OpenAiChat,
+        env_key: None,
+        local: true,
+    },
+    DirectProvider {
+        id: "llamacpp",
+        name: "llama.cpp / MLX",
+        base_url: "http://127.0.0.1:8080/v1",
+        wire: Wire::OpenAiChat,
+        env_key: None,
+        local: true,
+    },
 ];
 
 pub fn direct_provider(id: &str) -> Option<&'static DirectProvider> {
@@ -154,7 +264,9 @@ pub fn provider_display_name(id: &str) -> String {
     if id == MOCK_RELAY_PROVIDER {
         return "Mock relay".into();
     }
-    direct_provider(id).map(|p| p.name.to_string()).unwrap_or_else(|| id.to_string())
+    direct_provider(id)
+        .map(|p| p.name.to_string())
+        .unwrap_or_else(|| id.to_string())
 }
 
 /// How to install an agent's CLI: the line to run on macOS and on Windows, side by side so the
@@ -169,28 +281,53 @@ pub struct Hint {
 impl Hint {
     /// One line for both.
     const fn same(line: &'static str) -> Self {
-        Self { unix: line, windows: line }
+        Self {
+            unix: line,
+            windows: line,
+        }
     }
 
     /// The line for the platform Trek runs on.
     pub const fn here(&self) -> &'static str {
-        if cfg!(windows) { self.windows } else { self.unix }
+        if cfg!(windows) {
+            self.windows
+        } else {
+            self.unix
+        }
     }
 }
 
-const CLAUDE_CODE: Hint = Hint { unix: "npm i -g @anthropic-ai/claude-code", windows: "irm https://claude.ai/install.ps1 | iex" };
+const CLAUDE_CODE: Hint = Hint {
+    unix: "npm i -g @anthropic-ai/claude-code",
+    windows: "irm https://claude.ai/install.ps1 | iex",
+};
 const CODEX: Hint = Hint::same("npm i -g @openai/codex");
 // OpenCode has no PowerShell installer (its docs list npm, Scoop, Chocolatey and a release download).
-const OPENCODE: Hint = Hint { unix: "curl -fsSL https://opencode.ai/install | bash", windows: "npm i -g opencode-ai" };
-const DROID: Hint = Hint { unix: "curl -fsSL https://app.factory.ai/cli | sh", windows: "irm https://app.factory.ai/cli/windows | iex" };
-const CURSOR: Hint = Hint { unix: "curl https://cursor.com/install -fsS | bash", windows: "irm 'https://cursor.com/install?win32=true' | iex" };
+const OPENCODE: Hint = Hint {
+    unix: "curl -fsSL https://opencode.ai/install | bash",
+    windows: "npm i -g opencode-ai",
+};
+const DROID: Hint = Hint {
+    unix: "curl -fsSL https://app.factory.ai/cli | sh",
+    windows: "irm https://app.factory.ai/cli/windows | iex",
+};
+const CURSOR: Hint = Hint {
+    unix: "curl https://cursor.com/install -fsS | bash",
+    windows: "irm 'https://cursor.com/install?win32=true' | iex",
+};
 const GITHUB_COPILOT: Hint = Hint::same("npm i -g @github/copilot");
 const KIMI: Hint = Hint::same("npm i -g @moonshot-ai/kimi-code");
 const QWEN_CODE: Hint = Hint::same("npm i -g @qwen-code/qwen-code");
-const GROK: Hint = Hint { unix: "curl -fsSL https://x.ai/cli/install.sh | bash", windows: "irm https://x.ai/cli/install.ps1 | iex" };
+const GROK: Hint = Hint {
+    unix: "curl -fsSL https://x.ai/cli/install.sh | bash",
+    windows: "irm https://x.ai/cli/install.ps1 | iex",
+};
 // The line `devin update` itself prints on Windows. The script's own usage note still names
 // static.devin.ai/cli/install.ps1, which answers 403 now (2026-10-11).
-const DEVIN: Hint = Hint { unix: "curl -fsSL https://cli.devin.ai/install.sh | bash", windows: "irm https://cli.devin.ai/install.ps1 | iex" };
+const DEVIN: Hint = Hint {
+    unix: "curl -fsSL https://cli.devin.ai/install.sh | bash",
+    windows: "irm https://cli.devin.ai/install.ps1 | iex",
+};
 // Goose's installer for Windows is a script to download and run; it supports x86-64 only.
 const GOOSE: Hint = Hint {
     unix: "brew install block-goose-cli",
@@ -214,15 +351,78 @@ pub struct AcpAgent {
 }
 
 pub const ACP_AGENTS: &[AcpAgent] = &[
-    AcpAgent { id: "cursor", name: "Cursor", binary: "cursor-agent", args: &["acp"], version_marker: None, install_hint: CURSOR.here() },
-    AcpAgent { id: "github-copilot", name: "GitHub Copilot", binary: "copilot", args: &["--acp"], version_marker: None, install_hint: GITHUB_COPILOT.here() },
-    AcpAgent { id: "kimi", name: "Kimi", binary: "kimi", args: &["acp"], version_marker: None, install_hint: KIMI.here() },
-    AcpAgent { id: "qwen-code", name: "Qwen Code", binary: "qwen", args: &["--acp"], version_marker: None, install_hint: QWEN_CODE.here() },
-    AcpAgent { id: "grok", name: "Grok", binary: "grok", args: &["agent", "stdio"], version_marker: None, install_hint: GROK.here() },
-    AcpAgent { id: "devin", name: "Devin", binary: "devin", args: &["acp"], version_marker: None, install_hint: DEVIN.here() },
-    AcpAgent { id: "goose", name: "Goose", binary: "goose", args: &["acp"], version_marker: None, install_hint: GOOSE.here() },
-    AcpAgent { id: "amp", name: "Amp", binary: "amp-acp", args: &[], version_marker: None, install_hint: AMP.here() },
-    AcpAgent { id: "pi", name: "Pi", binary: "pi-acp", args: &[], version_marker: None, install_hint: PI.here() },
+    AcpAgent {
+        id: "cursor",
+        name: "Cursor",
+        binary: "cursor-agent",
+        args: &["acp"],
+        version_marker: None,
+        install_hint: CURSOR.here(),
+    },
+    AcpAgent {
+        id: "github-copilot",
+        name: "GitHub Copilot",
+        binary: "copilot",
+        args: &["--acp"],
+        version_marker: None,
+        install_hint: GITHUB_COPILOT.here(),
+    },
+    AcpAgent {
+        id: "kimi",
+        name: "Kimi",
+        binary: "kimi",
+        args: &["acp"],
+        version_marker: None,
+        install_hint: KIMI.here(),
+    },
+    AcpAgent {
+        id: "qwen-code",
+        name: "Qwen Code",
+        binary: "qwen",
+        args: &["--acp"],
+        version_marker: None,
+        install_hint: QWEN_CODE.here(),
+    },
+    AcpAgent {
+        id: "grok",
+        name: "Grok",
+        binary: "grok",
+        args: &["agent", "stdio"],
+        version_marker: None,
+        install_hint: GROK.here(),
+    },
+    AcpAgent {
+        id: "devin",
+        name: "Devin",
+        binary: "devin",
+        args: &["acp"],
+        version_marker: None,
+        install_hint: DEVIN.here(),
+    },
+    AcpAgent {
+        id: "goose",
+        name: "Goose",
+        binary: "goose",
+        args: &["acp"],
+        version_marker: None,
+        install_hint: GOOSE.here(),
+    },
+    AcpAgent {
+        id: "amp",
+        name: "Amp",
+        binary: "amp-acp",
+        args: &[],
+        version_marker: None,
+        install_hint: AMP.here(),
+    },
+    AcpAgent {
+        id: "pi",
+        name: "Pi",
+        binary: "pi-acp",
+        args: &[],
+        version_marker: None,
+        install_hint: PI.here(),
+    },
 ];
 
 /// How to install a CLI agent and sign in to it, keyed by `AgentId::key()`.
@@ -275,7 +475,11 @@ pub fn agent_setup(key: &str) -> Option<AgentSetup> {
         _ => return None,
     };
     let install = install_hint(key).map(|h| h.here()).unwrap_or("");
-    Some(AgentSetup { install, login, account_url })
+    Some(AgentSetup {
+        install,
+        login,
+        account_url,
+    })
 }
 
 pub fn acp_display_name(id: &str) -> String {
@@ -302,7 +506,12 @@ pub fn added_agents() -> Vec<AddedAgent> {
 
 /// An added agent by its id (`AgentId::Acp(id)`). Built-in ids are never added ones.
 pub fn added_agent(id: &str) -> Option<AddedAgent> {
-    ADDED.read().unwrap_or_else(|e| e.into_inner()).iter().find(|a| a.id == id).cloned()
+    ADDED
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|a| a.id == id)
+        .cloned()
 }
 
 #[cfg(test)]
@@ -318,17 +527,37 @@ mod tests {
     }
 
     /// Every agent Trek can install, by `AgentId::key()`.
-    const INSTALLABLE: &[&str] = &["claude-code", "codex", "opencode", "droid", "cursor", "github-copilot", "kimi", "qwen-code", "grok", "devin", "goose", "amp", "pi"];
+    const INSTALLABLE: &[&str] = &[
+        "claude-code",
+        "codex",
+        "opencode",
+        "droid",
+        "cursor",
+        "github-copilot",
+        "kimi",
+        "qwen-code",
+        "grok",
+        "devin",
+        "goose",
+        "amp",
+        "pi",
+    ];
 
     #[test]
     fn install_lines_for_macos_are_what_they_were() {
         let mac = |key: &str| install_hint(key).unwrap().unix;
         assert_eq!(mac("claude-code"), "npm i -g @anthropic-ai/claude-code");
-        assert_eq!(mac("opencode"), "curl -fsSL https://opencode.ai/install | bash");
+        assert_eq!(
+            mac("opencode"),
+            "curl -fsSL https://opencode.ai/install | bash"
+        );
         assert_eq!(mac("droid"), "curl -fsSL https://app.factory.ai/cli | sh");
         assert_eq!(mac("cursor"), "curl https://cursor.com/install -fsS | bash");
         assert_eq!(mac("grok"), "curl -fsSL https://x.ai/cli/install.sh | bash");
-        assert_eq!(mac("devin"), "curl -fsSL https://cli.devin.ai/install.sh | bash");
+        assert_eq!(
+            mac("devin"),
+            "curl -fsSL https://cli.devin.ai/install.sh | bash"
+        );
         assert_eq!(mac("goose"), "brew install block-goose-cli");
         assert_eq!(mac("pi"), "npm i -g @earendil-works/pi-coding-agent pi-acp");
     }
@@ -337,14 +566,24 @@ mod tests {
     fn install_lines_for_windows_are_ones_a_windows_shell_runs() {
         let win = |key: &str| install_hint(key).unwrap().windows;
         // From the vendors' own documentation and install scripts.
-        assert_eq!(win("claude-code"), "irm https://claude.ai/install.ps1 | iex");
-        assert_eq!(win("cursor"), "irm 'https://cursor.com/install?win32=true' | iex");
+        assert_eq!(
+            win("claude-code"),
+            "irm https://claude.ai/install.ps1 | iex"
+        );
+        assert_eq!(
+            win("cursor"),
+            "irm 'https://cursor.com/install?win32=true' | iex"
+        );
         assert_eq!(win("grok"), "irm https://x.ai/cli/install.ps1 | iex");
         assert_eq!(win("devin"), "irm https://cli.devin.ai/install.ps1 | iex");
         assert_eq!(win("droid"), "irm https://app.factory.ai/cli/windows | iex");
         // OpenCode has no PowerShell installer: npm, which its documentation lists.
         assert_eq!(win("opencode"), "npm i -g opencode-ai");
-        assert!(win("goose").contains("download_cli.ps1"), "{}", win("goose"));
+        assert!(
+            win("goose").contains("download_cli.ps1"),
+            "{}",
+            win("goose")
+        );
         // The npm packages are the same on both.
         for key in ["codex", "github-copilot", "kimi", "qwen-code", "amp", "pi"] {
             let hint = install_hint(key).unwrap();
@@ -354,8 +593,19 @@ mod tests {
         // And none is a Unix idiom: no `| bash`, `| sh`, `curl … -fsSL`, `brew`.
         for key in INSTALLABLE {
             let line = install_hint(key).unwrap().windows;
-            assert!(!line.contains("| bash") && !line.contains("| sh") && !line.contains("brew ") && !line.starts_with("curl"), "{key}: {line}");
-            assert!(line.starts_with("irm ") || line.starts_with("npm i -g ") || line.starts_with("Invoke-WebRequest "), "{key}: {line}");
+            assert!(
+                !line.contains("| bash")
+                    && !line.contains("| sh")
+                    && !line.contains("brew ")
+                    && !line.starts_with("curl"),
+                "{key}: {line}"
+            );
+            assert!(
+                line.starts_with("irm ")
+                    || line.starts_with("npm i -g ")
+                    || line.starts_with("Invoke-WebRequest "),
+                "{key}: {line}"
+            );
         }
     }
 
@@ -363,14 +613,23 @@ mod tests {
     fn the_install_line_is_picked_by_platform_in_one_place() {
         for key in INSTALLABLE {
             let hint = install_hint(key).unwrap();
-            let here = if cfg!(windows) { hint.windows } else { hint.unix };
+            let here = if cfg!(windows) {
+                hint.windows
+            } else {
+                hint.unix
+            };
             assert_eq!(hint.here(), here, "{key}");
             assert_eq!(agent_setup(key).unwrap().install, here, "{key}");
         }
         // The ACP agents carry the same line as their setup, so the "isn't installed" message
         // and the install chip never disagree.
         for a in ACP_AGENTS {
-            assert_eq!(a.install_hint, agent_setup(a.id).unwrap().install, "{}", a.id);
+            assert_eq!(
+                a.install_hint,
+                agent_setup(a.id).unwrap().install,
+                "{}",
+                a.id
+            );
         }
         assert!(install_hint("not-an-agent").is_none() && agent_setup("not-an-agent").is_none());
     }

@@ -27,7 +27,9 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::TextViewState;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
@@ -67,7 +69,16 @@ impl Block {
     fn first(&self) -> usize {
         match self {
             Block::Thought(v) | Block::Explore(v) | Block::Edits(v) => v[0],
-            Block::User(i) | Block::Wake(i) | Block::Command(i) | Block::SubAgent(i) | Block::Assistant(i) | Block::TurnEnd(i) | Block::Notice(i) | Block::Error(i) | Block::Limit(i) | Block::Handoff(i) => *i,
+            Block::User(i)
+            | Block::Wake(i)
+            | Block::Command(i)
+            | Block::SubAgent(i)
+            | Block::Assistant(i)
+            | Block::TurnEnd(i)
+            | Block::Notice(i)
+            | Block::Error(i)
+            | Block::Limit(i)
+            | Block::Handoff(i) => *i,
         }
     }
 }
@@ -138,11 +149,20 @@ fn explore_parts(calls: &[(String, String)], cwd: Option<&Path>) -> Vec<Part> {
     for (title, detail) in calls {
         let o = op(title, detail, cwd);
         match tool_kind(title) {
-            ToolKind::Read => reads.extend(o.file.or(Some(o.text)).filter(|f| !f.is_empty()).map(|f| f.rsplit('/').next().unwrap_or(&f).to_string())),
+            ToolKind::Read => reads.extend(
+                o.file
+                    .or(Some(o.text))
+                    .filter(|f| !f.is_empty())
+                    .map(|f| f.rsplit('/').next().unwrap_or(&f).to_string()),
+            ),
             ToolKind::Search => searches.push(o.text),
             ToolKind::WebSearch => web += 1,
             ToolKind::Fetch => fetched.push(o.text),
-            _ => other.push(if o.text.is_empty() { o.verb } else { format!("{} {}", o.verb, o.text) }),
+            _ => other.push(if o.text.is_empty() {
+                o.verb
+            } else {
+                format!("{} {}", o.verb, o.text)
+            }),
         }
     }
     reads.dedup();
@@ -157,18 +177,39 @@ fn explore_parts(calls: &[(String, String)], cwd: Option<&Path>) -> Vec<Part> {
         parts.push(p);
     }
     if let Some(first) = searches.first() {
-        let more = if searches.len() > 1 { format!(" +{}", searches.len() - 1) } else { String::new() };
-        parts.push(vec![Part::Text(format!("searched “{}”{more}", orch::preview(first, 40)))]);
+        let more = if searches.len() > 1 {
+            format!(" +{}", searches.len() - 1)
+        } else {
+            String::new()
+        };
+        parts.push(vec![Part::Text(format!(
+            "searched “{}”{more}",
+            orch::preview(first, 40)
+        ))]);
     }
     if web > 0 {
-        parts.push(vec![Part::Text(if web == 1 { "searched the web".into() } else { format!("searched the web {web} times") })]);
+        parts.push(vec![Part::Text(if web == 1 {
+            "searched the web".into()
+        } else {
+            format!("searched the web {web} times")
+        })]);
     }
     if let Some(first) = fetched.first() {
-        parts.push(vec![Part::Text(format!("fetched {}", orch::preview(first, 40)))]);
+        parts.push(vec![Part::Text(format!(
+            "fetched {}",
+            orch::preview(first, 40)
+        ))]);
     }
     if let Some(first) = other.first() {
-        let more = if other.len() > 1 { format!(" +{}", other.len() - 1) } else { String::new() };
-        parts.push(vec![Part::Text(format!("{}{more}", orch::preview(first, 48)))]);
+        let more = if other.len() > 1 {
+            format!(" +{}", other.len() - 1)
+        } else {
+            String::new()
+        };
+        parts.push(vec![Part::Text(format!(
+            "{}{more}",
+            orch::preview(first, 48)
+        ))]);
     }
     // The first part leads with a capital; the rest follow a dot.
     let mut out = vec![];
@@ -191,14 +232,20 @@ fn explore_parts(calls: &[(String, String)], cwd: Option<&Path>) -> Vec<Part> {
 
 fn capitalize(text: &str) -> String {
     let mut chars = text.chars();
-    chars.next().map(|f| f.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
+    chars
+        .next()
+        .map(|f| f.to_uppercase().collect::<String>() + chars.as_str())
+        .unwrap_or_default()
 }
 
 /// The footer (`TurnEnd`) of the turn item `ix` is in, once the turn is over.
 fn turn_end(items: &[Item], ix: usize) -> Option<usize> {
     let after = items.get(ix + 1..)?;
     let end = after.iter().position(trek_core::rewind::ends_turn)?;
-    if after[..end].iter().any(|i| matches!(i, Item::User { aside: false, .. })) {
+    if after[..end]
+        .iter()
+        .any(|i| matches!(i, Item::User { aside: false, .. }))
+    {
         return None;
     }
     matches!(after[end], Item::TurnEnd { .. }).then_some(ix + 1 + end)
@@ -215,18 +262,66 @@ struct EditFile {
 
 /// A block, read out of the transcript for drawing (owned, so drawing can update the view).
 enum View {
-    User { key: String, text: String, context: Vec<String>, ask: bool, images: Vec<PathBuf>, at: Option<i64>, aside: bool, open: bool },
-    Wake { key: String, summary: String, text: String, open: bool },
+    User {
+        key: String,
+        text: String,
+        context: Vec<String>,
+        ask: bool,
+        images: Vec<PathBuf>,
+        at: Option<i64>,
+        aside: bool,
+        open: bool,
+    },
+    Wake {
+        key: String,
+        summary: String,
+        text: String,
+        open: bool,
+    },
     /// `secs`: how long the thinking took, when it was watched here (a transcript read back
     /// doesn't say).
-    Thought { key: String, text: String, secs: Option<u64>, open: bool },
-    Explore { key: String, parts: Vec<Part>, rows: Vec<(String, String, ToolStatus)>, running: bool, open: bool },
-    Edits { files: Vec<EditFile>, running: bool },
-    Command { key: String, command: String, tail: Vec<String>, output: Option<String>, status: ToolStatus, open: bool },
-    SubAgent { label: String, detail: String, state: TaskState, child: Option<String>, agent: Option<trek_core::AgentId> },
+    Thought {
+        key: String,
+        text: String,
+        secs: Option<u64>,
+        open: bool,
+    },
+    Explore {
+        key: String,
+        parts: Vec<Part>,
+        rows: Vec<(String, String, ToolStatus)>,
+        running: bool,
+        open: bool,
+    },
+    Edits {
+        files: Vec<EditFile>,
+        running: bool,
+    },
+    Command {
+        key: String,
+        command: String,
+        tail: Vec<String>,
+        output: Option<String>,
+        status: ToolStatus,
+        open: bool,
+    },
+    SubAgent {
+        label: String,
+        detail: String,
+        state: TaskState,
+        child: Option<String>,
+        agent: Option<trek_core::AgentId>,
+    },
     /// `live`: still streaming in.
-    Assistant { key: String, text: String, live: bool },
-    TurnEnd { ix: usize, key: String },
+    Assistant {
+        key: String,
+        text: String,
+        live: bool,
+    },
+    TurnEnd {
+        ix: usize,
+        key: String,
+    },
     Notice(String),
     Error(String),
     Limit(String),
@@ -273,7 +368,8 @@ pub struct AiTranscript {
     /// The thread shown.
     current: Option<String>,
     /// Blocks worked out for (thread, revision, items, thought streaming).
-    blocks: std::cell::RefCell<Option<((String, u64, usize, Option<usize>), std::rc::Rc<Vec<Block>>)>>,
+    blocks:
+        std::cell::RefCell<Option<((String, u64, usize, Option<usize>), std::rc::Rc<Vec<Block>>)>>,
     seen: Seen,
     confirm: Option<Confirm>,
     scroll: ScrollHandle,
@@ -298,10 +394,19 @@ impl AiTranscript {
     pub fn new(workspace: Entity<Workspace>, _: &mut Window, cx: &mut Context<Self>) -> Self {
         let subscriptions = vec![
             cx.observe(&workspace, |this, _, cx| this.sync(cx)),
-            cx.subscribe(&workspace, |this, _, event: &WorkspaceEvent, cx| match event {
-                WorkspaceEvent::Transcript { id, .. } | WorkspaceEvent::TurnChanges { id, .. } | WorkspaceEvent::ReviewChanged { id } if this.current.as_ref() == Some(id) => cx.notify(),
-                _ => {}
-            }),
+            cx.subscribe(
+                &workspace,
+                |this, _, event: &WorkspaceEvent, cx| match event {
+                    WorkspaceEvent::Transcript { id, .. }
+                    | WorkspaceEvent::TurnChanges { id, .. }
+                    | WorkspaceEvent::ReviewChanged { id }
+                        if this.current.as_ref() == Some(id) =>
+                    {
+                        cx.notify()
+                    }
+                    _ => {}
+                },
+            ),
         ];
         let mut this = Self {
             workspace,
@@ -353,10 +458,14 @@ impl AiTranscript {
         self.seen = seen;
         match (running, self._ticker.is_some()) {
             (true, false) => {
-                self._ticker = Some(cx.spawn(async move |this, cx| loop {
-                    cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
-                        break;
+                self._ticker = Some(cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_secs(1))
+                            .await;
+                        if this.update(cx, |_, cx| cx.notify()).is_err() {
+                            break;
+                        }
                     }
                 }))
             }
@@ -371,7 +480,13 @@ impl AiTranscript {
     /// The current thread's blocks, worked out once per transcript revision.
     fn blocks_of(&self, cx: &App) -> std::rc::Rc<Vec<Block>> {
         let ws = self.workspace.read(cx);
-        let Some((id, live)) = self.current.as_ref().and_then(|id| Some((id, ws.live.get(id)?))) else { return Default::default() };
+        let Some((id, live)) = self
+            .current
+            .as_ref()
+            .and_then(|id| Some((id, ws.live.get(id)?)))
+        else {
+            return Default::default();
+        };
         let key = (id.clone(), live.revision, live.items.len(), live.reasoning);
         if let Some((k, blocks)) = self.blocks.borrow().as_ref() {
             if *k == key {
@@ -404,7 +519,8 @@ impl AiTranscript {
         }
         let state = cx.new(|cx| TextViewState::markdown(text, cx));
         let changed = cx.observe(&state, |_, _, cx| cx.notify());
-        self.md.insert(key.to_string(), (state.clone(), text.to_string(), changed));
+        self.md
+            .insert(key.to_string(), (state.clone(), text.to_string(), changed));
         state
     }
 
@@ -413,12 +529,21 @@ impl AiTranscript {
     fn views(&self, cx: &App) -> (Vec<View>, usize) {
         let all = self.blocks_of(cx);
         let ws = self.workspace.read(cx);
-        let Some((id, live)) = self.current.as_ref().and_then(|id| Some((id, ws.live.get(id)?))) else { return (vec![], 0) };
+        let Some((id, live)) = self
+            .current
+            .as_ref()
+            .and_then(|id| Some((id, ws.live.get(id)?)))
+        else {
+            return (vec![], 0);
+        };
         let cwd = ws.thread(id).and_then(|t| t.cwd.clone());
         // Where the folder really is: turns' changes name files under the repository's top
         // folder as git sees it (links resolved).
         let canon_cwd = cwd.as_deref().and_then(crate::system::canonical);
-        let agent = ws.thread(id).map(|t| t.agent.clone()).unwrap_or(trek_core::AgentId::ClaudeCode);
+        let agent = ws
+            .thread(id)
+            .map(|t| t.agent.clone())
+            .unwrap_or(trek_core::AgentId::ClaudeCode);
         let ids = live.item_ids();
         let earlier = all.len().saturating_sub(self.shown);
         let open = |ix: usize| self.expanded.contains(&ids[ix]);
@@ -428,48 +553,129 @@ impl AiTranscript {
                 let key = ids[b.first()].clone();
                 match b {
                     Block::User(ix) => {
-                        let Item::User { text, images, at, aside, .. } = &live.items[*ix] else { return View::Notice(String::new()) };
+                        let Item::User {
+                            text,
+                            images,
+                            at,
+                            aside,
+                            ..
+                        } = &live.items[*ix]
+                        else {
+                            return View::Notice(String::new());
+                        };
                         let (said, _) = orch::split_consult(text);
                         let (said, _) = trek_core::restate::split_restate(said);
                         let sent = context::split(said);
-                        View::User { key, text: sent.said.to_string(), context: sent.context, ask: sent.ask, images: images.iter().map(PathBuf::from).collect(), at: *at, aside: *aside, open: open(*ix) }
+                        View::User {
+                            key,
+                            text: sent.said.to_string(),
+                            context: sent.context,
+                            ask: sent.ask,
+                            images: images.iter().map(PathBuf::from).collect(),
+                            at: *at,
+                            aside: *aside,
+                            open: open(*ix),
+                        }
                     }
                     Block::Wake(ix) => {
-                        let Item::User { text, .. } = &live.items[*ix] else { return View::Notice(String::new()) };
-                        View::Wake { key, summary: orch::wake_summary(text), text: text.clone(), open: open(*ix) }
+                        let Item::User { text, .. } = &live.items[*ix] else {
+                            return View::Notice(String::new());
+                        };
+                        View::Wake {
+                            key,
+                            summary: orch::wake_summary(text),
+                            text: text.clone(),
+                            open: open(*ix),
+                        }
                     }
                     Block::Thought(v) => {
-                        let text = v.iter().filter_map(|i| if let Item::Reasoning { text } = &live.items[*i] { Some(text.trim()) } else { None }).collect::<Vec<_>>().join("\n\n");
-                        let secs = v.iter().filter_map(|i| live.thought_secs(&ids[*i])).reduce(|a, b| a + b);
-                        View::Thought { key, text, secs, open: open(v[0]) }
+                        let text = v
+                            .iter()
+                            .filter_map(|i| {
+                                if let Item::Reasoning { text } = &live.items[*i] {
+                                    Some(text.trim())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        let secs = v
+                            .iter()
+                            .filter_map(|i| live.thought_secs(&ids[*i]))
+                            .reduce(|a, b| a + b);
+                        View::Thought {
+                            key,
+                            text,
+                            secs,
+                            open: open(v[0]),
+                        }
                     }
                     Block::Explore(v) => {
                         let calls: Vec<(String, String, ToolStatus)> = v
                             .iter()
                             .filter_map(|i| match &live.items[*i] {
-                                Item::Tool { title, detail, status, .. } => Some((title.clone(), detail.clone(), *status)),
+                                Item::Tool {
+                                    title,
+                                    detail,
+                                    status,
+                                    ..
+                                } => Some((title.clone(), detail.clone(), *status)),
                                 _ => None,
                             })
                             .collect();
-                        let pairs: Vec<(String, String)> = calls.iter().map(|(t, d, _)| (t.clone(), d.clone())).collect();
+                        let pairs: Vec<(String, String)> = calls
+                            .iter()
+                            .map(|(t, d, _)| (t.clone(), d.clone()))
+                            .collect();
                         let running = calls.iter().any(|(_, _, s)| *s == ToolStatus::Running);
                         let rows = calls.iter().map(|(t, d, s)| {
                             let o = op(t, d, cwd.as_deref());
-                            (if o.verb.is_empty() || o.text.is_empty() { format!("{}{}", o.verb, o.text) } else { format!("{} {}", o.verb, o.text) }, t.clone(), *s)
+                            (
+                                if o.verb.is_empty() || o.text.is_empty() {
+                                    format!("{}{}", o.verb, o.text)
+                                } else {
+                                    format!("{} {}", o.verb, o.text)
+                                },
+                                t.clone(),
+                                *s,
+                            )
                         });
-                        View::Explore { key, parts: explore_parts(&pairs, cwd.as_deref()), rows: rows.map(|(a, _, s)| (a, String::new(), s)).collect(), running, open: open(v[0]) }
+                        View::Explore {
+                            key,
+                            parts: explore_parts(&pairs, cwd.as_deref()),
+                            rows: rows.map(|(a, _, s)| (a, String::new(), s)).collect(),
+                            running,
+                            open: open(v[0]),
+                        }
                     }
                     Block::Edits(v) => {
                         let mut files: Vec<EditFile> = vec![];
                         let mut running = false;
                         for i in v {
-                            let Item::Tool { id: call, detail, status, .. } = &live.items[*i] else { continue };
+                            let Item::Tool {
+                                id: call,
+                                detail,
+                                status,
+                                ..
+                            } = &live.items[*i]
+                            else {
+                                continue;
+                            };
                             running |= *status == ToolStatus::Running;
                             if matches!(status, ToolStatus::Failed | ToolStatus::Denied) {
                                 continue;
                             }
-                            let paths: Vec<&str> = detail.split(", ").map(str::trim).filter(|p| !p.is_empty()).collect();
-                            let counted = if paths.len() == 1 { live.lines.get(call).copied() } else { None };
+                            let paths: Vec<&str> = detail
+                                .split(", ")
+                                .map(str::trim)
+                                .filter(|p| !p.is_empty())
+                                .collect();
+                            let counted = if paths.len() == 1 {
+                                live.lines.get(call).copied()
+                            } else {
+                                None
+                            };
                             for p in paths {
                                 let path = match &cwd {
                                     Some(c) if !Path::new(p).is_absolute() => c.join(p),
@@ -477,40 +683,110 @@ impl AiTranscript {
                                 };
                                 let name = p.rsplit('/').next().unwrap_or(p).to_string();
                                 match files.iter_mut().find(|f| f.path == path) {
-                                    Some(f) => f.lines = f.lines.zip(counted).map(|((a, r), (da, dr))| (a + da, r + dr)),
-                                    None => files.push(EditFile { path, name, lines: counted }),
+                                    Some(f) => {
+                                        f.lines = f
+                                            .lines
+                                            .zip(counted)
+                                            .map(|((a, r), (da, dr))| (a + da, r + dr))
+                                    }
+                                    None => files.push(EditFile {
+                                        path,
+                                        name,
+                                        lines: counted,
+                                    }),
                                 }
                             }
                         }
                         // A finished turn counted from its checkpoints: each file's lines as its
                         // changes card and the review count them, not as the tools reported them.
-                        if let Some(turn) = turn_end(&live.items, v[0]).and_then(|end| ws.turn_changes(id, end)).filter(|t| t.counted == trek_core::changes::Counted::Checkpoints) {
-                            let below = canon_cwd.as_deref().and_then(|c| c.strip_prefix(&turn.root).ok());
+                        if let Some(turn) = turn_end(&live.items, v[0])
+                            .and_then(|end| ws.turn_changes(id, end))
+                            .filter(|t| t.counted == trek_core::changes::Counted::Checkpoints)
+                        {
+                            let below = canon_cwd
+                                .as_deref()
+                                .and_then(|c| c.strip_prefix(&turn.root).ok());
                             for f in &mut files {
-                                let rel = cwd.as_deref().and_then(|c| f.path.strip_prefix(c).ok()).zip(below).map(|(rel, below)| below.join(rel));
-                                f.lines = rel.and_then(|rel| turn.files.iter().find(|c| Path::new(&c.path) == rel)).filter(|c| c.lines_known && !c.binary).map(|c| (c.added, c.removed));
+                                let rel = cwd
+                                    .as_deref()
+                                    .and_then(|c| f.path.strip_prefix(c).ok())
+                                    .zip(below)
+                                    .map(|(rel, below)| below.join(rel));
+                                f.lines = rel
+                                    .and_then(|rel| {
+                                        turn.files.iter().find(|c| Path::new(&c.path) == rel)
+                                    })
+                                    .filter(|c| c.lines_known && !c.binary)
+                                    .map(|c| (c.added, c.removed));
                             }
                         }
                         View::Edits { files, running }
                     }
                     Block::Command(ix) => {
-                        let Item::Tool { detail, output, status, .. } = &live.items[*ix] else { return View::Notice(String::new()) };
-                        let tail: Vec<String> = output.lines().filter(|l| !l.trim().is_empty()).rev().take(TAIL_LINES).map(|l| orch::preview(l, 160)).collect::<Vec<_>>().into_iter().rev().collect();
+                        let Item::Tool {
+                            detail,
+                            output,
+                            status,
+                            ..
+                        } = &live.items[*ix]
+                        else {
+                            return View::Notice(String::new());
+                        };
+                        let tail: Vec<String> = output
+                            .lines()
+                            .filter(|l| !l.trim().is_empty())
+                            .rev()
+                            .take(TAIL_LINES)
+                            .map(|l| orch::preview(l, 160))
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
                         let is_open = open(*ix);
-                        View::Command { key, command: detail.lines().next().unwrap_or_default().to_string(), tail, output: is_open.then(|| output.clone()), status: *status, open: is_open }
+                        View::Command {
+                            key,
+                            command: detail.lines().next().unwrap_or_default().to_string(),
+                            tail,
+                            output: is_open.then(|| output.clone()),
+                            status: *status,
+                            open: is_open,
+                        }
                     }
                     Block::SubAgent(ix) => {
-                        let Item::Tool { id: row, detail, output, status, .. } = &live.items[*ix] else { return View::Notice(String::new()) };
-                        let sub = crate::thread_view::SubAgentRow::read(ws, id, &agent, row, detail, output, *status);
-                        View::SubAgent { label: sub.label, detail: sub.detail, state: sub.state, child: sub.child, agent: sub.agent }
+                        let Item::Tool {
+                            id: row,
+                            detail,
+                            output,
+                            status,
+                            ..
+                        } = &live.items[*ix]
+                        else {
+                            return View::Notice(String::new());
+                        };
+                        let sub = crate::thread_view::SubAgentRow::read(
+                            ws, id, &agent, row, detail, output, *status,
+                        );
+                        View::SubAgent {
+                            label: sub.label,
+                            detail: sub.detail,
+                            state: sub.state,
+                            child: sub.child,
+                            agent: sub.agent,
+                        }
                     }
                     Block::Assistant(ix) => match &live.items[*ix] {
-                        Item::Assistant { text } => View::Assistant { key, text: text.clone(), live: live.streaming == Some(*ix) },
+                        Item::Assistant { text } => View::Assistant {
+                            key,
+                            text: text.clone(),
+                            live: live.streaming == Some(*ix),
+                        },
                         _ => View::Notice(String::new()),
                     },
                     Block::TurnEnd(ix) => View::TurnEnd { ix: *ix, key },
                     Block::Notice(ix) => match &live.items[*ix] {
-                        Item::Notice { text } => View::Notice(text.replace("**", "").replace('`', "")),
+                        Item::Notice { text } => {
+                            View::Notice(text.replace("**", "").replace('`', ""))
+                        }
                         _ => View::Notice(String::new()),
                     },
                     Block::Error(ix) => match &live.items[*ix] {
@@ -518,13 +794,32 @@ impl AiTranscript {
                         _ => View::Notice(String::new()),
                     },
                     Block::Limit(ix) => match &live.items[*ix] {
-                        Item::Limit { scope, resets_at, .. } => View::Limit(format!("Usage limit reached · {}", crate::thread_view::limit_when(scope, *resets_at, ws.now()))),
+                        Item::Limit {
+                            scope, resets_at, ..
+                        } => View::Limit(format!(
+                            "Usage limit reached · {}",
+                            crate::thread_view::limit_when(scope, *resets_at, ws.now())
+                        )),
                         _ => View::Notice(String::new()),
                     },
                     Block::Handoff(ix) => match &live.items[*ix] {
-                        Item::Handoff { to, to_model, to_name, .. } => {
+                        Item::Handoff {
+                            to,
+                            to_model,
+                            to_name,
+                            ..
+                        } => {
                             let agent = trek_core::AgentId::from_key(to);
-                            let name = to_name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| crate::thread_view::handoff_name(&agent, to_model.as_deref()));
+                            let name =
+                                to_name
+                                    .clone()
+                                    .filter(|n| !n.is_empty())
+                                    .unwrap_or_else(|| {
+                                        crate::thread_view::handoff_name(
+                                            &agent,
+                                            to_model.as_deref(),
+                                        )
+                                    });
                             View::Handoff(format!("Handed off to {name}"))
                         }
                         _ => View::Notice(String::new()),
@@ -538,7 +833,9 @@ impl AiTranscript {
     /// Ask before `ask` on `anchor` (a message for a rewind, a turn's end otherwise), and find
     /// out, off the main thread, which files putting its checkpoint back would change.
     fn open_confirm(&mut self, ask: Ask, anchor: String, cx: &mut Context<Self>) {
-        let Some(thread) = self.current.clone() else { return };
+        let Some(thread) = self.current.clone() else {
+            return;
+        };
         let ws = self.workspace.read(cx);
         if ws.turn_running(&thread) {
             return;
@@ -551,7 +848,10 @@ impl AiTranscript {
         let (files, check) = match restore::checkpoint(ws, &thread, &message) {
             Ok((repo, sha)) => {
                 let task = cx.spawn(async move |this, cx| {
-                    let files = cx.background_executor().spawn(async move { restore::read(repo, sha) }).await;
+                    let files = cx
+                        .background_executor()
+                        .spawn(async move { restore::read(repo, sha) })
+                        .await;
                     let _ = this.update(cx, |this, cx| {
                         if let Some(c) = this.confirm.as_mut() {
                             c.files = files;
@@ -564,7 +864,14 @@ impl AiTranscript {
             Err(why) => (Files::Unavailable(why), None),
         };
         let restore = matches!(files, Files::Checking);
-        self.confirm = Some(Confirm { ask, anchor, message, files, restore, _check: check });
+        self.confirm = Some(Confirm {
+            ask,
+            anchor,
+            message,
+            files,
+            restore,
+            _check: check,
+        });
         cx.notify();
     }
 
@@ -573,7 +880,10 @@ impl AiTranscript {
     pub fn confirm_last_undo(&mut self, cx: &mut Context<Self>) {
         let end = self.current.as_ref().and_then(|id| {
             let live = self.workspace.read(cx).live.get(id)?;
-            let ix = live.items.iter().rposition(|i| matches!(i, Item::TurnEnd { .. }))?;
+            let ix = live
+                .items
+                .iter()
+                .rposition(|i| matches!(i, Item::TurnEnd { .. }))?;
             live.items.id_at(ix).map(str::to_string)
         });
         if let Some(end) = end {
@@ -589,7 +899,9 @@ impl AiTranscript {
 
     /// Do what the open confirmation asked. A message taken back goes to the input.
     fn run_confirm(&mut self, cx: &mut Context<Self>) {
-        let (Some(c), Some(thread)) = (self.confirm.take(), self.current.clone()) else { return };
+        let (Some(c), Some(thread)) = (self.confirm.take(), self.current.clone()) else {
+            return;
+        };
         let restore = c.restore && !c.files.nothing();
         self.workspace.update(cx, |ws, cx| {
             let back = match c.ask {
@@ -601,7 +913,13 @@ impl AiTranscript {
                 }
             };
             if let Some((text, images)) = back {
-                cx.emit(WorkspaceEvent::ComposeIn { scope: Scope::Ide, thread, text, images, edit: None });
+                cx.emit(WorkspaceEvent::ComposeIn {
+                    scope: Scope::Ide,
+                    thread,
+                    text,
+                    images,
+                    edit: None,
+                });
             }
         });
         cx.notify();
@@ -621,32 +939,68 @@ impl AiTranscript {
             Ask::Undo => ("Undo this turn?".to_string(), "Undo turn"),
             Ask::Retry(None) => ("Retry this turn?".to_string(), "Retry"),
             Ask::Retry(Some(m)) => {
-                let name = ws.models_for(&thread.agent).into_iter().find(|i| crate::composer::same_model(m, &i.id)).map(|i| i.name).unwrap_or_else(|| m.clone());
+                let name = ws
+                    .models_for(&thread.agent)
+                    .into_iter()
+                    .find(|i| crate::composer::same_model(m, &i.id))
+                    .map(|i| i.name)
+                    .unwrap_or_else(|| m.clone());
                 (format!("Retry with {name}?"), "Retry")
             }
         };
         let mut body = match &c.ask {
-            Ask::Rewind => format!("This message and everything after it leave the chat, and {agent} forgets them. Your message comes back to the input."),
-            Ask::Undo => format!("This turn and everything after it leave the chat, and {agent} forgets them. Your message comes back to the input."),
-            Ask::Retry(_) => format!("This turn and everything after it leave the chat, and {agent} gets your message again."),
+            Ask::Rewind => format!(
+                "This message and everything after it leave the chat, and {agent} forgets them. Your message comes back to the input."
+            ),
+            Ask::Undo => format!(
+                "This turn and everything after it leave the chat, and {agent} forgets them. Your message comes back to the input."
+            ),
+            Ask::Retry(_) => format!(
+                "This turn and everything after it leave the chat, and {agent} gets your message again."
+            ),
         };
         if ws.rewind_plan(&thread.id, &c.message) == Some(trek_core::rewind::Reopen::Recap) {
             body.push_str(&format!(" {agent} can't take its own session back to this point, so it continues in a new one with a recap."));
         }
-        let note = |text: String| div().text_size(px(11.5)).line_height(relative(1.45)).text_color(muted).child(text).into_any_element();
+        let note = |text: String| {
+            div()
+                .text_size(px(11.5))
+                .line_height(relative(1.45))
+                .text_color(muted)
+                .child(text)
+                .into_any_element()
+        };
         let files: AnyElement = match &c.files {
-            Files::Checking => h_flex().gap(px(6.)).text_size(px(11.5)).text_color(muted).child(Spinner::new().xsmall()).child("Checking which files changed…").into_any_element(),
-            Files::Changes(changes) if changes.iter().all(|f| !restore::acts(f)) => note("The files are as they were then.".into()),
+            Files::Checking => h_flex()
+                .gap(px(6.))
+                .text_size(px(11.5))
+                .text_color(muted)
+                .child(Spinner::new().xsmall())
+                .child("Checking which files changed…")
+                .into_any_element(),
+            Files::Changes(changes) if changes.iter().all(|f| !restore::acts(f)) => {
+                note("The files are as they were then.".into())
+            }
             Files::Changes(changes) => {
                 let shown: Vec<_> = changes.iter().take(restore::LISTED).cloned().collect();
                 v_flex()
                     .gap(px(4.))
-                    .child(crate::ui::check_row("ai-confirm-restore", "Also restore files", c.restore, false, cx).test_support().on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(c) = this.confirm.as_mut() {
-                            c.restore = !c.restore;
-                            cx.notify();
-                        }
-                    })))
+                    .child(
+                        crate::ui::check_row(
+                            "ai-confirm-restore",
+                            "Also restore files",
+                            c.restore,
+                            false,
+                            cx,
+                        )
+                        .test_support()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(c) = this.confirm.as_mut() {
+                                c.restore = !c.restore;
+                                cx.notify();
+                            }
+                        })),
+                    )
                     .child(
                         v_flex()
                             .pl(px(22.))
@@ -656,14 +1010,43 @@ impl AiTranscript {
                                 h_flex()
                                     .gap(px(8.))
                                     .text_size(px(11.))
-                                    .child(div().flex_1().min_w_0().truncate().font_family(theme.mono_font_family.clone()).child(f.path.clone()))
-                                    .child(div().flex_none().text_color(muted).child(restore::verb(f)))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_family(theme.mono_font_family.clone())
+                                            .child(f.path.clone()),
+                                    )
+                                    .child(
+                                        div().flex_none().text_color(muted).child(restore::verb(f)),
+                                    )
                             }))
-                            .when(changes.len() > restore::LISTED, |el| el.child(div().text_size(px(11.)).text_color(muted).child(format!("and {} more", changes.len() - restore::LISTED)))),
+                            .when(changes.len() > restore::LISTED, |el| {
+                                el.child(
+                                    div().text_size(px(11.)).text_color(muted).child(format!(
+                                        "and {} more",
+                                        changes.len() - restore::LISTED
+                                    )),
+                                )
+                            }),
                     )
                     .into_any_element()
             }
-            Files::Unavailable(why) => v_flex().gap(px(4.)).child(crate::ui::check_row("ai-confirm-restore", "Also restore files", false, true, cx).test_support()).child(note(why.clone())).into_any_element(),
+            Files::Unavailable(why) => v_flex()
+                .gap(px(4.))
+                .child(
+                    crate::ui::check_row(
+                        "ai-confirm-restore",
+                        "Also restore files",
+                        false,
+                        true,
+                        cx,
+                    )
+                    .test_support(),
+                )
+                .child(note(why.clone()))
+                .into_any_element(),
             Files::Failed(e) => note(format!("Couldn't check the files: {e}")),
         };
         Some(
@@ -677,15 +1060,39 @@ impl AiTranscript {
                 .border_1()
                 .border_color(theme.foreground.opacity(0.12))
                 .bg(theme.foreground.opacity(0.03))
-                .child(div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(title))
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.foreground)
+                        .child(title),
+                )
                 .child(note(body))
-                .child(div().pt(px(6.)).border_t_1().border_color(theme.foreground.opacity(0.07)).child(files))
+                .child(
+                    div()
+                        .pt(px(6.))
+                        .border_t_1()
+                        .border_color(theme.foreground.opacity(0.07))
+                        .child(files),
+                )
                 .child(
                     h_flex()
                         .gap(px(6.))
                         .justify_end()
-                        .child(Button::new("ai-confirm-cancel").ghost().xsmall().label("Cancel").on_click(cx.listener(|this, _, _, cx| this.close_confirm(cx))))
-                        .child(Button::new("ai-confirm-go").primary().xsmall().label(action).on_click(cx.listener(|this, _, _, cx| this.run_confirm(cx)))),
+                        .child(
+                            Button::new("ai-confirm-cancel")
+                                .ghost()
+                                .xsmall()
+                                .label("Cancel")
+                                .on_click(cx.listener(|this, _, _, cx| this.close_confirm(cx))),
+                        )
+                        .child(
+                            Button::new("ai-confirm-go")
+                                .primary()
+                                .xsmall()
+                                .label(action)
+                                .on_click(cx.listener(|this, _, _, cx| this.run_confirm(cx))),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -694,13 +1101,25 @@ impl AiTranscript {
     /// Undo, Retry and Retry with another model for the turn ending at `key` (shown always on
     /// the latest turn, on hover on earlier ones), and the restatement check when the agent was
     /// asked to say back what it understood.
-    fn turn_actions(&self, ix: usize, key: &str, n: usize, last: bool, busy: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn turn_actions(
+        &self,
+        ix: usize,
+        key: &str,
+        n: usize,
+        last: bool,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let ws = self.workspace.read(cx);
-        let Some(thread) = self.current.clone() else { return div().into_any_element() };
+        let Some(thread) = self.current.clone() else {
+            return div().into_any_element();
+        };
         let live = ws.live.get(&thread);
-        let started = live.and_then(|l| trek_core::rewind::turn_start(&l.items, ix)).is_some();
+        let started = live
+            .and_then(|l| trek_core::rewind::turn_start(&l.items, ix))
+            .is_some();
         let off = busy || !started;
         let tip = |what: &str| -> SharedString {
             if busy {
@@ -712,23 +1131,35 @@ impl AiTranscript {
             }
         };
         let restated = live.is_some_and(|l| trek_core::restate::asked_in_turn(&l.items, ix));
-        let (agent, model) = ws.thread(&thread).map(|t| (t.agent.clone(), t.model.clone())).unzip();
+        let (agent, model) = ws
+            .thread(&thread)
+            .map(|t| (t.agent.clone(), t.model.clone()))
+            .unzip();
         let group = SharedString::from(format!("ai-turn-{n}"));
-        let action = |id: (&'static str, usize), icon: Icon, label: &'static str, tooltip: SharedString| {
-            h_flex()
-                .id(id)
-                .test_support()
-                .gap(px(3.))
-                .px(px(4.))
-                .h(px(18.))
-                .items_center()
-                .rounded(px(4.))
-                .when(off, |el| el.opacity(0.45))
-                .when(!off, |el| el.cursor_pointer().hover(|s| s.text_color(theme.foreground).bg(theme.foreground.opacity(0.06))))
-                .child(icon.size(px(11.)))
-                .child(label)
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx))
-        };
+        let action =
+            |id: (&'static str, usize), icon: Icon, label: &'static str, tooltip: SharedString| {
+                h_flex()
+                    .id(id)
+                    .test_support()
+                    .gap(px(3.))
+                    .px(px(4.))
+                    .h(px(18.))
+                    .items_center()
+                    .rounded(px(4.))
+                    .when(off, |el| el.opacity(0.45))
+                    .when(!off, |el| {
+                        el.cursor_pointer().hover(|s| {
+                            s.text_color(theme.foreground)
+                                .bg(theme.foreground.opacity(0.06))
+                        })
+                    })
+                    .child(icon.size(px(11.)))
+                    .child(label)
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(tooltip.clone())
+                            .build(window, cx)
+                    })
+            };
         let (k1, k2) = (key.to_string(), key.to_string());
         let me = cx.weak_entity();
         let retry_with = {
@@ -738,18 +1169,47 @@ impl AiTranscript {
                 .ghost()
                 .xsmall()
                 .icon(Icon::new(IconName::ChevronDown).text_color(muted))
-                .tooltip(if off { tip("retry") } else { "Retry with another model".into() })
+                .tooltip(if off {
+                    tip("retry")
+                } else {
+                    "Retry with another model".into()
+                })
                 .disabled(off)
                 .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, cx| {
-                    menu = menu.min_w(px(220.)).max_h(px(320.)).scrollable(true).label("Retry with");
-                    let Some(agent) = agent.clone() else { return menu };
+                    menu = menu
+                        .min_w(px(220.))
+                        .max_h(px(320.))
+                        .scrollable(true)
+                        .label("Retry with");
+                    let Some(agent) = agent.clone() else {
+                        return menu;
+                    };
                     let models = ws.read(cx).models_for(&agent);
-                    let current = model.clone().flatten().or_else(|| crate::composer::default_model(&models).map(|m| m.id.clone()));
-                    for m in models.iter().filter(|m| current.as_deref().is_none_or(|c| !crate::composer::same_model(c, &m.id))).cloned() {
+                    let current = model
+                        .clone()
+                        .flatten()
+                        .or_else(|| crate::composer::default_model(&models).map(|m| m.id.clone()));
+                    for m in models
+                        .iter()
+                        .filter(|m| {
+                            current
+                                .as_deref()
+                                .is_none_or(|c| !crate::composer::same_model(c, &m.id))
+                        })
+                        .cloned()
+                    {
                         let (me, key) = (me.clone(), key.clone());
-                        menu = menu.item(PopupMenuItem::new(m.name.clone()).on_click(move |_, _, cx| {
-                            let _ = me.update(cx, |this, cx| this.open_confirm(Ask::Retry(Some(m.id.clone())), key.clone(), cx));
-                        }));
+                        menu = menu.item(PopupMenuItem::new(m.name.clone()).on_click(
+                            move |_, _, cx| {
+                                let _ = me.update(cx, |this, cx| {
+                                    this.open_confirm(
+                                        Ask::Retry(Some(m.id.clone())),
+                                        key.clone(),
+                                        cx,
+                                    )
+                                });
+                            },
+                        ));
                     }
                     menu
                 })
@@ -768,9 +1228,35 @@ impl AiTranscript {
                     .gap(px(2.))
                     .text_size(px(11.))
                     .text_color(muted.opacity(0.85))
-                    .when(!shown, |el| el.invisible().group_hover(group.clone(), |s| s.visible()))
-                    .child(action(("ai-undo-turn", n), Icon::new(crate::assets::Lucide::Undo2), "Undo", tip("undo this turn")).when(!off, |el| el.on_click(cx.listener(move |this, _, _, cx| this.open_confirm(Ask::Undo, k1.clone(), cx)))))
-                    .child(action(("ai-retry-turn", n), Icon::new(crate::assets::Lucide::RefreshCw), "Retry", tip("retry")).when(!off, |el| el.on_click(cx.listener(move |this, _, _, cx| this.open_confirm(Ask::Retry(None), k2.clone(), cx)))))
+                    .when(!shown, |el| {
+                        el.invisible().group_hover(group.clone(), |s| s.visible())
+                    })
+                    .child(
+                        action(
+                            ("ai-undo-turn", n),
+                            Icon::new(crate::assets::Lucide::Undo2),
+                            "Undo",
+                            tip("undo this turn"),
+                        )
+                        .when(!off, |el| {
+                            el.on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_confirm(Ask::Undo, k1.clone(), cx)
+                            }))
+                        }),
+                    )
+                    .child(
+                        action(
+                            ("ai-retry-turn", n),
+                            Icon::new(crate::assets::Lucide::RefreshCw),
+                            "Retry",
+                            tip("retry"),
+                        )
+                        .when(!off, |el| {
+                            el.on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_confirm(Ask::Retry(None), k2.clone(), cx)
+                            }))
+                        }),
+                    )
                     .child(retry_with),
             )
             // The agent said back what it was asked: the user confirms it, or corrects it.
@@ -781,12 +1267,36 @@ impl AiTranscript {
                         .test_support()
                         .flex_wrap()
                         .gap(px(6.))
-                        .child(div().text_size(px(12.)).text_color(muted).child("Is that what you meant?"))
-                        .child(Button::new(("ai-restate-yes", n)).xsmall().primary().label("That's right — go ahead").on_click(move |_, _, cx| ws1.update(cx, |ws, cx| ws.go_ahead(&t1, cx))))
-                        .child(Button::new(("ai-restate-no", n)).xsmall().ghost().label("Not quite…").on_click(move |_, _, cx| {
-                            let thread = t2.clone();
-                            ws2.update(cx, |_, cx| cx.emit(WorkspaceEvent::CorrectRestatement { scope: Scope::Ide, thread }));
-                        })),
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(muted)
+                                .child("Is that what you meant?"),
+                        )
+                        .child(
+                            Button::new(("ai-restate-yes", n))
+                                .xsmall()
+                                .primary()
+                                .label("That's right — go ahead")
+                                .on_click(move |_, _, cx| {
+                                    ws1.update(cx, |ws, cx| ws.go_ahead(&t1, cx))
+                                }),
+                        )
+                        .child(
+                            Button::new(("ai-restate-no", n))
+                                .xsmall()
+                                .ghost()
+                                .label("Not quite…")
+                                .on_click(move |_, _, cx| {
+                                    let thread = t2.clone();
+                                    ws2.update(cx, |_, cx| {
+                                        cx.emit(WorkspaceEvent::CorrectRestatement {
+                                            scope: Scope::Ide,
+                                            thread,
+                                        })
+                                    });
+                                }),
+                        ),
                 )
             })
             .children(self.confirm_card(key, cx))
@@ -794,47 +1304,91 @@ impl AiTranscript {
     }
 
     /// Answers from the question card, `None` until every question has one.
-    fn card_answers(&self, request_id: &str, questions: &[trek_agents::Question], cx: &App) -> Option<Vec<(String, String)>> {
-        let picks = &self.workspace.read(cx).live.get(self.current.as_ref()?)?.picks;
+    fn card_answers(
+        &self,
+        request_id: &str,
+        questions: &[trek_agents::Question],
+        cx: &App,
+    ) -> Option<Vec<(String, String)>> {
+        let picks = &self
+            .workspace
+            .read(cx)
+            .live
+            .get(self.current.as_ref()?)?
+            .picks;
         let mut fields = self.secrets.1.iter();
         questions
             .iter()
             .enumerate()
             .map(|(i, q)| {
-                let picked = picks.get(&(request_id.to_string(), i)).filter(|v| !v.is_empty()).map(|v| v.join(", "));
-                let typed = q.secret.then(|| fields.next()).flatten().map(|(f, _)| f.read(cx).value().trim().to_string()).filter(|v| !v.is_empty());
+                let picked = picks
+                    .get(&(request_id.to_string(), i))
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v.join(", "));
+                let typed = q
+                    .secret
+                    .then(|| fields.next())
+                    .flatten()
+                    .map(|(f, _)| f.read(cx).value().trim().to_string())
+                    .filter(|v| !v.is_empty());
                 typed.or(picked).map(|a| (q.question.clone(), a))
             })
             .collect()
     }
 
     fn submit_answers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.current.clone() else { return };
-        let pending = self.workspace.read(cx).live.get(&id).and_then(|l| l.permissions.first()).and_then(|p| match &p.prompt {
-            Some(trek_agents::Prompt::Questions(q)) => Some((p.request_id.clone(), q.clone())),
-            _ => None,
-        });
-        let Some((request_id, questions)) = pending else { return };
-        let Some(answers) = self.card_answers(&request_id, &questions, cx) else { return };
+        let Some(id) = self.current.clone() else {
+            return;
+        };
+        let pending = self
+            .workspace
+            .read(cx)
+            .live
+            .get(&id)
+            .and_then(|l| l.permissions.first())
+            .and_then(|p| match &p.prompt {
+                Some(trek_agents::Prompt::Questions(q)) => Some((p.request_id.clone(), q.clone())),
+                _ => None,
+            });
+        let Some((request_id, questions)) = pending else {
+            return;
+        };
+        let Some(answers) = self.card_answers(&request_id, &questions, cx) else {
+            return;
+        };
         for (f, _) in &self.secrets.1 {
             f.update(cx, |s, cx| s.set_value("", window, cx));
         }
-        self.workspace.update(cx, |ws, cx| ws.answer(&id, &request_id, answers, cx));
+        self.workspace
+            .update(cx, |ws, cx| ws.answer(&id, &request_id, answers, cx));
     }
 
     /// One masked field per secret question, empty for each new card.
-    fn secret_fields(&mut self, request_id: &str, questions: &[trek_agents::Question], window: &mut Window, cx: &mut Context<Self>) {
+    fn secret_fields(
+        &mut self,
+        request_id: &str,
+        questions: &[trek_agents::Question],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.secrets.0.as_deref() != Some(request_id) {
             self.secrets = (Some(request_id.to_string()), vec![]);
         }
         while self.secrets.1.len() < questions.iter().filter(|q| q.secret).count() {
-            let field = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Type it here"));
-            // Kept with its field: a new card's fields drop the old ones' watches with them.
-            let watch = cx.subscribe_in(&field, window, |this, _, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { .. } => this.submit_answers(window, cx),
-                InputEvent::Change => cx.notify(),
-                _ => {}
+            let field = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .masked(true)
+                    .placeholder("Type it here")
             });
+            // Kept with its field: a new card's fields drop the old ones' watches with them.
+            let watch =
+                cx.subscribe_in(&field, window, |this, _, event: &InputEvent, window, cx| {
+                    match event {
+                        InputEvent::PressEnter { .. } => this.submit_answers(window, cx),
+                        InputEvent::Change => cx.notify(),
+                        _ => {}
+                    }
+                });
             self.secrets.1.push((field, watch));
         }
     }
@@ -846,10 +1400,23 @@ impl AiTranscript {
             let ws = self.workspace.read(cx);
             let live = ws.live.get(&id)?;
             let p = live.permissions.first()?.clone();
-            (p, ws.thread(&id)?.agent.display_name(), live.picks.clone(), ws.cwd_in(&Scope::Ide))
+            (
+                p,
+                ws.thread(&id)?.agent.display_name(),
+                live.picks.clone(),
+                ws.cwd_in(&Scope::Ide),
+            )
         };
         let card = match &p.prompt {
-            None => cards::approval(&self.workspace, &id, &p.request_id, &agent, &p.title, &p.detail, cx),
+            None => cards::approval(
+                &self.workspace,
+                &id,
+                &p.request_id,
+                &agent,
+                &p.title,
+                &p.detail,
+                cx,
+            ),
             Some(trek_agents::Prompt::Questions(questions)) => {
                 self.secret_fields(&p.request_id, questions, window, cx);
                 let complete = self.card_answers(&p.request_id, questions, cx).is_some();
@@ -857,20 +1424,52 @@ impl AiTranscript {
                 let submit = std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
                     let _ = me.update(cx, |this, cx| this.submit_answers(window, cx));
                 });
-                let fields: Vec<Entity<InputState>> = self.secrets.1.iter().map(|(f, _)| f.clone()).collect();
-                cards::questions(&self.workspace, &id, &p.request_id, &agent, questions, &picks, &fields, complete, submit, cx)
+                let fields: Vec<Entity<InputState>> =
+                    self.secrets.1.iter().map(|(f, _)| f.clone()).collect();
+                cards::questions(
+                    &self.workspace,
+                    &id,
+                    &p.request_id,
+                    &agent,
+                    questions,
+                    &picks,
+                    &fields,
+                    complete,
+                    submit,
+                    cx,
+                )
             }
             Some(trek_agents::Prompt::Plan(plan)) => {
-                if self.plan_md.as_ref().is_none_or(|(rid, _, _)| *rid != p.request_id) {
+                if self
+                    .plan_md
+                    .as_ref()
+                    .is_none_or(|(rid, _, _)| *rid != p.request_id)
+                {
                     let md = cx.new(|cx| TextViewState::markdown(plan, cx));
                     let parsed = cx.observe(&md, |_, _, cx| cx.notify());
                     self.plan_md = Some((p.request_id.clone(), md, parsed));
                 }
                 let doc = self.plan_md.as_ref().map(|(_, m, _)| m.clone());
-                cards::plan(&self.workspace, &id, &p.request_id, &agent, doc.as_ref(), cwd, cx)
+                cards::plan(
+                    &self.workspace,
+                    &id,
+                    &p.request_id,
+                    &agent,
+                    doc.as_ref(),
+                    cwd,
+                    cx,
+                )
             }
         };
-        Some(div().flex_none().px(px(12.)).pt(px(6.)).pb(px(2.)).child(card).into_any_element())
+        Some(
+            div()
+                .flex_none()
+                .px(px(12.))
+                .pt(px(6.))
+                .pb(px(2.))
+                .child(card)
+                .into_any_element(),
+        )
     }
 
     /// While a turn runs: what it's doing, how long it's been at it, and the follow-ups queued.
@@ -892,10 +1491,21 @@ impl AiTranscript {
                 .iter()
                 .rev()
                 .take_while(|i| !matches!(i, Item::User { .. } | Item::Assistant { .. }))
-                .find_map(|i| if let Item::Tool { title, detail, .. } = i { Some(phrase(title, detail, None)) } else { None })
+                .find_map(|i| {
+                    if let Item::Tool { title, detail, .. } = i {
+                        Some(phrase(title, detail, None))
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or_else(|| crate::mascot::word(&id, secs).into())
         };
-        let queued: Vec<(usize, String)> = live.queued.iter().enumerate().map(|(i, (t, _))| (i, orch::preview(context::split(t).said, 80))).collect();
+        let queued: Vec<(usize, String)> = live
+            .queued
+            .iter()
+            .enumerate()
+            .map(|(i, (t, _))| (i, orch::preview(context::split(t).said, 80)))
+            .collect();
         Some(
             v_flex()
                 .id("ai-working")
@@ -907,8 +1517,14 @@ impl AiTranscript {
                         .text_size(px(12.))
                         .text_color(muted)
                         .child(Spinner::new().xsmall().color(palette::ember(cx)))
-                        .child(div().text_color(theme.foreground.opacity(0.8)).child(format!("{doing}…")))
-                        .child(div().child(crate::time::elapsed(std::time::Duration::from_secs(secs)))),
+                        .child(
+                            div()
+                                .text_color(theme.foreground.opacity(0.8))
+                                .child(format!("{doing}…")),
+                        )
+                        .child(
+                            div().child(crate::time::elapsed(std::time::Duration::from_secs(secs))),
+                        ),
                 )
                 .children(queued.into_iter().map(|(i, text)| {
                     let ws = self.workspace.clone();
@@ -922,7 +1538,14 @@ impl AiTranscript {
                         .text_size(px(11.5))
                         .text_color(muted)
                         .child(div().flex_none().child("Queued"))
-                        .child(div().flex_1().min_w_0().truncate().text_color(theme.foreground.opacity(0.75)).child(text))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.foreground.opacity(0.75))
+                                .child(text),
+                        )
                         .child(
                             div()
                                 .id(("ai-queued-drop", i))
@@ -932,7 +1555,9 @@ impl AiTranscript {
                                 .child(Icon::new(IconName::Close).size(px(11.)))
                                 .on_click(move |_, _, cx| {
                                     ws.update(cx, |ws, cx| {
-                                        if let Some(l) = ws.live.get_mut(&id).filter(|l| i < l.queued.len()) {
+                                        if let Some(l) =
+                                            ws.live.get_mut(&id).filter(|l| i < l.queued.len())
+                                        {
                                             l.queued.remove(i);
                                             l.revision += 1;
                                         }
@@ -950,7 +1575,9 @@ impl Render for AiTranscript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         crate::tests::rendered("AiTranscript");
-        let Some(thread) = self.current.clone() else { return div().into_any_element() };
+        let Some(thread) = self.current.clone() else {
+            return div().into_any_element();
+        };
         // Keep the end in view while the reader is there.
         let (offset, max) = (self.scroll.offset().y, self.scroll.max_offset().y);
         self.follow = -offset >= max - px(24.);
@@ -959,11 +1586,22 @@ impl Render for AiTranscript {
         }
         let (views, earlier) = self.views(cx);
         // The last turn's end: its actions show without a hover.
-        let last_end = self.blocks_of(cx).iter().rev().find_map(|b| if let Block::TurnEnd(ix) = b { Some(*ix) } else { None });
+        let last_end = self.blocks_of(cx).iter().rev().find_map(|b| {
+            if let Block::TurnEnd(ix) = b {
+                Some(*ix)
+            } else {
+                None
+            }
+        });
         let (cwd, folder, busy, loading) = {
             let ws = self.workspace.read(cx);
             let t = ws.thread(&thread);
-            (t.and_then(|t| t.cwd.clone()), t.and_then(|t| ws.thread_project_tint(t, cx)), ws.turn_running(&thread), ws.live.get(&thread).is_some_and(|l| l.loading))
+            (
+                t.and_then(|t| t.cwd.clone()),
+                t.and_then(|t| ws.thread_project_tint(t, cx)),
+                ws.turn_running(&thread),
+                ws.live.get(&thread).is_some_and(|l| l.loading),
+            )
         };
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
@@ -987,7 +1625,15 @@ impl Render for AiTranscript {
                     .into_any_element(),
             );
         }
-        let chevron = |open: bool| Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(11.)).text_color(muted.opacity(0.7));
+        let chevron = |open: bool| {
+            Icon::new(if open {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            })
+            .size(px(11.))
+            .text_color(muted.opacity(0.7))
+        };
         let file_chip = |id: SharedString, name: &str, lines: Option<(u32, u32)>, cx: &App| {
             h_flex()
                 .id(id)
@@ -1006,13 +1652,36 @@ impl Render for AiTranscript {
                 .child(crate::file_icon::badge(name, px(11.), cx))
                 .child(name.to_string())
                 .when_some(lines, |el, (a, r)| {
-                    el.when(a > 0, |el| el.child(div().font_family(theme.mono_font_family.clone()).text_color(palette::emerald(cx)).child(format!("+{a}"))))
-                        .when(r > 0, |el| el.child(div().font_family(theme.mono_font_family.clone()).text_color(palette::red(cx)).child(format!("−{r}"))))
+                    el.when(a > 0, |el| {
+                        el.child(
+                            div()
+                                .font_family(theme.mono_font_family.clone())
+                                .text_color(palette::emerald(cx))
+                                .child(format!("+{a}")),
+                        )
+                    })
+                    .when(r > 0, |el| {
+                        el.child(
+                            div()
+                                .font_family(theme.mono_font_family.clone())
+                                .text_color(palette::red(cx))
+                                .child(format!("−{r}")),
+                        )
+                    })
                 })
         };
         for (n, view) in views.into_iter().enumerate() {
             let el: AnyElement = match view {
-                View::User { key, text, context: chips, ask, images, at, aside, open } => {
+                View::User {
+                    key,
+                    text,
+                    context: chips,
+                    ask,
+                    images,
+                    at,
+                    aside,
+                    open,
+                } => {
                     let long = text.lines().count() > 8 || text.len() > 600;
                     let group = SharedString::from(format!("ai-user-{n}"));
                     let copy = text.clone();
@@ -1104,7 +1773,12 @@ impl Render for AiTranscript {
                         .children(self.confirm_card(&key, cx))
                         .into_any_element()
                 }
-                View::Wake { key, summary, text, open } => v_flex()
+                View::Wake {
+                    key,
+                    summary,
+                    text,
+                    open,
+                } => v_flex()
                     .child(
                         h_flex()
                             .id(("ai-wake", n))
@@ -1117,9 +1791,22 @@ impl Render for AiTranscript {
                             .child(chevron(open))
                             .on_click(cx.listener(move |this, _, _, cx| this.toggle(&key, cx))),
                     )
-                    .when(open, |el| el.child(div().pl(px(17.)).text_size(px(11.5)).text_color(muted).child(text)))
+                    .when(open, |el| {
+                        el.child(
+                            div()
+                                .pl(px(17.))
+                                .text_size(px(11.5))
+                                .text_color(muted)
+                                .child(text),
+                        )
+                    })
                     .into_any_element(),
-                View::Thought { key, text, secs, open } => {
+                View::Thought {
+                    key,
+                    text,
+                    secs,
+                    open,
+                } => {
                     let doc = open.then(|| self.doc(&key, &text, cx));
                     v_flex()
                         .child(
@@ -1138,10 +1825,31 @@ impl Render for AiTranscript {
                                 })
                                 .on_click(cx.listener(move |this, _, _, cx| this.toggle(&key, cx))),
                         )
-                        .when_some(doc, |el, doc| el.child(div().ml(px(5.)).pl(px(10.)).border_l_1().border_color(theme.foreground.opacity(0.1)).child(crate::md::thought(&doc, cwd.clone(), folder, px(12.), cx))))
+                        .when_some(doc, |el, doc| {
+                            el.child(
+                                div()
+                                    .ml(px(5.))
+                                    .pl(px(10.))
+                                    .border_l_1()
+                                    .border_color(theme.foreground.opacity(0.1))
+                                    .child(crate::md::thought(
+                                        &doc,
+                                        cwd.clone(),
+                                        folder,
+                                        px(12.),
+                                        cx,
+                                    )),
+                            )
+                        })
                         .into_any_element()
                 }
-                View::Explore { key, parts, rows: calls, running, open } => v_flex()
+                View::Explore {
+                    key,
+                    parts,
+                    rows: calls,
+                    running,
+                    open,
+                } => v_flex()
                     .child(
                         h_flex()
                             .id(("ai-explore", n))
@@ -1152,22 +1860,61 @@ impl Render for AiTranscript {
                             .text_color(muted)
                             .cursor_pointer()
                             .hover(|s| s.text_color(theme.foreground))
-                            .child(if running { Spinner::new().xsmall().color(muted).into_any_element() } else { chevron(open).into_any_element() })
-                            .children(parts.into_iter().enumerate().map(|(i, p)| match p {
-                                Part::Text(t) => div().child(t).into_any_element(),
-                                Part::File(f) => file_chip(SharedString::from(format!("ai-read-{n}-{i}")), &f, None, cx).into_any_element(),
+                            .child(if running {
+                                Spinner::new().xsmall().color(muted).into_any_element()
+                            } else {
+                                chevron(open).into_any_element()
+                            })
+                            .children(parts.into_iter().enumerate().map(|(i, p)| {
+                                match p {
+                                    Part::Text(t) => div().child(t).into_any_element(),
+                                    Part::File(f) => file_chip(
+                                        SharedString::from(format!("ai-read-{n}-{i}")),
+                                        &f,
+                                        None,
+                                        cx,
+                                    )
+                                    .into_any_element(),
+                                }
                             }))
                             .on_click(cx.listener(move |this, _, _, cx| this.toggle(&key, cx))),
                     )
                     .when(open, |el| {
-                        el.child(v_flex().ml(px(5.)).pl(px(10.)).border_l_1().border_color(theme.foreground.opacity(0.1)).gap(px(2.)).children(calls.into_iter().map(|(text, _, status)| {
-                            h_flex()
-                                .gap(px(6.))
-                                .text_size(px(11.5))
-                                .text_color(muted)
-                                .child(div().flex_1().min_w_0().truncate().font_family(theme.mono_font_family.clone()).child(text))
-                                .when(matches!(status, ToolStatus::Failed | ToolStatus::Denied), |el| el.child(Icon::new(IconName::CircleX).size(px(11.)).text_color(palette::red(cx))))
-                        })))
+                        el.child(
+                            v_flex()
+                                .ml(px(5.))
+                                .pl(px(10.))
+                                .border_l_1()
+                                .border_color(theme.foreground.opacity(0.1))
+                                .gap(px(2.))
+                                .children(calls.into_iter().map(|(text, _, status)| {
+                                    h_flex()
+                                        .gap(px(6.))
+                                        .text_size(px(11.5))
+                                        .text_color(muted)
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .font_family(theme.mono_font_family.clone())
+                                                .child(text),
+                                        )
+                                        .when(
+                                            matches!(
+                                                status,
+                                                ToolStatus::Failed | ToolStatus::Denied
+                                            ),
+                                            |el| {
+                                                el.child(
+                                                    Icon::new(IconName::CircleX)
+                                                        .size(px(11.))
+                                                        .text_color(palette::red(cx)),
+                                                )
+                                            },
+                                        )
+                                })),
+                        )
                     })
                     .into_any_element(),
                 View::Edits { files, running } => h_flex()
@@ -1177,22 +1924,51 @@ impl Render for AiTranscript {
                     .flex_wrap()
                     .text_size(px(12.))
                     .text_color(muted)
-                    .child(if running { Spinner::new().xsmall().color(muted).into_any_element() } else { Icon::new(crate::assets::Lucide::Pencil).size(px(11.)).text_color(muted.opacity(0.8)).into_any_element() })
+                    .child(if running {
+                        Spinner::new().xsmall().color(muted).into_any_element()
+                    } else {
+                        Icon::new(crate::assets::Lucide::Pencil)
+                            .size(px(11.))
+                            .text_color(muted.opacity(0.8))
+                            .into_any_element()
+                    })
                     .child("Edited")
                     .children(files.into_iter().enumerate().map(|(i, f)| {
                         let ws = self.workspace.clone();
                         let path = f.path.clone();
-                        file_chip(SharedString::from(format!("ai-edit-{n}-{i}")), &f.name, f.lines, cx)
-                            .cursor_pointer()
-                            .hover(|s| s.border_color(ember.opacity(0.6)))
-                            .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.open_editor(path.clone(), None, cx)))
+                        file_chip(
+                            SharedString::from(format!("ai-edit-{n}-{i}")),
+                            &f.name,
+                            f.lines,
+                            cx,
+                        )
+                        .cursor_pointer()
+                        .hover(|s| s.border_color(ember.opacity(0.6)))
+                        .on_click(move |_, _, cx| {
+                            ws.update(cx, |ws, cx| ws.open_editor(path.clone(), None, cx))
+                        })
                     }))
                     .into_any_element(),
-                View::Command { key, command, tail, output, status, open } => {
+                View::Command {
+                    key,
+                    command,
+                    tail,
+                    output,
+                    status,
+                    open,
+                } => {
                     let status_el = match status {
-                        ToolStatus::Running => Spinner::new().xsmall().color(muted).into_any_element(),
-                        ToolStatus::Done => Icon::new(IconName::Check).size(px(11.)).text_color(palette::emerald(cx)).into_any_element(),
-                        ToolStatus::Failed | ToolStatus::Denied => Icon::new(IconName::CircleX).size(px(11.)).text_color(palette::red(cx)).into_any_element(),
+                        ToolStatus::Running => {
+                            Spinner::new().xsmall().color(muted).into_any_element()
+                        }
+                        ToolStatus::Done => Icon::new(IconName::Check)
+                            .size(px(11.))
+                            .text_color(palette::emerald(cx))
+                            .into_any_element(),
+                        ToolStatus::Failed | ToolStatus::Denied => Icon::new(IconName::CircleX)
+                            .size(px(11.))
+                            .text_color(palette::red(cx))
+                            .into_any_element(),
                     };
                     let ws = self.workspace.clone();
                     let has_tail = !tail.is_empty();
@@ -1215,7 +1991,13 @@ impl Render for AiTranscript {
                                 .py(px(4.))
                                 .text_color(muted)
                                 .cursor_pointer()
-                                .child(div().flex_1().min_w_0().truncate().child(format!("$ {command}")))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .child(format!("$ {command}")),
+                                )
                                 .child(status_el)
                                 .on_click(cx.listener(move |this, _, _, cx| this.toggle(&key, cx))),
                         )
@@ -1228,8 +2010,17 @@ impl Render for AiTranscript {
                                     .border_color(theme.foreground.opacity(0.07))
                                     .text_color(theme.foreground.opacity(0.7))
                                     .map(|el| match output {
-                                        Some(full) => el.child(div().id(("ai-command-out", n)).max_h(px(240.)).overflow_y_scroll().whitespace_normal().child(full)),
-                                        None => el.children(tail.into_iter().map(|l| div().truncate().child(l))),
+                                        Some(full) => el.child(
+                                            div()
+                                                .id(("ai-command-out", n))
+                                                .max_h(px(240.))
+                                                .overflow_y_scroll()
+                                                .whitespace_normal()
+                                                .child(full),
+                                        ),
+                                        None => el.children(
+                                            tail.into_iter().map(|l| div().truncate().child(l)),
+                                        ),
                                     })
                                     .child(
                                         h_flex()
@@ -1243,14 +2034,29 @@ impl Render for AiTranscript {
                                             .cursor_pointer()
                                             .hover(|s| s.text_color(theme.foreground))
                                             .child("Open in Terminal")
-                                            .child(Icon::new(crate::assets::Lucide::ArrowUpRight).size(px(10.)))
-                                            .on_click(move |_, _, cx| ws.update(cx, |_, cx| cx.emit(WorkspaceEvent::OpenTool(crate::workspace::PanelTool::Terminal)))),
+                                            .child(
+                                                Icon::new(crate::assets::Lucide::ArrowUpRight)
+                                                    .size(px(10.)),
+                                            )
+                                            .on_click(move |_, _, cx| {
+                                                ws.update(cx, |_, cx| {
+                                                    cx.emit(WorkspaceEvent::OpenTool(
+                                                        crate::workspace::PanelTool::Terminal,
+                                                    ))
+                                                })
+                                            }),
                                     ),
                             )
                         })
                         .into_any_element()
                 }
-                View::SubAgent { label, detail, state, child, agent } => {
+                View::SubAgent {
+                    label,
+                    detail,
+                    state,
+                    child,
+                    agent,
+                } => {
                     let dot = match state {
                         TaskState::Running => palette::sky(cx),
                         TaskState::NeedsYou => palette::amber(cx),
@@ -1264,44 +2070,98 @@ impl Render for AiTranscript {
                         .test_support()
                         .gap(px(8.))
                         .text_size(px(12.))
-                        .child(div().relative().flex_none().size(px(16.)).child(match &agent {
-                            Some(a) => crate::ui::agent_logo(a, px(16.), cx),
-                            None => Icon::new(crate::assets::Lucide::Users).size(px(14.)).text_color(muted).into_any_element(),
-                        }).child(div().absolute().right(px(-2.)).bottom(px(-2.)).size(px(7.)).rounded_full().bg(dot)))
-                        .child(v_flex().flex_1().min_w_0().child(div().truncate().child(label)).child(div().truncate().text_size(px(11.)).text_color(muted).child(detail)))
+                        .child(
+                            div()
+                                .relative()
+                                .flex_none()
+                                .size(px(16.))
+                                .child(match &agent {
+                                    Some(a) => crate::ui::agent_logo(a, px(16.), cx),
+                                    None => Icon::new(crate::assets::Lucide::Users)
+                                        .size(px(14.))
+                                        .text_color(muted)
+                                        .into_any_element(),
+                                })
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .right(px(-2.))
+                                        .bottom(px(-2.))
+                                        .size(px(7.))
+                                        .rounded_full()
+                                        .bg(dot),
+                                ),
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().truncate().child(label))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(11.))
+                                        .text_color(muted)
+                                        .child(detail),
+                                ),
+                        )
                         .when_some(child, |el, child| {
                             el.child(
                                 Button::new(("ai-subagent-open", n))
                                     .ghost()
                                     .xsmall()
-                                    .icon(Icon::new(crate::assets::Lucide::SquareArrowOutUpRight).text_color(muted))
+                                    .icon(
+                                        Icon::new(crate::assets::Lucide::SquareArrowOutUpRight)
+                                            .text_color(muted),
+                                    )
                                     .tooltip("Open its thread in a window")
-                                    .on_click(move |_, _, cx| crate::thread_window::open(ws.clone(), &child, cx)),
+                                    .on_click(move |_, _, cx| {
+                                        crate::thread_window::open(ws.clone(), &child, cx)
+                                    }),
                             )
                         })
                         .into_any_element()
                 }
                 View::Assistant { key, text, live } => {
                     let doc = self.doc(&key, &text, cx);
-                    div().id(("ai-answer", n)).test_support().child(crate::md::answer(&doc, cwd.clone(), folder, ui, live, cx).motion(crate::md::streaming())).into_any_element()
+                    div()
+                        .id(("ai-answer", n))
+                        .test_support()
+                        .child(
+                            crate::md::answer(&doc, cwd.clone(), folder, ui, live, cx)
+                                .motion(crate::md::streaming()),
+                        )
+                        .into_any_element()
                 }
                 View::TurnEnd { ix, key } => {
-                    let changes: Option<Arc<TurnChanges>> = self.workspace.update(cx, |ws, cx| ws.load_turn_changes(&thread, ix, cx));
+                    let changes: Option<Arc<TurnChanges>> = self
+                        .workspace
+                        .update(cx, |ws, cx| ws.load_turn_changes(&thread, ix, cx));
                     let card = changes.map(|c| {
                         let ws = self.workspace.read(cx);
                         let review = ws.review(&thread);
                         let pending = |p: &str| review.is_some_and(|r| r.is_pending(p));
                         let root = match (&c.counted, &cwd) {
-                            (trek_core::changes::Counted::Checkpoints, Some(cwd)) => crate::workspace::as_given(&c.root, cwd),
+                            (trek_core::changes::Counted::Checkpoints, Some(cwd)) => {
+                                crate::workspace::as_given(&c.root, cwd)
+                            }
                             _ => c.root.clone(),
                         };
                         cards::changes(ix, &c, &root, &pending, busy, &self.workspace, &thread, cx)
                     });
                     let last = Some(ix) == last_end;
-                    v_flex().gap(px(6.)).children(card).child(self.turn_actions(ix, &key, n, last, busy, cx)).into_any_element()
+                    v_flex()
+                        .gap(px(6.))
+                        .children(card)
+                        .child(self.turn_actions(ix, &key, n, last, busy, cx))
+                        .into_any_element()
                 }
                 View::Notice(text) if text.is_empty() => div().into_any_element(),
-                View::Notice(text) => div().text_size(px(11.5)).text_color(muted).child(text).into_any_element(),
+                View::Notice(text) => div()
+                    .text_size(px(11.5))
+                    .text_color(muted)
+                    .child(text)
+                    .into_any_element(),
                 View::Error(text) => div()
                     .px(px(8.))
                     .py(px(5.))
@@ -1345,8 +2205,24 @@ impl Render for AiTranscript {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
-                    .child(v_flex().w_full().px(px(14.)).pt(px(12.)).pb(px(14.)).gap(px(10.)).children(rows))
-                    .when(empty && loading, |el| el.child(h_flex().w_full().justify_center().pt(px(24.)).child(Spinner::new()))),
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .px(px(14.))
+                            .pt(px(12.))
+                            .pb(px(14.))
+                            .gap(px(10.))
+                            .children(rows),
+                    )
+                    .when(empty && loading, |el| {
+                        el.child(
+                            h_flex()
+                                .w_full()
+                                .justify_center()
+                                .pt(px(24.))
+                                .child(Spinner::new()),
+                        )
+                    }),
             )
             .children(card)
             .into_any_element()
@@ -1363,21 +2239,39 @@ impl AiTranscript {
             .0
             .into_iter()
             .map(|v| match v {
-                View::User { text, context, ask, .. } => format!("user: {text}{}{}", if ask { " [ask]" } else { "" }, if context.is_empty() { String::new() } else { format!(" [{}]", context.join(", ")) }),
+                View::User {
+                    text, context, ask, ..
+                } => format!(
+                    "user: {text}{}{}",
+                    if ask { " [ask]" } else { "" },
+                    if context.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{}]", context.join(", "))
+                    }
+                ),
                 View::Wake { .. } => "wake".into(),
                 View::Thought { .. } => "thought".into(),
                 View::Explore { parts, .. } => format!(
                     "explore: {}",
-                    parts.into_iter().map(|p| match p {
-                        Part::Text(t) | Part::File(t) => t,
-                    }).collect::<Vec<_>>().join(" ")
+                    parts
+                        .into_iter()
+                        .map(|p| match p {
+                            Part::Text(t) | Part::File(t) => t,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 ),
                 View::Edits { files, .. } => format!(
                     "edits: {}",
-                    files.iter().map(|f| match f.lines {
-                        Some((a, r)) => format!("{} +{a} −{r}", f.name),
-                        None => f.name.clone(),
-                    }).collect::<Vec<_>>().join(", ")
+                    files
+                        .iter()
+                        .map(|f| match f.lines {
+                            Some((a, r)) => format!("{} +{a} −{r}", f.name),
+                            None => f.name.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
                 View::Command { command, .. } => format!("command: {command}"),
                 View::SubAgent { .. } => "subagent".into(),
@@ -1398,27 +2292,58 @@ mod tests {
     use trek_core::store::{Item, ToolStatus};
 
     fn tool(id: &str, title: &str, detail: &str) -> Item {
-        Item::Tool { id: id.into(), title: title.into(), detail: detail.into(), output: String::new(), status: ToolStatus::Done }
+        Item::Tool {
+            id: id.into(),
+            title: title.into(),
+            detail: detail.into(),
+            output: String::new(),
+            status: ToolStatus::Done,
+        }
     }
 
     #[test]
     fn calls_fold_by_kind_and_thoughts_join_the_looking_around() {
         let items = vec![
-            Item::User { text: "go".into(), images: vec![], at: None, resume: None, aside: false },
-            Item::Reasoning { text: "First, look.".into() },
+            Item::User {
+                text: "go".into(),
+                images: vec![],
+                at: None,
+                resume: None,
+                aside: false,
+            },
+            Item::Reasoning {
+                text: "First, look.".into(),
+            },
             tool("a", "Read", "src/a.rs"),
-            Item::Reasoning { text: "And search.".into() },
+            Item::Reasoning {
+                text: "And search.".into(),
+            },
             tool("b", "Search", "parse"),
             tool("c", "Edit", "src/a.rs"),
             tool("d", "Write", "src/b.rs"),
             tool("e", "Run command", "cargo test"),
-            Item::Reasoning { text: String::new() },
-            Item::Assistant { text: "Done.".into() },
-            Item::TurnEnd { at: 1, took_secs: 3 },
+            Item::Reasoning {
+                text: String::new(),
+            },
+            Item::Assistant {
+                text: "Done.".into(),
+            },
+            Item::TurnEnd {
+                at: 1,
+                took_secs: 3,
+            },
         ];
         assert_eq!(
             blocks(&items, None),
-            vec![Block::User(0), Block::Thought(vec![1]), Block::Explore(vec![2, 3, 4]), Block::Edits(vec![5, 6]), Block::Command(7), Block::Assistant(9), Block::TurnEnd(10)]
+            vec![
+                Block::User(0),
+                Block::Thought(vec![1]),
+                Block::Explore(vec![2, 3, 4]),
+                Block::Edits(vec![5, 6]),
+                Block::Command(7),
+                Block::Assistant(9),
+                Block::TurnEnd(10)
+            ]
         );
         // A thought still streaming has no block of its own yet.
         assert_eq!(blocks(&items[..2], Some(1)), vec![Block::User(0)]);
@@ -1426,11 +2351,40 @@ mod tests {
 
     #[test]
     fn looking_around_reads_as_one_line() {
-        let calls = |c: &[(&str, &str)]| c.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<Vec<_>>();
-        let parts = explore_parts(&calls(&[("Read", "/p/src/editor.rs"), ("Read", "/p/src/root.rs"), ("Search", "files_epoch")]), Some(std::path::Path::new("/p")));
-        assert_eq!(parts, vec![Part::Text("Read".into()), Part::File("editor.rs".into()), Part::File("root.rs".into()), Part::Text("·".into()), Part::Text("searched “files_epoch”".into())]);
-        let many = explore_parts(&calls(&[("Read", "a"), ("Read", "b"), ("Read", "c"), ("Read", "d")]), None);
-        assert_eq!(many, vec![Part::Text("Read".into()), Part::Text("4 files".into())]);
-        assert_eq!(explore_parts(&calls(&[("Search", "x")]), None), vec![Part::Text("Searched “x”".into())]);
+        let calls = |c: &[(&str, &str)]| {
+            c.iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect::<Vec<_>>()
+        };
+        let parts = explore_parts(
+            &calls(&[
+                ("Read", "/p/src/editor.rs"),
+                ("Read", "/p/src/root.rs"),
+                ("Search", "files_epoch"),
+            ]),
+            Some(std::path::Path::new("/p")),
+        );
+        assert_eq!(
+            parts,
+            vec![
+                Part::Text("Read".into()),
+                Part::File("editor.rs".into()),
+                Part::File("root.rs".into()),
+                Part::Text("·".into()),
+                Part::Text("searched “files_epoch”".into())
+            ]
+        );
+        let many = explore_parts(
+            &calls(&[("Read", "a"), ("Read", "b"), ("Read", "c"), ("Read", "d")]),
+            None,
+        );
+        assert_eq!(
+            many,
+            vec![Part::Text("Read".into()), Part::Text("4 files".into())]
+        );
+        assert_eq!(
+            explore_parts(&calls(&[("Search", "x")]), None),
+            vec![Part::Text("Searched “x”".into())]
+        );
     }
 }

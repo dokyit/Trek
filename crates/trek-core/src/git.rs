@@ -15,7 +15,8 @@ impl GitMissing {
     #[cfg(target_os = "macos")]
     pub const MESSAGE: &'static str = "Trek needs Git. Install the Xcode command line tools (`xcode-select --install`) or `brew install git`, then restart Trek.";
     #[cfg(not(any(windows, target_os = "macos")))]
-    pub const MESSAGE: &'static str = "Trek needs Git. Install it with your package manager, then restart Trek.";
+    pub const MESSAGE: &'static str =
+        "Trek needs Git. Install it with your package manager, then restart Trek.";
 }
 
 impl std::fmt::Display for GitMissing {
@@ -30,7 +31,9 @@ impl std::error::Error for GitMissing {}
 /// error use this and say [`GitMissing`]; a restart is what picks up a git installed since.
 pub fn git_binary() -> Result<&'static Path, GitMissing> {
     static BIN: OnceLock<Option<PathBuf>> = OnceLock::new();
-    BIN.get_or_init(|| crate::detect::which("git")).as_deref().ok_or(GitMissing)
+    BIN.get_or_init(|| crate::detect::which("git"))
+        .as_deref()
+        .ok_or(GitMissing)
 }
 
 /// What to run for git: [`git_binary`], or plain `git` when there is none (spawning it then fails
@@ -46,7 +49,11 @@ pub fn run_error(e: std::io::Error) -> anyhow::Error {
 }
 
 fn explain(e: std::io::Error, found: bool) -> anyhow::Error {
-    if found { anyhow::Error::new(e).context("couldn't run git") } else { anyhow::Error::new(GitMissing) }
+    if found {
+        anyhow::Error::new(e).context("couldn't run git")
+    } else {
+        anyhow::Error::new(GitMissing)
+    }
 }
 
 /// Settings a repository's own config can't override in Trek's read-only calls: nothing from the
@@ -109,8 +116,14 @@ pub fn read_only(dir: &Path) -> Command {
 
 /// `git <args>` through [`read_only`]: its trimmed output, when it succeeds.
 pub fn read(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = read_only(dir).args(args).stderr(Stdio::null()).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    let out = read_only(dir)
+        .args(args)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Option<String> {
@@ -119,27 +132,45 @@ fn git(cwd: &Path, args: &[&str]) -> Option<String> {
 
 /// The repository's default branch: origin's HEAD, else a local main, master or trunk.
 fn default_branch(cwd: &Path) -> Option<String> {
-    if let Some(remote) = git(cwd, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
+    if let Some(remote) = git(
+        cwd,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    ) {
         return remote.split_once('/').map(|(_, b)| b.to_string());
     }
     let local = git(cwd, &["branch", "--format=%(refname:short)"])?;
-    ["main", "master", "trunk"].into_iter().find(|b| local.lines().any(|l| l == *b)).map(str::to_string)
+    ["main", "master", "trunk"]
+        .into_iter()
+        .find(|b| local.lines().any(|l| l == *b))
+        .map(str::to_string)
 }
 
 /// The default branch's refs that exist here: the local branch and origin's copy. Work merged on
 /// the remote shows up in `origin/<default>` after a fetch, before the local branch is pulled.
 fn default_refs(cwd: &Path) -> Option<(String, Vec<String>)> {
     let default = default_branch(cwd)?;
-    let refs: Vec<String> = [format!("refs/heads/{default}"), format!("refs/remotes/origin/{default}")]
-        .into_iter()
-        .filter(|r| git(cwd, &["rev-parse", "--verify", "--quiet", r]).is_some())
-        .collect();
+    let refs: Vec<String> = [
+        format!("refs/heads/{default}"),
+        format!("refs/remotes/origin/{default}"),
+    ]
+    .into_iter()
+    .filter(|r| git(cwd, &["rev-parse", "--verify", "--quiet", r]).is_some())
+    .collect();
     (!refs.is_empty()).then_some((default, refs))
 }
 
 /// Commits on `branch` that `base` doesn't have.
 fn ahead(cwd: &Path, base: &str, branch: &str) -> Option<u64> {
-    git(cwd, &["rev-list", "--count", &format!("{base}..refs/heads/{branch}")])?.parse().ok()
+    git(
+        cwd,
+        &[
+            "rev-list",
+            "--count",
+            &format!("{base}..refs/heads/{branch}"),
+        ],
+    )?
+    .parse()
+    .ok()
 }
 
 /// The branch checked out in `cwd` when it holds commits of its own: not the default branch, and
@@ -150,14 +181,21 @@ pub fn unmerged_branch(cwd: &Path) -> Option<String> {
     if branch == default {
         return None;
     }
-    refs.iter().all(|r| ahead(cwd, r, &branch).is_some_and(|n| n > 0)).then_some(branch)
+    refs.iter()
+        .all(|r| ahead(cwd, r, &branch).is_some_and(|n| n > 0))
+        .then_some(branch)
 }
 
 /// `unmerged_branch`, if its last commit was made at or after `since` (seconds since the epoch):
 /// a branch a turn that began then committed to, rather than one the folder just happened to be on.
 pub fn branch_committed_since(cwd: &Path, since: i64) -> Option<String> {
     let branch = unmerged_branch(cwd)?;
-    let at: i64 = git(cwd, &["log", "-1", "--format=%ct", &format!("refs/heads/{branch}")])?.parse().ok()?;
+    let at: i64 = git(
+        cwd,
+        &["log", "-1", "--format=%ct", &format!("refs/heads/{branch}")],
+    )?
+    .parse()
+    .ok()?;
     (at >= since).then_some(branch)
 }
 
@@ -173,11 +211,27 @@ pub enum BranchState {
 }
 
 pub fn branch_state(cwd: &Path, branch: &str) -> BranchState {
-    if git(cwd, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_none() {
+    if git(
+        cwd,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .is_none()
+    {
         return BranchState::Gone;
     }
-    let Some((default, refs)) = default_refs(cwd) else { return BranchState::Gone };
-    if branch != default && refs.iter().any(|r| ahead(cwd, r, branch) == Some(0)) { BranchState::Merged } else { BranchState::Unmerged }
+    let Some((default, refs)) = default_refs(cwd) else {
+        return BranchState::Gone;
+    };
+    if branch != default && refs.iter().any(|r| ahead(cwd, r, branch) == Some(0)) {
+        BranchState::Merged
+    } else {
+        BranchState::Unmerged
+    }
 }
 
 #[cfg(test)]
@@ -189,11 +243,24 @@ mod tests {
         let gone = || std::io::Error::from(std::io::ErrorKind::NotFound);
         let said = explain(gone(), false);
         assert_eq!(said.to_string(), GitMissing::MESSAGE);
-        assert!(said.downcast_ref::<GitMissing>().is_some(), "callers can tell it apart");
+        assert!(
+            said.downcast_ref::<GitMissing>().is_some(),
+            "callers can tell it apart"
+        );
         // Any way of not starting git, when there is none, is the same message.
-        assert_eq!(explain(std::io::Error::from(std::io::ErrorKind::PermissionDenied), false).to_string(), GitMissing::MESSAGE);
+        assert_eq!(
+            explain(
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                false
+            )
+            .to_string(),
+            GitMissing::MESSAGE
+        );
         // With git found, a failure to start it is its own.
-        let other = explain(std::io::Error::from(std::io::ErrorKind::PermissionDenied), true);
+        let other = explain(
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            true,
+        );
         assert_eq!(other.to_string(), "couldn't run git");
         assert!(other.downcast_ref::<GitMissing>().is_none());
         #[cfg(windows)]
@@ -227,7 +294,13 @@ mod tests {
     }
 
     fn run(dir: &Path, args: &[&str]) {
-        let ok = Command::new("git").args(args).current_dir(dir).output().unwrap().status.success();
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap()
+            .status
+            .success();
         assert!(ok, "git {args:?}");
     }
 
@@ -244,7 +317,11 @@ mod tests {
         assert_eq!(unmerged_branch(&dir), None);
         run(&dir, &["checkout", "-q", "-b", "feature"]);
         assert_eq!(unmerged_branch(&dir), None);
-        assert_eq!(branch_state(&dir, "main"), BranchState::Unmerged, "the default branch is never 'merged'");
+        assert_eq!(
+            branch_state(&dir, "main"),
+            BranchState::Unmerged,
+            "the default branch is never 'merged'"
+        );
         commit(&dir, "work");
         assert_eq!(unmerged_branch(&dir).as_deref(), Some("feature"));
         assert_eq!(branch_state(&dir, "feature"), BranchState::Unmerged);
@@ -264,11 +341,31 @@ mod tests {
     fn a_merge_on_origin_counts_before_main_is_pulled() {
         let src = repo("src");
         let tmp = std::env::temp_dir();
-        let (origin, clone) = (tmp.join(format!("trek-git-origin-{}.git", std::process::id())), tmp.join(format!("trek-git-clone-{}", std::process::id())));
+        let (origin, clone) = (
+            tmp.join(format!("trek-git-origin-{}.git", std::process::id())),
+            tmp.join(format!("trek-git-clone-{}", std::process::id())),
+        );
         let _ = std::fs::remove_dir_all(&origin);
         let _ = std::fs::remove_dir_all(&clone);
-        run(&tmp, &["clone", "-q", "--bare", src.to_str().unwrap(), origin.to_str().unwrap()]);
-        run(&tmp, &["clone", "-q", origin.to_str().unwrap(), clone.to_str().unwrap()]);
+        run(
+            &tmp,
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                src.to_str().unwrap(),
+                origin.to_str().unwrap(),
+            ],
+        );
+        run(
+            &tmp,
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        );
         run(&clone, &["config", "user.email", "test@example.com"]);
         run(&clone, &["config", "user.name", "Test"]);
         run(&clone, &["config", "commit.gpgsign", "false"]);
@@ -290,9 +387,19 @@ mod tests {
         let dir = repo("since");
         run(&dir, &["checkout", "-q", "-b", "feature"]);
         commit(&dir, "work");
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-        assert_eq!(branch_committed_since(&dir, now - 60).as_deref(), Some("feature"));
-        assert_eq!(branch_committed_since(&dir, now + 60), None, "on the branch, but nothing committed since");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert_eq!(
+            branch_committed_since(&dir, now - 60).as_deref(),
+            Some("feature")
+        );
+        assert_eq!(
+            branch_committed_since(&dir, now + 60),
+            None,
+            "on the branch, but nothing committed since"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -301,7 +408,14 @@ mod tests {
         let dir = repo("untrusted");
         let marker = dir.join("fsmonitor-ran");
         // A repository whose config would run a command on every status, and drop diff prefixes.
-        run(&dir, &["config", "core.fsmonitor", &format!("touch {}; false", marker.display())]);
+        run(
+            &dir,
+            &[
+                "config",
+                "core.fsmonitor",
+                &format!("touch {}; false", marker.display()),
+            ],
+        );
         run(&dir, &["config", "diff.noprefix", "true"]);
         std::fs::write(dir.join("first.txt"), "changed").unwrap();
         let status = read(&dir, &["status", "--porcelain"]).unwrap();
@@ -319,16 +433,34 @@ mod tests {
         std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
         std::fs::write(&hook, "#!/bin/sh\necho 'lint failed' >&2\nexit 1\n").unwrap();
         #[cfg(unix)]
-        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
         // The hook does turn a plain commit down...
         std::fs::write(dir.join("a.txt"), "a").unwrap();
         run(&dir, &["add", "."]);
-        let plain = Command::new("git").args(["commit", "-q", "-m", "a"]).current_dir(&dir).output().unwrap();
-        assert!(!plain.status.success(), "the hook didn't run for a plain commit");
+        let plain = Command::new("git")
+            .args(["commit", "-q", "-m", "a"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            !plain.status.success(),
+            "the hook didn't run for a plain commit"
+        );
         // ...and doesn't through Trek's wrapper.
-        let out = read_only(&dir).args(["commit", "-q", "-m", "a"]).output().unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        assert_eq!(read(&dir, &["log", "-1", "--format=%s"]).as_deref(), Some("a"));
+        let out = read_only(&dir)
+            .args(["commit", "-q", "-m", "a"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            read(&dir, &["log", "-1", "--format=%s"]).as_deref(),
+            Some("a")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

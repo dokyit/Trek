@@ -56,7 +56,14 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
     } else {
         let err = String::from_utf8_lossy(&out.stderr);
         let err = err.trim();
-        Err(anyhow!("{}", if err.is_empty() { format!("git {} failed", args.first().unwrap_or(&"")) } else { err.to_string() }))
+        Err(anyhow!(
+            "{}",
+            if err.is_empty() {
+                format!("git {} failed", args.first().unwrap_or(&""))
+            } else {
+                err.to_string()
+            }
+        ))
     }
 }
 
@@ -65,14 +72,21 @@ fn ok(cwd: &Path, args: &[&str]) -> bool {
 }
 
 fn count(cwd: &Path, args: &[&str]) -> usize {
-    git(cwd, args).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+    git(cwd, args)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 /// A branch-name slug from the thread's first message: its first few words, lowercase ASCII.
 pub fn slug(text: &str) -> String {
     const MAX: usize = 32;
     let mut out = String::new();
-    for word in text.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).take(6) {
+    for word in text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .take(6)
+    {
         let word = word.to_ascii_lowercase();
         let room = MAX.saturating_sub(out.len() + usize::from(!out.is_empty()));
         if room < word.len().min(4) {
@@ -89,16 +103,28 @@ pub fn slug(text: &str) -> String {
 /// The branch HEAD is on in `repo`, or why a worktree can't start from it.
 pub fn current_branch(repo: &Path) -> Result<String> {
     if !ok(repo, &["rev-parse", "--verify", "--quiet", "HEAD"]) {
-        bail!("The repository has no commits yet. Commit something first, then start a thread in a worktree.");
+        bail!(
+            "The repository has no commits yet. Commit something first, then start a thread in a worktree."
+        );
     }
     match git(repo, &["symbolic-ref", "--short", "-q", "HEAD"]) {
         Ok(b) if !b.trim().is_empty() => Ok(b.trim().to_string()),
-        _ => bail!("The project folder isn't on a branch (detached HEAD). Switch to a branch to start a thread in a worktree."),
+        _ => bail!(
+            "The project folder isn't on a branch (detached HEAD). Switch to a branch to start a thread in a worktree."
+        ),
     }
 }
 
 fn branch_exists(repo: &Path, branch: &str) -> bool {
-    ok(repo, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+    ok(
+        repo,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
 }
 
 /// Pick the branch and folder for a new thread's worktree in `repo`: `trek/<slug>` off the
@@ -107,12 +133,19 @@ fn branch_exists(repo: &Path, branch: &str) -> bool {
 /// other threads are passed as `taken`: one still being made has no folder or branch yet.
 pub fn plan(worktrees: &Path, repo: &Path, hint: &str, taken: &[Worktree]) -> Result<Worktree> {
     let base = current_branch(repo)?;
-    let name = repo.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "repo".into());
+    let name = repo
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "repo".into());
     let root = worktrees.join(name);
     let stem = slug(hint);
     let mut n = 1;
     loop {
-        let s = if n == 1 { stem.clone() } else { format!("{stem}-{n}") };
+        let s = if n == 1 {
+            stem.clone()
+        } else {
+            format!("{stem}-{n}")
+        };
         let (path, branch) = (root.join(&s), format!("{BRANCH_PREFIX}{s}"));
         let reserved = taken.iter().any(|w| w.path == path || w.branch == branch);
         if !reserved && !path.exists() && !branch_exists(repo, &branch) {
@@ -128,13 +161,17 @@ pub fn add(repo: &Path, wt: &Worktree, copy: &[String]) -> Result<()> {
     // Forget a checkout git still lists for a folder that's gone.
     let _ = git(repo, &["worktree", "prune"]);
     if let Some(parent) = wt.path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("couldn't create {}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("couldn't create {}", parent.display()))?;
     }
     let path = wt.path.to_string_lossy();
     if branch_exists(repo, &wt.branch) {
         git(repo, &["worktree", "add", &path, &wt.branch])?;
     } else {
-        git(repo, &["worktree", "add", "-b", &wt.branch, &path, &wt.base])?;
+        git(
+            repo,
+            &["worktree", "add", "-b", &wt.branch, &path, &wt.base],
+        )?;
     }
     copy_files(repo, &wt.path, copy);
     Ok(())
@@ -156,7 +193,10 @@ pub fn copy_files(repo: &Path, dest: &Path, entries: &[String]) -> Vec<String> {
     for entry in entries.iter().map(|e| e.trim()).filter(|e| !e.is_empty()) {
         let rel = Path::new(entry);
         // Inside the project only.
-        if !rel.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir)) {
+        if !rel
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+        {
             continue;
         }
         let (src, dst) = (repo.join(rel), dest.join(rel));
@@ -166,10 +206,16 @@ pub fn copy_files(repo: &Path, dest: &Path, entries: &[String]) -> Vec<String> {
         let done = if src.is_dir() {
             walkdir::WalkDir::new(&src).into_iter().flatten().all(|e| {
                 let to = dst.join(e.path().strip_prefix(&src).unwrap_or(e.path()));
-                if e.file_type().is_dir() { std::fs::create_dir_all(&to).is_ok() } else { std::fs::copy(e.path(), &to).is_ok() }
+                if e.file_type().is_dir() {
+                    std::fs::create_dir_all(&to).is_ok()
+                } else {
+                    std::fs::copy(e.path(), &to).is_ok()
+                }
             })
         } else {
-            dst.parent().is_none_or(|p| std::fs::create_dir_all(p).is_ok()) && std::fs::copy(&src, &dst).is_ok()
+            dst.parent()
+                .is_none_or(|p| std::fs::create_dir_all(p).is_ok())
+                && std::fs::copy(&src, &dst).is_ok()
         };
         if done {
             copied.push(entry.to_string());
@@ -220,37 +266,76 @@ fn fields(s: &str) -> impl Iterator<Item = &str> {
 }
 
 fn line_count(path: &Path) -> i64 {
-    std::fs::read_to_string(path).map(|s| s.lines().count() as i64).unwrap_or(0)
+    std::fs::read_to_string(path)
+        .map(|s| s.lines().count() as i64)
+        .unwrap_or(0)
 }
 
 /// What the worktree changed against its base: committed, staged, unstaged and untracked.
 pub fn review(wt: &Worktree) -> Result<Review> {
     let dir = &wt.path;
-    let merge_base = git(dir, &["merge-base", &wt.base, "HEAD"]).map_err(|_| anyhow!("The base branch {} is gone, so there's nothing to compare with.", wt.base))?.trim().to_string();
+    let merge_base = git(dir, &["merge-base", &wt.base, "HEAD"])
+        .map_err(|_| {
+            anyhow!(
+                "The base branch {} is gone, so there's nothing to compare with.",
+                wt.base
+            )
+        })?
+        .trim()
+        .to_string();
     let mut stats = std::collections::HashMap::new();
-    let numstat = git(dir, &["diff", "--no-renames", "--numstat", "-z", &merge_base])?;
+    let numstat = git(
+        dir,
+        &["diff", "--no-renames", "--numstat", "-z", &merge_base],
+    )?;
     for f in fields(&numstat) {
         let mut parts = f.splitn(3, '\t');
         if let (Some(a), Some(d), Some(p)) = (parts.next(), parts.next(), parts.next()) {
-            stats.insert(p.to_string(), (a.parse().unwrap_or(0), d.parse().unwrap_or(0)));
+            stats.insert(
+                p.to_string(),
+                (a.parse().unwrap_or(0), d.parse().unwrap_or(0)),
+            );
         }
     }
     let mut files = vec![];
-    let names = git(dir, &["diff", "--no-renames", "--name-status", "-z", &merge_base])?;
+    let names = git(
+        dir,
+        &["diff", "--no-renames", "--name-status", "-z", &merge_base],
+    )?;
     let mut it = fields(&names);
     while let (Some(status), Some(path)) = (it.next(), it.next()) {
         let (additions, deletions) = stats.get(path).copied().unwrap_or((0, 0));
-        files.push(Change { path: path.to_string(), status: status.chars().next().unwrap_or('M'), additions, deletions });
+        files.push(Change {
+            path: path.to_string(),
+            status: status.chars().next().unwrap_or('M'),
+            additions,
+            deletions,
+        });
     }
-    for path in fields(&git(dir, &["ls-files", "--others", "--exclude-standard", "-z"])?) {
-        files.push(Change { path: path.to_string(), status: 'U', additions: line_count(&dir.join(path)), deletions: 0 });
+    for path in fields(&git(
+        dir,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )?) {
+        files.push(Change {
+            path: path.to_string(),
+            status: 'U',
+            additions: line_count(&dir.join(path)),
+            deletions: 0,
+        });
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
-    let uncommitted = git(dir, &["status", "--porcelain", "-uall"]).map(|s| s.lines().count()).unwrap_or(0);
+    let uncommitted = git(dir, &["status", "--porcelain", "-uall"])
+        .map(|s| s.lines().count())
+        .unwrap_or(0);
     Ok(Review {
-        ahead: count(dir, &["rev-list", "--count", &format!("{merge_base}..HEAD")]),
+        ahead: count(
+            dir,
+            &["rev-list", "--count", &format!("{merge_base}..HEAD")],
+        ),
         behind: count(dir, &["rev-list", "--count", &format!("HEAD..{}", wt.base)]),
-        unpushed: git(dir, &["rev-list", "--count", "@{u}..HEAD"]).ok().and_then(|s| s.trim().parse().ok()),
+        unpushed: git(dir, &["rev-list", "--count", "@{u}..HEAD"])
+            .ok()
+            .and_then(|s| s.trim().parse().ok()),
         merge_base,
         files,
         uncommitted,
@@ -261,25 +346,50 @@ pub fn review(wt: &Worktree) -> Result<Review> {
 pub fn file_diff(wt: &Worktree, merge_base: &str, change: &Change) -> String {
     if change.status == 'U' {
         return match std::fs::read_to_string(wt.path.join(&change.path)) {
-            Ok(s) => s.lines().map(|l| format!("+{l}")).collect::<Vec<_>>().join("\n"),
+            Ok(s) => s
+                .lines()
+                .map(|l| format!("+{l}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
             Err(_) => "Binary or unreadable file".into(),
         };
     }
-    git(&wt.path, &["diff", "--no-renames", merge_base, "--", &change.path]).unwrap_or_default()
+    git(
+        &wt.path,
+        &["diff", "--no-renames", merge_base, "--", &change.path],
+    )
+    .unwrap_or_default()
 }
 
 /// Put one file back as it was at the merge base: changes and commits to it are undone in the
 /// working tree (and index), and a file the thread added goes.
 pub fn revert_file(wt: &Worktree, merge_base: &str, change: &Change) -> Result<()> {
     if change.status == 'U' {
-        return std::fs::remove_file(wt.path.join(&change.path)).with_context(|| format!("couldn't delete {}", change.path));
+        return std::fs::remove_file(wt.path.join(&change.path))
+            .with_context(|| format!("couldn't delete {}", change.path));
     }
     let source = format!("--source={merge_base}");
-    if change.status == 'A' && !ok(&wt.path, &["ls-files", "--error-unmatch", "--", &change.path]) {
+    if change.status == 'A'
+        && !ok(
+            &wt.path,
+            &["ls-files", "--error-unmatch", "--", &change.path],
+        )
+    {
         // Added in a commit but deleted since: nothing on disk or in the index to put back.
         return Ok(());
     }
-    git(&wt.path, &["restore", &source, "--staged", "--worktree", "--", &change.path]).map(|_| ())
+    git(
+        &wt.path,
+        &[
+            "restore",
+            &source,
+            "--staged",
+            "--worktree",
+            "--",
+            &change.path,
+        ],
+    )
+    .map(|_| ())
 }
 
 /// Commit everything in the worktree.
@@ -316,7 +426,11 @@ pub fn commit_context(dir: &Path, max_diff: usize) -> String {
 
 /// Push the branch to origin and track it.
 pub fn push(wt: &Worktree) -> Result<()> {
-    if git(&wt.path, &["remote"]).unwrap_or_default().lines().all(|r| r.trim() != "origin") {
+    if git(&wt.path, &["remote"])
+        .unwrap_or_default()
+        .lines()
+        .all(|r| r.trim() != "origin")
+    {
         bail!("This repository has no origin remote to push to.");
     }
     git(&wt.path, &["push", "-u", "origin", &wt.branch]).map(|_| ())
@@ -328,7 +442,12 @@ pub fn github_origin(repo: &Path) -> bool {
 }
 
 fn gh_at(bin: &Path, dir: &Path, args: &[&str]) -> Result<String> {
-    let out = crate::procs::command(bin).args(args).current_dir(dir).env("PATH", crate::detect::login_path()).env("GH_PROMPT_DISABLED", "1").output()?;
+    let out = crate::procs::command(bin)
+        .args(args)
+        .current_dir(dir)
+        .env("PATH", crate::detect::login_path())
+        .env("GH_PROMPT_DISABLED", "1")
+        .output()?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
@@ -342,7 +461,21 @@ pub fn find_pr(wt: &Worktree) -> Option<String> {
 }
 
 fn find_pr_with(gh: &Path, wt: &Worktree) -> Option<String> {
-    gh_at(gh, &wt.path, &["pr", "view", &wt.branch, "--json", "url,state", "--jq", "select(.state == \"OPEN\") | .url"]).ok().filter(|u| u.starts_with("http"))
+    gh_at(
+        gh,
+        &wt.path,
+        &[
+            "pr",
+            "view",
+            &wt.branch,
+            "--json",
+            "url,state",
+            "--jq",
+            "select(.state == \"OPEN\") | .url",
+        ],
+    )
+    .ok()
+    .filter(|u| u.starts_with("http"))
 }
 
 /// Push the branch and open a pull request into its base. Returns the pull request's URL.
@@ -353,14 +486,35 @@ pub fn create_pr(wt: &Worktree, title: &str, body: &str) -> Result<String> {
 
 fn create_pr_with(gh: &Path, wt: &Worktree, title: &str, body: &str) -> Result<String> {
     push(wt)?;
-    let out = gh_at(gh, &wt.path, &["pr", "create", "--head", &wt.branch, "--base", &wt.base, "--title", title, "--body", body])?;
+    let out = gh_at(
+        gh,
+        &wt.path,
+        &[
+            "pr", "create", "--head", &wt.branch, "--base", &wt.base, "--title", title, "--body",
+            body,
+        ],
+    )?;
     // gh says what it did, then the link, last.
-    out.lines().rev().find(|l| l.starts_with("http")).map(str::to_string).ok_or_else(|| anyhow!("gh didn't say where the pull request is: {out}"))
+    out.lines()
+        .rev()
+        .find(|l| l.starts_with("http"))
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("gh didn't say where the pull request is: {out}"))
 }
 
 /// Subjects of the branch's own commits, oldest first (for a pull request's description).
 pub fn commit_subjects(wt: &Worktree) -> Vec<String> {
-    git(&wt.path, &["log", "--reverse", "--format=%s", &format!("{}..HEAD", wt.base)]).map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default()
+    git(
+        &wt.path,
+        &[
+            "log",
+            "--reverse",
+            "--format=%s",
+            &format!("{}..HEAD", wt.base),
+        ],
+    )
+    .map(|s| s.lines().map(str::to_string).collect())
+    .unwrap_or_default()
 }
 
 /// Why the thread's branch can't be merged into its base right now.
@@ -381,14 +535,27 @@ pub enum MergeBlock {
 impl MergeBlock {
     pub fn explain(&self, base: &str) -> String {
         match self {
-            MergeBlock::NotOnBase { current: Some(b) } => format!("The project folder is on {b}, not {base}. Switch it to {base} to merge here."),
-            MergeBlock::NotOnBase { current: None } => format!("The project folder isn't on a branch. Switch it to {base} to merge here."),
-            MergeBlock::BaseDirty => format!("The project folder has uncommitted changes on {base}. Commit or stash them first."),
-            MergeBlock::Uncommitted(1) => "1 file isn't committed yet. Commit or revert it first.".into(),
-            MergeBlock::Uncommitted(n) => format!("{n} files aren't committed yet. Commit or revert them first."),
+            MergeBlock::NotOnBase { current: Some(b) } => format!(
+                "The project folder is on {b}, not {base}. Switch it to {base} to merge here."
+            ),
+            MergeBlock::NotOnBase { current: None } => {
+                format!("The project folder isn't on a branch. Switch it to {base} to merge here.")
+            }
+            MergeBlock::BaseDirty => format!(
+                "The project folder has uncommitted changes on {base}. Commit or stash them first."
+            ),
+            MergeBlock::Uncommitted(1) => {
+                "1 file isn't committed yet. Commit or revert it first.".into()
+            }
+            MergeBlock::Uncommitted(n) => {
+                format!("{n} files aren't committed yet. Commit or revert them first.")
+            }
             MergeBlock::NothingToMerge => format!("{base} already has everything on this branch."),
             MergeBlock::Conflicts(files) => {
-                format!("Merging conflicts with {base} in {}. Nothing was changed; merge by hand or ask the agent to rebase onto {base}.", files.join(", "))
+                format!(
+                    "Merging conflicts with {base} in {}. Nothing was changed; merge by hand or ask the agent to rebase onto {base}.",
+                    files.join(", ")
+                )
             }
         }
     }
@@ -397,14 +564,23 @@ impl MergeBlock {
 /// What stands in the way of merging `wt` into its base in the project folder, if anything
 /// (conflicts only show when merging).
 pub fn merge_check(repo: &Path, wt: &Worktree) -> Option<MergeBlock> {
-    let current = git(repo, &["symbolic-ref", "--short", "-q", "HEAD"]).ok().map(|b| b.trim().to_string()).filter(|b| !b.is_empty());
+    let current = git(repo, &["symbolic-ref", "--short", "-q", "HEAD"])
+        .ok()
+        .map(|b| b.trim().to_string())
+        .filter(|b| !b.is_empty());
     if current.as_deref() != Some(wt.base.as_str()) {
         return Some(MergeBlock::NotOnBase { current });
     }
-    if !git(repo, &["status", "--porcelain", "--untracked-files=no"]).unwrap_or_default().trim().is_empty() {
+    if !git(repo, &["status", "--porcelain", "--untracked-files=no"])
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
         return Some(MergeBlock::BaseDirty);
     }
-    let uncommitted = git(&wt.path, &["status", "--porcelain", "-uall"]).map(|s| s.lines().count()).unwrap_or(0);
+    let uncommitted = git(&wt.path, &["status", "--porcelain", "-uall"])
+        .map(|s| s.lines().count())
+        .unwrap_or(0);
     if uncommitted > 0 {
         return Some(MergeBlock::Uncommitted(uncommitted));
     }
@@ -423,7 +599,11 @@ pub fn merge(repo: &Path, wt: &Worktree) -> Result<std::result::Result<(), Merge
     match git(repo, &["merge", "--no-edit", &wt.branch]) {
         Ok(_) => Ok(Ok(())),
         Err(e) => {
-            let conflicted: Vec<String> = git(repo, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default().lines().map(str::to_string).collect();
+            let conflicted: Vec<String> = git(repo, &["diff", "--name-only", "--diff-filter=U"])
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect();
             if conflicted.is_empty() {
                 return Err(e);
             }
@@ -451,22 +631,52 @@ pub struct Removal {
 
 pub fn removal(repo: &Path, wt: &Worktree) -> Removal {
     let missing = wt.is_missing();
-    let uncommitted = if missing { 0 } else { git(&wt.path, &["status", "--porcelain", "-uall"]).map(|s| s.lines().count()).unwrap_or(0) };
-    let unmerged = if branch_exists(repo, &wt.branch) { count(repo, &["rev-list", "--count", &format!("{}..{}", wt.base, wt.branch)]) } else { 0 };
-    Removal { uncommitted, unmerged, missing }
+    let uncommitted = if missing {
+        0
+    } else {
+        git(&wt.path, &["status", "--porcelain", "-uall"])
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    };
+    let unmerged = if branch_exists(repo, &wt.branch) {
+        count(
+            repo,
+            &[
+                "rev-list",
+                "--count",
+                &format!("{}..{}", wt.base, wt.branch),
+            ],
+        )
+    } else {
+        0
+    };
+    Removal {
+        uncommitted,
+        unmerged,
+        missing,
+    }
 }
 
 /// Remove the worktree's folder and, when its commits are all in the base (or
 /// `delete_unmerged`), its branch. `discard_uncommitted` is how many uncommitted changes the user
 /// agreed to lose: more than that (the agent wrote more since they were asked) and nothing is
 /// removed. Returns whether the branch was deleted.
-pub fn remove(repo: &Path, wt: &Worktree, discard_uncommitted: usize, delete_unmerged: bool) -> Result<bool> {
+pub fn remove(
+    repo: &Path,
+    wt: &Worktree,
+    discard_uncommitted: usize,
+    delete_unmerged: bool,
+) -> Result<bool> {
     let check = removal(repo, wt);
     if check.uncommitted > discard_uncommitted {
         bail!(
             "The worktree has {} now{}. Nothing was removed.",
             changes(check.uncommitted),
-            if discard_uncommitted == 0 { String::new() } else { format!(", not the {discard_uncommitted} you agreed to lose") }
+            if discard_uncommitted == 0 {
+                String::new()
+            } else {
+                format!(", not the {discard_uncommitted} you agreed to lose")
+            }
         );
     }
     if !check.missing {
@@ -494,20 +704,30 @@ pub fn remove(repo: &Path, wt: &Worktree, discard_uncommitted: usize, delete_unm
 }
 
 fn changes(n: usize) -> String {
-    format!("{n} uncommitted {}", if n == 1 { "change" } else { "changes" })
+    format!(
+        "{n} uncommitted {}",
+        if n == 1 { "change" } else { "changes" }
+    )
 }
 
 /// The checkout `dir` is in: the nearest folder up with a `.git` (a linked worktree's own
 /// folder, unlike `store::project_root`), else `dir` itself.
 pub fn checkout_root(dir: &Path) -> PathBuf {
-    dir.ancestors().find(|d| d.join(".git").exists()).unwrap_or(dir).to_path_buf()
+    dir.ancestors()
+        .find(|d| d.join(".git").exists())
+        .unwrap_or(dir)
+        .to_path_buf()
 }
 
 /// The main checkout a linked worktree belongs to (`None` for anything else).
 pub fn main_checkout(dir: &Path) -> Option<PathBuf> {
     let dot_git = std::fs::read_to_string(dir.join(".git")).ok()?;
     let gitdir = PathBuf::from(dot_git.trim().strip_prefix("gitdir:")?.trim());
-    let gitdir = if gitdir.is_absolute() { gitdir } else { dir.join(gitdir) };
+    let gitdir = if gitdir.is_absolute() {
+        gitdir
+    } else {
+        dir.join(gitdir)
+    };
     // Submodules have a `.git` file too, without `commondir`.
     let relative = std::fs::read_to_string(gitdir.join("commondir")).ok()?;
     // `commondir` is relative (`../..`): resolve it by hand, keeping the path as git wrote it.
@@ -519,7 +739,10 @@ pub fn main_checkout(dir: &Path) -> Option<PathBuf> {
             other => common.push(other),
         }
     }
-    (common.file_name()? == ".git").then(|| common.parent().map(Path::to_path_buf)).flatten().filter(|p| p.exists())
+    (common.file_name()? == ".git")
+        .then(|| common.parent().map(Path::to_path_buf))
+        .flatten()
+        .filter(|p| p.exists())
 }
 
 #[cfg(test)]
@@ -533,8 +756,15 @@ mod tests {
         DIR.get_or_init(|| {
             const PREFIX: &str = "trek-worktree-tests-";
             let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
-            for e in std::fs::read_dir(std::env::temp_dir()).into_iter().flatten().flatten() {
-                let old = e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t < hour_ago);
+            for e in std::fs::read_dir(std::env::temp_dir())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let old = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|t| t < hour_ago);
                 if old && e.file_name().to_string_lossy().starts_with(PREFIX) {
                     let _ = std::fs::remove_dir_all(e.path());
                 }
@@ -554,10 +784,18 @@ mod tests {
 
     /// A repo in a temp folder with one commit on `main`; nothing outside it is touched.
     fn repo(name: &str) -> PathBuf {
-        let dir = tmp().join("repos").join(format!("{name}-{}", uuid::Uuid::new_v4().simple()));
+        let dir = tmp()
+            .join("repos")
+            .join(format!("{name}-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
         // `core.autocrlf=false`: Git for Windows defaults to true, which would hand the tests CRLF files.
-        for args in [&["init", "-q", "-b", "main"][..], &["config", "core.autocrlf", "false"], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"]] {
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "core.autocrlf", "false"],
+            &["config", "user.email", "t@example.com"],
+            &["config", "user.name", "T"],
+            &["config", "commit.gpgsign", "false"],
+        ] {
             git(&dir, args).unwrap();
         }
         write(&dir, "README.md", "hello\n");
@@ -591,10 +829,19 @@ mod tests {
 
     #[test]
     fn slugs_are_short_branch_safe_words() {
-        assert_eq!(slug("Fix the login bug, please!"), "fix-the-login-bug-please");
-        assert_eq!(slug("Ünïcode → only ascii words survive"), "n-code-only-ascii-words-survive");
+        assert_eq!(
+            slug("Fix the login bug, please!"),
+            "fix-the-login-bug-please"
+        );
+        assert_eq!(
+            slug("Ünïcode → only ascii words survive"),
+            "n-code-only-ascii-words-survive"
+        );
         assert_eq!(slug("   "), "thread");
-        assert_eq!(slug("a-really-long-description-that-goes-on-and-on-forever"), "a-really-long-description-that");
+        assert_eq!(
+            slug("a-really-long-description-that-goes-on-and-on-forever"),
+            "a-really-long-description-that"
+        );
         assert!(slug(&"x".repeat(100)).len() <= 32);
     }
 
@@ -605,16 +852,35 @@ mod tests {
         write(&r, "secrets/token", "abc\n");
         // Untracked but not ignored: it would turn up as the thread's change, and get committed.
         write(&r, "local.cfg", "secret\n");
-        let copy = vec![".env".into(), ".env.local".into(), "secrets".into(), "../escape".into(), "local.cfg".into(), "README.md".into()];
+        let copy = vec![
+            ".env".into(),
+            ".env.local".into(),
+            "secrets".into(),
+            "../escape".into(),
+            "local.cfg".into(),
+            "README.md".into(),
+        ];
         let wt = create(&r, "Add a verbose flag", &copy).unwrap();
         assert_eq!(wt.branch, "trek/add-a-verbose-flag");
         assert_eq!(wt.base, "main");
-        assert!(wt.path.starts_with(worktrees().join(r.file_name().unwrap())));
-        assert_eq!(std::fs::read_to_string(wt.path.join(".env")).unwrap(), "KEY=1\n");
-        assert_eq!(std::fs::read_to_string(wt.path.join("secrets/token")).unwrap(), "abc\n");
+        assert!(
+            wt.path
+                .starts_with(worktrees().join(r.file_name().unwrap()))
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.path.join(".env")).unwrap(),
+            "KEY=1\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.path.join("secrets/token")).unwrap(),
+            "abc\n"
+        );
         assert!(!wt.path.join(".env.local").exists());
         assert!(!wt.path.join("local.cfg").exists());
-        assert_eq!(git(&wt.path, &["branch", "--show-current"]).unwrap().trim(), "trek/add-a-verbose-flag");
+        assert_eq!(
+            git(&wt.path, &["branch", "--show-current"]).unwrap().trim(),
+            "trek/add-a-verbose-flag"
+        );
         assert_eq!(main_checkout(&wt.path).unwrap(), real_path(&r));
         assert_eq!(main_checkout(&r), None);
         assert_eq!(checkout_root(&wt.path.join("src")), wt.path);
@@ -630,10 +896,20 @@ mod tests {
         let empty = tmp().join(format!("empty-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&empty).unwrap();
         git(&empty, &["init", "-q"]).unwrap();
-        assert!(create(&empty, "x", &[]).unwrap_err().to_string().contains("no commits"));
+        assert!(
+            create(&empty, "x", &[])
+                .unwrap_err()
+                .to_string()
+                .contains("no commits")
+        );
         let r = repo("detached");
         git(&r, &["checkout", "-q", "--detach"]).unwrap();
-        assert!(create(&r, "x", &[]).unwrap_err().to_string().contains("detached"));
+        assert!(
+            create(&r, "x", &[])
+                .unwrap_err()
+                .to_string()
+                .contains("detached")
+        );
     }
 
     #[test]
@@ -657,17 +933,37 @@ mod tests {
         let rv = review(&wt).unwrap();
         assert_eq!(
             statuses(&rv),
-            [("README.md".into(), 'D'), ("docs/new.md".into(), 'A'), ("notes.txt".into(), 'U'), ("src/lib.rs".into(), 'M'), ("staged.txt".into(), 'A')]
+            [
+                ("README.md".into(), 'D'),
+                ("docs/new.md".into(), 'A'),
+                ("notes.txt".into(), 'U'),
+                ("src/lib.rs".into(), 'M'),
+                ("staged.txt".into(), 'A')
+            ]
         );
         let lib = rv.files.iter().find(|f| f.path == "src/lib.rs").unwrap();
         assert_eq!((lib.additions, lib.deletions), (1, 0));
-        assert_eq!(rv.files.iter().find(|f| f.path == "notes.txt").unwrap().additions, 3);
+        assert_eq!(
+            rv.files
+                .iter()
+                .find(|f| f.path == "notes.txt")
+                .unwrap()
+                .additions,
+            3
+        );
         assert_eq!((rv.ahead, rv.behind, rv.uncommitted), (1, 1, 4));
         assert_eq!(rv.unpushed, None);
         // The base's own commit isn't the thread's change.
         assert!(!rv.files.iter().any(|f| f.path == "other.txt"));
         assert!(file_diff(&wt, &rv.merge_base, lib).contains("+fn b() {}"));
-        assert_eq!(file_diff(&wt, &rv.merge_base, rv.files.iter().find(|f| f.path == "notes.txt").unwrap()), "+a\n+b\n+c");
+        assert_eq!(
+            file_diff(
+                &wt,
+                &rv.merge_base,
+                rv.files.iter().find(|f| f.path == "notes.txt").unwrap()
+            ),
+            "+a\n+b\n+c"
+        );
         assert!(commit_context(&wt.path, 10_000).contains("notes.txt"));
     }
 
@@ -684,9 +980,19 @@ mod tests {
         for c in &rv.files {
             revert_file(&wt, &rv.merge_base, c).unwrap();
         }
-        assert!(review(&wt).unwrap().files.is_empty(), "{:?}", review(&wt).unwrap().files);
-        assert_eq!(std::fs::read_to_string(wt.path.join("src/lib.rs")).unwrap(), "fn a() {}\n");
-        assert_eq!(std::fs::read_to_string(wt.path.join("README.md")).unwrap(), "hello\n");
+        assert!(
+            review(&wt).unwrap().files.is_empty(),
+            "{:?}",
+            review(&wt).unwrap().files
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.path.join("src/lib.rs")).unwrap(),
+            "fn a() {}\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.path.join("README.md")).unwrap(),
+            "hello\n"
+        );
         assert!(!wt.path.join("added.rs").exists() && !wt.path.join("scratch.txt").exists());
     }
 
@@ -700,7 +1006,12 @@ mod tests {
         commit(&wt.path, "Feature").unwrap();
         // The project folder on another branch, then with changes of its own.
         git(&r, &["switch", "-qc", "side"]).unwrap();
-        assert_eq!(merge(&r, &wt).unwrap(), Err(MergeBlock::NotOnBase { current: Some("side".into()) }));
+        assert_eq!(
+            merge(&r, &wt).unwrap(),
+            Err(MergeBlock::NotOnBase {
+                current: Some("side".into())
+            })
+        );
         git(&r, &["switch", "-q", "main"]).unwrap();
         write(&r, "README.md", "edited in the project folder\n");
         assert_eq!(merge(&r, &wt).unwrap(), Err(MergeBlock::BaseDirty));
@@ -721,9 +1032,20 @@ mod tests {
         commit(&wt.path, "Theirs").unwrap();
         write(&r, "README.md", "ours\n");
         commit(&r, "Ours").unwrap();
-        assert_eq!(merge(&r, &wt).unwrap(), Err(MergeBlock::Conflicts(vec!["README.md".into()])));
-        assert_eq!(std::fs::read_to_string(r.join("README.md")).unwrap(), "ours\n");
-        assert!(git(&r, &["status", "--porcelain"]).unwrap().trim().is_empty());
+        assert_eq!(
+            merge(&r, &wt).unwrap(),
+            Err(MergeBlock::Conflicts(vec!["README.md".into()]))
+        );
+        assert_eq!(
+            std::fs::read_to_string(r.join("README.md")).unwrap(),
+            "ours\n"
+        );
+        assert!(
+            git(&r, &["status", "--porcelain"])
+                .unwrap()
+                .trim()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -732,12 +1054,24 @@ mod tests {
         // Uncommitted work stops it.
         let wt = create(&r, "dirty", &[]).unwrap();
         write(&wt.path, "wip.txt", "wip\n");
-        assert_eq!(removal(&r, &wt), Removal { uncommitted: 1, unmerged: 0, missing: false });
+        assert_eq!(
+            removal(&r, &wt),
+            Removal {
+                uncommitted: 1,
+                unmerged: 0,
+                missing: false
+            }
+        );
         assert!(remove(&r, &wt, 0, false).is_err());
         assert!(wt.path.exists());
         // More than the user agreed to lose (the agent wrote another file since): kept.
         write(&wt.path, "more.txt", "more\n");
-        assert!(remove(&r, &wt, 1, false).unwrap_err().to_string().contains("2 uncommitted changes now"));
+        assert!(
+            remove(&r, &wt, 1, false)
+                .unwrap_err()
+                .to_string()
+                .contains("2 uncommitted changes now")
+        );
         assert!(wt.path.join("wip.txt").exists());
         // Discarded on request; nothing unmerged, so the branch goes too.
         assert!(remove(&r, &wt, 2, false).unwrap());
@@ -791,7 +1125,10 @@ mod tests {
         let first = plan(&worktrees(), &r, "same words", &[]).unwrap();
         // Not made yet, so only `taken` knows about it.
         let second = plan(&worktrees(), &r, "same words", std::slice::from_ref(&first)).unwrap();
-        assert_eq!((first.branch.as_str(), second.branch.as_str()), ("trek/same-words", "trek/same-words-2"));
+        assert_eq!(
+            (first.branch.as_str(), second.branch.as_str()),
+            ("trek/same-words", "trek/same-words-2")
+        );
         assert_ne!(first.path, second.path);
     }
 
@@ -802,7 +1139,14 @@ mod tests {
         write(&r, ".env", "E=1\n");
         std::fs::remove_dir_all(&wt.path).unwrap();
         assert!(wt.is_missing());
-        assert_eq!(removal(&r, &wt), Removal { uncommitted: 0, unmerged: 0, missing: true });
+        assert_eq!(
+            removal(&r, &wt),
+            Removal {
+                uncommitted: 0,
+                unmerged: 0,
+                missing: true
+            }
+        );
         add(&r, &wt, &default_copy()).unwrap();
         assert!(!wt.is_missing());
         assert!(wt.path.join(".env").exists());
@@ -811,7 +1155,10 @@ mod tests {
         git(&r, &["worktree", "prune"]).unwrap();
         git(&r, &["branch", "-D", &wt.branch]).unwrap();
         add(&r, &wt, &[]).unwrap();
-        assert_eq!(git(&wt.path, &["branch", "--show-current"]).unwrap().trim(), wt.branch);
+        assert_eq!(
+            git(&wt.path, &["branch", "--show-current"]).unwrap().trim(),
+            wt.branch
+        );
         // A missing folder can still be removed: just its branch is tidied.
         std::fs::remove_dir_all(&wt.path).unwrap();
         assert!(remove(&r, &wt, 0, false).unwrap());
@@ -825,7 +1172,14 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt as _;
             let bin = dir.join(format!("gh-{id}"));
-            std::fs::write(&bin, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}.args\"\n{sh}\n", bin.display())).unwrap();
+            std::fs::write(
+                &bin,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}.args\"\n{sh}\n",
+                    bin.display()
+                ),
+            )
+            .unwrap();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
             let _ = cmd;
             bin
@@ -856,20 +1210,65 @@ mod tests {
         let wt = create(&r, "pr", &[]).unwrap();
         write(&wt.path, "x.txt", "x\n");
         commit(&wt.path, "X").unwrap();
-        let gh = fake_gh(&tmp(), "echo 'Creating pull request for trek/pr into main'\necho\necho https://github.com/o/r/pull/7", "echo Creating pull request for trek/pr into main\necho.\necho https://github.com/o/r/pull/7");
+        let gh = fake_gh(
+            &tmp(),
+            "echo 'Creating pull request for trek/pr into main'\necho\necho https://github.com/o/r/pull/7",
+            "echo Creating pull request for trek/pr into main\necho.\necho https://github.com/o/r/pull/7",
+        );
         let url = create_pr_with(&gh, &wt, "Add x", "Body").unwrap();
         assert_eq!(url, "https://github.com/o/r/pull/7");
         let args = std::fs::read_to_string(format!("{}.args", gh.display())).unwrap();
-        assert_eq!(args.lines().collect::<Vec<_>>(), ["pr", "create", "--head", "trek/pr", "--base", "main", "--title", "Add x", "--body", "Body"]);
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            [
+                "pr", "create", "--head", "trek/pr", "--base", "main", "--title", "Add x",
+                "--body", "Body"
+            ]
+        );
         // Pushed first, with its upstream set.
         assert_eq!(review(&wt).unwrap().unpushed, Some(0));
         // gh failing, or saying nothing useful, is an error with its words.
-        assert!(create_pr_with(&fake_gh(&tmp(), "echo 'no access' >&2; exit 1", "echo no access 1>&2\nexit /b 1"), &wt, "t", "b").unwrap_err().to_string().contains("no access"));
+        assert!(
+            create_pr_with(
+                &fake_gh(
+                    &tmp(),
+                    "echo 'no access' >&2; exit 1",
+                    "echo no access 1>&2\nexit /b 1"
+                ),
+                &wt,
+                "t",
+                "b"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("no access")
+        );
         assert!(create_pr_with(&fake_gh(&tmp(), "echo done", "echo done"), &wt, "t", "b").is_err());
         // The open one is found; none (or a closed one: gh prints nothing) is none.
-        assert_eq!(find_pr_with(&fake_gh(&tmp(), "echo https://github.com/o/r/pull/7", "echo https://github.com/o/r/pull/7"), &wt).as_deref(), Some("https://github.com/o/r/pull/7"));
+        assert_eq!(
+            find_pr_with(
+                &fake_gh(
+                    &tmp(),
+                    "echo https://github.com/o/r/pull/7",
+                    "echo https://github.com/o/r/pull/7"
+                ),
+                &wt
+            )
+            .as_deref(),
+            Some("https://github.com/o/r/pull/7")
+        );
         assert_eq!(find_pr_with(&fake_gh(&tmp(), "true", "rem"), &wt), None);
-        assert_eq!(find_pr_with(&fake_gh(&tmp(), "echo 'no pull requests found' >&2; exit 1", "echo no pull requests found 1>&2\nexit /b 1"), &wt), None);
+        assert_eq!(
+            find_pr_with(
+                &fake_gh(
+                    &tmp(),
+                    "echo 'no pull requests found' >&2; exit 1",
+                    "echo no pull requests found 1>&2\nexit /b 1"
+                ),
+                &wt
+            ),
+            None
+        );
     }
 
     #[test]

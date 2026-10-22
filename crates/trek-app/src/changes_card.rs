@@ -31,14 +31,22 @@ pub struct Actions {
 pub fn folders(changes: &TurnChanges) -> Vec<(String, Vec<&FileChange>)> {
     let mut out: Vec<(String, Vec<&FileChange>)> = vec![];
     for f in &changes.files {
-        let dir = f.path.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
+        let dir = f
+            .path
+            .rsplit_once('/')
+            .map(|(d, _)| d.to_string())
+            .unwrap_or_default();
         match out.iter_mut().find(|(d, _)| *d == dir) {
             Some((_, files)) => files.push(f),
             None => out.push((dir, vec![f])),
         }
     }
     // The top folder's own files first, then the folders by path.
-    out.sort_by(|a, b| (!a.0.is_empty()).cmp(&!b.0.is_empty()).then_with(|| a.0.cmp(&b.0)));
+    out.sort_by(|a, b| {
+        (!a.0.is_empty())
+            .cmp(&!b.0.is_empty())
+            .then_with(|| a.0.cmp(&b.0))
+    });
     out
 }
 
@@ -47,7 +55,13 @@ const SHOWN: usize = 8;
 
 /// The card for the turn ending at transcript item `ix`; `shown_all`: more than `SHOWN` files,
 /// opened out.
-pub fn card(ix: usize, changes: &TurnChanges, shown_all: bool, actions: Actions, cx: &App) -> AnyElement {
+pub fn card(
+    ix: usize,
+    changes: &TurnChanges,
+    shown_all: bool,
+    actions: Actions,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let line = theme.foreground.opacity(0.07);
@@ -66,7 +80,10 @@ pub fn card(ix: usize, changes: &TurnChanges, shown_all: bool, actions: Actions,
             div()
                 .font_semibold()
                 .text_color(theme.foreground.opacity(0.92))
-                .child(format!("Edited {n} {}", if n == 1 { "file" } else { "files" })),
+                .child(format!(
+                    "Edited {n} {}",
+                    if n == 1 { "file" } else { "files" }
+                )),
         )
         .when(added > 0 || removed > 0, |el| {
             el.child(crate::line_breakdown::hover(
@@ -92,10 +109,24 @@ pub fn card(ix: usize, changes: &TurnChanges, shown_all: bool, actions: Actions,
             )
         })
         .when_some(actions.view_diff.clone(), |el, view| {
-            el.child(Button::new(("changes-review", ix)).small().outline().label("Review").on_click(move |_, window, cx| view(None, window, cx)))
+            el.child(
+                Button::new(("changes-review", ix))
+                    .small()
+                    .outline()
+                    .label("Review")
+                    .on_click(move |_, window, cx| view(None, window, cx)),
+            )
         });
-    let files = if shown_all { &changes.files[..] } else { &changes.files[..n.min(SHOWN)] };
-    let mut rows: Vec<AnyElement> = files.iter().enumerate().map(|(i, f)| file_row(ix, i, f, &actions, cx)).collect();
+    let files = if shown_all {
+        &changes.files[..]
+    } else {
+        &changes.files[..n.min(SHOWN)]
+    };
+    let mut rows: Vec<AnyElement> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| file_row(ix, i, f, &actions, cx))
+        .collect();
     if n > SHOWN {
         let show_more = actions.show_more.clone();
         rows.push(
@@ -110,8 +141,15 @@ pub fn card(ix: usize, changes: &TurnChanges, shown_all: bool, actions: Actions,
                 .text_xs()
                 .text_color(muted)
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.foreground.opacity(0.04)).text_color(theme.foreground))
-                .child(if shown_all { "Show less".to_string() } else { format!("Show {} more", n - SHOWN) })
+                .hover(|s| {
+                    s.bg(theme.foreground.opacity(0.04))
+                        .text_color(theme.foreground)
+                })
+                .child(if shown_all {
+                    "Show less".to_string()
+                } else {
+                    format!("Show {} more", n - SHOWN)
+                })
                 .on_click(move |_, _, cx| show_more(!shown_all, cx))
                 .into_any_element(),
         );
@@ -138,7 +176,14 @@ pub fn card(ix: usize, changes: &TurnChanges, shown_all: bool, actions: Actions,
         .bg(theme.secondary)
         .overflow_hidden()
         .child(head)
-        .child(v_flex().py(px(4.)).px(px(6.)).border_t_1().border_color(line).children(rows))
+        .child(
+            v_flex()
+                .py(px(4.))
+                .px(px(6.))
+                .border_t_1()
+                .border_color(line)
+                .children(rows),
+        )
         .children(note)
         .into_any_element()
 }
@@ -167,14 +212,32 @@ fn file_row(ix: usize, i: usize, f: &FileChange, actions: &Actions, cx: &App) ->
     } else if f.lines_known {
         h_flex()
             .gap(px(6.))
-            .child(div().text_color(if f.added > 0 { green } else { muted.opacity(0.6) }).child(format!("+{}", f.added)))
-            .child(div().text_color(if f.removed > 0 { red } else { muted.opacity(0.6) }).child(format!("−{}", f.removed)))
+            .child(
+                div()
+                    .text_color(if f.added > 0 {
+                        green
+                    } else {
+                        muted.opacity(0.6)
+                    })
+                    .child(format!("+{}", f.added)),
+            )
+            .child(
+                div()
+                    .text_color(if f.removed > 0 {
+                        red
+                    } else {
+                        muted.opacity(0.6)
+                    })
+                    .child(format!("−{}", f.removed)),
+            )
             .into_any_element()
     } else {
         div().into_any_element()
     };
     let tip: SharedString = match (&f.status, actions.view_diff.is_some()) {
-        (FileStatus::Renamed { from }, true) => format!("{} · renamed from {from}\nShow the diff", f.path).into(),
+        (FileStatus::Renamed { from }, true) => {
+            format!("{} · renamed from {from}\nShow the diff", f.path).into()
+        }
         (_, true) => format!("{}\nShow the diff", f.path).into(),
         (_, false) => format!("{}\n{}", f.path, crate::words::words().show_in_file_manager).into(),
     };
@@ -189,12 +252,22 @@ fn file_row(ix: usize, i: usize, f: &FileChange, actions: &Actions, cx: &App) ->
         .text_size(px(12.5))
         .cursor_pointer()
         .hover(|s| s.bg(theme.foreground.opacity(0.045)))
-        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+        })
         .on_click(move |_, window, cx| match &view {
             Some(view) => view(Some(file.path.clone()), window, cx),
             None => reveal(&file, window, cx),
         })
-        .child(div().w(px(12.)).flex_none().text_xs().font_semibold().text_color(tint).child(letter))
+        .child(
+            div()
+                .w(px(12.))
+                .flex_none()
+                .text_xs()
+                .font_semibold()
+                .text_color(tint)
+                .child(letter),
+        )
         // The path takes what the counts don't: the folder ellipsizes first, then the name.
         .child(
             h_flex()
@@ -208,13 +281,23 @@ fn file_row(ix: usize, i: usize, f: &FileChange, actions: &Actions, cx: &App) ->
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_color(if deleted { muted } else { theme.foreground.opacity(0.92) })
+                        .text_color(if deleted {
+                            muted
+                        } else {
+                            theme.foreground.opacity(0.92)
+                        })
                         .font_medium()
                         .when(deleted, |el| el.line_through())
                         .child(name),
                 ),
         )
-        .child(div().flex_none().font_family(theme.mono_font_family.clone()).text_xs().child(lines))
+        .child(
+            div()
+                .flex_none()
+                .font_family(theme.mono_font_family.clone())
+                .text_xs()
+                .child(lines),
+        )
         .into_any_element()
 }
 
@@ -224,16 +307,40 @@ mod tests {
     use trek_core::changes::{Counted, FileChange, FileStatus, TurnChanges};
 
     fn file(path: &str) -> FileChange {
-        FileChange { path: path.into(), status: FileStatus::Modified, added: 1, removed: 0, binary: false, lines_known: true }
+        FileChange {
+            path: path.into(),
+            status: FileStatus::Modified,
+            added: 1,
+            removed: 0,
+            binary: false,
+            lines_known: true,
+        }
     }
 
     #[test]
     fn files_group_by_folder_the_top_folders_own_first() {
-        let changes = TurnChanges { files: vec![file("README.md"), file("a/x.rs"), file("a/y.rs"), file("a/b/z.rs"), file("Z.md")], root: "/p/trek".into(), counted: Counted::Checkpoints };
-        let got: Vec<(String, Vec<&str>)> = folders(&changes).into_iter().map(|(d, fs)| (d, fs.iter().map(|f| f.path.as_str()).collect())).collect();
+        let changes = TurnChanges {
+            files: vec![
+                file("README.md"),
+                file("a/x.rs"),
+                file("a/y.rs"),
+                file("a/b/z.rs"),
+                file("Z.md"),
+            ],
+            root: "/p/trek".into(),
+            counted: Counted::Checkpoints,
+        };
+        let got: Vec<(String, Vec<&str>)> = folders(&changes)
+            .into_iter()
+            .map(|(d, fs)| (d, fs.iter().map(|f| f.path.as_str()).collect()))
+            .collect();
         assert_eq!(
             got,
-            [("".to_string(), vec!["README.md", "Z.md"]), ("a".to_string(), vec!["a/x.rs", "a/y.rs"]), ("a/b".to_string(), vec!["a/b/z.rs"])]
+            [
+                ("".to_string(), vec!["README.md", "Z.md"]),
+                ("a".to_string(), vec!["a/x.rs", "a/y.rs"]),
+                ("a/b".to_string(), vec!["a/b/z.rs"])
+            ]
         );
     }
 }

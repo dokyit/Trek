@@ -54,7 +54,14 @@ fn unnamed(message: &str, needs: bool, failed: bool) -> &'static str {
 
 /// The note for an alert the Mac raised (`message` as the Mac's banner words it). `names`: say
 /// it as the banner does, with the project in the title; else only what kind of news it is.
-pub fn note_for(topic: &str, message: &str, thread: Option<&str>, project: Option<&str>, names: bool, host: &str) -> Note {
+pub fn note_for(
+    topic: &str,
+    message: &str,
+    thread: Option<&str>,
+    project: Option<&str>,
+    names: bool,
+    host: &str,
+) -> Note {
     // By how the banner starts (or ends), never by words that may be the thread's own title:
     // "Finished: Fix waiting spinner" is a finish. A thread an agent started says "Thread
     // failed · …" when it fails.
@@ -73,7 +80,11 @@ pub fn note_for(topic: &str, message: &str, thread: Option<&str>, project: Optio
             Some(p) => format!("Trek · {p}"),
             None => "Trek".into(),
         },
-        message: if names { message.to_string() } else { unnamed(message, needs, failed).to_string() },
+        message: if names {
+            message.to_string()
+        } else {
+            unnamed(message, needs, failed).to_string()
+        },
         click: thread.map(|t| format!("trek://open?thread={t}&host={host}")),
         tags,
         priority: if needs { 4 } else { 3 },
@@ -113,7 +124,11 @@ fn screen_locked() -> bool {
     }
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
-        fn CFStringCreateWithCString(allocator: *const c_void, text: *const c_char, encoding: u32) -> *const c_void;
+        fn CFStringCreateWithCString(
+            allocator: *const c_void,
+            text: *const c_char,
+            encoding: u32,
+        ) -> *const c_void;
         fn CFDictionaryGetValue(dictionary: *const c_void, key: *const c_void) -> *const c_void;
         fn CFBooleanGetValue(value: *const c_void) -> u8;
         fn CFRelease(value: *const c_void);
@@ -123,8 +138,16 @@ fn screen_locked() -> bool {
         if dictionary.is_null() {
             return false;
         }
-        let key = CFStringCreateWithCString(std::ptr::null(), c"CGSSessionScreenIsLocked".as_ptr(), 0x0800_0100);
-        let value = if key.is_null() { std::ptr::null() } else { CFDictionaryGetValue(dictionary, key) };
+        let key = CFStringCreateWithCString(
+            std::ptr::null(),
+            c"CGSSessionScreenIsLocked".as_ptr(),
+            0x0800_0100,
+        );
+        let value = if key.is_null() {
+            std::ptr::null()
+        } else {
+            CFDictionaryGetValue(dictionary, key)
+        };
         let locked = !value.is_null() && CFBooleanGetValue(value) != 0;
         if !key.is_null() {
             CFRelease(key);
@@ -171,15 +194,25 @@ fn worth_retrying(status: Option<reqwest::StatusCode>) -> bool {
 /// Publish `note` to `server` in the background, trying again after a failure that may pass
 /// (`tries` times in all). The last failure is the result (logged by the caller: there's no one
 /// to tell right then, the user is away).
-pub fn publish(server: &str, note: Note, tries: usize) -> tokio::task::JoinHandle<Result<(), String>> {
+pub fn publish(
+    server: &str,
+    note: Note,
+    tries: usize,
+) -> tokio::task::JoinHandle<Result<(), String>> {
     let url = server.trim_end_matches('/').to_string();
     trek_core::runtime().spawn(async move {
-        let client = reqwest::Client::builder().timeout(Duration::from_secs(15)).build().map_err(|e| e.to_string())?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|e| e.to_string())?;
         let mut waits = RETRIES.iter().take(tries.saturating_sub(1));
         loop {
             let (status, error) = match client.post(&url).json(&note).send().await {
                 Ok(response) if response.status().is_success() => return Ok(()),
-                Ok(response) => (Some(response.status()), format!("{} said {}", url, response.status())),
+                Ok(response) => (
+                    Some(response.status()),
+                    format!("{} said {}", url, response.status()),
+                ),
                 Err(e) => (None, e.to_string()),
             };
             match waits.next().filter(|_| worth_retrying(status)) {
@@ -201,8 +234,19 @@ impl Workspace {
         if !due(m.push_when, idle_seconds, screen_locked) {
             return;
         }
-        let project = self.thread(thread).and_then(|t| t.project_id.as_deref()).and_then(|p| self.project(p)).map(|p| p.name.clone());
-        let note = note_for(&m.push_topic, message, Some(thread), project.as_deref(), m.push_names, &crate::remote::host_info().id);
+        let project = self
+            .thread(thread)
+            .and_then(|t| t.project_id.as_deref())
+            .and_then(|p| self.project(p))
+            .map(|p| p.name.clone());
+        let note = note_for(
+            &m.push_topic,
+            message,
+            Some(thread),
+            project.as_deref(),
+            m.push_names,
+            &crate::remote::host_info().id,
+        );
         let job = publish(&m.push_server, note, 1 + RETRIES.len());
         trek_core::runtime().spawn(async move {
             if let Ok(Err(e)) = job.await {
@@ -226,7 +270,17 @@ impl Workspace {
         if m.push_topic.is_empty() {
             return;
         }
-        let mut note = note_for(&m.push_topic, &format!("Notifications from {} will come here.", crate::words::words().this_computer), None, None, true, &crate::remote::host_info().id);
+        let mut note = note_for(
+            &m.push_topic,
+            &format!(
+                "Notifications from {} will come here.",
+                crate::words::words().this_computer
+            ),
+            None,
+            None,
+            true,
+            &crate::remote::host_info().id,
+        );
         note.title = "Trek is connected".into();
         note.tags = vec!["tada".into()];
         // Once: the user is waiting to hear how it went.
@@ -237,7 +291,12 @@ impl Workspace {
                 Ok(()) => "Sent. It should be on your phone in a moment.".to_string(),
                 Err(e) => format!("Couldn't send it: {e}"),
             };
-            let _ = this.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message, undo: None }));
+            let _ = this.update(cx, |_, cx| {
+                cx.emit(WorkspaceEvent::Toast {
+                    message,
+                    undo: None,
+                })
+            });
         })
         .detach();
     }
@@ -249,12 +308,26 @@ mod tests {
 
     #[test]
     fn notes_say_what_the_banner_says_and_open_the_thread() {
-        let n = note_for("trek-abc", "Needs your approval: Run ./migrate.sh", Some("t1"), Some("api"), true, "m1");
+        let n = note_for(
+            "trek-abc",
+            "Needs your approval: Run ./migrate.sh",
+            Some("t1"),
+            Some("api"),
+            true,
+            "m1",
+        );
         assert_eq!(n.title, "Trek · api");
         assert_eq!(n.message, "Needs your approval: Run ./migrate.sh");
         assert_eq!(n.click.as_deref(), Some("trek://open?thread=t1&host=m1"));
         assert_eq!(n.priority, 4, "needs you comes first");
-        let done = note_for("trek-abc", "Finished: Add a verbose flag", Some("t2"), None, true, "m1");
+        let done = note_for(
+            "trek-abc",
+            "Finished: Add a verbose flag",
+            Some("t2"),
+            None,
+            true,
+            "m1",
+        );
         assert_eq!((done.title.as_str(), done.priority), ("Trek", 3));
         let json = serde_json::to_value(&done).unwrap();
         assert_eq!(json["topic"], "trek-abc");
@@ -263,31 +336,70 @@ mod tests {
 
     #[test]
     fn without_names_a_note_says_only_what_kind_of_news_it_is() {
-        let unnamed = |message: &str| note_for("trek-abc", message, Some("t1"), Some("api"), false, "m1");
+        let unnamed =
+            |message: &str| note_for("trek-abc", message, Some("t1"), Some("api"), false, "m1");
         let n = unnamed("Needs your approval: Run ./migrate.sh --apply");
         // Neither the project nor what was asked leaves the Mac; the note still opens the thread.
-        assert_eq!((n.title.as_str(), n.message.as_str(), n.priority), ("Trek", "A thread needs your approval", 4));
+        assert_eq!(
+            (n.title.as_str(), n.message.as_str(), n.priority),
+            ("Trek", "A thread needs your approval", 4)
+        );
         assert_eq!(n.click.as_deref(), Some("trek://open?thread=t1&host=m1"));
-        assert_eq!(unnamed("Finished: Rotate the signing key").message, "A thread finished");
-        assert_eq!(unnamed("Failed: Rotate the signing key").message, "A thread failed");
-        assert_eq!(unnamed("Paused until 2:10 AM: Rotate the signing key").message, "A thread is paused at its usage limit");
-        assert_eq!(unnamed("Resumed: Rotate the signing key").message, "A thread resumed");
-        assert_eq!(unnamed("Rotate the signing key is waiting on your answer").message, "A thread needs you");
+        assert_eq!(
+            unnamed("Finished: Rotate the signing key").message,
+            "A thread finished"
+        );
+        assert_eq!(
+            unnamed("Failed: Rotate the signing key").message,
+            "A thread failed"
+        );
+        assert_eq!(
+            unnamed("Paused until 2:10 AM: Rotate the signing key").message,
+            "A thread is paused at its usage limit"
+        );
+        assert_eq!(
+            unnamed("Resumed: Rotate the signing key").message,
+            "A thread resumed"
+        );
+        assert_eq!(
+            unnamed("Rotate the signing key is waiting on your answer").message,
+            "A thread needs you"
+        );
         // A thread an agent started fails in other words; a title that says "waiting" is still
         // the title, not what the thread needs.
         let agent_started = unnamed("Thread failed · Migrate the DB");
-        assert_eq!((agent_started.message.as_str(), agent_started.tags[0].as_str(), agent_started.priority), ("A thread failed", "x", 3));
-        assert_eq!(unnamed("Thread completed · Migrate the DB").message, "A thread finished");
+        assert_eq!(
+            (
+                agent_started.message.as_str(),
+                agent_started.tags[0].as_str(),
+                agent_started.priority
+            ),
+            ("A thread failed", "x", 3)
+        );
+        assert_eq!(
+            unnamed("Thread completed · Migrate the DB").message,
+            "A thread finished"
+        );
         for (message, said) in [
             ("Finished: Fix waiting spinner", "A thread finished"),
             ("Failed: Waiting room layout", "A thread failed"),
-            ("Paused until 2:10 AM: Fix waiting spinner", "A thread is paused at its usage limit"),
+            (
+                "Paused until 2:10 AM: Fix waiting spinner",
+                "A thread is paused at its usage limit",
+            ),
         ] {
             let n = unnamed(message);
             assert_eq!((n.message.as_str(), n.priority), (said, 3), "{message}");
             assert_ne!(n.tags[0], "raised_hand", "{message}");
         }
-        let named = note_for("trek-abc", "Thread failed · Migrate the DB", Some("t1"), None, true, "m1");
+        let named = note_for(
+            "trek-abc",
+            "Thread failed · Migrate the DB",
+            Some("t1"),
+            None,
+            true,
+            "m1",
+        );
         assert_eq!((named.tags[0].as_str(), named.priority), ("x", 3));
         let json = serde_json::to_string(&unnamed("Failed: Rotate the signing key")).unwrap();
         assert!(!json.contains("Rotate") && !json.contains("api"), "{json}");
@@ -297,8 +409,14 @@ mod tests {
     fn only_failures_that_may_pass_are_tried_again() {
         use reqwest::StatusCode;
         assert!(worth_retrying(None), "the server wasn't reached");
-        assert!(worth_retrying(Some(StatusCode::BAD_GATEWAY)) && worth_retrying(Some(StatusCode::TOO_MANY_REQUESTS)));
-        assert!(!worth_retrying(Some(StatusCode::FORBIDDEN)) && !worth_retrying(Some(StatusCode::BAD_REQUEST)));
+        assert!(
+            worth_retrying(Some(StatusCode::BAD_GATEWAY))
+                && worth_retrying(Some(StatusCode::TOO_MANY_REQUESTS))
+        );
+        assert!(
+            !worth_retrying(Some(StatusCode::FORBIDDEN))
+                && !worth_retrying(Some(StatusCode::BAD_REQUEST))
+        );
     }
 
     #[test]
@@ -306,18 +424,31 @@ mod tests {
         assert!(!away(1., false));
         assert!(away(1., true));
         assert!(away(AWAY_AFTER.as_secs_f64(), false));
-        assert!(!away(AWAY_AFTER.as_secs_f64() - 0.5, false), "two minutes, not a moment less");
+        assert!(
+            !away(AWAY_AFTER.as_secs_f64() - 0.5, false),
+            "two minutes, not a moment less"
+        );
     }
 
     #[test]
     fn a_note_goes_out_when_the_user_is_away_or_always() {
         let (idle, locked) = (|| 5.0, || false);
         assert!(!due(PushWhen::Away, idle, locked), "at the keyboard");
-        assert!(due(PushWhen::Away, || 600.0, locked), "idle for ten minutes");
-        assert!(due(PushWhen::Away, idle, || true), "locked, though the last input was a moment ago");
+        assert!(
+            due(PushWhen::Away, || 600.0, locked),
+            "idle for ten minutes"
+        );
+        assert!(
+            due(PushWhen::Away, idle, || true),
+            "locked, though the last input was a moment ago"
+        );
         assert!(due(PushWhen::Always, idle, locked));
         // `Always` doesn't ask the system anything: the queries cost a call per alert.
-        assert!(due(PushWhen::Always, || unreachable!("idle time"), || unreachable!("lock state")));
+        assert!(due(
+            PushWhen::Always,
+            || unreachable!("idle time"),
+            || unreachable!("lock state")
+        ));
     }
 
     #[test]
@@ -325,6 +456,10 @@ mod tests {
         let (a, b) = (new_topic(), new_topic());
         assert_ne!(a, b);
         assert_eq!(a.len(), 37);
-        assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'), "{a}");
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "{a}"
+        );
     }
 }

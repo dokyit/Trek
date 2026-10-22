@@ -66,14 +66,19 @@ impl Server {
         let msg: Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
-                return Some(error_response(Value::Null, PARSE_ERROR, &format!("Parse error: {e}")).to_string());
+                return Some(
+                    error_response(Value::Null, PARSE_ERROR, &format!("Parse error: {e}"))
+                        .to_string(),
+                );
             }
         };
         match msg {
             // JSON-RPC batch (allowed by protocol 2025-03-26).
             Value::Array(items) => {
                 if items.is_empty() {
-                    return Some(error_response(Value::Null, INVALID_REQUEST, "Empty batch").to_string());
+                    return Some(
+                        error_response(Value::Null, INVALID_REQUEST, "Empty batch").to_string(),
+                    );
                 }
                 let responses: Vec<Value> = items
                     .into_iter()
@@ -91,7 +96,11 @@ impl Server {
 
     pub fn handle_message(&mut self, msg: Value, tools: &mut dyn ToolSet) -> Option<Value> {
         let Some(obj) = msg.as_object() else {
-            return Some(error_response(Value::Null, INVALID_REQUEST, "Request must be an object"));
+            return Some(error_response(
+                Value::Null,
+                INVALID_REQUEST,
+                "Request must be an object",
+            ));
         };
         let id = obj.get("id").cloned();
         let Some(method) = obj.get("method").and_then(Value::as_str) else {
@@ -99,7 +108,11 @@ impl Server {
             if obj.contains_key("result") || obj.contains_key("error") {
                 return None;
             }
-            return Some(error_response(id.unwrap_or(Value::Null), INVALID_REQUEST, "Missing method"));
+            return Some(error_response(
+                id.unwrap_or(Value::Null),
+                INVALID_REQUEST,
+                "Missing method",
+            ));
         };
         let params = obj.get("params").cloned().unwrap_or(Value::Null);
 
@@ -149,18 +162,27 @@ impl Server {
         })
     }
 
-    fn call_tool(&mut self, params: &Value, tools: &mut dyn ToolSet) -> Result<Value, (i64, String)> {
-        let name = params
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or((INVALID_PARAMS, "tools/call requires params.name".to_string()))?;
+    fn call_tool(
+        &mut self,
+        params: &Value,
+        tools: &mut dyn ToolSet,
+    ) -> Result<Value, (i64, String)> {
+        let name = params.get("name").and_then(Value::as_str).ok_or((
+            INVALID_PARAMS,
+            "tools/call requires params.name".to_string(),
+        ))?;
         if !tools.tools().iter().any(|t| t.name == name) {
             return Err((INVALID_PARAMS, format!("Unknown tool: {name}")));
         }
         let args = match params.get("arguments") {
             None | Some(Value::Null) => json!({}),
             Some(v @ Value::Object(_)) => v.clone(),
-            Some(_) => return Err((INVALID_PARAMS, "params.arguments must be an object".to_string())),
+            Some(_) => {
+                return Err((
+                    INVALID_PARAMS,
+                    "params.arguments must be an object".to_string(),
+                ));
+            }
         };
         eprintln!("trek-mcp: tools/call {name}");
         Ok(match tools.call(name, &args) {
@@ -175,7 +197,12 @@ impl Server {
 
 pub fn negotiate_version(requested: Option<&str>) -> &'static str {
     requested
-        .and_then(|r| SUPPORTED_PROTOCOL_VERSIONS.iter().find(|v| **v == r).copied())
+        .and_then(|r| {
+            SUPPORTED_PROTOCOL_VERSIONS
+                .iter()
+                .find(|v| **v == r)
+                .copied()
+        })
         .unwrap_or(LATEST_PROTOCOL_VERSION)
 }
 
@@ -198,7 +225,10 @@ pub fn arg_f64(args: &Value, key: &str) -> Result<f64, String> {
 pub fn opt_f64(args: &Value, key: &str) -> Result<Option<f64>, String> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
-        Some(v) => v.as_f64().map(Some).ok_or_else(|| format!("Argument `{key}` must be a number")),
+        Some(v) => v
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| format!("Argument `{key}` must be a number")),
     }
 }
 
@@ -211,7 +241,9 @@ pub fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn opt_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
-    args.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty())
+    args.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
 }
 
 /// Read `{x, y}` from `args[key]`.
@@ -304,9 +336,21 @@ mod tests {
     #[test]
     fn notifications_get_no_response() {
         let mut s = Server::new();
-        assert!(roundtrip(&mut s, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none());
+        assert!(
+            roundtrip(
+                &mut s,
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#
+            )
+            .is_none()
+        );
         assert!(s.initialized);
-        assert!(roundtrip(&mut s, r#"{"jsonrpc":"2.0","method":"notifications/whatever"}"#).is_none());
+        assert!(
+            roundtrip(
+                &mut s,
+                r#"{"jsonrpc":"2.0","method":"notifications/whatever"}"#
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -314,7 +358,11 @@ mod tests {
         let mut s = Server::new();
         let r = roundtrip(&mut s, r#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#).unwrap();
         assert_eq!(r["result"], json!({}));
-        let r = roundtrip(&mut s, r#"{"jsonrpc":"2.0","id":8,"method":"sampling/createMessage"}"#).unwrap();
+        let r = roundtrip(
+            &mut s,
+            r#"{"jsonrpc":"2.0","id":8,"method":"sampling/createMessage"}"#,
+        )
+        .unwrap();
         assert_eq!(r["error"]["code"], METHOD_NOT_FOUND);
         assert_eq!(r["id"], 8);
     }
@@ -345,7 +393,10 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"text":"hi"}}}"#,
         )
         .unwrap();
-        assert_eq!(r["result"]["content"][0], json!({"type":"text","text":"hi"}));
+        assert_eq!(
+            r["result"]["content"][0],
+            json!({"type":"text","text":"hi"})
+        );
         assert!(r["result"].get("isError").is_none());
 
         let r = roundtrip(
@@ -355,11 +406,19 @@ mod tests {
         .unwrap();
         assert_eq!(r["result"]["isError"], true);
 
-        let r = roundtrip(&mut s, r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"fail"}}"#).unwrap();
+        let r = roundtrip(
+            &mut s,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"fail"}}"#,
+        )
+        .unwrap();
         assert_eq!(r["result"]["isError"], true);
         assert_eq!(r["result"]["content"][0]["text"], "boom");
 
-        let r = roundtrip(&mut s, r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"nope"}}"#).unwrap();
+        let r = roundtrip(
+            &mut s,
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"nope"}}"#,
+        )
+        .unwrap();
         assert_eq!(r["error"]["code"], INVALID_PARAMS);
     }
 

@@ -91,10 +91,16 @@ pub enum ClientMessage {
         limit: Option<u32>,
     },
     /// Stop receiving a thread's transcript.
-    Unsubscribe { thread_id: String },
+    Unsubscribe {
+        thread_id: String,
+    },
     /// The items just before `before` (an item id, `i340`), at most `limit` of them (the Mac
     /// caps it at [`MAX_PAGE`]); answered with `transcript_page`.
-    TranscriptBefore { thread_id: String, before: String, limit: u32 },
+    TranscriptBefore {
+        thread_id: String,
+        before: String,
+        limit: u32,
+    },
     /// Undo, retry, fork or rewind, as a turn's footer and a message's actions do on the Mac.
     TurnAction(TurnActionRequest),
     /// A follow-up message to a thread.
@@ -104,9 +110,13 @@ pub enum ClientMessage {
     /// Answer an approval, question or plan.
     Answer(AnswerRequest),
     /// Stop a running turn.
-    Interrupt { thread_id: String },
+    Interrupt {
+        thread_id: String,
+    },
     /// The user has seen the thread.
-    MarkSeen { thread_id: String },
+    MarkSeen {
+        thread_id: String,
+    },
     /// Change a thread's agent, model, effort, access or plan mode (as the Mac's composer does).
     SetPrefs(PrefsRequest),
     /// Pin, settle or archive a thread, or rename it.
@@ -121,7 +131,9 @@ pub enum ClientMessage {
     /// Every note, newest first (answered with `notes`).
     Notes,
     /// One note, whole (answered with `note`).
-    Note { note_id: String },
+    Note {
+        note_id: String,
+    },
     /// A new note (answered with `note`).
     CreateNote {
         #[serde(default)]
@@ -130,7 +142,9 @@ pub enum ClientMessage {
     /// Write a note (answered with `note`).
     SaveNote(SaveNoteRequest),
     /// Move a note to the notes folder's `Deleted/`.
-    DeleteNote { note_id: String },
+    DeleteNote {
+        note_id: String,
+    },
     /// A thread's or project's git status (answered with `git_status`).
     GitStatus(GitTarget),
     /// One changed file's diff (answered with `git_diff`).
@@ -143,11 +157,15 @@ pub enum ClientMessage {
     /// Check out another branch (not in a worktree thread, nor while the thread works).
     GitSwitch(GitSwitchRequest),
     /// Merge a worktree thread's branch into its base, in the project folder.
-    WorktreeMerge { thread_id: String },
+    WorktreeMerge {
+        thread_id: String,
+    },
     /// Remove a worktree thread's worktree; the thread carries on in the project folder.
     WorktreeRemove(WorktreeRemoveRequest),
     /// The slash commands a thread offers (answered with `commands`).
-    Commands { thread_id: String },
+    Commands {
+        thread_id: String,
+    },
     /// The Mac's settings the phone may see and change (answered with `settings`).
     Settings,
     /// Change some of them (answered with `settings`, as they are now).
@@ -159,13 +177,21 @@ pub enum ClientMessage {
     Search(SearchRequest),
     // Parity with the Mac (`parity.rs`; the Mac lists them in `features`, see [`feature`]).
     /// Spend a granted rate-limit reset (answered with `ack` once spent).
-    UseReset { credit_id: String },
+    UseReset {
+        credit_id: String,
+    },
     QueueAction(QueueActionRequest),
     /// A message's image (answered with `attachment`).
     Attachment(AttachmentRequest),
     /// The end of a background task's output (answered with `background_output`).
-    BackgroundOutput { thread_id: String, task_id: String },
-    StopBackground { thread_id: String, task_id: String },
+    BackgroundOutput {
+        thread_id: String,
+        task_id: String,
+    },
+    StopBackground {
+        thread_id: String,
+        task_id: String,
+    },
     /// An added agent's or a project's icon (answered with `icon`).
     Icon(IconRequest),
     /// One of a note's pictures (answered with `note_asset`).
@@ -336,7 +362,9 @@ impl ImageUpload {
     /// The image's bytes, and the file extension it takes, if it really is a JPEG or a PNG.
     pub fn decode(&self) -> Result<(Vec<u8>, &'static str), String> {
         use base64::Engine as _;
-        let bytes = base64::engine::general_purpose::STANDARD.decode(self.data.trim()).map_err(|e| format!("not base64: {e}"))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(self.data.trim())
+            .map_err(|e| format!("not base64: {e}"))?;
         // What the bytes are, not what the phone says: only photos are kept.
         let ext = if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
             "jpg"
@@ -394,7 +422,9 @@ pub enum ThreadAction {
     /// Back into the inbox.
     Unsettle,
     Archive,
-    Rename { title: String },
+    Rename {
+        title: String,
+    },
     /// Out of the inbox until `until` (ms), or until one of the Mac's presets (worked out on the
     /// Mac, in its time zone). Anything that needs the user wakes it early.
     Snooze {
@@ -533,7 +563,9 @@ impl NoteFileChunk {
     /// The piece's bytes.
     pub fn bytes(&self) -> Result<Vec<u8>, String> {
         use base64::Engine as _;
-        base64::engine::general_purpose::STANDARD.decode(self.bytes_b64.trim()).map_err(|e| format!("not base64: {e}"))
+        base64::engine::general_purpose::STANDARD
+            .decode(self.bytes_b64.trim())
+            .map_err(|e| format!("not base64: {e}"))
     }
 }
 
@@ -560,11 +592,17 @@ pub struct GitTarget {
 
 impl GitTarget {
     pub fn thread(id: impl Into<String>) -> Self {
-        Self { thread_id: Some(id.into()), project_id: None }
+        Self {
+            thread_id: Some(id.into()),
+            project_id: None,
+        }
     }
 
     pub fn project(id: impl Into<String>) -> Self {
-        Self { thread_id: None, project_id: Some(id.into()) }
+        Self {
+            thread_id: None,
+            project_id: Some(id.into()),
+        }
     }
 }
 
@@ -808,7 +846,10 @@ pub enum ServerMessage {
     /// The reply to `git_branches`.
     GitBranches(GitBranches),
     /// The reply to `commands`.
-    Commands { thread_id: String, commands: Vec<CommandInfo> },
+    Commands {
+        thread_id: String,
+        commands: Vec<CommandInfo>,
+    },
     /// The reply to `settings` and `set_settings`.
     Settings(MacSettings),
     /// The reply to `attachment`.
@@ -1148,7 +1189,13 @@ pub struct ProjectSummary {
 impl ProjectSummary {
     /// The reference a thread row carries.
     pub fn to_ref(&self) -> ProjectRef {
-        ProjectRef { id: self.id.clone(), name: self.name.clone(), hue: self.hue, monogram: self.monogram.clone(), icon: self.icon.clone() }
+        ProjectRef {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            hue: self.hue,
+            monogram: self.monogram.clone(),
+            icon: self.icon.clone(),
+        }
     }
 }
 
@@ -1170,7 +1217,12 @@ pub struct AgentRef {
 
 impl AgentRef {
     pub fn new(key: impl Into<String>, name: impl Into<String>, logo: Option<&str>) -> Self {
-        Self { key: key.into(), name: name.into(), logo: logo.map(str::to_string), icon: None }
+        Self {
+            key: key.into(),
+            name: name.into(),
+            logo: logo.map(str::to_string),
+            icon: None,
+        }
     }
 }
 
@@ -1290,14 +1342,20 @@ impl Transcript {
         while start < end && items[start].body.is_attached() {
             start += 1;
         }
-        Some(TranscriptPage { items: items[start..end].iter().map(|i| (*i).clone()).collect(), more: start > 0 })
+        Some(TranscriptPage {
+            items: items[start..end].iter().map(|i| (*i).clone()).collect(),
+            more: start > 0,
+        })
     }
 }
 
 impl ItemBody {
     /// An approval, question or plan card (an `r…` item).
     pub fn is_request(&self) -> bool {
-        matches!(self, Self::Approval { .. } | Self::Question { .. } | Self::Plan { .. })
+        matches!(
+            self,
+            Self::Approval { .. } | Self::Question { .. } | Self::Plan { .. }
+        )
     }
 
     /// What follows another item rather than standing on its own: a turn's changed files.
@@ -1714,9 +1772,13 @@ pub enum ReviewStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Span {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     /// A number worth reading first ("18 prompts").
-    Strong { text: String },
+    Strong {
+        text: String,
+    },
     /// A project, drawn as its badge.
     Project {
         text: String,
@@ -1724,7 +1786,10 @@ pub enum Span {
         project: Option<ProjectRef>,
     },
     /// A model, drawn with its agent's logo.
-    Model { text: String, agent: AgentRef },
+    Model {
+        text: String,
+        agent: AgentRef,
+    },
 }
 
 /// The recap's figures, for laying out a sentence of one's own.
@@ -2141,8 +2206,15 @@ pub fn ntfy_links(server: &str, topic: &str) -> (Option<String>, Option<String>)
     let server = server.trim().trim_end_matches('/');
     let host = server.split_once("://").map_or(server, |(_, h)| h);
     // `ntfy://` is https; a plain-http server says so (`?secure=false`).
-    let insecure = if server.starts_with("http://") { "?secure=false" } else { "" };
-    (Some(format!("{server}/{topic}")), Some(format!("ntfy://{host}/{topic}{insecure}")))
+    let insecure = if server.starts_with("http://") {
+        "?secure=false"
+    } else {
+        ""
+    };
+    (
+        Some(format!("{server}/{topic}")),
+        Some(format!("ntfy://{host}/{topic}{insecure}")),
+    )
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2169,14 +2241,22 @@ pub fn truncate_output(output: &str) -> &str {
 pub fn project_hue(name: &str, chosen: Option<u16>) -> u16 {
     match chosen {
         Some(deg) => deg % 360,
-        None => (name.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32) % 360) as u16,
+        None => {
+            (name
+                .bytes()
+                .fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32)
+                % 360) as u16
+        }
     }
 }
 
 /// A project's two-letter badge (the desktop's monogram): the first two letters of a one-word
 /// name, else the initials of its first two words; `·` for a name without letters.
 pub fn monogram(name: &str) -> String {
-    let words: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let words: Vec<&str> = name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
     let letters: String = match words.as_slice() {
         [] => "·".into(),
         [one] => one.chars().take(2).collect(),

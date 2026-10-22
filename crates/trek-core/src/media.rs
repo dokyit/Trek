@@ -36,15 +36,26 @@ about a video. A video file, or an https link to one, written as a Markdown link
 /// (`~/Library/Caches/dev.trek.Trek/videos` on a Mac), or the data folder's when Trek's data is
 /// somewhere else (isolated, or `TREK_DATA_DIR`).
 pub fn video_cache_dir() -> PathBuf {
-    let moved = crate::paths::isolated() || std::env::var_os("TREK_DATA_DIR").is_some_and(|d| !d.is_empty());
-    let cache = (!moved).then(|| directories::ProjectDirs::from("dev", "trek", "Trek").map(|p| p.cache_dir().to_path_buf())).flatten();
-    cache.unwrap_or_else(|| crate::paths::data_dir().join("cache")).join("videos")
+    let moved = crate::paths::isolated()
+        || std::env::var_os("TREK_DATA_DIR").is_some_and(|d| !d.is_empty());
+    let cache = (!moved)
+        .then(|| {
+            directories::ProjectDirs::from("dev", "trek", "Trek")
+                .map(|p| p.cache_dir().to_path_buf())
+        })
+        .flatten();
+    cache
+        .unwrap_or_else(|| crate::paths::data_dir().join("cache"))
+        .join("videos")
 }
 
 /// Whether a tool row titled `title` is a call to `watch_video`: `mcp__trek-video__watch_video`
 /// (Claude, Codex as Trek names it), `trek-video_watch_video` (OpenCode), or the bare name.
 pub fn is_watch_call(title: &str) -> bool {
-    title == WATCH_TOOL || title.strip_suffix(WATCH_TOOL).is_some_and(|rest| rest.ends_with("__") || rest.ends_with('_') && rest.contains(VIDEO_SERVER))
+    title == WATCH_TOOL
+        || title.strip_suffix(WATCH_TOOL).is_some_and(|rest| {
+            rest.ends_with("__") || rest.ends_with('_') && rest.contains(VIDEO_SERVER)
+        })
 }
 
 /// One frame the model saw.
@@ -102,12 +113,19 @@ pub fn read_watch(path: &Path) -> Option<Watch> {
         .filter_map(|f| {
             let file = f.file?;
             let rel = Path::new(&file);
-            let inside = rel.components().all(|c| matches!(c, std::path::Component::Normal(_)));
+            let inside = rel
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)));
             let path = dir.join(rel);
             (inside && f.t.is_finite() && path.is_file()).then_some(Frame { t: f.t, path })
         })
         .collect();
-    Some(Watch { source: raw.source, video: raw.video.filter(|v| v.is_absolute() && v.is_file()), duration: raw.duration.filter(|d| d.is_finite()), frames })
+    Some(Watch {
+        source: raw.source,
+        video: raw.video.filter(|v| v.is_absolute() && v.is_file()),
+        duration: raw.duration.filter(|d| d.is_finite()),
+        frames,
+    })
 }
 
 /// Whether `name` (a path or a URL's path) ends in a video kind Trek plays.
@@ -119,7 +137,12 @@ pub fn is_video_name(name: &str) -> bool {
 pub fn remote_video(url: &str) -> Option<String> {
     let url = url.trim();
     let lower = url.to_ascii_lowercase();
-    if !lower.starts_with("https://") || url.len() > 4096 || url.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '"' | '<' | '>' | '\\' | '`')) {
+    if !lower.starts_with("https://")
+        || url.len() > 4096
+        || url.chars().any(|c| {
+            c.is_whitespace() || c.is_control() || matches!(c, '"' | '<' | '>' | '\\' | '`')
+        })
+    {
         return None;
     }
     let rest = &url["https://".len()..];
@@ -127,7 +150,10 @@ pub fn remote_video(url: &str) -> Option<String> {
     if authority.is_empty() || authority.contains('@') {
         return None;
     }
-    let path = rest[authority.len()..].split(['?', '#']).next().unwrap_or_default();
+    let path = rest[authority.len()..]
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default();
     is_video_name(path).then(|| url.to_string())
 }
 
@@ -136,7 +162,9 @@ pub fn remote_video(url: &str) -> Option<String> {
 pub fn mentioned_videos(text: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for word in text.split_whitespace() {
-        let Some(raw) = word.strip_prefix('@') else { continue };
+        let Some(raw) = word.strip_prefix('@') else {
+            continue;
+        };
         let raw = raw.trim_end_matches([',', '.', ';', ':', ')', '!', '?']);
         if !is_video_name(raw) {
             continue;
@@ -161,7 +189,11 @@ pub fn mentioned_videos(text: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
 pub fn clock(secs: f64) -> String {
     let s = secs.max(0.).floor() as u64;
     let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
-    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
 }
 
 #[cfg(test)]
@@ -174,8 +206,14 @@ mod tests {
         assert!(is_watch_call("trek-video_watch_video"), "OpenCode's naming");
         assert!(is_watch_call("watch_video"));
         assert!(!is_watch_call("mcp__trek-video__watch_videos"));
-        assert!(!is_watch_call("other_watch_video"), "another server's tool of the same name");
-        assert!(is_watch_call("mcp__someone__watch_video"), "Claude's naming, whoever serves it: the manifest decides");
+        assert!(
+            !is_watch_call("other_watch_video"),
+            "another server's tool of the same name"
+        );
+        assert!(
+            is_watch_call("mcp__someone__watch_video"),
+            "Claude's naming, whoever serves it: the manifest decides"
+        );
     }
 
     #[test]
@@ -194,7 +232,10 @@ mod tests {
             "transcript": [{"start": 0.1, "end": 1.0, "text": "hi"}],
         });
         std::fs::write(&manifest, body.to_string()).unwrap();
-        let output = format!("Watched https://example.com/a.mp4\nManifest: {}\nVideo: 0:03.0 long", manifest.display());
+        let output = format!(
+            "Watched https://example.com/a.mp4\nManifest: {}\nVideo: 0:03.0 long",
+            manifest.display()
+        );
         assert_eq!(manifest_in(&output), Some(manifest.clone()));
         assert_eq!(manifest_in("Manifest: relative/watch.json"), None);
         assert_eq!(manifest_in("Manifest: /etc/passwd"), None);
@@ -202,19 +243,41 @@ mod tests {
         assert_eq!(w.source, "https://example.com/a.mp4");
         assert_eq!(w.video, Some(video.clone()));
         assert_eq!(w.duration, Some(3.));
-        assert_eq!(w.frames, vec![Frame { t: 0.5, path: dir.join("frames/frame-001.jpg") }, Frame { t: 2.5, path: dir.join("frames/frame-002.jpg") }]);
+        assert_eq!(
+            w.frames,
+            vec![
+                Frame {
+                    t: 0.5,
+                    path: dir.join("frames/frame-001.jpg")
+                },
+                Frame {
+                    t: 2.5,
+                    path: dir.join("frames/frame-002.jpg")
+                }
+            ]
+        );
         std::fs::remove_file(&video).unwrap();
-        assert_eq!(read_watch(&manifest).unwrap().video, None, "a download cleared since");
+        assert_eq!(
+            read_watch(&manifest).unwrap().video,
+            None,
+            "a download cleared since"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn web_videos_are_https_links_to_video_files() {
-        assert_eq!(remote_video("https://cdn.example.com/clip.mp4"), Some("https://cdn.example.com/clip.mp4".into()));
+        assert_eq!(
+            remote_video("https://cdn.example.com/clip.mp4"),
+            Some("https://cdn.example.com/clip.mp4".into())
+        );
         assert!(remote_video("https://cdn.example.com/clip.WEBM?sig=1#t=3").is_some());
         assert!(remote_video("http://cdn.example.com/clip.mp4").is_none());
         assert!(remote_video("https://cdn.example.com/page.html").is_none());
-        assert!(remote_video("https://cdn.example.com/?file=clip.mp4").is_none(), "the path decides, not the query");
+        assert!(
+            remote_video("https://cdn.example.com/?file=clip.mp4").is_none(),
+            "the path decides, not the query"
+        );
         assert!(remote_video("https://a@b.com/clip.mp4").is_none());
         assert!(remote_video("https://cdn.example.com/a\".mp4").is_none());
         assert!(remote_video("https://www.youtube.com/watch?v=x").is_none());
@@ -226,9 +289,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let clip = dir.join("clip.mov");
         std::fs::write(&clip, b"x").unwrap();
-        let text = format!("What happens here? @{} and @clip.mov, again @{}. Not @notes.md or @gone.mp4", clip.display(), clip.display());
+        let text = format!(
+            "What happens here? @{} and @clip.mov, again @{}. Not @notes.md or @gone.mp4",
+            clip.display(),
+            clip.display()
+        );
         assert_eq!(mentioned_videos(&text, Some(&dir)), vec![clip.clone()]);
-        assert!(mentioned_videos("@clip.mov", None).is_empty(), "relative needs a folder");
+        assert!(
+            mentioned_videos("@clip.mov", None).is_empty(),
+            "relative needs a folder"
+        );
         assert_eq!(mentioned_videos("@clip.mov", Some(&dir)), vec![clip]);
         let _ = std::fs::remove_dir_all(&dir);
     }

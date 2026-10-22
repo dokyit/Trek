@@ -33,7 +33,10 @@ pub const MAX_LAYER_ITEMS: usize = 8;
 pub const MAX_TABS: usize = 8;
 
 /// Every `type` the schema knows, in the order the instructions list them.
-pub const TYPES: &[&str] = &["bar", "line", "donut", "stats", "table", "heatmap", "treemap", "timeline", "flow", "layers", "mockup"];
+pub const TYPES: &[&str] = &[
+    "bar", "line", "donut", "stats", "table", "heatmap", "treemap", "timeline", "flow", "layers",
+    "mockup",
+];
 
 /// Instructions suitable for including verbatim in an agent capability prompt: native
 /// visualizations, and that TeX math in an answer is typeset. Every session carries them, so they
@@ -348,7 +351,16 @@ pub enum MockNodeKind {
 impl MockNodeKind {
     /// Kinds that hold children.
     pub fn is_container(self) -> bool {
-        matches!(self, Self::Row | Self::Column | Self::Card | Self::List | Self::Tabs | Self::Nav | Self::Frame)
+        matches!(
+            self,
+            Self::Row
+                | Self::Column
+                | Self::Card
+                | Self::List
+                | Self::Tabs
+                | Self::Nav
+                | Self::Frame
+        )
     }
 }
 
@@ -471,7 +483,8 @@ pub fn parse_partial(payload: &str) -> Partial {
                     if !is_value {
                         key = Some((string_start, i + 1));
                     } else if let Some((ks, ke)) = key.take() {
-                        let text = || serde_json::from_str::<String>(&payload[string_start..=i]).ok();
+                        let text =
+                            || serde_json::from_str::<String>(&payload[string_start..=i]).ok();
                         match &payload[ks..ke] {
                             "\"type\"" => partial.kind = text(),
                             "\"title\"" => partial.title = text(),
@@ -491,7 +504,11 @@ pub fn parse_partial(payload: &str) -> Partial {
                 if stack.len() == 1 {
                     key = None;
                 }
-                stack.push(Open { array: b == b'[', good: i + 1, value: false });
+                stack.push(Open {
+                    array: b == b'[',
+                    good: i + 1,
+                    value: false,
+                });
             }
             b'}' | b']' if !stack.is_empty() => {
                 stack.pop();
@@ -530,7 +547,10 @@ pub fn parse_partial(payload: &str) -> Partial {
         return partial;
     }
     // Where to cut: each open array, innermost first, then the top-level object itself.
-    let cuts = (0..stack.len()).rev().filter(|&k| k == 0 || stack[k].array).take(4);
+    let cuts = (0..stack.len())
+        .rev()
+        .filter(|&k| k == 0 || stack[k].array)
+        .take(4);
     for k in cuts {
         let mut text = payload[..stack[k].good].to_string();
         for open in stack[..=k].iter().rev() {
@@ -701,7 +721,9 @@ pub fn validate(visualization: &Visualization) -> Result<(), VisualizationError>
                 short_opt(&format!("tiles[{index}].delta"), &tile.delta)?;
                 if let Some(trend) = &tile.trend {
                     if trend.len() < 2 || trend.len() > MAX_TREND_POINTS {
-                        return invalid(format!("tiles[{index}].trend needs 2 to {MAX_TREND_POINTS} values"));
+                        return invalid(format!(
+                            "tiles[{index}].trend needs 2 to {MAX_TREND_POINTS} values"
+                        ));
                     }
                     for (point, value) in trend.iter().enumerate() {
                         number(&format!("tiles[{index}].trend[{point}]"), *value)?;
@@ -733,7 +755,11 @@ pub fn validate(visualization: &Visualization) -> Result<(), VisualizationError>
                 }
             }
         }
-        VisualizationContent::Timeline { events, ticks, unit } => {
+        VisualizationContent::Timeline {
+            events,
+            ticks,
+            unit,
+        } => {
             if events.is_empty() || events.len() > MAX_EVENTS {
                 return invalid(format!("timeline needs 1 to {MAX_EVENTS} events"));
             }
@@ -743,7 +769,11 @@ pub fn validate(visualization: &Visualization) -> Result<(), VisualizationError>
                     return invalid(format!("timeline ticks need 1 to {MAX_MARKS} labels"));
                 }
                 labels("ticks", ticks, true)?;
-                if let Some(dup) = ticks.iter().enumerate().find(|(i, t)| ticks[..*i].contains(t)) {
+                if let Some(dup) = ticks
+                    .iter()
+                    .enumerate()
+                    .find(|(i, t)| ticks[..*i].contains(t))
+                {
                     return invalid(format!("ticks[{}] repeats `{}`", dup.0, dup.1));
                 }
             }
@@ -756,7 +786,11 @@ pub fn validate(visualization: &Visualization) -> Result<(), VisualizationError>
                         lanes.push(lane.clone());
                     }
                 }
-                let start = time_point(&format!("events[{index}].start"), &event.start, ticks.as_deref())?;
+                let start = time_point(
+                    &format!("events[{index}].start"),
+                    &event.start,
+                    ticks.as_deref(),
+                )?;
                 if let Some(end) = &event.end {
                     let end = time_point(&format!("events[{index}].end"), end, ticks.as_deref())?;
                     if end < start {
@@ -803,8 +837,14 @@ pub fn validate(visualization: &Visualization) -> Result<(), VisualizationError>
                 if edge.from == edge.to {
                     return invalid(format!("edges[{index}] connects `{}` to itself", edge.from));
                 }
-                if edges[..index].iter().any(|other| other.from == edge.from && other.to == edge.to) {
-                    return invalid(format!("edges[{index}] repeats `{}` -> `{}`", edge.from, edge.to));
+                if edges[..index]
+                    .iter()
+                    .any(|other| other.from == edge.from && other.to == edge.to)
+                {
+                    return invalid(format!(
+                        "edges[{index}] repeats `{}` -> `{}`",
+                        edge.from, edge.to
+                    ));
                 }
                 short_opt(&format!("edges[{index}].label"), &edge.label)?;
             }
@@ -817,7 +857,9 @@ pub fn validate(visualization: &Visualization) -> Result<(), VisualizationError>
                 text(&format!("layers[{index}].label"), &layer.label, true)?;
                 optional_text(&format!("layers[{index}].detail"), &layer.detail)?;
                 if layer.items.len() > MAX_LAYER_ITEMS {
-                    return invalid(format!("layers[{index}] has more than {MAX_LAYER_ITEMS} items"));
+                    return invalid(format!(
+                        "layers[{index}] has more than {MAX_LAYER_ITEMS} items"
+                    ));
                 }
                 labels(&format!("layers[{index}].items"), &layer.items, true)?;
             }
@@ -851,7 +893,9 @@ fn reject_unknown_top_level_fields(payload: &str) -> Result<(), VisualizationErr
         "donut" => &["version", "title", "summary", "type", "parts", "unit"][..],
         "stats" => &["version", "title", "summary", "type", "tiles"][..],
         "table" => &["version", "title", "summary", "type", "columns", "rows"][..],
-        "timeline" => &["version", "title", "summary", "type", "events", "ticks", "unit"][..],
+        "timeline" => &[
+            "version", "title", "summary", "type", "events", "ticks", "unit",
+        ][..],
         "flow" => &["version", "title", "summary", "type", "nodes", "edges"][..],
         "layers" => &["version", "title", "summary", "type", "layers"][..],
         other => {
@@ -865,7 +909,11 @@ fn reject_unknown_top_level_fields(payload: &str) -> Result<(), VisualizationErr
         .find(|field| !variant.contains(&field.as_str()))
     {
         // Name what the type does take, so the mistake reads at a glance.
-        let takes = variant[4..].iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", ");
+        let takes = variant[4..]
+            .iter()
+            .map(|f| format!("`{f}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(VisualizationError::InvalidJson(format!(
             "unknown field `{field}` (a {kind} takes {takes})"
         )));
@@ -896,7 +944,9 @@ fn validate_node(
         return invalid(format!("{path} leaf node cannot have children"));
     }
     if node.device.is_some() != (node.kind == MockNodeKind::Frame) {
-        return invalid(format!("{path} `device` belongs on a frame, and every frame needs one"));
+        return invalid(format!(
+            "{path} `device` belongs on a frame, and every frame needs one"
+        ));
     }
     let no_value = |what: &str| -> Result<(), VisualizationError> {
         if node.value.is_some() {
@@ -924,11 +974,18 @@ fn validate_node(
             if node.children.is_empty() || node.children.len() > MAX_TABS {
                 return invalid(format!("{path} tabs need 1 to {MAX_TABS} text children"));
             }
-            if node.children.iter().any(|child| child.kind != MockNodeKind::Text) {
+            if node
+                .children
+                .iter()
+                .any(|child| child.kind != MockNodeKind::Text)
+            {
                 return invalid(format!("{path} tabs children must be text nodes"));
             }
             if let Some(active) = &node.value
-                && !node.children.iter().any(|child| child.text.as_ref() == Some(active))
+                && !node
+                    .children
+                    .iter()
+                    .any(|child| child.text.as_ref() == Some(active))
             {
                 return invalid(format!("{path}.value must name one of its tabs"));
             }
@@ -943,7 +1000,11 @@ fn validate_node(
         MockNodeKind::Input => required(&node.text, &format!("{path}.text"))?,
         MockNodeKind::Toggle => {
             required(&node.text, &format!("{path}.text"))?;
-            if node.value.as_deref().is_some_and(|v| v != "on" && v != "off") {
+            if node
+                .value
+                .as_deref()
+                .is_some_and(|v| v != "on" && v != "off")
+            {
                 return invalid(format!("{path}.value must be `on` or `off`"));
             }
         }
@@ -958,8 +1019,15 @@ fn validate_node(
         }
         MockNodeKind::Image => {
             // A placeholder only: its value picks a shape, never a source.
-            if node.value.as_deref().is_some_and(|v| !IMAGE_SHAPES.contains(&v)) {
-                return invalid(format!("{path}.value must be one of {}", IMAGE_SHAPES.join(", ")));
+            if node
+                .value
+                .as_deref()
+                .is_some_and(|v| !IMAGE_SHAPES.contains(&v))
+            {
+                return invalid(format!(
+                    "{path}.value must be one of {}",
+                    IMAGE_SHAPES.join(", ")
+                ));
             }
         }
         MockNodeKind::Divider => {
@@ -1039,7 +1107,11 @@ fn short_opt(field: &str, value: &Option<String>) -> Result<(), VisualizationErr
 fn labels(field: &str, values: &[String], brief: bool) -> Result<(), VisualizationError> {
     for (index, value) in values.iter().enumerate() {
         let field = format!("{field}[{index}]");
-        if brief { short(&field, value)? } else { text(&field, value, true)? }
+        if brief {
+            short(&field, value)?
+        } else {
+            text(&field, value, true)?
+        }
     }
     Ok(())
 }
@@ -1047,7 +1119,10 @@ fn labels(field: &str, values: &[String], brief: bool) -> Result<(), Visualizati
 /// Flow node ids: short words a renderer never shows, so letters, digits, `-` and `_` only.
 fn identifier(field: &str, value: &str) -> Result<(), VisualizationError> {
     short(field, value)?;
-    if !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return invalid(format!("{field} may use only letters, digits, `-` and `_`"));
     }
     Ok(())
@@ -1055,7 +1130,11 @@ fn identifier(field: &str, value: &str) -> Result<(), VisualizationError> {
 
 /// A timeline position as a number on its axis: itself, or its tick's index. Numbers and
 /// ticks don't mix, and a tick must be one of `ticks`.
-fn time_point(field: &str, point: &TimePoint, ticks: Option<&[String]>) -> Result<f64, VisualizationError> {
+fn time_point(
+    field: &str,
+    point: &TimePoint,
+    ticks: Option<&[String]>,
+) -> Result<f64, VisualizationError> {
     match (point, ticks) {
         (TimePoint::Number(value), None) => {
             number(field, *value)?;
@@ -1065,8 +1144,12 @@ fn time_point(field: &str, point: &TimePoint, ticks: Option<&[String]>) -> Resul
             Some(index) => Ok(index as f64),
             None => invalid(format!("{field} `{tick}` is not one of the ticks")),
         },
-        (TimePoint::Number(_), Some(_)) => invalid(format!("{field} must name a tick when `ticks` is set")),
-        (TimePoint::Tick(_), None) => invalid(format!("{field} is a string, so the timeline needs `ticks`")),
+        (TimePoint::Number(_), Some(_)) => {
+            invalid(format!("{field} must name a tick when `ticks` is set"))
+        }
+        (TimePoint::Tick(_), None) => invalid(format!(
+            "{field} is a string, so the timeline needs `ticks`"
+        )),
     }
 }
 
@@ -1264,11 +1347,22 @@ mod tests {
 
     #[test]
     fn instructions_stay_compact_and_cover_every_type() {
-        assert!(AGENT_INSTRUCTIONS.chars().count() < 2_000, "{} chars", AGENT_INSTRUCTIONS.chars().count());
+        assert!(
+            AGENT_INSTRUCTIONS.chars().count() < 2_000,
+            "{} chars",
+            AGENT_INSTRUCTIONS.chars().count()
+        );
         for kind in TYPES {
-            assert!(AGENT_INSTRUCTIONS.contains(&format!("{kind} `")) || AGENT_INSTRUCTIONS.contains(&format!("{kind} ")), "{kind}");
+            assert!(
+                AGENT_INSTRUCTIONS.contains(&format!("{kind} `"))
+                    || AGENT_INSTRUCTIONS.contains(&format!("{kind} ")),
+                "{kind}"
+            );
         }
-        for kind in ["input", "toggle", "progress", "avatar", "image", "list", "tabs", "nav", "frame", "phone", "browser", "window", "tablet"] {
+        for kind in [
+            "input", "toggle", "progress", "avatar", "image", "list", "tabs", "nav", "frame",
+            "phone", "browser", "window", "tablet",
+        ] {
             assert!(AGENT_INSTRUCTIONS.contains(kind), "{kind}");
         }
         // Math renders too, with all four delimiters.
@@ -1281,11 +1375,17 @@ mod tests {
     fn every_type_has_a_wire_name_and_known_fields() {
         let bodies = [
             ("bar", r#""bars":[{"label":"a","value":1}]"#),
-            ("line", r#""x_labels":["a","b"],"series":[{"label":"s","values":[1,2]}]"#),
+            (
+                "line",
+                r#""x_labels":["a","b"],"series":[{"label":"s","values":[1,2]}]"#,
+            ),
             ("donut", r#""parts":[{"label":"a","value":1}]"#),
             ("stats", r#""tiles":[{"label":"a","value":"1"}]"#),
             ("table", r#""columns":["a"],"rows":[["x"]]"#),
-            ("heatmap", r#""x_labels":["a"],"y_labels":["b"],"values":[[1]]"#),
+            (
+                "heatmap",
+                r#""x_labels":["a"],"y_labels":["b"],"values":[[1]]"#,
+            ),
             ("treemap", r#""items":[{"label":"a","weight":1}]"#),
             ("timeline", r#""events":[{"label":"a","start":1}]"#),
             ("flow", r#""nodes":[{"id":"a","label":"A"}]"#),
@@ -1299,7 +1399,10 @@ mod tests {
             assert_eq!(viz.content.kind(), *kind);
             // What a renderer copies parses back to the same thing.
             assert_eq!(parse(&serde_json::to_string(&viz).unwrap()).unwrap(), viz);
-            assert!(err(kind, &format!(r#"{body},"html":"<b>""#)).contains("unknown field `html`"), "{kind}");
+            assert!(
+                err(kind, &format!(r#"{body},"html":"<b>""#)).contains("unknown field `html`"),
+                "{kind}"
+            );
         }
     }
 
@@ -1310,83 +1413,234 @@ mod tests {
             r#""x_labels":["Mon","Tue","Wed"],"series":[{"label":"p50","values":[1,2,3],"tone":"info"},{"label":"p95","values":[4,5,6]}],"area":true,"y_label":"latency","unit":"ms""#,
         ))
         .unwrap();
-        let VisualizationContent::Line { series, area, unit, .. } = viz.content else { panic!() };
+        let VisualizationContent::Line {
+            series, area, unit, ..
+        } = viz.content
+        else {
+            panic!()
+        };
         assert_eq!((series.len(), area, unit.as_deref()), (2, true, Some("ms")));
-        assert!(err("line", r#""x_labels":["a"],"series":[{"label":"s","values":[1]}]"#).contains("at least two x labels"));
-        assert!(err("line", r#""x_labels":["a","b"],"series":[{"label":"s","values":[1]}]"#).contains("one value per x label"));
+        assert!(
+            err(
+                "line",
+                r#""x_labels":["a"],"series":[{"label":"s","values":[1]}]"#
+            )
+            .contains("at least two x labels")
+        );
+        assert!(
+            err(
+                "line",
+                r#""x_labels":["a","b"],"series":[{"label":"s","values":[1]}]"#
+            )
+            .contains("one value per x label")
+        );
         assert!(err("line", r#""x_labels":["a","b"],"series":[]"#).contains("1 to 6 series"));
-        let seven = (0..7).map(|i| format!(r#"{{"label":"{i}","values":[1,2]}}"#)).collect::<Vec<_>>().join(",");
-        assert!(err("line", &format!(r#""x_labels":["a","b"],"series":[{seven}]"#)).contains("1 to 6 series"));
+        let seven = (0..7)
+            .map(|i| format!(r#"{{"label":"{i}","values":[1,2]}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            err(
+                "line",
+                &format!(r#""x_labels":["a","b"],"series":[{seven}]"#)
+            )
+            .contains("1 to 6 series")
+        );
         assert!(err("line", r#""x_labels":["a","b"],"series":[{"label":"s","values":[1,2]}],"unit":"this unit is far too long to sit beside a number on an axis""#).contains("maximum is 48"));
-        assert!(err("line", r#""x_labels":["a","b"],"series":[{"label":"s","values":[1,2],"color":"red"}]"#).contains("unknown field `color`"));
+        assert!(
+            err(
+                "line",
+                r#""x_labels":["a","b"],"series":[{"label":"s","values":[1,2],"color":"red"}]"#
+            )
+            .contains("unknown field `color`")
+        );
     }
 
     #[test]
     fn donuts_and_stats_stay_small() {
         assert!(parse(&common("donut", r#""parts":[{"label":"Rust","value":62,"tone":"accent"},{"label":"Other","value":38}],"unit":"%""#)).is_ok());
-        assert!(err("donut", r#""parts":[{"label":"none","value":0}]"#).contains("must be positive"));
+        assert!(
+            err("donut", r#""parts":[{"label":"none","value":0}]"#).contains("must be positive")
+        );
         assert!(err("donut", r#""parts":[]"#).contains("1 to 12 parts"));
-        let many = (0..13).map(|i| format!(r#"{{"label":"{i}","value":1}}"#)).collect::<Vec<_>>().join(",");
+        let many = (0..13)
+            .map(|i| format!(r#"{{"label":"{i}","value":1}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
         assert!(err("donut", &format!(r#""parts":[{many}]"#)).contains("1 to 12 parts"));
 
         let viz = parse(&common("stats", r#""tiles":[{"label":"Success","value":"99.94%","delta":"+0.2 pts","trend":[1,2,3],"tone":"positive"}]"#)).unwrap();
-        let VisualizationContent::Stats { tiles } = viz.content else { panic!() };
+        let VisualizationContent::Stats { tiles } = viz.content else {
+            panic!()
+        };
         assert_eq!(tiles[0].trend.as_deref(), Some(&[1., 2., 3.][..]));
-        assert!(err("stats", r#""tiles":[{"label":"a","value":"1","trend":[1]}]"#).contains("2 to 64 values"));
-        assert!(err("stats", r#""tiles":[{"label":"a","value":1}]"#).contains("invalid"), "values are preformatted strings");
-        assert!(err("stats", &format!(r#""tiles":[{{"label":"a","value":"{}"}}]"#, "9".repeat(49))).contains("maximum is 48"));
+        assert!(
+            err(
+                "stats",
+                r#""tiles":[{"label":"a","value":"1","trend":[1]}]"#
+            )
+            .contains("2 to 64 values")
+        );
+        assert!(
+            err("stats", r#""tiles":[{"label":"a","value":1}]"#).contains("invalid"),
+            "values are preformatted strings"
+        );
+        assert!(
+            err(
+                "stats",
+                &format!(r#""tiles":[{{"label":"a","value":"{}"}}]"#, "9".repeat(49))
+            )
+            .contains("maximum is 48")
+        );
         assert!(err("stats", r#""tiles":[]"#).contains("1 to 12 tiles"));
     }
 
     #[test]
     fn tables_mix_text_and_numbers_in_rectangular_rows() {
         let viz = parse(&common("table", r#""columns":["Service","p95"],"rows":[["API",120.5],{"cells":["Workers",940],"tone":"warning"}]"#)).unwrap();
-        let VisualizationContent::Table { rows, .. } = viz.content else { panic!() };
-        assert_eq!(rows[0].cells(), &[TableCell::Text("API".into()), TableCell::Number(120.5)]);
+        let VisualizationContent::Table { rows, .. } = viz.content else {
+            panic!()
+        };
+        assert_eq!(
+            rows[0].cells(),
+            &[TableCell::Text("API".into()), TableCell::Number(120.5)]
+        );
         assert_eq!(rows[1].tone(), Some(SemanticTone::Warning));
-        assert!(err("table", r#""columns":["a","b"],"rows":[["x"]]"#).contains("one cell per column"));
+        assert!(
+            err("table", r#""columns":["a","b"],"rows":[["x"]]"#).contains("one cell per column")
+        );
         assert!(err("table", r#""columns":["a"],"rows":[]"#).contains("1 to 64 rows"));
         assert!(err("table", r#""columns":["a"],"rows":[[true]]"#).contains("invalid"));
-        assert!(err("table", r#""columns":["a"],"rows":[{"cells":["x"],"href":"y"}]"#).contains("invalid"));
-        let columns = (0..12).map(|i| format!(r#""c{i}""#)).collect::<Vec<_>>().join(",");
-        let row = format!("[{}]", (0..12).map(|i| i.to_string()).collect::<Vec<_>>().join(","));
+        assert!(
+            err(
+                "table",
+                r#""columns":["a"],"rows":[{"cells":["x"],"href":"y"}]"#
+            )
+            .contains("invalid")
+        );
+        let columns = (0..12)
+            .map(|i| format!(r#""c{i}""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let row = format!(
+            "[{}]",
+            (0..12).map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+        );
         let rows = vec![row; 33].join(",");
-        assert!(err("table", &format!(r#""columns":[{columns}],"rows":[{rows}]"#)).contains("more than 384 cells"));
+        assert!(
+            err(
+                "table",
+                &format!(r#""columns":[{columns}],"rows":[{rows}]"#)
+            )
+            .contains("more than 384 cells")
+        );
     }
 
     #[test]
     fn timelines_take_numbers_or_their_own_ticks() {
         assert!(parse(&common("timeline", r#""events":[{"label":"Design","start":0,"end":2,"lane":"UI"},{"label":"Ship","start":4}],"unit":"wk""#)).is_ok());
         assert!(parse(&common("timeline", r#""ticks":["Oct","Nov","Dec"],"events":[{"label":"Beta","start":"Oct","end":"Nov","tone":"info"},{"label":"GA","start":"Dec"}]"#)).is_ok());
-        assert!(err("timeline", r#""events":[{"label":"x","start":3,"end":1}]"#).contains("ends before it starts"));
-        assert!(err("timeline", r#""ticks":["Oct","Nov"],"events":[{"label":"x","start":"Nov","end":"Oct"}]"#).contains("ends before it starts"));
-        assert!(err("timeline", r#""ticks":["Oct"],"events":[{"label":"x","start":"Jan"}]"#).contains("not one of the ticks"));
-        assert!(err("timeline", r#""events":[{"label":"x","start":"Jan"}]"#).contains("needs `ticks`"));
-        assert!(err("timeline", r#""ticks":["Oct"],"events":[{"label":"x","start":1}]"#).contains("must name a tick"));
-        assert!(err("timeline", r#""ticks":["Oct","Oct"],"events":[{"label":"x","start":"Oct"}]"#).contains("repeats"));
+        assert!(
+            err("timeline", r#""events":[{"label":"x","start":3,"end":1}]"#)
+                .contains("ends before it starts")
+        );
+        assert!(
+            err(
+                "timeline",
+                r#""ticks":["Oct","Nov"],"events":[{"label":"x","start":"Nov","end":"Oct"}]"#
+            )
+            .contains("ends before it starts")
+        );
+        assert!(
+            err(
+                "timeline",
+                r#""ticks":["Oct"],"events":[{"label":"x","start":"Jan"}]"#
+            )
+            .contains("not one of the ticks")
+        );
+        assert!(
+            err("timeline", r#""events":[{"label":"x","start":"Jan"}]"#).contains("needs `ticks`")
+        );
+        assert!(
+            err(
+                "timeline",
+                r#""ticks":["Oct"],"events":[{"label":"x","start":1}]"#
+            )
+            .contains("must name a tick")
+        );
+        assert!(
+            err(
+                "timeline",
+                r#""ticks":["Oct","Oct"],"events":[{"label":"x","start":"Oct"}]"#
+            )
+            .contains("repeats")
+        );
         assert!(err("timeline", r#""events":[]"#).contains("1 to 48 events"));
-        let lanes = (0..9).map(|i| format!(r#"{{"label":"e","start":1,"lane":"l{i}"}}"#)).collect::<Vec<_>>().join(",");
+        let lanes = (0..9)
+            .map(|i| format!(r#"{{"label":"e","start":1,"lane":"l{i}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
         assert!(err("timeline", &format!(r#""events":[{lanes}]"#)).contains("more than 8 lanes"));
     }
 
     #[test]
     fn flows_reference_only_their_own_nodes() {
         let viz = parse(&common("flow", r#""nodes":[{"id":"ui","label":"Composer","group":"App"},{"id":"core","label":"Workspace","detail":"routes turns","tone":"accent"}],"edges":[{"from":"ui","to":"core","label":"send"}]"#)).unwrap();
-        let VisualizationContent::Flow { nodes, edges } = viz.content else { panic!() };
+        let VisualizationContent::Flow { nodes, edges } = viz.content else {
+            panic!()
+        };
         assert_eq!((nodes.len(), edges.len()), (2, 1));
         assert!(parse(&common("flow", r#""nodes":[{"id":"a","label":"A"},{"id":"b","label":"B"}],"edges":[{"from":"a","to":"b"},{"from":"b","to":"a"}]"#)).is_ok(), "cycles are drawn, not refused");
-        assert!(err("flow", r#""nodes":[{"id":"a","label":"A"}],"edges":[{"from":"a","to":"ghost"}]"#).contains("names no node `ghost`"));
-        assert!(err("flow", r#""nodes":[{"id":"a","label":"A"},{"id":"a","label":"B"}]"#).contains("not unique"));
+        assert!(
+            err(
+                "flow",
+                r#""nodes":[{"id":"a","label":"A"}],"edges":[{"from":"a","to":"ghost"}]"#
+            )
+            .contains("names no node `ghost`")
+        );
+        assert!(
+            err(
+                "flow",
+                r#""nodes":[{"id":"a","label":"A"},{"id":"a","label":"B"}]"#
+            )
+            .contains("not unique")
+        );
         assert!(err("flow", r#""nodes":[{"id":"a b","label":"A"}]"#).contains("letters, digits"));
-        assert!(err("flow", r#""nodes":[{"id":"a","label":"A"}],"edges":[{"from":"a","to":"a"}]"#).contains("to itself"));
+        assert!(
+            err(
+                "flow",
+                r#""nodes":[{"id":"a","label":"A"}],"edges":[{"from":"a","to":"a"}]"#
+            )
+            .contains("to itself")
+        );
         assert!(err("flow", r#""nodes":[{"id":"a","label":"A"},{"id":"b","label":"B"}],"edges":[{"from":"a","to":"b"},{"from":"a","to":"b"}]"#).contains("repeats"));
         assert!(err("flow", r#""nodes":[]"#).contains("1 to 24 nodes"));
-        let nodes = (0..25).map(|i| format!(r#"{{"id":"n{i}","label":"N"}}"#)).collect::<Vec<_>>().join(",");
+        let nodes = (0..25)
+            .map(|i| format!(r#"{{"id":"n{i}","label":"N"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
         assert!(err("flow", &format!(r#""nodes":[{nodes}]"#)).contains("1 to 24 nodes"));
-        let nodes = (0..10).map(|i| format!(r#"{{"id":"n{i}","label":"N"}}"#)).collect::<Vec<_>>().join(",");
-        let edges = (0..10).flat_map(|a| (0..10).filter(move |b| *b != a).map(move |b| format!(r#"{{"from":"n{a}","to":"n{b}"}}"#))).take(49).collect::<Vec<_>>().join(",");
-        assert!(err("flow", &format!(r#""nodes":[{nodes}],"edges":[{edges}]"#)).contains("more than 48 edges"));
-        let grouped = (0..7).map(|i| format!(r#"{{"id":"n{i}","label":"N","group":"g{i}"}}"#)).collect::<Vec<_>>().join(",");
+        let nodes = (0..10)
+            .map(|i| format!(r#"{{"id":"n{i}","label":"N"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let edges = (0..10)
+            .flat_map(|a| {
+                (0..10)
+                    .filter(move |b| *b != a)
+                    .map(move |b| format!(r#"{{"from":"n{a}","to":"n{b}"}}"#))
+            })
+            .take(49)
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            err("flow", &format!(r#""nodes":[{nodes}],"edges":[{edges}]"#))
+                .contains("more than 48 edges")
+        );
+        let grouped = (0..7)
+            .map(|i| format!(r#"{{"id":"n{i}","label":"N","group":"g{i}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
         assert!(err("flow", &format!(r#""nodes":[{grouped}]"#)).contains("more than 6 groups"));
     }
 
@@ -1394,8 +1648,17 @@ mod tests {
     fn layers_are_a_short_stack_of_short_items() {
         assert!(parse(&common("layers", r#""layers":[{"label":"UI","detail":"GPUI views","items":["Sidebar","Transcript"],"tone":"accent"},{"label":"Core"}]"#)).is_ok());
         assert!(err("layers", r#""layers":[]"#).contains("1 to 8 layers"));
-        let items = (0..9).map(|i| format!(r#""i{i}""#)).collect::<Vec<_>>().join(",");
-        assert!(err("layers", &format!(r#""layers":[{{"label":"x","items":[{items}]}}]"#)).contains("more than 8 items"));
+        let items = (0..9)
+            .map(|i| format!(r#""i{i}""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            err(
+                "layers",
+                &format!(r#""layers":[{{"label":"x","items":[{items}]}}]"#)
+            )
+            .contains("more than 8 items")
+        );
         assert!(err("layers", r#""layers":[{"label":"x","items":[""]}]"#).contains("nonempty"));
     }
 
@@ -1410,26 +1673,55 @@ mod tests {
             {"kind":"image","text":"Latency chart","value":"wide"},
             {"kind":"list","children":[{"kind":"text","text":"API"},{"kind":"text","text":"Workers"}]}]}]"#;
         let viz = parse(&common("mockup", &tree.replace('\n', ""))).unwrap();
-        let VisualizationContent::Mockup { nodes } = viz.content else { panic!() };
+        let VisualizationContent::Mockup { nodes } = viz.content else {
+            panic!()
+        };
         assert_eq!(nodes[0].device, Some(MockDevice::Phone));
         for device in ["browser", "window", "tablet"] {
-            assert!(parse(&common("mockup", &format!(r#""nodes":[{{"kind":"frame","device":"{device}"}}]"#))).is_ok());
+            assert!(
+                parse(&common(
+                    "mockup",
+                    &format!(r#""nodes":[{{"kind":"frame","device":"{device}"}}]"#)
+                ))
+                .is_ok()
+            );
         }
         let bad = [
             (r#"{"kind":"frame"}"#, "every frame needs one"),
             (r#"{"kind":"card","device":"phone"}"#, "belongs on a frame"),
             (r#"{"kind":"frame","device":"watch"}"#, "invalid"),
-            (r#"{"kind":"frame","device":"phone","children":[{"kind":"frame","device":"browser"}]}"#, "cannot nest"),
-            (r#"{"kind":"tabs","children":[{"kind":"button","text":"x"}]}"#, "must be text nodes"),
-            (r#"{"kind":"tabs","value":"Z","children":[{"kind":"text","text":"A"}]}"#, "name one of its tabs"),
+            (
+                r#"{"kind":"frame","device":"phone","children":[{"kind":"frame","device":"browser"}]}"#,
+                "cannot nest",
+            ),
+            (
+                r#"{"kind":"tabs","children":[{"kind":"button","text":"x"}]}"#,
+                "must be text nodes",
+            ),
+            (
+                r#"{"kind":"tabs","value":"Z","children":[{"kind":"text","text":"A"}]}"#,
+                "name one of its tabs",
+            ),
             (r#"{"kind":"tabs"}"#, "1 to 8 text children"),
-            (r#"{"kind":"toggle","text":"x","value":"maybe"}"#, "`on` or `off`"),
+            (
+                r#"{"kind":"toggle","text":"x","value":"maybe"}"#,
+                "`on` or `off`",
+            ),
             (r#"{"kind":"progress","value":"140%"}"#, "0 to 100"),
             (r#"{"kind":"progress"}"#, "0 to 100"),
-            (r#"{"kind":"image","value":"https://example.com/a.png"}"#, "must be one of"),
+            (
+                r#"{"kind":"image","value":"https://example.com/a.png"}"#,
+                "must be one of",
+            ),
             (r#"{"kind":"input"}"#, "text is required"),
-            (r#"{"kind":"avatar","text":"A","value":"x"}"#, "cannot have a value"),
-            (r#"{"kind":"input","text":"x","children":[{"kind":"divider"}]}"#, "cannot have children"),
+            (
+                r#"{"kind":"avatar","text":"A","value":"x"}"#,
+                "cannot have a value",
+            ),
+            (
+                r#"{"kind":"input","text":"x","children":[{"kind":"divider"}]}"#,
+                "cannot have children",
+            ),
             (r#"{"kind":"image","src":"x"}"#, "unknown field `src`"),
         ];
         for (node, message) in bad {
@@ -1441,20 +1733,37 @@ mod tests {
 
     #[test]
     fn a_block_still_arriving_draws_its_whole_marks() {
-        let full = common("bar", r#""bars":[{"label":"a","value":12},{"label":"b","value":128},{"label":"c \"q\"","value":7}],"x_label":"s""#);
+        let full = common(
+            "bar",
+            r#""bars":[{"label":"a","value":12},{"label":"b","value":128},{"label":"c \"q\"","value":7}],"x_label":"s""#,
+        );
         let at = |needle: &str| &full[..full.find(needle).unwrap() + needle.len()];
         // Nothing yet but the type and title: something to frame, nothing to draw.
         let early = parse_partial(at(r#""type":"bar""#));
-        assert_eq!((early.kind.as_deref(), early.title.as_deref(), early.drawable.is_none()), (Some("bar"), Some("Demo"), true));
-        assert!(parse_partial(r#"{"version":1,"title":"De"#).title.is_none(), "only a title written in full");
+        assert_eq!(
+            (
+                early.kind.as_deref(),
+                early.title.as_deref(),
+                early.drawable.is_none()
+            ),
+            (Some("bar"), Some("Demo"), true)
+        );
+        assert!(
+            parse_partial(r#"{"version":1,"title":"De"#).title.is_none(),
+            "only a title written in full"
+        );
         // A number still arriving is left out, not drawn as 12 on its way to 128.
         let mid = parse_partial(at(r#""value":12"#));
         assert!(mid.drawable.is_none(), "{mid:?}");
         let one = parse_partial(at(r#""value":12},{"label":"b","value":12"#));
-        let VisualizationContent::Bar { bars, .. } = one.drawable.unwrap().content else { panic!() };
+        let VisualizationContent::Bar { bars, .. } = one.drawable.unwrap().content else {
+            panic!()
+        };
         assert_eq!(bars.iter().map(|b| b.value).collect::<Vec<_>>(), vec![12.0]);
         let two = parse_partial(at(r#"{"label":"c \"q"#));
-        let VisualizationContent::Bar { bars, .. } = two.drawable.unwrap().content else { panic!() };
+        let VisualizationContent::Bar { bars, .. } = two.drawable.unwrap().content else {
+            panic!()
+        };
         assert_eq!(bars.len(), 2);
         // Closed, with the fence still to come; and every prefix reads without a panic.
         let done = parse_partial(&format!("{full}\n``"));
@@ -1464,21 +1773,47 @@ mod tests {
         }
         // A row of a table only once it's whole; a line's series only once it has every value.
         // (`common` closes the object; a block still arriving hasn't.)
-        let open = |kind: &str, body: &str| common(kind, body).strip_suffix('}').unwrap().to_string();
+        let open =
+            |kind: &str, body: &str| common(kind, body).strip_suffix('}').unwrap().to_string();
         let table = open("table", r#""columns":["a","b"],"rows":[["x",1],["y","#);
-        let VisualizationContent::Table { rows, .. } = parse_partial(&table).drawable.unwrap().content else { panic!() };
+        let VisualizationContent::Table { rows, .. } =
+            parse_partial(&table).drawable.unwrap().content
+        else {
+            panic!()
+        };
         assert_eq!(rows.len(), 1);
-        let line = open("line", r#""x_labels":["a","b"],"series":[{"label":"s","values":[1,2]},{"label":"t","values":[3"#);
-        let VisualizationContent::Line { series, .. } = parse_partial(&line).drawable.unwrap().content else { panic!() };
+        let line = open(
+            "line",
+            r#""x_labels":["a","b"],"series":[{"label":"s","values":[1,2]},{"label":"t","values":[3"#,
+        );
+        let VisualizationContent::Line { series, .. } =
+            parse_partial(&line).drawable.unwrap().content
+        else {
+            panic!()
+        };
         assert_eq!(series.len(), 1);
     }
 
     #[test]
     fn errors_read_plainly_after_the_notice() {
-        let unknown = parse(&common("bar", r#""bars":[{"label":"x","value":1}],"html":"<b>""#)).unwrap_err();
-        assert_eq!(unknown.reason(), "unknown field `html` (a bar takes `bars`, `x_label`, `y_label`)");
-        let big = VisualizationError::PayloadTooLarge { bytes: 40 * 1024, max: MAX_PAYLOAD_BYTES };
+        let unknown = parse(&common(
+            "bar",
+            r#""bars":[{"label":"x","value":1}],"html":"<b>""#,
+        ))
+        .unwrap_err();
+        assert_eq!(
+            unknown.reason(),
+            "unknown field `html` (a bar takes `bars`, `x_label`, `y_label`)"
+        );
+        let big = VisualizationError::PayloadTooLarge {
+            bytes: 40 * 1024,
+            max: MAX_PAYLOAD_BYTES,
+        };
         assert_eq!(big.reason(), "it's 40.0 KiB, over the 32 KiB limit");
-        assert!(!VisualizationError::Invalid("bars dataset must be nonempty".into()).reason().contains("invalid visualization"));
+        assert!(
+            !VisualizationError::Invalid("bars dataset must be nonempty".into())
+                .reason()
+                .contains("invalid visualization")
+        );
     }
 }

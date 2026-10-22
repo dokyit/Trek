@@ -16,23 +16,44 @@ fn print(name: &str, s: &anyhow::Result<AgentStatus>) {
         Ok(s) => s,
         Err(e) => return println!("  failed: {e:#}"),
     };
-    println!("  logged_in: {}  account: {}  plan: {:?}  billing: {:?}", s.logged_in, if s.account.is_some() { "(set)" } else { "none" }, s.plan, s.billing);
+    println!(
+        "  logged_in: {}  account: {}  plan: {:?}  billing: {:?}",
+        s.logged_in,
+        if s.account.is_some() { "(set)" } else { "none" },
+        s.plan,
+        s.billing
+    );
     if let Some(e) = &s.error {
         println!("  error: {e}");
     }
     for l in &s.limits {
-        let resets = l.resets_at.and_then(chrono::DateTime::from_timestamp_millis).map(|d| d.to_rfc3339()).unwrap_or_default();
-        println!("  limit: {:<24} {:>5.1}%  window {:<4} resets {resets}", l.label, l.percent, l.window);
+        let resets = l
+            .resets_at
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_default();
+        println!(
+            "  limit: {:<24} {:>5.1}%  window {:<4} resets {resets}",
+            l.label, l.percent, l.window
+        );
     }
     for r in &s.resets {
         println!("  reset credit: {:?} expires {:?}", r.title, r.expires_at);
     }
     for m in &s.models {
-        println!("  model: {:<28} {:<24} tier {} fast {:?} efforts {:?}", m.id, m.name, m.tier, m.fast, m.efforts);
+        println!(
+            "  model: {:<28} {:<24} tier {} fast {:?} efforts {:?}",
+            m.id, m.name, m.tier, m.fast, m.efforts
+        );
     }
     let count = |k| s.commands.iter().filter(|c| c.kind == k).count();
     use trek_agents::CommandKind::*;
-    println!("  commands: {} commands, {} skills, {} agents", count(Command), count(Skill), count(Agent));
+    println!(
+        "  commands: {} commands, {} skills, {} agents",
+        count(Command),
+        count(Skill),
+        count(Agent)
+    );
     for c in s.commands.iter().take(8) {
         let d: String = c.description.chars().take(60).collect();
         println!("    {:?} /{} — {d}", c.kind, c.name);
@@ -42,13 +63,23 @@ fn print(name: &str, s: &anyhow::Result<AgentStatus>) {
 /// Processes still running under this one.
 fn leftovers() -> Vec<String> {
     let me = std::process::id().to_string();
-    let out = std::process::Command::new("/bin/ps").args(["-A", "-o", "pid=,ppid=,pgid=,command="]).output().unwrap();
+    let out = std::process::Command::new("/bin/ps")
+        .args(["-A", "-o", "pid=,ppid=,pgid=,command="])
+        .output()
+        .unwrap();
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let rows: Vec<Vec<&str>> = text.lines().map(|l| l.split_whitespace().collect()).filter(|r: &Vec<&str>| r.len() >= 4).collect();
+    let rows: Vec<Vec<&str>> = text
+        .lines()
+        .map(|l| l.split_whitespace().collect())
+        .filter(|r: &Vec<&str>| r.len() >= 4)
+        .collect();
     let mut ours = vec![me];
     let mut found = Vec::new();
     while let Some(pid) = ours.pop() {
-        for r in rows.iter().filter(|r| r[1] == pid && !r[3].ends_with("/ps")) {
+        for r in rows
+            .iter()
+            .filter(|r| r[1] == pid && !r[3].ends_with("/ps"))
+        {
             ours.push(r[0].to_string());
             found.push(r.join(" "));
         }
@@ -87,8 +118,16 @@ fn main() {
             timed("Codex (full: codex_status)", codex_status(&cwd)).await;
         }
         if commands {
-            timed("Claude Code (commands only: claude_commands)", claude_commands(&cwd)).await;
-            timed("Codex (commands only: codex_commands)", codex_commands(&cwd)).await;
+            timed(
+                "Claude Code (commands only: claude_commands)",
+                claude_commands(&cwd),
+            )
+            .await;
+            timed(
+                "Codex (commands only: codex_commands)",
+                codex_commands(&cwd),
+            )
+            .await;
         }
     });
 }

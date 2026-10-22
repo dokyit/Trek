@@ -44,11 +44,15 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     };
     follow_reduce_motion(&workspace, cx);
     sync(&workspace, &mut applied, cx);
-    cx.observe(&workspace, move |workspace, cx| sync(&workspace, &mut applied, cx)).detach();
+    cx.observe(&workspace, move |workspace, cx| {
+        sync(&workspace, &mut applied, cx)
+    })
+    .detach();
 }
 
 /// The system's Reduce motion (macOS) or Animation effects off (Windows) is on, as last asked.
-static SYSTEM_REDUCES_MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SYSTEM_REDUCES_MOTION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// The system's Reduce motion (macOS: Accessibility › Display; Windows: Accessibility › Visual
 /// effects › Animation effects, off) or Trek's own setting stills every animation:
@@ -63,7 +67,9 @@ fn follow_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
     let workspace = workspace.downgrade();
     cx.spawn(async move |cx| {
         loop {
-            cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
             SYSTEM_REDUCES_MOTION.store(reduce_motion(), std::sync::atomic::Ordering::Relaxed);
             let gone = cx.update(|cx| match workspace.upgrade() {
                 Some(ws) => {
@@ -85,7 +91,11 @@ fn apply_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
     if cfg!(test) {
         return;
     }
-    reduce_motion_as(SYSTEM_REDUCES_MOTION.load(std::sync::atomic::Ordering::Relaxed), workspace, cx);
+    reduce_motion_as(
+        SYSTEM_REDUCES_MOTION.load(std::sync::atomic::Ordering::Relaxed),
+        workspace,
+        cx,
+    );
 }
 
 /// Set the app's reduce-motion flag from what the system asks (`system`) and Trek's own setting:
@@ -102,7 +112,11 @@ fn sync(workspace: &Entity<Workspace>, applied: &mut Applied, cx: &mut App) {
     apply_reduce_motion(workspace, cx);
     let ws = workspace.read(cx);
     let awake = ws.settings.general.prevent_sleep_while_running && ws.any_turn_running();
-    let badge = if ws.settings.notifications.dock_badge { ws.needs_you_count() } else { 0 };
+    let badge = if ws.settings.notifications.dock_badge {
+        ws.needs_you_count()
+    } else {
+        0
+    };
     let menu_bar_icon = ws.settings.notifications.menu_bar_icon;
     let ui_font_size = ws.settings.appearance.ui_font_size();
     let app_icon = ws.settings.appearance.app_icon;
@@ -125,7 +139,9 @@ fn sync(workspace: &Entity<Workspace>, applied: &mut Applied, cx: &mut App) {
         } else if main.is_some() {
             let workspace = workspace.downgrade();
             applied.badge_retry = Some(cx.spawn(async move |cx| {
-                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
                 let _ = workspace.update(cx, |_, cx| cx.notify());
             }));
         }
@@ -136,7 +152,11 @@ fn sync(workspace: &Entity<Workspace>, applied: &mut Applied, cx: &mut App) {
     }
     // The Dock tile is the app's, so the icon is put up once per choice; a Windows icon is each
     // window's, so a window that wasn't there when it was chosen needs it put on too.
-    let windows = if cfg!(windows) { cx.windows() } else { Vec::new() };
+    let windows = if cfg!(windows) {
+        cx.windows()
+    } else {
+        Vec::new()
+    };
     if applied.app_icon != Some(app_icon) || windows != applied.icon_windows {
         applied.app_icon = Some(app_icon);
         applied.icon_retry = None;
@@ -147,7 +167,9 @@ fn sync(workspace: &Entity<Workspace>, applied: &mut Applied, cx: &mut App) {
             applied.icon_windows.clear();
             let workspace = workspace.downgrade();
             applied.icon_retry = Some(cx.spawn(async move |cx| {
-                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
                 let _ = workspace.update(cx, |_, cx| cx.notify());
             }));
         }
@@ -172,7 +194,9 @@ fn set_dock_badge(count: usize, _main: Option<AnyWindowHandle>, _cx: &mut App) -
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSApplication;
     use objc2_foundation::NSString;
-    let Some(mtm) = MainThreadMarker::new() else { return true };
+    let Some(mtm) = MainThreadMarker::new() else {
+        return true;
+    };
     let tile = NSApplication::sharedApplication(mtm).dockTile();
     let label = (count > 0).then(|| NSString::from_str(&count.to_string()));
     tile.setBadgeLabel(label.as_deref());
@@ -184,7 +208,10 @@ fn set_dock_badge(count: usize, _main: Option<AnyWindowHandle>, _cx: &mut App) -
 #[cfg(all(windows, not(test)))]
 fn set_dock_badge(count: usize, main: Option<AnyWindowHandle>, cx: &mut App) -> bool {
     let Some(main) = main else { return count == 0 };
-    let hwnd = main.update(cx, |_, window, _| crate::winsys::hwnd_of(window)).ok().flatten();
+    let hwnd = main
+        .update(cx, |_, window, _| crate::winsys::hwnd_of(window))
+        .ok()
+        .flatten();
     hwnd.is_some_and(|hwnd| crate::winsys::set_overlay_badge(hwnd, count))
 }
 
@@ -210,8 +237,12 @@ fn set_app_icon(icon: AppIcon, _cx: &mut App) -> bool {
     use objc2::{AllocAnyThread as _, MainThreadMarker};
     use objc2_app_kit::{NSApplication, NSImage};
     use objc2_foundation::NSData;
-    let Some(mtm) = MainThreadMarker::new() else { return true };
-    let Some(bytes) = crate::assets::brand_bytes(app_icon_image(icon)) else { return true };
+    let Some(mtm) = MainThreadMarker::new() else {
+        return true;
+    };
+    let Some(bytes) = crate::assets::brand_bytes(app_icon_image(icon)) else {
+        return true;
+    };
     let data = NSData::with_bytes(&bytes);
     let image = NSImage::initWithData(NSImage::alloc(), &data);
     // SAFETY: on the main thread (`mtm`), with an image AppKit retains; `None` puts the bundle's
@@ -228,7 +259,10 @@ fn set_app_icon(icon: AppIcon, cx: &mut App) -> bool {
     let resource = crate::winsys::icon_resource(icon);
     let mut all = true;
     for handle in cx.windows() {
-        let hwnd = handle.update(cx, |_, window, _| crate::winsys::hwnd_of(window)).ok().flatten();
+        let hwnd = handle
+            .update(cx, |_, window, _| crate::winsys::hwnd_of(window))
+            .ok()
+            .flatten();
         all &= hwnd.is_some_and(|hwnd| crate::winsys::set_window_icon(hwnd, resource));
     }
     all
@@ -246,7 +280,10 @@ pub fn scale_changed(window: &Window, cx: &App) {
     #[cfg(test)]
     SCALE_CHANGES.with(|n| n.set(n.get() + 1));
     #[cfg(all(windows, not(test)))]
-    if let (Some(workspace), Some(hwnd)) = (cx.try_global::<crate::workspace::GlobalWorkspace>(), crate::winsys::hwnd_of(window)) {
+    if let (Some(workspace), Some(hwnd)) = (
+        cx.try_global::<crate::workspace::GlobalWorkspace>(),
+        crate::winsys::hwnd_of(window),
+    ) {
         let icon = workspace.0.read(cx).settings.appearance.app_icon;
         crate::winsys::set_window_icon(hwnd, crate::winsys::icon_resource(icon));
     }
@@ -291,7 +328,8 @@ pub fn reduce_transparency() -> bool {
     ASKED.with(|a| match a.get() {
         Some((at, on)) if at.elapsed() < Duration::from_secs(1) => on,
         _ => {
-            let on = objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceTransparency();
+            let on = objc2_app_kit::NSWorkspace::sharedWorkspace()
+                .accessibilityDisplayShouldReduceTransparency();
             a.set(Some((Instant::now(), on)));
             on
         }
@@ -331,13 +369,20 @@ fn reduce_motion() -> bool {
 pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
     use objc2_foundation::{NSFileManager, NSString, NSURL};
     let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
-    NSFileManager::defaultManager().trashItemAtURL_resultingItemURL_error(&url, None).map_err(|e| anyhow::anyhow!("{}", e.localizedDescription()))
+    NSFileManager::defaultManager()
+        .trashItemAtURL_resultingItemURL_error(&url, None)
+        .map_err(|e| anyhow::anyhow!("{}", e.localizedDescription()))
 }
 
 /// Tests' folders are their own: gone for good, not into the user's Trash.
 #[cfg(test)]
 pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
-    if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) }.map_err(Into::into)
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+    .map_err(Into::into)
 }
 
 /// The Recycle Bin (Windows) or the XDG trash (Linux).
@@ -352,7 +397,10 @@ pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
 pub fn canonical(path: &std::path::Path) -> Option<std::path::PathBuf> {
     let real = std::fs::canonicalize(path).ok()?;
     if cfg!(windows) {
-        let plain = real.to_str().and_then(|p| p.strip_prefix(r"\\?\")).filter(|p| p.as_bytes().get(1) == Some(&b':'));
+        let plain = real
+            .to_str()
+            .and_then(|p| p.strip_prefix(r"\\?\"))
+            .filter(|p| p.as_bytes().get(1) == Some(&b':'));
         if let Some(plain) = plain {
             return Some(std::path::PathBuf::from(plain));
         }
@@ -372,12 +420,16 @@ pub fn app_is_active() -> bool {
 #[cfg(windows)]
 pub fn app_is_active() -> bool {
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
     // SAFETY: plain calls; a null window (none in front) is passed over, and `pid` is writable.
     unsafe {
         let front = GetForegroundWindow();
         let mut pid = 0u32;
-        !front.is_null() && GetWindowThreadProcessId(front, &mut pid) != 0 && pid == GetCurrentProcessId()
+        !front.is_null()
+            && GetWindowThreadProcessId(front, &mut pid) != 0
+            && pid == GetCurrentProcessId()
     }
 }
 
@@ -392,8 +444,12 @@ pub fn order_back(window: &Window) {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
-    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else { return };
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
     // SAFETY: `ns_view` is the live NSView GPUI created for this window; both messages are
     // plain AppKit calls made on the main thread.
     unsafe {
@@ -416,13 +472,29 @@ pub const SHOW_BEHIND: bool = cfg!(windows);
 #[cfg(windows)]
 pub fn order_back(window: &Window) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos};
-    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
-    let RawWindowHandle::Win32(win32) = handle.as_raw() else { return };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+    };
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
     let hwnd = win32.hwnd.get() as windows_sys::Win32::Foundation::HWND;
     // SAFETY: `hwnd` is the live window GPUI created for this `window`, and this is its thread;
     // the call changes only the z-order, and doesn't activate it.
-    unsafe { SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    };
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -443,9 +515,13 @@ pub fn order_back(_: &Window) {}
 #[cfg(windows)]
 pub fn activate_window(window: &mut Window, cx: &mut App) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindow};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindow,
+    };
     let hwnd = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
-        Ok(RawWindowHandle::Win32(win32)) => win32.hwnd.get() as windows_sys::Win32::Foundation::HWND,
+        Ok(RawWindowHandle::Win32(win32)) => {
+            win32.hwnd.get() as windows_sys::Win32::Foundation::HWND
+        }
         // GPUI's test platform: no system window behind it. (Never GPUI's own activation on a
         // real one: that is the one that sends the Alt key.)
         #[cfg(test)]
@@ -489,9 +565,15 @@ pub fn native_glass(window: &Window, on: bool) -> bool {
     use objc2::runtime::{AnyClass, AnyObject};
     use objc2_foundation::NSRect;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    let Some(glass) = AnyClass::get(c"NSGlassEffectView") else { return false };
-    let Ok(handle) = HasWindowHandle::window_handle(window) else { return false };
-    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else { return false };
+    let Some(glass) = AnyClass::get(c"NSGlassEffectView") else {
+        return false;
+    };
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return false;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return false;
+    };
     // SAFETY: plain AppKit messages on this window's live content view, on the main thread. The
     // glass view is retained by its superview once added; `alloc`/`init` hand over the one
     // reference that `addSubview:` then takes (released below).
@@ -547,10 +629,14 @@ pub fn native_glass(_: &Window, _: bool) -> bool {
 /// (`TREK_BACKGROUND`) cover drawing too. Every Trek window keeps one for as long as it's open.
 pub fn hidden_frames<V: 'static>(window: &mut Window, cx: &mut Context<V>) -> Option<Task<()>> {
     crate::mascot::force_active().then(|| {
-        cx.spawn_in(window, async move |_, cx| loop {
-            cx.background_executor().timer(std::time::Duration::from_micros(16_667)).await;
-            if cx.update(|window, _| display_if_hidden(window)).is_err() {
-                break;
+        cx.spawn_in(window, async move |_, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_micros(16_667))
+                    .await;
+                if cx.update(|window, _| display_if_hidden(window)).is_err() {
+                    break;
+                }
             }
         })
     })
@@ -566,8 +652,12 @@ pub fn display_if_hidden(window: &Window) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     /// `NSWindowOcclusionStateVisible`.
     const VISIBLE: usize = 1 << 1;
-    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
-    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else { return };
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
     // SAFETY: `ns_view` is the live NSView GPUI created for this window; these are plain AppKit
     // and Core Animation calls made on the main thread.
     unsafe {
@@ -687,13 +777,26 @@ pub fn play_alert_sound() {
 pub fn windows_version() -> String {
     use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
     fn value(name: &str) -> Option<String> {
-        let key: Vec<u16> = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion".encode_utf16().chain([0]).collect();
+        let key: Vec<u16> = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+            .encode_utf16()
+            .chain([0])
+            .collect();
         let name: Vec<u16> = name.encode_utf16().chain([0]).collect();
         let mut buf = [0u16; 128];
         let mut size = std::mem::size_of_val(&buf) as u32;
         // SAFETY: both names end in a NUL; `buf` is `size` bytes long, and `size` is how many are
         // written (the terminator included) on success.
-        let status = unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut size) };
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                key.as_ptr(),
+                name.as_ptr(),
+                RRF_RT_REG_SZ,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
         if status != 0 {
             return None;
         }
@@ -701,7 +804,15 @@ pub fn windows_version() -> String {
         Some(String::from_utf16_lossy(&buf[..chars])).filter(|s| !s.is_empty())
     }
     let build = value("CurrentBuild");
-    let major = if build.as_deref().and_then(|b| b.parse::<u32>().ok()).is_some_and(|b| b >= 22000) { "Windows 11" } else { "Windows 10" };
+    let major = if build
+        .as_deref()
+        .and_then(|b| b.parse::<u32>().ok())
+        .is_some_and(|b| b >= 22000)
+    {
+        "Windows 11"
+    } else {
+        "Windows 10"
+    };
     let mut out = major.to_string();
     out.extend(value("DisplayVersion").map(|v| format!(" {v}")));
     out.extend(build.map(|b| format!(" ({b})")));
@@ -721,7 +832,8 @@ pub struct Alert {
 /// Decide from the notification settings whether the window is focused and the thread on screen.
 /// A thread you're looking at in the focused window never alerts.
 pub fn alert_for(n: &trek_core::settings::Notifications, focused: bool, viewing: bool) -> Alert {
-    let wanted = n.mode != NotifyMode::Off && !(focused && viewing) && (!focused || !n.only_when_unfocused);
+    let wanted =
+        n.mode != NotifyMode::Off && !(focused && viewing) && (!focused || !n.only_when_unfocused);
     Alert {
         toast: !viewing,
         banner: wanted && matches!(n.mode, NotifyMode::Banner | NotifyMode::BannerAndSound),
@@ -739,18 +851,81 @@ mod tests {
     fn alerts_follow_notification_settings() {
         let mut n = Notifications::default();
         // Default: banner + sound, only when unfocused.
-        assert_eq!(alert_for(&n, false, false), Alert { toast: true, banner: true, sound: true });
-        assert_eq!(alert_for(&n, true, false), Alert { toast: true, banner: false, sound: false });
-        assert_eq!(alert_for(&n, false, true), Alert { toast: false, banner: true, sound: true });
-        assert_eq!(alert_for(&n, true, true), Alert { toast: false, banner: false, sound: false });
+        assert_eq!(
+            alert_for(&n, false, false),
+            Alert {
+                toast: true,
+                banner: true,
+                sound: true
+            }
+        );
+        assert_eq!(
+            alert_for(&n, true, false),
+            Alert {
+                toast: true,
+                banner: false,
+                sound: false
+            }
+        );
+        assert_eq!(
+            alert_for(&n, false, true),
+            Alert {
+                toast: false,
+                banner: true,
+                sound: true
+            }
+        );
+        assert_eq!(
+            alert_for(&n, true, true),
+            Alert {
+                toast: false,
+                banner: false,
+                sound: false
+            }
+        );
         n.only_when_unfocused = false;
-        assert_eq!(alert_for(&n, true, false), Alert { toast: true, banner: true, sound: true });
-        assert_eq!(alert_for(&n, true, true), Alert { toast: false, banner: false, sound: false });
+        assert_eq!(
+            alert_for(&n, true, false),
+            Alert {
+                toast: true,
+                banner: true,
+                sound: true
+            }
+        );
+        assert_eq!(
+            alert_for(&n, true, true),
+            Alert {
+                toast: false,
+                banner: false,
+                sound: false
+            }
+        );
         n.mode = NotifyMode::Sound;
-        assert_eq!(alert_for(&n, false, false), Alert { toast: true, banner: false, sound: true });
+        assert_eq!(
+            alert_for(&n, false, false),
+            Alert {
+                toast: true,
+                banner: false,
+                sound: true
+            }
+        );
         n.mode = NotifyMode::Banner;
-        assert_eq!(alert_for(&n, false, false), Alert { toast: true, banner: true, sound: false });
+        assert_eq!(
+            alert_for(&n, false, false),
+            Alert {
+                toast: true,
+                banner: true,
+                sound: false
+            }
+        );
         n.mode = NotifyMode::Off;
-        assert_eq!(alert_for(&n, false, false), Alert { toast: true, banner: false, sound: false });
+        assert_eq!(
+            alert_for(&n, false, false),
+            Alert {
+                toast: true,
+                banner: false,
+                sound: false
+            }
+        );
     }
 }

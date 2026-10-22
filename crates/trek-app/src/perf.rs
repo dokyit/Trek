@@ -86,34 +86,56 @@ pub fn frame_begins() {
 
 /// Drawn last in the main window while measuring: notes when painting reached it.
 pub fn probe() -> Option<impl IntoElement> {
-    on().then(|| canvas(|_, _, _| (), |_, _, _, _| painted()).absolute().top_0().left_0().size_0())
+    on().then(|| {
+        canvas(|_, _, _| (), |_, _, _, _| painted())
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_0()
+    })
 }
 
 fn painted() {
     let now = Instant::now();
     let (first, frame, waiters) = FRAMES.with(|f| {
         let mut f = f.borrow_mut();
-        let frame = Frame { begun: f.begun.take().unwrap_or(now), painted: now };
+        let frame = Frame {
+            begun: f.begun.take().unwrap_or(now),
+            painted: now,
+        };
         if f.recording {
             f.recorded.push(frame);
         }
         let first = !std::mem::replace(&mut f.first_painted, true);
-        (first.then(|| f.phases.clone()), frame, std::mem::take(&mut f.waiters))
+        (
+            first.then(|| f.phases.clone()),
+            frame,
+            std::mem::take(&mut f.waiters),
+        )
     });
     for w in waiters {
         let _ = w.try_send(Some(frame));
     }
     if let Some(phases) = first {
         let at = chrono::Utc::now().timestamp_millis();
-        let phases: String = phases.iter().map(|(name, d)| format!(" {name}={}", ms(*d))).collect();
-        tracing::info!("perf: startup first_frame={}{phases} at={at}", ms(since_start()));
+        let phases: String = phases
+            .iter()
+            .map(|(name, d)| format!(" {name}={}", ms(*d)))
+            .collect();
+        tracing::info!(
+            "perf: startup first_frame={}{phases} at={at}",
+            ms(since_start())
+        );
     }
 }
 
 /// The next frame the main window paints, on the receiver. The sender is for a time limit: a
 /// `None` sent on it ends the wait (two fit, so neither side blocks).
 #[cfg_attr(not(feature = "shots"), allow(dead_code))]
-pub fn next_frame() -> (async_channel::Sender<Option<Frame>>, async_channel::Receiver<Option<Frame>>) {
+pub fn next_frame() -> (
+    async_channel::Sender<Option<Frame>>,
+    async_channel::Receiver<Option<Frame>>,
+) {
     let (tx, rx) = async_channel::bounded(2);
     FRAMES.with(|f| f.borrow_mut().waiters.push(tx.clone()));
     (tx, rx)
@@ -171,14 +193,26 @@ pub fn summarize(samples: &[Duration], budget: Duration) -> Summary {
         let i = ((p * sorted.len() as f64).ceil() as usize).clamp(1, sorted.len()) - 1;
         sorted[i]
     };
-    Summary { n: sorted.len(), p50: rank(0.5), p95: rank(0.95), max: sorted.last().copied().unwrap_or_default(), over: sorted.iter().filter(|d| **d > budget).count() }
+    Summary {
+        n: sorted.len(),
+        p50: rank(0.5),
+        p95: rank(0.95),
+        max: sorted.last().copied().unwrap_or_default(),
+        over: sorted.iter().filter(|d| **d > budget).count(),
+    }
 }
 
 #[cfg_attr(not(feature = "shots"), allow(dead_code))]
 impl Summary {
     /// As a log line's `key=value` pairs, under `prefix` (`frame_`, `latency_`).
     pub fn pairs(&self, prefix: &str) -> String {
-        format!("{prefix}p50={} {prefix}p95={} {prefix}max={} {prefix}over={}", ms(self.p50), ms(self.p95), ms(self.max), self.over)
+        format!(
+            "{prefix}p50={} {prefix}p95={} {prefix}max={} {prefix}over={}",
+            ms(self.p50),
+            ms(self.p95),
+            ms(self.max),
+            self.over
+        )
     }
 }
 
@@ -206,14 +240,33 @@ mod tests {
     fn a_hundred_samples_put_p95_at_the_95th() {
         let samples: Vec<u64> = (1..=100).collect();
         let s = summarize(&ms(&samples), Duration::from_millis(90));
-        assert_eq!((s.p50, s.p95, s.max), (Duration::from_millis(50), Duration::from_millis(95), Duration::from_millis(100)));
+        assert_eq!(
+            (s.p50, s.p95, s.max),
+            (
+                Duration::from_millis(50),
+                Duration::from_millis(95),
+                Duration::from_millis(100)
+            )
+        );
         assert_eq!(s.over, 10);
     }
 
     #[test]
     fn no_samples_sum_to_nothing() {
         let s = summarize(&[], BUDGET);
-        assert_eq!(s, Summary { n: 0, p50: Duration::ZERO, p95: Duration::ZERO, max: Duration::ZERO, over: 0 });
-        assert_eq!(s.pairs("frame_"), "frame_p50=0.0 frame_p95=0.0 frame_max=0.0 frame_over=0");
+        assert_eq!(
+            s,
+            Summary {
+                n: 0,
+                p50: Duration::ZERO,
+                p95: Duration::ZERO,
+                max: Duration::ZERO,
+                over: 0
+            }
+        );
+        assert_eq!(
+            s.pairs("frame_"),
+            "frame_p50=0.0 frame_p95=0.0 frame_max=0.0 frame_over=0"
+        );
     }
 }

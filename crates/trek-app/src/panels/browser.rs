@@ -8,14 +8,17 @@ use crate::workspace::{Workspace, WorkspaceEvent};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, h_flex,
+    v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use gpui_wry::WebView;
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::path::PathBuf;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,7 +29,9 @@ const ERROR_URL: &str = "trek://newtab/error";
 const START_HTML: &str = include_str!("browser_start.html");
 
 /// Ports dev servers commonly listen on (Next, Vite, Angular, Django, Tauri, Storybook…).
-const DEV_PORTS: [u16; 13] = [3000, 3001, 4173, 4200, 5000, 5173, 5174, 8000, 8080, 8081, 8888, 1420, 6006];
+const DEV_PORTS: [u16; 13] = [
+    3000, 3001, 4173, 4200, 5000, 5173, 5174, 8000, 8080, 8081, 8888, 1420, 6006,
+];
 
 const ZOOM_STEPS: [f64; 9] = [0.5, 0.67, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 2.0];
 
@@ -127,7 +132,8 @@ const PICK_JS: &str = r#"(() => {
 const PICK_STOP_JS: &str = "window.__trekPick && window.__trekPick.stop();";
 
 /// Where to get the WebView2 runtime when a Windows system has none.
-pub(crate) const WEBVIEW2_DOWNLOAD: &str ="https://developer.microsoft.com/microsoft-edge/webview2/";
+pub(crate) const WEBVIEW2_DOWNLOAD: &str =
+    "https://developer.microsoft.com/microsoft-edge/webview2/";
 
 /// The scheme Trek's own pages are registered under, which Trek spells `trek://`. WebView2 can't
 /// load a custom scheme, so on Windows wry serves `<scheme>://newtab/…` as `http://<scheme>.newtab/…`
@@ -142,7 +148,9 @@ const WEBVIEW2_TREK: &str = "http://trek-pages.";
 fn to_webview2(url: &str) -> Cow<'_, str> {
     const TREK: &str = "trek://";
     match url.get(..TREK.len()) {
-        Some(scheme) if scheme.eq_ignore_ascii_case(TREK) => Cow::Owned(format!("{WEBVIEW2_TREK}{}", &url[TREK.len()..])),
+        Some(scheme) if scheme.eq_ignore_ascii_case(TREK) => {
+            Cow::Owned(format!("{WEBVIEW2_TREK}{}", &url[TREK.len()..]))
+        }
         _ => Cow::Borrowed(url),
     }
 }
@@ -156,12 +164,20 @@ fn from_webview2(url: String) -> String {
 
 /// A URL on its way into a view, in the view's form (see `WEBVIEW2_TREK`).
 fn to_view(url: &str) -> Cow<'_, str> {
-    if cfg!(windows) { to_webview2(url) } else { Cow::Borrowed(url) }
+    if cfg!(windows) {
+        to_webview2(url)
+    } else {
+        Cow::Borrowed(url)
+    }
 }
 
 /// A URL a view reported, in Trek's form.
 fn from_view(url: String) -> String {
-    if cfg!(windows) { from_webview2(url) } else { url }
+    if cfg!(windows) {
+        from_webview2(url)
+    } else {
+        url
+    }
 }
 
 /// Native WKWebView controls wry doesn't wrap.
@@ -200,8 +216,13 @@ mod native {
 #[cfg(windows)]
 mod native {
     use super::Msg;
-    use webview2_com::Microsoft::Web::WebView2::Win32::{COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, ICoreWebView2};
-    use webview2_com::{CallDevToolsProtocolMethodCompletedHandler, CapturePreviewCompletedHandler, ContentLoadingEventHandler, HistoryChangedEventHandler};
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, ICoreWebView2,
+    };
+    use webview2_com::{
+        CallDevToolsProtocolMethodCompletedHandler, CapturePreviewCompletedHandler,
+        ContentLoadingEventHandler, HistoryChangedEventHandler,
+    };
     use windows_61::Win32::System::Com::{IStream, STREAM_SEEK_SET};
     use windows_61::Win32::UI::Shell::SHCreateMemStream;
     use windows_61::core::{BOOL, PWSTR, w};
@@ -230,7 +251,15 @@ mod native {
     /// Reload past the cache, as WKWebView's `reloadFromOrigin` does.
     pub fn hard_reload(wv: &wry::WebView) {
         let done = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
-        if unsafe { wv.webview().CallDevToolsProtocolMethod(w!("Page.reload"), w!(r#"{"ignoreCache":true}"#), &done) }.is_err() {
+        if unsafe {
+            wv.webview().CallDevToolsProtocolMethod(
+                w!("Page.reload"),
+                w!(r#"{"ignoreCache":true}"#),
+                &done,
+            )
+        }
+        .is_err()
+        {
             let _ = wv.reload();
         }
     }
@@ -250,11 +279,16 @@ mod native {
         let webview = wv.webview();
         let failed = tx.clone();
         let on_error = ContentLoadingEventHandler::create(Box::new(move |wv, args| {
-            let (Some(wv), Some(args)) = (wv, args) else { return Ok(()) };
+            let (Some(wv), Some(args)) = (wv, args) else {
+                return Ok(());
+            };
             let mut error = BOOL::default();
             unsafe { args.IsErrorPage(&mut error)? };
             if error.as_bool() {
-                let _ = failed.try_send(Msg::Failed { tab, url: source(&wv) });
+                let _ = failed.try_send(Msg::Failed {
+                    tab,
+                    url: source(&wv),
+                });
             }
             Ok(())
         }));
@@ -276,14 +310,24 @@ mod native {
     pub fn capture_png(wv: &wry::WebView) -> async_channel::Receiver<Result<Vec<u8>, String>> {
         let (tx, rx) = async_channel::bounded(1);
         let started = (|| -> Result<(), String> {
-            let stream = unsafe { SHCreateMemStream(None) }.ok_or("Couldn't make room for the screenshot.")?;
+            let stream = unsafe { SHCreateMemStream(None) }
+                .ok_or("Couldn't make room for the screenshot.")?;
             let (out, done) = (stream.clone(), tx.clone());
             let handler = CapturePreviewCompletedHandler::create(Box::new(move |result| {
-                let png = result.map_err(|e| e.message()).and_then(|()| read_all(&out));
+                let png = result
+                    .map_err(|e| e.message())
+                    .and_then(|()| read_all(&out));
                 let _ = done.try_send(png);
                 Ok(())
             }));
-            unsafe { wv.webview().CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, &stream, &handler) }.map_err(|e| e.message())
+            unsafe {
+                wv.webview().CapturePreview(
+                    COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+                    &stream,
+                    &handler,
+                )
+            }
+            .map_err(|e| e.message())
         })();
         if let Err(e) = started {
             let _ = tx.try_send(Err(e));
@@ -297,13 +341,19 @@ mod native {
         let mut buf = vec![0u8; 64 * 1024];
         loop {
             let mut read = 0u32;
-            unsafe { stream.Read(buf.as_mut_ptr().cast(), buf.len() as u32, Some(&mut read)) }.ok().map_err(|e| e.message())?;
+            unsafe { stream.Read(buf.as_mut_ptr().cast(), buf.len() as u32, Some(&mut read)) }
+                .ok()
+                .map_err(|e| e.message())?;
             if read == 0 {
                 break;
             }
             out.extend_from_slice(&buf[..read as usize]);
         }
-        if out.is_empty() { Err("The page didn't draw.".into()) } else { Ok(out) }
+        if out.is_empty() {
+            Err("The page didn't draw.".into())
+        } else {
+            Ok(out)
+        }
     }
 }
 
@@ -338,12 +388,23 @@ mod native {
 /// Events from the native views, bridged onto the GPUI thread.
 enum Msg {
     Title(u64, String),
-    Load { tab: u64, finished: bool, url: String },
-    Ipc { tab: u64, origin: String, body: String },
+    Load {
+        tab: u64,
+        finished: bool,
+        url: String,
+    },
+    Ipc {
+        tab: u64,
+        origin: String,
+        body: String,
+    },
     NewWindow(String),
     /// WebView2 is showing its own error page for `url`: the load failed.
     #[cfg(windows)]
-    Failed { tab: u64, url: String },
+    Failed {
+        tab: u64,
+        url: String,
+    },
     /// History moved without a load (a fragment, `pushState`): back and forward may have changed.
     #[cfg(windows)]
     History(u64),
@@ -543,7 +604,9 @@ fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -559,18 +622,24 @@ fn normalize(input: &str) -> String {
     if t.chars().all(|c| c.is_ascii_digit()) && t.len() <= 5 {
         return format!("http://localhost:{t}");
     }
-    let port = t.strip_prefix(':').map(|r| r.split(['/', '?', '#']).next().unwrap_or(""));
+    let port = t
+        .strip_prefix(':')
+        .map(|r| r.split(['/', '?', '#']).next().unwrap_or(""));
     if port.is_some_and(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())) {
         return format!("http://localhost{t}");
     }
-    if ["localhost", "127.0.0.1", "0.0.0.0", "[::1]"].iter().any(|h| t.starts_with(h)) {
+    if ["localhost", "127.0.0.1", "0.0.0.0", "[::1]"]
+        .iter()
+        .any(|h| t.starts_with(h))
+    {
         return format!("http://{t}");
     }
     if t.contains("://") || t.starts_with("about:") || t.starts_with("data:") {
         return t.to_string();
     }
     let host = t.split(['/', '?', '#']).next().unwrap_or("");
-    let looks_like_host = !t.contains(char::is_whitespace) && (host.contains('.') && !host.ends_with('.') || host.contains(':'));
+    let looks_like_host = !t.contains(char::is_whitespace)
+        && (host.contains('.') && !host.ends_with('.') || host.contains(':'));
     if looks_like_host {
         return format!("https://{t}");
     }
@@ -579,7 +648,13 @@ fn normalize(input: &str) -> String {
 
 fn css_color(c: Hsla) -> String {
     let c = c.to_rgb();
-    format!("rgba({:.0},{:.0},{:.0},{:.3})", c.r * 255., c.g * 255., c.b * 255., c.a)
+    format!(
+        "rgba({:.0},{:.0},{:.0},{:.3})",
+        c.r * 255.,
+        c.g * 255.,
+        c.b * 255.,
+        c.a
+    )
 }
 
 /// Trek's theme as CSS variables for the internal pages.
@@ -595,15 +670,24 @@ fn page_vars(cx: &App) -> String {
         ("--muted", css_color(theme.muted_foreground)),
         ("--border", css_color(theme.border)),
         ("--border-strong", css_color(fg.opacity(0.16))),
-        ("--card", css_color(fg.opacity(if dark { 0.035 } else { 0.025 }))),
-        ("--card-strong", css_color(fg.opacity(if dark { 0.055 } else { 0.035 }))),
+        (
+            "--card",
+            css_color(fg.opacity(if dark { 0.035 } else { 0.025 })),
+        ),
+        (
+            "--card-strong",
+            css_color(fg.opacity(if dark { 0.055 } else { 0.035 })),
+        ),
         ("--chip", css_color(fg.opacity(0.07))),
         ("--accent", css_color(accent)),
         ("--accent-soft", css_color(accent.opacity(0.6))),
         ("--accent-ring", css_color(accent.opacity(0.16))),
         ("--ok", css_color(ok)),
         ("--ok-ring", css_color(ok.opacity(0.18))),
-        ("color-scheme", (if dark { "dark" } else { "light" }).to_string()),
+        (
+            "color-scheme",
+            (if dark { "dark" } else { "light" }).to_string(),
+        ),
     ]
     .iter()
     .map(|(k, v)| format!("{k}:{v};"))
@@ -612,8 +696,14 @@ fn page_vars(cx: &App) -> String {
 
 fn internal_page(path: &str, vars: &str) -> (&'static str, Cow<'static, [u8]>) {
     match path {
-        "/mark.png" => ("image/png", Cow::Owned(crate::assets::brand_bytes("brand/mark.png").unwrap_or_default())),
-        _ => ("text/html; charset=utf-8", Cow::Owned(START_HTML.replace("/*VARS*/", vars).into_bytes())),
+        "/mark.png" => (
+            "image/png",
+            Cow::Owned(crate::assets::brand_bytes("brand/mark.png").unwrap_or_default()),
+        ),
+        _ => (
+            "text/html; charset=utf-8",
+            Cow::Owned(START_HTML.replace("/*VARS*/", vars).into_bytes()),
+        ),
     }
 }
 
@@ -622,11 +712,18 @@ fn probe_servers() -> Vec<(u16, Option<String>)> {
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpStream};
     let probe = |port: u16| -> Option<(u16, Option<String>)> {
-        let addrs: [SocketAddr; 2] = [([127, 0, 0, 1], port).into(), (std::net::Ipv6Addr::LOCALHOST, port).into()];
-        let mut stream = addrs.iter().find_map(|a| TcpStream::connect_timeout(a, Duration::from_millis(150)).ok())?;
+        let addrs: [SocketAddr; 2] = [
+            ([127, 0, 0, 1], port).into(),
+            (std::net::Ipv6Addr::LOCALHOST, port).into(),
+        ];
+        let mut stream = addrs
+            .iter()
+            .find_map(|a| TcpStream::connect_timeout(a, Duration::from_millis(150)).ok())?;
         let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
         let _ = stream.set_write_timeout(Some(Duration::from_millis(300)));
-        let req = format!("GET / HTTP/1.0\r\nHost: localhost:{port}\r\nAccept: text/html\r\nUser-Agent: Trek\r\nConnection: close\r\n\r\n");
+        let req = format!(
+            "GET / HTTP/1.0\r\nHost: localhost:{port}\r\nAccept: text/html\r\nUser-Agent: Trek\r\nConnection: close\r\n\r\n"
+        );
         if stream.write_all(req.as_bytes()).is_err() {
             return Some((port, None));
         }
@@ -634,13 +731,23 @@ fn probe_servers() -> Vec<(u16, Option<String>)> {
         let _ = stream.take(96 * 1024).read_to_end(&mut buf);
         let text = String::from_utf8_lossy(&buf);
         // macOS's AirPlay receiver squats on 5000/7000; it isn't a dev server.
-        if text.lines().take(20).any(|l| l.to_ascii_lowercase().starts_with("server: airtunes")) {
+        if text
+            .lines()
+            .take(20)
+            .any(|l| l.to_ascii_lowercase().starts_with("server: airtunes"))
+        {
             return None;
         }
         Some((port, extract_title(&text)))
     };
-    let handles: Vec<_> = DEV_PORTS.iter().map(|&p| std::thread::spawn(move || probe(p))).collect();
-    let mut found: Vec<_> = handles.into_iter().filter_map(|h| h.join().ok().flatten()).collect();
+    let handles: Vec<_> = DEV_PORTS
+        .iter()
+        .map(|&p| std::thread::spawn(move || probe(p)))
+        .collect();
+    let mut found: Vec<_> = handles
+        .into_iter()
+        .filter_map(|h| h.join().ok().flatten())
+        .collect();
     found.sort_by_key(|(p, _)| *p);
     found
 }
@@ -661,8 +768,13 @@ fn favicon_url(icon: &str, page: &str) -> Option<String> {
     if !icon.is_empty() {
         return None;
     }
-    let (scheme, rest) = page.split_once("://").filter(|(s, _)| *s == "http" || *s == "https")?;
-    let host = rest.split(['/', '?', '#']).next().filter(|h| !h.is_empty())?;
+    let (scheme, rest) = page
+        .split_once("://")
+        .filter(|(s, _)| *s == "http" || *s == "https")?;
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .filter(|h| !h.is_empty())?;
     Some(format!("{scheme}://{host}/favicon.ico"))
 }
 
@@ -677,9 +789,16 @@ fn fetch_favicon(url: String) -> async_channel::Receiver<Option<Vec<u8>>> {
 }
 
 async fn download_favicon(url: &str) -> Option<Vec<u8>> {
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(6)).user_agent("Mozilla/5.0 Trek").build().ok()?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(6))
+        .user_agent("Mozilla/5.0 Trek")
+        .build()
+        .ok()?;
     let mut response = client.get(url).send().await.ok()?.error_for_status().ok()?;
-    if response.content_length().is_some_and(|n| n > FAVICON_MAX_BYTES as u64) {
+    if response
+        .content_length()
+        .is_some_and(|n| n > FAVICON_MAX_BYTES as u64)
+    {
         return None;
     }
     let mut body = Vec::new();
@@ -743,7 +862,10 @@ pub(crate) fn capture_png(wv: &wry::WebView) -> async_channel::Receiver<Result<V
 /// A web view's rectangle as the screen shows it, cropped out of a capture of its window: the
 /// editor's previews, for `shots` (the Browser screenshot's own crop).
 #[cfg(all(not(windows), feature = "shots"))]
-pub(crate) fn view_capture(view: &gpui_wry::WebView, window: &Window) -> Option<impl FnOnce(&std::path::Path) -> Result<(), String> + Send + use<>> {
+pub(crate) fn view_capture(
+    view: &gpui_wry::WebView,
+    window: &Window,
+) -> Option<impl FnOnce(&std::path::Path) -> Result<(), String> + Send + use<>> {
     let rect = view.bounds();
     let number = native::window_number(view.raw())?;
     if rect.size.width <= px(0.) || rect.size.height <= px(0.) {
@@ -766,7 +888,12 @@ pub(crate) fn webview_data_dir() -> PathBuf {
 
 /// Capture `rect` (window points) of a window by number into a PNG at `dest`.
 #[cfg(not(windows))]
-fn capture_window_rect(window_number: isize, window_width: f32, rect: Bounds<Pixels>, dest: &std::path::Path) -> Result<(), String> {
+fn capture_window_rect(
+    window_number: isize,
+    window_width: f32,
+    rect: Bounds<Pixels>,
+    dest: &std::path::Path,
+) -> Result<(), String> {
     use std::io::BufReader;
     let tmp = dest.with_extension("full.png");
     let status = std::process::Command::new("/usr/sbin/screencapture")
@@ -812,38 +939,46 @@ fn capture_window_rect(window_number: isize, window_width: f32, rect: Bounds<Pix
 
 impl BrowserPanel {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let address = cx.new(|cx| InputState::new(window, cx).placeholder("Search or enter address"));
+        let address =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search or enter address"));
         let (tx, rx) = async_channel::unbounded::<Msg>();
         let pump = cx.spawn_in(window, async move |this, cx| {
             while let Ok(msg) = rx.recv().await {
-                if this.update_in(cx, |this, window, cx| this.handle(msg, window, cx)).is_err() {
+                if this
+                    .update_in(cx, |this, window, cx| this.handle(msg, window, cx))
+                    .is_err()
+                {
                     break;
                 }
             }
         });
-        let subscriptions = vec![cx.subscribe_in(&address, window, |this: &mut Self, input, event: &InputEvent, window, cx| match event {
-            InputEvent::PressEnter { .. } => {
-                let url = normalize(&input.read(cx).value());
-                this.editing = false;
-                this.navigate(url, cx);
-                // WKWebView takes the keys once an address is entered. WebView2 would keep them from
-                // Trek's own shortcuts (Ctrl+K, Ctrl+W…: none reach Trek while the page has them)
-                // until the page is clicked, so on Windows they stay where they were.
-                #[cfg(not(windows))]
-                {
-                    if let Some(tab) = this.active_tab() {
-                        let _ = tab.view.read(cx).raw().focus();
+        let subscriptions = vec![cx.subscribe_in(
+            &address,
+            window,
+            |this: &mut Self, input, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => {
+                    let url = normalize(&input.read(cx).value());
+                    this.editing = false;
+                    this.navigate(url, cx);
+                    // WKWebView takes the keys once an address is entered. WebView2 would keep them from
+                    // Trek's own shortcuts (Ctrl+K, Ctrl+W…: none reach Trek while the page has them)
+                    // until the page is clicked, so on Windows they stay where they were.
+                    #[cfg(not(windows))]
+                    {
+                        if let Some(tab) = this.active_tab() {
+                            let _ = tab.view.read(cx).raw().focus();
+                        }
                     }
+                    let _ = window;
+                    cx.notify();
                 }
-                let _ = window;
-                cx.notify();
-            }
-            InputEvent::Blur => {
-                this.editing = false;
-                cx.notify();
-            }
-            _ => {}
-        })];
+                InputEvent::Blur => {
+                    this.editing = false;
+                    cx.notify();
+                }
+                _ => {}
+            },
+        )];
         let mut this = Self {
             workspace,
             tabs: vec![],
@@ -910,18 +1045,30 @@ impl BrowserPanel {
         self.tabs.iter_mut().find(|t| t.id == id)
     }
 
-    fn build_view(&self, id: u64, url: &str, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<WebView>> {
+    fn build_view(
+        &self,
+        id: u64,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<WebView>> {
         let built = {
             use raw_window_handle::HasWindowHandle;
             let handle = window.window_handle().ok()?;
-            let (t1, t2, t3, t4) = (self.tx.clone(), self.tx.clone(), self.tx.clone(), self.tx.clone());
+            let (t1, t2, t3, t4) = (
+                self.tx.clone(),
+                self.tx.clone(),
+                self.tx.clone(),
+                self.tx.clone(),
+            );
             let vars = self.page_vars.clone();
             #[cfg(windows)]
             let mut context = wry::WebContext::new(Some(webview_data_dir()));
             // A new view mustn't take the keys from Trek (WebView2 focuses it by default): it gets
             // them when the page is clicked, or after the address bar sends it somewhere.
             #[cfg(windows)]
-            let builder = wry::WebViewBuilder::new_with_web_context(&mut context).with_focused(false);
+            let builder =
+                wry::WebViewBuilder::new_with_web_context(&mut context).with_focused(false);
             #[cfg(not(windows))]
             let builder = wry::WebViewBuilder::new();
             builder
@@ -933,17 +1080,29 @@ impl BrowserPanel {
                 .with_initialization_script_for_main_only(INIT_JS, true)
                 .with_custom_protocol(PAGES_SCHEME.into(), move |_, request| {
                     let (mime, body) = internal_page(request.uri().path(), &vars.borrow());
-                    wry::http::Response::builder().header("Content-Type", mime).header("Cache-Control", "no-store").body(body).unwrap_or_default()
+                    wry::http::Response::builder()
+                        .header("Content-Type", mime)
+                        .header("Cache-Control", "no-store")
+                        .body(body)
+                        .unwrap_or_default()
                 })
                 .with_ipc_handler(move |request| {
                     let origin = request.uri().to_string();
-                    let _ = t1.try_send(Msg::Ipc { tab: id, origin, body: request.into_body() });
+                    let _ = t1.try_send(Msg::Ipc {
+                        tab: id,
+                        origin,
+                        body: request.into_body(),
+                    });
                 })
                 .with_document_title_changed_handler(move |title| {
                     let _ = t2.try_send(Msg::Title(id, title));
                 })
                 .with_on_page_load_handler(move |event, url| {
-                    let _ = t3.try_send(Msg::Load { tab: id, finished: matches!(event, wry::PageLoadEvent::Finished), url });
+                    let _ = t3.try_send(Msg::Load {
+                        tab: id,
+                        finished: matches!(event, wry::PageLoadEvent::Finished),
+                        url,
+                    });
                 })
                 .with_new_window_req_handler(move |url, _| {
                     let _ = t4.try_send(Msg::NewWindow(url));
@@ -967,11 +1126,18 @@ impl BrowserPanel {
             return;
         };
         self.stop_picking(cx);
-        self.tabs.push(Tab { id, view, zoom: 1.0, page: Page::new(url) });
+        self.tabs.push(Tab {
+            id,
+            view,
+            zoom: 1.0,
+            page: Page::new(url),
+        });
         self.active = id;
         // Reveal after a moment even if the first load never reports in.
         self._tasks.push(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(1500)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if let Some(tab) = this.tab_mut(id).filter(|t| !t.page.ready) {
                     tab.page.ready = true;
@@ -999,7 +1165,9 @@ impl BrowserPanel {
     }
 
     fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(ix) = self.tabs.iter().position(|t| t.id == id) else { return };
+        let Some(ix) = self.tabs.iter().position(|t| t.id == id) else {
+            return;
+        };
         if self.active == id {
             self.stop_picking(cx);
         }
@@ -1031,7 +1199,9 @@ impl BrowserPanel {
     /// Load `url` in the active tab and watch for it failing to load.
     fn navigate(&mut self, url: String, cx: &mut Context<Self>) {
         self.stop_picking(cx);
-        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active) else { return };
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active) else {
+            return;
+        };
         let (id, seq) = (tab.id, tab.page.navigating());
         let sent = tab.view.read(cx).raw().load_url(&to_view(&url));
         // WebView2 turns an address it can't parse down at once, and then reports nothing.
@@ -1062,7 +1232,9 @@ impl BrowserPanel {
             let started = Instant::now();
             let mut seen_loading = false;
             loop {
-                cx.background_executor().timer(Duration::from_millis(150)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
                 let state = this.update(cx, |this, cx| {
                     let tab = this.tab_mut(id)?;
                     if tab.page.nav_seq != seq || tab.page.committed_seq >= seq {
@@ -1072,7 +1244,9 @@ impl BrowserPanel {
                 });
                 let Ok(Some(loading)) = state else { return };
                 seen_loading |= loading;
-                if loading && started.elapsed() < Duration::from_secs(90) || !seen_loading && started.elapsed() < Duration::from_millis(1500) {
+                if loading && started.elapsed() < Duration::from_secs(90)
+                    || !seen_loading && started.elapsed() < Duration::from_millis(1500)
+                {
                     continue;
                 }
                 let _ = this.update(cx, |this, cx| this.show_load_error(id, url, cx));
@@ -1084,7 +1258,9 @@ impl BrowserPanel {
     }
 
     fn refresh_nav(&mut self, id: u64, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return };
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else {
+            return;
+        };
         let raw = tab.view.read(cx).raw();
         tab.page.can_back = native::can_go_back(raw);
         tab.page.can_forward = native::can_go_forward(raw);
@@ -1097,7 +1273,11 @@ impl BrowserPanel {
                     tab.page.title = title;
                 }
             }
-            Msg::Load { tab: id, finished, url } => {
+            Msg::Load {
+                tab: id,
+                finished,
+                url,
+            } => {
                 let Some(tab) = self.tab_mut(id) else { return };
                 tab.page.loaded(finished, from_view(url));
                 if !finished && self.active == id {
@@ -1112,11 +1292,17 @@ impl BrowserPanel {
                     self.new_tab(&url, window, cx);
                 }
             }
-            Msg::Ipc { tab, origin, body } => self.handle_ipc(tab, from_view(origin), body, window, cx),
+            Msg::Ipc { tab, origin, body } => {
+                self.handle_ipc(tab, from_view(origin), body, window, cx)
+            }
             #[cfg(windows)]
             Msg::Failed { tab: id, url } => {
                 let Some(tab) = self.tab_mut(id) else { return };
-                let url = if url.is_empty() { tab.page.url.clone() } else { from_view(url) };
+                let url = if url.is_empty() {
+                    tab.page.url.clone()
+                } else {
+                    from_view(url)
+                };
                 self.show_load_error(id, url, cx);
             }
             #[cfg(windows)]
@@ -1125,9 +1311,23 @@ impl BrowserPanel {
         cx.notify();
     }
 
-    fn handle_ipc(&mut self, id: u64, origin: String, body: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Ok(msg) = serde_json::from_str::<serde_json::Value>(&body) else { return };
-        let str_of = |k: &str| msg.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    fn handle_ipc(
+        &mut self,
+        id: u64,
+        origin: String,
+        body: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(msg) = serde_json::from_str::<serde_json::Value>(&body) else {
+            return;
+        };
+        let str_of = |k: &str| {
+            msg.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
         let internal = origin.starts_with("trek://");
         match msg.get("t").and_then(|v| v.as_str()).unwrap_or_default() {
             "meta" => {
@@ -1144,10 +1344,17 @@ impl BrowserPanel {
             "url" => {
                 // The page names its own address after a history change, and any page can name
                 // any address: it counts only for the origin the view is on and the message came from.
-                let actual = self.tab_mut(id).and_then(|t| t.view.read(cx).raw().url().ok()).map(from_view);
+                let actual = self
+                    .tab_mut(id)
+                    .and_then(|t| t.view.read(cx).raw().url().ok())
+                    .map(from_view);
                 let url = str_of("url");
                 if let Some(tab) = self.tab_mut(id) {
-                    if !url.is_empty() && !internal && same_origin(&url, &origin) && actual.as_deref().is_some_and(|a| same_origin(&url, a)) {
+                    if !url.is_empty()
+                        && !internal
+                        && same_origin(&url, &origin)
+                        && actual.as_deref().is_some_and(|a| same_origin(&url, a))
+                    {
                         tab.page.url = url;
                     }
                 }
@@ -1163,7 +1370,9 @@ impl BrowserPanel {
             "pick" if self.picking && self.active == id => {
                 self.picking = false;
                 let text = describe_pick(&msg);
-                self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::InsertIntoComposer(text)));
+                self.workspace.update(cx, |_, cx| {
+                    cx.emit(WorkspaceEvent::InsertIntoComposer(text))
+                });
             }
             "pick-cancel" => self.picking = false,
             _ => {}
@@ -1187,10 +1396,20 @@ impl BrowserPanel {
         }
         let bytes = fetch_favicon(url.clone());
         cx.spawn(async move |this, cx| {
-            let image = bytes.recv().await.ok().flatten().and_then(decode_favicon).map(Arc::new);
+            let image = bytes
+                .recv()
+                .await
+                .ok()
+                .flatten()
+                .and_then(decode_favicon)
+                .map(Arc::new);
             let _ = this.update(cx, |this, cx| {
                 this.favicons.insert(url.clone(), image.clone());
-                for tab in this.tabs.iter_mut().filter(|t| t.page.favicon_url.as_deref() == Some(url.as_str())) {
+                for tab in this
+                    .tabs
+                    .iter_mut()
+                    .filter(|t| t.page.favicon_url.as_deref() == Some(url.as_str()))
+                {
                     tab.page.favicon = image.clone();
                 }
                 cx.notify();
@@ -1201,15 +1420,27 @@ impl BrowserPanel {
 
     fn scan_servers(&mut self, id: u64, cx: &mut Context<Self>) {
         let task = cx.spawn(async move |this, cx| {
-            let found = cx.background_executor().spawn(async move { probe_servers() }).await;
-            let list: Vec<serde_json::Value> = found.into_iter().map(|(port, title)| serde_json::json!({ "port": port, "title": title })).collect();
+            let found = cx
+                .background_executor()
+                .spawn(async move { probe_servers() })
+                .await;
+            let list: Vec<serde_json::Value> = found
+                .into_iter()
+                .map(|(port, title)| serde_json::json!({ "port": port, "title": title }))
+                .collect();
             let json = serde_json::Value::Array(list).to_string();
             let _ = this.update(cx, |this, cx| {
                 let Some(tab) = this.tab_mut(id) else { return };
                 let raw = tab.view.read(cx).raw();
                 // Only hand the list to Trek's own page, never to a site the tab has since moved to.
-                if raw.url().map(|u| from_view(u).starts_with("trek://")).unwrap_or(false) {
-                    let _ = raw.evaluate_script(&format!("window.__trekServers && window.__trekServers({json});"));
+                if raw
+                    .url()
+                    .map(|u| from_view(u).starts_with("trek://"))
+                    .unwrap_or(false)
+                {
+                    let _ = raw.evaluate_script(&format!(
+                        "window.__trekServers && window.__trekServers({json});"
+                    ));
                 }
             });
         });
@@ -1218,7 +1449,10 @@ impl BrowserPanel {
     }
 
     fn start_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let value = self.active_tab().map(|t| t.page.address()).unwrap_or_default();
+        let value = self
+            .active_tab()
+            .map(|t| t.page.address())
+            .unwrap_or_default();
         self.editing = true;
         self.address.update(cx, |s, cx| {
             s.set_value(value, window, cx);
@@ -1253,7 +1487,10 @@ impl BrowserPanel {
     fn toggle_picking(&mut self, cx: &mut Context<Self>) {
         if self.picking {
             self.stop_picking(cx);
-        } else if self.active_tab().is_some_and(|t| !t.page.url.starts_with("trek://")) {
+        } else if self
+            .active_tab()
+            .is_some_and(|t| !t.page.url.starts_with("trek://"))
+        {
             self.picking = true;
             self.with_active(cx, |wv| {
                 let _ = wv.evaluate_script(PICK_JS);
@@ -1289,7 +1526,12 @@ impl BrowserPanel {
             let result = match png.recv().await {
                 Ok(Ok(bytes)) => {
                     let out = dest.clone();
-                    cx.background_executor().spawn(async move { std::fs::write(&out, bytes).map_err(|e| e.to_string()) }).await.map(|()| dest)
+                    cx.background_executor()
+                        .spawn(
+                            async move { std::fs::write(&out, bytes).map_err(|e| e.to_string()) },
+                        )
+                        .await
+                        .map(|()| dest)
                 }
                 Ok(Err(message)) => Err(format!("Couldn't capture the page: {message}")),
                 Err(_) => Err("The page closed before it was captured.".to_string()),
@@ -1300,7 +1542,13 @@ impl BrowserPanel {
         // give up, or the button would spin for good.
         let timeout = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(CAPTURE_TIMEOUT).await;
-            let _ = this.update(cx, |this, cx| this.captured(id, Err("Couldn't capture the page: it didn't draw.".to_string()), cx));
+            let _ = this.update(cx, |this, cx| {
+                this.captured(
+                    id,
+                    Err("Couldn't capture the page: it didn't draw.".to_string()),
+                    cx,
+                )
+            });
         });
         self._tasks.retain(|t| !t.is_ready());
         self._tasks.push(task);
@@ -1316,7 +1564,10 @@ impl BrowserPanel {
         self.capturing = false;
         let event = match result {
             Ok(dest) => WorkspaceEvent::AttachImage(dest),
-            Err(message) => WorkspaceEvent::Toast { message, undo: None },
+            Err(message) => WorkspaceEvent::Toast {
+                message,
+                undo: None,
+            },
         };
         self.workspace.update(cx, |_, cx| cx.emit(event));
         cx.notify();
@@ -1330,7 +1581,9 @@ impl BrowserPanel {
         }
         let view = tab.view.read(cx);
         let rect = view.bounds();
-        let Some(number) = native::window_number(view.raw()) else { return };
+        let Some(number) = native::window_number(view.raw()) else {
+            return;
+        };
         if rect.size.width <= px(0.) || rect.size.height <= px(0.) {
             return;
         }
@@ -1340,12 +1593,18 @@ impl BrowserPanel {
         cx.notify();
         let task = cx.spawn(async move |this, cx| {
             let out = dest.clone();
-            let result = cx.background_executor().spawn(async move { capture_window_rect(number, window_width, rect, &out) }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move { capture_window_rect(number, window_width, rect, &out) })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.capturing = false;
                 let event = match result {
                     Ok(()) => WorkspaceEvent::AttachImage(dest),
-                    Err(message) => WorkspaceEvent::Toast { message, undo: None },
+                    Err(message) => WorkspaceEvent::Toast {
+                        message,
+                        undo: None,
+                    },
                 };
                 this.workspace.update(cx, |_, cx| cx.emit(event));
                 cx.notify();
@@ -1370,7 +1629,11 @@ impl BrowserPanel {
         let next = if up {
             ZOOM_STEPS.iter().copied().find(|z| *z > current + 0.001)
         } else {
-            ZOOM_STEPS.iter().rev().copied().find(|z| *z < current - 0.001)
+            ZOOM_STEPS
+                .iter()
+                .rev()
+                .copied()
+                .find(|z| *z < current - 0.001)
         };
         if let Some(z) = next {
             self.set_zoom(z, cx);
@@ -1394,8 +1657,15 @@ impl BrowserPanel {
         *self.page_vars.borrow_mut() = vars.clone();
         for tab in &self.tabs {
             let raw = tab.view.read(cx).raw();
-            if raw.url().map(|u| from_view(u).starts_with("trek://")).unwrap_or(false) {
-                let _ = raw.evaluate_script(&format!("document.documentElement.style.cssText = {};", serde_json::Value::String(vars.clone())));
+            if raw
+                .url()
+                .map(|u| from_view(u).starts_with("trek://"))
+                .unwrap_or(false)
+            {
+                let _ = raw.evaluate_script(&format!(
+                    "document.documentElement.style.cssText = {};",
+                    serde_json::Value::String(vars.clone())
+                ));
             }
         }
     }
@@ -1403,8 +1673,16 @@ impl BrowserPanel {
     fn more_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
-        let (is_page, zoom) = self.active_tab().map(|t| (!t.page.url.starts_with("trek://"), t.zoom)).unwrap_or((false, 1.0));
-        let row = |id: &'static str, icon: Icon, label: &'static str, enabled: bool, cx: &mut Context<Self>, f: fn(&mut Self, &mut Context<Self>)| {
+        let (is_page, zoom) = self
+            .active_tab()
+            .map(|t| (!t.page.url.starts_with("trek://"), t.zoom))
+            .unwrap_or((false, 1.0));
+        let row = |id: &'static str,
+                   icon: Icon,
+                   label: &'static str,
+                   enabled: bool,
+                   cx: &mut Context<Self>,
+                   f: fn(&mut Self, &mut Context<Self>)| {
             ui::menu_row(id, false, cx)
                 .child(icon.small().text_color(muted))
                 .child(div().flex_1().child(label))
@@ -1458,27 +1736,60 @@ impl BrowserPanel {
             )
             .child(zoom_button("browser-zoom-in", Lucide::Plus, true, cx))
             .into_any_element();
-        let separator = || div().my(px(4.)).mx(px(6.)).h(px(1.)).bg(theme.border).into_any_element();
+        let separator = || {
+            div()
+                .my(px(4.))
+                .mx(px(6.))
+                .h(px(1.))
+                .bg(theme.border)
+                .into_any_element()
+        };
 
         ui::menu_surface(cx)
             .w(px(250.))
-            .child(row("browser-copy-url", Icon::new(Lucide::Copy), "Copy URL", is_page, cx, |this, cx| {
-                if let Some(tab) = this.active_tab() {
-                    cx.write_to_clipboard(ClipboardItem::new_string(tab.page.address()));
-                }
-            }))
-            .child(row("browser-hard-reload", Icon::new(Lucide::RotateCw), "Hard reload", is_page, cx, |this, cx| {
-                this.with_active(cx, native::hard_reload);
-            }))
+            .child(row(
+                "browser-copy-url",
+                Icon::new(Lucide::Copy),
+                "Copy URL",
+                is_page,
+                cx,
+                |this, cx| {
+                    if let Some(tab) = this.active_tab() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(tab.page.address()));
+                    }
+                },
+            ))
+            .child(row(
+                "browser-hard-reload",
+                Icon::new(Lucide::RotateCw),
+                "Hard reload",
+                is_page,
+                cx,
+                |this, cx| {
+                    this.with_active(cx, native::hard_reload);
+                },
+            ))
             .child(separator())
             .child(zoom_row)
             .child(separator())
-            .child(row("browser-clear-data", Icon::new(Lucide::Eraser), "Clear cookies and site data", true, cx, |this, cx| {
-                this.with_active(cx, |wv| {
-                    let _ = wv.clear_all_browsing_data();
-                });
-                this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message: "Cleared browsing data".into(), undo: None }));
-            }))
+            .child(row(
+                "browser-clear-data",
+                Icon::new(Lucide::Eraser),
+                "Clear cookies and site data",
+                true,
+                cx,
+                |this, cx| {
+                    this.with_active(cx, |wv| {
+                        let _ = wv.clear_all_browsing_data();
+                    });
+                    this.workspace.update(cx, |_, cx| {
+                        cx.emit(WorkspaceEvent::Toast {
+                            message: "Cleared browsing data".into(),
+                            undo: None,
+                        })
+                    });
+                },
+            ))
             .into_any_element()
     }
 
@@ -1491,16 +1802,27 @@ impl BrowserPanel {
         let icon: AnyElement = if page.loading && !page.is_start() {
             Spinner::new().xsmall().color(muted).into_any_element()
         } else if page.is_start() {
-            Icon::new(Lucide::Sparkle).xsmall().text_color(crate::palette::ember(cx)).into_any_element()
+            Icon::new(Lucide::Sparkle)
+                .xsmall()
+                .text_color(crate::palette::ember(cx))
+                .into_any_element()
         } else if let Some(image) = page.favicon.clone() {
             img(image)
                 .size(px(14.))
                 .flex_none()
                 .rounded(px(3.))
-                .with_fallback(move || Icon::new(Lucide::Globe).xsmall().text_color(muted).into_any_element())
+                .with_fallback(move || {
+                    Icon::new(Lucide::Globe)
+                        .xsmall()
+                        .text_color(muted)
+                        .into_any_element()
+                })
                 .into_any_element()
         } else {
-            Icon::new(Lucide::Globe).xsmall().text_color(muted).into_any_element()
+            Icon::new(Lucide::Globe)
+                .xsmall()
+                .text_color(muted)
+                .into_any_element()
         };
         h_flex()
             .id(("browser-tab", id as usize))
@@ -1517,9 +1839,29 @@ impl BrowserPanel {
             .cursor_pointer()
             .text_size(px(12.5))
             .border_1()
-            .when(active, |el| el.bg(theme.popover).border_color(theme.border).text_color(theme.foreground).shadow_xs())
-            .when(!active, |el| el.border_color(transparent_black()).text_color(muted).hover(|s| s.bg(theme.foreground.opacity(0.05)).text_color(theme.foreground)))
-            .child(div().flex_none().size(px(14.)).flex().items_center().justify_center().child(icon))
+            .when(active, |el| {
+                el.bg(theme.popover)
+                    .border_color(theme.border)
+                    .text_color(theme.foreground)
+                    .shadow_xs()
+            })
+            .when(!active, |el| {
+                el.border_color(transparent_black())
+                    .text_color(muted)
+                    .hover(|s| {
+                        s.bg(theme.foreground.opacity(0.05))
+                            .text_color(theme.foreground)
+                    })
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(14.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon),
+            )
             .child(div().flex_1().min_w_0().truncate().child(page.label()))
             .child(
                 div()
@@ -1530,7 +1872,9 @@ impl BrowserPanel {
                     .items_center()
                     .justify_center()
                     .rounded(px(5.))
-                    .when(!active, |el| el.invisible().group_hover("browser-tab", |s| s.visible()))
+                    .when(!active, |el| {
+                        el.invisible().group_hover("browser-tab", |s| s.visible())
+                    })
                     .hover(|s| s.bg(theme.foreground.opacity(0.1)))
                     .child(Icon::new(IconName::Close).xsmall())
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -1562,7 +1906,12 @@ impl BrowserPanel {
                 .bg(theme.foreground.opacity(0.08))
                 .border_color(crate::palette::ember(cx).opacity(0.55))
                 .child(Icon::new(Lucide::Search).xsmall().text_color(muted))
-                .child(div().flex_1().min_w_0().child(Input::new(&self.address).small().appearance(false)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Input::new(&self.address).small().appearance(false)),
+                )
                 .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     if event.keystroke.key == "escape" {
                         this.editing = false;
@@ -1602,7 +1951,11 @@ impl BrowserPanel {
                         Lucide::Globe
                     })
                     .xsmall()
-                    .text_color(if failed { crate::palette::red(cx) } else { muted }),
+                    .text_color(if failed {
+                        crate::palette::red(cx)
+                    } else {
+                        muted
+                    }),
                 )
                 .child(
                     h_flex()
@@ -1656,7 +2009,9 @@ impl BrowserPanel {
             "back" => self.with_active(cx, native::go_back),
             "forward" => self.with_active(cx, native::go_forward),
             "reload" => self.reload_or_stop(cx),
-            _ => anyhow::bail!("browser: unknown command {cmd:?} (go <address>|back|forward|reload|state|snap <name>)"),
+            _ => anyhow::bail!(
+                "browser: unknown command {cmd:?} (go <address>|back|forward|reload|state|snap <name>)"
+            ),
         }
         Ok(())
     }
@@ -1669,10 +2024,18 @@ impl BrowserPanel {
         let view = tab.map(|t| t.view.read(cx));
         let area = view.map(|v| {
             let b = v.bounds();
-            serde_json::json!([f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)])
+            serde_json::json!([
+                f32::from(b.origin.x),
+                f32::from(b.origin.y),
+                f32::from(b.size.width),
+                f32::from(b.size.height)
+            ])
         });
         let native = view.and_then(|v| v.raw().bounds().ok()).map(|r| {
-            let (p, s) = (r.position.to_physical::<i32>(scale), r.size.to_physical::<i32>(scale));
+            let (p, s) = (
+                r.position.to_physical::<i32>(scale),
+                r.size.to_physical::<i32>(scale),
+            );
             serde_json::json!([p.x, p.y, s.width, s.height])
         });
         serde_json::json!({
@@ -1697,8 +2060,12 @@ impl BrowserPanel {
 
     /// The page as `screenshot` would capture it.
     #[cfg(windows)]
-    pub fn shots_capture(&self, cx: &App) -> Option<async_channel::Receiver<Result<Vec<u8>, String>>> {
-        self.active_tab().map(|t| native::capture_png(t.view.read(cx).raw()))
+    pub fn shots_capture(
+        &self,
+        cx: &App,
+    ) -> Option<async_channel::Receiver<Result<Vec<u8>, String>>> {
+        self.active_tab()
+            .map(|t| native::capture_png(t.view.read(cx).raw()))
     }
 }
 
@@ -1707,14 +2074,22 @@ impl BrowserPanel {
 #[cfg(all(feature = "shots", windows))]
 fn shots_focus(window: &Window) -> String {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GUITHREADINFO, GetClassNameW, GetGUIThreadInfo};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GUITHREADINFO, GetClassNameW, GetGUIThreadInfo,
+    };
     let main = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
         Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
         _ => 0,
     };
     unsafe {
-        let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..std::mem::zeroed() };
-        GetGUIThreadInfo(windows_sys::Win32::System::Threading::GetCurrentThreadId(), &mut info);
+        let mut info = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            ..std::mem::zeroed()
+        };
+        GetGUIThreadInfo(
+            windows_sys::Win32::System::Threading::GetCurrentThreadId(),
+            &mut info,
+        );
         if info.hwndFocus.is_null() {
             return "none".into();
         }
@@ -1723,7 +2098,10 @@ fn shots_focus(window: &Window) -> String {
         }
         let mut class = [0u16; 128];
         let n = GetClassNameW(info.hwndFocus, class.as_mut_ptr(), class.len() as i32);
-        format!("child:{}", String::from_utf16_lossy(&class[..n.max(0) as usize]))
+        format!(
+            "child:{}",
+            String::from_utf16_lossy(&class[..n.max(0) as usize])
+        )
     }
 }
 
@@ -1748,15 +2126,37 @@ fn describe_pick(msg: &serde_json::Value) -> String {
 /// motion), the whole line, dimmer. Sliding is what says "loading"; a sliding bar held at its
 /// start would be off the line altogether.
 pub(crate) fn loading_line(still: bool, ember: Hsla) -> impl IntoElement {
-    let bar = div().id("browser-loading-bar").test_support().absolute().top_0().h_full().rounded(px(1.)).bg(ember);
+    let bar = div()
+        .id("browser-loading-bar")
+        .test_support()
+        .absolute()
+        .top_0()
+        .h_full()
+        .rounded(px(1.))
+        .bg(ember);
     let bar = if still {
         bar.left_0().w_full().opacity(0.45).into_any_element()
     } else {
         bar.w(relative(0.32))
-            .with_animation("browser-loading", Animation::new(Duration::from_millis(1100)).repeat().with_easing(ease_in_out), |el, t| el.left(relative(-0.32 + 1.32 * t)))
+            .with_animation(
+                "browser-loading",
+                Animation::new(Duration::from_millis(1100))
+                    .repeat()
+                    .with_easing(ease_in_out),
+                |el, t| el.left(relative(-0.32 + 1.32 * t)),
+            )
             .into_any_element()
     };
-    div().id("browser-loading").test_support().absolute().left_0().bottom(px(-1.)).w_full().h(px(2.)).overflow_hidden().child(bar)
+    div()
+        .id("browser-loading")
+        .test_support()
+        .absolute()
+        .left_0()
+        .bottom(px(-1.))
+        .w_full()
+        .h(px(2.))
+        .overflow_hidden()
+        .child(bar)
 }
 
 impl Render for BrowserPanel {
@@ -1791,23 +2191,25 @@ impl Render for BrowserPanel {
         // void. Hidden while a menu is open (or the panel is) is suppression, not empty.
         let blank = tab.is_none_or(|t| !t.page.ready);
 
-        let strip = h_flex()
-            .h(px(36.))
-            .px(px(6.))
-            .gap(px(4.))
-            .child(
-                h_flex()
-                    .id("browser-tabs")
-                    .flex_1()
-                    .min_w_0()
-                    .gap(px(4.))
-                    .overflow_x_scroll()
-                    .children(self.tabs.iter().map(|t| self.render_tab(t, cx)).collect::<Vec<_>>())
-                    .child(
-                        ui::icon_button("browser-new-tab", IconName::Plus, "New tab")
-                            .on_click(cx.listener(|this, _, window, cx| this.new_tab(START_URL, window, cx))),
+        let strip = h_flex().h(px(36.)).px(px(6.)).gap(px(4.)).child(
+            h_flex()
+                .id("browser-tabs")
+                .flex_1()
+                .min_w_0()
+                .gap(px(4.))
+                .overflow_x_scroll()
+                .children(
+                    self.tabs
+                        .iter()
+                        .map(|t| self.render_tab(t, cx))
+                        .collect::<Vec<_>>(),
+                )
+                .child(
+                    ui::icon_button("browser-new-tab", IconName::Plus, "New tab").on_click(
+                        cx.listener(|this, _, window, cx| this.new_tab(START_URL, window, cx)),
                     ),
-            );
+                ),
+        );
 
         let entity = cx.entity();
         let more = Popover::new("browser-more")
@@ -1815,10 +2217,16 @@ impl Render for BrowserPanel {
             .appearance(false)
             .open(self.menu_open)
             .on_open_change(cx.listener(|this, open: &bool, _, cx| this.set_menu_open(*open, cx)))
-            .trigger(ui::icon_button("browser-more-button", IconName::Ellipsis, "More"))
+            .trigger(ui::icon_button(
+                "browser-more-button",
+                IconName::Ellipsis,
+                "More",
+            ))
             .content(move |_, _, cx| entity.update(cx, |p, cx| p.more_menu(cx)));
 
-        let nav_button = |id: &'static str, icon: Lucide, tooltip: &'static str, enabled: bool| ui::icon_button(id, icon, tooltip).disabled(!enabled);
+        let nav_button = |id: &'static str, icon: Lucide, tooltip: &'static str, enabled: bool| {
+            ui::icon_button(id, icon, tooltip).disabled(!enabled)
+        };
         let toolbar = h_flex()
             .relative()
             .h(px(40.))
@@ -1826,43 +2234,79 @@ impl Render for BrowserPanel {
             .gap(px(2.))
             .border_b_1()
             .border_color(theme.border)
-            .child(nav_button("browser-back", Lucide::ArrowLeft, "Back", can_back).on_click(cx.listener(|this, _, _, cx| {
-                this.stop_picking(cx);
-                this.with_active(cx, native::go_back);
-            })))
-            .child(nav_button("browser-forward", Lucide::ArrowRight, "Forward", can_forward).on_click(cx.listener(|this, _, _, cx| {
-                this.stop_picking(cx);
-                this.with_active(cx, native::go_forward);
-            })))
             .child(
-                ui::icon_button("browser-reload", if loading { Lucide::X } else { Lucide::RotateCw }, if loading { "Stop" } else { "Reload" })
-                    .on_click(cx.listener(|this, _, _, cx| this.reload_or_stop(cx))),
+                nav_button("browser-back", Lucide::ArrowLeft, "Back", can_back).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.stop_picking(cx);
+                        this.with_active(cx, native::go_back);
+                    }),
+                ),
+            )
+            .child(
+                nav_button(
+                    "browser-forward",
+                    Lucide::ArrowRight,
+                    "Forward",
+                    can_forward,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.stop_picking(cx);
+                    this.with_active(cx, native::go_forward);
+                })),
+            )
+            .child(
+                ui::icon_button(
+                    "browser-reload",
+                    if loading { Lucide::X } else { Lucide::RotateCw },
+                    if loading { "Stop" } else { "Reload" },
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.reload_or_stop(cx))),
             )
             .child(div().w(px(4.)))
             .child(self.render_url_pill(cx))
             .child(div().w(px(4.)))
             .child(
-                ui::icon_button("browser-pick", Lucide::Crosshair, "Pick an element for the chat")
-                    .selected(self.picking)
-                    .disabled(!is_page)
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_picking(cx))),
+                ui::icon_button(
+                    "browser-pick",
+                    Lucide::Crosshair,
+                    "Pick an element for the chat",
+                )
+                .selected(self.picking)
+                .disabled(!is_page)
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_picking(cx))),
             )
             .child(
-                ui::icon_button("browser-screenshot", Lucide::Camera, "Screenshot the page into the chat")
-                    .loading(self.capturing)
-                    .on_click(cx.listener(|this, _, window, cx| this.screenshot(window, cx))),
+                ui::icon_button(
+                    "browser-screenshot",
+                    Lucide::Camera,
+                    "Screenshot the page into the chat",
+                )
+                .loading(self.capturing)
+                .on_click(cx.listener(|this, _, window, cx| this.screenshot(window, cx))),
             )
-            .child(ui::icon_button("browser-devtools", Lucide::CodeXml, "Open devtools").on_click(cx.listener(|this, _, _, cx| {
-                this.with_active(cx, |wv| wv.open_devtools());
-            })))
             .child(
-                ui::icon_button("browser-external", Lucide::ExternalLink, "Open in default browser")
-                    .disabled(!is_page && !failed)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(url) = this.active_tab().filter(|t| t.page.failed.is_some() || !t.page.url.starts_with("trek://")).map(|t| t.page.address()) {
-                            cx.open_url(&url);
-                        }
-                    })),
+                ui::icon_button("browser-devtools", Lucide::CodeXml, "Open devtools").on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.with_active(cx, |wv| wv.open_devtools());
+                    }),
+                ),
+            )
+            .child(
+                ui::icon_button(
+                    "browser-external",
+                    Lucide::ExternalLink,
+                    "Open in default browser",
+                )
+                .disabled(!is_page && !failed)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(url) = this
+                        .active_tab()
+                        .filter(|t| t.page.failed.is_some() || !t.page.url.starts_with("trek://"))
+                        .map(|t| t.page.address())
+                    {
+                        cx.open_url(&url);
+                    }
+                })),
             )
             .child(more)
             .when(loading, |el| el.child(loading_line(still, ember)));
@@ -1877,8 +2321,16 @@ impl Render for BrowserPanel {
                 .border_b_1()
                 .border_color(theme.border)
                 .child(Icon::new(Lucide::Crosshair).xsmall().text_color(ember))
-                .child(div().flex_1().child("Click an element on the page to add it to the chat"))
-                .child(div().text_color(theme.muted_foreground).child("Esc to cancel"))
+                .child(
+                    div()
+                        .flex_1()
+                        .child("Click an element on the page to add it to the chat"),
+                )
+                .child(
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child("Esc to cancel"),
+                )
         });
 
         v_flex()
@@ -1892,7 +2344,14 @@ impl Render for BrowserPanel {
                     .flex_1()
                     .min_h_0()
                     .bg(theme.background)
-                    .when(blank, |el| el.child(super::empty("Search or enter an address", cx).absolute().top_0().left_0()))
+                    .when(blank, |el| {
+                        el.child(
+                            super::empty("Search or enter an address", cx)
+                                .absolute()
+                                .top_0()
+                                .left_0(),
+                        )
+                    })
                     .children(active_view),
             )
             .into_any_element()
@@ -1902,13 +2361,14 @@ impl Render for BrowserPanel {
 #[cfg(test)]
 mod tests {
     // Named, not `super::*`: that would bring GPUI's `test` attribute over the standard one.
+    #[cfg(windows)]
+    use super::{Captures, Msg, PAGES_SCHEME, native};
     use super::{
-        ERROR_URL, FAVICON_MAX_BYTES, Page, START_URL, decode_favicon, download_favicon, extract_title, favicon_url, from_view, from_webview2, host_of, normalize, same_origin,
+        ERROR_URL, FAVICON_MAX_BYTES, Page, START_URL, decode_favicon, download_favicon,
+        extract_title, favicon_url, from_view, from_webview2, host_of, normalize, same_origin,
         to_view, to_webview2,
     };
     use gpui_kit::ImageFormat;
-    #[cfg(windows)]
-    use super::{Captures, Msg, PAGES_SCHEME, native};
 
     #[test]
     fn a_page_can_only_name_an_address_on_its_own_origin() {
@@ -1927,14 +2387,35 @@ mod tests {
     #[test]
     fn trek_pages_cross_into_webview2_and_back() {
         assert_eq!(to_webview2("trek://newtab/"), "http://trek-pages.newtab/");
-        assert_eq!(to_webview2("trek://newtab/error#http%3A%2F%2Fx"), "http://trek-pages.newtab/error#http%3A%2F%2Fx");
-        assert_eq!(from_webview2("http://trek-pages.newtab/mark.png".into()), "trek://newtab/mark.png");
+        assert_eq!(
+            to_webview2("trek://newtab/error#http%3A%2F%2Fx"),
+            "http://trek-pages.newtab/error#http%3A%2F%2Fx"
+        );
+        assert_eq!(
+            from_webview2("http://trek-pages.newtab/mark.png".into()),
+            "trek://newtab/mark.png"
+        );
         // A scheme is the same scheme in any case: WebView2 mustn't be handed `TREK://`, which it
         // would take for an app to launch.
         assert_eq!(to_webview2("TREK://newtab/"), "http://trek-pages.newtab/");
-        assert_eq!(to_webview2("Trek://newtab/error"), "http://trek-pages.newtab/error");
+        assert_eq!(
+            to_webview2("Trek://newtab/error"),
+            "http://trek-pages.newtab/error"
+        );
         // Everything else passes untouched, either way, including sites named like Trek's pages.
-        for url in ["https://example.com/", "http://localhost:3000/", "https://trek.dev/", "http://trek.localhost:3000/", "http://trek/", "trek:", "trek:/x", "trek:/é", "tré","about:blank", ""] {
+        for url in [
+            "https://example.com/",
+            "http://localhost:3000/",
+            "https://trek.dev/",
+            "http://trek.localhost:3000/",
+            "http://trek/",
+            "trek:",
+            "trek:/x",
+            "trek:/é",
+            "tré",
+            "about:blank",
+            "",
+        ] {
             assert_eq!(to_webview2(url), url);
             assert_eq!(from_webview2(url.into()), url);
         }
@@ -1951,7 +2432,10 @@ mod tests {
         assert!(captures.end(first), "the timeout ends it");
         assert!(!captures.end(first), "its late answer finds it gone");
         let second = captures.begin();
-        assert!(!captures.end(first), "an old answer doesn't end the next screenshot");
+        assert!(
+            !captures.end(first),
+            "an old answer doesn't end the next screenshot"
+        );
         assert!(captures.end(second));
     }
 
@@ -1959,7 +2443,10 @@ mod tests {
     fn a_new_tab_is_the_start_page_until_it_loads() {
         let page = Page::new(START_URL);
         assert!(page.is_start() && page.loading && !page.ready);
-        assert_eq!((page.address(), page.label()), (String::new(), "New Tab".to_string()));
+        assert_eq!(
+            (page.address(), page.label()),
+            (String::new(), "New Tab".to_string())
+        );
     }
 
     #[test]
@@ -1968,12 +2455,25 @@ mod tests {
         let seq = page.navigating();
         assert_eq!(seq, 2);
         page.loaded(false, "https://www.example.com/docs".into());
-        assert!(page.loading && page.committed_seq == seq, "the load committed");
-        assert_eq!(page.label(), "example.com", "the host until there's a title");
+        assert!(
+            page.loading && page.committed_seq == seq,
+            "the load committed"
+        );
+        assert_eq!(
+            page.label(),
+            "example.com",
+            "the host until there's a title"
+        );
         page.title = "Example Docs".into();
         page.loaded(true, "https://www.example.com/docs".into());
         assert!(!page.loading && page.ready);
-        assert_eq!((page.address(), page.label()), ("https://www.example.com/docs".to_string(), "Example Docs".to_string()));
+        assert_eq!(
+            (page.address(), page.label()),
+            (
+                "https://www.example.com/docs".to_string(),
+                "Example Docs".to_string()
+            )
+        );
         // Back to an internal page: its title isn't the site's.
         page.loaded(false, START_URL.into());
         assert!(page.title.is_empty() && page.is_start());
@@ -1995,13 +2495,22 @@ mod tests {
         let mut page = Page::new(START_URL);
         page.navigating();
         let error_page = page.failed_to_load("http://localhost:9/app".into());
-        assert_eq!(error_page, format!("{ERROR_URL}#http%3A%2F%2Flocalhost%3A9%2Fapp"));
+        assert_eq!(
+            error_page,
+            format!("{ERROR_URL}#http%3A%2F%2Flocalhost%3A9%2Fapp")
+        );
         assert!(!page.loading && page.ready);
         // The error page loading keeps the failure on show.
         page.loaded(false, error_page.clone());
         page.loaded(true, error_page);
         assert!(!page.is_start());
-        assert_eq!((page.address(), page.label()), ("http://localhost:9/app".to_string(), "Can’t reach page".to_string()));
+        assert_eq!(
+            (page.address(), page.label()),
+            (
+                "http://localhost:9/app".to_string(),
+                "Can’t reach page".to_string()
+            )
+        );
         // A new address clears it.
         page.navigating();
         assert_eq!(page.failed, None);
@@ -2012,16 +2521,36 @@ mod tests {
         let mut page = Page::new("https://slow.dev/");
         let seq = page.nav_seq;
         page.stopped();
-        assert!(!page.loading && page.nav_seq > seq, "the load watcher sees a newer load and stands down");
+        assert!(
+            !page.loading && page.nav_seq > seq,
+            "the load watcher sees a newer load and stands down"
+        );
     }
 
     #[test]
     fn favicons_come_from_the_page_or_its_site() {
-        assert_eq!(favicon_url("https://cdn.x.dev/icon.svg", "https://x.dev/a"), Some("https://cdn.x.dev/icon.svg".into()));
-        assert_eq!(favicon_url("", "http://localhost:5173/app?x=1#y"), Some("http://localhost:5173/favicon.ico".into()));
-        assert_eq!(favicon_url("", "https://user@x.dev"), Some("https://user@x.dev/favicon.ico".into()));
-        assert_eq!(favicon_url("data:image/png;base64,AAAA", "https://x.dev/"), None, "not fetchable");
-        assert_eq!(favicon_url("https://x.dev/i.png", "trek://newtab/"), None, "Trek's own pages have none");
+        assert_eq!(
+            favicon_url("https://cdn.x.dev/icon.svg", "https://x.dev/a"),
+            Some("https://cdn.x.dev/icon.svg".into())
+        );
+        assert_eq!(
+            favicon_url("", "http://localhost:5173/app?x=1#y"),
+            Some("http://localhost:5173/favicon.ico".into())
+        );
+        assert_eq!(
+            favicon_url("", "https://user@x.dev"),
+            Some("https://user@x.dev/favicon.ico".into())
+        );
+        assert_eq!(
+            favicon_url("data:image/png;base64,AAAA", "https://x.dev/"),
+            None,
+            "not fetchable"
+        );
+        assert_eq!(
+            favicon_url("https://x.dev/i.png", "trek://newtab/"),
+            None,
+            "Trek's own pages have none"
+        );
         assert_eq!(favicon_url("", "about:blank"), None);
         assert_eq!(favicon_url("", "file:///C:/a.html"), None);
     }
@@ -2032,7 +2561,10 @@ mod tests {
         assert_eq!(png.format, ImageFormat::Png);
         let ico = decode_favicon(vec![0, 0, 1, 0, 1, 0]).expect("an ICO");
         assert_eq!(ico.format, ImageFormat::Ico);
-        let svg = decode_favicon(b"<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec()).expect("an SVG");
+        let svg = decode_favicon(
+            b"<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec(),
+        )
+        .expect("an SVG");
         assert_eq!(svg.format, ImageFormat::Svg);
         assert!(decode_favicon(b"<html>Not found</html>".to_vec()).is_none());
     }
@@ -2046,7 +2578,10 @@ mod tests {
             if let Ok((mut stream, _)) = listener.accept() {
                 let mut request = [0u8; 2048];
                 let _ = stream.read(&mut request);
-                let head = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
                 let _ = stream.write_all(head.as_bytes());
                 let _ = stream.write_all(&body);
             }
@@ -2057,11 +2592,18 @@ mod tests {
     #[test]
     fn favicons_download_over_http_within_their_limit() {
         let png = b"\x89PNG\r\n\x1a\nicon".to_vec();
-        let got = trek_core::runtime().block_on(download_favicon(&serve_once("200 OK", png.clone())));
+        let got =
+            trek_core::runtime().block_on(download_favicon(&serve_once("200 OK", png.clone())));
         assert_eq!(got, Some(png));
-        let missing = trek_core::runtime().block_on(download_favicon(&serve_once("404 Not Found", b"nope".to_vec())));
+        let missing = trek_core::runtime().block_on(download_favicon(&serve_once(
+            "404 Not Found",
+            b"nope".to_vec(),
+        )));
         assert_eq!(missing, None, "an error page isn't an icon");
-        let huge = trek_core::runtime().block_on(download_favicon(&serve_once("200 OK", vec![0; FAVICON_MAX_BYTES + 1])));
+        let huge = trek_core::runtime().block_on(download_favicon(&serve_once(
+            "200 OK",
+            vec![0; FAVICON_MAX_BYTES + 1],
+        )));
         assert_eq!(huge, None, "too big to be an icon");
     }
 
@@ -2070,7 +2612,9 @@ mod tests {
     #[cfg(windows)]
     mod real {
         use super::{Msg, PAGES_SCHEME, from_view, native};
-        use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle};
+        use raw_window_handle::{
+            HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle,
+        };
         use std::borrow::Cow;
         use std::path::PathBuf;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2081,7 +2625,9 @@ mod tests {
         impl HasWindowHandle for Parent {
             fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
                 let hwnd = std::num::NonZeroIsize::new(self.0).ok_or(HandleError::Unavailable)?;
-                Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(Win32WindowHandle::new(hwnd))) })
+                Ok(unsafe {
+                    WindowHandle::borrow_raw(RawWindowHandle::Win32(Win32WindowHandle::new(hwnd)))
+                })
             }
         }
 
@@ -2111,7 +2657,20 @@ mod tests {
         pub fn parent_window() -> isize {
             let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
             let parent = unsafe {
-                CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, class.as_ptr(), std::ptr::null(), WS_POPUP | WS_CLIPCHILDREN, -32000, -32000, 640, 480, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null())
+                CreateWindowExW(
+                    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                    class.as_ptr(),
+                    std::ptr::null(),
+                    WS_POPUP | WS_CLIPCHILDREN,
+                    -32000,
+                    -32000,
+                    640,
+                    480,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                )
             };
             assert!(!parent.is_null(), "a parent window");
             unsafe { ShowWindow(parent, SW_SHOWNOACTIVATE) };
@@ -2126,8 +2685,14 @@ mod tests {
         /// The window of this thread with the keys (0 for none).
         pub fn focus() -> isize {
             unsafe {
-                let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..std::mem::zeroed() };
-                GetGUIThreadInfo(windows_sys::Win32::System::Threading::GetCurrentThreadId(), &mut info);
+                let mut info = GUITHREADINFO {
+                    cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+                    ..std::mem::zeroed()
+                };
+                GetGUIThreadInfo(
+                    windows_sys::Win32::System::Threading::GetCurrentThreadId(),
+                    &mut info,
+                );
                 info.hwndFocus as isize
             }
         }
@@ -2143,48 +2708,75 @@ mod tests {
         impl View {
             pub fn open(parent: isize) -> View {
                 static N: AtomicUsize = AtomicUsize::new(0);
-                let data = std::env::temp_dir().join(format!("trek-webview2-test-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+                let data = std::env::temp_dir().join(format!(
+                    "trek-webview2-test-{}-{}",
+                    std::process::id(),
+                    N.fetch_add(1, Ordering::Relaxed)
+                ));
                 let mut context = wry::WebContext::new(Some(data.clone()));
                 let (tx, rx) = async_channel::unbounded::<Msg>();
                 let (t1, t2) = (tx.clone(), tx.clone());
                 let wv = wry::WebViewBuilder::new_with_web_context(&mut context)
                     .with_focused(false)
                     .with_url("about:blank")
-                    .with_bounds(wry::Rect { position: wry::dpi::LogicalPosition::new(0, 0).into(), size: wry::dpi::LogicalSize::new(400, 300).into() })
+                    .with_bounds(wry::Rect {
+                        position: wry::dpi::LogicalPosition::new(0, 0).into(),
+                        size: wry::dpi::LogicalSize::new(400, 300).into(),
+                    })
                     .with_custom_protocol(PAGES_SCHEME.into(), |_, _| {
-                        wry::http::Response::builder().header("Content-Type", "text/html").body(Cow::Borrowed(&b"<title>Trek page</title>"[..])).unwrap_or_default()
+                        wry::http::Response::builder()
+                            .header("Content-Type", "text/html")
+                            .body(Cow::Borrowed(&b"<title>Trek page</title>"[..]))
+                            .unwrap_or_default()
                     })
                     .with_document_title_changed_handler(move |title| {
                         let _ = t1.try_send(Msg::Title(1, title));
                     })
                     .with_on_page_load_handler(move |event, url| {
-                        let _ = t2.try_send(Msg::Load { tab: 1, finished: matches!(event, wry::PageLoadEvent::Finished), url });
+                        let _ = t2.try_send(Msg::Load {
+                            tab: 1,
+                            finished: matches!(event, wry::PageLoadEvent::Finished),
+                            url,
+                        });
                     })
                     .build_as_child(&Parent(parent))
                     .expect("a WebView2 (is the runtime installed?)");
                 native::watch(&wv, 1, &tx);
-                View { wv, rx, context, data }
+                View {
+                    wv,
+                    rx,
+                    context,
+                    data,
+                }
             }
 
             /// Wait for `want` (in Trek's form) to finish loading.
             pub fn loaded(&self, want: &str) {
                 wait_for(&format!("{want} to load"), || match self.rx.try_recv() {
-                    Ok(Msg::Load { finished: true, url, .. }) if from_view(url.clone()) == want => Some(()),
+                    Ok(Msg::Load {
+                        finished: true,
+                        url,
+                        ..
+                    }) if from_view(url.clone()) == want => Some(()),
                     _ => None,
                 })
             }
 
             /// Wait for the page's title to be `want`.
             pub fn titled(&self, want: &str) {
-                wait_for(&format!("the title {want:?}"), || match self.rx.try_recv() {
-                    Ok(Msg::Title(_, title)) if title == want => Some(()),
-                    _ => None,
+                wait_for(&format!("the title {want:?}"), || {
+                    match self.rx.try_recv() {
+                        Ok(Msg::Title(_, title)) if title == want => Some(()),
+                        _ => None,
+                    }
                 })
             }
 
             /// Close the view, then the data folder it kept.
             pub fn finish(self) {
-                let View { wv, context, data, .. } = self;
+                let View {
+                    wv, context, data, ..
+                } = self;
                 drop(wv);
                 pump();
                 drop(context);
@@ -2212,7 +2804,8 @@ mod tests {
         assert!(keys == 0 || keys == parent, "the new view took the focus");
 
         // A titled page: the title arrives, and history now goes back.
-        wv.load_url("data:text/html,<title>Trek%20test</title><p>hello").expect("navigate");
+        wv.load_url("data:text/html,<title>Trek%20test</title><p>hello")
+            .expect("navigate");
         wait_for("the title", || match rx.try_recv() {
             Ok(Msg::Title(_, title)) if title == "Trek test" => Some(()),
             _ => None,
@@ -2227,7 +2820,11 @@ mod tests {
         // The screenshot: a PNG the size of the view in device pixels.
         let shot = native::capture_png(&wv);
         let png = wait_for("the capture", || shot.try_recv().ok()).expect("a capture");
-        let info = png::Decoder::new(std::io::Cursor::new(&png)).read_info().expect("a PNG").info().clone();
+        let info = png::Decoder::new(std::io::Cursor::new(&png))
+            .read_info()
+            .expect("a PNG")
+            .info()
+            .clone();
         let size = wv.bounds().expect("bounds").size.to_physical::<u32>(1.0);
         assert_eq!((info.width, info.height), (size.width, size.height));
 
@@ -2273,7 +2870,10 @@ mod tests {
                             let _ = stream.set_nonblocking(false);
                             let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                             let _ = stream.read(&mut [0u8; 4096]);
-                            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len());
+                            let head = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+                                page.len()
+                            );
                             let _ = stream.write_all(head.as_bytes());
                         }
                         Err(_) => std::thread::sleep(Duration::from_millis(10)),
@@ -2288,7 +2888,8 @@ mod tests {
         view.loaded("about:blank");
 
         // `trek.localhost` is a dev server's name (Caddy, portless…), not Trek's start page.
-        wv.load_url(&to_view(&format!("http://trek.localhost:{port}/"))).expect("navigate");
+        wv.load_url(&to_view(&format!("http://trek.localhost:{port}/")))
+            .expect("navigate");
         view.titled("Dev server");
         wv.load_url(&to_view(START_URL)).expect("navigate");
         view.titled("Trek page");
@@ -2300,7 +2901,11 @@ mod tests {
         pump();
         wv.set_visible(true).expect("show");
         pump();
-        assert_eq!(foreground(), front, "the view changed which window is in front");
+        assert_eq!(
+            foreground(),
+            front,
+            "the view changed which window is in front"
+        );
 
         // A view that's hidden draws nothing and answers no capture (hence the panel's timeout and
         // its refusing to ask); shown again, it answers.
@@ -2311,7 +2916,10 @@ mod tests {
             pump();
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(hidden.try_recv().is_err(), "a hidden view drew a capture: the panel's guard is not needed");
+        assert!(
+            hidden.try_recv().is_err(),
+            "a hidden view drew a capture: the panel's guard is not needed"
+        );
         wv.set_visible(true).expect("show");
         let shot = native::capture_png(wv);
         let png = wait_for("a capture", || shot.try_recv().ok()).expect("a capture");
@@ -2331,15 +2939,27 @@ mod tests {
         assert_eq!(normalize("localhost:8080"), "http://localhost:8080");
         assert_eq!(normalize("example.com/a"), "https://example.com/a");
         assert_eq!(normalize("https://x.dev"), "https://x.dev");
-        assert_eq!(normalize("rust borrow checker"), "https://www.google.com/search?q=rust%20borrow%20checker");
+        assert_eq!(
+            normalize("rust borrow checker"),
+            "https://www.google.com/search?q=rust%20borrow%20checker"
+        );
         assert_eq!(normalize(""), START_URL);
     }
 
     #[test]
     fn reads_titles_and_hosts() {
-        assert_eq!(extract_title("<html><head><TITLE> Vite &amp; React </TITLE>"), Some("Vite & React".into()));
+        assert_eq!(
+            extract_title("<html><head><TITLE> Vite &amp; React </TITLE>"),
+            Some("Vite & React".into())
+        );
         assert_eq!(extract_title("<html>"), None);
-        assert_eq!(host_of("https://www.github.com/a?b"), Some("github.com".into()));
-        assert_eq!(host_of("http://localhost:3000"), Some("localhost:3000".into()));
+        assert_eq!(
+            host_of("https://www.github.com/a?b"),
+            Some("github.com".into())
+        );
+        assert_eq!(
+            host_of("http://localhost:3000"),
+            Some("localhost:3000".into())
+        );
     }
 }

@@ -43,12 +43,22 @@ fn open_link(link: Link, cx: &mut App) {
     }
     // The window has to exist before it can ask.
     crate::root::show_main(ws.clone(), cx);
-    let Some(main) = ws.read(cx).main_window else { return };
+    let Some(main) = ws.read(cx).main_window else {
+        return;
+    };
     let detail = format!(
         "{}\n\nThis isn't in one of your projects. Opening it reads the folder with git and may start a language server there. Only open files from folders you trust.",
         link.path().display()
     );
-    let answer = main.update(cx, |_, window, cx| window.prompt(PromptLevel::Warning, "Open a file from a link?", Some(&detail), &["Open", "Cancel"], cx));
+    let answer = main.update(cx, |_, window, cx| {
+        window.prompt(
+            PromptLevel::Warning,
+            "Open a file from a link?",
+            Some(&detail),
+            &["Open", "Cancel"],
+            cx,
+        )
+    });
     let Ok(answer) = answer else { return };
     cx.spawn(async move |cx| {
         if answer.await == Ok(0) {
@@ -85,15 +95,26 @@ fn follow(link: Link, cx: &mut App) {
                 cx.emit(WorkspaceEvent::ActivateMain);
             });
         }
-        Link::Ask { path, line, end, selection } => {
+        Link::Ask {
+            path,
+            line,
+            end,
+            selection,
+        } => {
             let project = path.parent().map(trek_core::store::project_root);
-            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.display().to_string());
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string());
             let where_ = match (line, end) {
                 (Some(l), Some(e)) if e > l => format!("L{l}-L{e}"),
                 (Some(l), _) => format!("L{l}"),
                 _ => String::new(),
             };
-            let lang = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+            let lang = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default();
             let text = format!("`{name}{where_}`\n```{lang}\n{selection}\n```\n");
             crate::root::show_main(ws.clone(), cx);
             ws.update(cx, |ws, cx| {
@@ -109,7 +130,11 @@ fn follow(link: Link, cx: &mut App) {
 /// IDE's. Never the home folder itself (an agent once run there makes it a "project"), nor a path
 /// that climbs out with `..` or through a symlink.
 fn trusted(ws: &Workspace, path: &Path) -> bool {
-    if !path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir | Component::CurDir)) {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
         return false;
     }
     let home = trek_core::paths::home();
@@ -141,8 +166,16 @@ fn within(roots: &[PathBuf], path: &Path, real: impl Fn(&Path) -> Option<PathBuf
 }
 
 enum Link {
-    Edit { path: PathBuf, line: Option<u32> },
-    Ask { path: PathBuf, line: Option<u32>, end: Option<u32>, selection: String },
+    Edit {
+        path: PathBuf,
+        line: Option<u32>,
+    },
+    Ask {
+        path: PathBuf,
+        line: Option<u32>,
+        end: Option<u32>,
+        selection: String,
+    },
     /// A thread in this Trek: `trek://thread/<id>`.
     Thread(String),
 }
@@ -181,7 +214,12 @@ fn parse(url: &str) -> Option<Link> {
     let path = path?;
     match verb {
         "edit" => Some(Link::Edit { path, line }),
-        "ask" => Some(Link::Ask { path, line, end, selection }),
+        "ask" => Some(Link::Ask {
+            path,
+            line,
+            end,
+            selection,
+        }),
         _ => None,
     }
 }
@@ -193,7 +231,10 @@ fn decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'%' if i + 2 < bytes.len() && bytes[i + 1].is_ascii_hexdigit() && bytes[i + 2].is_ascii_hexdigit() => {
+            b'%' if i + 2 < bytes.len()
+                && bytes[i + 1].is_ascii_hexdigit()
+                && bytes[i + 2].is_ascii_hexdigit() =>
+            {
                 out.push(u8::from_str_radix(&s[i + 1..i + 3], 16).unwrap_or(b'%'));
                 i += 3;
             }
@@ -216,16 +257,26 @@ mod tests {
 
     #[test]
     fn an_edit_link_opens_a_file_on_a_line() {
-        let Link::Edit { path, line } = parse("trek://edit?path=%2Ftmp%2Fmain.rs&line=42").unwrap() else { panic!() };
+        let Link::Edit { path, line } = parse("trek://edit?path=%2Ftmp%2Fmain.rs&line=42").unwrap()
+        else {
+            panic!()
+        };
         assert_eq!(path, PathBuf::from("/tmp/main.rs"));
         assert_eq!(line, Some(42));
     }
 
     #[test]
     fn an_ask_link_carries_the_selection() {
-        let Link::Ask { path, line, end, selection } =
-            parse("trek://ask?path=%2Ftmp%2Fx.rs&line=3&end=9&selection=let%20x%20%3D%201").unwrap()
-        else { panic!() };
+        let Link::Ask {
+            path,
+            line,
+            end,
+            selection,
+        } = parse("trek://ask?path=%2Ftmp%2Fx.rs&line=3&end=9&selection=let%20x%20%3D%201")
+            .unwrap()
+        else {
+            panic!()
+        };
         assert_eq!(path, PathBuf::from("/tmp/x.rs"));
         assert_eq!((line, end), (Some(3), Some(9)));
         assert_eq!(selection, "let x = 1");
@@ -237,7 +288,11 @@ mod tests {
     #[test]
     fn a_path_outside_the_projects_is_not_looked_at() {
         let root = std::env::temp_dir().join("trek-trust-project");
-        let far = if cfg!(windows) { PathBuf::from(r"\\attacker.example\share\x.rs") } else { PathBuf::from("/Volumes/share/x.rs") };
+        let far = if cfg!(windows) {
+            PathBuf::from(r"\\attacker.example\share\x.rs")
+        } else {
+            PathBuf::from("/Volumes/share/x.rs")
+        };
         let asked = std::cell::RefCell::new(Vec::new());
         let real = |p: &Path| {
             asked.borrow_mut().push(p.to_path_buf());
@@ -245,15 +300,32 @@ mod tests {
         };
         assert!(!within(std::slice::from_ref(&root), &far, real));
         assert!(asked.borrow().is_empty(), "looked at {:?}", asked.borrow());
-        assert!(within(std::slice::from_ref(&root), &root.join("a.rs"), real));
+        assert!(within(
+            std::slice::from_ref(&root),
+            &root.join("a.rs"),
+            real
+        ));
         assert!(asked.borrow().contains(&root.join("a.rs")));
-        let leads_out = |p: &Path| Some(if p == root.join("link.rs") { far.clone() } else { p.to_path_buf() });
-        assert!(!within(std::slice::from_ref(&root), &root.join("link.rs"), leads_out));
+        let leads_out = |p: &Path| {
+            Some(if p == root.join("link.rs") {
+                far.clone()
+            } else {
+                p.to_path_buf()
+            })
+        };
+        assert!(!within(
+            std::slice::from_ref(&root),
+            &root.join("link.rs"),
+            leads_out
+        ));
     }
 
     #[test]
     fn a_thread_link_names_a_thread() {
-        let Link::Thread(id) = parse("trek://thread/0197c2b4-3e5a-7b1c-8d2e-4f6a8b0c1d2e").unwrap() else { panic!() };
+        let Link::Thread(id) = parse("trek://thread/0197c2b4-3e5a-7b1c-8d2e-4f6a8b0c1d2e").unwrap()
+        else {
+            panic!()
+        };
         assert_eq!(id, "0197c2b4-3e5a-7b1c-8d2e-4f6a8b0c1d2e");
         assert!(parse("trek://thread/").is_none());
     }

@@ -13,7 +13,10 @@ use trek_core::store::Store;
 /// The registry as if it had just been fetched, and Settings › Agents on screen.
 fn on_agents_page(trek: &Trek, cx: &mut TestAppContext) {
     trek.update(cx, |ws, cx| {
-        let mut r = trek_core::registry::parse(include_str!("../../../trek-core/fixtures/acp-registry.json")).unwrap();
+        let mut r = trek_core::registry::parse(include_str!(
+            "../../../trek-core/fixtures/acp-registry.json"
+        ))
+        .unwrap();
         r.fetched_at = trek_core::store::now_ms();
         ws.added_agents.registry = Some(r);
         ws.navigate(Route::Settings(SettingsPage::Agents), cx);
@@ -37,10 +40,19 @@ fn the_registry_lists_agents_marks_built_in_ones_and_search_filters_it() {
         on_agents_page(&trek, cx);
         open_sheet(&trek, cx);
         assert!(trek.visible(cx, "registry-row-auggie"));
-        assert!(trek.visible(cx, "registry-add-auggie"), "one Trek doesn't have: Add");
-        assert!(trek.visible(cx, "registry-built-in-devin"), "Devin is built in: no Add");
+        assert!(
+            trek.visible(cx, "registry-add-auggie"),
+            "one Trek doesn't have: Add"
+        );
+        assert!(
+            trek.visible(cx, "registry-built-in-devin"),
+            "Devin is built in: no Add"
+        );
         assert!(!trek.visible(cx, "registry-add-devin"));
-        assert!(!trek.visible(cx, "registry-row-not-valid"), "entries the format doesn't allow are left out");
+        assert!(
+            !trek.visible(cx, "registry-row-not-valid"),
+            "entries the format doesn't allow are left out"
+        );
 
         // The search has focus as the sheet opens.
         trek.type_text(cx, "augment");
@@ -49,7 +61,10 @@ fn the_registry_lists_agents_marks_built_in_ones_and_search_filters_it() {
         assert!(!trek.visible(cx, "registry-row-devin"));
         trek.type_text(cx, "zzz");
         trek.render(cx);
-        assert!(trek.visible(cx, "registry-empty"), "nothing matches: it says so");
+        assert!(
+            trek.visible(cx, "registry-empty"),
+            "nothing matches: it says so"
+        );
 
         // A test process never downloads: the row says why, and offers it again.
         for _ in "augmentzzz".chars() {
@@ -57,7 +72,13 @@ fn the_registry_lists_agents_marks_built_in_ones_and_search_filters_it() {
         }
         trek.render(cx);
         trek.click(cx, "registry-add-auggie");
-        trek.wait(cx, "the install to be turned down", |ws| matches!(ws.added_agents.installs.get("auggie"), Some(AgentInstall::Failed(_)))).await;
+        trek.wait(cx, "the install to be turned down", |ws| {
+            matches!(
+                ws.added_agents.installs.get("auggie"),
+                Some(AgentInstall::Failed(_))
+            )
+        })
+        .await;
         trek.render(cx);
         assert!(trek.visible(cx, "registry-add-auggie"), "Retry");
         assert!(trek.read(cx, |ws, _| ws.settings.added_agents.is_empty()));
@@ -92,13 +113,28 @@ fn a_custom_command_becomes_an_agent_on_the_agents_page_and_survives_a_restart()
         let agent = AgentId::Acp("local-bot".into());
         let key = agent.key();
         let found = agent.clone();
-        trek.wait(cx, "the agent to be found", move |ws| ws.agents.iter().any(|a| a.agent == found && a.availability == Availability::Ready)).await;
+        trek.wait(cx, "the agent to be found", move |ws| {
+            ws.agents
+                .iter()
+                .any(|a| a.agent == found && a.availability == Availability::Ready)
+        })
+        .await;
         trek.render(cx);
         assert!(!trek.visible(cx, "add-agent-sheet"), "the sheet closes");
-        assert!(trek.visible(cx, gpui_kit::SharedString::from(format!("enable-{key}"))), "a row on the Agents page");
+        assert!(
+            trek.visible(cx, gpui_kit::SharedString::from(format!("enable-{key}"))),
+            "a row on the Agents page"
+        );
         let added = trek.read(cx, |ws, _| ws.settings.added_agents.clone());
         assert_eq!(added.len(), 1);
-        assert_eq!((added[0].name.as_str(), added[0].command.as_str(), added[0].args.as_slice()), ("Local Bot", fake.as_str(), &["-c".to_string()][..]));
+        assert_eq!(
+            (
+                added[0].name.as_str(),
+                added[0].command.as_str(),
+                added[0].args.as_slice()
+            ),
+            ("Local Bot", fake.as_str(), &["-c".to_string()][..])
+        );
         assert_eq!(agent.display_name(), "Local Bot");
 
         // Saved: a Trek started afresh (nothing known in this process) knows it by name.
@@ -109,15 +145,23 @@ fn a_custom_command_becomes_an_agent_on_the_agents_page_and_survives_a_restart()
         assert_eq!(agent.display_name(), "Local Bot");
         let deadline = std::time::Instant::now() + super::harness::REAL_TIME_LIMIT;
         while !ws2.read_with(cx, |ws, _| ws.agents.iter().any(|a| a.agent == agent)) {
-            assert!(std::time::Instant::now() < deadline, "the restarted Trek finds it");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the restarted Trek finds it"
+            );
             cx.run_until_parked();
-            cx.background_executor.timer(std::time::Duration::from_millis(5)).await;
+            cx.background_executor
+                .timer(std::time::Duration::from_millis(5))
+                .await;
         }
 
         // Removed: gone from settings and the page.
         trek.update(cx, |ws, cx| ws.remove_added_agent("local-bot", cx));
         let gone = agent.clone();
-        trek.wait(cx, "the agent to go", move |ws| !ws.agents.iter().any(|a| a.agent == gone)).await;
+        trek.wait(cx, "the agent to go", move |ws| {
+            !ws.agents.iter().any(|a| a.agent == gone)
+        })
+        .await;
         trek.render(cx);
         assert!(!trek.visible(cx, gpui_kit::SharedString::from(format!("enable-{key}"))));
         assert!(trek.read(cx, |ws, _| ws.settings.added_agents.is_empty()));
@@ -128,17 +172,33 @@ fn a_custom_command_becomes_an_agent_on_the_agents_page_and_survives_a_restart()
 fn running_in_terminal_from_settings_redirects_and_opens_dock() {
     run(async |cx| {
         let trek = open(cx);
-        trek.update(cx, |ws, cx| ws.navigate(crate::workspace::Route::Settings(crate::workspace::SettingsPage::Agents), cx));
+        trek.update(cx, |ws, cx| {
+            ws.navigate(
+                crate::workspace::Route::Settings(crate::workspace::SettingsPage::Agents),
+                cx,
+            )
+        });
         trek.render(cx);
-        assert!(matches!(trek.read(cx, |ws, _| ws.route.clone()), crate::workspace::Route::Settings(_)));
-        
-        trek.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::RunInTerminal {
-            command: "echo test".into(),
-            cwd: None,
-        }));
+        assert!(matches!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            crate::workspace::Route::Settings(_)
+        ));
+
+        trek.update(cx, |_, cx| {
+            cx.emit(crate::workspace::WorkspaceEvent::RunInTerminal {
+                command: "echo test".into(),
+                cwd: None,
+            })
+        });
         trek.render(cx);
-        
-        assert!(!matches!(trek.read(cx, |ws, _| ws.route.clone()), crate::workspace::Route::Settings(_)), "navigates out of settings");
+
+        assert!(
+            !matches!(
+                trek.read(cx, |ws, _| ws.route.clone()),
+                crate::workspace::Route::Settings(_)
+            ),
+            "navigates out of settings"
+        );
         assert!(trek.visible(cx, "terminal-dock"), "opens terminal dock");
     });
 }
@@ -162,17 +222,23 @@ fn an_agent_removed_while_its_update_installs_stays_removed() {
             website: None,
             icon: None,
         };
-        trek.update(cx, |ws, cx| ws.add_custom_agent(agent("1.0"), vec![], cx)).unwrap();
+        trek.update(cx, |ws, cx| ws.add_custom_agent(agent("1.0"), vec![], cx))
+            .unwrap();
         // Its update is under way when the user removes it.
         trek.update(cx, |ws, cx| {
-            ws.added_agents.installs.insert("auggie".into(), AgentInstall::Running(None));
+            ws.added_agents
+                .installs
+                .insert("auggie".into(), AgentInstall::Running(None));
             ws.remove_added_agent("auggie", cx);
             ws.install_step("auggie", InstallStep::Progress(Progress::Unpacking), cx);
             ws.install_step("auggie", InstallStep::Done(Ok(agent("1.2"))), cx);
         });
-        assert!(trek.read(cx, |ws, _| ws.settings.added_agents.is_empty() && ws.added_agents.installs.is_empty()));
+        assert!(trek.read(cx, |ws, _| ws.settings.added_agents.is_empty()
+            && ws.added_agents.installs.is_empty()));
         // An update that fails after it's gone says nothing about it either.
-        trek.update(cx, |ws, cx| ws.install_step("auggie", InstallStep::Done(Err("offline".into())), cx));
+        trek.update(cx, |ws, cx| {
+            ws.install_step("auggie", InstallStep::Done(Err("offline".into())), cx)
+        });
         assert!(trek.read(cx, |ws, _| ws.added_agents.installs.is_empty()));
     });
 }

@@ -74,20 +74,33 @@ impl IpcServer {
         let listener = rt.spawn(async move {
             loop {
                 match listener.accept().await {
-                    Ok(stream) => _ = tokio::spawn(serve(stream, tok.clone(), sess.clone(), calls_tx.clone())),
+                    Ok(stream) => {
+                        _ = tokio::spawn(serve(stream, tok.clone(), sess.clone(), calls_tx.clone()))
+                    }
                     // Out of file descriptors, say: the error comes straight back, so pause
                     // rather than spin.
                     Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
                 }
             }
         });
-        Ok((IpcServer { path, token, sessions, listener }, calls))
+        Ok((
+            IpcServer {
+                path,
+                token,
+                sessions,
+                listener,
+            },
+            calls,
+        ))
     }
 
     /// A key for a new agent session, for `thread` (or one to name later with `bind`).
     pub fn open_session(&self, thread: Option<&str>) -> String {
         let key = trek_ipc::token().unwrap_or_else(|_| uuid_like());
-        self.sessions.lock().unwrap().insert(key.clone(), thread.map(str::to_string));
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(key.clone(), thread.map(str::to_string));
         key
     }
 
@@ -114,7 +127,11 @@ impl IpcServer {
 
     #[cfg(test)]
     pub fn client(&self, key: &str) -> trek_ipc::Client {
-        trek_ipc::Client { socket: self.path.clone(), token: self.token.clone(), session: key.to_string() }
+        trek_ipc::Client {
+            socket: self.path.clone(),
+            token: self.token.clone(),
+            session: key.to_string(),
+        }
     }
 }
 
@@ -146,7 +163,14 @@ fn address(_dir: &Path, n: usize) -> std::io::Result<PathBuf> {
 
 /// A session key when the system's random source can't be read (it always can on macOS).
 fn uuid_like() -> String {
-    format!("{:x}{:x}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0))
+    format!(
+        "{:x}{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    )
 }
 
 /// Remove sockets left by Trek processes that have gone (a crash leaves its socket behind).
@@ -155,7 +179,14 @@ fn uuid_like() -> String {
 fn sweep(dir: &Path) {
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let name = entry.file_name();
-        let Some(pid) = name.to_str().and_then(|n| n.strip_prefix("trek-")).and_then(|n| n.split('-').next()).and_then(|p| p.parse::<i32>().ok()) else { continue };
+        let Some(pid) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("trek-"))
+            .and_then(|n| n.split('-').next())
+            .and_then(|p| p.parse::<i32>().ok())
+        else {
+            continue;
+        };
         // SAFETY: signal 0 only checks whether the process exists.
         if pid != std::process::id() as i32 && unsafe { libc::kill(pid, 0) } != 0 {
             let _ = std::fs::remove_file(entry.path());
@@ -166,30 +197,53 @@ fn sweep(dir: &Path) {
 /// How long a call may wait for a sub-agent: its `timeout_seconds` within bounds, for a
 /// `delegate_task` or `task_result` that waits.
 pub fn wait_for(params: &Value) -> Duration {
-    params.get("timeout_seconds").and_then(Value::as_u64).map_or(WAIT_DEFAULT, |s| Duration::from_secs(s.clamp(WAIT_MIN, WAIT_MAX)))
+    params
+        .get("timeout_seconds")
+        .and_then(Value::as_u64)
+        .map_or(WAIT_DEFAULT, |s| {
+            Duration::from_secs(s.clamp(WAIT_MIN, WAIT_MAX))
+        })
 }
 
 /// Read one frame, at most `MAX_FRAME` bytes. `Ok(None)` at the end of the stream.
-async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> std::io::Result<Option<String>> {
+async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(
+    r: &mut R,
+) -> std::io::Result<Option<String>> {
     let mut buf = Vec::new();
-    let n = (&mut *r).take(trek_ipc::MAX_FRAME as u64 + 1).read_until(b'\n', &mut buf).await?;
+    let n = (&mut *r)
+        .take(trek_ipc::MAX_FRAME as u64 + 1)
+        .read_until(b'\n', &mut buf)
+        .await?;
     if n == 0 {
         return Ok(None);
     }
     if buf.last() == Some(&b'\n') {
         buf.pop();
     } else if buf.len() > trek_ipc::MAX_FRAME {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "frame too long"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "frame too long",
+        ));
     }
-    String::from_utf8(buf).map(Some).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "frame isn't UTF-8"))
+    String::from_utf8(buf)
+        .map(Some)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "frame isn't UTF-8"))
 }
 
-async fn write(w: &mut tokio::io::WriteHalf<trek_ipc::server::Stream>, v: &Value) -> std::io::Result<()> {
+async fn write(
+    w: &mut tokio::io::WriteHalf<trek_ipc::server::Stream>,
+    v: &Value,
+) -> std::io::Result<()> {
     w.write_all(trek_ipc::encode(v).as_bytes()).await
 }
 
 /// One connection: the hello, then requests one at a time.
-async fn serve(stream: trek_ipc::server::Stream, token: Arc<str>, sessions: Sessions, calls: async_channel::Sender<Call>) {
+async fn serve(
+    stream: trek_ipc::server::Stream,
+    token: Arc<str>,
+    sessions: Sessions,
+    calls: async_channel::Sender<Call>,
+) {
     // Another user's process gets nothing, not even an error.
     if !trek_ipc::server::peer_is_me(&stream) {
         return;
@@ -201,13 +255,21 @@ async fn serve(stream: trek_ipc::server::Stream, token: Arc<str>, sessions: Sess
         _ => return,
     };
     let session = match hello.as_ref().and_then(trek_ipc::parse_hello) {
-        Some((trek_ipc::VERSION, t, s)) if trek_ipc::same_secret(t, &token) && sessions.lock().unwrap().contains_key(s) => s.to_string(),
+        Some((trek_ipc::VERSION, t, s))
+            if trek_ipc::same_secret(t, &token) && sessions.lock().unwrap().contains_key(s) =>
+        {
+            s.to_string()
+        }
         Some((trek_ipc::VERSION, t, _)) if trek_ipc::same_secret(t, &token) => {
             let _ = write(&mut w, &json!({ "error": "Trek doesn't know this agent session (it may have ended). Start a new message to get a fresh one." })).await;
             return;
         }
         Some((trek_ipc::VERSION, _, _)) => {
-            let _ = write(&mut w, &json!({ "error": "Trek refused the connection: wrong token." })).await;
+            let _ = write(
+                &mut w,
+                &json!({ "error": "Trek refused the connection: wrong token." }),
+            )
+            .await;
             return;
         }
         Some((v, _, _)) => {
@@ -227,17 +289,32 @@ async fn serve(stream: trek_ipc::server::Stream, token: Arc<str>, sessions: Sess
             Ok(Some(line)) => line,
             Ok(None) => return,
             Err(e) => {
-                let _ = write(&mut w, &trek_ipc::reply(&Value::Null, Err(format!("Bad request: {e}")))).await;
+                let _ = write(
+                    &mut w,
+                    &trek_ipc::reply(&Value::Null, Err(format!("Bad request: {e}"))),
+                )
+                .await;
                 return;
             }
         };
         let Ok(req) = serde_json::from_str::<Value>(&line) else {
-            let _ = write(&mut w, &trek_ipc::reply(&Value::Null, Err("Bad request: not JSON".into()))).await;
+            let _ = write(
+                &mut w,
+                &trek_ipc::reply(&Value::Null, Err("Bad request: not JSON".into())),
+            )
+            .await;
             continue;
         };
         let id = req.get("id").cloned().unwrap_or(Value::Null);
-        let (Some(method), params) = (req.get("method").and_then(Value::as_str), req.get("params").cloned().unwrap_or_else(|| json!({}))) else {
-            let _ = write(&mut w, &trek_ipc::reply(&id, Err("Bad request: no method".into()))).await;
+        let (Some(method), params) = (
+            req.get("method").and_then(Value::as_str),
+            req.get("params").cloned().unwrap_or_else(|| json!({})),
+        ) else {
+            let _ = write(
+                &mut w,
+                &trek_ipc::reply(&id, Err("Bad request: no method".into())),
+            )
+            .await;
             continue;
         };
         let thread = sessions.lock().unwrap().get(&session).cloned();
@@ -250,8 +327,21 @@ async fn serve(stream: trek_ipc::server::Stream, token: Arc<str>, sessions: Sess
             continue;
         };
         let (reply, replies) = async_channel::unbounded();
-        if calls.send(Call { thread, method: method.to_string(), params, reply }).await.is_err() {
-            let _ = write(&mut w, &trek_ipc::reply(&id, Err("Trek is shutting down.".into()))).await;
+        if calls
+            .send(Call {
+                thread,
+                method: method.to_string(),
+                params,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            let _ = write(
+                &mut w,
+                &trek_ipc::reply(&id, Err("Trek is shutting down.".into())),
+            )
+            .await;
             return;
         }
         let answer = match replies.recv().await {
@@ -311,20 +401,31 @@ mod tests {
 
     fn dir() -> PathBuf {
         static N: AtomicUsize = AtomicUsize::new(0);
-        let d = std::env::temp_dir().join(format!("trek-ipc-app-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        let d = std::env::temp_dir().join(format!(
+            "trek-ipc-app-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
 
     /// Answer every call with `answer`, from a thread standing in for the workspace.
-    fn answer_with(calls: async_channel::Receiver<Call>, answer: impl Fn(&Call) -> Vec<Reply> + Send + 'static) -> std::thread::JoinHandle<Vec<(String, String, Value)>> {
+    fn answer_with(
+        calls: async_channel::Receiver<Call>,
+        answer: impl Fn(&Call) -> Vec<Reply> + Send + 'static,
+    ) -> std::thread::JoinHandle<Vec<(String, String, Value)>> {
         std::thread::spawn(move || {
             let mut seen = vec![];
             while let Ok(call) = calls.recv_blocking() {
                 for r in answer(&call) {
                     let _ = call.reply.send_blocking(r);
                 }
-                seen.push((call.thread.clone(), call.method.clone(), call.params.clone()));
+                seen.push((
+                    call.thread.clone(),
+                    call.method.clone(),
+                    call.params.clone(),
+                ));
             }
             seen
         })
@@ -337,25 +438,66 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            assert_eq!(std::fs::metadata(&server.path).unwrap().permissions().mode() & 0o777, 0o600, "only the user can connect");
+            assert_eq!(
+                std::fs::metadata(&server.path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600,
+                "only the user can connect"
+            );
         }
         let key = server.open_session(Some("thread-1"));
-        let answers = answer_with(calls, |c| vec![Reply::Done(Ok(json!({ "echo": c.params.clone() })))]);
+        let answers = answer_with(calls, |c| {
+            vec![Reply::Done(Ok(json!({ "echo": c.params.clone() })))]
+        });
 
         let good = server.client(&key);
-        assert_eq!(good.call("task_status", &json!({"id": "x"})).unwrap(), json!({"echo": {"id": "x"}}));
-        let wrong_token = trek_ipc::Client { token: "0".repeat(64), ..good.clone() };
-        assert!(wrong_token.call("list_models", &json!({})).unwrap_err().contains("wrong token"));
-        let unknown = trek_ipc::Client { session: "made-up".into(), ..good.clone() };
-        assert!(unknown.call("list_models", &json!({})).unwrap_err().contains("doesn't know this agent session"));
+        assert_eq!(
+            good.call("task_status", &json!({"id": "x"})).unwrap(),
+            json!({"echo": {"id": "x"}})
+        );
+        let wrong_token = trek_ipc::Client {
+            token: "0".repeat(64),
+            ..good.clone()
+        };
+        assert!(
+            wrong_token
+                .call("list_models", &json!({}))
+                .unwrap_err()
+                .contains("wrong token")
+        );
+        let unknown = trek_ipc::Client {
+            session: "made-up".into(),
+            ..good.clone()
+        };
+        assert!(
+            unknown
+                .call("list_models", &json!({}))
+                .unwrap_err()
+                .contains("doesn't know this agent session")
+        );
 
         // A warmed-up session waits to be named; then it speaks for its thread.
         let warm = server.open_session(None);
-        assert!(server.client(&warm).call("list_models", &json!({})).unwrap_err().contains("isn't part of a thread yet"));
+        assert!(
+            server
+                .client(&warm)
+                .call("list_models", &json!({}))
+                .unwrap_err()
+                .contains("isn't part of a thread yet")
+        );
         server.bind(&warm, "thread-2");
         assert!(server.client(&warm).call("list_models", &json!({})).is_ok());
         server.close_session(&warm);
-        assert!(server.client(&warm).call("list_models", &json!({})).is_err(), "an ended session is shut out");
+        assert!(
+            server
+                .client(&warm)
+                .call("list_models", &json!({}))
+                .is_err(),
+            "an ended session is shut out"
+        );
 
         let path = server.path.clone();
         drop(server);
@@ -367,12 +509,20 @@ mod tests {
         {
             let started = std::time::Instant::now();
             while trek_ipc::Stream::connect(&path).is_ok() {
-                assert!(started.elapsed() < Duration::from_secs(5), "the pipe goes with the server");
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "the pipe goes with the server"
+                );
                 std::thread::sleep(Duration::from_millis(20));
             }
         }
         let seen = answers.join().unwrap();
-        assert_eq!(seen.iter().map(|(t, m, _)| (t.as_str(), m.as_str())).collect::<Vec<_>>(), [("thread-1", "task_status"), ("thread-2", "list_models")]);
+        assert_eq!(
+            seen.iter()
+                .map(|(t, m, _)| (t.as_str(), m.as_str()))
+                .collect::<Vec<_>>(),
+            [("thread-1", "task_status"), ("thread-2", "list_models")]
+        );
     }
 
     #[test]
@@ -382,7 +532,8 @@ mod tests {
         let key = server.open_session(Some("t"));
         let _answers = answer_with(calls, |_| vec![Reply::Done(Ok(json!("fine")))]);
         let mut s = trek_ipc::Stream::connect(&server.path).unwrap();
-        s.write_all(trek_ipc::encode(&trek_ipc::hello(&server.token, &key)).as_bytes()).unwrap();
+        s.write_all(trek_ipc::encode(&trek_ipc::hello(&server.token, &key)).as_bytes())
+            .unwrap();
         let mut r = BufReader::new(s.try_clone().unwrap());
         let mut line = String::new();
         r.read_line(&mut line).unwrap();
@@ -394,7 +545,10 @@ mod tests {
         s.write_all(b"{\"id\":3}\n").unwrap();
         line.clear();
         r.read_line(&mut line).unwrap();
-        assert!(line.contains("no method") && line.contains("\"id\":3"), "{line}");
+        assert!(
+            line.contains("no method") && line.contains("\"id\":3"),
+            "{line}"
+        );
         // Over the limit: the connection closes rather than buffering it.
         let huge = vec![b'x'; trek_ipc::MAX_FRAME + 10];
         let _ = s.write_all(&huge);
@@ -414,7 +568,11 @@ mod tests {
         let mut buf = [0u8; 64];
         assert_eq!(s.read(&mut buf).unwrap_or(0), 0, "closed without a word");
         let waited = started.elapsed();
-        assert!(waited >= HELLO_WITHIN - Duration::from_millis(100) && waited < HELLO_WITHIN + Duration::from_secs(5), "{waited:?}");
+        assert!(
+            waited >= HELLO_WITHIN - Duration::from_millis(100)
+                && waited < HELLO_WITHIN + Duration::from_secs(5),
+            "{waited:?}"
+        );
     }
 
     #[test]
@@ -424,7 +582,10 @@ mod tests {
         let held: Arc<Mutex<Vec<async_channel::Sender<Reply>>>> = Default::default();
         let keep = held.clone();
         let _answers = answer_with(calls, move |c| match c.params["case"].as_str() {
-            Some("quick") => vec![Reply::Waiting("child-1".into(), WAIT_DEFAULT), Reply::Done(Ok(json!({"id": "child-1", "status": "done"})))],
+            Some("quick") => vec![
+                Reply::Waiting("child-1".into(), WAIT_DEFAULT),
+                Reply::Done(Ok(json!({"id": "child-1", "status": "done"}))),
+            ],
             _ => {
                 // Never answered: the wait runs out.
                 keep.lock().unwrap().push(c.reply.clone());
@@ -432,9 +593,19 @@ mod tests {
             }
         });
         let client = server.client(&key);
-        assert_eq!(client.call("delegate_task", &json!({"case": "quick", "wait": true})).unwrap()["status"], "done");
+        assert_eq!(
+            client
+                .call("delegate_task", &json!({"case": "quick", "wait": true}))
+                .unwrap()["status"],
+            "done"
+        );
         let started = std::time::Instant::now();
-        let out = client.call("delegate_task", &json!({"case": "slow", "wait": true, "timeout_seconds": 1})).unwrap();
+        let out = client
+            .call(
+                "delegate_task",
+                &json!({"case": "slow", "wait": true, "timeout_seconds": 1}),
+            )
+            .unwrap();
         assert!(started.elapsed() >= Duration::from_secs(WAIT_MIN));
         assert_eq!(out["id"], "child-2");
         assert_eq!(out["status"], "running");
@@ -442,7 +613,10 @@ mod tests {
         // the closed side of the channel reaches it.
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while !held.lock().unwrap()[0].is_closed() {
-            assert!(std::time::Instant::now() < deadline, "the workspace still waits on the caller's behalf");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the workspace still waits on the caller's behalf"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -454,17 +628,36 @@ mod tests {
         let held: Arc<Mutex<Vec<async_channel::Sender<Reply>>>> = Default::default();
         let keep = held.clone();
         let _answers = answer_with(calls, move |c| match c.params["case"].as_str() {
-            Some("quick") => vec![Reply::WaitingOnThread("t-1".into(), WAIT_DEFAULT), Reply::Done(Ok(json!({"id": "t-1", "status": "finished"})))],
+            Some("quick") => vec![
+                Reply::WaitingOnThread("t-1".into(), WAIT_DEFAULT),
+                Reply::Done(Ok(json!({"id": "t-1", "status": "finished"}))),
+            ],
             _ => {
                 keep.lock().unwrap().push(c.reply.clone());
                 vec![Reply::WaitingOnThread("t-2".into(), wait_for(&c.params))]
             }
         });
         let client = server.client(&key);
-        assert_eq!(client.call("read_thread", &json!({"case": "quick", "wait": true})).unwrap()["status"], "finished");
-        let out = client.call("read_thread", &json!({"case": "slow", "wait": true, "timeout_seconds": 1})).unwrap();
-        assert_eq!((out["id"].as_str(), out["status"].as_str()), (Some("t-2"), Some("working")));
-        assert!(out["note"].as_str().unwrap().contains("read_thread"), "{out}");
+        assert_eq!(
+            client
+                .call("read_thread", &json!({"case": "quick", "wait": true}))
+                .unwrap()["status"],
+            "finished"
+        );
+        let out = client
+            .call(
+                "read_thread",
+                &json!({"case": "slow", "wait": true, "timeout_seconds": 1}),
+            )
+            .unwrap();
+        assert_eq!(
+            (out["id"].as_str(), out["status"].as_str()),
+            (Some("t-2"), Some("working"))
+        );
+        assert!(
+            out["note"].as_str().unwrap().contains("read_thread"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -499,7 +692,13 @@ mod tests {
     #[test]
     fn waits_are_bounded() {
         assert_eq!(wait_for(&json!({})), WAIT_DEFAULT);
-        assert_eq!(wait_for(&json!({"timeout_seconds": 1})), Duration::from_secs(WAIT_MIN));
-        assert_eq!(wait_for(&json!({"timeout_seconds": 99999})), Duration::from_secs(WAIT_MAX));
+        assert_eq!(
+            wait_for(&json!({"timeout_seconds": 1})),
+            Duration::from_secs(WAIT_MIN)
+        );
+        assert_eq!(
+            wait_for(&json!({"timeout_seconds": 99999})),
+            Duration::from_secs(WAIT_MAX)
+        );
     }
 }

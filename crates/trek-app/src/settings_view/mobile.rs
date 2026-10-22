@@ -15,7 +15,9 @@ use trek_core::settings::{Reach, Settings};
 /// A QR code as dark squares on white, each `module` points, with the standard quiet zone.
 fn qr(url: &str, module: f32) -> AnyElement {
     let Ok(code) = qrcode::QrCode::new(url.as_bytes()) else {
-        return div().child("The pairing link is too long for a QR code.").into_any_element();
+        return div()
+            .child("The pairing link is too long for a QR code.")
+            .into_any_element();
     };
     let width = code.width();
     let colors = code.to_colors();
@@ -25,7 +27,10 @@ fn qr(url: &str, module: f32) -> AnyElement {
         .rounded(px(10.))
         .children(colors.chunks(width).map(|row| {
             h_flex().children(row.iter().map(|c| {
-                div().size(px(module)).flex_none().when(*c == qrcode::Color::Dark, |el| el.bg(rgb(0x111111)))
+                div()
+                    .size(px(module))
+                    .flex_none()
+                    .when(*c == qrcode::Color::Dark, |el| el.bg(rgb(0x111111)))
             }))
         }))
         .into_any_element()
@@ -44,8 +49,14 @@ impl SettingsView {
             ui::group(
                 vec![Self::row(
                     "Tell my phone when a thread needs me",
-                    format!("Also when one finishes or fails: what {this} would alert you for, sent through the free ntfy app. Tapping one opens the thread in Trek on iPhone."),
-                    gpui_kit::component::switch::Switch::new("push-on").checked(m.push).on_click(move |v: &bool, _, cx| ws.update(cx, |ws, cx| ws.set_push(*v, cx))),
+                    format!(
+                        "Also when one finishes or fails: what {this} would alert you for, sent through the free ntfy app. Tapping one opens the thread in Trek on iPhone."
+                    ),
+                    gpui_kit::component::switch::Switch::new("push-on")
+                        .checked(m.push)
+                        .on_click(move |v: &bool, _, cx| {
+                            ws.update(cx, |ws, cx| ws.set_push(*v, cx))
+                        }),
                     cx,
                 )],
                 cx,
@@ -75,7 +86,11 @@ impl SettingsView {
             ],
             cx,
         ));
-        let (copy_topic, test, fresh) = (topic.clone(), self.workspace.clone(), self.workspace.clone());
+        let (copy_topic, test, fresh) = (
+            topic.clone(),
+            self.workspace.clone(),
+            self.workspace.clone(),
+        );
         out.push(div().h(px(12.)).into_any_element());
         out.push(
             h_flex()
@@ -136,10 +151,23 @@ impl SettingsView {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
         let enabled = s.mobile.enabled;
-        let running = ws.remote.as_ref().map(|r| (r.offer.clone(), r.addresses.clone(), r.advertise.clone(), r.routes.clone(), r.devices.clone(), r.connected.clone()));
+        let running = ws.remote.as_ref().map(|r| {
+            (
+                r.offer.clone(),
+                r.addresses.clone(),
+                r.advertise.clone(),
+                r.routes.clone(),
+                r.devices.clone(),
+                r.connected.clone(),
+            )
+        });
         let starting = enabled && running.is_none();
         let failed = ws.remote_error.clone().filter(|_| starting);
-        let session_approvals = self.switch("mobile-session-approvals", s.mobile.session_approvals, |s, v| s.mobile.session_approvals = v);
+        let session_approvals = self.switch(
+            "mobile-session-approvals",
+            s.mobile.session_approvals,
+            |s, v| s.mobile.session_approvals = v,
+        );
         let mut rows = vec![Self::row(
             "Let your iPhone connect",
             "Trek listens for phones you've paired, on your network or tailnet. Off, nothing listens.",
@@ -162,7 +190,13 @@ impl SettingsView {
             out.push(Self::note(firewall, cx));
         }
         if let Some(why) = failed {
-            out.push(Self::note(&format!("Couldn't start: {why}. Trying again every {} seconds.", crate::remote::RETRY.as_secs()), cx));
+            out.push(Self::note(
+                &format!(
+                    "Couldn't start: {why}. Trying again every {} seconds.",
+                    crate::remote::RETRY.as_secs()
+                ),
+                cx,
+            ));
         } else if starting {
             out.push(Self::note("Starting…", cx));
         }
@@ -182,28 +216,57 @@ impl SettingsView {
             Some(ts) => Self::row(
                 format!("Reach {this} over"),
                 match (s.mobile.reach, routes.get(1)) {
-                    (Reach::Wifi, Some(tailnet)) => format!("Phones dial {advertise} on this Wi-Fi, and {tailnet} over Tailscale from anywhere: a phone paired here keeps both, and uses whichever answers."),
-                    (Reach::Wifi, None) => format!("Phones dial {advertise}. Wi-Fi works on the same network; Tailscale ({ts}) works anywhere your phone is on your tailnet."),
-                    (Reach::Tailscale, _) => format!("Phones dial {advertise}, from anywhere your phone is on your tailnet. Nothing listens on the Wi-Fi."),
+                    (Reach::Wifi, Some(tailnet)) => format!(
+                        "Phones dial {advertise} on this Wi-Fi, and {tailnet} over Tailscale from anywhere: a phone paired here keeps both, and uses whichever answers."
+                    ),
+                    (Reach::Wifi, None) => format!(
+                        "Phones dial {advertise}. Wi-Fi works on the same network; Tailscale ({ts}) works anywhere your phone is on your tailnet."
+                    ),
+                    (Reach::Tailscale, _) => format!(
+                        "Phones dial {advertise}, from anywhere your phone is on your tailnet. Nothing listens on the Wi-Fi."
+                    ),
                 },
-                ui::segmented("mobile-reach", vec![(Reach::Wifi, "Wi-Fi"), (Reach::Tailscale, "Tailscale")], s.mobile.reach, self.setter(|s, v| s.mobile.reach = v), cx),
+                ui::segmented(
+                    "mobile-reach",
+                    vec![(Reach::Wifi, "Wi-Fi"), (Reach::Tailscale, "Tailscale")],
+                    s.mobile.reach,
+                    self.setter(|s, v| s.mobile.reach = v),
+                    cx,
+                ),
                 cx,
             ),
             None => Self::row(
                 "Reached at",
-                format!("Phones on this Wi-Fi network dial this address. With Tailscale on {this} and your phone, you can choose your tailnet address here to reach it from anywhere."),
-                div().text_size(px(12.5)).font_family(theme.mono_font_family.clone()).child(advertise.clone()),
+                format!(
+                    "Phones on this Wi-Fi network dial this address. With Tailscale on {this} and your phone, you can choose your tailnet address here to reach it from anywhere."
+                ),
+                div()
+                    .text_size(px(12.5))
+                    .font_family(theme.mono_font_family.clone())
+                    .child(advertise.clone()),
                 cx,
             ),
         };
         out.push(ui::group(vec![reach_row], cx));
         // Tailscale is up here, but a phone can only use it if it's in the same tailnet.
-        if let Some(tailnet) = addresses.tailnet.as_ref().filter(|_| addresses.tailscale.is_some()) {
-            let account = tailnet.account.as_deref().map(|a| format!(" ({a})")).unwrap_or_default();
+        if let Some(tailnet) = addresses
+            .tailnet
+            .as_ref()
+            .filter(|_| addresses.tailscale.is_some())
+        {
+            let account = tailnet
+                .account
+                .as_deref()
+                .map(|a| format!(" ({a})"))
+                .unwrap_or_default();
             let note = if tailnet.phones == 0 {
-                Some(format!("No iPhone is in your tailnet{account} yet, so phones reach {this} only on this Wi-Fi. Install Tailscale on your iPhone and sign in with the same account, then pair again here (or just reconnect: a paired phone learns the tailnet address)."))
+                Some(format!(
+                    "No iPhone is in your tailnet{account} yet, so phones reach {this} only on this Wi-Fi. Install Tailscale on your iPhone and sign in with the same account, then pair again here (or just reconnect: a paired phone learns the tailnet address)."
+                ))
             } else if tailnet.phones_online == 0 {
-                Some(format!("Your iPhone is in your tailnet{account}, but Tailscale isn't on on it right now. Turn it on in the Tailscale app to reach {this} away from this Wi-Fi."))
+                Some(format!(
+                    "Your iPhone is in your tailnet{account}, but Tailscale isn't on on it right now. Turn it on in the Tailscale app to reach {this} away from this Wi-Fi."
+                ))
             } else {
                 None
             };
@@ -309,7 +372,9 @@ impl SettingsView {
                                 .outline()
                                 .icon(Icon::new(crate::assets::Lucide::Smartphone))
                                 .label("Show pairing code")
-                                .on_click(move |_, _, cx| ws_entity.update(cx, |ws, cx| ws.offer_pairing(cx))),
+                                .on_click(move |_, _, cx| {
+                                    ws_entity.update(cx, |ws, cx| ws.offer_pairing(cx))
+                                }),
                         )
                         .into_any_element(),
                 );
@@ -335,14 +400,20 @@ impl SettingsView {
                     Self::row(
                         h_flex()
                             .gap(px(8.))
-                            .child(div().size(px(7.)).rounded_full().bg(if online { palette::emerald(cx) } else { theme.foreground.opacity(0.2) }))
+                            .child(div().size(px(7.)).rounded_full().bg(if online {
+                                palette::emerald(cx)
+                            } else {
+                                theme.foreground.opacity(0.2)
+                            }))
                             .child(d.name.clone()),
                         seen,
                         Button::new(SharedString::from(format!("mobile-revoke-{}", d.device_id)))
                             .small()
                             .ghost()
                             .label("Unpair")
-                            .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.revoke_device(&id, cx))),
+                            .on_click(move |_, _, cx| {
+                                ws.update(cx, |ws, cx| ws.revoke_device(&id, cx))
+                            }),
                         cx,
                     )
                 })
@@ -365,11 +436,25 @@ impl SettingsView {
         let this = crate::words::words().this_computer;
         let mut out = vec![Self::heading("Machines", cx)];
         let ws = self.workspace.read(cx);
-        let machines: Vec<(String, String, crate::machines::Reach, Option<i64>, Vec<String>)> = ws
+        let machines: Vec<(
+            String,
+            String,
+            crate::machines::Reach,
+            Option<i64>,
+            Vec<String>,
+        )> = ws
             .machines
             .list
             .iter()
-            .map(|m| (m.id().to_string(), m.entry.name.clone(), m.reach.clone(), m.entry.last_seen, m.entry.paired.routes.clone()))
+            .map(|m| {
+                (
+                    m.id().to_string(),
+                    m.entry.name.clone(),
+                    m.reach.clone(),
+                    m.entry.last_seen,
+                    m.entry.paired.routes.clone(),
+                )
+            })
             .collect();
         if machines.is_empty() {
             out.push(Self::note(&format!("Pair another computer running Trek to start threads on it from here: they run there, and show here in the sidebar under its name, as live as {this}'s own."), cx));
@@ -382,8 +467,12 @@ impl SettingsView {
                     let route = routes.first().cloned().unwrap_or_default();
                     let seen = match (&reach, last_seen) {
                         (Reach::Connected, _) => format!("Connected now · {route}"),
-                        (Reach::Stopped(why), _) => format!("Not connecting: {why}. Forget it and pair again."),
-                        (Reach::Connecting, Some(at)) => format!("Last seen {} · trying {route}", crate::time::relative(at)),
+                        (Reach::Stopped(why), _) => {
+                            format!("Not connecting: {why}. Forget it and pair again.")
+                        }
+                        (Reach::Connecting, Some(at)) => {
+                            format!("Last seen {} · trying {route}", crate::time::relative(at))
+                        }
                         (Reach::Connecting, None) => format!("Trying {route}"),
                     };
                     let ws = self.workspace.clone();
@@ -393,10 +482,20 @@ impl SettingsView {
                             .id(SharedString::from(format!("machine-row-{id}")))
                             .test_support()
                             .gap(px(8.))
-                            .child(crate::composer::reach_dot(reachable, cx).id(SharedString::from(format!("machine-dot-{id}"))).test_support())
+                            .child(
+                                crate::composer::reach_dot(reachable, cx)
+                                    .id(SharedString::from(format!("machine-dot-{id}")))
+                                    .test_support(),
+                            )
                             .child(name),
                         seen,
-                        Button::new(SharedString::from(format!("machine-forget-{id}"))).small().ghost().label("Forget").on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.forget_machine(&host, cx))),
+                        Button::new(SharedString::from(format!("machine-forget-{id}")))
+                            .small()
+                            .ghost()
+                            .label("Forget")
+                            .on_click(move |_, _, cx| {
+                                ws.update(cx, |ws, cx| ws.forget_machine(&host, cx))
+                            }),
                         cx,
                     )
                 })
@@ -413,7 +512,9 @@ impl SettingsView {
                         .outline()
                         .icon(Icon::new(crate::assets::Lucide::Laptop))
                         .label("Add a machine…")
-                        .on_click(move |_, window, cx| crate::machines::sheets::open_pair(ws.clone(), window, cx)),
+                        .on_click(move |_, window, cx| {
+                            crate::machines::sheets::open_pair(ws.clone(), window, cx)
+                        }),
                 )
                 .into_any_element(),
         );

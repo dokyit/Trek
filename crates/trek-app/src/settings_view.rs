@@ -41,18 +41,21 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
+use trek_core::AgentId;
 use trek_core::catalog::DIRECT_PROVIDERS;
 use trek_core::detect::Availability;
 use trek_core::import::{ImportedThread, Skip};
 use trek_core::settings::{Settings, secrets};
-use trek_core::AgentId;
 
 /// What the iOS Simulator section says where Windows has nothing to show.
-const SIMULATOR_NEEDS_A_MAC: &str = "The iOS Simulator needs macOS, so Trek doesn't offer it on Windows.";
+const SIMULATOR_NEEDS_A_MAC: &str =
+    "The iOS Simulator needs macOS, so Trek doesn't offer it on Windows.";
 
 pub(crate) fn page_icon(p: SettingsPage) -> Icon {
     match p {
@@ -77,15 +80,39 @@ pub(crate) fn page_icon(p: SettingsPage) -> Icon {
 
 const NAV_GROUPS: &[(&str, &[SettingsPage])] = &[
     ("Project", &[SettingsPage::Project]),
-    ("App", &[SettingsPage::General, SettingsPage::Appearance, SettingsPage::Notifications, SettingsPage::Mobile, SettingsPage::Snapshots, SettingsPage::Shortcuts]),
-    ("Agents", &[SettingsPage::Agents, SettingsPage::Skills, SettingsPage::ApiKeys, SettingsPage::LocalModels, SettingsPage::Tools]),
-    ("Workflow", &[SettingsPage::Permissions, SettingsPage::Import]),
+    (
+        "App",
+        &[
+            SettingsPage::General,
+            SettingsPage::Appearance,
+            SettingsPage::Notifications,
+            SettingsPage::Mobile,
+            SettingsPage::Snapshots,
+            SettingsPage::Shortcuts,
+        ],
+    ),
+    (
+        "Agents",
+        &[
+            SettingsPage::Agents,
+            SettingsPage::Skills,
+            SettingsPage::ApiKeys,
+            SettingsPage::LocalModels,
+            SettingsPage::Tools,
+        ],
+    ),
+    (
+        "Workflow",
+        &[SettingsPage::Permissions, SettingsPage::Import],
+    ),
     ("Trek", &[SettingsPage::Updates, SettingsPage::About]),
 ];
 
 /// Every settings page, in the order the navigation lists them.
 pub(crate) fn pages() -> impl Iterator<Item = SettingsPage> {
-    NAV_GROUPS.iter().flat_map(|(_, pages)| pages.iter().copied())
+    NAV_GROUPS
+        .iter()
+        .flat_map(|(_, pages)| pages.iter().copied())
 }
 
 /// A settings page by its label, case-insensitive with dashes for spaces ("updates", "api-keys").
@@ -93,7 +120,13 @@ pub(crate) fn pages() -> impl Iterator<Item = SettingsPage> {
 pub fn page_named(name: &str) -> Option<SettingsPage> {
     let name = name.trim().to_lowercase();
     let slug = |label: &str| label.to_lowercase().replace(' ', "-");
-    pages().find(|p| slug(p.label()) == name).or_else(|| pages().find(|p| p.label().split_once(" & ").is_some_and(|(first, _)| slug(first) == name)))
+    pages().find(|p| slug(p.label()) == name).or_else(|| {
+        pages().find(|p| {
+            p.label()
+                .split_once(" & ")
+                .is_some_and(|(first, _)| slug(first) == name)
+        })
+    })
 }
 
 pub(crate) fn page_blurb(p: SettingsPage) -> std::borrow::Cow<'static, str> {
@@ -132,7 +165,10 @@ pub struct SettingsNav {
 impl SettingsNav {
     pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
         let sub = cx.observe(&workspace, |_, _, cx| cx.notify());
-        Self { workspace, _subscription: sub }
+        Self {
+            workspace,
+            _subscription: sub,
+        }
     }
 }
 
@@ -150,7 +186,9 @@ impl Render for SettingsNav {
             .px(px(10.))
             .pt(px(4.))
             .gap(px(1.))
-            .when(!self.workspace.read(cx).see_through(), |el| el.bg(theme.sidebar))
+            .when(!self.workspace.read(cx).see_through(), |el| {
+                el.bg(theme.sidebar)
+            })
             .child(
                 h_flex()
                     .id("settings-back")
@@ -161,16 +199,29 @@ impl Render for SettingsNav {
                     .cursor_pointer()
                     .text_size(px(13.))
                     .text_color(theme.muted_foreground)
-                    .hover(|s| s.bg(theme.foreground.opacity(0.045)).text_color(theme.foreground))
+                    .hover(|s| {
+                        s.bg(theme.foreground.opacity(0.045))
+                            .text_color(theme.foreground)
+                    })
                     .child(Icon::new(IconName::ArrowLeft).size(px(15.)))
                     .child("Back to threads")
-                    .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.new_thread(cx)))),
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.workspace.update(cx, |ws, cx| ws.new_thread(cx))
+                    })),
             )
             .children(NAV_GROUPS.iter().map(|(group, pages)| {
                 v_flex()
                     .pt(px(20.))
                     .gap(px(1.))
-                    .child(div().px(px(10.)).pb(px(6.)).text_size(px(11.5)).font_medium().text_color(theme.muted_foreground.opacity(0.8)).child(*group))
+                    .child(
+                        div()
+                            .px(px(10.))
+                            .pb(px(6.))
+                            .text_size(px(11.5))
+                            .font_medium()
+                            .text_color(theme.muted_foreground.opacity(0.8))
+                            .child(*group),
+                    )
                     .children(pages.iter().map(|&p| {
                         let label: &'static str = p.label();
                         // Agents: how many CLI updates are out (while Trek keeps checking: with checks
@@ -194,7 +245,10 @@ impl Render for SettingsNav {
                                         .child(n.to_string()),
                                 )
                             })
-                            .on_click(cx.listener(move |this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.navigate(Route::Settings(p), cx))))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.workspace
+                                    .update(cx, |ws, cx| ws.navigate(Route::Settings(p), cx))
+                            }))
                     }))
             }))
     }
@@ -251,7 +305,9 @@ type Started = std::rc::Rc<std::cell::RefCell<HashMap<String, std::time::Instant
 const STARTED_FOR: std::time::Duration = std::time::Duration::from_secs(120);
 
 fn is_started(set: &Started, key: &str) -> bool {
-    set.borrow().get(key).is_some_and(|at| at.elapsed() < STARTED_FOR)
+    set.borrow()
+        .get(key)
+        .is_some_and(|at| at.elapsed() < STARTED_FOR)
 }
 
 /// Something a page shows that takes the disk, a process or a system call to learn. It's read on a
@@ -265,7 +321,11 @@ pub(super) struct Probe<T> {
 
 impl<T> Default for Probe<T> {
     fn default() -> Self {
-        Self { value: None, fresh: false, task: None }
+        Self {
+            value: None,
+            fresh: false,
+            task: None,
+        }
     }
 }
 
@@ -300,7 +360,14 @@ impl ToolsProbe {
     fn read() -> Self {
         let agent_mcp = crate::integrations::agent_mcp_servers();
         let plugins = crate::integrations::claude_plugins();
-        let figma = connections::figma_links(&agent_mcp, &plugins, |a| trek_core::detect::which(if *a == AgentId::Codex { "codex" } else { "claude" }).is_some());
+        let figma = connections::figma_links(&agent_mcp, &plugins, |a| {
+            trek_core::detect::which(if *a == AgentId::Codex {
+                "codex"
+            } else {
+                "claude"
+            })
+            .is_some()
+        });
         Self {
             accessibility: crate::integrations::accessibility_allowed(),
             screen_recording: crate::integrations::screen_recording_allowed(),
@@ -325,7 +392,11 @@ pub(super) struct SnapshotsProbe {
 impl SnapshotsProbe {
     fn read() -> Self {
         let (count, bytes) = crate::mentions::snapshot_usage();
-        Self { count, bytes, screen_recording: crate::integrations::screen_recording_allowed() }
+        Self {
+            count,
+            bytes,
+            screen_recording: crate::integrations::screen_recording_allowed(),
+        }
     }
 }
 
@@ -343,29 +414,54 @@ impl SettingsView {
         let mut key_inputs = HashMap::new();
         let mut saved_keys = HashMap::new();
         for p in DIRECT_PROVIDERS.iter().filter(|p| !p.local) {
-            key_inputs.insert(p.id, cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Paste key")));
+            key_inputs.insert(
+                p.id,
+                cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .masked(true)
+                        .placeholder("Paste key")
+                }),
+            );
             // What the Keychain holds, not a shell variable: Remove can only remove the former.
             saved_keys.insert(p.id, secrets::stored_api_key(p.id).is_some());
         }
         let subs = vec![cx.observe(&workspace, |_, _, cx| cx.notify())];
         let mcp_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. github"));
-        let mcp_command = cx.new(|cx| InputState::new(window, cx).placeholder("A command, a URL, or a server's JSON config"));
+        let mcp_command = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("A command, a URL, or a server's JSON config")
+        });
         let mcp_header_name = cx.new(|cx| InputState::new(window, cx).placeholder("Header name"));
-        let mcp_header_value = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(format!("Value, kept in {} (optional)", crate::words::words().your_credential_store)));
+        let mcp_header_value = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder(format!(
+                    "Value, kept in {} (optional)",
+                    crate::words::words().your_credential_store
+                ))
+        });
         let skill_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter skills"));
-        let skill_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. Review pull requests"));
-        let skill_desc = cx.new(|cx| InputState::new(window, cx).placeholder("When should an agent use it?"));
+        let skill_name =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. Review pull requests"));
+        let skill_desc =
+            cx.new(|cx| InputState::new(window, cx).placeholder("When should an agent use it?"));
         let mut subs = subs;
         subs.push(cx.observe(&skill_filter, |_, _, cx| cx.notify()));
         // A URL shows the header fields.
         subs.push(cx.observe(&mcp_command, |_, _, cx| cx.notify()));
         // Return in the add row adds (or saves) the server.
         for input in [&mcp_name, &mcp_command, &mcp_header_value] {
-            subs.push(cx.subscribe_in(input, window, |this: &mut Self, _, event: &gpui_kit::component::input::InputEvent, window, cx| {
-                if matches!(event, gpui_kit::component::input::InputEvent::PressEnter { .. }) {
-                    this.add_mcp_server(window, cx);
-                }
-            }));
+            subs.push(cx.subscribe_in(
+                input,
+                window,
+                |this: &mut Self, _, event: &gpui_kit::component::input::InputEvent, window, cx| {
+                    if matches!(
+                        event,
+                        gpui_kit::component::input::InputEvent::PressEnter { .. }
+                    ) {
+                        this.add_mcp_server(window, cx);
+                    }
+                },
+            ));
         }
         // Each page reads the Mac again whenever it's opened.
         subs.push(cx.observe(&workspace, |this: &mut Self, ws, cx| {
@@ -386,66 +482,115 @@ impl SettingsView {
             // Registry agents' rows offer the registry's newer versions: its index is read once.
             if route == Route::Settings(SettingsPage::Agents) {
                 ws.update(cx, |ws, cx| {
-                    let listed = ws.settings.added_agents.iter().any(|a| a.source == trek_core::registry::AgentSource::Registry);
-                    if listed && ws.added_agents.registry.is_none() && ws.added_agents.error.is_none() {
+                    let listed = ws
+                        .settings
+                        .added_agents
+                        .iter()
+                        .any(|a| a.source == trek_core::registry::AgentSource::Registry);
+                    if listed
+                        && ws.added_agents.registry.is_none()
+                        && ws.added_agents.error.is_none()
+                    {
                         ws.load_registry(false, cx);
                     }
                 });
             }
         }));
         // Permissions are granted in System Settings: coming back from there reads them again.
-        subs.push(cx.observe_window_activation(window, |this: &mut Self, window, cx| {
-            if window.is_window_active() {
-                this.tools.invalidate();
-                this.figma_desktop.invalidate();
-                this.snapshots.invalidate();
-                cx.notify();
-            }
-        }));
-        let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
-        let action_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. Test"));
-        let worktree_copy = cx.new(|cx| InputState::new(window, cx).placeholder("Nothing is copied"));
-        subs.push(cx.subscribe_in(&worktree_copy, window, |this: &mut Self, input, event: &gpui_kit::component::input::InputEvent, _, cx| {
-            if matches!(event, gpui_kit::component::input::InputEvent::PressEnter { .. } | gpui_kit::component::input::InputEvent::Blur) {
-                let list: Vec<String> = input.read(cx).value().split(',').map(|e| e.trim().to_string()).filter(|e| !e.is_empty()).collect();
-                let Some(id) = this.project_name_for.clone() else { return };
-                this.workspace.update(cx, |ws, cx| {
-                    let Some(path) = ws.project(&id).map(|p| p.path.clone()) else { return };
-                    if ws.project_prefs(&path).worktree_copy != list {
-                        ws.update_project_prefs(&path, |pr| pr.worktree_copy = list, cx);
-                    }
-                });
-            }
-        }));
-        let action_command = cx.new(|cx| InputState::new(window, cx).placeholder("Command, e.g. cargo test"));
-        let frost = frost_of(workspace.read(cx).settings.appearance.glass_tint);
-        let glass_slider = cx.new(|_| gpui_kit::component::slider::SliderState::new().min(0.).max(100.).step(1.).default_value(frost));
-        // The glass follows the slider as it moves; the setting is saved when it's let go.
-        subs.push(cx.subscribe(&glass_slider, |this: &mut Self, _, event: &gpui_kit::component::slider::SliderEvent, cx| {
-            let (gpui_kit::component::slider::SliderEvent::Change(v) | gpui_kit::component::slider::SliderEvent::Release(v)) = event;
-            let gpui_kit::component::slider::SliderValue::Single(percent) = *v else { return };
-            let release = matches!(event, gpui_kit::component::slider::SliderEvent::Release(_));
-            this.workspace.update(cx, |ws, cx| {
-                ws.settings.appearance.glass_tint = tint_at(percent);
-                if release {
-                    ws.save_settings(cx);
-                } else {
+        subs.push(
+            cx.observe_window_activation(window, |this: &mut Self, window, cx| {
+                if window.is_window_active() {
+                    this.tools.invalidate();
+                    this.figma_desktop.invalidate();
+                    this.snapshots.invalidate();
                     cx.notify();
                 }
-            });
-        }));
-        subs.push(cx.subscribe_in(&project_name, window, |this: &mut Self, input, event: &gpui_kit::component::input::InputEvent, _, cx| {
-            if matches!(event, gpui_kit::component::input::InputEvent::PressEnter { .. } | gpui_kit::component::input::InputEvent::Blur) {
-                let name = input.read(cx).value().to_string();
-                if let Some(id) = this.project_name_for.clone() {
+            }),
+        );
+        let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
+        let action_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. Test"));
+        let worktree_copy =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Nothing is copied"));
+        subs.push(cx.subscribe_in(
+            &worktree_copy,
+            window,
+            |this: &mut Self, input, event: &gpui_kit::component::input::InputEvent, _, cx| {
+                if matches!(
+                    event,
+                    gpui_kit::component::input::InputEvent::PressEnter { .. }
+                        | gpui_kit::component::input::InputEvent::Blur
+                ) {
+                    let list: Vec<String> = input
+                        .read(cx)
+                        .value()
+                        .split(',')
+                        .map(|e| e.trim().to_string())
+                        .filter(|e| !e.is_empty())
+                        .collect();
+                    let Some(id) = this.project_name_for.clone() else {
+                        return;
+                    };
                     this.workspace.update(cx, |ws, cx| {
-                        if ws.project(&id).is_some_and(|p| p.name != name.trim()) {
-                            ws.rename_project(&id, &name, cx);
+                        let Some(path) = ws.project(&id).map(|p| p.path.clone()) else {
+                            return;
+                        };
+                        if ws.project_prefs(&path).worktree_copy != list {
+                            ws.update_project_prefs(&path, |pr| pr.worktree_copy = list, cx);
                         }
                     });
                 }
-            }
-        }));
+            },
+        ));
+        let action_command =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Command, e.g. cargo test"));
+        let frost = frost_of(workspace.read(cx).settings.appearance.glass_tint);
+        let glass_slider = cx.new(|_| {
+            gpui_kit::component::slider::SliderState::new()
+                .min(0.)
+                .max(100.)
+                .step(1.)
+                .default_value(frost)
+        });
+        // The glass follows the slider as it moves; the setting is saved when it's let go.
+        subs.push(cx.subscribe(
+            &glass_slider,
+            |this: &mut Self, _, event: &gpui_kit::component::slider::SliderEvent, cx| {
+                let (gpui_kit::component::slider::SliderEvent::Change(v)
+                | gpui_kit::component::slider::SliderEvent::Release(v)) = event;
+                let gpui_kit::component::slider::SliderValue::Single(percent) = *v else {
+                    return;
+                };
+                let release = matches!(event, gpui_kit::component::slider::SliderEvent::Release(_));
+                this.workspace.update(cx, |ws, cx| {
+                    ws.settings.appearance.glass_tint = tint_at(percent);
+                    if release {
+                        ws.save_settings(cx);
+                    } else {
+                        cx.notify();
+                    }
+                });
+            },
+        ));
+        subs.push(cx.subscribe_in(
+            &project_name,
+            window,
+            |this: &mut Self, input, event: &gpui_kit::component::input::InputEvent, _, cx| {
+                if matches!(
+                    event,
+                    gpui_kit::component::input::InputEvent::PressEnter { .. }
+                        | gpui_kit::component::input::InputEvent::Blur
+                ) {
+                    let name = input.read(cx).value().to_string();
+                    if let Some(id) = this.project_name_for.clone() {
+                        this.workspace.update(cx, |ws, cx| {
+                            if ws.project(&id).is_some_and(|p| p.name != name.trim()) {
+                                ws.rename_project(&id, &name, cx);
+                            }
+                        });
+                    }
+                }
+            },
+        ));
         Self {
             workspace,
             key_inputs,
@@ -480,7 +625,12 @@ impl SettingsView {
 
     /// Read `slot` on a background thread unless it's fresh or already being read; the page
     /// redraws when it's in.
-    fn probe<T: Send + 'static>(&mut self, slot: fn(&mut Self) -> &mut Probe<T>, read: impl FnOnce() -> T + Send + 'static, cx: &mut Context<Self>) {
+    fn probe<T: Send + 'static>(
+        &mut self,
+        slot: fn(&mut Self) -> &mut Probe<T>,
+        read: impl FnOnce() -> T + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
         let p = slot(self);
         if p.fresh || p.task.is_some() {
             return;
@@ -505,10 +655,16 @@ impl SettingsView {
                 self.probe(|this| &mut this.tools, ToolsProbe::read, cx);
                 self.probe_figma_desktop(cx);
             }
-            SettingsPage::Snapshots => self.probe(|this| &mut this.snapshots, SnapshotsProbe::read, cx),
+            SettingsPage::Snapshots => {
+                self.probe(|this| &mut this.snapshots, SnapshotsProbe::read, cx)
+            }
             SettingsPage::Skills => {
                 let project = self.workspace.read(cx).current_cwd();
-                self.probe(|this| &mut this.skills, move || trek_core::skills::discover(project.as_deref()), cx)
+                self.probe(
+                    |this| &mut this.skills,
+                    move || trek_core::skills::discover(project.as_deref()),
+                    cx,
+                )
             }
             _ => {}
         }
@@ -517,11 +673,20 @@ impl SettingsView {
     /// Whether the project's image icon (`file:` spec) is still on disk; `None` until it's known.
     pub(super) fn icon_file_exists(&mut self, spec: &str, cx: &mut Context<Self>) -> Option<bool> {
         let file = spec.strip_prefix("file:")?.to_string();
-        if self.icon_file.value.as_ref().is_some_and(|(s, _)| s != spec) {
+        if self
+            .icon_file
+            .value
+            .as_ref()
+            .is_some_and(|(s, _)| s != spec)
+        {
             self.icon_file = Probe::default();
         }
         let spec = spec.to_string();
-        self.probe(|this| &mut this.icon_file, move || (spec, std::path::Path::new(&file).exists()), cx);
+        self.probe(
+            |this| &mut this.icon_file,
+            move || (spec, std::path::Path::new(&file).exists()),
+            cx,
+        );
         self.icon_file.value.as_ref().map(|(_, exists)| *exists)
     }
 
@@ -533,7 +698,10 @@ impl SettingsView {
     }
 
     /// Closure that edits settings and saves.
-    fn setter<T: 'static>(&self, f: fn(&mut Settings, T)) -> impl Fn(T, &mut Window, &mut App) + Clone + 'static {
+    fn setter<T: 'static>(
+        &self,
+        f: fn(&mut Settings, T),
+    ) -> impl Fn(T, &mut Window, &mut App) + Clone + 'static {
         let ws = self.workspace.clone();
         move |v: T, _: &mut Window, cx: &mut App| {
             ws.update(cx, |ws, cx| {
@@ -543,12 +711,23 @@ impl SettingsView {
         }
     }
 
-    fn row(title: impl IntoElement + 'static, description: impl Into<SharedString>, control: impl IntoElement, cx: &App) -> AnyElement {
+    fn row(
+        title: impl IntoElement + 'static,
+        description: impl Into<SharedString>,
+        control: impl IntoElement,
+        cx: &App,
+    ) -> AnyElement {
         Self::row_with(title, description, None, control, cx)
     }
 
     /// `row`, with a line of its own under the description (a server's status).
-    fn row_with(title: impl IntoElement + 'static, description: impl Into<SharedString>, extra: Option<AnyElement>, control: impl IntoElement, cx: &App) -> AnyElement {
+    fn row_with(
+        title: impl IntoElement + 'static,
+        description: impl Into<SharedString>,
+        extra: Option<AnyElement>,
+        control: impl IntoElement,
+        cx: &App,
+    ) -> AnyElement {
         let description: SharedString = description.into();
         #[cfg(test)]
         shown::title_and(&title, &description);
@@ -564,7 +743,14 @@ impl SettingsView {
                     .gap(px(3.))
                     .child(div().text_size(px(13.5)).font_medium().child(title))
                     .when(!description.is_empty(), |el| {
-                        el.child(div().max_w(px(460.)).text_size(px(12.5)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground).child(description))
+                        el.child(
+                            div()
+                                .max_w(px(460.))
+                                .text_size(px(12.5))
+                                .line_height(relative(1.5))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(description),
+                        )
                     })
                     .children(extra),
             )
@@ -574,30 +760,56 @@ impl SettingsView {
 
     fn switch(&self, id: &'static str, on: bool, f: fn(&mut Settings, bool)) -> Switch {
         let set = self.setter(f);
-        Switch::new(id).checked(on).on_click(move |v: &bool, window, cx| set(*v, window, cx))
+        Switch::new(id)
+            .checked(on)
+            .on_click(move |v: &bool, window, cx| set(*v, window, cx))
     }
 
     /// Section heading: more space above than below (rhythm), real weight instead of an eyebrow.
     fn heading(text: &str, cx: &App) -> AnyElement {
         #[cfg(test)]
         shown::text(text);
-        div().pt(px(36.)).pb(px(10.)).text_size(px(13.)).font_semibold().text_color(cx.theme().foreground).child(text.to_string()).into_any_element()
+        div()
+            .pt(px(36.))
+            .pb(px(10.))
+            .text_size(px(13.))
+            .font_semibold()
+            .text_color(cx.theme().foreground)
+            .child(text.to_string())
+            .into_any_element()
     }
 
     fn note(text: &str, cx: &App) -> AnyElement {
         #[cfg(test)]
         shown::text(text);
-        div().pb(px(16.)).max_w(px(560.)).text_size(px(13.)).line_height(relative(1.55)).text_color(cx.theme().muted_foreground).child(text.to_string()).into_any_element()
+        div()
+            .pb(px(16.))
+            .max_w(px(560.))
+            .text_size(px(13.))
+            .line_height(relative(1.55))
+            .text_color(cx.theme().muted_foreground)
+            .child(text.to_string())
+            .into_any_element()
     }
 
     /// What checking MCP server `i` found: its tools, or why it didn't answer.
     fn mcp_status(i: usize, check: &crate::workspace::McpCheck, cx: &App) -> AnyElement {
         use crate::workspace::McpCheck;
         let muted = cx.theme().muted_foreground;
-        let line = h_flex().id(SharedString::from(format!("mcp-status-{i}"))).test_support().max_w(px(460.)).gap(px(7.)).pt(px(2.)).text_size(px(12.5));
+        let line = h_flex()
+            .id(SharedString::from(format!("mcp-status-{i}")))
+            .test_support()
+            .max_w(px(460.))
+            .gap(px(7.))
+            .pt(px(2.))
+            .text_size(px(12.5));
         let dot = |color: Hsla| div().flex_none().size(px(6.)).rounded_full().bg(color);
         match check {
-            McpCheck::Checking(_) => line.text_color(muted).child(dot(muted.opacity(0.5))).child("Checking…").into_any_element(),
+            McpCheck::Checking(_) => line
+                .text_color(muted)
+                .child(dot(muted.opacity(0.5)))
+                .child("Checking…")
+                .into_any_element(),
             McpCheck::Works(tools) => {
                 let count = match tools.len() {
                     0 => "Works, no tools".to_string(),
@@ -607,24 +819,57 @@ impl SettingsView {
                 let all: SharedString = tools.join(", ").into();
                 line.child(dot(palette::emerald(cx)))
                     .child(div().flex_none().child(count))
-                    .when(!tools.is_empty(), |el| el.child(div().min_w_0().text_color(muted).text_ellipsis().whitespace_nowrap().overflow_hidden().child(all.clone())))
-                    .when(!tools.is_empty(), |el| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(all.clone()).build(window, cx)))
+                    .when(!tools.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .min_w_0()
+                                .text_color(muted)
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .child(all.clone()),
+                        )
+                    })
+                    .when(!tools.is_empty(), |el| {
+                        el.tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(all.clone())
+                                .build(window, cx)
+                        })
+                    })
                     .into_any_element()
             }
-            McpCheck::Failed(why) => line.items_start().child(div().mt(px(6.)).child(dot(palette::red(cx)))).child(div().min_w_0().line_height(relative(1.5)).child(why.clone())).into_any_element(),
+            McpCheck::Failed(why) => line
+                .items_start()
+                .child(div().mt(px(6.)).child(dot(palette::red(cx))))
+                .child(
+                    div()
+                        .min_w_0()
+                        .line_height(relative(1.5))
+                        .child(why.clone()),
+                )
+                .into_any_element(),
         }
     }
 
     fn status_dot(color: Hsla, label: &'static str) -> AnyElement {
-        h_flex().gap(px(7.)).text_size(px(12.5)).child(div().size(px(6.)).rounded_full().bg(color)).child(label).into_any_element()
+        h_flex()
+            .gap(px(7.))
+            .text_size(px(12.5))
+            .child(div().size(px(6.)).rounded_full().bg(color))
+            .child(label)
+            .into_any_element()
     }
 
     /// Thumbnails: None, the built-in art, the user's own image, and "Choose image…".
     fn background_gallery(&self, s: &Settings, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let current = s.appearance.background.clone();
-        let mut options: Vec<(Option<String>, &'static str)> =
-            vec![(None, "None"), (Some("builtin:dawn".into()), "Dawn"), (Some("builtin:night".into()), "Night"), (Some("builtin:paper".into()), "Paper")];
+        let mut options: Vec<(Option<String>, &'static str)> = vec![
+            (None, "None"),
+            (Some("builtin:dawn".into()), "Dawn"),
+            (Some("builtin:night".into()), "Night"),
+            (Some("builtin:paper".into()), "Paper"),
+        ];
         if let Some(c) = current.clone().filter(|c| !c.starts_with("builtin:")) {
             options.push((Some(c), "Yours"));
         }
@@ -636,7 +881,11 @@ impl SettingsView {
                     .rounded(px(10.))
                     .overflow_hidden()
                     .border_2()
-                    .border_color(if selected { theme.foreground } else { theme.border })
+                    .border_color(if selected {
+                        theme.foreground
+                    } else {
+                        theme.border
+                    })
                     .border_dashed()
                     .flex()
                     .items_center()
@@ -664,11 +913,30 @@ impl SettingsView {
                             .rounded(px(10.))
                             .overflow_hidden()
                             .border_2()
-                            .border_color(if selected { theme.foreground } else { theme.border })
+                            .border_color(if selected {
+                                theme.foreground
+                            } else {
+                                theme.border
+                            })
                             .bg(theme.background)
-                            .when_some(preview, |el, spec| el.child(img(ui::background_source(&spec)).size_full().object_fit(ObjectFit::Cover))),
+                            .when_some(preview, |el, spec| {
+                                el.child(
+                                    img(ui::background_source(&spec))
+                                        .size_full()
+                                        .object_fit(ObjectFit::Cover),
+                                )
+                            }),
                     )
-                    .child(div().text_xs().text_color(if selected { theme.foreground } else { theme.muted_foreground }).child(label))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(if selected {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .child(label),
+                    )
                     .on_click(move |_, _, cx| {
                         let spec = spec.clone();
                         ws.update(cx, |ws, cx| {
@@ -679,8 +947,16 @@ impl SettingsView {
             }))
             .child(
                 tile("bg-choose".into(), false)
-                    .child(div().text_xs().text_color(theme.muted_foreground).child("Choose image…"))
-                    .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.pick_background_image(cx)))),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Choose image…"),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.workspace
+                            .update(cx, |ws, cx| ws.pick_background_image(cx))
+                    })),
             )
             .into_any_element()
     }
@@ -702,9 +978,18 @@ impl SettingsView {
         let detecting = ws.detecting;
         let muted = cx.theme().muted_foreground;
         let disabled = ws.settings.disabled_agents.clone();
-        let agents: Vec<_> = ws.agents.iter().filter(|a| !matches!(a.agent, AgentId::Direct(_))).cloned().collect();
-        let (installed, missing): (Vec<_>, Vec<_>) = agents.into_iter().partition(|a| a.availability != Availability::NotInstalled);
-        self.installing_agents.borrow_mut().retain(|k, _| missing.iter().any(|m| m.agent.key() == *k));
+        let agents: Vec<_> = ws
+            .agents
+            .iter()
+            .filter(|a| !matches!(a.agent, AgentId::Direct(_)))
+            .cloned()
+            .collect();
+        let (installed, missing): (Vec<_>, Vec<_>) = agents
+            .into_iter()
+            .partition(|a| a.availability != Availability::NotInstalled);
+        self.installing_agents
+            .borrow_mut()
+            .retain(|k, _| missing.iter().any(|m| m.agent.key() == *k));
         let mut out: Vec<AnyElement> = vec![];
         let setup_key = |a: &AgentId| match a {
             AgentId::Acp(id) => id.clone(),
@@ -720,27 +1005,59 @@ impl SettingsView {
             // Account line: who is signed in and on which plan.
             let (account, needs_login): (String, bool) = match (&a.agent, status, acp) {
                 (_, Some(st), _) if st.logged_in || st.account.is_some() => {
-                    let parts: Vec<String> = [st.account.clone(), st.plan.clone()].into_iter().flatten().collect();
-                    (if parts.is_empty() { "Signed in".into() } else { parts.join(" · ") }, false)
+                    let parts: Vec<String> = [st.account.clone(), st.plan.clone()]
+                        .into_iter()
+                        .flatten()
+                        .collect();
+                    (
+                        if parts.is_empty() {
+                            "Signed in".into()
+                        } else {
+                            parts.join(" · ")
+                        },
+                        false,
+                    )
                 }
                 (_, Some(_), _) => ("Not signed in".into(), true),
-                (_, _, Some(Ok(info))) if info.needs_auth => ("Sign in to use this agent".into(), true),
+                (_, _, Some(Ok(info))) if info.needs_auth => {
+                    ("Sign in to use this agent".into(), true)
+                }
                 (_, _, Some(Ok(info))) => {
                     let n = info.models.len();
-                    (if n > 0 { format!("Signed in · {n} models") } else { "Signed in".into() }, false)
+                    (
+                        if n > 0 {
+                            format!("Signed in · {n} models")
+                        } else {
+                            "Signed in".into()
+                        },
+                        false,
+                    )
                 }
-                (_, _, Some(Err(e))) => (e.lines().next().unwrap_or("Couldn't start").to_string(), true),
+                (_, _, Some(Err(e))) => (
+                    e.lines().next().unwrap_or("Couldn't start").to_string(),
+                    true,
+                ),
                 // Agents that are off aren't asked (asking starts them).
                 (_, None, None) if !on => ("Off".into(), false),
                 // One the user added says where it came from until it's been asked.
-                (agent, None, None) if crate::workspace::is_added(agent) => (crate::add_agent::source_line(agent).unwrap_or_default(), false),
-                (AgentId::ClaudeCode | AgentId::Codex, None, None) if ws.usage_loading => ("Checking account…".into(), false),
-                (_, None, None) if a.availability == Availability::NeedsLogin => ("Not signed in".into(), true),
+                (agent, None, None) if crate::workspace::is_added(agent) => (
+                    crate::add_agent::source_line(agent).unwrap_or_default(),
+                    false,
+                ),
+                (AgentId::ClaudeCode | AgentId::Codex, None, None) if ws.usage_loading => {
+                    ("Checking account…".into(), false)
+                }
+                (_, None, None) if a.availability == Availability::NeedsLogin => {
+                    ("Not signed in".into(), true)
+                }
                 _ => ("Checking account…".into(), false),
             };
             // "2.1.287 (Claude Code)", "grok 1.0.46 (…) [stable]" → "2.1.287", "1.0.46".
             let version = a.version.as_deref().and_then(|v| {
-                v.split(|c: char| c.is_whitespace() || c == '(' || c == ',').find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()) && t.contains('.'))
+                v.split(|c: char| c.is_whitespace() || c == '(' || c == ',')
+                    .find(|t| {
+                        t.chars().next().is_some_and(|c| c.is_ascii_digit()) && t.contains('.')
+                    })
             });
             let account = match version {
                 Some(v) => format!("{account} · v{}", v.trim_end_matches('.')),
@@ -749,14 +1066,26 @@ impl SettingsView {
             let title = h_flex()
                 .gap(px(10.))
                 .child(ui::agent_logo(&a.agent, px(22.), cx))
-                .child(v_flex().child(div().text_size(px(14.)).font_medium().child(a.name.clone())).child(
-                    div().text_size(px(12.5)).text_color(if needs_login { palette::amber(cx) } else { muted }).child(account),
-                ));
+                .child(
+                    v_flex()
+                        .child(div().text_size(px(14.)).font_medium().child(a.name.clone()))
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .text_color(if needs_login {
+                                    palette::amber(cx)
+                                } else {
+                                    muted
+                                })
+                                .child(account),
+                        ),
+                );
             // A login that took stops being waited on once the agent is signed in.
             if !needs_login {
                 self.signing_in_agents.borrow_mut().remove(&key);
             }
-            let is_signing = self.workspace.read(cx).authenticating_agents.contains(&key) || is_started(&self.signing_in_agents, &key);
+            let is_signing = self.workspace.read(cx).authenticating_agents.contains(&key)
+                || is_started(&self.signing_in_agents, &key);
             let signing_ref = self.signing_in_agents.clone();
             let k_sign = key.clone();
             let is_acp = matches!(a.agent, AgentId::Acp(_));
@@ -767,10 +1096,15 @@ impl SettingsView {
                             .small()
                             .outline()
                             .loading(is_signing)
-                            .label(if is_signing { "Signing in…" } else { "Sign in" })
+                            .label(if is_signing {
+                                "Signing in…"
+                            } else {
+                                "Sign in"
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let k = k_sign.clone();
-                                this.workspace.update(cx, |ws, cx| ws.authenticate_acp_agent(&k, None, cx));
+                                this.workspace
+                                    .update(cx, |ws, cx| ws.authenticate_acp_agent(&k, None, cx));
                             })),
                     )
                 } else if let Some(s) = setup {
@@ -782,11 +1116,20 @@ impl SettingsView {
                             .small()
                             .outline()
                             .loading(is_signing)
-                            .label(if is_signing { "Signing in…" } else { "Sign in" })
+                            .label(if is_signing {
+                                "Signing in…"
+                            } else {
+                                "Sign in"
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 Self::start(&signing_ref, k_sign.clone(), cx);
                                 let cmd = cmd.clone();
-                                this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: cmd, cwd: None }));
+                                this.workspace.update(cx, |_, cx| {
+                                    cx.emit(WorkspaceEvent::RunInTerminal {
+                                        command: cmd,
+                                        cwd: None,
+                                    })
+                                });
                             })),
                     )
                 } else {
@@ -805,11 +1148,22 @@ impl SettingsView {
                     .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                         let (login, ws) = (login.clone(), ws.clone());
                         menu.min_w(px(180.))
-                            .item(PopupMenuItem::new("Switch account…").on_click(move |_, _, cx| {
-                                let cmd = login.clone();
-                                ws.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: cmd, cwd: None }))
-                            }))
-                            .item(PopupMenuItem::new("Manage plan").icon(IconName::ExternalLink).on_click(move |_, _, cx| cx.open_url(url)))
+                            .item(PopupMenuItem::new("Switch account…").on_click(
+                                move |_, _, cx| {
+                                    let cmd = login.clone();
+                                    ws.update(cx, |_, cx| {
+                                        cx.emit(WorkspaceEvent::RunInTerminal {
+                                            command: cmd,
+                                            cwd: None,
+                                        })
+                                    })
+                                },
+                            ))
+                            .item(
+                                PopupMenuItem::new("Manage plan")
+                                    .icon(IconName::ExternalLink)
+                                    .on_click(move |_, _, cx| cx.open_url(url)),
+                            )
                     })
             });
             let more = match more {
@@ -817,31 +1171,41 @@ impl SettingsView {
                 None => self.added_menu(&a.agent, cx),
             };
             let k2 = key.clone();
-            let toggle = Switch::new(SharedString::from(format!("enable-{key}"))).checked(on).on_click(cx.listener(move |this, v: &bool, _, cx| {
-                let (k, v) = (k2.clone(), *v);
-                this.workspace.update(cx, |ws, cx| {
-                    ws.settings.disabled_agents.retain(|d| *d != k);
-                    if !v {
-                        ws.settings.disabled_agents.push(k.clone());
-                    }
-                    ws.save_settings(cx);
-                    // Disabled agents aren't probed; find out what one offers once it's back on.
-                    if v {
-                        ws.probe_acp_agent(&k, cx);
-                    }
-                });
-            }));
-            let controls = h_flex().gap(px(6.)).children(sign_in).children(more).child(div().pl(px(4.)).child(toggle));
+            let toggle = Switch::new(SharedString::from(format!("enable-{key}")))
+                .checked(on)
+                .on_click(cx.listener(move |this, v: &bool, _, cx| {
+                    let (k, v) = (k2.clone(), *v);
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.settings.disabled_agents.retain(|d| *d != k);
+                        if !v {
+                            ws.settings.disabled_agents.push(k.clone());
+                        }
+                        ws.save_settings(cx);
+                        // Disabled agents aren't probed; find out what one offers once it's back on.
+                        if v {
+                            ws.probe_acp_agent(&k, cx);
+                        }
+                    });
+                }));
+            let controls = h_flex()
+                .gap(px(6.))
+                .children(sign_in)
+                .children(more)
+                .child(div().pl(px(4.)).child(toggle));
             rows.push(Self::row(title, "", controls, cx));
         }
         // Updates to install come first; otherwise the setting waits under the agents.
-        let first = self.workspace.read(cx).agent_updates.pending() > 0 && self.workspace.read(cx).settings.updates.check_agents;
+        let first = self.workspace.read(cx).agent_updates.pending() > 0
+            && self.workspace.read(cx).settings.updates.check_agents;
         let updates = self.agent_updates_section(first, cx);
         // Nothing installed: the guidance still shows, under it the CLIs a scan can install.
         let none = rows.is_empty();
         let empty = Self::note(
             &if detecting {
-                format!("Looking for agents on {}…", crate::words::words().this_computer)
+                format!(
+                    "Looking for agents on {}…",
+                    crate::words::words().this_computer
+                )
             } else {
                 "No agents found. Install an agent's CLI — Claude Code, Codex or another — and press Scan again; it joins with the login it already has. Or add one from the ACP Registry.".to_string()
             },
@@ -869,8 +1233,14 @@ impl SettingsView {
                 .into_iter()
                 .map(|a| {
                     let key = a.agent.key();
-                    let install = trek_core::catalog::agent_setup(&setup_key(&a.agent)).map(|s| s.install.to_string()).or(a.install_hint.clone()).unwrap_or_default();
-                    let title = h_flex().gap(px(10.)).child(ui::agent_logo(&a.agent, px(22.), cx)).child(div().text_size(px(14.)).font_medium().child(a.name.clone()));
+                    let install = trek_core::catalog::agent_setup(&setup_key(&a.agent))
+                        .map(|s| s.install.to_string())
+                        .or(a.install_hint.clone())
+                        .unwrap_or_default();
+                    let title = h_flex()
+                        .gap(px(10.))
+                        .child(ui::agent_logo(&a.agent, px(22.), cx))
+                        .child(div().text_size(px(14.)).font_medium().child(a.name.clone()));
                     // One the user added: what's missing, and its menu (update, remove).
                     if let Some(menu) = self.added_menu(&a.agent, cx) {
                         return Self::row(title, install, menu, cx);
@@ -883,15 +1253,26 @@ impl SettingsView {
                         .small()
                         .outline()
                         .loading(is_installing)
-                        .icon(if is_installing { IconName::RefreshCw } else { IconName::ArrowDown })
-                        .label(if is_installing { "Installing…" } else { "Install" })
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                Self::start(&install_ref, k_inst.clone(), cx);
-                                let cmd = cmd.clone();
-                                this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: cmd, cwd: None }))
-                            }),
-                        );
+                        .icon(if is_installing {
+                            IconName::RefreshCw
+                        } else {
+                            IconName::ArrowDown
+                        })
+                        .label(if is_installing {
+                            "Installing…"
+                        } else {
+                            "Install"
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            Self::start(&install_ref, k_inst.clone(), cx);
+                            let cmd = cmd.clone();
+                            this.workspace.update(cx, |_, cx| {
+                                cx.emit(WorkspaceEvent::RunInTerminal {
+                                    command: cmd,
+                                    cwd: None,
+                                })
+                            })
+                        }));
                     Self::row(title, install, button, cx)
                 })
                 .collect();
@@ -901,9 +1282,21 @@ impl SettingsView {
             h_flex()
                 .pt_3()
                 .gap_2()
-                .child(Button::new("add-agent").small().outline().icon(IconName::Plus).label("Add agent…").on_click(cx.listener(|this, _, window, cx| {
-                    crate::add_agent::open(this.workspace.clone(), crate::add_agent::Tab::Registry, window, cx)
-                })))
+                .child(
+                    Button::new("add-agent")
+                        .small()
+                        .outline()
+                        .icon(IconName::Plus)
+                        .label("Add agent…")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            crate::add_agent::open(
+                                this.workspace.clone(),
+                                crate::add_agent::Tab::Registry,
+                                window,
+                                cx,
+                            )
+                        })),
+                )
                 .child(
                     Button::new("rescan")
                         .small()
@@ -926,11 +1319,27 @@ impl SettingsView {
     /// Remove (which asks first). `None` for built-in agents.
     fn added_menu(&self, agent: &AgentId, cx: &App) -> Option<AnyElement> {
         let AgentId::Acp(id) = agent else { return None };
-        let added = self.workspace.read(cx).settings.added_agents.iter().find(|a| a.id == *id).cloned()?;
+        let added = self
+            .workspace
+            .read(cx)
+            .settings
+            .added_agents
+            .iter()
+            .find(|a| a.id == *id)
+            .cloned()?;
         let update = self.workspace.read(cx).registry_update(id);
         let key = agent.key();
-        let acp = self.workspace.read(cx).acp_info.get(&key).and_then(|r| r.as_ref().ok()).cloned();
-        let auth_methods = acp.as_ref().map(|i| i.auth_methods.clone()).unwrap_or_default();
+        let acp = self
+            .workspace
+            .read(cx)
+            .acp_info
+            .get(&key)
+            .and_then(|r| r.as_ref().ok())
+            .cloned();
+        let auth_methods = acp
+            .as_ref()
+            .map(|i| i.auth_methods.clone())
+            .unwrap_or_default();
         let muted = cx.theme().muted_foreground;
         let ws = self.workspace.clone();
         let menu = Button::new(SharedString::from(format!("more-{}", agent.key())))
@@ -942,9 +1351,15 @@ impl SettingsView {
                 if !auth_methods.is_empty() {
                     for (method_id, method_name) in auth_methods.clone() {
                         let (ws, key, mid) = (ws.clone(), key.clone(), method_id.clone());
-                        menu = menu.item(PopupMenuItem::new(format!("Sign in ({method_name})")).on_click(move |_, _, cx| {
-                            ws.update(cx, |ws, cx| ws.authenticate_acp_agent(&key, Some(mid.clone()), cx));
-                        }));
+                        menu = menu.item(
+                            PopupMenuItem::new(format!("Sign in ({method_name})")).on_click(
+                                move |_, _, cx| {
+                                    ws.update(cx, |ws, cx| {
+                                        ws.authenticate_acp_agent(&key, Some(mid.clone()), cx)
+                                    });
+                                },
+                            ),
+                        );
                     }
                 } else {
                     let (ws, key) = (ws.clone(), key.clone());
@@ -954,13 +1369,23 @@ impl SettingsView {
                 }
                 if let Some(v) = update.clone() {
                     let (ws, id) = (ws.clone(), added.id.clone());
-                    menu = menu.item(PopupMenuItem::new(format!("Update to {v}")).on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.install_registry_agent(&id, cx))));
+                    menu = menu.item(PopupMenuItem::new(format!("Update to {v}")).on_click(
+                        move |_, _, cx| ws.update(cx, |ws, cx| ws.install_registry_agent(&id, cx)),
+                    ));
                 }
                 if let Some(url) = added.website.clone() {
-                    menu = menu.item(PopupMenuItem::new("Website").icon(IconName::ExternalLink).on_click(move |_, _, cx| cx.open_url(&url)));
+                    menu = menu.item(
+                        PopupMenuItem::new("Website")
+                            .icon(IconName::ExternalLink)
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    );
                 }
                 let (ws, added) = (ws.clone(), added.clone());
-                menu.item(PopupMenuItem::new("Remove…").on_click(move |_, window, cx| confirm_remove(ws.clone(), &added, window, cx)))
+                menu.item(
+                    PopupMenuItem::new("Remove…").on_click(move |_, window, cx| {
+                        confirm_remove(ws.clone(), &added, window, cx)
+                    }),
+                )
             });
         Some(menu.into_any_element())
     }
@@ -970,13 +1395,20 @@ impl SettingsView {
     fn agent_updates_section(&mut self, first: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let ws = self.workspace.read(cx);
         let (on, u) = (ws.settings.updates.check_agents, &ws.agent_updates);
-        let (checking, checked_at, listed, missed) = (u.checking, u.checked_at, !u.listed().is_empty(), u.unchecked_note());
+        let (checking, checked_at, listed, missed) = (
+            u.checking,
+            u.checked_at,
+            !u.listed().is_empty(),
+            u.unchecked_note(),
+        );
         // "Up to date" only when every agent was compared: an offline check proves nothing.
         let last = match (checking, checked_at, missed) {
             (true, ..) => "Checking now…".to_string(),
             (false, 0, _) => "Not checked yet.".to_string(),
             (false, at, Some(missed)) => format!("Checked {}. {missed}", relative_ago(at)),
-            (false, at, None) if !listed => format!("Checked {}: every agent is up to date.", relative_ago(at)),
+            (false, at, None) if !listed => {
+                format!("Checked {}: every agent is up to date.", relative_ago(at))
+            }
             (false, at, None) => format!("Checked {}.", relative_ago(at)),
         };
         let description = format!(
@@ -991,13 +1423,26 @@ impl SettingsView {
                     .outline()
                     .loading(checking)
                     .label("Check now")
-                    .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.check_agent_updates(true, cx)))),
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.workspace
+                            .update(cx, |ws, cx| ws.check_agent_updates(true, cx))
+                    })),
             )
             .child(self.switch("agent-updates-auto", on, |s, v| s.updates.check_agents = v));
-        let mut rows = vec![Self::row("Check for agent updates", description, controls, cx)];
+        let mut rows = vec![Self::row(
+            "Check for agent updates",
+            description,
+            controls,
+            cx,
+        )];
         rows.extend(crate::agent_updates::rows(&self.workspace, cx));
         let heading = if first {
-            div().pb(px(10.)).text_size(px(13.)).font_semibold().child("Updates").into_any_element()
+            div()
+                .pb(px(10.))
+                .text_size(px(13.))
+                .font_semibold()
+                .child("Updates")
+                .into_any_element()
         } else {
             Self::heading("Updates", cx)
         };
@@ -1007,7 +1452,13 @@ impl SettingsView {
                 h_flex()
                     .pt_3()
                     .gap(px(12.))
-                    .child(div().flex_1().text_size(px(12.5)).text_color(cx.theme().muted_foreground).child(crate::agent_updates::WHY))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(12.5))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(crate::agent_updates::WHY),
+                    )
                     .children(crate::agent_updates::update_all(&self.workspace, cx))
                     .into_any_element(),
             );
@@ -1027,7 +1478,13 @@ impl SettingsView {
             Ok(servers) => servers,
             Err(e) => return crate::toast::push(window, SharedString::from(e), cx),
         };
-        let header = self.mcp_header_name.read(cx).value().trim().trim_end_matches(':').to_string();
+        let header = self
+            .mcp_header_name
+            .read(cx)
+            .value()
+            .trim()
+            .trim_end_matches(':')
+            .to_string();
         let value = self.mcp_header_value.read(cx).value().trim().to_string();
         if let [server] = &mut servers[..]
             && server.is_http()
@@ -1035,10 +1492,20 @@ impl SettingsView {
             && !value.is_empty()
         {
             if header.contains(char::is_whitespace) {
-                return crate::toast::push(window, "A header name has no spaces, e.g. Authorization.", cx);
+                return crate::toast::push(
+                    window,
+                    "A header name has no spaces, e.g. Authorization.",
+                    cx,
+                );
             }
-            server.headers.retain(|h| !h.name.eq_ignore_ascii_case(&header));
-            server.headers.push(McpHeader { name: header, value, secret: false });
+            server
+                .headers
+                .retain(|h| !h.name.eq_ignore_ascii_case(&header));
+            server.headers.push(McpHeader {
+                name: header,
+                value,
+                secret: false,
+            });
         }
         let existing = self.workspace.read(cx).settings.tools.mcp_servers.clone();
         let mut notes: Vec<String> = vec![];
@@ -1052,27 +1519,50 @@ impl SettingsView {
         if let Some(was) = self.mcp_editing.clone() {
             let Some(at) = existing.iter().position(|m| m.name == was) else {
                 self.mcp_editing = None;
-                return crate::toast::push(window, SharedString::from(format!("{was} was removed meanwhile; nothing was saved.")), cx);
+                return crate::toast::push(
+                    window,
+                    SharedString::from(format!("{was} was removed meanwhile; nothing was saved.")),
+                    cx,
+                );
             };
             if servers.len() != 1 {
-                return crate::toast::push(window, SharedString::from(format!("That's {} servers. Edit one at a time, or cancel and add them.", servers.len())), cx);
+                return crate::toast::push(
+                    window,
+                    SharedString::from(format!(
+                        "That's {} servers. Edit one at a time, or cancel and add them.",
+                        servers.len()
+                    )),
+                    cx,
+                );
             }
             let mut server = servers.remove(0);
             let old = &existing[at];
             if server.name != was && existing.iter().any(|m| m.name == server.name) {
-                return crate::toast::push(window, SharedString::from(format!("There's already a server named {}.", server.name)), cx);
+                return crate::toast::push(
+                    window,
+                    SharedString::from(format!("There's already a server named {}.", server.name)),
+                    cx,
+                );
             }
             server.enabled = old.enabled;
             // A header not typed again stays as it was (its token in the Keychain).
             if server.is_http() && old.is_http() {
                 for h in &old.headers {
-                    if !server.headers.iter().any(|n| n.name.eq_ignore_ascii_case(&h.name)) {
+                    if !server
+                        .headers
+                        .iter()
+                        .any(|n| n.name.eq_ignore_ascii_case(&h.name))
+                    {
                         server.headers.push(h.clone());
                     }
                 }
             }
             if let Err(e) = server.stash_secrets(Some(&was)) {
-                return crate::toast::push(window, SharedString::from(format!("Not saved: {e}.")), cx);
+                return crate::toast::push(
+                    window,
+                    SharedString::from(format!("Not saved: {e}.")),
+                    cx,
+                );
             }
             old.forget_secrets(Some(&server));
             let checked = server.name.clone();
@@ -1093,18 +1583,36 @@ impl SettingsView {
                     continue;
                 }
                 if let Err(e) = server.stash_secrets(None) {
-                    notes.push(format!("{} wasn't added: its tokens couldn't be saved to {} ({e}).", server.name, crate::words::words().your_credential_store));
+                    notes.push(format!(
+                        "{} wasn't added: its tokens couldn't be saved to {} ({e}).",
+                        server.name,
+                        crate::words::words().your_credential_store
+                    ));
                     continue;
                 }
                 added.push(server.name.clone());
-                self.workspace.update(cx, |ws, _| ws.settings.tools.mcp_servers.push(server));
+                self.workspace
+                    .update(cx, |ws, _| ws.settings.tools.mcp_servers.push(server));
             }
             if !skipped.is_empty() {
-                let why = if skipped.len() == 1 { "there's already a server by that name" } else { "there are already servers by those names" };
-                notes.insert(0, format!("Skipped {}: {why}. Edit or remove it to change it.", skipped.join(", ")));
+                let why = if skipped.len() == 1 {
+                    "there's already a server by that name"
+                } else {
+                    "there are already servers by those names"
+                };
+                notes.insert(
+                    0,
+                    format!(
+                        "Skipped {}: {why}. Edit or remove it to change it.",
+                        skipped.join(", ")
+                    ),
+                );
             }
             if added.len() > 1 {
-                notes.insert(0, format!("Added {} servers: {}.", added.len(), added.join(", ")));
+                notes.insert(
+                    0,
+                    format!("Added {} servers: {}.", added.len(), added.join(", ")),
+                );
             }
             self.workspace.update(cx, |ws, cx| ws.save_settings(cx));
         }
@@ -1115,7 +1623,12 @@ impl SettingsView {
             return;
         }
         self.mcp_editing = None;
-        for input in [&self.mcp_name, &self.mcp_command, &self.mcp_header_name, &self.mcp_header_value] {
+        for input in [
+            &self.mcp_name,
+            &self.mcp_command,
+            &self.mcp_header_name,
+            &self.mcp_header_value,
+        ] {
             input.update(cx, |s, cx| s.set_value("", window, cx));
         }
         // Each one is tried straight away, so a missing token or a typo shows now, not mid-task.
@@ -1129,10 +1642,23 @@ impl SettingsView {
     /// Load server `name` into the add row to be edited: its command line with its environment
     /// in front (saved values shown as …, kept unless typed over), or its URL.
     fn edit_mcp_server(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(server) = self.workspace.read(cx).settings.tools.mcp_servers.iter().find(|m| m.name == name).cloned() else { return };
+        let Some(server) = self
+            .workspace
+            .read(cx)
+            .settings
+            .tools
+            .mcp_servers
+            .iter()
+            .find(|m| m.name == name)
+            .cloned()
+        else {
+            return;
+        };
         self.mcp_editing = Some(server.name.clone());
-        self.mcp_name.update(cx, |s, cx| s.set_value(server.name.clone(), window, cx));
-        self.mcp_command.update(cx, |s, cx| s.set_value(server.command_line(), window, cx));
+        self.mcp_name
+            .update(cx, |s, cx| s.set_value(server.name.clone(), window, cx));
+        self.mcp_command
+            .update(cx, |s, cx| s.set_value(server.command_line(), window, cx));
         for input in [&self.mcp_header_name, &self.mcp_header_value] {
             input.update(cx, |s, cx| s.set_value("", window, cx));
         }
@@ -1141,7 +1667,12 @@ impl SettingsView {
 
     fn cancel_mcp_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.mcp_editing = None;
-        for input in [&self.mcp_name, &self.mcp_command, &self.mcp_header_name, &self.mcp_header_value] {
+        for input in [
+            &self.mcp_name,
+            &self.mcp_command,
+            &self.mcp_header_name,
+            &self.mcp_header_value,
+        ] {
             input.update(cx, |s, cx| s.set_value("", window, cx));
         }
         cx.notify();
@@ -1154,13 +1685,31 @@ impl SettingsView {
         let mut out = vec![];
         // Read off the main thread when the page opens; until then each check says so.
         let probe = self.tools.value.clone();
-        let checking = |id: &str| div().id(SharedString::from(format!("{id}-checking"))).test_support().text_size(px(12.5)).text_color(muted).child("Checking…").into_any_element();
+        let checking = |id: &str| {
+            div()
+                .id(SharedString::from(format!("{id}-checking")))
+                .test_support()
+                .text_size(px(12.5))
+                .text_color(muted)
+                .child("Checking…")
+                .into_any_element()
+        };
         let bundled = probe.as_ref().is_none_or(|p| p.mcp_bundled);
-        let permission = |id: &'static str, label: &'static str, ok: Option<bool>, pane: &'static str, cx: &mut Context<Self>| -> AnyElement {
+        let permission = |id: &'static str,
+                          label: &'static str,
+                          ok: Option<bool>,
+                          pane: &'static str,
+                          cx: &mut Context<Self>|
+         -> AnyElement {
             match ok {
                 None => checking(id),
                 Some(true) => Self::status_dot(palette::emerald(cx), "Allowed"),
-                Some(false) => Button::new(id).small().outline().label(format!("Allow {label}")).on_click(move |_, _, cx| cx.open_url(pane)).into_any_element(),
+                Some(false) => Button::new(id)
+                    .small()
+                    .outline()
+                    .label(format!("Allow {label}"))
+                    .on_click(move |_, _, cx| cx.open_url(pane))
+                    .into_any_element(),
             }
         };
         let ax = probe.as_ref().map(|p| p.accessibility);
@@ -1170,17 +1719,36 @@ impl SettingsView {
         let mut computer_use = vec![Self::row(
             "Computer use tools",
             "Off until you turn it on. Agents can then see the screen, click, type and switch apps through Trek's MCP tools, following your hand-holding level.",
-            self.switch("computer-use", s.tools.computer_use, |s, v| s.tools.computer_use = v),
+            self.switch("computer-use", s.tools.computer_use, |s, v| {
+                s.tools.computer_use = v
+            }),
             cx,
         )];
         let permissions_note = crate::words::words().computer_use_note;
         // Where the system asks for no permission, a sentence says so instead of two rows that could only say Allowed.
         if permissions_note.is_none() {
-            computer_use.push(Self::row("Accessibility", "Lets Trek click and type for the agent.", permission("ax-perm", "Accessibility", ax, crate::integrations::ACCESSIBILITY_PANE, cx), cx));
+            computer_use.push(Self::row(
+                "Accessibility",
+                "Lets Trek click and type for the agent.",
+                permission(
+                    "ax-perm",
+                    "Accessibility",
+                    ax,
+                    crate::integrations::ACCESSIBILITY_PANE,
+                    cx,
+                ),
+                cx,
+            ));
             computer_use.push(Self::row(
                 "Screen Recording",
                 "Lets Trek take screenshots of other apps.",
-                permission("sr-perm", "Screen Recording", sr, crate::integrations::SCREEN_RECORDING_PANE, cx),
+                permission(
+                    "sr-perm",
+                    "Screen Recording",
+                    sr,
+                    crate::integrations::SCREEN_RECORDING_PANE,
+                    cx,
+                ),
                 cx,
             ));
         }
@@ -1219,7 +1787,12 @@ impl SettingsView {
                     .icon(IconName::ArrowDown)
                     .label("Install AXe")
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: crate::integrations::AXE_INSTALL.into(), cwd: None }))
+                        this.workspace.update(cx, |_, cx| {
+                            cx.emit(WorkspaceEvent::RunInTerminal {
+                                command: crate::integrations::AXE_INSTALL.into(),
+                                cwd: None,
+                            })
+                        })
                     }))
                     .into_any_element(),
             };
@@ -1246,7 +1819,12 @@ impl SettingsView {
                 .icon(IconName::ArrowDown)
                 .label("Install ffmpeg")
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::RunInTerminal { command: crate::integrations::FFMPEG_INSTALL.into(), cwd: None }))
+                    this.workspace.update(cx, |_, cx| {
+                        cx.emit(WorkspaceEvent::RunInTerminal {
+                            command: crate::integrations::FFMPEG_INSTALL.into(),
+                            cwd: None,
+                        })
+                    })
                 }))
                 .into_any_element(),
         };
@@ -1292,43 +1870,92 @@ impl SettingsView {
                 let name = m.name.clone();
                 let controls = h_flex()
                     .gap_1()
-                    .child(ui::icon_button(SharedString::from(format!("mcp-check-{i}")), IconName::RefreshCw, "Check it works").on_click(cx.listener({
-                        let name = name.clone();
-                        move |this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.check_mcp_server(&name, cx))
-                    })))
-                    .child(ui::icon_button(SharedString::from(format!("mcp-edit-{i}")), crate::assets::Lucide::Pencil, "Edit").on_click(cx.listener({
-                        let name = name.clone();
-                        move |this, _, window, cx| this.edit_mcp_server(&name, window, cx)
-                    })))
-                    .child(ui::icon_button(SharedString::from(format!("mcp-del-{i}")), IconName::Delete, "Remove").on_click(cx.listener(move |this, _, _, cx| {
-                        if this.mcp_editing.as_deref() == Some(name.as_str()) {
-                            this.mcp_editing = None;
-                        }
-                        this.workspace.update(cx, |ws, cx| {
-                            if i < ws.settings.tools.mcp_servers.len() {
-                                let gone = ws.settings.tools.mcp_servers.remove(i);
-                                // Its tokens go with it.
-                                gone.forget_secrets(None);
-                                ws.mcp_checks.remove(&gone.name);
+                    .child(
+                        ui::icon_button(
+                            SharedString::from(format!("mcp-check-{i}")),
+                            IconName::RefreshCw,
+                            "Check it works",
+                        )
+                        .on_click(cx.listener({
+                            let name = name.clone();
+                            move |this, _, _, cx| {
+                                this.workspace
+                                    .update(cx, |ws, cx| ws.check_mcp_server(&name, cx))
                             }
-                            ws.save_settings(cx);
-                        })
-                    })))
-                    .child(div().pl_2().child(Switch::new(SharedString::from(format!("mcp-on-{i}"))).checked(m.enabled).on_click(cx.listener(move |this, v: &bool, _, cx| {
-                        let v = *v;
-                        this.workspace.update(cx, |ws, cx| {
-                            if let Some(m) = ws.settings.tools.mcp_servers.get_mut(i) {
-                                m.enabled = v;
+                        })),
+                    )
+                    .child(
+                        ui::icon_button(
+                            SharedString::from(format!("mcp-edit-{i}")),
+                            crate::assets::Lucide::Pencil,
+                            "Edit",
+                        )
+                        .on_click(cx.listener({
+                            let name = name.clone();
+                            move |this, _, window, cx| this.edit_mcp_server(&name, window, cx)
+                        })),
+                    )
+                    .child(
+                        ui::icon_button(
+                            SharedString::from(format!("mcp-del-{i}")),
+                            IconName::Delete,
+                            "Remove",
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if this.mcp_editing.as_deref() == Some(name.as_str()) {
+                                this.mcp_editing = None;
                             }
-                            ws.save_settings(cx);
-                        })
-                    }))));
+                            this.workspace.update(cx, |ws, cx| {
+                                if i < ws.settings.tools.mcp_servers.len() {
+                                    let gone = ws.settings.tools.mcp_servers.remove(i);
+                                    // Its tokens go with it.
+                                    gone.forget_secrets(None);
+                                    ws.mcp_checks.remove(&gone.name);
+                                }
+                                ws.save_settings(cx);
+                            })
+                        })),
+                    )
+                    .child(
+                        div().pl_2().child(
+                            Switch::new(SharedString::from(format!("mcp-on-{i}")))
+                                .checked(m.enabled)
+                                .on_click(cx.listener(move |this, v: &bool, _, cx| {
+                                    let v = *v;
+                                    this.workspace.update(cx, |ws, cx| {
+                                        if let Some(m) = ws.settings.tools.mcp_servers.get_mut(i) {
+                                            m.enabled = v;
+                                        }
+                                        ws.save_settings(cx);
+                                    })
+                                })),
+                        ),
+                    );
                 let transport = if m.is_http() { "Remote" } else { "Command" };
                 let title = h_flex()
                     .gap(px(8.))
                     .child(m.name.clone())
-                    .child(div().id(SharedString::from(format!("mcp-transport-{i}"))).test_support().px(px(6.)).rounded_full().bg(cx.theme().foreground.opacity(0.07)).text_size(px(11.)).font_normal().text_color(muted).child(transport))
-                    .when(editing.as_deref() == Some(m.name.as_str()), |el| el.child(div().text_size(px(11.)).font_normal().text_color(muted).child("Editing below")));
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("mcp-transport-{i}")))
+                            .test_support()
+                            .px(px(6.))
+                            .rounded_full()
+                            .bg(cx.theme().foreground.opacity(0.07))
+                            .text_size(px(11.))
+                            .font_normal()
+                            .text_color(muted)
+                            .child(transport),
+                    )
+                    .when(editing.as_deref() == Some(m.name.as_str()), |el| {
+                        el.child(
+                            div()
+                                .text_size(px(11.))
+                                .font_normal()
+                                .text_color(muted)
+                                .child("Editing below"),
+                        )
+                    });
                 let mut line = m.summary();
                 let headers: Vec<&str> = m.headers.iter().map(|h| h.name.as_str()).collect();
                 if !headers.is_empty() {
@@ -1400,24 +2027,60 @@ impl SettingsView {
         let ws = self.workspace.read(cx);
         let mut rows = vec![];
         if probe.is_none() {
-            rows.push(div().id("tools-reading").test_support().py(px(16.)).text_size(px(12.5)).text_color(muted).child("Reading your agents' setup…").into_any_element());
+            rows.push(
+                div()
+                    .id("tools-reading")
+                    .test_support()
+                    .py(px(16.))
+                    .text_size(px(12.5))
+                    .text_color(muted)
+                    .child("Reading your agents' setup…")
+                    .into_any_element(),
+            );
         }
-        for (agent, names) in probe.as_ref().map(|p| p.agent_mcp.clone()).unwrap_or_default() {
+        for (agent, names) in probe
+            .as_ref()
+            .map(|p| p.agent_mcp.clone())
+            .unwrap_or_default()
+        {
             rows.push(Self::row(
                 format!("{agent} MCP servers"),
-                if names.is_empty() { "None".to_string() } else { names.join(", ") },
-                div().text_xs().text_color(muted).child(names.len().to_string()),
+                if names.is_empty() {
+                    "None".to_string()
+                } else {
+                    names.join(", ")
+                },
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(names.len().to_string()),
                 cx,
             ));
         }
         for agent in [AgentId::ClaudeCode, AgentId::Codex] {
             if let Some(st) = ws.agent_status.get(&agent.key()) {
-                let skills: Vec<String> = st.commands.iter().filter(|c| c.kind == trek_agents::CommandKind::Skill).map(|c| c.name.clone()).collect();
+                let skills: Vec<String> = st
+                    .commands
+                    .iter()
+                    .filter(|c| c.kind == trek_agents::CommandKind::Skill)
+                    .map(|c| c.name.clone())
+                    .collect();
                 if !skills.is_empty() {
                     rows.push(Self::row(
                         format!("{} skills", agent.display_name()),
-                        format!("Type $ in the composer to use one. {}", skills.iter().take(12).cloned().collect::<Vec<_>>().join(", ")),
-                        div().text_xs().text_color(muted).child(skills.len().to_string()),
+                        format!(
+                            "Type $ in the composer to use one. {}",
+                            skills
+                                .iter()
+                                .take(12)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(skills.len().to_string()),
                         cx,
                     ));
                 }
@@ -1426,8 +2089,16 @@ impl SettingsView {
         if let Some(plugins) = probe.map(|p| p.plugins) {
             rows.push(Self::row(
                 "Claude Code plugins",
-                if plugins.is_empty() { "None installed".to_string() } else { plugins.join(", ") },
-                div().font_family(mono).text_xs().text_color(muted).child(plugins.len().to_string()),
+                if plugins.is_empty() {
+                    "None installed".to_string()
+                } else {
+                    plugins.join(", ")
+                },
+                div()
+                    .font_family(mono)
+                    .text_xs()
+                    .text_color(muted)
+                    .child(plugins.len().to_string()),
                 cx,
             ));
         }
@@ -1473,7 +2144,12 @@ impl SettingsView {
             SettingsPage::LocalModels => {
                 let ws = self.workspace.read(cx);
                 let detecting = ws.detecting;
-                let locals: Vec<_> = ws.agents.iter().filter(|a| matches!(a.agent, AgentId::Direct(_))).cloned().collect();
+                let locals: Vec<_> = ws
+                    .agents
+                    .iter()
+                    .filter(|a| matches!(a.agent, AgentId::Direct(_)))
+                    .cloned()
+                    .collect();
                 // Nothing up yet: say how servers get here, under it the ones found offline.
                 let up = locals.iter().any(|a| a.availability == Availability::Ready);
                 if !up {
@@ -1491,13 +2167,29 @@ impl SettingsView {
                         .into_iter()
                         .map(|a| {
                             let (status, detail) = match a.availability {
-                                Availability::Ready if a.models.is_empty() => {
-                                    (Self::status_dot(palette::amber(cx), "No models"), "Running. Pull a model, e.g. ollama pull qwen3-coder".to_string())
-                                }
-                                Availability::Ready => (Self::status_dot(palette::emerald(cx), "Ready"), a.models.join(", ")),
-                                _ => (Self::status_dot(muted.opacity(0.5), "Not running"), String::new()),
+                                Availability::Ready if a.models.is_empty() => (
+                                    Self::status_dot(palette::amber(cx), "No models"),
+                                    "Running. Pull a model, e.g. ollama pull qwen3-coder"
+                                        .to_string(),
+                                ),
+                                Availability::Ready => (
+                                    Self::status_dot(palette::emerald(cx), "Ready"),
+                                    a.models.join(", "),
+                                ),
+                                _ => (
+                                    Self::status_dot(muted.opacity(0.5), "Not running"),
+                                    String::new(),
+                                ),
                             };
-                            let title = h_flex().gap(px(10.)).child(ui::agent_logo(&a.agent, px(18.), cx)).child(div().text_size(px(13.5)).font_medium().child(a.name.clone()));
+                            let title = h_flex()
+                                .gap(px(10.))
+                                .child(ui::agent_logo(&a.agent, px(18.), cx))
+                                .child(
+                                    div()
+                                        .text_size(px(13.5))
+                                        .font_medium()
+                                        .child(a.name.clone()),
+                                );
                             Self::row(title, detail, status, cx)
                         })
                         .collect();
@@ -1513,7 +2205,9 @@ impl SettingsView {
                                     .loading(detecting)
                                     .icon(IconName::RefreshCw)
                                     .label("Scan again")
-                                    .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.detect_agents(cx)))),
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.workspace.update(cx, |ws, cx| ws.detect_agents(cx))
+                                    })),
                             )
                             .into_any_element(),
                     );
@@ -1526,15 +2220,50 @@ impl SettingsView {
                 let summary = ws.import_summary.clone();
                 out.push(ui::group(
                     vec![
-                        Self::row(h_flex().gap(px(10.)).child(ui::agent_logo(&AgentId::ClaudeCode, px(18.), cx)).child(div().text_size(px(13.5)).font_medium().child("Claude Code")), "~/.claude/projects", self.switch("imp-claude", s.import.claude_code, |s, v| s.import.claude_code = v), cx),
-                        Self::row(h_flex().gap(px(10.)).child(ui::agent_logo(&AgentId::Codex, px(18.), cx)).child(div().text_size(px(13.5)).font_medium().child("Codex")), "~/.codex", self.switch("imp-codex", s.import.codex, |s, v| s.import.codex = v), cx),
-                        Self::row(h_flex().gap(px(10.)).child(ui::agent_logo(&AgentId::OpenCode, px(18.), cx)).child(div().text_size(px(13.5)).font_medium().child("OpenCode")), "~/.local/share/opencode", self.switch("imp-opencode", s.import.opencode, |s, v| s.import.opencode = v), cx),
+                        Self::row(
+                            h_flex()
+                                .gap(px(10.))
+                                .child(ui::agent_logo(&AgentId::ClaudeCode, px(18.), cx))
+                                .child(
+                                    div().text_size(px(13.5)).font_medium().child("Claude Code"),
+                                ),
+                            "~/.claude/projects",
+                            self.switch("imp-claude", s.import.claude_code, |s, v| {
+                                s.import.claude_code = v
+                            }),
+                            cx,
+                        ),
+                        Self::row(
+                            h_flex()
+                                .gap(px(10.))
+                                .child(ui::agent_logo(&AgentId::Codex, px(18.), cx))
+                                .child(div().text_size(px(13.5)).font_medium().child("Codex")),
+                            "~/.codex",
+                            self.switch("imp-codex", s.import.codex, |s, v| s.import.codex = v),
+                            cx,
+                        ),
+                        Self::row(
+                            h_flex()
+                                .gap(px(10.))
+                                .child(ui::agent_logo(&AgentId::OpenCode, px(18.), cx))
+                                .child(div().text_size(px(13.5)).font_medium().child("OpenCode")),
+                            "~/.local/share/opencode",
+                            self.switch("imp-opencode", s.import.opencode, |s, v| {
+                                s.import.opencode = v
+                            }),
+                            cx,
+                        ),
                         Self::row(
                             "How far back",
                             "",
                             ui::segmented(
                                 "max-age",
-                                vec![(30, "30 days"), (90, "90 days"), (365, "1 year"), (0, "All")],
+                                vec![
+                                    (30, "30 days"),
+                                    (90, "90 days"),
+                                    (365, "1 year"),
+                                    (0, "All"),
+                                ],
                                 s.import.max_age_days,
                                 self.setter(|s, v| s.import.max_age_days = v),
                                 cx,
@@ -1554,10 +2283,15 @@ impl SettingsView {
                                 .outline()
                                 .loading(importing)
                                 .label("Import now")
-                                .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.import_threads(cx)))),
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.workspace.update(cx, |ws, cx| ws.import_threads(cx))
+                                })),
                         )
                         .when_some(summary, |el, s| {
-                            let mut line = format!("{} Claude Code · {} Codex · {} OpenCode", s.claude_code, s.codex, s.opencode);
+                            let mut line = format!(
+                                "{} Claude Code · {} Codex · {} OpenCode",
+                                s.claude_code, s.codex, s.opencode
+                            );
                             // Title generators, test runs and sub-agents never become threads.
                             match s.left_out.len() {
                                 0 => {}
@@ -1578,23 +2312,46 @@ impl SettingsView {
 }
 
 /// Ask before removing an added agent: its download goes, and its threads can't continue.
-fn confirm_remove(ws: Entity<Workspace>, agent: &trek_core::registry::AddedAgent, window: &mut Window, cx: &mut App) {
+fn confirm_remove(
+    ws: Entity<Workspace>,
+    agent: &trek_core::registry::AddedAgent,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let (id, name) = (agent.id.clone(), agent.name.clone());
     let what = match agent.source {
-        trek_core::registry::AgentSource::Registry if agent.distribution.as_deref() == Some("binary") => "Its download is deleted. ",
+        trek_core::registry::AgentSource::Registry
+            if agent.distribution.as_deref() == Some("binary") =>
+        {
+            "Its download is deleted. "
+        }
         _ => "",
     };
-    let body = format!("{what}Its threads stay in the sidebar, and continue once it's added again.");
+    let body =
+        format!("{what}Its threads stay in the sidebar, and continue once it's added again.");
     window.open_alert_dialog(cx, move |alert, _, _| {
         let (ws, id) = (ws.clone(), id.clone());
         use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
-        alert.title(format!("Remove {name}?")).description(body.clone()).footer(
-            DialogFooter::new().child(DialogClose::new().child(Button::new("remove-agent-cancel").outline().label("Cancel"))).child(DialogAction::new().child(
-                Button::new("remove-agent-ok").with_variant(gpui_kit::component::button::ButtonVariant::Danger).label("Remove").on_click(move |_, _, cx| {
-                    ws.update(cx, |ws, cx| ws.remove_added_agent(&id, cx))
-                }),
-            )),
-        )
+        alert
+            .title(format!("Remove {name}?"))
+            .description(body.clone())
+            .footer(
+                DialogFooter::new()
+                    .child(
+                        DialogClose::new()
+                            .child(Button::new("remove-agent-cancel").outline().label("Cancel")),
+                    )
+                    .child(
+                        DialogAction::new().child(
+                            Button::new("remove-agent-ok")
+                                .with_variant(gpui_kit::component::button::ButtonVariant::Danger)
+                                .label("Remove")
+                                .on_click(move |_, _, cx| {
+                                    ws.update(cx, |ws, cx| ws.remove_added_agent(&id, cx))
+                                }),
+                        ),
+                    ),
+            )
     });
 }
 
@@ -1602,7 +2359,11 @@ fn confirm_remove(ws: Entity<Workspace>, agent: &trek_core::registry::AddedAgent
 fn relative_ago(ms: i64) -> String {
     match crate::time::relative(ms) {
         r if r == "now" => "just now".into(),
-        r if r.ends_with(|c: char| c.is_ascii_alphabetic()) && r.starts_with(|c: char| c.is_ascii_digit()) => format!("{r} ago"),
+        r if r.ends_with(|c: char| c.is_ascii_alphabetic())
+            && r.starts_with(|c: char| c.is_ascii_digit()) =>
+        {
+            format!("{r} ago")
+        }
         r => format!("on {r}"),
     }
 }
@@ -1610,20 +2371,40 @@ fn relative_ago(ms: i64) -> String {
 /// How Settings names and explains each kind of session the import leaves out.
 fn left_out_rule(rule: Skip) -> (&'static str, &'static str) {
     match rule {
-        Skip::Trek => ("Started by Trek", "Already in the sidebar as Trek's own threads."),
+        Skip::Trek => (
+            "Started by Trek",
+            "Already in the sidebar as Trek's own threads.",
+        ),
         Skip::Subagent => ("Sub-agents", "Work a sub-agent did for another thread."),
-        Skip::UntouchedFork => ("Untouched forks", "Copies of a session nothing was added to. The original is imported."),
-        Skip::TitleGenerator => ("Title generators", "Other apps asking an agent to name one of their threads."),
-        Skip::TempDir => ("Temp folder runs", "Started by a program, or a single prompt, in a system temp folder."),
-        Skip::OneShotRun => ("One-shot runs", "A single prompt run from the command line, with codex exec or opencode run."),
-        Skip::NoUserMessage => ("Empty sessions", "Nothing typed and nothing answered, or only commands like /clear."),
+        Skip::UntouchedFork => (
+            "Untouched forks",
+            "Copies of a session nothing was added to. The original is imported.",
+        ),
+        Skip::TitleGenerator => (
+            "Title generators",
+            "Other apps asking an agent to name one of their threads.",
+        ),
+        Skip::TempDir => (
+            "Temp folder runs",
+            "Started by a program, or a single prompt, in a system temp folder.",
+        ),
+        Skip::OneShotRun => (
+            "One-shot runs",
+            "A single prompt run from the command line, with codex exec or opencode run.",
+        ),
+        Skip::NoUserMessage => (
+            "Empty sessions",
+            "Nothing typed and nothing answered, or only commands like /clear.",
+        ),
     }
 }
 
 impl SettingsView {
     /// Sessions the last import left out, grouped by rule, each one can be brought back.
     fn left_out_section(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let Some(summary) = self.workspace.read(cx).import_summary.clone() else { return vec![] };
+        let Some(summary) = self.workspace.read(cx).import_summary.clone() else {
+            return vec![];
+        };
         if summary.left_out.is_empty() {
             return vec![];
         }
@@ -1631,7 +2412,11 @@ impl SettingsView {
         let hover = cx.theme().list_active;
         let mut rows = vec![];
         for rule in Skip::ALL {
-            let sessions: Vec<&ImportedThread> = summary.left_out.iter().filter(|t| t.skip == Some(rule)).collect();
+            let sessions: Vec<&ImportedThread> = summary
+                .left_out
+                .iter()
+                .filter(|t| t.skip == Some(rule))
+                .collect();
             if sessions.is_empty() {
                 continue;
             }
@@ -1648,7 +2433,14 @@ impl SettingsView {
                 .text_size(px(12.5))
                 .text_color(muted)
                 .child(sessions.len().to_string())
-                .child(Icon::new(if open { IconName::ChevronUp } else { IconName::ChevronDown }).xsmall())
+                .child(
+                    Icon::new(if open {
+                        IconName::ChevronUp
+                    } else {
+                        IconName::ChevronDown
+                    })
+                    .xsmall(),
+                )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if !this.left_out_open.remove(&rule) {
                         this.left_out_open.insert(rule);
@@ -1662,20 +2454,29 @@ impl SettingsView {
         }
         vec![
             Self::heading("Left out", cx),
-            Self::note("Sessions that aren't your conversations don't become threads. If one was misjudged, bring it back; imports leave it in the sidebar from then on.", cx),
+            Self::note(
+                "Sessions that aren't your conversations don't become threads. If one was misjudged, bring it back; imports leave it in the sidebar from then on.",
+                cx,
+            ),
             ui::group(rows, cx),
         ]
     }
 
     fn left_out_row(&self, t: &ImportedThread, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let place = t.cwd.as_deref().map(trek_core::paths::tildify).unwrap_or_default();
+        let place = t
+            .cwd
+            .as_deref()
+            .map(trek_core::paths::tildify)
+            .unwrap_or_default();
         // Long temp-folder paths are cut; when it happened stays readable.
         let meta = h_flex()
             .gap(px(6.))
             .text_size(px(12.))
             .text_color(muted)
-            .when(!place.is_empty(), |el| el.child(div().min_w_0().truncate().child(place)).child("·"))
+            .when(!place.is_empty(), |el| {
+                el.child(div().min_w_0().truncate().child(place)).child("·")
+            })
             .child(div().flex_none().child(crate::time::relative(t.updated_at)));
         let session = t.clone();
         h_flex()
@@ -1684,7 +2485,11 @@ impl SettingsView {
             .gap(px(12.))
             .py(px(8.))
             .pl(px(12.))
-            .child(ui::agent_logo(&t.source.agent().unwrap_or(AgentId::ClaudeCode), px(14.), cx))
+            .child(ui::agent_logo(
+                &t.source.agent().unwrap_or(AgentId::ClaudeCode),
+                px(14.),
+                cx,
+            ))
             .child(
                 v_flex()
                     .flex_1()
@@ -1694,11 +2499,18 @@ impl SettingsView {
                     .child(meta),
             )
             .child(
-                Button::new(SharedString::from(format!("left-out-show-{}-{}", t.source.key(), t.native_id)))
-                    .small()
-                    .outline()
-                    .label("Show in sidebar")
-                    .on_click(cx.listener(move |this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.show_left_out(&session, cx)))),
+                Button::new(SharedString::from(format!(
+                    "left-out-show-{}-{}",
+                    t.source.key(),
+                    t.native_id
+                )))
+                .small()
+                .outline()
+                .label("Show in sidebar")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.workspace
+                        .update(cx, |ws, cx| ws.show_left_out(&session, cx))
+                })),
             )
             .into_any_element()
     }
@@ -1711,42 +2523,62 @@ impl Render for SettingsView {
             self.sync_project_name(window, cx);
         }
         let body = self.content(cx);
-        div().id("settings-content").test_support().size_full().overflow_y_scroll().child(
-            h_flex().w_full().justify_center().child(
-                v_flex()
-                    .w_full()
-                    .max_w(px(720.))
-                    .px(px(48.))
-                    .pt(px(44.))
-                    .pb(px(80.))
-                    .child(div().text_size(px(20.)).font_semibold().child(page.label()))
-                    .when(!page_blurb(page).is_empty(), |el| {
-                        el.child(div().pt(px(6.)).max_w(px(560.)).text_size(px(13.)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground).child(page_blurb(page).into_owned()))
-                    })
-                    .child(div().h(px(28.)))
-                    .children(body),
-            ),
-        )
+        div()
+            .id("settings-content")
+            .test_support()
+            .size_full()
+            .overflow_y_scroll()
+            .child(
+                h_flex().w_full().justify_center().child(
+                    v_flex()
+                        .w_full()
+                        .max_w(px(720.))
+                        .px(px(48.))
+                        .pt(px(44.))
+                        .pb(px(80.))
+                        .child(div().text_size(px(20.)).font_semibold().child(page.label()))
+                        .when(!page_blurb(page).is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .pt(px(6.))
+                                    .max_w(px(560.))
+                                    .text_size(px(13.))
+                                    .line_height(relative(1.5))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(page_blurb(page).into_owned()),
+                            )
+                        })
+                        .child(div().h(px(28.)))
+                        .children(body),
+                ),
+            )
     }
 }
 
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob import brings its own `test` attribute.
-    use super::{SettingsPage, Started, STARTED_FOR, is_started, page_named};
+    use super::{STARTED_FOR, SettingsPage, Started, is_started, page_named};
 
     #[test]
     fn the_legal_note_reads_as_one_paragraph() {
-        assert!(!super::pages::LEGAL.contains("  ") && !super::pages::LEGAL.contains('\n'), "{}", super::pages::LEGAL);
+        assert!(
+            !super::pages::LEGAL.contains("  ") && !super::pages::LEGAL.contains('\n'),
+            "{}",
+            super::pages::LEGAL
+        );
     }
 
     #[test]
     fn a_started_install_stops_counting_after_a_while() {
         let set = Started::default();
         assert!(!is_started(&set, "droid"));
-        set.borrow_mut().insert("droid".into(), std::time::Instant::now());
+        set.borrow_mut()
+            .insert("droid".into(), std::time::Instant::now());
         assert!(is_started(&set, "droid"));
-        let long_ago = std::time::Instant::now().checked_sub(STARTED_FOR + std::time::Duration::from_secs(1)).expect("an hour has passed since boot");
+        let long_ago = std::time::Instant::now()
+            .checked_sub(STARTED_FOR + std::time::Duration::from_secs(1))
+            .expect("an hour has passed since boot");
         set.borrow_mut().insert("droid".into(), long_ago);
         assert!(!is_started(&set, "droid"));
     }
@@ -1755,7 +2587,10 @@ mod tests {
     fn pages_resolve_by_label() {
         assert_eq!(page_named("updates"), Some(SettingsPage::Updates));
         assert_eq!(page_named(" API-Keys "), Some(SettingsPage::ApiKeys));
-        assert_eq!(page_named("agents-&-subscriptions"), Some(SettingsPage::Agents));
+        assert_eq!(
+            page_named("agents-&-subscriptions"),
+            Some(SettingsPage::Agents)
+        );
         assert_eq!(page_named("nowhere"), None);
     }
 }

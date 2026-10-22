@@ -13,17 +13,23 @@ pub mod mcp_check;
 pub mod mock;
 mod opencode;
 mod status;
-#[cfg(test)]
-mod tests_stop;
 #[cfg(all(test, windows))]
 mod tests_cmd_args;
+#[cfg(test)]
+mod tests_stop;
 
 pub use acp::{AcpInfo, acp_authenticate, acp_probe};
 pub use codex::list_models as codex_models;
-pub use direct::{cache_direct_models, cached_direct_models, direct_provider_models, load_all_cached_direct_models};
+pub use direct::{
+    cache_direct_models, cached_direct_models, direct_provider_models,
+    load_all_cached_direct_models,
+};
 pub use limits::{Limit, LimitScope};
 pub use opencode::share_history as share_opencode_history;
-pub use status::{AgentStatus, CommandKind, ResetCredit, SlashCommand, UsageLimit, claude_commands, claude_status, codex_commands, codex_consume_reset, codex_status, devin_status};
+pub use status::{
+    AgentStatus, CommandKind, ResetCredit, SlashCommand, UsageLimit, claude_commands,
+    claude_status, codex_commands, codex_consume_reset, codex_status, devin_status,
+};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -78,18 +84,49 @@ pub struct McpServer {
 #[derive(Debug, Clone, PartialEq)]
 pub enum McpTransport {
     /// A command the agent starts and talks to over its stdio.
-    Stdio { command: String, args: Vec<String>, env: Vec<(String, String)> },
+    Stdio {
+        command: String,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    },
     /// A server already running at `url` (streamable HTTP), sent `headers` with each request.
-    Http { url: String, headers: Vec<(String, String)> },
+    Http {
+        url: String,
+        headers: Vec<(String, String)>,
+    },
 }
 
 impl McpServer {
-    pub fn stdio(name: impl Into<String>, command: impl Into<String>, args: Vec<String>, env: Vec<(String, String)>) -> Self {
-        Self { name: name.into(), transport: McpTransport::Stdio { command: command.into(), args, env }, tool_timeout_secs: None }
+    pub fn stdio(
+        name: impl Into<String>,
+        command: impl Into<String>,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            transport: McpTransport::Stdio {
+                command: command.into(),
+                args,
+                env,
+            },
+            tool_timeout_secs: None,
+        }
     }
 
-    pub fn http(name: impl Into<String>, url: impl Into<String>, headers: Vec<(String, String)>) -> Self {
-        Self { name: name.into(), transport: McpTransport::Http { url: url.into(), headers }, tool_timeout_secs: None }
+    pub fn http(
+        name: impl Into<String>,
+        url: impl Into<String>,
+        headers: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            transport: McpTransport::Http {
+                url: url.into(),
+                headers,
+            },
+            tool_timeout_secs: None,
+        }
     }
 
     /// The environment a stdio server is started with (none for a remote one).
@@ -108,24 +145,41 @@ impl McpServer {
     /// takes (Codex's differs for HTTP, see `codex::codex_mcp_servers`).
     pub(crate) fn to_json(&self) -> serde_json::Value {
         let map = |pairs: &[(String, String)]| -> serde_json::Map<String, serde_json::Value> {
-            pairs.iter().map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone()))).collect()
+            pairs
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect()
         };
         match &self.transport {
-            McpTransport::Stdio { command, args, env } => serde_json::json!({ "command": command, "args": args, "env": map(env) }),
-            McpTransport::Http { url, headers } => serde_json::json!({ "type": "http", "url": url, "headers": map(headers) }),
+            McpTransport::Stdio { command, args, env } => {
+                serde_json::json!({ "command": command, "args": args, "env": map(env) })
+            }
+            McpTransport::Http { url, headers } => {
+                serde_json::json!({ "type": "http", "url": url, "headers": map(headers) })
+            }
         }
     }
 }
 
 /// `{name: {…}, ...}` for a set of servers, as `agent` can start them, and the notices for the
 /// ones it can't (left out). The user's own settings are never changed, only what's handed over.
-pub(crate) fn mcp_servers_json(servers: &[McpServer], agent: BatchHandOff) -> (serde_json::Value, Vec<String>) {
-    mcp_servers_json_with(servers, agent, cfg!(windows), |name| trek_core::detect::which_in(trek_core::detect::login_path(), name))
+pub(crate) fn mcp_servers_json(
+    servers: &[McpServer],
+    agent: BatchHandOff,
+) -> (serde_json::Value, Vec<String>) {
+    mcp_servers_json_with(servers, agent, cfg!(windows), |name| {
+        trek_core::detect::which_in(trek_core::detect::login_path(), name)
+    })
 }
 
 /// `mcp_servers_json` with the platform and the lookup of a command name as arguments, so both
 /// platforms' output is tested on either.
-pub(crate) fn mcp_servers_json_with(servers: &[McpServer], agent: BatchHandOff, windows: bool, resolve: impl Fn(&str) -> Option<PathBuf>) -> (serde_json::Value, Vec<String>) {
+pub(crate) fn mcp_servers_json_with(
+    servers: &[McpServer],
+    agent: BatchHandOff,
+    windows: bool,
+    resolve: impl Fn(&str) -> Option<PathBuf>,
+) -> (serde_json::Value, Vec<String>) {
     let mut out = serde_json::Map::new();
     let mut left_out = vec![];
     for server in servers {
@@ -179,28 +233,59 @@ fn agent_stdio_command(
         return Ok(None);
     }
     let bare = trek_core::detect::is_bare_name_on(command, true);
-    let program = if bare { resolve(command) } else { Some(PathBuf::from(command)) };
-    let Some(program) = program.filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))) else {
+    let program = if bare {
+        resolve(command)
+    } else {
+        Some(PathBuf::from(command))
+    };
+    let Some(program) = program.filter(|p| {
+        p.extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
+    }) else {
         return Ok(None);
     };
     if let Some(problem) = trek_core::detect::batch_script_problem(&program, args) {
         return Err(problem);
     }
     match agent {
-        BatchHandOff::ResolvedPath => Ok(Some((program.to_string_lossy().into_owned(), args.to_vec()))),
+        BatchHandOff::ResolvedPath => Ok(Some((
+            program.to_string_lossy().into_owned(),
+            args.to_vec(),
+        ))),
         BatchHandOff::CmdWrapper => {
             // Found by name, cmd.exe finds it again by that name; a path is written with backslashes
             // (a `/` begins cmd's switches).
-            let target = if bare { command.to_string() } else { command.replace('/', "\\") };
+            let target = if bare {
+                command.to_string()
+            } else {
+                command.replace('/', "\\")
+            };
             let name = trek_core::detect::script_name(&program);
-            if let Some(n) = std::iter::once(&target).chain(args).position(|a| a.contains(['&', '|', '<', '>', '^', '%', '"'])) {
-                let which = if n == 0 { "its name".to_string() } else { format!("argument {n}") };
-                return Err(format!("{name} is a batch script, which the agent can only start through cmd.exe, and cmd.exe would act on a character in {which} (one of & | < > ^ % or a quote)."));
+            if let Some(n) = std::iter::once(&target)
+                .chain(args)
+                .position(|a| a.contains(['&', '|', '<', '>', '^', '%', '"']))
+            {
+                let which = if n == 0 {
+                    "its name".to_string()
+                } else {
+                    format!("argument {n}")
+                };
+                return Err(format!(
+                    "{name} is a batch script, which the agent can only start through cmd.exe, and cmd.exe would act on a character in {which} (one of & | < > ^ % or a quote)."
+                ));
             }
             if target.contains(' ') {
-                return Err(format!("{name} is a batch script in a folder with a space in its name, which can't be handed through cmd.exe; use its name (it's on your PATH) instead."));
+                return Err(format!(
+                    "{name} is a batch script in a folder with a space in its name, which can't be handed through cmd.exe; use its name (it's on your PATH) instead."
+                ));
             }
-            Ok(Some(("cmd".into(), ["/c".to_string(), target].into_iter().chain(args.iter().cloned()).collect())))
+            Ok(Some((
+                "cmd".into(),
+                ["/c".to_string(), target]
+                    .into_iter()
+                    .chain(args.iter().cloned())
+                    .collect(),
+            )))
         }
     }
 }
@@ -247,22 +332,42 @@ pub enum Billing {
 #[derive(Debug, Clone)]
 pub enum Command {
     /// Answers to a `Prompt::Questions` request: `(question, chosen labels or free text)`.
-    Answer { request_id: String, answers: Vec<(String, String)> },
+    Answer {
+        request_id: String,
+        answers: Vec<(String, String)>,
+    },
     /// A user message; `images` are local image files attached before the text.
-    Prompt { text: String, images: Vec<PathBuf> },
+    Prompt {
+        text: String,
+        images: Vec<PathBuf>,
+    },
     Interrupt,
-    Respond { request_id: String, decision: Decision },
+    Respond {
+        request_id: String,
+        decision: Decision,
+    },
     SetHandHolding(HandHolding),
-    SetModel { model: String, effort: Effort },
+    SetModel {
+        model: String,
+        effort: Effort,
+    },
     /// Settings a session is started with (`SessionConfig::plan`, `fast`, `effort`), for one that
     /// can't be restarted to take them (it has work running in the background). Agents that read
     /// them per turn, or can be told mid-session, take them now; the others with their next session.
-    SetModes { plan: bool, fast: Option<String>, effort: Effort },
+    SetModes {
+        plan: bool,
+        fast: Option<String>,
+        effort: Effort,
+    },
     /// Read the end of a background task's output (`BackgroundTask::readable`); the answer
     /// comes back as `AgentEvent::TaskOutput`. Starts no turn.
-    ReadTask { id: String },
+    ReadTask {
+        id: String,
+    },
     /// Stop a background task (`BackgroundTask::stoppable`).
-    StopTask { id: String },
+    StopTask {
+        id: String,
+    },
     Shutdown,
 }
 
@@ -299,50 +404,101 @@ pub enum BackgroundKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
     /// The agent is up; `native_id` resumes it later.
-    Started { native_id: String, model: Option<String> },
+    Started {
+        native_id: String,
+        model: Option<String>,
+    },
     /// Streaming assistant text, appended to the current message.
     TextDelta(String),
     /// The final text of the current assistant message (replaces streamed text).
     TextDone(String),
     ReasoningDelta(String),
-    ToolStarted { id: String, title: String, detail: String },
-    ToolFinished { id: String, output: String, ok: bool },
+    ToolStarted {
+        id: String,
+        title: String,
+        detail: String,
+    },
+    ToolFinished {
+        id: String,
+        output: String,
+        ok: bool,
+    },
     /// Lines a tool call that changed a file added and removed (sent once known; a later report
     /// for the same call replaces it).
-    ToolLines { id: String, added: u32, removed: u32 },
+    ToolLines {
+        id: String,
+        added: u32,
+        removed: u32,
+    },
     /// The agent needs the user: a yes/no approval, or (`prompt`) a question or a plan to review.
-    PermissionRequest { request_id: String, title: String, detail: String, prompt: Option<Prompt> },
+    PermissionRequest {
+        request_id: String,
+        title: String,
+        detail: String,
+        prompt: Option<Prompt>,
+    },
     /// The agent settled a request on its own (it timed out, or the turn moved on): its card goes.
-    PermissionResolved { request_id: String },
+    PermissionResolved {
+        request_id: String,
+    },
     /// A diff stat for the turn, when the agent reports one.
-    DiffStat { additions: i64, deletions: i64 },
+    DiffStat {
+        additions: i64,
+        deletions: i64,
+    },
     /// A turn ended (`error`: why it failed, or "Interrupted"). What it cost came before it, in
     /// its `Usage` reports.
-    TurnComplete { error: Option<String> },
+    TurnComplete {
+        error: Option<String>,
+    },
     /// Tokens currently in the context window, and the window size.
-    Context { used: u64, window: u64 },
+    Context {
+        used: u64,
+        window: u64,
+    },
     /// Tokens the running turn used on `model` (`None`: the session's own), sent as the agent
     /// reports them, before the turn's `TurnComplete`. A turn may send several: one per model
     /// it used, or one per request. `cost`: what they cost at API prices, as the agent said or
     /// as priced per request (`trek_core::pricing`); `None` when no price is known here.
-    Usage { model: Option<String>, tokens: TokenUsage, cost: Option<UsageCost> },
+    Usage {
+        model: Option<String>,
+        tokens: TokenUsage,
+        cost: Option<UsageCost>,
+    },
     /// How the session is billed, once the agent has said which login it uses.
     Billing(Billing),
     /// A sub-agent (keyed by the tool call that launched it) started, moved on, or finished.
-    Task { id: String, description: Option<String>, activity: Option<String>, tool_uses: Option<u64>, done: Option<bool> },
+    Task {
+        id: String,
+        description: Option<String>,
+        activity: Option<String>,
+        tool_uses: Option<u64>,
+        done: Option<bool>,
+    },
     /// A tool call a sub-agent made (keyed by the call that launched the sub-agent), for its
     /// row's live activity.
-    TaskStep { task: String, title: String, detail: String },
+    TaskStep {
+        task: String,
+        title: String,
+        detail: String,
+    },
     /// The work the agent has running in the background now, all of it: it replaces the last
     /// set. A turn can end with some still running.
     Background(Vec<BackgroundTask>),
     /// The end of background task `id`'s output, as it stands (the answer to `Command::ReadTask`).
-    TaskOutput { id: String, output: String },
+    TaskOutput {
+        id: String,
+        output: String,
+    },
     /// The slash commands the agent offers in this session (replaces any earlier list).
     Commands(Vec<SlashCommand>),
     /// The effort levels the session's `model` offers (they can change with the model: OpenCode
     /// 2's do), and the one it's on. Sent as the session starts and after a model switch.
-    Efforts { model: String, efforts: Vec<Effort>, effort: Option<Effort> },
+    Efforts {
+        model: String,
+        efforts: Vec<Effort>,
+        effort: Option<Effort>,
+    },
     /// Something the user should know that isn't an error (the transcript shows it as a note).
     Notice(String),
     /// The latest point the session can be taken back to, for `SessionConfig::resume_at`: the
@@ -351,10 +507,18 @@ pub enum AgentEvent {
     /// The agent stopped at a usage limit (5-hour, weekly, a model's, or a provider's rate limit).
     /// `resets_at`: unix ms, when the agent said or it could be worked out. The turn then ends
     /// with an error saying the same.
-    LimitReached { message: String, resets_at: Option<i64>, scope: LimitScope },
+    LimitReached {
+        message: String,
+        resets_at: Option<i64>,
+        scope: LimitScope,
+    },
     /// How much of one of the plan's usage windows is used (0–100) and when it resets (unix ms),
     /// as the agent reports it while it works. Not a limit reached: the turn goes on.
-    LimitUsed { scope: LimitScope, percent: f32, resets_at: Option<i64> },
+    LimitUsed {
+        scope: LimitScope,
+        percent: f32,
+        resets_at: Option<i64>,
+    },
     /// Something went wrong. It ends no turn by itself (an unreadable image, a refused model
     /// change): a turn that fails says so as it completes, or its session ends.
     Error(String),
@@ -377,11 +541,19 @@ const SESSION_LOG_LINES: usize = 2000;
 
 impl SessionLog {
     pub fn lines(&self) -> Vec<String> {
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().cloned().collect()
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
     }
 
     pub fn len(&self) -> usize {
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -389,7 +561,10 @@ impl SessionLog {
     }
 
     fn push(&self, line: String) {
-        let mut l = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut l = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         l.push_back(line);
         while l.len() > SESSION_LOG_LINES {
             l.pop_front();
@@ -433,7 +608,10 @@ pub(crate) fn recap_prompt(recap: &str, text: &str) -> String {
 }
 
 /// `commands`, with `recap` put in front of the first message.
-pub(crate) fn recap_first(commands: async_channel::Receiver<Command>, recap: String) -> async_channel::Receiver<Command> {
+pub(crate) fn recap_first(
+    commands: async_channel::Receiver<Command>,
+    recap: String,
+) -> async_channel::Receiver<Command> {
     first_prompt(commands, move |text| recap_prompt(&recap, text))
 }
 
@@ -441,16 +619,23 @@ pub(crate) fn recap_first(commands: async_channel::Receiver<Command>, recap: Str
 /// every session (Claude Code; the mock reads them from the config). Others get them in a
 /// message.
 pub fn notes_in_system_prompt(agent: &AgentId) -> bool {
-    matches!(agent, AgentId::ClaudeCode) || matches!(agent, AgentId::Direct(p) if trek_core::catalog::is_mock(p))
+    matches!(agent, AgentId::ClaudeCode)
+        || matches!(agent, AgentId::Direct(p) if trek_core::catalog::is_mock(p))
 }
 
 /// A session's first message, with what Trek tells the agent about the project.
 pub(crate) fn instructions_prompt(instructions: &str, text: &str) -> String {
-    format!("<trek-project-notes>\n{}\n</trek-project-notes>\n\n{text}", instructions.trim())
+    format!(
+        "<trek-project-notes>\n{}\n</trek-project-notes>\n\n{text}",
+        instructions.trim()
+    )
 }
 
 /// `commands`, with the first message rewritten by `f`.
-fn first_prompt(commands: async_channel::Receiver<Command>, f: impl FnOnce(&str) -> String + Send + 'static) -> async_channel::Receiver<Command> {
+fn first_prompt(
+    commands: async_channel::Receiver<Command>,
+    f: impl FnOnce(&str) -> String + Send + 'static,
+) -> async_channel::Receiver<Command> {
     let (tx, rx) = async_channel::unbounded();
     trek_core::runtime().spawn(async move {
         let mut f = Some(f);
@@ -494,21 +679,34 @@ pub fn start(config: SessionConfig) -> SessionHandle {
             match &config.agent {
                 AgentId::ClaudeCode => claude::run(config, cmd_rx, events).await,
                 AgentId::Codex => codex::run(config, cmd_rx, events).await,
-                AgentId::Direct(p) if trek_core::catalog::is_mock(p) => mock::run(config, cmd_rx, events).await,
+                AgentId::Direct(p) if trek_core::catalog::is_mock(p) => {
+                    mock::run(config, cmd_rx, events).await
+                }
                 AgentId::Direct(_) => direct::run(config, cmd_rx, events).await,
-                AgentId::Acp(_) | AgentId::OpenCode | AgentId::Droid => acp::run(config, cmd_rx, events).await,
+                AgentId::Acp(_) | AgentId::OpenCode | AgentId::Droid => {
+                    acp::run(config, cmd_rx, events).await
+                }
             }
         }),
         ev_tx,
     );
-    SessionHandle { commands: cmd_tx, events: ev_rx, log }
+    SessionHandle {
+        commands: cmd_tx,
+        events: ev_rx,
+        log,
+    }
 }
 
 /// Run a session, then report how it ended: its error, if any, and `Exited`. A session that
 /// panics ends the same way, so its thread stops working instead of waiting on it forever.
-fn supervise(session: impl Future<Output = anyhow::Result<()>> + Send + 'static, events: async_channel::Sender<AgentEvent>) {
+fn supervise(
+    session: impl Future<Output = anyhow::Result<()>> + Send + 'static,
+    events: async_channel::Sender<AgentEvent>,
+) {
     trek_core::runtime().spawn(async move {
-        let result = tokio::spawn(session).await.unwrap_or_else(|e| Err(anyhow::anyhow!("the agent session crashed: {e}")));
+        let result = tokio::spawn(session)
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("the agent session crashed: {e}")));
         if let Err(e) = result {
             let _ = events.send(AgentEvent::Error(format!("{e:#}"))).await;
         }
@@ -567,12 +765,21 @@ pub(crate) fn plan_row(steps: &[(String, Step)]) -> (String, String) {
 
 /// Said when an agent can't reopen a saved conversation and starts over.
 pub(crate) fn lost_session(agent: &str) -> AgentEvent {
-    AgentEvent::Notice(format!("{agent} couldn't reopen this conversation, so it continues in a new session without the earlier context."))
+    AgentEvent::Notice(format!(
+        "{agent} couldn't reopen this conversation, so it continues in a new session without the earlier context."
+    ))
 }
 
 /// A plan's title for its row: its first non-empty line, without the Markdown heading marks.
 pub(crate) fn plan_title(plan: &str) -> String {
-    clip(plan.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim_start_matches('#').trim(), 200)
+    clip(
+        plan.lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or_default()
+            .trim_start_matches('#')
+            .trim(),
+        200,
+    )
 }
 
 /// The longest line of an agent's protocol stream that's read: far more than any message a
@@ -592,7 +799,11 @@ pub(crate) struct ProtocolLines<R> {
 
 impl<R: tokio::io::AsyncBufRead + Unpin> ProtocolLines<R> {
     pub(crate) fn new(reader: R) -> Self {
-        ProtocolLines { reader, line: Vec::new(), skipping: false }
+        ProtocolLines {
+            reader,
+            line: Vec::new(),
+            skipping: false,
+        }
     }
 
     /// The next line, without its line ending; `None` at the end of the stream. What's read of a
@@ -603,7 +814,8 @@ impl<R: tokio::io::AsyncBufRead + Unpin> ProtocolLines<R> {
             let chunk = self.reader.fill_buf().await?;
             if chunk.is_empty() {
                 let rest = std::mem::take(&mut self.line);
-                return Ok((!rest.is_empty() && !std::mem::take(&mut self.skipping)).then(|| String::from_utf8_lossy(&rest).into_owned()));
+                return Ok((!rest.is_empty() && !std::mem::take(&mut self.skipping))
+                    .then(|| String::from_utf8_lossy(&rest).into_owned()));
             }
             let end = chunk.iter().position(|b| *b == b'\n');
             let taken = end.map_or(chunk.len(), |e| e + 1);
@@ -613,7 +825,8 @@ impl<R: tokio::io::AsyncBufRead + Unpin> ProtocolLines<R> {
                     self.skipping = true;
                     self.line = Vec::new();
                 } else {
-                    self.line.extend_from_slice(&chunk[..end.unwrap_or(chunk.len())]);
+                    self.line
+                        .extend_from_slice(&chunk[..end.unwrap_or(chunk.len())]);
                 }
             }
             self.reader.consume(taken);
@@ -647,7 +860,10 @@ pub(crate) fn spawn_group(command: &mut tokio::process::Command) -> std::io::Res
     let child = command.spawn()?;
     let group = child.id().unwrap_or_default() as i32;
     trek_core::procs::register(group);
-    Ok(GroupChild { child: Some(child), group })
+    Ok(GroupChild {
+        child: Some(child),
+        group,
+    })
 }
 
 /// Start `command` in a job object of its own, with no console window, tracked by
@@ -673,7 +889,10 @@ pub(crate) fn spawn_group(command: &mut tokio::process::Command) -> std::io::Res
         // Without the job, ending the group ends what can be found under the child by parent ids
         // (`trek_core::procs::end_tree`); what it starts outlives a Trek that crashes.
         Some(Err(e)) => {
-            tracing::warn!("couldn't put process {:?} in a job; it will be ended by its process tree instead: {e}", child.id());
+            tracing::warn!(
+                "couldn't put process {:?} in a job; it will be ended by its process tree instead: {e}",
+                child.id()
+            );
             None
         }
         // It has been reaped already: nothing to put in a job.
@@ -681,7 +900,11 @@ pub(crate) fn spawn_group(command: &mut tokio::process::Command) -> std::io::Res
     };
     let group = child.id().unwrap_or_default() as i32;
     trek_core::procs::register(group);
-    Ok(GroupChild { child: Some(child), group, job })
+    Ok(GroupChild {
+        child: Some(child),
+        group,
+        job,
+    })
 }
 
 /// A Windows job object that ends the processes in it when its last handle closes.
@@ -689,7 +912,8 @@ pub(crate) fn spawn_group(command: &mut tokio::process::Command) -> std::io::Res
 mod job {
     use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle, RawHandle};
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
         SetInformationJobObject, TerminateJobObject,
     };
 
@@ -712,7 +936,15 @@ mod job {
             info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
             let size = std::mem::size_of_val(&info) as u32;
             // SAFETY: `info` is the structure the class names, `size` long.
-            if unsafe { SetInformationJobObject(h, JobObjectExtendedLimitInformation, &info as *const _ as *const _, size) } == 0 {
+            if unsafe {
+                SetInformationJobObject(
+                    h,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const _,
+                    size,
+                )
+            } == 0
+            {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(job)
@@ -736,17 +968,30 @@ mod job {
 
 /// Run `command` in a group of its own, with `input` (if any) on its stdin, and collect its
 /// output. The group, and whatever it started, is ended once the command exits or `limit` passes.
-pub(crate) async fn output_group(command: &mut tokio::process::Command, input: Option<Vec<u8>>, limit: std::time::Duration) -> std::io::Result<std::process::Output> {
+pub(crate) async fn output_group(
+    command: &mut tokio::process::Command,
+    input: Option<Vec<u8>>,
+    limit: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
     use std::process::Stdio;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = spawn_group(command)?;
     if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
         tokio::spawn(async move {
             let _ = stdin.write_all(&input).await;
         });
     }
-    fn drain(pipe: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>) -> tokio::task::JoinHandle<Vec<u8>> {
+    fn drain(
+        pipe: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>,
+    ) -> tokio::task::JoinHandle<Vec<u8>> {
         tokio::spawn(async move {
             let mut out = Vec::new();
             if let Some(mut pipe) = pipe {
@@ -758,10 +1003,21 @@ pub(crate) async fn output_group(command: &mut tokio::process::Command, input: O
     let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
     let status = tokio::time::timeout(limit, child.wait()).await;
     child.terminate().await;
-    let status = status.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out"))??;
+    let status =
+        status.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out"))??;
     // The group is gone, so the pipes are closed (or soon will be).
-    let collect = |task: tokio::task::JoinHandle<Vec<u8>>| async move { tokio::time::timeout(std::time::Duration::from_secs(2), task).await.ok().and_then(Result::ok).unwrap_or_default() };
-    Ok(std::process::Output { status, stdout: collect(stdout).await, stderr: collect(stderr).await })
+    let collect = |task: tokio::task::JoinHandle<Vec<u8>>| async move {
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default()
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: collect(stdout).await,
+        stderr: collect(stderr).await,
+    })
 }
 
 impl GroupChild {
@@ -773,7 +1029,9 @@ impl GroupChild {
     /// caller has dropped any stdin writer it took from the child (`child.stdin.take()`) first;
     /// otherwise the child doesn't hear it and the full 2 s pass before the kill.
     pub(crate) async fn terminate(&mut self) {
-        let Some(child) = self.child.take() else { return };
+        let Some(child) = self.child.take() else {
+            return;
+        };
         #[cfg(unix)]
         finish_group(child, self.group).await;
         #[cfg(windows)]
@@ -784,7 +1042,9 @@ impl GroupChild {
     /// read-only probe that has what it came for, where the process has nothing to save and
     /// waiting for it to wind down only keeps the caller waiting.
     pub(crate) async fn kill_now(&mut self) {
-        let Some(mut child) = self.child.take() else { return };
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
         #[cfg(unix)]
         signal_group(self.group, libc::SIGKILL);
         // While the child is still held, so its id is still its own.
@@ -892,7 +1152,9 @@ fn reaped(child: &mut tokio::process::Child, limit: std::time::Duration) -> bool
 #[cfg(windows)]
 impl Drop for GroupChild {
     fn drop(&mut self) {
-        let Some(mut child) = self.child.take() else { return };
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
         let (group, job) = (self.group, self.job.take());
         soft_stop(&mut child);
         // As on Unix, a thread rather than a runtime task. It holds the job: were the handle
@@ -912,7 +1174,9 @@ impl Drop for GroupChild {
 #[cfg(unix)]
 impl Drop for GroupChild {
     fn drop(&mut self) {
-        let Some(mut child) = self.child.take() else { return };
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
         let group = self.group;
         signal_group(group, libc::SIGTERM);
         // A runtime task can be cancelled as its runtime shuts down. A short-lived OS thread
@@ -948,7 +1212,9 @@ impl StderrTail {
                 if let Some(s) = &session {
                     s.push(l.clone());
                 }
-                let mut t = lines.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut t = lines
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 t.push_back(l);
                 if t.len() > 20 {
                     t.pop_front();
@@ -972,12 +1238,20 @@ impl StderrTail {
 
     /// The lines kept, oldest first.
     pub(crate) fn lines(&self) -> Vec<String> {
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().cloned().collect()
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// "`name` exited: <last non-empty stderr line>".
     pub(crate) fn exited(&self, name: &str) -> anyhow::Error {
-        let tail = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tail = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match tail.iter().rev().map(|l| l.trim()).find(|l| !l.is_empty()) {
             Some(l) => anyhow::anyhow!("{name} exited: {l}"),
             None => anyhow::anyhow!("{name} exited unexpectedly"),
@@ -1037,7 +1311,11 @@ pub(crate) fn keep_tail(text: &mut String, more: &str) {
     while !text.is_char_boundary(cut) {
         cut += 1;
     }
-    let cut = text[cut..].find('\n').map(|n| cut + n + 1).filter(|c| *c - cut < 512).unwrap_or(cut);
+    let cut = text[cut..]
+        .find('\n')
+        .map(|n| cut + n + 1)
+        .filter(|c| *c - cut < 512)
+        .unwrap_or(cut);
     text.drain(..cut);
 }
 
@@ -1059,7 +1337,12 @@ pub fn line_changes(old: &str, new: &str) -> (u32, u32) {
     let old: Vec<&str> = old.lines().collect();
     let new: Vec<&str> = new.lines().collect();
     let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-    let tail = old[head..].iter().rev().zip(new[head..].iter().rev()).take_while(|(a, b)| a == b).count();
+    let tail = old[head..]
+        .iter()
+        .rev()
+        .zip(new[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
     let (old, new) = (&old[head..old.len() - tail], &new[head..new.len() - tail]);
     let mut left: HashMap<&str, usize> = HashMap::new();
     for l in old {
@@ -1078,7 +1361,11 @@ pub fn line_changes(old: &str, new: &str) -> (u32, u32) {
 /// Read a local image as `(media_type, base64 data)`.
 pub(crate) fn load_image(path: &std::path::Path) -> anyhow::Result<(&'static str, String)> {
     use base64::Engine as _;
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let media_type = match ext.as_str() {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
@@ -1086,8 +1373,12 @@ pub(crate) fn load_image(path: &std::path::Path) -> anyhow::Result<(&'static str
         "webp" => "image/webp",
         other => anyhow::bail!("unsupported image type .{other} ({})", path.display()),
     };
-    let bytes = std::fs::read(path).map_err(|e| anyhow::anyhow!("can't read image {}: {e}", path.display()))?;
-    Ok((media_type, base64::engine::general_purpose::STANDARD.encode(bytes)))
+    let bytes = std::fs::read(path)
+        .map_err(|e| anyhow::anyhow!("can't read image {}: {e}", path.display()))?;
+    Ok((
+        media_type,
+        base64::engine::general_purpose::STANDARD.encode(bytes),
+    ))
 }
 
 #[cfg(test)]
@@ -1096,7 +1387,8 @@ mod tests {
 
     #[tokio::test]
     async fn protocol_lines_are_read_whole_and_overlong_ones_skipped() {
-        let lines = |text: &'static [u8]| ProtocolLines::new(tokio::io::BufReader::with_capacity(8, text));
+        let lines =
+            |text: &'static [u8]| ProtocolLines::new(tokio::io::BufReader::with_capacity(8, text));
         // Lines longer than the reader's buffer, either line ending, a last one without any.
         let mut l = lines(b"{\"a\":\"0123456789abcdef\"}\r\nsecond\n\nlast");
         let mut got = vec![];
@@ -1136,7 +1428,8 @@ mod tests {
         use std::process::Stdio;
         let mut command = if cfg!(windows) {
             // cmd has no printf: `type` a file holding the same bytes.
-            let file = std::env::temp_dir().join(format!("trek-stderr-bytes-{}.bin", std::process::id()));
+            let file =
+                std::env::temp_dir().join(format!("trek-stderr-bytes-{}.bin", std::process::id()));
             std::fs::write(&file, b"\xff\nvalid\n").unwrap();
             let mut c = tokio::process::Command::new("cmd.exe");
             c.args(["/d", "/c", "type"]).arg(file).arg("1>&2");
@@ -1159,7 +1452,13 @@ mod tests {
         let log = SessionLog::default();
         SESSION_LOG
             .scope(log.clone(), async {
-                let mut child = echo_to_stderr("echo 'warning: slow' >&2; echo done >&2", "(echo warning: slow)>&2 & (echo done)>&2").stderr(Stdio::piped()).spawn().unwrap();
+                let mut child = echo_to_stderr(
+                    "echo 'warning: slow' >&2; echo done >&2",
+                    "(echo warning: slow)>&2 & (echo done)>&2",
+                )
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
                 let _tail = StderrTail::capture(child.stderr.take().unwrap(), "test");
                 child.wait().await.unwrap();
             })
@@ -1172,7 +1471,10 @@ mod tests {
         }
         assert_eq!(log.lines(), ["warning: slow", "done"]);
         // Outside a session nothing is kept but the tail.
-        let mut child = echo_to_stderr("echo stray >&2", "(echo stray)>&2").stderr(Stdio::piped()).spawn().unwrap();
+        let mut child = echo_to_stderr("echo stray >&2", "(echo stray)>&2")
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
         let _tail = StderrTail::capture(child.stderr.take().unwrap(), "test");
         child.wait().await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -1186,17 +1488,26 @@ mod tests {
         use tokio::io::{AsyncBufReadExt as _, BufReader};
         async fn tree() -> (GroupChild, i32) {
             let mut command = tokio::process::Command::new("sh");
-            command.args(["-c", "sh -c 'trap \"\" TERM; exec sleep 300' & echo $!; wait"]).stdout(Stdio::piped());
+            command
+                .args([
+                    "-c",
+                    "sh -c 'trap \"\" TERM; exec sleep 300' & echo $!; wait",
+                ])
+                .stdout(Stdio::piped());
             let mut child = spawn_group(&mut command).unwrap();
             let mut line = String::new();
-            BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).await.unwrap();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut line)
+                .await
+                .unwrap();
             (child, line.trim().parse().unwrap())
         }
         async fn assert_gone(pid: i32) {
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
             loop {
                 // SAFETY: signal 0 only checks whether this test's child still exists.
-                let gone = unsafe { libc::kill(pid, 0) } < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+                let gone = unsafe { libc::kill(pid, 0) } < 0
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
                 if gone || tokio::time::Instant::now() >= deadline {
                     assert!(gone, "grandchild {pid} survived its process group");
                     break;
@@ -1249,22 +1560,36 @@ mod tests {
         while trek_core::procs::live().contains(&group) && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert!(!trek_core::procs::live().contains(&group), "a dropped group is untracked once reaped");
+        assert!(
+            !trek_core::procs::live().contains(&group),
+            "a dropped group is untracked once reaped"
+        );
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn a_command_s_output_is_collected_and_a_slow_one_ended() {
         let mut cat = tokio::process::Command::new("cat");
-        let out = output_group(&mut cat, Some(b"hi".to_vec()), std::time::Duration::from_secs(5)).await.unwrap();
+        let out = output_group(
+            &mut cat,
+            Some(b"hi".to_vec()),
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
         assert!(out.status.success());
         assert_eq!(out.stdout, b"hi");
         let mut slow = tokio::process::Command::new("sh");
         slow.args(["-c", "sleep 30 & wait"]);
         let started = std::time::Instant::now();
-        let err = output_group(&mut slow, None, std::time::Duration::from_millis(200)).await.unwrap_err();
+        let err = output_group(&mut slow, None, std::time::Duration::from_millis(200))
+            .await
+            .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < std::time::Duration::from_secs(3), "the group was ended, not waited out");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "the group was ended, not waited out"
+        );
     }
 
     /// A process held open from before it's ended, so its id can't be another's when it's checked.
@@ -1287,7 +1612,8 @@ mod tests {
             use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
             use windows_sys::Win32::System::Threading::WaitForSingleObject;
             // SAFETY: a process handle with SYNCHRONIZE.
-            let waited = unsafe { WaitForSingleObject(self.0.as_raw_handle(), limit.as_millis() as u32) };
+            let waited =
+                unsafe { WaitForSingleObject(self.0.as_raw_handle(), limit.as_millis() as u32) };
             waited == WAIT_OBJECT_0
         }
     }
@@ -1306,28 +1632,52 @@ mod tests {
                  $p = [Diagnostics.Process]::Start($i); [Console]::Out.WriteLine($p.Id); [Console]::Out.Flush(); {then}"
             );
             let mut command = tokio::process::Command::new("powershell.exe");
-            command.args(["-NoProfile", "-NonInteractive", "-Command", &script]).stdin(Stdio::piped()).stdout(Stdio::piped());
+            command
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped());
             let mut child = spawn_group(&mut command).unwrap();
             let mut line = String::new();
             let mut stdout = BufReader::new(child.stdout.take().unwrap());
-            tokio::time::timeout(Duration::from_secs(60), stdout.read_line(&mut line)).await.expect("PowerShell said the ping's pid").unwrap();
+            tokio::time::timeout(Duration::from_secs(60), stdout.read_line(&mut line))
+                .await
+                .expect("PowerShell said the ping's pid")
+                .unwrap();
             (child, Held::open(line.trim().parse().unwrap()))
         }
 
         let (mut child, grandchild) = tree("Start-Sleep 300").await;
         child.terminate().await;
-        assert!(grandchild.exits_within(Duration::from_secs(10)), "the grandchild survived its job");
+        assert!(
+            grandchild.exits_within(Duration::from_secs(10)),
+            "the grandchild survived its job"
+        );
 
         let (child, grandchild) = tree("Start-Sleep 300").await;
         drop(child);
-        assert!(grandchild.exits_within(Duration::from_secs(10)), "the grandchild survived its dropped job");
+        assert!(
+            grandchild.exits_within(Duration::from_secs(10)),
+            "the grandchild survived its dropped job"
+        );
 
         // Its parent gone, the grandchild is still the job's: no parent id leads to it any more.
         let (mut child, grandchild) = tree("exit").await;
-        assert!(tokio::time::timeout(Duration::from_secs(30), child.wait()).await.unwrap().unwrap().success());
-        assert!(!grandchild.exits_within(Duration::from_millis(500)), "the ping runs on");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(30), child.wait())
+                .await
+                .unwrap()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            !grandchild.exits_within(Duration::from_millis(500)),
+            "the ping runs on"
+        );
         child.terminate().await;
-        assert!(grandchild.exits_within(Duration::from_secs(10)), "the orphaned grandchild survived its job");
+        assert!(
+            grandchild.exits_within(Duration::from_secs(10)),
+            "the orphaned grandchild survived its job"
+        );
     }
 
     #[cfg(windows)]
@@ -1335,7 +1685,9 @@ mod tests {
     async fn groups_are_tracked_until_ended_on_windows() {
         let pinger = || {
             let mut command = tokio::process::Command::new("ping.exe");
-            command.args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null());
+            command
+                .args(["-n", "30", "127.0.0.1"])
+                .stdout(std::process::Stdio::null());
             spawn_group(&mut command).unwrap()
         };
         let mut child = pinger();
@@ -1351,7 +1703,10 @@ mod tests {
         while trek_core::procs::live().contains(&group) && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert!(!trek_core::procs::live().contains(&group), "a dropped group is untracked once reaped");
+        assert!(
+            !trek_core::procs::live().contains(&group),
+            "a dropped group is untracked once reaped"
+        );
     }
 
     #[cfg(windows)]
@@ -1361,11 +1716,17 @@ mod tests {
         command.args(["/d", "/c", "exit 3"]);
         let mut child = spawn_group(&mut command).unwrap();
         let group = child.group;
-        let status = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await.unwrap().unwrap();
+        let status = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(status.code(), Some(3));
         let started = std::time::Instant::now();
         child.terminate().await;
-        assert!(started.elapsed() < std::time::Duration::from_secs(1), "nothing to wait for once it's exited");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "nothing to wait for once it's exited"
+        );
         assert!(!trek_core::procs::live().contains(&group));
     }
 
@@ -1373,17 +1734,29 @@ mod tests {
     #[tokio::test]
     async fn a_command_s_output_is_collected_and_a_slow_one_ended_on_windows() {
         // System32's own sort, not one from Git or MSYS that may come first on PATH.
-        let sort = std::path::Path::new(&std::env::var_os("SystemRoot").unwrap()).join(r"System32\sort.exe");
-        let out = output_group(&mut tokio::process::Command::new(sort), Some(b"b\r\na\r\n".to_vec()), std::time::Duration::from_secs(30)).await.unwrap();
+        let sort = std::path::Path::new(&std::env::var_os("SystemRoot").unwrap())
+            .join(r"System32\sort.exe");
+        let out = output_group(
+            &mut tokio::process::Command::new(sort),
+            Some(b"b\r\na\r\n".to_vec()),
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
         assert!(out.status.success());
         assert_eq!(out.stdout, b"a\r\nb\r\n");
         // cmd waits for the ping under it; both go when the time is up.
         let mut slow = tokio::process::Command::new("cmd.exe");
         slow.args(["/d", "/c", "ping -n 60 127.0.0.1 >nul"]);
         let started = std::time::Instant::now();
-        let err = output_group(&mut slow, None, std::time::Duration::from_secs(1)).await.unwrap_err();
+        let err = output_group(&mut slow, None, std::time::Duration::from_secs(1))
+            .await
+            .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < std::time::Duration::from_secs(20), "the group was ended, not waited out");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "the group was ended, not waited out"
+        );
     }
 
     #[cfg(windows)]
@@ -1401,31 +1774,63 @@ mod tests {
                  $p = [Diagnostics.Process]::Start($i); [Console]::Out.WriteLine($p.Id); [Console]::Out.Flush(); {then}"
             );
             let mut command = tokio::process::Command::new("powershell.exe");
-            command.args(["-NoProfile", "-NonInteractive", "-Command", &script]).stdin(Stdio::piped()).stdout(Stdio::piped()).creation_flags(CREATE_NO_WINDOW);
+            command
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .creation_flags(CREATE_NO_WINDOW);
             let mut child = command.spawn().unwrap();
             let group = child.id().unwrap() as i32;
             trek_core::procs::register(group);
             let mut line = String::new();
             let mut stdout = BufReader::new(child.stdout.take().unwrap());
-            tokio::time::timeout(Duration::from_secs(60), stdout.read_line(&mut line)).await.expect("PowerShell said the ping's pid").unwrap();
-            (GroupChild { child: Some(child), group, job: None }, Held::open(line.trim().parse().unwrap()))
+            tokio::time::timeout(Duration::from_secs(60), stdout.read_line(&mut line))
+                .await
+                .expect("PowerShell said the ping's pid")
+                .unwrap();
+            (
+                GroupChild {
+                    child: Some(child),
+                    group,
+                    job: None,
+                },
+                Held::open(line.trim().parse().unwrap()),
+            )
         }
 
         let (mut child, grandchild) = tree("Start-Sleep 300").await;
         child.terminate().await;
-        assert!(grandchild.exits_within(Duration::from_secs(10)), "the grandchild survived its group");
+        assert!(
+            grandchild.exits_within(Duration::from_secs(10)),
+            "the grandchild survived its group"
+        );
 
         let (child, grandchild) = tree("Start-Sleep 300").await;
         drop(child);
-        assert!(grandchild.exits_within(Duration::from_secs(10)), "the grandchild survived its dropped group");
+        assert!(
+            grandchild.exits_within(Duration::from_secs(10)),
+            "the grandchild survived its dropped group"
+        );
 
         // Its parent gone, the grandchild is still found by its parent's id, which the group
         // holds on to.
         let (mut child, grandchild) = tree("exit").await;
-        assert!(tokio::time::timeout(Duration::from_secs(30), child.wait()).await.unwrap().unwrap().success());
-        assert!(!grandchild.exits_within(Duration::from_millis(500)), "the ping runs on");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(30), child.wait())
+                .await
+                .unwrap()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            !grandchild.exits_within(Duration::from_millis(500)),
+            "the ping runs on"
+        );
         child.terminate().await;
-        assert!(grandchild.exits_within(Duration::from_secs(10)), "the orphaned grandchild survived its group");
+        assert!(
+            grandchild.exits_within(Duration::from_secs(10)),
+            "the orphaned grandchild survived its group"
+        );
     }
 
     /// A Trek that dies without cleaning up (killed: no destructors, no atexit) takes its agents
@@ -1437,7 +1842,9 @@ mod tests {
         use tokio::io::{AsyncBufReadExt as _, BufReader};
         if std::env::var_os("TREK_TEST_KILLED_TREK").is_some() {
             let mut command = tokio::process::Command::new("ping.exe");
-            command.args(["-n", "120", "127.0.0.1"]).stdout(std::process::Stdio::null());
+            command
+                .args(["-n", "120", "127.0.0.1"])
+                .stdout(std::process::Stdio::null());
             let child = spawn_group(&mut command).unwrap();
             println!("PING PID {}", child.id().unwrap());
             tokio::time::sleep(std::time::Duration::from_secs(100)).await;
@@ -1445,25 +1852,39 @@ mod tests {
         }
         let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
         command
-            .args(["--exact", "tests::a_killed_trek_takes_its_jobs_along", "--nocapture", "--test-threads=1"])
+            .args([
+                "--exact",
+                "tests::a_killed_trek_takes_its_jobs_along",
+                "--nocapture",
+                "--test-threads=1",
+            ])
             .env("TREK_TEST_KILLED_TREK", "1")
             .stdout(std::process::Stdio::piped());
         let mut trek = command.spawn().unwrap();
         let mut lines = BufReader::new(trek.stdout.take().unwrap()).lines();
         let pid: u32 = loop {
-            let line = tokio::time::timeout(std::time::Duration::from_secs(60), lines.next_line()).await.unwrap().unwrap().expect("the stand-in Trek ended before saying the ping's pid");
+            let line = tokio::time::timeout(std::time::Duration::from_secs(60), lines.next_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .expect("the stand-in Trek ended before saying the ping's pid");
             // After libtest's "test … ... " on the same line.
             if let Some((_, pid)) = line.split_once("PING PID ") {
                 break pid.trim().parse().unwrap();
             }
         };
         let ping = Held::open(pid);
-        assert!(!ping.exits_within(std::time::Duration::from_millis(500)), "the ping runs while its Trek does");
+        assert!(
+            !ping.exits_within(std::time::Duration::from_millis(500)),
+            "the ping runs while its Trek does"
+        );
         trek.start_kill().unwrap();
         let _ = trek.wait().await;
         let ended = ping.exits_within(std::time::Duration::from_secs(10));
         if !ended {
-            let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output();
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .output();
         }
         assert!(ended, "the agent outlived a Trek that was killed");
     }
@@ -1480,25 +1901,47 @@ mod tests {
             // close; it's left open until the process exits).
             let outer = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
             assert!(!outer.is_null());
-            assert_ne!(unsafe { AssignProcessToJobObject(outer, GetCurrentProcess()) }, 0, "{}", std::io::Error::last_os_error());
+            assert_ne!(
+                unsafe { AssignProcessToJobObject(outer, GetCurrentProcess()) },
+                0,
+                "{}",
+                std::io::Error::last_os_error()
+            );
             let mut command = tokio::process::Command::new("ping.exe");
-            command.args(["-n", "120", "127.0.0.1"]).stdout(std::process::Stdio::null());
+            command
+                .args(["-n", "120", "127.0.0.1"])
+                .stdout(std::process::Stdio::null());
             let mut child = spawn_group(&mut command).unwrap();
-            assert!(child.job.is_some(), "the child is in a job of its own, inside Trek's");
+            assert!(
+                child.job.is_some(),
+                "the child is in a job of its own, inside Trek's"
+            );
             let ping = Held::open(child.id().unwrap());
             assert!(!ping.exits_within(std::time::Duration::from_millis(300)));
             child.terminate().await;
-            assert!(ping.exits_within(std::time::Duration::from_secs(10)), "the nested job didn't end the ping");
+            assert!(
+                ping.exits_within(std::time::Duration::from_secs(10)),
+                "the nested job didn't end the ping"
+            );
             println!("NESTED JOB OK");
             return;
         }
         let out = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "tests::a_job_works_inside_the_job_trek_runs_in", "--nocapture", "--test-threads=1"])
+            .args([
+                "--exact",
+                "tests::a_job_works_inside_the_job_trek_runs_in",
+                "--nocapture",
+                "--test-threads=1",
+            ])
             .env("TREK_TEST_NESTED_JOB", "1")
             .output()
             .unwrap();
-        let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-        assert!(out.status.success() && text.contains("NESTED JOB OK"), "{text}");
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && text.contains("NESTED JOB OK"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1528,7 +1971,10 @@ mod tests {
     fn line_changes_count_what_an_edit_did() {
         assert_eq!(line_changes("a\nb\nc\n", "a\nB\nc\n"), (1, 1));
         assert_eq!(line_changes("", "one\ntwo\n"), (2, 0), "a new file");
-        assert_eq!(line_changes("fn a() {\n}\n", "fn a() {\n    x();\n    y();\n}\n"), (2, 0));
+        assert_eq!(
+            line_changes("fn a() {\n}\n", "fn a() {\n    x();\n    y();\n}\n"),
+            (2, 0)
+        );
         assert_eq!(line_changes("x\ny\nz", ""), (0, 3));
         // Moved lines aren't changes; repeated ones are counted as often as they're added.
         assert_eq!(line_changes("1\n2\n3", "3\n1\n2"), (0, 0));
@@ -1538,14 +1984,24 @@ mod tests {
 
     #[test]
     fn plan_title_is_the_first_line() {
-        assert_eq!(plan_title("\n# Add `hello.txt`\n\n1. Write it"), "Add `hello.txt`");
+        assert_eq!(
+            plan_title("\n# Add `hello.txt`\n\n1. Write it"),
+            "Add `hello.txt`"
+        );
         assert_eq!(plan_title(""), "");
     }
 
     #[test]
     fn plan_row_names_the_active_step() {
-        let steps = vec![("Read code".to_string(), Step::Done), ("Fix bug".into(), Step::Active), ("Test".into(), Step::Pending)];
-        assert_eq!(plan_row(&steps), ("Fix bug".into(), "✓ Read code\n→ Fix bug\n○ Test".into()));
+        let steps = vec![
+            ("Read code".to_string(), Step::Done),
+            ("Fix bug".into(), Step::Active),
+            ("Test".into(), Step::Pending),
+        ];
+        assert_eq!(
+            plan_row(&steps),
+            ("Fix bug".into(), "✓ Read code\n→ Fix bug\n○ Test".into())
+        );
         let done = vec![("A".to_string(), Step::Done), ("B".into(), Step::Done)];
         assert_eq!(plan_row(&done).0, "All 2 steps done");
         let waiting = vec![("A".to_string(), Step::Done), ("B".into(), Step::Pending)];
@@ -1555,7 +2011,9 @@ mod tests {
     #[test]
     fn only_a_session_s_first_message_carries_the_project_notes() {
         let (tx, rx) = async_channel::unbounded();
-        let out = first_prompt(rx, |text| instructions_prompt("Verify with ./app check.", text));
+        let out = first_prompt(rx, |text| {
+            instructions_prompt("Verify with ./app check.", text)
+        });
         trek_core::runtime().block_on(async {
             tx.send(Command::Prompt { text: "first".into(), images: vec![] }).await.unwrap();
             tx.send(Command::Prompt { text: "second".into(), images: vec![] }).await.unwrap();
@@ -1571,9 +2029,14 @@ mod tests {
     fn only_the_first_message_carries_the_recap() {
         let (tx, rx) = async_channel::unbounded();
         let out = recap_first(rx, "User: hi".into());
-        let prompt = |t: &str| Command::Prompt { text: t.into(), images: vec![] };
+        let prompt = |t: &str| Command::Prompt {
+            text: t.into(),
+            images: vec![],
+        };
         let got = trek_core::runtime().block_on(async {
-            tx.send(Command::SetHandHolding(trek_core::HandHolding::Auto)).await.unwrap();
+            tx.send(Command::SetHandHolding(trek_core::HandHolding::Auto))
+                .await
+                .unwrap();
             tx.send(prompt("first")).await.unwrap();
             tx.send(prompt("second")).await.unwrap();
             drop(tx);
@@ -1583,16 +2046,35 @@ mod tests {
             }
             got
         });
-        let texts: Vec<String> = got.iter().filter_map(|c| if let Command::Prompt { text, .. } = c { Some(text.clone()) } else { None }).collect();
+        let texts: Vec<String> = got
+            .iter()
+            .filter_map(|c| {
+                if let Command::Prompt { text, .. } = c {
+                    Some(text.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(got.len(), 3, "everything passes through, in order");
-        assert!(texts[0].contains("<recap>\nUser: hi\n</recap>") && texts[0].ends_with("\n\nfirst"), "{}", texts[0]);
+        assert!(
+            texts[0].contains("<recap>\nUser: hi\n</recap>") && texts[0].ends_with("\n\nfirst"),
+            "{}",
+            texts[0]
+        );
         assert_eq!(texts[1], "second");
     }
 
     #[test]
     fn which_agents_resume_partway() {
-        assert!(resumes_partway(&AgentId::ClaudeCode, None) && resumes_partway(&AgentId::Codex, Some("gpt-5.6-luna")));
-        assert!(!resumes_partway(&AgentId::OpenCode, None) && !resumes_partway(&AgentId::Direct("anthropic".into()), None));
+        assert!(
+            resumes_partway(&AgentId::ClaudeCode, None)
+                && resumes_partway(&AgentId::Codex, Some("gpt-5.6-luna"))
+        );
+        assert!(
+            !resumes_partway(&AgentId::OpenCode, None)
+                && !resumes_partway(&AgentId::Direct("anthropic".into()), None)
+        );
         let mock = AgentId::Direct(mock::PROVIDER.into());
         assert!(resumes_partway(&mock, None) && !resumes_partway(&mock, Some(mock::RECAP_MODEL)));
     }
@@ -1601,7 +2083,10 @@ mod tests {
     fn a_session_that_panics_still_exits() {
         use super::AgentEvent;
         let (tx, rx) = async_channel::unbounded();
-        super::supervise(async { panic!("overflow when adding duration to instant") }, tx);
+        super::supervise(
+            async { panic!("overflow when adding duration to instant") },
+            tx,
+        );
         // The channel closes once the supervisor is done with it.
         let events = trek_core::runtime().block_on(async {
             let mut events = vec![];
@@ -1610,7 +2095,10 @@ mod tests {
             }
             events
         });
-        assert!(matches!(&events[..], [AgentEvent::Error(e), AgentEvent::Exited] if e.contains("crashed")), "{events:?}");
+        assert!(
+            matches!(&events[..], [AgentEvent::Error(e), AgentEvent::Exited] if e.contains("crashed")),
+            "{events:?}"
+        );
     }
 }
 
@@ -1621,15 +2109,36 @@ mod live_usage {
 
     /// One tiny turn with a real agent: the events it sent.
     fn one_turn(agent: AgentId, model: &str) -> Vec<AgentEvent> {
-        turn_in(agent, model, None, "Reply with just the word: ok", HandHolding::Supervised)
+        turn_in(
+            agent,
+            model,
+            None,
+            "Reply with just the word: ok",
+            HandHolding::Supervised,
+        )
     }
 
     /// The session a turn ran in.
     fn session_of(events: &[AgentEvent]) -> String {
-        events.iter().find_map(|e| if let AgentEvent::Started { native_id, .. } = e { Some(native_id.clone()) } else { None }).expect("started")
+        events
+            .iter()
+            .find_map(|e| {
+                if let AgentEvent::Started { native_id, .. } = e {
+                    Some(native_id.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("started")
     }
 
-    fn turn_in(agent: AgentId, model: &str, resume: Option<String>, prompt: &str, hand_holding: HandHolding) -> Vec<AgentEvent> {
+    fn turn_in(
+        agent: AgentId,
+        model: &str,
+        resume: Option<String>,
+        prompt: &str,
+        hand_holding: HandHolding,
+    ) -> Vec<AgentEvent> {
         let cwd = std::env::temp_dir().join("trek-basecamp-e2e");
         std::fs::create_dir_all(&cwd).unwrap();
         let session = start(SessionConfig {
@@ -1650,11 +2159,21 @@ mod live_usage {
             read_only: false,
         });
         trek_core::runtime().block_on(async {
-            session.commands.send(Command::Prompt { text: prompt.into(), images: vec![] }).await.unwrap();
+            session
+                .commands
+                .send(Command::Prompt {
+                    text: prompt.into(),
+                    images: vec![],
+                })
+                .await
+                .unwrap();
             let mut seen = vec![];
             let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
             loop {
-                let ev = tokio::time::timeout_at(deadline, session.events.recv()).await.expect("in time").expect("open");
+                let ev = tokio::time::timeout_at(deadline, session.events.recv())
+                    .await
+                    .expect("in time")
+                    .expect("open");
                 println!("{ev:?}");
                 let done = matches!(ev, AgentEvent::TurnComplete { .. } | AgentEvent::Exited);
                 seen.push(ev);
@@ -1668,7 +2187,16 @@ mod live_usage {
     }
 
     fn reported(events: &[AgentEvent]) -> Vec<(Option<String>, TokenUsage)> {
-        events.iter().filter_map(|e| if let AgentEvent::Usage { model, tokens, .. } = e { Some((model.clone(), *tokens)) } else { None }).collect()
+        events
+            .iter()
+            .filter_map(|e| {
+                if let AgentEvent::Usage { model, tokens, .. } = e {
+                    Some((model.clone(), *tokens))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     #[test]
@@ -1676,24 +2204,57 @@ mod live_usage {
     fn claude_live_turn_reports_its_tokens() {
         let ev = one_turn(AgentId::ClaudeCode, "claude-haiku-4-5");
         let used = reported(&ev);
-        assert!(used.iter().any(|(m, t)| m.as_deref().is_some_and(|m| m.starts_with("claude-haiku")) && t.output > 0), "{used:?}");
+        assert!(
+            used.iter().any(
+                |(m, t)| m.as_deref().is_some_and(|m| m.starts_with("claude-haiku"))
+                    && t.output > 0
+            ),
+            "{used:?}"
+        );
     }
 
     #[test]
     #[ignore = "talks to the real Claude Code"]
     fn claude_live_resumed_turn_counts_only_itself() {
-        let first = turn_in(AgentId::ClaudeCode, "claude-haiku-4-5", None, "Reply with just the word: ok", HandHolding::Supervised);
+        let first = turn_in(
+            AgentId::ClaudeCode,
+            "claude-haiku-4-5",
+            None,
+            "Reply with just the word: ok",
+            HandHolding::Supervised,
+        );
         let before: u64 = reported(&first).iter().map(|(_, t)| t.total()).sum();
         // A new process resuming the session: its totals carry the first turn's.
-        let second = turn_in(AgentId::ClaudeCode, "claude-haiku-4-5", Some(session_of(&first)), "Reply with just the word: yes", HandHolding::Supervised);
+        let second = turn_in(
+            AgentId::ClaudeCode,
+            "claude-haiku-4-5",
+            Some(session_of(&first)),
+            "Reply with just the word: yes",
+            HandHolding::Supervised,
+        );
         let used = reported(&second);
         println!("first {before}, resumed {used:?}");
-        assert!(matches!(&used[..], [(Some(m), t)] if m.starts_with("claude-haiku") && t.output > 0 && t.output < 200), "{used:?}");
+        assert!(
+            matches!(&used[..], [(Some(m), t)] if m.starts_with("claude-haiku") && t.output > 0 && t.output < 200),
+            "{used:?}"
+        );
         // The first process left its totals in the ledger: the resumed turn is Claude Code's
         // own figure, not one priced here.
-        let costs: Vec<UsageCost> = second.iter().filter_map(|e| if let AgentEvent::Usage { cost, .. } = e { *cost } else { None }).collect();
+        let costs: Vec<UsageCost> = second
+            .iter()
+            .filter_map(|e| {
+                if let AgentEvent::Usage { cost, .. } = e {
+                    *cost
+                } else {
+                    None
+                }
+            })
+            .collect();
         println!("resumed costs {costs:?}");
-        assert!(matches!(&costs[..], [c] if c.reported && c.usd > 0.0 && c.usd < 0.05), "{costs:?}");
+        assert!(
+            matches!(&costs[..], [c] if c.reported && c.usd > 0.0 && c.usd < 0.05),
+            "{costs:?}"
+        );
     }
 
     #[test]
@@ -1720,18 +2281,38 @@ mod live_usage {
         });
         let prompt = "Use the Bash tool with run_in_background=true to run: echo started-bg; sleep 8; echo done-bg. Then immediately reply with just the word: started. When it completes, reply with just: finished.";
         let seen = trek_core::runtime().block_on(async {
-            session.commands.send(Command::Prompt { text: prompt.into(), images: vec![] }).await.unwrap();
+            session
+                .commands
+                .send(Command::Prompt {
+                    text: prompt.into(),
+                    images: vec![],
+                })
+                .await
+                .unwrap();
             let mut seen = vec![];
             let mut turns = 0;
             let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
             while turns < 2 {
-                let ev = tokio::time::timeout_at(deadline, session.events.recv()).await.expect("in time").expect("open");
+                let ev = tokio::time::timeout_at(deadline, session.events.recv())
+                    .await
+                    .expect("in time")
+                    .expect("open");
                 println!("{ev:?}");
                 if let AgentEvent::TurnComplete { .. } = ev {
                     turns += 1;
                     // Between turns, the shell's output can be read.
-                    if let Some(id) = seen.iter().rev().find_map(|e| if let AgentEvent::Background(b) = e { b.first().map(|t: &BackgroundTask| t.id.clone()) } else { None }) {
-                        session.commands.send(Command::ReadTask { id }).await.unwrap();
+                    if let Some(id) = seen.iter().rev().find_map(|e| {
+                        if let AgentEvent::Background(b) = e {
+                            b.first().map(|t: &BackgroundTask| t.id.clone())
+                        } else {
+                            None
+                        }
+                    }) {
+                        session
+                            .commands
+                            .send(Command::ReadTask { id })
+                            .await
+                            .unwrap();
                     }
                 }
                 seen.push(ev);
@@ -1739,12 +2320,23 @@ mod live_usage {
             let _ = session.commands.send(Command::Shutdown).await;
             seen
         });
-        let first_end = seen.iter().position(|e| matches!(e, AgentEvent::TurnComplete { .. })).unwrap();
+        let first_end = seen
+            .iter()
+            .position(|e| matches!(e, AgentEvent::TurnComplete { .. }))
+            .unwrap();
         assert!(seen[..first_end].iter().any(|e| matches!(e, AgentEvent::Background(b) if b.iter().any(|t| t.kind == BackgroundKind::Shell && t.readable && t.stoppable))), "{seen:?}");
         assert!(seen.iter().any(|e| matches!(e, AgentEvent::TaskOutput { output, .. } if output.contains("started-bg"))), "{seen:?}");
         let rest = &seen[first_end + 1..];
-        let emptied = rest.iter().position(|e| *e == AgentEvent::Background(vec![])).expect("the shell ends");
-        assert!(rest[emptied..].iter().any(|e| matches!(e, AgentEvent::TextDelta(_))), "the agent takes a turn of its own: {rest:?}");
+        let emptied = rest
+            .iter()
+            .position(|e| *e == AgentEvent::Background(vec![]))
+            .expect("the shell ends");
+        assert!(
+            rest[emptied..]
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TextDelta(_))),
+            "the agent takes a turn of its own: {rest:?}"
+        );
     }
 
     #[test]
@@ -1771,12 +2363,22 @@ mod live_usage {
         });
         let prompt = "Use the Agent tool with run_in_background=true and subagent_type general-purpose, description \"Wait a while\", prompt: \"Run the Bash command `sleep 45` and then reply with just: waited.\" Then immediately reply with just the word: started.";
         let seen = trek_core::runtime().block_on(async {
-            session.commands.send(Command::Prompt { text: prompt.into(), images: vec![] }).await.unwrap();
+            session
+                .commands
+                .send(Command::Prompt {
+                    text: prompt.into(),
+                    images: vec![],
+                })
+                .await
+                .unwrap();
             let mut seen = vec![];
             let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
             // The turn that sends it out.
             loop {
-                let ev = tokio::time::timeout_at(deadline, session.events.recv()).await.expect("in time").expect("open");
+                let ev = tokio::time::timeout_at(deadline, session.events.recv())
+                    .await
+                    .expect("in time")
+                    .expect("open");
                 println!("{ev:?}");
                 let done = matches!(ev, AgentEvent::TurnComplete { .. });
                 seen.push(ev);
@@ -1784,9 +2386,25 @@ mod live_usage {
                     break;
                 }
             }
-            let agent = seen.iter().rev().find_map(|e| if let AgentEvent::Background(b) = e { b.iter().find(|t| t.kind == BackgroundKind::Agent).map(|t| t.id.clone()) } else { None }).expect("an agent out");
+            let agent = seen
+                .iter()
+                .rev()
+                .find_map(|e| {
+                    if let AgentEvent::Background(b) = e {
+                        b.iter()
+                            .find(|t| t.kind == BackgroundKind::Agent)
+                            .map(|t| t.id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .expect("an agent out");
             println!("--- stopping {agent}");
-            session.commands.send(Command::StopTask { id: agent }).await.unwrap();
+            session
+                .commands
+                .send(Command::StopTask { id: agent })
+                .await
+                .unwrap();
             // Whatever follows within 30 s.
             let quiet = tokio::time::Instant::now() + Duration::from_secs(30);
             while let Ok(Ok(ev)) = tokio::time::timeout_at(quiet, session.events.recv()).await {
@@ -1796,25 +2414,47 @@ mod live_usage {
             let _ = session.commands.send(Command::Shutdown).await;
             seen
         });
-        let first_end = seen.iter().position(|e| matches!(e, AgentEvent::TurnComplete { .. })).unwrap();
+        let first_end = seen
+            .iter()
+            .position(|e| matches!(e, AgentEvent::TurnComplete { .. }))
+            .unwrap();
         let rest = &seen[first_end + 1..];
-        assert!(rest.contains(&AgentEvent::Background(vec![])), "it stops: {rest:?}");
+        assert!(
+            rest.contains(&AgentEvent::Background(vec![])),
+            "it stops: {rest:?}"
+        );
         // Recorded (Claude Code 2.1.289): it takes a turn of its own to say so, which Trek keeps
         // quiet (`Workspace::interrupt`, `quiet_turn`).
-        assert!(rest.iter().any(|e| matches!(e, AgentEvent::TextDelta(_))), "{rest:?}");
+        assert!(
+            rest.iter().any(|e| matches!(e, AgentEvent::TextDelta(_))),
+            "{rest:?}"
+        );
     }
 
     #[test]
     #[ignore = "talks to the real OpenCode"]
     fn opencode_live_turn_with_tools_counts_every_step() {
-        let model = std::env::var("TREK_LIVE_OPENCODE_MODEL").unwrap_or_else(|_| "opencode/ling-3.1-flash-free".into());
-        let ev = turn_in(AgentId::OpenCode, &model, None, "Use your shell tool to run `ls -a` here, then tell me how many entries it printed.", HandHolding::FullAccess);
+        let model = std::env::var("TREK_LIVE_OPENCODE_MODEL")
+            .unwrap_or_else(|_| "opencode/ling-3.1-flash-free".into());
+        let ev = turn_in(
+            AgentId::OpenCode,
+            &model,
+            None,
+            "Use your shell tool to run `ls -a` here, then tell me how many entries it printed.",
+            HandHolding::FullAccess,
+        );
         let steps = trek_core::import::opencode::usage(&session_of(&ev), 0, i64::MAX);
         let used = reported(&ev);
         println!("steps {steps:?}\nreported {used:?}");
-        assert!(steps.len() > 1, "a turn with a tool call takes more than one step: {steps:?}");
+        assert!(
+            steps.len() > 1,
+            "a turn with a tool call takes more than one step: {steps:?}"
+        );
         let total = |t: &[TokenUsage]| t.iter().map(|t| t.total()).sum::<u64>();
-        assert_eq!(total(&used.iter().map(|(_, t)| *t).collect::<Vec<_>>()), total(&steps.iter().map(|(_, _, t)| *t).collect::<Vec<_>>()));
+        assert_eq!(
+            total(&used.iter().map(|(_, t)| *t).collect::<Vec<_>>()),
+            total(&steps.iter().map(|(_, _, t)| *t).collect::<Vec<_>>())
+        );
     }
 
     #[test]
@@ -1822,15 +2462,28 @@ mod live_usage {
     fn codex_live_turn_reports_its_tokens() {
         let ev = one_turn(AgentId::Codex, "gpt-5.6-luna");
         let used = reported(&ev);
-        assert!(matches!(&used[..], [(Some(m), t)] if m == "gpt-5.6-luna" && t.total() > 0), "{used:?}");
+        assert!(
+            matches!(&used[..], [(Some(m), t)] if m == "gpt-5.6-luna" && t.total() > 0),
+            "{used:?}"
+        );
     }
 
     #[test]
     #[ignore = "talks to the real OpenCode"]
     fn opencode_live_turn_reports_what_it_reports() {
         // ACP agents report a turn's tokens in the prompt response when they do at all.
-        let ev = one_turn(AgentId::OpenCode, &std::env::var("TREK_LIVE_OPENCODE_MODEL").unwrap_or_else(|_| "opencode/ling-3.1-flash-free".into()));
-        assert!(matches!(ev.last(), Some(AgentEvent::TurnComplete { error: None, .. })), "{ev:?}");
+        let ev = one_turn(
+            AgentId::OpenCode,
+            &std::env::var("TREK_LIVE_OPENCODE_MODEL")
+                .unwrap_or_else(|_| "opencode/ling-3.1-flash-free".into()),
+        );
+        assert!(
+            matches!(
+                ev.last(),
+                Some(AgentEvent::TurnComplete { error: None, .. })
+            ),
+            "{ev:?}"
+        );
         println!("reported: {:?}", reported(&ev));
     }
 }
@@ -1853,18 +2506,38 @@ mod mcp_hand_off_tests {
         a.iter().map(|s| s.to_string()).collect()
     }
 
-    fn hand_off(agent: BatchHandOff, command: &str, args: &[&str]) -> Result<Option<(String, Vec<String>)>, String> {
+    fn hand_off(
+        agent: BatchHandOff,
+        command: &str,
+        args: &[&str],
+    ) -> Result<Option<(String, Vec<String>)>, String> {
         agent_stdio_command(agent, command, &strings(args), true, &found)
     }
 
     #[test]
     fn claude_is_given_a_batch_script_through_cmd() {
-        let wrapped = |command: &str, args: &[&str]| hand_off(BatchHandOff::CmdWrapper, command, args);
+        let wrapped =
+            |command: &str, args: &[&str]| hand_off(BatchHandOff::CmdWrapper, command, args);
         // By name, as the user wrote it (cmd.exe finds `npx.cmd`, even from a folder with spaces).
-        assert_eq!(wrapped("npx", &["-y", "@scope/pkg@1.0"]), Ok(Some(("cmd".into(), strings(&["/c", "npx", "-y", "@scope/pkg@1.0"])))));
+        assert_eq!(
+            wrapped("npx", &["-y", "@scope/pkg@1.0"]),
+            Ok(Some((
+                "cmd".into(),
+                strings(&["/c", "npx", "-y", "@scope/pkg@1.0"])
+            )))
+        );
         // By path, with the backslashes cmd.exe wants.
-        assert_eq!(wrapped("D:/tools/run.cmd", &["a b"]), Ok(Some(("cmd".into(), strings(&["/c", r"D:\tools\run.cmd", "a b"])))));
-        assert_eq!(wrapped(r"C:\tools\run.BAT", &[]), Ok(Some(("cmd".into(), strings(&["/c", r"C:\tools\run.BAT"])))));
+        assert_eq!(
+            wrapped("D:/tools/run.cmd", &["a b"]),
+            Ok(Some((
+                "cmd".into(),
+                strings(&["/c", r"D:\tools\run.cmd", "a b"])
+            )))
+        );
+        assert_eq!(
+            wrapped(r"C:\tools\run.BAT", &[]),
+            Ok(Some(("cmd".into(), strings(&["/c", r"C:\tools\run.BAT"]))))
+        );
         // An `.exe`, a name that isn't found, and a path to something else: as written.
         assert_eq!(wrapped("uvx", &["tool"]), Ok(None));
         assert_eq!(wrapped("not-installed", &["x"]), Ok(None));
@@ -1873,40 +2546,92 @@ mod mcp_hand_off_tests {
 
     #[test]
     fn claude_is_not_given_what_cmd_would_misread() {
-        let wrapped = |command: &str, args: &[&str]| hand_off(BatchHandOff::CmdWrapper, command, args);
+        let wrapped =
+            |command: &str, args: &[&str]| hand_off(BatchHandOff::CmdWrapper, command, args);
         let err = wrapped("npx", &["-y", "two\nlines"]).unwrap_err();
-        assert_eq!(err, "npx.cmd is a batch script, which Windows runs through cmd.exe, and cmd.exe can't be given an argument with a line break in it (argument 2 has one).");
+        assert_eq!(
+            err,
+            "npx.cmd is a batch script, which Windows runs through cmd.exe, and cmd.exe can't be given an argument with a line break in it (argument 2 has one)."
+        );
         for bad in ["a&b", "a|b", "<x", "x>", "a^b", "%PATH%", "say \"hi\""] {
             let err = wrapped("npx", &["-y", bad]).unwrap_err();
-            assert!(err.starts_with("npx.cmd is a batch script") && err.contains("argument 2") && !err.contains(bad), "{bad}: {err}");
+            assert!(
+                err.starts_with("npx.cmd is a batch script")
+                    && err.contains("argument 2")
+                    && !err.contains(bad),
+                "{bad}: {err}"
+            );
         }
-        assert!(wrapped(r"C:\a&b\run.cmd", &[]).unwrap_err().contains("its name"));
-        assert!(wrapped(r"C:\Program Files\tools\run.cmd", &[]).unwrap_err().contains("folder with a space"));
+        assert!(
+            wrapped(r"C:\a&b\run.cmd", &[])
+                .unwrap_err()
+                .contains("its name")
+        );
+        assert!(
+            wrapped(r"C:\Program Files\tools\run.cmd", &[])
+                .unwrap_err()
+                .contains("folder with a space")
+        );
         let long = "x".repeat(9000);
-        assert!(wrapped("npx", &[&long]).unwrap_err().contains("over cmd.exe's limit"));
+        assert!(
+            wrapped("npx", &[&long])
+                .unwrap_err()
+                .contains("over cmd.exe's limit")
+        );
     }
 
     #[test]
     fn codex_is_given_the_scripts_own_path() {
         // Codex starts a server with tokio's `Command`, which runs a `.cmd` path with every argument
         // quoted (see `tests_cmd_args`), so `&` and quotes get through; a line break still can't.
-        let given = |command: &str, args: &[&str]| hand_off(BatchHandOff::ResolvedPath, command, args);
-        assert_eq!(given("npx", &["-y", "a&b", "say \"hi\""]), Ok(Some((r"C:\Program Files\nodejs\npx.cmd".into(), strings(&["-y", "a&b", "say \"hi\""])))));
-        assert_eq!(given(r"C:\tools\run.cmd", &["x"]), Ok(Some((r"C:\tools\run.cmd".into(), strings(&["x"])))));
+        let given =
+            |command: &str, args: &[&str]| hand_off(BatchHandOff::ResolvedPath, command, args);
+        assert_eq!(
+            given("npx", &["-y", "a&b", "say \"hi\""]),
+            Ok(Some((
+                r"C:\Program Files\nodejs\npx.cmd".into(),
+                strings(&["-y", "a&b", "say \"hi\""])
+            )))
+        );
+        assert_eq!(
+            given(r"C:\tools\run.cmd", &["x"]),
+            Ok(Some((r"C:\tools\run.cmd".into(), strings(&["x"]))))
+        );
         assert_eq!(given("uvx", &["tool"]), Ok(None));
-        assert!(given("npx", &["two\r\nlines"]).unwrap_err().contains("line break"));
+        assert!(
+            given("npx", &["two\r\nlines"])
+                .unwrap_err()
+                .contains("line break")
+        );
     }
 
     #[test]
     fn nothing_is_different_off_windows() {
         for agent in [BatchHandOff::CmdWrapper, BatchHandOff::ResolvedPath] {
-            assert_eq!(agent_stdio_command(agent, "npx", &strings(&["-y", "a&b\nc"]), false, &found), Ok(None));
+            assert_eq!(
+                agent_stdio_command(agent, "npx", &strings(&["-y", "a&b\nc"]), false, &found),
+                Ok(None)
+            );
         }
         // The same JSON as before, to the byte, however the lookup answers.
         let servers = [
-            McpServer::stdio("fs", "npx", strings(&["-y", "srv"]), vec![("K".into(), "v".into())]),
-            McpServer::stdio("trek", "/Applications/Trek.app/Contents/MacOS/trek-mcp", vec![], vec![]),
-            McpServer::http("linear", "https://mcp.linear.app/mcp", vec![("Authorization".into(), "Bearer t".into())]),
+            McpServer::stdio(
+                "fs",
+                "npx",
+                strings(&["-y", "srv"]),
+                vec![("K".into(), "v".into())],
+            ),
+            McpServer::stdio(
+                "trek",
+                "/Applications/Trek.app/Contents/MacOS/trek-mcp",
+                vec![],
+                vec![],
+            ),
+            McpServer::http(
+                "linear",
+                "https://mcp.linear.app/mcp",
+                vec![("Authorization".into(), "Bearer t".into())],
+            ),
         ];
         let expected = r#"{"fs":{"args":["-y","srv"],"command":"npx","env":{"K":"v"}},"linear":{"headers":{"Authorization":"Bearer t"},"type":"http","url":"https://mcp.linear.app/mcp"},"trek":{"args":[],"command":"/Applications/Trek.app/Contents/MacOS/trek-mcp","env":{}}}"#;
         // As values: serde_json keeps keys in a different order on each platform's build.
@@ -1921,15 +2646,34 @@ mod mcp_hand_off_tests {
     #[test]
     fn a_server_that_cant_be_handed_over_is_left_out_with_its_reason() {
         let servers = [
-            McpServer::stdio("fs", "npx", strings(&["-y", "srv"]), vec![("K".into(), "v".into())]),
+            McpServer::stdio(
+                "fs",
+                "npx",
+                strings(&["-y", "srv"]),
+                vec![("K".into(), "v".into())],
+            ),
             McpServer::stdio("bad", "npx", strings(&["a\nb"]), vec![]),
             McpServer::http("linear", "https://mcp.linear.app/mcp", vec![]),
         ];
-        let (out, left_out) = mcp_servers_json_with(&servers, BatchHandOff::CmdWrapper, true, found);
-        assert_eq!(out, json!({"fs":{"command":"cmd","args":["/c","npx","-y","srv"],"env":{"K":"v"}},"linear":{"type":"http","url":"https://mcp.linear.app/mcp","headers":{}}}));
+        let (out, left_out) =
+            mcp_servers_json_with(&servers, BatchHandOff::CmdWrapper, true, found);
+        assert_eq!(
+            out,
+            json!({"fs":{"command":"cmd","args":["/c","npx","-y","srv"],"env":{"K":"v"}},"linear":{"type":"http","url":"https://mcp.linear.app/mcp","headers":{}}})
+        );
         assert_eq!(left_out.len(), 1);
-        assert!(left_out[0].starts_with("MCP server bad wasn't started: npx.cmd is a batch script"), "{left_out:?}");
+        assert!(
+            left_out[0].starts_with("MCP server bad wasn't started: npx.cmd is a batch script"),
+            "{left_out:?}"
+        );
         // The user's own settings are what they were.
-        assert_eq!(servers[0].transport, McpTransport::Stdio { command: "npx".into(), args: strings(&["-y", "srv"]), env: vec![("K".into(), "v".into())] });
+        assert_eq!(
+            servers[0].transport,
+            McpTransport::Stdio {
+                command: "npx".into(),
+                args: strings(&["-y", "srv"]),
+                env: vec![("K".into(), "v".into())]
+            }
+        );
     }
 }

@@ -41,7 +41,13 @@ pub fn open(paths: Vec<PathBuf>, index: usize, window: &mut Window, cx: &mut App
 }
 
 /// Preview a composer's outbox at `index`: as `open`, with Remove taking an image out of it.
-pub fn open_outbox(paths: Vec<PathBuf>, index: usize, remove: impl Fn(&Path, &mut Window, &mut App) + 'static, window: &mut Window, cx: &mut App) {
+pub fn open_outbox(
+    paths: Vec<PathBuf>,
+    index: usize,
+    remove: impl Fn(&Path, &mut Window, &mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) {
     show(paths, index, Some(Rc::new(remove)), window, cx);
 }
 
@@ -50,8 +56,16 @@ pub fn showable(path: &Path) -> bool {
     crate::mentions::is_image(path) && path.is_file()
 }
 
-fn show(paths: Vec<PathBuf>, index: usize, remove: Option<Remove>, window: &mut Window, cx: &mut App) {
-    let Some(clicked) = paths.get(index).cloned() else { return };
+fn show(
+    paths: Vec<PathBuf>,
+    index: usize,
+    remove: Option<Remove>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(clicked) = paths.get(index).cloned() else {
+        return;
+    };
     if !showable(&clicked) {
         quick_look(&clicked, cx);
         return;
@@ -61,7 +75,9 @@ fn show(paths: Vec<PathBuf>, index: usize, remove: Option<Remove>, window: &mut 
     let index = items.iter().position(|p| *p == clicked).unwrap_or(0);
     let from = thumb_bounds(&clicked, window, cx);
     match in_window(window, cx) {
-        Some(preview) => preview.update(cx, |p, cx| p.present(items, index, remove, from, window, cx)),
+        Some(preview) => preview.update(cx, |p, cx| {
+            p.present(items, index, remove, from, window, cx)
+        }),
         None => cx.open_with_system(&clicked),
     }
 }
@@ -76,7 +92,11 @@ enum Viewer {
 }
 
 fn viewer(windows: bool) -> Viewer {
-    if windows { Viewer::DefaultApp } else { Viewer::QuickLook }
+    if windows {
+        Viewer::DefaultApp
+    } else {
+        Viewer::QuickLook
+    }
 }
 
 /// Show `path` as `viewer` does, for files Trek doesn't draw itself.
@@ -117,7 +137,10 @@ struct Previews(HashMap<WindowId, WeakEntity<ImagePreview>>);
 impl Global for Previews {}
 
 fn in_window(window: &Window, cx: &App) -> Option<Entity<ImagePreview>> {
-    cx.try_global::<Previews>()?.0.get(&window.window_handle().window_id())?.upgrade()
+    cx.try_global::<Previews>()?
+        .0
+        .get(&window.window_handle().window_id())?
+        .upgrade()
 }
 
 /// Where each window last drew each image's thumbnail, while it's on screen.
@@ -155,28 +178,43 @@ pub fn thumb(path: impl Into<PathBuf>) -> impl IntoElement {
 
 /// Where `path`'s thumbnail is in this window, if it's drawn there and on screen.
 fn thumb_bounds(path: &Path, window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
-    let b = *cx.try_global::<Thumbs>()?.0.get(&window.window_handle().window_id())?.get(path)?;
+    let b = *cx
+        .try_global::<Thumbs>()?
+        .0
+        .get(&window.window_handle().window_id())?
+        .get(path)?;
     let viewport = Bounds::new(point(px(0.), px(0.)), window.viewport_size());
     (viewport.intersects(&b) && b.size.width > px(1.) && b.size.height > px(1.)).then_some(b)
 }
 
 /// `path`'s width and height in pixels, from its file's header (read once per path).
 pub fn pixels(path: &Path) -> Option<(u32, u32)> {
-    static SEEN: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, Option<(u32, u32)>>>> = std::sync::LazyLock::new(Default::default);
+    static SEEN: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, Option<(u32, u32)>>>> =
+        std::sync::LazyLock::new(Default::default);
     let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-    *seen.entry(path.to_path_buf()).or_insert_with(|| pixels_now(path))
+    *seen
+        .entry(path.to_path_buf())
+        .or_insert_with(|| pixels_now(path))
 }
 
 /// `pixels`, read from the file now: for one that may have changed since it was last looked at
 /// (the editor's previews), where a remembered size would be the old picture's.
 pub fn pixels_now(path: &Path) -> Option<(u32, u32)> {
-    image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.into_dimensions().ok()
+    image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
 }
 
 /// How wide a tile `height` tall shows `path` in its own proportions, between `min` and `max`
 /// (a square when its size can't be read). Sent messages draw their images this way.
 pub fn tile_width(path: &Path, height: Pixels, min: Pixels, max: Pixels) -> Pixels {
-    let aspect = pixels(path).filter(|(w, h)| *w > 0 && *h > 0).map(|(w, h)| w as f32 / h as f32).unwrap_or(1.);
+    let aspect = pixels(path)
+        .filter(|(w, h)| *w > 0 && *h > 0)
+        .map(|(w, h)| w as f32 / h as f32)
+        .unwrap_or(1.);
     (height * aspect).clamp(min, max)
 }
 
@@ -192,11 +230,18 @@ impl Shown {
     fn new(path: PathBuf) -> Self {
         let pixels = pixels(&path);
         let bytes = std::fs::metadata(&path).ok().map(|m| m.len());
-        Shown { path, pixels, bytes }
+        Shown {
+            path,
+            pixels,
+            bytes,
+        }
     }
 
     fn name(&self) -> String {
-        self.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| self.path.display().to_string())
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| self.path.display().to_string())
     }
 }
 
@@ -236,7 +281,13 @@ impl ImagePreview {
         let previews = cx.default_global::<Previews>();
         previews.0.retain(|_, p| p.upgrade().is_some());
         previews.0.insert(id, me);
-        ImagePreview { showing: crate::motion::Presence::new(crate::motion::SURFACE), focus: cx.focus_handle(), restore: None, scroll: ScrollHandle::new(), drag: None }
+        ImagePreview {
+            showing: crate::motion::Presence::new(crate::motion::SURFACE),
+            focus: cx.focus_handle(),
+            restore: None,
+            scroll: ScrollHandle::new(),
+            drag: None,
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -264,14 +315,25 @@ impl ImagePreview {
     /// The image on screen and whether it's at actual pixels.
     #[cfg(test)]
     pub fn current(&self) -> Option<(PathBuf, bool)> {
-        self.showing.item().filter(|_| self.is_open()).map(|s| (s.items[s.index].path.clone(), s.actual))
+        self.showing
+            .item()
+            .filter(|_| self.is_open())
+            .map(|s| (s.items[s.index].path.clone(), s.actual))
     }
 
     fn animate(&self, cx: &App) -> bool {
         crate::workspace::workspace_global(cx).read(cx).motion(cx)
     }
 
-    fn present(&mut self, items: Vec<PathBuf>, index: usize, remove: Option<Remove>, from: Option<Bounds<Pixels>>, window: &mut Window, cx: &mut Context<Self>) {
+    fn present(
+        &mut self,
+        items: Vec<PathBuf>,
+        index: usize,
+        remove: Option<Remove>,
+        from: Option<Bounds<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if items.is_empty() {
             return;
         }
@@ -281,7 +343,17 @@ impl ImagePreview {
         }
         let index = index.min(items.len() - 1);
         let motion = self.animate(cx);
-        self.showing.enter(Showing { items: items.into_iter().map(Shown::new).collect(), index, actual: false, remove, from }, motion, crate::motion::now(cx));
+        self.showing.enter(
+            Showing {
+                items: items.into_iter().map(Shown::new).collect(),
+                index,
+                actual: false,
+                remove,
+                from,
+            },
+            motion,
+            crate::motion::now(cx),
+        );
         self.drag = None;
         self.focus.focus(window, cx);
         set_overlay(true, cx);
@@ -298,7 +370,12 @@ impl ImagePreview {
         self.drag = None;
         // Back into the thumbnail of the image on screen now (stepping may have changed it), if
         // that's still on screen; from actual pixels, or with none, it fades.
-        let back = self.showing.item().filter(|s| !s.actual).and_then(|s| s.items.get(s.index)).and_then(|i| thumb_bounds(&i.path, window, cx));
+        let back = self
+            .showing
+            .item()
+            .filter(|s| !s.actual)
+            .and_then(|s| s.items.get(s.index))
+            .and_then(|i| thumb_bounds(&i.path, window, cx));
         if let Some(s) = self.showing.item_mut() {
             s.from = back;
         }
@@ -311,7 +388,9 @@ impl ImagePreview {
 
     /// Step `by` images (wrapping round), fit to the window again.
     fn step(&mut self, by: isize, cx: &mut Context<Self>) {
-        let Some(s) = self.showing.item_mut() else { return };
+        let Some(s) = self.showing.item_mut() else {
+            return;
+        };
         let n = s.items.len() as isize;
         if n < 2 {
             return;
@@ -332,10 +411,19 @@ impl ImagePreview {
     }
 
     /// Fit ⇄ actual pixels. `at`: the point to keep under the pointer (a click), else the centre.
-    fn toggle_actual(&mut self, at: Option<Point<Pixels>>, window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_actual(
+        &mut self,
+        at: Option<Point<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (viewport, scale) = (window.viewport_size(), window.scale_factor());
-        let Some(s) = self.showing.item_mut() else { return };
-        let Some(layout) = Layout::of(&s.items[s.index], s.items.len(), viewport, scale) else { return };
+        let Some(s) = self.showing.item_mut() else {
+            return;
+        };
+        let Some(layout) = Layout::of(&s.items[s.index], s.items.len(), viewport, scale) else {
+            return;
+        };
         if !s.actual && !layout.zoomable() {
             return;
         }
@@ -344,10 +432,20 @@ impl ImagePreview {
             // Keep the spot that was clicked (or the middle) where it was on screen.
             let fit = layout.fit_bounds();
             let at = at.filter(|p| fit.contains(p)).unwrap_or(fit.center());
-            let (fx, fy) = ((at.x - fit.origin.x) / fit.size.width, (at.y - fit.origin.y) / fit.size.height);
+            let (fx, fy) = (
+                (at.x - fit.origin.x) / fit.size.width,
+                (at.y - fit.origin.y) / fit.size.height,
+            );
             let image = layout.actual_bounds_in_content();
-            let target = point(image.origin.x + image.size.width * fx - (at.x - layout.pan.origin.x), image.origin.y + image.size.height * fy - (at.y - layout.pan.origin.y));
-            self.scroll.set_offset(clamp_offset(point(-target.x, -target.y), layout.content(), layout.pan.size));
+            let target = point(
+                image.origin.x + image.size.width * fx - (at.x - layout.pan.origin.x),
+                image.origin.y + image.size.height * fy - (at.y - layout.pan.origin.y),
+            );
+            self.scroll.set_offset(clamp_offset(
+                point(-target.x, -target.y),
+                layout.content(),
+                layout.pan.size,
+            ));
         }
         cx.notify();
     }
@@ -359,10 +457,15 @@ impl ImagePreview {
     }
 
     fn copy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.showing.item().map(|s| s.items[s.index].path.clone()) else { return };
+        let Some(path) = self.showing.item().map(|s| s.items[s.index].path.clone()) else {
+            return;
+        };
         match std::fs::read(&path) {
             Ok(bytes) => {
-                cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(format_of(&path), bytes)));
+                cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
+                    format_of(&path),
+                    bytes,
+                )));
                 crate::toast::push(window, "Image copied", cx);
             }
             Err(e) => crate::toast::push(window, format!("Couldn't copy the image: {e}"), cx),
@@ -372,8 +475,12 @@ impl ImagePreview {
     /// Take the image on screen out of the outbox; the next one shows, or the preview closes
     /// with the last.
     fn remove(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(s) = self.showing.item_mut() else { return };
-        let Some(remove) = s.remove.clone() else { return };
+        let Some(s) = self.showing.item_mut() else {
+            return;
+        };
+        let Some(remove) = s.remove.clone() else {
+            return;
+        };
         let gone = s.items.remove(s.index);
         s.actual = false;
         let empty = s.items.is_empty();
@@ -382,7 +489,12 @@ impl ImagePreview {
         }
         remove(&gone.path, window, cx);
         // Its thumbnail is gone from the outbox: nothing to shrink back into.
-        if let Some(seen) = cx.try_global::<Thumbs>().is_some().then(|| cx.global_mut::<Thumbs>()).and_then(|t| t.0.get_mut(&window.window_handle().window_id())) {
+        if let Some(seen) = cx
+            .try_global::<Thumbs>()
+            .is_some()
+            .then(|| cx.global_mut::<Thumbs>())
+            .and_then(|t| t.0.get_mut(&window.window_handle().window_id()))
+        {
             seen.remove(&gone.path);
         }
         if empty {
@@ -414,7 +526,11 @@ impl ImagePreview {
     fn mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         if self.showing.item().is_some_and(|s| s.actual) {
-            self.drag = Some(Drag { from: e.position, offset: self.scroll.offset(), panned: false });
+            self.drag = Some(Drag {
+                from: e.position,
+                offset: self.scroll.offset(),
+                panned: false,
+            });
             cx.notify();
         } else {
             self.toggle_actual(Some(e.position), window, cx);
@@ -422,7 +538,9 @@ impl ImagePreview {
     }
 
     fn mouse_move(&mut self, e: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(drag) = self.drag.as_mut() else { return };
+        let Some(drag) = self.drag.as_mut() else {
+            return;
+        };
         if e.pressed_button != Some(MouseButton::Left) {
             self.drag = None;
             cx.notify();
@@ -435,8 +553,14 @@ impl ImagePreview {
         drag.panned = true;
         let offset = drag.offset + d;
         let Some(s) = self.showing.item() else { return };
-        if let Some(layout) = Layout::of(&s.items[s.index], s.items.len(), window.viewport_size(), window.scale_factor()) {
-            self.scroll.set_offset(clamp_offset(offset, layout.content(), layout.pan.size));
+        if let Some(layout) = Layout::of(
+            &s.items[s.index],
+            s.items.len(),
+            window.viewport_size(),
+            window.scale_factor(),
+        ) {
+            self.scroll
+                .set_offset(clamp_offset(offset, layout.content(), layout.pan.size));
         }
         cx.notify();
     }
@@ -462,7 +586,12 @@ fn set_overlay(open: bool, cx: &mut App) {
 }
 
 fn format_of(path: &Path) -> ImageFormat {
-    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
         Some("jpg" | "jpeg") => ImageFormat::Jpeg,
         Some("gif") => ImageFormat::Gif,
         Some("webp") => ImageFormat::Webp,
@@ -495,10 +624,17 @@ fn meta(s: &Showing) -> String {
 }
 
 /// Keep a pan offset on the image: offsets run from 0 (top left) down to minus the overhang.
-pub(crate) fn clamp_offset(offset: Point<Pixels>, content: Size<Pixels>, area: Size<Pixels>) -> Point<Pixels> {
+pub(crate) fn clamp_offset(
+    offset: Point<Pixels>,
+    content: Size<Pixels>,
+    area: Size<Pixels>,
+) -> Point<Pixels> {
     let max_x = (content.width - area.width).max(px(0.));
     let max_y = (content.height - area.height).max(px(0.));
-    point(offset.x.clamp(-max_x, px(0.)), offset.y.clamp(-max_y, px(0.)))
+    point(
+        offset.x.clamp(-max_x, px(0.)),
+        offset.y.clamp(-max_y, px(0.)),
+    )
 }
 
 /// Where the image goes in a window `viewport` big: the stage it has (between the header and the
@@ -516,12 +652,28 @@ impl Layout {
     fn of(item: &Shown, count: usize, viewport: Size<Pixels>, scale: f32) -> Option<Self> {
         let (w, h) = item.pixels.filter(|(w, h)| *w > 0 && *h > 0)?;
         let bottom = if count > 1 { FILMSTRIP } else { BOTTOM };
-        let stage = Bounds::new(point(px(SIDE), px(HEADER)), size((viewport.width - px(2. * SIDE)).max(px(1.)), (viewport.height - px(HEADER + bottom)).max(px(1.))));
-        let pan = Bounds::new(point(px(0.), stage.origin.y), size(viewport.width, stage.size.height));
+        let stage = Bounds::new(
+            point(px(SIDE), px(HEADER)),
+            size(
+                (viewport.width - px(2. * SIDE)).max(px(1.)),
+                (viewport.height - px(HEADER + bottom)).max(px(1.)),
+            ),
+        );
+        let pan = Bounds::new(
+            point(px(0.), stage.origin.y),
+            size(viewport.width, stage.size.height),
+        );
         let actual = size(px(w as f32 / scale), px(h as f32 / scale));
         // Never past actual pixels: a small image stays small and sharp.
-        let k = (stage.size.width / actual.width).min(stage.size.height / actual.height).min(1.);
-        Some(Layout { stage, pan, actual, fit: size(actual.width * k, actual.height * k) })
+        let k = (stage.size.width / actual.width)
+            .min(stage.size.height / actual.height)
+            .min(1.);
+        Some(Layout {
+            stage,
+            pan,
+            actual,
+            fit: size(actual.width * k, actual.height * k),
+        })
     }
 
     fn zoomable(&self) -> bool {
@@ -529,17 +681,33 @@ impl Layout {
     }
 
     fn fit_bounds(&self) -> Bounds<Pixels> {
-        Bounds::new(self.stage.origin + point((self.stage.size.width - self.fit.width) / 2., (self.stage.size.height - self.fit.height) / 2.), self.fit)
+        Bounds::new(
+            self.stage.origin
+                + point(
+                    (self.stage.size.width - self.fit.width) / 2.,
+                    (self.stage.size.height - self.fit.height) / 2.,
+                ),
+            self.fit,
+        )
     }
 
     /// The actual-size image's scrolling area: the image, or the pan area where it's narrower.
     fn content(&self) -> Size<Pixels> {
-        size(self.actual.width.max(self.pan.size.width), self.actual.height.max(self.pan.size.height))
+        size(
+            self.actual.width.max(self.pan.size.width),
+            self.actual.height.max(self.pan.size.height),
+        )
     }
 
     fn actual_bounds_in_content(&self) -> Bounds<Pixels> {
         let c = self.content();
-        Bounds::new(point((c.width - self.actual.width) / 2., (c.height - self.actual.height) / 2.), self.actual)
+        Bounds::new(
+            point(
+                (c.width - self.actual.width) / 2.,
+                (c.height - self.actual.height) / 2.,
+            ),
+            self.actual,
+        )
     }
 }
 
@@ -553,11 +721,22 @@ fn keep_press<E: InteractiveElement>(el: E) -> E {
 impl ImagePreview {
     /// A round button on the backdrop, `y` from the top: the chevrons (left for `by` < 0). They
     /// show while the pointer is over the preview.
-    fn chevron(&self, id: &'static str, by: isize, y: Pixels, cx: &mut Context<Self>) -> AnyElement {
+    fn chevron(
+        &self,
+        id: &'static str,
+        by: isize,
+        y: Pixels,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
-        let (icon, tip) = if by < 0 { (IconName::ChevronLeft, "Previous (←)") } else { (IconName::ChevronRight, "Next (→)") };
+        let (icon, tip) = if by < 0 {
+            (IconName::ChevronLeft, "Previous (←)")
+        } else {
+            (IconName::ChevronRight, "Next (→)")
+        };
         let inset = px((SIDE - 36.) / 2.);
-        keep_press(div().id(id)).test_support()
+        keep_press(div().id(id))
+            .test_support()
             .absolute()
             .top(y)
             .when(by < 0, |el| el.left(inset))
@@ -577,7 +756,9 @@ impl ImagePreview {
             .cursor_pointer()
             .hover(|s| s.text_color(theme.foreground).bg(theme.popover))
             .child(Icon::new(icon).size(px(16.)))
-            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
+            })
             .on_click(cx.listener(move |this, _, _, cx| this.step(by, cx)))
             .into_any_element()
     }
@@ -600,21 +781,75 @@ impl ImagePreview {
                     .flex_1()
                     .min_w_0()
                     .gap(px(1.))
-                    .child(div().id("preview-name").test_support().truncate().text_size(px(13.)).font_medium().text_color(theme.foreground).child(item.name()))
-                    .child(div().id("preview-meta").test_support().truncate().text_size(px(11.5)).text_color(theme.muted_foreground).child(meta(s))),
+                    .child(
+                        div()
+                            .id("preview-name")
+                            .test_support()
+                            .truncate()
+                            .text_size(px(13.))
+                            .font_medium()
+                            .text_color(theme.foreground)
+                            .child(item.name()),
+                    )
+                    .child(
+                        div()
+                            .id("preview-meta")
+                            .test_support()
+                            .truncate()
+                            .text_size(px(11.5))
+                            .text_color(theme.muted_foreground)
+                            .child(meta(s)),
+                    ),
             )
             .child(
                 h_flex()
                     .flex_none()
                     .gap(px(2.))
-                    .child(ui::icon_button("preview-open", Icon::new(crate::assets::Lucide::SquareArrowOutUpRight), crate::words::words().open_in_viewer).on_click(move |_, _, cx| cx.open_with_system(&open_path)))
-                    .child(ui::icon_button("preview-reveal", IconName::FolderOpen, crate::words::words().reveal_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&reveal_path)))
-                    .child(ui::icon_button("preview-copy", IconName::Copy, crate::keys::shared("Copy image (⌘C)")).on_click(cx.listener(|this, _, window, cx| this.copy(window, cx))))
+                    .child(
+                        ui::icon_button(
+                            "preview-open",
+                            Icon::new(crate::assets::Lucide::SquareArrowOutUpRight),
+                            crate::words::words().open_in_viewer,
+                        )
+                        .on_click(move |_, _, cx| cx.open_with_system(&open_path)),
+                    )
+                    .child(
+                        ui::icon_button(
+                            "preview-reveal",
+                            IconName::FolderOpen,
+                            crate::words::words().reveal_in_file_manager,
+                        )
+                        .on_click(move |_, _, cx| cx.reveal_path(&reveal_path)),
+                    )
+                    .child(
+                        ui::icon_button(
+                            "preview-copy",
+                            IconName::Copy,
+                            crate::keys::shared("Copy image (⌘C)"),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| this.copy(window, cx))),
+                    )
                     .when(s.remove.is_some(), |el| {
-                        el.child(ui::icon_button("preview-remove", Icon::new(crate::assets::Lucide::Trash), crate::keys::shared("Remove from message (⌘⌫)")).on_click(cx.listener(|this, _, window, cx| this.remove(window, cx))))
+                        el.child(
+                            ui::icon_button(
+                                "preview-remove",
+                                Icon::new(crate::assets::Lucide::Trash),
+                                crate::keys::shared("Remove from message (⌘⌫)"),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| this.remove(window, cx))),
+                        )
                     })
-                    .child(div().w(px(1.)).h(px(16.)).mx(px(6.)).bg(theme.foreground.opacity(0.12)))
-                    .child(ui::icon_button("preview-close", IconName::Close, "Close (Esc)").on_click(cx.listener(|this, _, window, cx| this.close(window, cx)))),
+                    .child(
+                        div()
+                            .w(px(1.))
+                            .h(px(16.))
+                            .mx(px(6.))
+                            .bg(theme.foreground.opacity(0.12)),
+                    )
+                    .child(
+                        ui::icon_button("preview-close", IconName::Close, "Close (Esc)")
+                            .on_click(cx.listener(|this, _, window, cx| this.close(window, cx))),
+                    ),
             )
             .into_any_element()
     }
@@ -629,34 +864,63 @@ impl ImagePreview {
             .left_0()
             .w_full()
             .justify_center()
-            .child(keep_press(h_flex().id("preview-thumbs")).gap(px(6.)).p(px(4.)).children(s.items.iter().enumerate().map(|(i, item)| {
-                let on = i == s.index;
-                div()
-                    .id(("preview-thumb", i))
-                    .test_support()
-                    .size(px(THUMB))
-                    .flex_none()
-                    .rounded(px(7.))
-                    .overflow_hidden()
-                    .border_1()
-                    .border_color(theme.foreground.opacity(if on { 0.85 } else { 0.1 }))
-                    .when(!on, |el| el.opacity(0.55).hover(|s| s.opacity(0.9)).cursor_pointer())
-                    .child(img(item.path.clone()).size_full().object_fit(ObjectFit::Cover))
-                    .on_click(cx.listener(move |this, _, _, cx| this.go_to(i, cx)))
-            })))
+            .child(
+                keep_press(h_flex().id("preview-thumbs"))
+                    .gap(px(6.))
+                    .p(px(4.))
+                    .children(s.items.iter().enumerate().map(|(i, item)| {
+                        let on = i == s.index;
+                        div()
+                            .id(("preview-thumb", i))
+                            .test_support()
+                            .size(px(THUMB))
+                            .flex_none()
+                            .rounded(px(7.))
+                            .overflow_hidden()
+                            .border_1()
+                            .border_color(theme.foreground.opacity(if on { 0.85 } else { 0.1 }))
+                            .when(!on, |el| {
+                                el.opacity(0.55).hover(|s| s.opacity(0.9)).cursor_pointer()
+                            })
+                            .child(
+                                img(item.path.clone())
+                                    .size_full()
+                                    .object_fit(ObjectFit::Cover),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| this.go_to(i, cx)))
+                    })),
+            )
             .into_any_element()
     }
 
     /// The image itself: fit to the stage (`t` of the way in), or at actual pixels in a pan area.
-    fn image(&self, s: &Showing, t: f32, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn image(
+        &self,
+        s: &Showing,
+        t: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let item = &s.items[s.index];
-        let edge = theme.foreground.opacity(if theme.mode.is_dark() { 0.08 } else { 0.06 });
+        let edge = theme
+            .foreground
+            .opacity(if theme.mode.is_dark() { 0.08 } else { 0.06 });
         let under = theme.foreground.opacity(0.03);
         fn frame<E: Styled>(el: E, edge: Hsla, under: Hsla) -> E {
-            el.rounded(px(6.)).overflow_hidden().border_1().border_color(edge).shadow_lg().bg(under)
+            el.rounded(px(6.))
+                .overflow_hidden()
+                .border_1()
+                .border_color(edge)
+                .shadow_lg()
+                .bg(under)
         }
-        let Some(layout) = Layout::of(item, s.items.len(), window.viewport_size(), window.scale_factor()) else {
+        let Some(layout) = Layout::of(
+            item,
+            s.items.len(),
+            window.viewport_size(),
+            window.scale_factor(),
+        ) else {
             // No size in the file's header: the image fits itself.
             return div()
                 .absolute()
@@ -664,12 +928,25 @@ impl ImagePreview {
                 .top(px(HEADER))
                 .right(px(SIDE))
                 .bottom(px(if s.items.len() > 1 { FILMSTRIP } else { BOTTOM }))
-                .child(keep_press(div().id("preview-image").test_support()).size_full().child(img(item.path.clone()).size_full().object_fit(ObjectFit::Contain)))
+                .child(
+                    keep_press(div().id("preview-image").test_support())
+                        .size_full()
+                        .child(
+                            img(item.path.clone())
+                                .size_full()
+                                .object_fit(ObjectFit::Contain),
+                        ),
+                )
                 .into_any_element();
         };
-        let press = cx.listener(|this, e: &MouseDownEvent, window, cx| this.mouse_down(e, window, cx));
+        let press =
+            cx.listener(|this, e: &MouseDownEvent, window, cx| this.mouse_down(e, window, cx));
         if s.actual {
-            let (area, content, at) = (layout.pan, layout.content(), layout.actual_bounds_in_content());
+            let (area, content, at) = (
+                layout.pan,
+                layout.content(),
+                layout.actual_bounds_in_content(),
+            );
             let grabbing = self.drag.as_ref().is_some_and(|d| d.panned);
             return div()
                 .id("preview-pan")
@@ -689,7 +966,11 @@ impl ImagePreview {
                             .w(at.size.width)
                             .h(at.size.height)
                             .rounded(px(2.))
-                            .cursor(if grabbing { CursorStyle::ClosedHand } else { CursorStyle::OpenHand })
+                            .cursor(if grabbing {
+                                CursorStyle::ClosedHand
+                            } else {
+                                CursorStyle::OpenHand
+                            })
                             .child(img(item.path.clone()).size_full())
                             .on_mouse_down(MouseButton::Left, press),
                     ),
@@ -705,7 +986,14 @@ impl ImagePreview {
                 let k = 0.965 + 0.035 * t;
                 let shown = size(layout.fit.width * k, layout.fit.height * k);
                 let stage = layout.stage;
-                Bounds::new(stage.origin + point((stage.size.width - shown.width) / 2., (stage.size.height - shown.height) / 2.), shown)
+                Bounds::new(
+                    stage.origin
+                        + point(
+                            (stage.size.width - shown.width) / 2.,
+                            (stage.size.height - shown.height) / 2.,
+                        ),
+                    shown,
+                )
             }
         };
         let moving = t < 1.;
@@ -715,9 +1003,15 @@ impl ImagePreview {
             .top(at.origin.y)
             .w(at.size.width)
             .h(at.size.height)
-            .when(moving && s.from.is_some(), |el| el.rounded(px(crate::motion::lerp(10., 6., t))))
+            .when(moving && s.from.is_some(), |el| {
+                el.rounded(px(crate::motion::lerp(10., 6., t)))
+            })
             .when(layout.zoomable(), |el| el.cursor_pointer())
-            .child(img(item.path.clone()).size_full().when(moving, |i| i.object_fit(ObjectFit::Cover)))
+            .child(
+                img(item.path.clone())
+                    .size_full()
+                    .when(moving, |i| i.object_fit(ObjectFit::Cover)),
+            )
             .on_mouse_down(MouseButton::Left, press)
             .into_any_element()
     }
@@ -726,23 +1020,35 @@ impl ImagePreview {
 impl Render for ImagePreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // How far it has come in (1: all the way); it unmounts once it has gone all the way out.
-        let Some(t) = self.showing.sample(crate::motion::now(cx), window) else { return div().into_any_element() };
+        let Some(t) = self.showing.sample(crate::motion::now(cx), window) else {
+            return div().into_any_element();
+        };
         let closing = !self.showing.is_present();
-        let Some(s) = self.showing.item().filter(|s| !s.items.is_empty()) else { return div().into_any_element() };
+        let Some(s) = self.showing.item().filter(|s| !s.items.is_empty()) else {
+            return div().into_any_element();
+        };
         // Grown out of a thumbnail, the image itself is opaque all the way: the rest fades round it.
         let zoom = s.from.is_some() && !s.actual;
         let theme = cx.theme().clone();
         // The window's own surface, coming in over what was there (`t`) until the image is the only
         // thing with colour. Opaque once in: any of the transcript showing through (its images
         // above all) reads as clutter around the picture.
-        let backdrop = if theme.mode.is_dark() { theme.background } else { theme.sidebar };
+        let backdrop = if theme.mode.is_dark() {
+            theme.background
+        } else {
+            theme.sidebar
+        };
         let several = s.items.len() > 1;
         let image = self.image(s, t, window, cx);
         let header = self.header(s, cx);
         let film = several.then(|| self.filmstrip(s, cx));
         let chevrons = several.then(|| {
-            let y = px(HEADER) + (window.viewport_size().height - px(HEADER + FILMSTRIP)) / 2. - px(18.);
-            [self.chevron("preview-prev", -1, y, cx), self.chevron("preview-next", 1, y, cx)]
+            let y = px(HEADER) + (window.viewport_size().height - px(HEADER + FILMSTRIP)) / 2.
+                - px(18.);
+            [
+                self.chevron("preview-prev", -1, y, cx),
+                self.chevron("preview-next", 1, y, cx),
+            ]
         });
         let preview = div()
             .id("attachment-preview")
@@ -757,22 +1063,74 @@ impl Render for ImagePreview {
             .when(!closing, |el| {
                 el.track_focus(&self.focus)
                     .key_context("AttachmentPreview")
-                    .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| this.key(ev, window, cx)))
+                    .on_key_down(
+                        cx.listener(|this, ev: &KeyDownEvent, window, cx| this.key(ev, window, cx)),
+                    )
                     // ⌘W puts the preview away rather than the tab or window under it.
-                    .on_action(cx.listener(|this, _: &crate::CloseTab, window, cx| this.close(window, cx)))
-                    .on_action(cx.listener(|this, _: &crate::CloseWindow, window, cx| this.close(window, cx)))
-                    .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, cx| this.mouse_move(e, window, cx)))
-                    .on_mouse_up(MouseButton::Left, cx.listener(|this, _, window, cx| this.mouse_up(window, cx)))
-                    .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, window, cx| this.mouse_up(window, cx)))
+                    .on_action(
+                        cx.listener(|this, _: &crate::CloseTab, window, cx| this.close(window, cx)),
+                    )
+                    .on_action(cx.listener(|this, _: &crate::CloseWindow, window, cx| {
+                        this.close(window, cx)
+                    }))
+                    .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, cx| {
+                        this.mouse_move(e, window, cx)
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.mouse_up(window, cx)),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.mouse_up(window, cx)),
+                    )
             })
             // Clicking beside the image puts it away (what's over the backdrop keeps its presses).
-            .child(div().id("preview-backdrop").absolute().top_0().left_0().size_full().bg(backdrop).when(zoom, |el| el.opacity(t)).on_click(cx.listener(|this, _, window, cx| this.close(window, cx))))
+            .child(
+                div()
+                    .id("preview-backdrop")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .bg(backdrop)
+                    .when(zoom, |el| el.opacity(t))
+                    .on_click(cx.listener(|this, _, window, cx| this.close(window, cx))),
+            )
             .child(image)
-            .child(div().absolute().top_0().left_0().w_full().when(zoom, |el| el.opacity(t)).child(header))
-            .children(chevrons.map(|c| div().absolute().top_0().left_0().size_full().when(zoom, |el| el.opacity(t)).children(c)))
-            .children(film.map(|f| div().absolute().bottom_0().left_0().size_full().when(zoom, |el| el.opacity(t)).child(f)));
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w_full()
+                    .when(zoom, |el| el.opacity(t))
+                    .child(header),
+            )
+            .children(chevrons.map(|c| {
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .when(zoom, |el| el.opacity(t))
+                    .children(c)
+            }))
+            .children(film.map(|f| {
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .size_full()
+                    .when(zoom, |el| el.opacity(t))
+                    .child(f)
+            }));
         // Going, it's inert: a click reaches what's under it.
-        if closing { crate::motion::inert(preview).into_any_element() } else { preview.into_any_element() }
+        if closing {
+            crate::motion::inert(preview).into_any_element()
+        } else {
+            preview.into_any_element()
+        }
     }
 }
 
@@ -783,7 +1141,11 @@ mod tests {
     use std::path::PathBuf;
 
     fn shown(pixels: Option<(u32, u32)>) -> Shown {
-        Shown { path: PathBuf::from("/x.png"), pixels, bytes: None }
+        Shown {
+            path: PathBuf::from("/x.png"),
+            pixels,
+            bytes: None,
+        }
     }
 
     #[test]
@@ -806,7 +1168,10 @@ mod tests {
         let big = Layout::of(&shown(Some((2880, 1800))), 1, window, 2.).unwrap();
         assert!(big.zoomable());
         assert!(big.fit.width <= big.stage.size.width && big.fit.height <= big.stage.size.height);
-        assert!((big.fit.width / big.fit.height - 1.6).abs() < 0.01, "keeps its shape");
+        assert!(
+            (big.fit.width / big.fit.height - 1.6).abs() < 0.01,
+            "keeps its shape"
+        );
         // An icon isn't blown up.
         let small = Layout::of(&shown(Some((64, 64))), 3, window, 2.).unwrap();
         assert_eq!(small.fit, size(px(32.), px(32.)));
@@ -818,7 +1183,13 @@ mod tests {
     fn panning_stays_on_the_image() {
         let content = size(px(2000.), px(1000.));
         let area = size(px(1000.), px(800.));
-        assert_eq!(clamp_offset(point(px(50.), px(-500.)), content, area), point(px(0.), px(-200.)));
-        assert_eq!(clamp_offset(point(px(-1500.), px(0.)), content, area), point(px(-1000.), px(0.)));
+        assert_eq!(
+            clamp_offset(point(px(50.), px(-500.)), content, area),
+            point(px(0.), px(-200.))
+        );
+        assert_eq!(
+            clamp_offset(point(px(-1500.), px(0.)), content, area),
+            point(px(-1000.), px(0.))
+        );
     }
 }

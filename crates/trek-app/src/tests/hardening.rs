@@ -26,13 +26,19 @@ fn a_link_to_a_file_outside_the_projects_asks_first() {
         assert!(cx.has_pending_prompt(), "a link from outside asks");
         cx.simulate_prompt_answer("Cancel");
         trek.render(cx);
-        assert!(!trek.read(cx, |ws, _| editing(&file)(&ws.route)), "cancelled: nothing opened");
+        assert!(
+            !trek.read(cx, |ws, _| editing(&file)(&ws.route)),
+            "cancelled: nothing opened"
+        );
 
         cx.update(|cx| crate::deep_link::open(&url, cx));
         trek.render(cx);
         cx.simulate_prompt_answer("Open");
         trek.render(cx);
-        assert!(trek.read(cx, |ws, _| editing(&file)(&ws.route)), "opened once the user says so");
+        assert!(
+            trek.read(cx, |ws, _| editing(&file)(&ws.route)),
+            "opened once the user says so"
+        );
     });
 }
 
@@ -43,7 +49,11 @@ fn a_link_that_climbs_out_of_a_project_asks_too() {
         let elsewhere = new_project("elsewhere");
         let file = elsewhere.join("b.rs");
         std::fs::write(&file, "\n").unwrap();
-        let climbing = trek.project.join("..").join(elsewhere.file_name().unwrap()).join("b.rs");
+        let climbing = trek
+            .project
+            .join("..")
+            .join(elsewhere.file_name().unwrap())
+            .join("b.rs");
         let url = format!("trek://ask?path={}&line=1&selection=x", climbing.display());
         cx.update(|cx| crate::deep_link::open(&url, cx));
         trek.render(cx);
@@ -103,9 +113,15 @@ fn quitting_ends_the_process_groups_trek_started() {
     use std::os::unix::process::CommandExt as _;
     run(async |cx| {
         let trek = open(cx);
-        let mut child = std::process::Command::new(trek_test_fixtures::bin("fixture")).args(["sleep", "30"]).process_group(0).spawn().unwrap();
+        let mut child = std::process::Command::new(trek_test_fixtures::bin("fixture"))
+            .args(["sleep", "30"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
         GROUP.store(child.id() as i32, std::sync::atomic::Ordering::SeqCst);
-        trek.update(cx, |ws, _| ws.end_children_on_quit = Some(end_the_tests_group));
+        trek.update(cx, |ws, _| {
+            ws.end_children_on_quit = Some(end_the_tests_group)
+        });
         // Quit as the Dock or a logout does: no Quit action first, straight to shutdown.
         cx.quit();
         cx.run_until_parked();
@@ -113,6 +129,9 @@ fn quitting_ends_the_process_groups_trek_started() {
         while child.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(child.try_wait().unwrap().is_some(), "the agent's group was ended");
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "the agent's group was ended"
+        );
     });
 }

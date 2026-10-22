@@ -7,11 +7,12 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::rpc::{self, ToolDef, ToolResult, arg_f64, arg_point, arg_str, opt_f64, opt_str, point_schema, text};
+use crate::rpc::{
+    self, ToolDef, ToolResult, arg_f64, arg_point, arg_str, opt_f64, opt_str, point_schema, text,
+};
 use crate::util::{self, MAX_IMAGE_SIDE, TempFile, fmt_num};
 
-pub const AXE_MISSING: &str =
-    "Touch input needs AXe. Turn on 'Simulator touch input' in Trek ▸ Settings ▸ Tools to install it.";
+pub const AXE_MISSING: &str = "Touch input needs AXe. Turn on 'Simulator touch input' in Trek ▸ Settings ▸ Tools to install it.";
 
 const INSTRUCTIONS: &str = "iOS Simulator control. Use `sim_list` to find devices and `sim_boot` to start one. \
 `sim_screenshot` returns an image sized in device points (downscaled further only if very large) and reports the \
@@ -46,7 +47,8 @@ pub struct Simulator {
 fn simctl(args: &[&str]) -> Result<String, String> {
     let mut full = vec!["simctl"];
     full.extend_from_slice(args);
-    util::run_ok("/usr/bin/xcrun", &full, None, SIMCTL_TIMEOUT).map_err(|e| format!("simctl {}: {e}", args.join(" ")))
+    util::run_ok("/usr/bin/xcrun", &full, None, SIMCTL_TIMEOUT)
+        .map_err(|e| format!("simctl {}: {e}", args.join(" ")))
 }
 
 /// "com.apple.CoreSimulator.SimRuntime.iOS-26-0" → "iOS 26.0"
@@ -67,7 +69,12 @@ pub fn parse_devices(json_text: &str) -> Result<Vec<Device>, String> {
                 if d.get("isAvailable").and_then(Value::as_bool) == Some(false) {
                     continue;
                 }
-                let s = |k: &str| d.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+                let s = |k: &str| {
+                    d.get(k)
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                };
                 out.push(Device {
                     name: s("name"),
                     udid: s("udid"),
@@ -90,7 +97,10 @@ pub fn parse_devices(json_text: &str) -> Result<Vec<Device>, String> {
 
 fn version_key(runtime: &str) -> (String, Vec<u32>) {
     let (os, ver) = runtime.split_once(' ').unwrap_or((runtime, ""));
-    (os.to_string(), ver.split('.').filter_map(|p| p.parse().ok()).collect())
+    (
+        os.to_string(),
+        ver.split('.').filter_map(|p| p.parse().ok()).collect(),
+    )
 }
 
 fn devices() -> Result<Vec<Device>, String> {
@@ -98,7 +108,10 @@ fn devices() -> Result<Vec<Device>, String> {
 }
 
 fn find_axe() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("TREK_AXE_PATH").map(PathBuf::from).filter(|p| p.is_file()) {
+    if let Some(p) = std::env::var_os("TREK_AXE_PATH")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+    {
         return Some(p);
     }
     util::find_executable("axe", &["/opt/homebrew/bin", "/usr/local/bin"])
@@ -107,7 +120,8 @@ fn find_axe() -> Option<PathBuf> {
 fn axe(args: &[&str], stdin: Option<&str>) -> Result<String, String> {
     let bin = find_axe().ok_or(AXE_MISSING)?;
     let bin = bin.to_str().ok_or("AXe path is not UTF-8")?;
-    util::run_ok(bin, args, stdin, AXE_TIMEOUT).map_err(|e| format!("axe {}: {e}", args.first().unwrap_or(&"")))
+    util::run_ok(bin, args, stdin, AXE_TIMEOUT)
+        .map_err(|e| format!("axe {}: {e}", args.first().unwrap_or(&"")))
 }
 
 fn coord(v: f64) -> String {
@@ -146,7 +160,8 @@ impl Simulator {
         if let Some(s) = self.scale_cache.get(device_type) {
             return Some(*s);
         }
-        let types: Value = serde_json::from_str(&simctl(&["list", "devicetypes", "-j"]).ok()?).ok()?;
+        let types: Value =
+            serde_json::from_str(&simctl(&["list", "devicetypes", "-j"]).ok()?).ok()?;
         let bundle = types
             .get("devicetypes")?
             .as_array()?
@@ -157,7 +172,10 @@ impl Simulator {
             .to_string();
         let res = PathBuf::from(bundle).join("Contents/Resources");
         let attempts = [
-            ("capabilities.plist", "capabilities.ScreenDimensionsCapability.main-screen-scale"),
+            (
+                "capabilities.plist",
+                "capabilities.ScreenDimensionsCapability.main-screen-scale",
+            ),
             ("profile.plist", "mainScreenScale"),
         ];
         let scale = attempts.iter().find_map(|(file, key)| {
@@ -184,14 +202,24 @@ impl Simulator {
         let list = devices()?;
         let items: Vec<Value> = list
             .iter()
-            .map(|d| json!({"name": d.name, "udid": d.udid, "runtime": d.runtime, "state": d.state}))
+            .map(
+                |d| json!({"name": d.name, "udid": d.udid, "runtime": d.runtime, "state": d.state}),
+            )
             .collect();
         let booted = list.iter().filter(|d| d.state == "Booted").count();
         Ok(vec![text(format!(
             "{} available simulators ({booted} booted). AXe touch input: {}.\n{}",
             items.len(),
-            if find_axe().is_some() { "installed" } else { "not installed" },
-            items.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")
+            if find_axe().is_some() {
+                "installed"
+            } else {
+                "not installed"
+            },
+            items
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
         ))])
     }
 
@@ -220,7 +248,9 @@ impl Simulator {
         let udid = arg_str(args, "udid")?.trim();
         match simctl(&["shutdown", udid]) {
             Ok(_) => Ok(vec![text(format!("Shut down {udid}."))]),
-            Err(e) if e.contains("current state: Shutdown") => Ok(vec![text(format!("{udid} is already shut down."))]),
+            Err(e) if e.contains("current state: Shutdown") => {
+                Ok(vec![text(format!("{udid} is already shut down."))])
+            }
             Err(e) => Err(e),
         }
     }
@@ -230,7 +260,9 @@ impl Simulator {
         let tmp = TempFile::new("png");
         simctl(&["io", &dev.udid, "screenshot", "--type=png", tmp.path_str()])?;
         let (_, pw, ph) = util::load_png(&tmp.0)?;
-        let scale = self.screen_scale(&dev.device_type).unwrap_or(if pw.min(ph) >= 1000 { 3.0 } else { 2.0 });
+        let scale = self
+            .screen_scale(&dev.device_type)
+            .unwrap_or(if pw.min(ph) >= 1000 { 3.0 } else { 2.0 });
         let (pt_w, pt_h) = (pw as f64 / scale, ph as f64 / scale);
         let target = pt_w.max(pt_h).round().min(MAX_IMAGE_SIDE as f64) as u32;
         if pw.max(ph) > target {
@@ -238,7 +270,8 @@ impl Simulator {
         }
         let (b64, iw, ih) = util::load_png(&tmp.0)?;
         let factor = pt_w / iw.max(1) as f64;
-        self.mappings.insert(dev.udid.clone(), SimMapping { factor });
+        self.mappings
+            .insert(dev.udid.clone(), SimMapping { factor });
         let mapping = if (factor - 1.0).abs() < 0.01 {
             "Screenshot pixels equal device points, so pass coordinates from this image directly to sim_tap/sim_swipe."
                 .to_string()
@@ -272,7 +305,9 @@ impl Simulator {
     fn sim_install(&self, args: &Value) -> ToolResult {
         let path = arg_str(args, "app_path")?;
         if !std::path::Path::new(path).exists() {
-            return Err(format!("{path} does not exist (expected a built .app bundle, e.g. from DerivedData)"));
+            return Err(format!(
+                "{path} does not exist (expected a built .app bundle, e.g. from DerivedData)"
+            ));
         }
         let dev = self.resolve_booted(args)?;
         simctl(&["install", &dev.udid, path])?;
@@ -283,7 +318,11 @@ impl Simulator {
         let bundle = arg_str(args, "bundle_id")?;
         let dev = self.resolve_booted(args)?;
         let out = simctl(&["launch", "--terminate-running-process", &dev.udid, bundle])?;
-        Ok(vec![text(format!("Launched {bundle} on {}. {}", dev.name, out.trim()))])
+        Ok(vec![text(format!(
+            "Launched {bundle} on {}. {}",
+            dev.name,
+            out.trim()
+        ))])
     }
 
     fn sim_tap(&self, args: &Value) -> ToolResult {
@@ -291,8 +330,24 @@ impl Simulator {
         find_axe().ok_or(AXE_MISSING)?;
         let dev = self.resolve_booted(args)?;
         let (px, py) = self.to_points(&dev.udid, x, y);
-        axe(&["tap", "-x", &coord(px), "-y", &coord(py), "--udid", &dev.udid], None)?;
-        Ok(vec![text(format!("Tapped ({}, {}) on {}.", fmt_num(x), fmt_num(y), dev.name))])
+        axe(
+            &[
+                "tap",
+                "-x",
+                &coord(px),
+                "-y",
+                &coord(py),
+                "--udid",
+                &dev.udid,
+            ],
+            None,
+        )?;
+        Ok(vec![text(format!(
+            "Tapped ({}, {}) on {}.",
+            fmt_num(x),
+            fmt_num(y),
+            dev.name
+        ))])
     }
 
     fn sim_swipe(&self, args: &Value) -> ToolResult {
@@ -304,7 +359,17 @@ impl Simulator {
         let (ax, ay) = self.to_points(&dev.udid, fx, fy);
         let (bx, by) = self.to_points(&dev.udid, tx, ty);
         let (ax, ay, bx, by) = (coord(ax), coord(ay), coord(bx), coord(by));
-        let mut a = vec!["swipe", "--start-x", &ax, "--start-y", &ay, "--end-x", &bx, "--end-y", &by];
+        let mut a = vec![
+            "swipe",
+            "--start-x",
+            &ax,
+            "--start-y",
+            &ay,
+            "--end-x",
+            &bx,
+            "--end-y",
+            &by,
+        ];
         let dur;
         if let Some(d) = duration {
             dur = format!("{:.2}", d.clamp(0.05, 10.0));
@@ -330,7 +395,11 @@ impl Simulator {
         find_axe().ok_or(AXE_MISSING)?;
         let dev = self.resolve_booted(args)?;
         axe(&["type", "--stdin", "--udid", &dev.udid], Some(s))?;
-        Ok(vec![text(format!("Typed {} characters on {}.", s.chars().count(), dev.name))])
+        Ok(vec![text(format!(
+            "Typed {} characters on {}.",
+            s.chars().count(),
+            dev.name
+        ))])
     }
 
     fn sim_button(&self, args: &Value) -> ToolResult {
@@ -340,7 +409,11 @@ impl Simulator {
             "lock" | "power" => "lock",
             "siri" => "siri",
             "side" | "side-button" => "side-button",
-            other => return Err(format!("Unknown button {other:?}; use home, lock, siri or side-button")),
+            other => {
+                return Err(format!(
+                    "Unknown button {other:?}; use home, lock, siri or side-button"
+                ));
+            }
         };
         find_axe().ok_or(AXE_MISSING)?;
         let dev = self.resolve_booted(args)?;
@@ -501,8 +574,14 @@ mod tests {
 
     #[test]
     fn runtime_names() {
-        assert_eq!(pretty_runtime("com.apple.CoreSimulator.SimRuntime.iOS-26-0"), "iOS 26.0");
-        assert_eq!(pretty_runtime("com.apple.CoreSimulator.SimRuntime.watchOS-11-2"), "watchOS 11.2");
+        assert_eq!(
+            pretty_runtime("com.apple.CoreSimulator.SimRuntime.iOS-26-0"),
+            "iOS 26.0"
+        );
+        assert_eq!(
+            pretty_runtime("com.apple.CoreSimulator.SimRuntime.watchOS-11-2"),
+            "watchOS 11.2"
+        );
     }
 
     #[test]

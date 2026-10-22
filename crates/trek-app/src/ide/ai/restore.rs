@@ -55,21 +55,34 @@ pub(crate) fn summary(changes: &[FileChange]) -> (String, String) {
         tip.push_str(&format!("\nand {} more", acting.len() - LISTED));
     }
     let n = acting.len();
-    (format!("Restore {n} file{}", if n == 1 { "" } else { "s" }), tip)
+    (
+        format!("Restore {n} file{}", if n == 1 { "" } else { "s" }),
+        tip,
+    )
 }
 
 /// The checkpoint `item` of `thread` would restore from (its repository and commit), or why
 /// there's none.
-pub(crate) fn checkpoint(ws: &crate::workspace::Workspace, thread: &str, item: &str) -> Result<(PathBuf, String), String> {
+pub(crate) fn checkpoint(
+    ws: &crate::workspace::Workspace,
+    thread: &str,
+    item: &str,
+) -> Result<(PathBuf, String), String> {
     match ws.restorable_checkpoint(thread, item) {
         Some(c) => Ok((c.repo, c.sha)),
-        None => Err(ws.no_checkpoint(thread, item).unwrap_or(crate::workspace::NoCheckpoint::Missing).explain().to_string()),
+        None => Err(ws
+            .no_checkpoint(thread, item)
+            .unwrap_or(crate::workspace::NoCheckpoint::Missing)
+            .explain()
+            .to_string()),
     }
 }
 
 /// What restoring to `sha` of `repo` changes (run off the main thread).
 pub(crate) fn read(repo: PathBuf, sha: String) -> Files {
-    let result = trek_core::checkpoint::Repo::find(&repo).ok_or_else(|| anyhow::anyhow!("{} isn't a git repository any more", repo.display())).and_then(|r| r.changes_since(&sha));
+    let result = trek_core::checkpoint::Repo::find(&repo)
+        .ok_or_else(|| anyhow::anyhow!("{} isn't a git repository any more", repo.display()))
+        .and_then(|r| r.changes_since(&sha));
     match result {
         Ok(changes) => Files::Changes(changes),
         Err(e) => Files::Failed(format!("{e:#}")),

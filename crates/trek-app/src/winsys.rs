@@ -26,9 +26,18 @@ pub fn badge_rgba(count: usize, size: usize) -> Vec<u8> {
         [0b111, 0b101, 0b111, 0b101, 0b111],
         [0b111, 0b101, 0b111, 0b001, 0b111],
     ];
-    let digits: Vec<usize> = count.min(99).to_string().bytes().map(|b| (b - b'0') as usize).collect();
+    let digits: Vec<usize> = count
+        .min(99)
+        .to_string()
+        .bytes()
+        .map(|b| (b - b'0') as usize)
+        .collect();
     // One digit is drawn big, two smaller so they fit the disc.
-    let scale = if digits.len() == 1 { size / 8 } else { size / 10 };
+    let scale = if digits.len() == 1 {
+        size / 8
+    } else {
+        size / 10
+    };
     let (text_w, text_h) = ((digits.len() * 4 - 1) * scale, 5 * scale);
     let (left, top) = ((size - text_w) / 2, (size - text_h) / 2);
     let mut out = vec![0u8; size * size * 4];
@@ -59,7 +68,11 @@ pub fn badge_rgba(count: usize, size: usize) -> Vec<u8> {
 /// What the taskbar button's badge says to a screen reader.
 #[cfg(any(windows, test))]
 pub fn badge_description(count: usize) -> String {
-    format!("{count} thread{} need{} you", if count == 1 { "" } else { "s" }, if count == 1 { "s" } else { "" })
+    format!(
+        "{count} thread{} need{} you",
+        if count == 1 { "" } else { "s" },
+        if count == 1 { "s" } else { "" }
+    )
 }
 
 /// Put `count` on the taskbar button of window `hwnd` (cleared at 0). Returns whether it was
@@ -71,32 +84,58 @@ pub fn set_overlay_badge(hwnd: isize, count: usize) -> bool {
     use windows::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
     use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
     use windows::Win32::UI::Shell::{ITaskbarList3, TaskbarList};
-    use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, DestroyIcon, HICON, ICONINFO};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateIconIndirect, DestroyIcon, HICON, ICONINFO,
+    };
     use windows::core::{BOOL, HSTRING, PCWSTR};
 
     const SIZE: usize = 32;
     // SAFETY: COM calls on the main thread, which GPUI has initialised COM on; every handle made
     // here is freed here (the taskbar keeps its own copy of the icon).
     unsafe {
-        let Ok(list) = CoCreateInstance::<_, ITaskbarList3>(&TaskbarList, None::<&windows::core::IUnknown>, CLSCTX_INPROC_SERVER) else { return false };
+        let Ok(list) = CoCreateInstance::<_, ITaskbarList3>(
+            &TaskbarList,
+            None::<&windows::core::IUnknown>,
+            CLSCTX_INPROC_SERVER,
+        ) else {
+            return false;
+        };
         if list.HrInit().is_err() {
             return false;
         }
         let window = HWND(hwnd as *mut _);
         if count == 0 {
-            return list.SetOverlayIcon(window, HICON::default(), PCWSTR::null()).is_ok();
+            return list
+                .SetOverlayIcon(window, HICON::default(), PCWSTR::null())
+                .is_ok();
         }
         // Bitmaps want premultiplied BGRA.
         let mut bgra = badge_rgba(count, SIZE);
         for px in bgra.chunks_exact_mut(4) {
             let a = px[3] as u32;
-            let (r, g, b) = (px[0] as u32 * a / 255, px[1] as u32 * a / 255, px[2] as u32 * a / 255);
+            let (r, g, b) = (
+                px[0] as u32 * a / 255,
+                px[1] as u32 * a / 255,
+                px[2] as u32 * a / 255,
+            );
             px.copy_from_slice(&[b as u8, g as u8, r as u8, a as u8]);
         }
         let color = CreateBitmap(SIZE as i32, SIZE as i32, 1, 32, Some(bgra.as_ptr().cast()));
         let mask_bits = vec![0u8; SIZE * SIZE / 8];
-        let mask = CreateBitmap(SIZE as i32, SIZE as i32, 1, 1, Some(mask_bits.as_ptr().cast()));
-        let info = ICONINFO { fIcon: BOOL(1), xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };
+        let mask = CreateBitmap(
+            SIZE as i32,
+            SIZE as i32,
+            1,
+            1,
+            Some(mask_bits.as_ptr().cast()),
+        );
+        let info = ICONINFO {
+            fIcon: BOOL(1),
+            xHotspot: 0,
+            yHotspot: 0,
+            hbmMask: mask,
+            hbmColor: color,
+        };
         let icon = CreateIconIndirect(&info);
         let _ = DeleteObject(color.into());
         let _ = DeleteObject(mask.into());
@@ -130,7 +169,12 @@ pub fn icon_edges(dpi: u32) -> (i32, i32) {
     use windows_sys::Win32::UI::HiDpi::GetSystemMetricsForDpi;
     use windows_sys::Win32::UI::WindowsAndMessaging::{SM_CXICON, SM_CXSMICON};
     // SAFETY: a plain query.
-    unsafe { (GetSystemMetricsForDpi(SM_CXSMICON, dpi), GetSystemMetricsForDpi(SM_CXICON, dpi)) }
+    unsafe {
+        (
+            GetSystemMetricsForDpi(SM_CXSMICON, dpi),
+            GetSystemMetricsForDpi(SM_CXICON, dpi),
+        )
+    }
 }
 
 /// The DPI of the display `hwnd` is on now (96 at 100 %).
@@ -170,14 +214,26 @@ pub fn taskbar_dpi() -> u32 {
 pub fn set_window_icon(hwnd: isize, resource: u16) -> bool {
     use windows_sys::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GCLP_HICON, GCLP_HICONSM, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_SHARED, LoadImageW, SendMessageW, SetClassLongPtrW, WM_SETICON};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GCLP_HICON, GCLP_HICONSM, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_SHARED, LoadImageW,
+        SendMessageW, SetClassLongPtrW, WM_SETICON,
+    };
     let (small_edge, big_edge) = icon_edges(dpi_of(hwnd));
     // SAFETY: the resource id goes where a name does (MAKEINTRESOURCE); shared icons belong to
     // the system, which keeps them for the life of the process, so there is nothing to free.
     // `hwnd` is a window of this process, asked from its own thread.
     unsafe {
         let module = GetModuleHandleW(std::ptr::null());
-        let load = |edge: i32| LoadImageW(module, resource as usize as *const u16, IMAGE_ICON, edge, edge, LR_SHARED);
+        let load = |edge: i32| {
+            LoadImageW(
+                module,
+                resource as usize as *const u16,
+                IMAGE_ICON,
+                edge,
+                edge,
+                LR_SHARED,
+            )
+        };
         let (small, big) = (load(small_edge), load(big_edge));
         if small.is_null() || big.is_null() {
             return false;
@@ -216,10 +272,16 @@ pub fn idle_seconds_between(now_ms: u32, last_input_ms: u32) -> f64 {
 pub fn idle_seconds() -> Option<f64> {
     use windows_sys::Win32::System::SystemInformation::GetTickCount;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
-    let mut info = LASTINPUTINFO { cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+    let mut info = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
     // SAFETY: `info` is a LASTINPUTINFO with its size set, as the call asks; it's read after a
     // success only. The tick is taken after the input's, so it is never the earlier of the two.
-    unsafe { (GetLastInputInfo(&mut info) != 0).then(|| idle_seconds_between(GetTickCount(), info.dwTime)) }
+    unsafe {
+        (GetLastInputInfo(&mut info) != 0)
+            .then(|| idle_seconds_between(GetTickCount(), info.dwTime))
+    }
 }
 
 /// Whether a session's `WTSINFOEX` says its screen is locked, or that the session is no longer
@@ -239,14 +301,25 @@ pub fn session_is_away(state: i32, flags: i32) -> bool {
 /// False when Windows won't say: a note the user didn't need beats one they never got.
 #[cfg(windows)]
 pub fn session_locked() -> bool {
-    use windows_sys::Win32::System::RemoteDesktop::{WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTSFreeMemory, WTSINFOEXW, WTSQuerySessionInformationW, WTSSessionInfoEx};
+    use windows_sys::Win32::System::RemoteDesktop::{
+        WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTSFreeMemory, WTSINFOEXW,
+        WTSQuerySessionInformationW, WTSSessionInfoEx,
+    };
     let mut buffer: *mut u16 = std::ptr::null_mut();
     let mut bytes = 0u32;
     // SAFETY: on success `buffer` is a block of `bytes` bytes that WTS allocated and we free; it is
     // read as the WTSINFOEXW that `WTSSessionInfoEx` returns once it's seen to be that long and
     // Level 1 (the only one there is), unaligned in case the allocator's alignment is short.
     unsafe {
-        if WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTSSessionInfoEx, &mut buffer, &mut bytes) == 0 || buffer.is_null() {
+        if WTSQuerySessionInformationW(
+            WTS_CURRENT_SERVER_HANDLE,
+            WTS_CURRENT_SESSION,
+            WTSSessionInfoEx,
+            &mut buffer,
+            &mut bytes,
+        ) == 0
+            || buffer.is_null()
+        {
             return false;
         }
         let away = (bytes as usize >= std::mem::size_of::<WTSINFOEXW>())
@@ -267,7 +340,10 @@ pub fn session_locked() -> bool {
 #[cfg(windows)]
 #[cfg_attr(test, allow(dead_code))]
 pub fn register_toast_identity(app_id: &str, name: &str, icon_png: &[u8]) {
-    use windows_sys::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegSetValueExW};
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
+        RegCreateKeyExW, RegSetValueExW,
+    };
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain([0]).collect()
     }
@@ -281,12 +357,33 @@ pub fn register_toast_identity(app_id: &str, name: &str, icon_png: &[u8]) {
     let mut hkey: HKEY = std::ptr::null_mut();
     // SAFETY: NUL-ended names, and a key handle that is closed below.
     unsafe {
-        if RegCreateKeyExW(HKEY_CURRENT_USER, key.as_ptr(), 0, std::ptr::null(), REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, std::ptr::null(), &mut hkey, std::ptr::null_mut()) != 0 {
+        if RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            0,
+            std::ptr::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            std::ptr::null(),
+            &mut hkey,
+            std::ptr::null_mut(),
+        ) != 0
+        {
             return;
         }
-        for (value, text) in [("DisplayName", name.to_string()), ("IconUri", icon.to_string_lossy().into_owned())] {
+        for (value, text) in [
+            ("DisplayName", name.to_string()),
+            ("IconUri", icon.to_string_lossy().into_owned()),
+        ] {
             let (value, data) = (wide(value), wide(&text));
-            RegSetValueExW(hkey, value.as_ptr(), 0, REG_SZ, data.as_ptr().cast(), (data.len() * 2) as u32);
+            RegSetValueExW(
+                hkey,
+                value.as_ptr(),
+                0,
+                REG_SZ,
+                data.as_ptr().cast(),
+                (data.len() * 2) as u32,
+            );
         }
         RegCloseKey(hkey);
     }
@@ -297,7 +394,11 @@ pub fn register_toast_identity(app_id: &str, name: &str, icon_png: &[u8]) {
 /// link's, so that arguments a link with a `"` in it makes of itself are refused, not opened.
 #[cfg(any(windows, test))]
 pub fn protocol_command(exe: &std::path::Path) -> String {
-    format!("\"{}\" {} \"%1\"", exe.display(), crate::single_instance::LINK_ARG)
+    format!(
+        "\"{}\" {} \"%1\"",
+        exe.display(),
+        crate::single_instance::LINK_ARG
+    )
 }
 
 /// Where the protocol's keys go for real: the current user's classes.
@@ -323,12 +424,18 @@ pub fn register_protocol(root: &str, exe: &std::path::Path) -> std::io::Result<R
     let command = protocol_command(exe);
     let key = format!(r"{root}\trek");
     let command_key = format!(r"{key}\shell\open\command");
-    if reg_read(&command_key, "").as_deref() == Some(command.as_str()) && reg_read(&key, "URL Protocol").is_some() {
+    if reg_read(&command_key, "").as_deref() == Some(command.as_str())
+        && reg_read(&key, "URL Protocol").is_some()
+    {
         return Ok(Registered::Already);
     }
     reg_write(&key, "", "URL:Trek")?;
     reg_write(&key, "URL Protocol", "")?;
-    reg_write(&format!(r"{key}\DefaultIcon"), "", &format!("\"{}\",0", exe.display()))?;
+    reg_write(
+        &format!(r"{key}\DefaultIcon"),
+        "",
+        &format!("\"{}\",0", exe.display()),
+    )?;
     reg_write(&command_key, "", &command)?;
     Ok(Registered::Written)
 }
@@ -338,7 +445,10 @@ pub fn register_protocol(root: &str, exe: &std::path::Path) -> std::io::Result<R
 /// that moved starts its copy with neither (`relocate::mover_command` drops what a restart
 /// doesn't keep), so the copy registers itself at its first launch.
 #[cfg(any(windows, test))]
-fn takes_over_links(shot_dir: Option<&std::ffi::OsStr>, data_dir: Option<&std::ffi::OsStr>) -> bool {
+fn takes_over_links(
+    shot_dir: Option<&std::ffi::OsStr>,
+    data_dir: Option<&std::ffi::OsStr>,
+) -> bool {
     shot_dir.is_none() && data_dir.is_none_or(|d| d.is_empty())
 }
 
@@ -349,7 +459,10 @@ fn takes_over_links(shot_dir: Option<&std::ffi::OsStr>, data_dir: Option<&std::f
 #[cfg(windows)]
 #[cfg_attr(test, allow(dead_code))]
 pub fn register_trek_protocol() {
-    if !takes_over_links(std::env::var_os("TREK_SHOT_DIR").as_deref(), std::env::var_os("TREK_DATA_DIR").as_deref()) {
+    if !takes_over_links(
+        std::env::var_os("TREK_SHOT_DIR").as_deref(),
+        std::env::var_os("TREK_DATA_DIR").as_deref(),
+    ) {
         return;
     }
     let exe = match std::env::current_exe() {
@@ -377,11 +490,29 @@ fn reg_read(key: &str, value: &str) -> Option<String> {
     // SAFETY: NUL-ended names; the first call only asks how long the value is, the second fills
     // a buffer of that size.
     unsafe {
-        if RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), std::ptr::null_mut(), &mut bytes) != 0 {
+        if RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut bytes,
+        ) != 0
+        {
             return None;
         }
         let mut buf = vec![0u16; (bytes as usize).div_ceil(2)];
-        if RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut bytes) != 0 {
+        if RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr().cast(),
+            &mut bytes,
+        ) != 0
+        {
             return None;
         }
         // The size counts the terminating NUL.
@@ -393,16 +524,36 @@ fn reg_read(key: &str, value: &str) -> Option<String> {
 /// Set a string value of a key under `HKEY_CURRENT_USER`, making the key (and those above it).
 #[cfg(windows)]
 fn reg_write(key: &str, value: &str, text: &str) -> std::io::Result<()> {
-    use windows_sys::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegSetValueExW};
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
+        RegCreateKeyExW, RegSetValueExW,
+    };
     let (key, value, data) = (wide(key), wide(value), wide(text));
     let mut hkey: HKEY = std::ptr::null_mut();
     // SAFETY: NUL-ended names, and a key handle that is closed below.
     unsafe {
-        let made = RegCreateKeyExW(HKEY_CURRENT_USER, key.as_ptr(), 0, std::ptr::null(), REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, std::ptr::null(), &mut hkey, std::ptr::null_mut());
+        let made = RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            0,
+            std::ptr::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            std::ptr::null(),
+            &mut hkey,
+            std::ptr::null_mut(),
+        );
         if made != 0 {
             return Err(std::io::Error::from_raw_os_error(made as i32));
         }
-        let set = RegSetValueExW(hkey, value.as_ptr(), 0, REG_SZ, data.as_ptr().cast(), (data.len() * 2) as u32);
+        let set = RegSetValueExW(
+            hkey,
+            value.as_ptr(),
+            0,
+            REG_SZ,
+            data.as_ptr().cast(),
+            (data.len() * 2) as u32,
+        );
         RegCloseKey(hkey);
         if set != 0 {
             return Err(std::io::Error::from_raw_os_error(set as i32));
@@ -418,7 +569,13 @@ pub fn play_notification_sound() {
     use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_NODEFAULT};
     let alias: Vec<u16> = "SystemNotification".encode_utf16().chain([0]).collect();
     // SAFETY: a NUL-ended alias; no module handle, as it names a system sound.
-    unsafe { PlaySoundW(alias.as_ptr(), std::ptr::null_mut(), SND_ALIAS | SND_NODEFAULT) };
+    unsafe {
+        PlaySoundW(
+            alias.as_ptr(),
+            std::ptr::null_mut(),
+            SND_ALIAS | SND_NODEFAULT,
+        )
+    };
 }
 
 /// Whether the cursor is over window `hwnd` (or a window inside it, a web view), by what the
@@ -428,7 +585,9 @@ pub fn play_notification_sound() {
 #[cfg_attr(test, allow(dead_code))]
 pub fn cursor_over_window(hwnd: isize) -> bool {
     use windows_sys::Win32::Foundation::{HWND, POINT};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, GetCursorPos, WindowFromPoint};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GA_ROOT, GetAncestor, GetCursorPos, WindowFromPoint,
+    };
     let mut at = POINT { x: 0, y: 0 };
     // SAFETY: plain queries; a handle that isn't a window answers null.
     unsafe {
@@ -476,7 +635,12 @@ pub fn hit_test(hwnd: isize, x: i32, y: i32) -> isize {
     // SAFETY: a window of this process, asked from its own thread.
     unsafe {
         ClientToScreen(window, &mut at);
-        SendMessageW(window, WM_NCHITTEST, 0, ((at.y as u32 as isize & 0xffff) << 16) | (at.x as u32 as isize & 0xffff))
+        SendMessageW(
+            window,
+            WM_NCHITTEST,
+            0,
+            ((at.y as u32 as isize & 0xffff) << 16) | (at.x as u32 as isize & 0xffff),
+        )
     }
 }
 
@@ -488,10 +652,19 @@ pub fn hit_test(hwnd: isize, x: i32, y: i32) -> isize {
 #[cfg(all(windows, feature = "shots"))]
 pub fn mouse_activate(hwnd: isize, hit: isize) -> &'static str {
     use windows_sys::Win32::Foundation::HWND;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_LBUTTONDOWN, WM_MOUSEACTIVATE};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SendMessageW, WM_LBUTTONDOWN, WM_MOUSEACTIVATE,
+    };
     let window = hwnd as HWND;
     // SAFETY: a window of this process, asked from its own thread; the top-level window is its own.
-    let answer = unsafe { SendMessageW(window, WM_MOUSEACTIVATE, window as usize, ((WM_LBUTTONDOWN as isize) << 16) | (hit & 0xffff)) };
+    let answer = unsafe {
+        SendMessageW(
+            window,
+            WM_MOUSEACTIVATE,
+            window as usize,
+            ((WM_LBUTTONDOWN as isize) << 16) | (hit & 0xffff),
+        )
+    };
     match answer {
         1 => "MA_ACTIVATE",
         2 => "MA_ACTIVATEANDEAT",
@@ -508,7 +681,14 @@ pub fn client_move(hwnd: isize, x: i32, y: i32) {
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_MOUSEMOVE};
     // SAFETY: as above.
-    unsafe { SendMessageW(hwnd as HWND, WM_MOUSEMOVE, 0, ((y as u32 as isize & 0xffff) << 16) | (x as u32 as isize & 0xffff)) };
+    unsafe {
+        SendMessageW(
+            hwnd as HWND,
+            WM_MOUSEMOVE,
+            0,
+            ((y as u32 as isize & 0xffff) << 16) | (x as u32 as isize & 0xffff),
+        )
+    };
 }
 
 /// Windows telling the window the pointer has left it (`WM_MOUSELEAVE`): sent when a pointer
@@ -531,7 +711,9 @@ pub fn mouse_leave(hwnd: isize) {
 pub fn client_click(hwnd: isize, x: i32, y: i32) -> [std::time::Duration; 3] {
     use std::time::Instant;
     use windows_sys::Win32::Foundation::HWND;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SendMessageW, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    };
     /// `MK_LBUTTON`: the left button is down.
     const LEFT_DOWN: usize = 0x0001;
     let window = hwnd as HWND;
@@ -539,7 +721,11 @@ pub fn client_click(hwnd: isize, x: i32, y: i32) -> [std::time::Duration; 3] {
     let mut took = [std::time::Duration::ZERO; 3];
     // SAFETY: as above.
     unsafe {
-        for (slot, (msg, wparam)) in took.iter_mut().zip([(WM_MOUSEMOVE, 0), (WM_LBUTTONDOWN, LEFT_DOWN), (WM_LBUTTONUP, 0)]) {
+        for (slot, (msg, wparam)) in took.iter_mut().zip([
+            (WM_MOUSEMOVE, 0),
+            (WM_LBUTTONDOWN, LEFT_DOWN),
+            (WM_LBUTTONUP, 0),
+        ]) {
             let start = Instant::now();
             SendMessageW(window, msg, wparam, at);
             *slot = start.elapsed();
@@ -550,20 +736,41 @@ pub fn client_click(hwnd: isize, x: i32, y: i32) -> [std::time::Duration; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{badge_description, badge_rgba, hit_name, icon_resource, idle_seconds_between, session_is_away};
+    use super::{
+        badge_description, badge_rgba, hit_name, icon_resource, idle_seconds_between,
+        session_is_away,
+    };
     use trek_core::settings::AppIcon;
 
     #[test]
     fn the_answers_to_a_hit_test_are_named_as_the_sdk_names_them() {
         // The ones a title bar's answers are (winuser.h's values).
-        for (code, name) in [(0, "HTNOWHERE"), (1, "HTCLIENT"), (2, "HTCAPTION"), (8, "HTMINBUTTON"), (9, "HTMAXBUTTON"), (20, "HTCLOSE"), (12, "HTTOP")] {
+        for (code, name) in [
+            (0, "HTNOWHERE"),
+            (1, "HTCLIENT"),
+            (2, "HTCAPTION"),
+            (8, "HTMINBUTTON"),
+            (9, "HTMAXBUTTON"),
+            (20, "HTCLOSE"),
+            (12, "HTTOP"),
+        ] {
             assert_eq!(hit_name(code), name);
         }
         assert_eq!(hit_name(-1), "other", "HTTRANSPARENT and the rest");
         #[cfg(windows)]
         {
-            use windows_sys::Win32::UI::WindowsAndMessaging::{HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTNOWHERE, HTTOP};
-            for (code, name) in [(HTNOWHERE, "HTNOWHERE"), (HTCLIENT, "HTCLIENT"), (HTCAPTION, "HTCAPTION"), (HTMINBUTTON, "HTMINBUTTON"), (HTMAXBUTTON, "HTMAXBUTTON"), (HTCLOSE, "HTCLOSE"), (HTTOP, "HTTOP")] {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTNOWHERE, HTTOP,
+            };
+            for (code, name) in [
+                (HTNOWHERE, "HTNOWHERE"),
+                (HTCLIENT, "HTCLIENT"),
+                (HTCAPTION, "HTCAPTION"),
+                (HTMINBUTTON, "HTMINBUTTON"),
+                (HTMAXBUTTON, "HTMAXBUTTON"),
+                (HTCLOSE, "HTCLOSE"),
+                (HTTOP, "HTTOP"),
+            ] {
                 assert_eq!(hit_name(code as isize), name);
             }
         }
@@ -585,7 +792,10 @@ mod tests {
         assert!(session_is_away(ACTIVE, 0), "locked");
         assert!(!session_is_away(ACTIVE, 1), "unlocked");
         assert!(!session_is_away(ACTIVE, -1), "Windows didn't say: not away");
-        assert!(session_is_away(DISCONNECTED, 1), "another user's turn, or a closed remote desktop");
+        assert!(
+            session_is_away(DISCONNECTED, 1),
+            "another user's turn, or a closed remote desktop"
+        );
     }
 
     #[cfg(windows)]
@@ -594,7 +804,9 @@ mod tests {
         // Whether the session is locked depends on who runs the test (a locked laptop, a CI
         // service), so only that both calls come back, with a time that makes sense.
         let _ = super::session_locked();
-        assert!(super::idle_seconds().is_none_or(|s| (0.0..=f64::from(u32::MAX) / 1000.0).contains(&s)));
+        assert!(
+            super::idle_seconds().is_none_or(|s| (0.0..=f64::from(u32::MAX) / 1000.0).contains(&s))
+        );
     }
 
     /// Windows cuts a display's icons by its scale; the small one is what the tray draws
@@ -603,7 +815,10 @@ mod tests {
     #[test]
     fn icons_are_the_size_the_display_s_scale_wants() {
         // 100 %, 125 %, 150 %, 175 %, 200 %.
-        assert_eq!([96, 120, 144, 168, 192].map(super::icon_edges), [(16, 32), (20, 40), (24, 48), (28, 56), (32, 64)]);
+        assert_eq!(
+            [96, 120, 144, 168, 192].map(super::icon_edges),
+            [(16, 32), (20, 40), (24, 48), (28, 56), (32, 64)]
+        );
     }
 
     /// The taskbar's DPI is one Windows reports for a real display, never 0 (which would make a
@@ -620,14 +835,28 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_exe_is_per_monitor_dpi_aware() {
-        use windows_sys::Win32::UI::HiDpi::{AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetThreadDpiAwarenessContext};
+        use windows_sys::Win32::UI::HiDpi::{
+            AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            GetThreadDpiAwarenessContext,
+        };
         // SAFETY: plain queries.
-        let aware = unsafe { AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-        assert!(aware != 0, "the process isn't per-monitor v2 aware: GPUI's manifest isn't in the exe");
+        let aware = unsafe {
+            AreDpiAwarenessContextsEqual(
+                GetThreadDpiAwarenessContext(),
+                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            )
+        };
+        assert!(
+            aware != 0,
+            "the process isn't per-monitor v2 aware: GPUI's manifest isn't in the exe"
+        );
     }
 
     fn lit(pixels: &[u8], white: bool) -> usize {
-        pixels.chunks_exact(4).filter(|p| p[3] > 0 && (p[0] == 0xff && p[1] == 0xff) == white).count()
+        pixels
+            .chunks_exact(4)
+            .filter(|p| p[3] > 0 && (p[0] == 0xff && p[1] == 0xff) == white)
+            .count()
     }
 
     #[test]
@@ -648,13 +877,20 @@ mod tests {
     }
 
     /// What `build.rs` embeds, as it spells it: (resource id, file in assets/brand).
-    const EMBEDDED: [(AppIcon, &str); 3] = [(AppIcon::Ember, "trek.ico"), (AppIcon::Night, "trek-night.ico"), (AppIcon::Glass, "trek-glass.ico")];
+    const EMBEDDED: [(AppIcon, &str); 3] = [
+        (AppIcon::Ember, "trek.ico"),
+        (AppIcon::Night, "trek-night.ico"),
+        (AppIcon::Glass, "trek-glass.ico"),
+    ];
 
     #[test]
     fn each_app_icon_has_its_own_resource_and_ember_stays_the_exes_icon() {
         // Resource 1 is what GPUI's window class loads at start and Explorer shows for the exe.
         assert_eq!(icon_resource(AppIcon::Ember), 1);
-        let ids: Vec<u16> = EMBEDDED.iter().map(|(icon, _)| icon_resource(*icon)).collect();
+        let ids: Vec<u16> = EMBEDDED
+            .iter()
+            .map(|(icon, _)| icon_resource(*icon))
+            .collect();
         assert_eq!(ids, [1, 2, 3]);
     }
 
@@ -664,8 +900,13 @@ mod tests {
         let brand = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/brand");
         let mut seen = vec![];
         for (icon, file) in EMBEDDED {
-            assert!(build.contains(&format!("({}, \"{file}\")", icon_resource(icon))), "build.rs doesn't embed {file} as resource {}", icon_resource(icon));
-            let bytes = std::fs::read(brand.join(file)).unwrap_or_else(|e| panic!("{file}: {e} (script/windows-icons.py makes it)"));
+            assert!(
+                build.contains(&format!("({}, \"{file}\")", icon_resource(icon))),
+                "build.rs doesn't embed {file} as resource {}",
+                icon_resource(icon)
+            );
+            let bytes = std::fs::read(brand.join(file))
+                .unwrap_or_else(|e| panic!("{file}: {e} (script/windows-icons.py makes it)"));
             // An .ico: reserved 0, type 1, then at least the 256 px frame.
             assert_eq!(&bytes[..4], &[0, 0, 1, 0], "{file} isn't an icon file");
             assert!(bytes[4] >= 8, "{file} has too few sizes");
@@ -684,16 +925,31 @@ mod tests {
     #[test]
     fn a_link_runs_trek_with_the_link_as_one_argument() {
         let exe = std::path::Path::new(r"C:\Program Files\Trek\trek.exe");
-        assert_eq!(super::protocol_command(exe), r#""C:\Program Files\Trek\trek.exe" --link "%1""#);
+        assert_eq!(
+            super::protocol_command(exe),
+            r#""C:\Program Files\Trek\trek.exe" --link "%1""#
+        );
     }
 
     #[test]
     fn only_a_trek_with_no_data_folder_of_its_own_takes_the_links() {
         use std::ffi::OsStr;
-        assert!(super::takes_over_links(None, None), "the user's Trek, a moved one included");
-        assert!(super::takes_over_links(None, Some(OsStr::new(""))), "an empty setting is none");
-        assert!(!super::takes_over_links(None, Some(OsStr::new(r"D:\scratch"))), "a trial build or test");
-        assert!(!super::takes_over_links(Some(OsStr::new(r"D:\shots")), None), "a capture run");
+        assert!(
+            super::takes_over_links(None, None),
+            "the user's Trek, a moved one included"
+        );
+        assert!(
+            super::takes_over_links(None, Some(OsStr::new(""))),
+            "an empty setting is none"
+        );
+        assert!(
+            !super::takes_over_links(None, Some(OsStr::new(r"D:\scratch"))),
+            "a trial build or test"
+        );
+        assert!(
+            !super::takes_over_links(Some(OsStr::new(r"D:\shots")), None),
+            "a capture run"
+        );
     }
 
     /// The command as Windows runs it for a link (the link put in for `%1` as it came) and splits
@@ -706,26 +962,46 @@ mod tests {
         use windows::Win32::UI::Shell::CommandLineToArgvW;
         let exe = std::path::Path::new(r"C:\Program Files\Trek\trek.exe");
         let launch = |link: &str| {
-            let command: Vec<u16> = super::protocol_command(exe).replace("%1", link).encode_utf16().chain([0]).collect();
+            let command: Vec<u16> = super::protocol_command(exe)
+                .replace("%1", link)
+                .encode_utf16()
+                .chain([0])
+                .collect();
             let mut n = 0;
             // SAFETY: a NUL-ended command; the array Windows returns is read within its count, then freed.
             let args: Vec<OsString> = unsafe {
                 let argv = CommandLineToArgvW(windows::core::PCWSTR(command.as_ptr()), &mut n);
                 assert!(!argv.is_null());
-                let args = (1..n as usize).map(|i| OsString::from((*argv.add(i)).to_string().unwrap())).collect();
+                let args = (1..n as usize)
+                    .map(|i| OsString::from((*argv.add(i)).to_string().unwrap()))
+                    .collect();
                 LocalFree(Some(HLOCAL(argv.cast())));
                 args
             };
             crate::single_instance::launch_args(args, std::path::Path::new(r"C:\"))
         };
         let encoded = "trek://ask?path=C%3A%5Cx.rs&selection=say%20%22hi%22%20%25PATH%25";
-        assert_eq!(launch(encoded), [encoded], "an encoded link goes as it came");
+        assert_eq!(
+            launch(encoded),
+            [encoded],
+            "an encoded link goes as it came"
+        );
         // A folder that is there, with no `\` at its end (which would escape the quote after it).
         let folder = r"C:\Windows";
-        assert_eq!(launch(&format!(r#"trek://ask?x" "{folder}"#)), Vec::<String>::new(), "a folder of the link's own");
-        assert_eq!(launch(&format!(r#"trek://ask?x" "{folder}" "trek://edit?path=y"#)), Vec::<String>::new());
+        assert_eq!(
+            launch(&format!(r#"trek://ask?x" "{folder}"#)),
+            Vec::<String>::new(),
+            "a folder of the link's own"
+        );
+        assert_eq!(
+            launch(&format!(r#"trek://ask?x" "{folder}" "trek://edit?path=y"#)),
+            Vec::<String>::new()
+        );
         // A `\"` keeps it inside its quotes: one link, odd, for `deep_link` to judge.
-        assert_eq!(launch(&format!(r#"trek://ask?x\" {folder}"#)), [format!(r#"trek://ask?x" {folder}"#)]);
+        assert_eq!(
+            launch(&format!(r#"trek://ask?x\" {folder}"#)),
+            [format!(r#"trek://ask?x" {folder}"#)]
+        );
     }
 
     /// Against a key of the test's own (`HKCU\Software\Trek-tests\<pid>`), deleted afterwards:
@@ -756,15 +1032,33 @@ mod tests {
         fn the_protocol_is_registered_once_and_then_left_alone() {
             let root = TestKey::new("once");
             let exe = Path::new(r"C:\Apps\Trek\trek.exe");
-            assert_eq!(reg_read(&format!(r"{}\trek", root.0), "URL Protocol"), None, "nothing there yet");
+            assert_eq!(
+                reg_read(&format!(r"{}\trek", root.0), "URL Protocol"),
+                None,
+                "nothing there yet"
+            );
 
-            assert_eq!(register_protocol(&root.0, exe).unwrap(), Registered::Written);
+            assert_eq!(
+                register_protocol(&root.0, exe).unwrap(),
+                Registered::Written
+            );
             let key = format!(r"{}\trek", root.0);
-            assert_eq!(reg_read(&key, "URL Protocol").as_deref(), Some(""), "marked as a URL protocol");
-            assert_eq!(reg_read(&format!(r"{key}\shell\open\command"), "").as_deref(), Some(protocol_command(exe).as_str()));
+            assert_eq!(
+                reg_read(&key, "URL Protocol").as_deref(),
+                Some(""),
+                "marked as a URL protocol"
+            );
+            assert_eq!(
+                reg_read(&format!(r"{key}\shell\open\command"), "").as_deref(),
+                Some(protocol_command(exe).as_str())
+            );
             assert_eq!(reg_read(&key, "").as_deref(), Some("URL:Trek"));
 
-            assert_eq!(register_protocol(&root.0, exe).unwrap(), Registered::Already, "the second run writes nothing");
+            assert_eq!(
+                register_protocol(&root.0, exe).unwrap(),
+                Registered::Already,
+                "the second run writes nothing"
+            );
         }
 
         /// Trek moved (an update, another folder): the command follows it.
@@ -773,9 +1067,18 @@ mod tests {
             let root = TestKey::new("moved");
             register_protocol(&root.0, Path::new(r"C:\Old\trek.exe")).unwrap();
             let new = Path::new(r"D:\New place\trek.exe");
-            assert_eq!(register_protocol(&root.0, new).unwrap(), Registered::Written);
-            assert_eq!(reg_read(&format!(r"{}\trek\shell\open\command", root.0), "").as_deref(), Some(protocol_command(new).as_str()));
-            assert_eq!(register_protocol(&root.0, new).unwrap(), Registered::Already);
+            assert_eq!(
+                register_protocol(&root.0, new).unwrap(),
+                Registered::Written
+            );
+            assert_eq!(
+                reg_read(&format!(r"{}\trek\shell\open\command", root.0), "").as_deref(),
+                Some(protocol_command(new).as_str())
+            );
+            assert_eq!(
+                register_protocol(&root.0, new).unwrap(),
+                Registered::Already
+            );
         }
 
         /// Trek moved out of Documents to its programs folder: the links go to the copy, and so
@@ -786,10 +1089,19 @@ mod tests {
             let old = Path::new(r"C:\Users\me\Documents\Trek\trek.exe");
             let new = Path::new(r"C:\Users\me\AppData\Local\Programs\Trek\trek.exe");
             register_protocol(&root.0, old).unwrap();
-            assert_eq!(register_protocol(&root.0, new).unwrap(), Registered::Written);
+            assert_eq!(
+                register_protocol(&root.0, new).unwrap(),
+                Registered::Written
+            );
             let key = format!(r"{}\trek", root.0);
-            assert_eq!(reg_read(&format!(r"{key}\DefaultIcon"), "").as_deref(), Some(format!("\"{}\",0", new.display()).as_str()));
-            assert_eq!(reg_read(&format!(r"{key}\shell\open\command"), "").as_deref(), Some(protocol_command(new).as_str()));
+            assert_eq!(
+                reg_read(&format!(r"{key}\DefaultIcon"), "").as_deref(),
+                Some(format!("\"{}\",0", new.display()).as_str())
+            );
+            assert_eq!(
+                reg_read(&format!(r"{key}\shell\open\command"), "").as_deref(),
+                Some(protocol_command(new).as_str())
+            );
         }
     }
 }
@@ -799,9 +1111,12 @@ mod tests {
 /// above only draw the pixels; this is the one that asks Windows.
 #[cfg(all(windows, test))]
 mod by_hand {
-    use windows_sys::Win32::Foundation::HWND;
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, SW_SHOWNOACTIVATE, ShowWindow, TranslateMessage, WS_OVERLAPPEDWINDOW};
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE, PeekMessageW,
+        SW_SHOWNOACTIVATE, ShowWindow, TranslateMessage, WS_OVERLAPPEDWINDOW,
+    };
 
     fn pump(ms: u64) {
         let until = std::time::Instant::now() + std::time::Duration::from_millis(ms);
@@ -826,11 +1141,27 @@ mod by_hand {
         // SAFETY: a plain window of a system class, destroyed below; COM for this thread.
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-            let hwnd: HWND = CreateWindowExW(0, class.as_ptr(), title.as_ptr(), WS_OVERLAPPEDWINDOW, 200, 200, 320, 120, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null());
+            let hwnd: HWND = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                title.as_ptr(),
+                WS_OVERLAPPEDWINDOW,
+                200,
+                200,
+                320,
+                120,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            );
             assert!(!hwnd.is_null());
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             pump(1500);
-            assert!(super::set_overlay_badge(hwnd as isize, 3), "the badge went up");
+            assert!(
+                super::set_overlay_badge(hwnd as isize, 3),
+                "the badge went up"
+            );
             pump(1500);
             assert!(super::set_overlay_badge(hwnd as isize, 12), "and changed");
             pump(1000);

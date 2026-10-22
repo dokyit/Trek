@@ -25,7 +25,13 @@ fn thread(id: &str) -> ThreadSummary {
     ThreadSummary {
         id: id.into(),
         title: format!("Thread {id}"),
-        project: ProjectRef { id: "p1".into(), name: "trek-api".into(), hue: 212, monogram: "TA".into(), icon: None },
+        project: ProjectRef {
+            id: "p1".into(),
+            name: "trek-api".into(),
+            hue: 212,
+            monogram: "TA".into(),
+            icon: None,
+        },
         agent: AgentRef::new("claude-code", "Claude Code", Some("claude-code")),
         updated_at: 1,
         ..Default::default()
@@ -33,7 +39,12 @@ fn thread(id: &str) -> ThreadSummary {
 }
 
 fn note(id: &str, body: &str) -> Note {
-    Note { id: id.into(), title: body.lines().next().unwrap_or("Untitled").into(), body: body.into(), modified: 5 }
+    Note {
+        id: id.into(),
+        title: body.lines().next().unwrap_or("Untitled").into(),
+        body: body.into(),
+        modified: 5,
+    }
 }
 
 fn settings() -> MacSettings {
@@ -44,7 +55,14 @@ fn settings() -> MacSettings {
         default_access: Access::AutoAcceptEdits,
         follow_up: SendMode::Steer,
         notifications: NotifyMode::BannerAndSound,
-        push: PushSettings { enabled: false, when: PushWhen::Away, server: "https://ntfy.sh".into(), topic: String::new(), topic_url: None, subscribe_url: None },
+        push: PushSettings {
+            enabled: false,
+            when: PushWhen::Away,
+            server: "https://ntfy.sh".into(),
+            topic: String::new(),
+            topic_url: None,
+            subscribe_url: None,
+        },
         auto_settle_days: 3,
         theme: Theme::System,
         full_access: false,
@@ -53,21 +71,62 @@ fn settings() -> MacSettings {
 }
 
 fn item(id: &str, seq: u64, text: &str) -> Item {
-    Item { id: id.into(), seq, at: None, body: ItemBody::Assistant { text: text.into(), streaming: false } }
+    Item {
+        id: id.into(),
+        seq,
+        at: None,
+        body: ItemBody::Assistant {
+            text: text.into(),
+            streaming: false,
+        },
+    }
 }
 
 /// Ten items, `i0`…`i9`, with the files `i4`'s turn changed after it and an approval open.
 fn long_transcript() -> Transcript {
-    let mut items: Vec<Item> = (0..10).map(|n| item(&format!("i{n}"), n + 1, &format!("item {n}"))).collect();
-    let changes = ItemBody::Changes { files: vec![], added: 1, removed: 0 };
-    items.insert(5, Item { id: "c4".into(), seq: 11, at: None, body: changes });
-    let approval = ItemBody::Approval { request_id: "req".into(), title: "Run command".into(), detail: "make".into(), state: ApprovalState::Pending };
-    items.push(Item { id: "rreq".into(), seq: 12, at: None, body: approval });
-    Transcript { seq: 12, items, ..Default::default() }
+    let mut items: Vec<Item> = (0..10)
+        .map(|n| item(&format!("i{n}"), n + 1, &format!("item {n}")))
+        .collect();
+    let changes = ItemBody::Changes {
+        files: vec![],
+        added: 1,
+        removed: 0,
+    };
+    items.insert(
+        5,
+        Item {
+            id: "c4".into(),
+            seq: 11,
+            at: None,
+            body: changes,
+        },
+    );
+    let approval = ItemBody::Approval {
+        request_id: "req".into(),
+        title: "Run command".into(),
+        detail: "make".into(),
+        state: ApprovalState::Pending,
+    };
+    items.push(Item {
+        id: "rreq".into(),
+        seq: 12,
+        at: None,
+        body: approval,
+    });
+    Transcript {
+        seq: 12,
+        items,
+        ..Default::default()
+    }
 }
 
 fn ids(v: &Value) -> Vec<&str> {
-    v["items"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect()
+    v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect()
 }
 
 impl FakeHost {
@@ -82,38 +141,75 @@ impl FakeHost {
 
 impl RemoteHost for FakeHost {
     async fn snapshot(&self) -> HostResult<Snapshot> {
-        Ok(Snapshot { threads: vec![thread("t1"), thread("t2")], ..Default::default() })
+        Ok(Snapshot {
+            threads: vec![thread("t1"), thread("t2")],
+            ..Default::default()
+        })
     }
 
     async fn transcript(&self, thread_id: &str) -> HostResult<Transcript> {
         match thread_id {
-            "t1" => Ok(Transcript { seq: 3, items: vec![item("a", 1, "one"), item("b", 2, "two"), item("c", 3, "three")], ..Default::default() }),
+            "t1" => Ok(Transcript {
+                seq: 3,
+                items: vec![
+                    item("a", 1, "one"),
+                    item("b", 2, "two"),
+                    item("c", 3, "three"),
+                ],
+                ..Default::default()
+            }),
             "t2" => Ok(Transcript::default()),
             "slow" => {
                 tokio::time::sleep(Duration::from_millis(300)).await;
-                Ok(Transcript { seq: 3, items: vec![item("a", 3, "one")], ..Default::default() })
+                Ok(Transcript {
+                    seq: 3,
+                    items: vec![item("a", 3, "one")],
+                    ..Default::default()
+                })
             }
             "long" => Ok(long_transcript()),
             other => Err(HostError::not_found(format!("No thread {other}"))),
         }
     }
 
-    async fn transcript_before(&self, thread_id: &str, before: &str, limit: u32) -> HostResult<TranscriptPage> {
+    async fn transcript_before(
+        &self,
+        thread_id: &str,
+        before: &str,
+        limit: u32,
+    ) -> HostResult<TranscriptPage> {
         self.record(format!("transcript_before {thread_id} {before} {limit}"));
         if thread_id == "slow" {
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
-        let transcript = if thread_id == "slow" { long_transcript() } else { self.transcript(thread_id).await? };
-        transcript.page_before(before, limit).ok_or_else(|| HostError::not_found("No such item"))
+        let transcript = if thread_id == "slow" {
+            long_transcript()
+        } else {
+            self.transcript(thread_id).await?
+        };
+        transcript
+            .page_before(before, limit)
+            .ok_or_else(|| HostError::not_found("No such item"))
     }
 
     async fn turn_action(&self, req: TurnActionRequest) -> HostResult<TurnActionDone> {
-        self.record(format!("turn_action {} {} {:?} {:?} {}", req.thread_id, req.item_id, req.action, req.model, req.restore_files));
+        self.record(format!(
+            "turn_action {} {} {:?} {:?} {}",
+            req.thread_id, req.item_id, req.action, req.model, req.restore_files
+        ));
         match req.action {
-            TurnAction::Undo if req.item_id == "i9" => Err(HostError::bad_request("Stop the running turn to undo")),
-            TurnAction::Undo | TurnAction::Rewind => Ok(TurnActionDone { thread_id: None, text: Some("Fix the parser".into()) }),
+            TurnAction::Undo if req.item_id == "i9" => {
+                Err(HostError::bad_request("Stop the running turn to undo"))
+            }
+            TurnAction::Undo | TurnAction::Rewind => Ok(TurnActionDone {
+                thread_id: None,
+                text: Some("Fix the parser".into()),
+            }),
             TurnAction::Retry => Ok(TurnActionDone::default()),
-            TurnAction::Fork => Ok(TurnActionDone { thread_id: Some("t-fork".into()), text: None }),
+            TurnAction::Fork => Ok(TurnActionDone {
+                thread_id: Some("t-fork".into()),
+                text: None,
+            }),
         }
     }
 
@@ -125,13 +221,21 @@ impl RemoteHost for FakeHost {
         if req.thread_id == "missing" {
             return Err(HostError::not_found("No thread missing"));
         }
-        self.record(format!("send {} {} {:?}", req.thread_id, req.text, req.mode));
+        self.record(format!(
+            "send {} {} {:?}",
+            req.thread_id, req.text, req.mode
+        ));
         // `/new` in a thread: the phone opens its own new-thread sheet.
-        Ok((req.text == "/new").then(|| Open::NewThread { project_id: Some("p1".into()) }))
+        Ok((req.text == "/new").then(|| Open::NewThread {
+            project_id: Some("p1".into()),
+        }))
     }
 
     async fn new_thread(&self, req: NewThreadRequest) -> HostResult<String> {
-        self.record(format!("new_thread {} {} {:?} {}", req.project_id, req.agent, req.model, req.worktree));
+        self.record(format!(
+            "new_thread {} {} {:?} {}",
+            req.project_id, req.agent, req.model, req.worktree
+        ));
         Ok("t-new".into())
     }
 
@@ -139,7 +243,10 @@ impl RemoteHost for FakeHost {
         if req.request_id == "done" {
             return Err(HostError::conflict("Already answered"));
         }
-        self.record(format!("answer {} {} {:?}", req.thread_id, req.request_id, req.response));
+        self.record(format!(
+            "answer {} {} {:?}",
+            req.thread_id, req.request_id, req.response
+        ));
         Ok(())
     }
 
@@ -158,8 +265,21 @@ impl RemoteHost for FakeHost {
 
     async fn usage(&self) -> HostResult<Usage> {
         self.record("usage".into());
-        let limit = UsageLimit { label: "5-hour limit".into(), percent: 42.0, resets_at: Some(9), window: "5h".into() };
-        Ok(Usage { providers: vec![ProviderUsage { agent: thread("x").agent, plan: Some("Claude Max".into()), limits: vec![limit], ..Default::default() }], ..Default::default() })
+        let limit = UsageLimit {
+            label: "5-hour limit".into(),
+            percent: 42.0,
+            resets_at: Some(9),
+            window: "5h".into(),
+        };
+        Ok(Usage {
+            providers: vec![ProviderUsage {
+                agent: thread("x").agent,
+                plan: Some("Claude Max".into()),
+                limits: vec![limit],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
     }
 
     async fn basecamp(&self, range: BasecampRange) -> HostResult<Basecamp> {
@@ -188,7 +308,12 @@ impl RemoteHost for FakeHost {
 
     async fn notes(&self) -> HostResult<Vec<NoteSummary>> {
         self.record("notes".into());
-        Ok(vec![NoteSummary { id: "n1".into(), title: "Groceries".into(), preview: "milk".into(), modified: 5 }])
+        Ok(vec![NoteSummary {
+            id: "n1".into(),
+            title: "Groceries".into(),
+            preview: "milk".into(),
+            modified: 5,
+        }])
     }
 
     async fn note(&self, note_id: &str) -> HostResult<Note> {
@@ -219,13 +344,30 @@ impl RemoteHost for FakeHost {
 
     async fn git_status(&self, target: GitTarget) -> HostResult<GitStatus> {
         self.record(format!("git_status {target:?}"));
-        let file = ChangedFile { path: "src/a.rs".into(), status: FileStatus::Modified, from: None, added: 3, removed: 1, binary: false };
-        Ok(GitStatus { is_repo: true, branch: Some("main".into()), files: vec![file], can_switch: true, ..Default::default() })
+        let file = ChangedFile {
+            path: "src/a.rs".into(),
+            status: FileStatus::Modified,
+            from: None,
+            added: 3,
+            removed: 1,
+            binary: false,
+        };
+        Ok(GitStatus {
+            is_repo: true,
+            branch: Some("main".into()),
+            files: vec![file],
+            can_switch: true,
+            ..Default::default()
+        })
     }
 
     async fn git_diff(&self, req: GitDiffRequest) -> HostResult<GitDiff> {
         self.record(format!("git_diff {:?} {}", req.target, req.path));
-        Ok(GitDiff { path: req.path, diff: "@@ -1 +1 @@\n-a\n+b".into(), truncated: false })
+        Ok(GitDiff {
+            path: req.path,
+            diff: "@@ -1 +1 @@\n-a\n+b".into(),
+            truncated: false,
+        })
     }
 
     async fn git_commit(&self, req: GitCommitRequest) -> HostResult<()> {
@@ -240,7 +382,11 @@ impl RemoteHost for FakeHost {
 
     async fn git_branches(&self, target: GitTarget) -> HostResult<GitBranches> {
         self.record(format!("git_branches {target:?}"));
-        Ok(GitBranches { current: Some("main".into()), default_branch: Some("main".into()), branches: vec!["main".into(), "dev".into()] })
+        Ok(GitBranches {
+            current: Some("main".into()),
+            default_branch: Some("main".into()),
+            branches: vec!["main".into(), "dev".into()],
+        })
     }
 
     async fn git_switch(&self, req: GitSwitchRequest) -> HostResult<()> {
@@ -254,34 +400,71 @@ impl RemoteHost for FakeHost {
     }
 
     async fn worktree_remove(&self, req: WorktreeRemoveRequest) -> HostResult<()> {
-        self.record(format!("worktree_remove {} {} {}", req.thread_id, req.delete_branch, req.force));
+        self.record(format!(
+            "worktree_remove {} {} {}",
+            req.thread_id, req.delete_branch, req.force
+        ));
         if !req.force {
-            return Err(HostError::conflict("2 uncommitted changes in the worktree would be lost."));
+            return Err(HostError::conflict(
+                "2 uncommitted changes in the worktree would be lost.",
+            ));
         }
         Ok(())
     }
 
     async fn commands(&self, thread_id: &str) -> HostResult<Vec<CommandInfo>> {
         self.record(format!("commands {thread_id}"));
-        Ok(vec![CommandInfo { name: "usage".into(), description: "Show plan usage".into(), kind: CommandKind::Command, trek: true }])
+        Ok(vec![CommandInfo {
+            name: "usage".into(),
+            description: "Show plan usage".into(),
+            kind: CommandKind::Command,
+            trek: true,
+        }])
     }
 
     /// Only the newer kinds: the first ones are refused, as by a host that has none.
     async fn thread_action(&self, req: ThreadActionRequest) -> HostResult<()> {
-        if matches!(req.action, ThreadAction::Pin | ThreadAction::Unpin | ThreadAction::Settle | ThreadAction::Unsettle | ThreadAction::Archive | ThreadAction::Rename { .. }) {
+        if matches!(
+            req.action,
+            ThreadAction::Pin
+                | ThreadAction::Unpin
+                | ThreadAction::Settle
+                | ThreadAction::Unsettle
+                | ThreadAction::Archive
+                | ThreadAction::Rename { .. }
+        ) {
             return Err(HostError::bad_request("This Mac can't do that to a thread"));
         }
         self.record(format!("thread_action {} {:?}", req.thread_id, req.action));
         match req.action {
-            ThreadAction::Delete { confirmed: false } => Err(HostError::conflict("The thread and its transcript are deleted from Trek. This can't be undone.")),
+            ThreadAction::Delete { confirmed: false } => Err(HostError::conflict(
+                "The thread and its transcript are deleted from Trek. This can't be undone.",
+            )),
             _ => Ok(()),
         }
     }
 
     async fn search(&self, req: SearchRequest) -> HostResult<SearchResults> {
         self.record(format!("search {} {:?}", req.query, req.limit));
-        let hit = SearchResult { thread: ThreadSummary { parent_id: Some("t1".into()), ..thread("kid") }, snippet: Some("two refreshes race".into()), ranges: vec![[14, 18]] };
-        Ok(SearchResults { query: req.query, results: vec![SearchResult { thread: thread("t2"), snippet: None, ranges: vec![] }, hit] })
+        let hit = SearchResult {
+            thread: ThreadSummary {
+                parent_id: Some("t1".into()),
+                ..thread("kid")
+            },
+            snippet: Some("two refreshes race".into()),
+            ranges: vec![[14, 18]],
+        };
+        Ok(SearchResults {
+            query: req.query,
+            results: vec![
+                SearchResult {
+                    thread: thread("t2"),
+                    snippet: None,
+                    ranges: vec![],
+                },
+                hit,
+            ],
+        })
     }
 
     async fn settings(&self) -> HostResult<MacSettings> {
@@ -291,7 +474,10 @@ impl RemoteHost for FakeHost {
 
     async fn set_settings(&self, change: SettingsChange) -> HostResult<MacSettings> {
         self.record(format!("set_settings {:?}", change.theme));
-        Ok(MacSettings { theme: change.theme.unwrap_or(Theme::System), ..settings() })
+        Ok(MacSettings {
+            theme: change.theme.unwrap_or(Theme::System),
+            ..settings()
+        })
     }
 }
 
@@ -302,7 +488,11 @@ impl RemoteHost for FakeHost {
 type Client = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 fn host_info() -> HostInfo {
-    HostInfo { id: "host-1".into(), name: "Test Mac".into(), version: "0.3.2".into() }
+    HostInfo {
+        id: "host-1".into(),
+        name: "Test Mac".into(),
+        version: "0.3.2".into(),
+    }
 }
 
 async fn start_with(f: impl FnOnce(&mut ServerConfig)) -> (RemoteHandle, Arc<FakeHost>) {
@@ -319,7 +509,9 @@ async fn start() -> (RemoteHandle, Arc<FakeHost>) {
 }
 
 async fn connect(handle: &RemoteHandle) -> Client {
-    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", handle.local_addr())).await.unwrap();
+    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{}", handle.local_addr()))
+        .await
+        .unwrap();
     ws
 }
 
@@ -332,13 +524,17 @@ async fn recv(c: &mut Client) -> Value {
     let next = async {
         loop {
             match c.next().await {
-                Some(Ok(Message::Text(text))) => return serde_json::from_str::<Value>(&text).unwrap(),
+                Some(Ok(Message::Text(text))) => {
+                    return serde_json::from_str::<Value>(&text).unwrap();
+                }
                 Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
                 other => panic!("expected a message, got {other:?}"),
             }
         }
     };
-    tokio::time::timeout(Duration::from_secs(5), next).await.expect("timed out waiting for a message")
+    tokio::time::timeout(Duration::from_secs(5), next)
+        .await
+        .expect("timed out waiting for a message")
 }
 
 /// Nothing arrives within `ms`.
@@ -367,7 +563,9 @@ async fn closed(c: &mut Client) {
             }
         }
     };
-    tokio::time::timeout(Duration::from_secs(5), wait).await.expect("socket didn't close");
+    tokio::time::timeout(Duration::from_secs(5), wait)
+        .await
+        .expect("socket didn't close");
 }
 
 /// Pair a new device; returns the authenticated client (snapshot consumed) and its token.
@@ -389,7 +587,11 @@ async fn pair(handle: &RemoteHandle, device_id: &str) -> (Client, String) {
 
 async fn hello(handle: &RemoteHandle, device_id: &str, token: &str) -> Client {
     let mut c = connect(handle).await;
-    send(&mut c, json!({"type": "hello", "id": "h", "protocol": 1, "device_id": device_id, "token": token})).await;
+    send(
+        &mut c,
+        json!({"type": "hello", "id": "h", "protocol": 1, "device_id": device_id, "token": token}),
+    )
+    .await;
     let welcome = recv(&mut c).await;
     assert_eq!(welcome["type"], "welcome", "{welcome}");
     assert_eq!(recv(&mut c).await["type"], "snapshot");
@@ -408,11 +610,18 @@ async fn hello_with_a_wrong_token_is_refused() {
     let mut c = connect(&handle).await;
     send(&mut c, json!({"type": "hello", "id": "1", "protocol": 1, "device_id": "dev-1", "token": format!("{token}x")})).await;
     let err = recv(&mut c).await;
-    assert_eq!(err, json!({"type": "error", "re": "1", "code": "unauthorized", "message": err["message"]}));
+    assert_eq!(
+        err,
+        json!({"type": "error", "re": "1", "code": "unauthorized", "message": err["message"]})
+    );
     closed(&mut c).await;
 
     let mut c = connect(&handle).await;
-    send(&mut c, json!({"type": "hello", "protocol": 1, "device_id": "nobody", "token": token})).await;
+    send(
+        &mut c,
+        json!({"type": "hello", "protocol": 1, "device_id": "nobody", "token": token}),
+    )
+    .await;
     assert_eq!(recv(&mut c).await["code"], "unauthorized");
     closed(&mut c).await;
 }
@@ -442,7 +651,10 @@ async fn only_pair_or_hello_before_authenticating() {
     let mut c = connect(&handle).await;
     send(&mut c, json!({"type": "pair", "id": "2", "protocol": 1})).await;
     let err = recv(&mut c).await;
-    assert_eq!((err["code"].as_str(), err["re"].as_str()), (Some("bad_request"), Some("2")));
+    assert_eq!(
+        (err["code"].as_str(), err["re"].as_str()),
+        (Some("bad_request"), Some("2"))
+    );
     closed(&mut c).await;
     assert!(host.calls().is_empty());
 }
@@ -450,8 +662,11 @@ async fn only_pair_or_hello_before_authenticating() {
 #[tokio::test]
 async fn browsers_are_refused() {
     let (handle, _) = start().await;
-    let mut req = format!("ws://{}", handle.local_addr()).into_client_request().unwrap();
-    req.headers_mut().insert("Origin", "http://evil.example".parse().unwrap());
+    let mut req = format!("ws://{}", handle.local_addr())
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("Origin", "http://evil.example".parse().unwrap());
     match tokio_tungstenite::connect_async(req).await {
         Err(tungstenite::Error::Http(resp)) => assert_eq!(resp.status(), 403),
         other => panic!("expected a 403, got {other:?}"),
@@ -460,7 +675,10 @@ async fn browsers_are_refused() {
 
 #[tokio::test]
 async fn a_second_address_and_the_routes_phones_keep() {
-    let routes = vec!["192.168.1.2:7420".to_string(), "100.101.1.2:7420".to_string()];
+    let routes = vec![
+        "192.168.1.2:7420".to_string(),
+        "100.101.1.2:7420".to_string(),
+    ];
     let (handle, _) = start_with(|c| {
         c.also_bind = vec!["127.0.0.1:0".parse().unwrap()];
         c.advertise = Some(routes[0].clone());
@@ -472,10 +690,16 @@ async fn a_second_address_and_the_routes_phones_keep() {
     assert_ne!(listening[0], listening[1]);
     // The pairing code names the first; the rest follow.
     let offer = handle.pairing_offer();
-    assert!(offer.url.contains("host=192.168.1.2:7420&") && offer.url.contains("&alt=100.101.1.2:7420"), "{}", offer.url);
+    assert!(
+        offer.url.contains("host=192.168.1.2:7420&") && offer.url.contains("&alt=100.101.1.2:7420"),
+        "{}",
+        offer.url
+    );
 
     // Paired on the second address, the phone hears every route; and again with each hello.
-    let (mut c, _) = tokio_tungstenite::connect_async(format!("ws://{}", listening[1])).await.unwrap();
+    let (mut c, _) = tokio_tungstenite::connect_async(format!("ws://{}", listening[1]))
+        .await
+        .unwrap();
     send(&mut c, json!({"type": "pair", "id": "1", "protocol": 1, "code": offer.code, "device_id": "dev-1", "device_name": "Phone"})).await;
     let paired = recv(&mut c).await;
     assert_eq!(paired["type"], "paired");
@@ -483,9 +707,16 @@ async fn a_second_address_and_the_routes_phones_keep() {
     let token = paired["token"].as_str().unwrap().to_string();
     drop(c);
     let mut c = connect(&handle).await;
-    send(&mut c, json!({"type": "hello", "id": "2", "protocol": 1, "device_id": "dev-1", "token": token})).await;
+    send(
+        &mut c,
+        json!({"type": "hello", "id": "2", "protocol": 1, "device_id": "dev-1", "token": token}),
+    )
+    .await;
     let welcome = recv(&mut c).await;
-    assert_eq!((welcome["type"].as_str(), &welcome["routes"]), (Some("welcome"), &json!(routes)));
+    assert_eq!(
+        (welcome["type"].as_str(), &welcome["routes"]),
+        (Some("welcome"), &json!(routes))
+    );
 
     // A Mac that names no routes sends none, as before.
     let (plain, _) = start().await;
@@ -495,7 +726,10 @@ async fn a_second_address_and_the_routes_phones_keep() {
 
 #[tokio::test]
 async fn routes_change_while_phones_stay_connected() {
-    let before = vec!["192.168.1.2:7420".to_string(), "100.101.1.2:7420".to_string()];
+    let before = vec![
+        "192.168.1.2:7420".to_string(),
+        "100.101.1.2:7420".to_string(),
+    ];
     let (handle, _) = start_with(|c| {
         c.advertise = Some(before[0].clone());
         c.routes = before.clone();
@@ -503,23 +737,41 @@ async fn routes_change_while_phones_stay_connected() {
     .await;
     let (mut phone, token) = pair(&handle, "dev-1").await;
     let last = handle.last_connection().expect("the phone that paired");
-    assert_eq!((last.device_id.as_str(), last.local, last.peer.ip()), ("dev-1", handle.local_addr(), handle.local_addr().ip()));
+    assert_eq!(
+        (last.device_id.as_str(), last.local, last.peer.ip()),
+        ("dev-1", handle.local_addr(), handle.local_addr().ip())
+    );
 
     // This Mac moved to another network: phones are told the new address, and nothing restarts.
     let after = vec!["10.0.0.7:7420".to_string(), "100.101.1.2:7420".to_string()];
     handle.set_routes(Some(after[0].clone()), after.clone());
     assert_eq!(handle.routes(), after);
     send(&mut phone, json!({"type": "ping", "id": "p"})).await;
-    assert_eq!(recv(&mut phone).await, json!({"type": "pong", "re": "p"}), "the phone that was connected still is");
+    assert_eq!(
+        recv(&mut phone).await,
+        json!({"type": "pong", "re": "p"}),
+        "the phone that was connected still is"
+    );
     assert_eq!(handle.connected_devices(), ["dev-1"]);
 
     // The next welcome and pairing code carry the new routes.
     let mut c = connect(&handle).await;
-    send(&mut c, json!({"type": "hello", "id": "h", "protocol": 1, "device_id": "dev-1", "token": token})).await;
+    send(
+        &mut c,
+        json!({"type": "hello", "id": "h", "protocol": 1, "device_id": "dev-1", "token": token}),
+    )
+    .await;
     let welcome = recv(&mut c).await;
-    assert_eq!((welcome["type"].as_str(), &welcome["routes"]), (Some("welcome"), &json!(after)));
+    assert_eq!(
+        (welcome["type"].as_str(), &welcome["routes"]),
+        (Some("welcome"), &json!(after))
+    );
     let offer = handle.pairing_offer();
-    assert!(offer.url.contains("host=10.0.0.7:7420&") && offer.url.contains("&alt=100.101.1.2:7420"), "{}", offer.url);
+    assert!(
+        offer.url.contains("host=10.0.0.7:7420&") && offer.url.contains("&alt=100.101.1.2:7420"),
+        "{}",
+        offer.url
+    );
 }
 
 #[tokio::test]
@@ -542,7 +794,10 @@ async fn the_admission_decides_per_connection_from_both_addresses() {
     assert_eq!(paired["type"], "paired", "{paired}");
     let loopback: std::net::IpAddr = "127.0.0.1".parse().unwrap();
     assert_eq!(asked.lock().unwrap()[0], (loopback, loopback));
-    assert_eq!(handle.last_connection().unwrap().local, format!("127.0.0.1:{port}").parse().unwrap());
+    assert_eq!(
+        handle.last_connection().unwrap().local,
+        format!("127.0.0.1:{port}").parse().unwrap()
+    );
 
     // Refused: closed before anything is said, and no place among the unauthenticated taken.
     match tokio_tungstenite::connect_async(format!("ws://[::1]:{port}")).await {
@@ -564,16 +819,42 @@ async fn a_channel_host_forwards_what_another_machine_asks() {
             match req {
                 HostRequest::Snapshot { reply } => drop(reply.send(Ok(Snapshot::default()))),
                 HostRequest::MachineInfo { reply } => {
-                    let info = MachineInfo { name: "Studio".into(), platform: "macos".into(), trek_version: "0.4.7".into(), home: "/Users/me".into() };
+                    let info = MachineInfo {
+                        name: "Studio".into(),
+                        platform: "macos".into(),
+                        trek_version: "0.4.7".into(),
+                        home: "/Users/me".into(),
+                    };
                     drop(reply.send(Ok(info)));
                 }
-                HostRequest::CloneProject { req, progress, reply } => {
+                HostRequest::CloneProject {
+                    req,
+                    progress,
+                    reply,
+                } => {
                     progress.line(format!("Cloning into '{}'...", req.folder));
                     drop(reply.send(Ok("p-new".into())));
                 }
-                HostRequest::PutFiles { project_id, files, reply } => {
-                    let said = files.iter().map(|f| format!("{} {:o} {}", f.path, f.mode, String::from_utf8_lossy(&f.bytes))).collect::<Vec<_>>();
-                    assert_eq!((project_id.as_str(), said), ("p-new", vec![".env 600 KEY=1".to_string()]));
+                HostRequest::PutFiles {
+                    project_id,
+                    files,
+                    reply,
+                } => {
+                    let said = files
+                        .iter()
+                        .map(|f| {
+                            format!(
+                                "{} {:o} {}",
+                                f.path,
+                                f.mode,
+                                String::from_utf8_lossy(&f.bytes)
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        (project_id.as_str(), said),
+                        ("p-new", vec![".env 600 KEY=1".to_string()])
+                    );
                     drop(reply.send(Ok(())));
                 }
                 other => panic!("unexpected {other:?}"),
@@ -583,13 +864,34 @@ async fn a_channel_host_forwards_what_another_machine_asks() {
     let (mut c, _) = pair(&handle, "mac-a").await;
     send(&mut c, json!({"type": "machine_info", "id": "1"})).await;
     let info = recv(&mut c).await;
-    assert_eq!((info["type"].as_str(), info["name"].as_str(), info["re"].as_str()), (Some("machine_info"), Some("Studio"), Some("1")));
+    assert_eq!(
+        (
+            info["type"].as_str(),
+            info["name"].as_str(),
+            info["re"].as_str()
+        ),
+        (Some("machine_info"), Some("Studio"), Some("1"))
+    );
     send(&mut c, json!({"type": "clone_project", "id": "2", "url": "https://github.com/dokyit/trek.git", "folder": "~/trek", "name": "trek"})).await;
-    assert_eq!(recv(&mut c).await, json!({"type": "clone_progress", "folder": "~/trek", "line": "Cloning into '~/trek'..."}));
+    assert_eq!(
+        recv(&mut c).await,
+        json!({"type": "clone_progress", "folder": "~/trek", "line": "Cloning into '~/trek'..."})
+    );
     let ack = recv(&mut c).await;
-    assert_eq!((ack["type"].as_str(), ack["re"].as_str(), ack["project_id"].as_str()), (Some("ack"), Some("2"), Some("p-new")));
+    assert_eq!(
+        (
+            ack["type"].as_str(),
+            ack["re"].as_str(),
+            ack["project_id"].as_str()
+        ),
+        (Some("ack"), Some("2"), Some("p-new"))
+    );
     let file = serde_json::to_value(PutFile::new(".env", b"KEY=1", Some(0o600))).unwrap();
-    send(&mut c, json!({"type": "put_files", "id": "3", "project_id": "p-new", "files": [file]})).await;
+    send(
+        &mut c,
+        json!({"type": "put_files", "id": "3", "project_id": "p-new", "files": [file]}),
+    )
+    .await;
     assert_eq!(recv(&mut c).await["type"], "ack");
 }
 
@@ -599,7 +901,11 @@ async fn pairing_then_hello() {
     let mut notices = handle.notices();
     let offer = handle.pairing_offer();
     assert_eq!(offer.code.len(), 9);
-    assert!(offer.url.starts_with(&format!("trek://pair?host={}&code={}&name=Test%20Mac&hid=host-1", handle.local_addr(), offer.code)));
+    assert!(offer.url.starts_with(&format!(
+        "trek://pair?host={}&code={}&name=Test%20Mac&hid=host-1",
+        handle.local_addr(),
+        offer.code
+    )));
 
     // A wrong protocol doesn't burn the code.
     let mut c = connect(&handle).await;
@@ -615,7 +921,10 @@ async fn pairing_then_hello() {
     assert_eq!(paired["type"], "paired");
     assert_eq!(paired["re"], "1");
     assert_eq!(paired["protocol"], 1);
-    assert_eq!(paired["host"], json!({"id": "host-1", "name": "Test Mac", "version": "0.3.2"}));
+    assert_eq!(
+        paired["host"],
+        json!({"id": "host-1", "name": "Test Mac", "version": "0.3.2"})
+    );
     let token = paired["token"].as_str().unwrap().to_string();
     assert_eq!(token.len(), 43);
     let snapshot = recv(&mut c).await;
@@ -625,9 +934,17 @@ async fn pairing_then_hello() {
 
     assert_eq!(
         notices.recv().await.unwrap(),
-        ServerNotice::Paired { device_id: "dev-1".into(), name: "Tobias's iPhone".into() }
+        ServerNotice::Paired {
+            device_id: "dev-1".into(),
+            name: "Tobias's iPhone".into()
+        }
     );
-    assert_eq!(notices.recv().await.unwrap(), ServerNotice::Connected { device_id: "dev-1".into() });
+    assert_eq!(
+        notices.recv().await.unwrap(),
+        ServerNotice::Connected {
+            device_id: "dev-1".into()
+        }
+    );
     assert_eq!(handle.connected_devices(), ["dev-1"]);
     let devices = handle.devices();
     assert_eq!(devices.len(), 1);
@@ -637,13 +954,21 @@ async fn pairing_then_hello() {
     send(&mut c, json!({"type": "ping", "id": "p"})).await;
     assert_eq!(recv(&mut c).await, json!({"type": "pong", "re": "p"}));
     drop(c);
-    assert_eq!(notices.recv().await.unwrap(), ServerNotice::Disconnected { device_id: "dev-1".into() });
+    assert_eq!(
+        notices.recv().await.unwrap(),
+        ServerNotice::Disconnected {
+            device_id: "dev-1".into()
+        }
+    );
 
     // Reconnect with the token.
     let mut c = connect(&handle).await;
     send(&mut c, json!({"type": "hello", "id": "1", "protocol": 1, "device_id": "dev-1", "token": token, "app_version": "0.1.0"})).await;
     let welcome = recv(&mut c).await;
-    assert_eq!(welcome, json!({"type": "welcome", "re": "1", "protocol": 1, "host": {"id": "host-1", "name": "Test Mac", "version": "0.3.2"}}));
+    assert_eq!(
+        welcome,
+        json!({"type": "welcome", "re": "1", "protocol": 1, "host": {"id": "host-1", "name": "Test Mac", "version": "0.3.2"}})
+    );
     assert_eq!(recv(&mut c).await["type"], "snapshot");
 
     // The code was single use.
@@ -659,7 +984,11 @@ async fn pairing_then_hello() {
 async fn start_dual_stack() -> (RemoteHandle, String, String) {
     let (handle, _) = start_with(|config| config.bind = "[::]:0".parse().unwrap()).await;
     let port = handle.local_addr().port();
-    (handle, format!("ws://127.0.0.1:{port}"), format!("ws://[::1]:{port}"))
+    (
+        handle,
+        format!("ws://127.0.0.1:{port}"),
+        format!("ws://[::1]:{port}"),
+    )
 }
 
 async fn try_pair(url: &str, code: &str, device_id: &str) -> Value {
@@ -673,11 +1002,20 @@ async fn a_wrong_code_holds_up_only_its_address() {
     let (handle, v4, v6) = start_dual_stack().await;
     handle.pairing_offer_with_code("K7Q2-9XMV");
     let wrong = try_pair(&v6, "AAAA-AAAA", "x").await;
-    assert_eq!((wrong["code"].as_str(), wrong["message"].as_str()), (Some("pairing_failed"), Some("Wrong pairing code")));
+    assert_eq!(
+        (wrong["code"].as_str(), wrong["message"].as_str()),
+        (Some("pairing_failed"), Some("Wrong pairing code"))
+    );
     // That address waits, even with the right code.
     let waits = try_pair(&v6, "K7Q2-9XMV", "x").await;
     assert_eq!(waits["code"], "pairing_failed");
-    assert!(waits["message"].as_str().unwrap().contains("try again in 1 s"), "{waits}");
+    assert!(
+        waits["message"]
+            .as_str()
+            .unwrap()
+            .contains("try again in 1 s"),
+        "{waits}"
+    );
     // A phone elsewhere pairs at once.
     assert_eq!(try_pair(&v4, "K7Q2-9XMV", "phone").await["type"], "paired");
     assert_eq!(handle.devices().len(), 1);
@@ -688,10 +1026,21 @@ async fn wrong_codes_back_off_then_count_again() {
     let (handle, _) = start().await;
     let url = format!("ws://{}", handle.local_addr());
     handle.pairing_offer_with_code("K7Q2-9XMV");
-    assert_eq!(try_pair(&url, "AAAA-AAAA", "x").await["message"], "Wrong pairing code");
+    assert_eq!(
+        try_pair(&url, "AAAA-AAAA", "x").await["message"],
+        "Wrong pairing code"
+    );
     tokio::time::sleep(Duration::from_millis(1100)).await;
-    assert_eq!(try_pair(&url, "AAAA-AAAA", "x").await["message"], "Wrong pairing code");
-    assert!(try_pair(&url, "K7Q2-9XMV", "x").await["message"].as_str().unwrap().contains("try again in 2 s"));
+    assert_eq!(
+        try_pair(&url, "AAAA-AAAA", "x").await["message"],
+        "Wrong pairing code"
+    );
+    assert!(
+        try_pair(&url, "K7Q2-9XMV", "x").await["message"]
+            .as_str()
+            .unwrap()
+            .contains("try again in 2 s")
+    );
     tokio::time::sleep(Duration::from_millis(2100)).await;
     assert_eq!(try_pair(&url, "K7Q2-9XMV", "x").await["type"], "paired");
 }
@@ -701,17 +1050,39 @@ async fn replacing_a_connection_does_not_report_the_device_disconnected() {
     let (handle, _) = start().await;
     let mut notices = handle.notices();
     let (old, token) = pair(&handle, "dev-1").await;
-    assert!(matches!(notices.recv().await.unwrap(), ServerNotice::Paired { .. }));
-    assert_eq!(notices.recv().await.unwrap(), ServerNotice::Connected { device_id: "dev-1".into() });
+    assert!(matches!(
+        notices.recv().await.unwrap(),
+        ServerNotice::Paired { .. }
+    ));
+    assert_eq!(
+        notices.recv().await.unwrap(),
+        ServerNotice::Connected {
+            device_id: "dev-1".into()
+        }
+    );
 
     let new = hello(&handle, "dev-1", &token).await;
-    assert_eq!(notices.recv().await.unwrap(), ServerNotice::Connected { device_id: "dev-1".into() });
+    assert_eq!(
+        notices.recv().await.unwrap(),
+        ServerNotice::Connected {
+            device_id: "dev-1".into()
+        }
+    );
     drop(old);
-    assert!(tokio::time::timeout(Duration::from_millis(200), notices.recv()).await.is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), notices.recv())
+            .await
+            .is_err()
+    );
     assert_eq!(handle.connected_devices(), ["dev-1"]);
 
     drop(new);
-    assert_eq!(notices.recv().await.unwrap(), ServerNotice::Disconnected { device_id: "dev-1".into() });
+    assert_eq!(
+        notices.recv().await.unwrap(),
+        ServerNotice::Disconnected {
+            device_id: "dev-1".into()
+        }
+    );
 }
 
 #[tokio::test]
@@ -725,8 +1096,14 @@ async fn unauthenticated_connections_are_capped_per_address() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     let mut refused = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     let mut byte = [0];
-    let read = tokio::time::timeout(Duration::from_secs(1), refused.read(&mut byte)).await.unwrap().unwrap();
-    assert_eq!(read, 0, "a fifth unauthenticated socket from one address is closed");
+    let read = tokio::time::timeout(Duration::from_secs(1), refused.read(&mut byte))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        read, 0,
+        "a fifth unauthenticated socket from one address is closed"
+    );
     // Another address still pairs; this one does once a place is free.
     let offer = handle.pairing_offer();
     assert_eq!(try_pair(&v6, &offer.code, "dev-6").await["type"], "paired");
@@ -754,9 +1131,17 @@ async fn messages_before_authenticating_are_capped() {
     assert_eq!(recv(&mut c).await["type"], "snapshot");
     // Once authenticated, messages may be as large as `max_message`.
     let text = "y".repeat(64 << 10);
-    send(&mut c, json!({"type": "send", "id": "1", "thread_id": "t1", "text": text})).await;
+    send(
+        &mut c,
+        json!({"type": "send", "id": "1", "thread_id": "t1", "text": text}),
+    )
+    .await;
     assert_eq!(recv(&mut c).await["type"], "ack");
-    assert!(host.calls().iter().any(|call| call.starts_with("send t1 yyy")));
+    assert!(
+        host.calls()
+            .iter()
+            .any(|call| call.starts_with("send t1 yyy"))
+    );
 }
 
 #[tokio::test]
@@ -770,13 +1155,20 @@ async fn pairing_keeps_the_offer_when_devices_cannot_be_saved() {
     let mut failed = connect(&handle).await;
     send(&mut failed, json!({"type": "pair", "id": "1", "protocol": 1, "code": offer.code, "device_id": "dev-1", "device_name": "Phone"})).await;
     let err = recv(&mut failed).await;
-    assert_eq!((err["code"].as_str(), handle.devices().len()), (Some("host_error"), 0));
+    assert_eq!(
+        (err["code"].as_str(), handle.devices().len()),
+        (Some("host_error"), 0)
+    );
     closed(&mut failed).await;
 
     std::fs::remove_dir(&path).unwrap();
     let mut retry = connect(&handle).await;
     send(&mut retry, json!({"type": "pair", "id": "2", "protocol": 1, "code": offer.code, "device_id": "dev-1", "device_name": "Phone"})).await;
-    assert_eq!(recv(&mut retry).await["type"], "paired", "the same offer still works");
+    assert_eq!(
+        recv(&mut retry).await["type"],
+        "paired",
+        "the same offer still works"
+    );
     assert_eq!(recv(&mut retry).await["type"], "snapshot");
     drop(retry);
     let _ = std::fs::remove_dir_all(&dir);
@@ -788,7 +1180,11 @@ async fn subscriptions_route_items() {
     let (mut a, _) = pair(&handle, "dev-a").await;
     let (mut b, _) = pair(&handle, "dev-b").await;
 
-    send(&mut a, json!({"type": "subscribe", "id": "7", "thread_id": "t1", "after_seq": null})).await;
+    send(
+        &mut a,
+        json!({"type": "subscribe", "id": "7", "thread_id": "t1", "after_seq": null}),
+    )
+    .await;
     let t = recv(&mut a).await;
     assert_eq!(t["type"], "transcript");
     assert_eq!(t["re"], "7");
@@ -796,9 +1192,15 @@ async fn subscriptions_route_items() {
     assert_eq!(t["reset"], true);
     assert_eq!(t["seq"], 3);
     assert_eq!(t["items"].as_array().unwrap().len(), 3);
-    assert_eq!(t["items"][0], json!({"id": "a", "seq": 1, "at": null, "kind": "assistant", "text": "one", "streaming": false}));
+    assert_eq!(
+        t["items"][0],
+        json!({"id": "a", "seq": 1, "at": null, "kind": "assistant", "text": "one", "streaming": false})
+    );
 
-    handle.push(HostEvent::Item { thread_id: "t1".into(), item: item("d", 4, "four") });
+    handle.push(HostEvent::Item {
+        thread_id: "t1".into(),
+        item: item("d", 4, "four"),
+    });
     let pushed = recv(&mut a).await;
     assert_eq!(pushed["type"], "item");
     assert_eq!(pushed["thread_id"], "t1");
@@ -806,46 +1208,91 @@ async fn subscriptions_route_items() {
     assert_eq!(pushed.get("re"), None);
 
     // Items for other threads don't reach `a`; nothing reaches the unsubscribed `b`.
-    handle.push(HostEvent::Item { thread_id: "t2".into(), item: item("z", 9, "other") });
+    handle.push(HostEvent::Item {
+        thread_id: "t2".into(),
+        item: item("z", 9, "other"),
+    });
     handle.push(HostEvent::TranscriptReset("t2".into()));
     // Thread events reach everyone, in order after the items.
     handle.push(HostEvent::Thread(thread("t9")));
     assert_eq!(recv(&mut a).await["type"], "thread");
     let to_b = recv(&mut b).await;
-    assert_eq!(to_b["type"], "thread", "b only gets the thread upsert: {to_b}");
+    assert_eq!(
+        to_b["type"], "thread",
+        "b only gets the thread upsert: {to_b}"
+    );
     assert_eq!(to_b["thread"]["id"], "t9");
 
     handle.push(HostEvent::TranscriptReset("t1".into()));
-    assert_eq!(recv(&mut a).await, json!({"type": "transcript_reset", "thread_id": "t1"}));
+    assert_eq!(
+        recv(&mut a).await,
+        json!({"type": "transcript_reset", "thread_id": "t1"})
+    );
 
     handle.push(HostEvent::ThreadRemoved("t9".into()));
-    assert_eq!(recv(&mut a).await, json!({"type": "thread_removed", "thread_id": "t9"}));
-    assert_eq!(recv(&mut b).await, json!({"type": "thread_removed", "thread_id": "t9"}));
+    assert_eq!(
+        recv(&mut a).await,
+        json!({"type": "thread_removed", "thread_id": "t9"})
+    );
+    assert_eq!(
+        recv(&mut b).await,
+        json!({"type": "thread_removed", "thread_id": "t9"})
+    );
 
     handle.push(HostEvent::Snapshot(Snapshot::default()));
-    assert_eq!(recv(&mut b).await, json!({"type": "snapshot", "threads": [], "projects": [], "agents": []}));
+    assert_eq!(
+        recv(&mut b).await,
+        json!({"type": "snapshot", "threads": [], "projects": [], "agents": []})
+    );
     assert_eq!(recv(&mut a).await["type"], "snapshot");
 
     // Incremental and stale resubscribes.
-    send(&mut a, json!({"type": "subscribe", "id": "8", "thread_id": "t1", "after_seq": 1})).await;
+    send(
+        &mut a,
+        json!({"type": "subscribe", "id": "8", "thread_id": "t1", "after_seq": 1}),
+    )
+    .await;
     let t = recv(&mut a).await;
-    assert_eq!((t["reset"].as_bool(), t["seq"].as_u64()), (Some(false), Some(3)));
-    let seqs: Vec<u64> = t["items"].as_array().unwrap().iter().map(|i| i["seq"].as_u64().unwrap()).collect();
+    assert_eq!(
+        (t["reset"].as_bool(), t["seq"].as_u64()),
+        (Some(false), Some(3))
+    );
+    let seqs: Vec<u64> = t["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["seq"].as_u64().unwrap())
+        .collect();
     assert_eq!(seqs, [2, 3]);
-    send(&mut a, json!({"type": "subscribe", "id": "9", "thread_id": "t1", "after_seq": 99})).await;
+    send(
+        &mut a,
+        json!({"type": "subscribe", "id": "9", "thread_id": "t1", "after_seq": 99}),
+    )
+    .await;
     let t = recv(&mut a).await;
     assert_eq!(t["reset"], true);
     assert_eq!(t["items"].as_array().unwrap().len(), 3);
 
     // Unsubscribing stops items.
-    send(&mut a, json!({"type": "unsubscribe", "id": "u", "thread_id": "t1"})).await;
+    send(
+        &mut a,
+        json!({"type": "unsubscribe", "id": "u", "thread_id": "t1"}),
+    )
+    .await;
     assert_eq!(recv(&mut a).await, json!({"type": "ack", "re": "u"}));
-    handle.push(HostEvent::Item { thread_id: "t1".into(), item: item("e", 5, "five") });
+    handle.push(HostEvent::Item {
+        thread_id: "t1".into(),
+        item: item("e", 5, "five"),
+    });
     quiet(&mut a, 200).await;
     quiet(&mut b, 50).await;
 
     // Unknown threads.
-    send(&mut b, json!({"type": "subscribe", "id": "x", "thread_id": "nope"})).await;
+    send(
+        &mut b,
+        json!({"type": "subscribe", "id": "x", "thread_id": "nope"}),
+    )
+    .await;
     assert_eq!(recv(&mut b).await["code"], "not_found");
 }
 
@@ -853,19 +1300,41 @@ async fn subscriptions_route_items() {
 async fn items_pushed_while_a_transcript_loads_follow_it() {
     let (handle, _) = start().await;
     let (mut c, _) = pair(&handle, "dev-1").await;
-    send(&mut c, json!({"type": "subscribe", "id": "s", "thread_id": "slow"})).await;
+    send(
+        &mut c,
+        json!({"type": "subscribe", "id": "s", "thread_id": "slow"}),
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     // Already in the transcript the host is building (seq <= 3): dropped.
-    handle.push(HostEvent::Item { thread_id: "slow".into(), item: item("a", 2, "stale") });
+    handle.push(HostEvent::Item {
+        thread_id: "slow".into(),
+        item: item("a", 2, "stale"),
+    });
     // Newer: delivered right after the transcript.
-    handle.push(HostEvent::Item { thread_id: "slow".into(), item: item("b", 4, "new") });
+    handle.push(HostEvent::Item {
+        thread_id: "slow".into(),
+        item: item("b", 4, "new"),
+    });
     handle.push(HostEvent::TranscriptReset("slow".into()));
     let t = recv(&mut c).await;
-    assert_eq!((t["type"].as_str(), t["re"].as_str()), (Some("transcript"), Some("s")));
+    assert_eq!(
+        (t["type"].as_str(), t["re"].as_str()),
+        (Some("transcript"), Some("s"))
+    );
     let next = recv(&mut c).await;
-    assert_eq!((next["type"].as_str(), next["item"]["seq"].as_u64()), (Some("item"), Some(4)));
-    assert_eq!(recv(&mut c).await, json!({"type": "transcript_reset", "thread_id": "slow"}));
-    handle.push(HostEvent::Item { thread_id: "slow".into(), item: item("c", 5, "live") });
+    assert_eq!(
+        (next["type"].as_str(), next["item"]["seq"].as_u64()),
+        (Some("item"), Some(4))
+    );
+    assert_eq!(
+        recv(&mut c).await,
+        json!({"type": "transcript_reset", "thread_id": "slow"})
+    );
+    handle.push(HostEvent::Item {
+        thread_id: "slow".into(),
+        item: item("c", 5, "live"),
+    });
     assert_eq!(recv(&mut c).await["item"]["id"], "c");
 }
 
@@ -875,8 +1344,14 @@ async fn actions_reach_the_host() {
     let (mut c, _) = pair(&handle, "dev-1").await;
 
     let requests = [
-        (json!({"type": "send", "id": "9", "thread_id": "t1", "text": "Also add a regression test", "mode": "steer"}), json!({"type": "ack", "re": "9"})),
-        (json!({"type": "send", "id": "9b", "thread_id": "t1", "text": "later"}), json!({"type": "ack", "re": "9b"})),
+        (
+            json!({"type": "send", "id": "9", "thread_id": "t1", "text": "Also add a regression test", "mode": "steer"}),
+            json!({"type": "ack", "re": "9"}),
+        ),
+        (
+            json!({"type": "send", "id": "9b", "thread_id": "t1", "text": "later"}),
+            json!({"type": "ack", "re": "9b"}),
+        ),
         (
             json!({"type": "new_thread", "id": "10", "project_id": "p1", "agent": "codex", "model": "gpt-6", "text": "Add rate limiting", "worktree": true}),
             json!({"type": "ack", "re": "10", "thread_id": "t-new"}),
@@ -893,9 +1368,18 @@ async fn actions_reach_the_host() {
             json!({"type": "answer", "id": "13", "thread_id": "t1", "request_id": "r3", "response": {"kind": "plan", "approve": false, "feedback": "Skip step 3"}}),
             json!({"type": "ack", "re": "13"}),
         ),
-        (json!({"type": "interrupt", "id": "14", "thread_id": "t1"}), json!({"type": "ack", "re": "14"})),
-        (json!({"type": "mark_seen", "thread_id": "t1"}), json!({"type": "ack"})),
-        (json!({"type": "ping", "id": "15"}), json!({"type": "pong", "re": "15"})),
+        (
+            json!({"type": "interrupt", "id": "14", "thread_id": "t1"}),
+            json!({"type": "ack", "re": "14"}),
+        ),
+        (
+            json!({"type": "mark_seen", "thread_id": "t1"}),
+            json!({"type": "ack"}),
+        ),
+        (
+            json!({"type": "ping", "id": "15"}),
+            json!({"type": "pong", "re": "15"}),
+        ),
         // Over the wire to the host (which here, like an older Mac, can't do them).
         (
             json!({"type": "set_prefs", "id": "16", "thread_id": "t1", "effort": "low"}),
@@ -925,11 +1409,22 @@ async fn actions_reach_the_host() {
     );
 
     // Host errors keep their codes.
-    send(&mut c, json!({"type": "send", "id": "e1", "thread_id": "missing", "text": "x"})).await;
-    assert_eq!(recv(&mut c).await, json!({"type": "error", "re": "e1", "code": "not_found", "message": "No thread missing"}));
+    send(
+        &mut c,
+        json!({"type": "send", "id": "e1", "thread_id": "missing", "text": "x"}),
+    )
+    .await;
+    assert_eq!(
+        recv(&mut c).await,
+        json!({"type": "error", "re": "e1", "code": "not_found", "message": "No thread missing"})
+    );
     send(&mut c, json!({"type": "answer", "id": "e2", "thread_id": "t1", "request_id": "done", "response": {"kind": "approval", "decision": "deny"}})).await;
     assert_eq!(recv(&mut c).await["code"], "conflict");
-    send(&mut c, json!({"type": "interrupt", "id": "e3", "thread_id": "boom"})).await;
+    send(
+        &mut c,
+        json!({"type": "interrupt", "id": "e3", "thread_id": "boom"}),
+    )
+    .await;
     assert_eq!(recv(&mut c).await["code"], "host_error");
 
     // Bad input is answered and the connection stays.
@@ -937,10 +1432,21 @@ async fn actions_reach_the_host() {
     assert_eq!(recv(&mut c).await["code"], "bad_request");
     send(&mut c, json!({"type": "teleport", "id": "b1"})).await;
     let err = recv(&mut c).await;
-    assert_eq!((err["code"].as_str(), err["re"].as_str()), (Some("bad_request"), Some("b1")));
-    send(&mut c, json!({"type": "send", "id": "b2", "thread_id": "t1"})).await;
+    assert_eq!(
+        (err["code"].as_str(), err["re"].as_str()),
+        (Some("bad_request"), Some("b1"))
+    );
+    send(
+        &mut c,
+        json!({"type": "send", "id": "b2", "thread_id": "t1"}),
+    )
+    .await;
     assert_eq!(recv(&mut c).await["code"], "bad_request");
-    send(&mut c, json!({"type": "hello", "id": "b3", "protocol": 1, "device_id": "x", "token": "y"})).await;
+    send(
+        &mut c,
+        json!({"type": "hello", "id": "b3", "protocol": 1, "device_id": "x", "token": "y"}),
+    )
+    .await;
     assert_eq!(recv(&mut c).await["code"], "bad_request");
     send(&mut c, json!({"type": "ping", "id": "still"})).await;
     assert_eq!(recv(&mut c).await, json!({"type": "pong", "re": "still"}));
@@ -955,63 +1461,168 @@ async fn newer_requests_reach_the_host_over_the_wire() {
 
     let requests = [
         (json!({"type": "usage", "id": "u"}), "usage"),
-        (json!({"type": "basecamp", "id": "b", "range": "week"}), "basecamp"),
+        (
+            json!({"type": "basecamp", "id": "b", "range": "week"}),
+            "basecamp",
+        ),
         (json!({"type": "notes", "id": "n"}), "notes"),
         (json!({"type": "note", "id": "n1", "note_id": "n1"}), "note"),
-        (json!({"type": "create_note", "id": "n2", "body": "Groceries"}), "note"),
-        (json!({"type": "save_note", "id": "n3", "note_id": "n1", "body": "Groceries\nbread", "modified": 5}), "note"),
-        (json!({"type": "delete_note", "id": "n4", "note_id": "n1"}), "ack"),
-        (json!({"type": "git_status", "id": "g1", "thread_id": "t1"}), "git_status"),
-        (json!({"type": "git_diff", "id": "g2", "project_id": "p1", "path": "src/a.rs"}), "git_diff"),
-        (json!({"type": "git_commit", "id": "g3", "thread_id": "t1", "message": "Fix the race"}), "ack"),
-        (json!({"type": "git_push", "id": "g4", "thread_id": "t1"}), "ack"),
-        (json!({"type": "git_branches", "id": "g5", "project_id": "p1"}), "git_branches"),
-        (json!({"type": "git_switch", "id": "g6", "project_id": "p1", "branch": "dev"}), "ack"),
-        (json!({"type": "worktree_merge", "id": "w1", "thread_id": "t1"}), "ack"),
-        (json!({"type": "worktree_remove", "id": "w2", "thread_id": "t1", "delete_branch": true, "force": true}), "ack"),
-        (json!({"type": "commands", "id": "c", "thread_id": "t1"}), "commands"),
+        (
+            json!({"type": "create_note", "id": "n2", "body": "Groceries"}),
+            "note",
+        ),
+        (
+            json!({"type": "save_note", "id": "n3", "note_id": "n1", "body": "Groceries\nbread", "modified": 5}),
+            "note",
+        ),
+        (
+            json!({"type": "delete_note", "id": "n4", "note_id": "n1"}),
+            "ack",
+        ),
+        (
+            json!({"type": "git_status", "id": "g1", "thread_id": "t1"}),
+            "git_status",
+        ),
+        (
+            json!({"type": "git_diff", "id": "g2", "project_id": "p1", "path": "src/a.rs"}),
+            "git_diff",
+        ),
+        (
+            json!({"type": "git_commit", "id": "g3", "thread_id": "t1", "message": "Fix the race"}),
+            "ack",
+        ),
+        (
+            json!({"type": "git_push", "id": "g4", "thread_id": "t1"}),
+            "ack",
+        ),
+        (
+            json!({"type": "git_branches", "id": "g5", "project_id": "p1"}),
+            "git_branches",
+        ),
+        (
+            json!({"type": "git_switch", "id": "g6", "project_id": "p1", "branch": "dev"}),
+            "ack",
+        ),
+        (
+            json!({"type": "worktree_merge", "id": "w1", "thread_id": "t1"}),
+            "ack",
+        ),
+        (
+            json!({"type": "worktree_remove", "id": "w2", "thread_id": "t1", "delete_branch": true, "force": true}),
+            "ack",
+        ),
+        (
+            json!({"type": "commands", "id": "c", "thread_id": "t1"}),
+            "commands",
+        ),
         (json!({"type": "settings", "id": "s1"}), "settings"),
-        (json!({"type": "set_settings", "id": "s2", "theme": "paper"}), "settings"),
-        (json!({"type": "transcript_before", "id": "tb", "thread_id": "long", "before": "i5", "limit": 2}), "transcript_page"),
-        (json!({"type": "turn_action", "id": "ta", "thread_id": "t1", "item_id": "i4", "action": "fork"}), "ack"),
+        (
+            json!({"type": "set_settings", "id": "s2", "theme": "paper"}),
+            "settings",
+        ),
+        (
+            json!({"type": "transcript_before", "id": "tb", "thread_id": "long", "before": "i5", "limit": 2}),
+            "transcript_page",
+        ),
+        (
+            json!({"type": "turn_action", "id": "ta", "thread_id": "t1", "item_id": "i4", "action": "fork"}),
+            "ack",
+        ),
     ];
     for (request, kind) in requests {
         let id = request["id"].clone();
         send(&mut c, request.clone()).await;
         let reply = recv(&mut c).await;
-        assert_eq!((reply["type"].as_str(), &reply["re"]), (Some(kind), &id), "{request} → {reply}");
+        assert_eq!(
+            (reply["type"].as_str(), &reply["re"]),
+            (Some(kind), &id),
+            "{request} → {reply}"
+        );
     }
     // What came back is what the host said, whole.
     send(&mut c, json!({"type": "usage", "id": "u2"})).await;
     let usage = recv(&mut c).await;
-    assert_eq!(usage["providers"][0]["limits"][0], json!({"label": "5-hour limit", "percent": 42.0, "resets_at": 9, "window": "5h"}));
+    assert_eq!(
+        usage["providers"][0]["limits"][0],
+        json!({"label": "5-hour limit", "percent": 42.0, "resets_at": 9, "window": "5h"})
+    );
     assert_eq!(usage["providers"][0]["agent"]["logo"], "claude-code");
-    send(&mut c, json!({"type": "git_status", "id": "g7", "project_id": "p1"})).await;
+    send(
+        &mut c,
+        json!({"type": "git_status", "id": "g7", "project_id": "p1"}),
+    )
+    .await;
     let status = recv(&mut c).await;
-    assert_eq!(status["files"][0], json!({"path": "src/a.rs", "status": "modified", "added": 3, "removed": 1}));
-    send(&mut c, json!({"type": "commands", "id": "c2", "thread_id": "t9"})).await;
+    assert_eq!(
+        status["files"][0],
+        json!({"path": "src/a.rs", "status": "modified", "added": 3, "removed": 1})
+    );
+    send(
+        &mut c,
+        json!({"type": "commands", "id": "c2", "thread_id": "t9"}),
+    )
+    .await;
     let commands = recv(&mut c).await;
-    assert_eq!((commands["thread_id"].as_str(), commands["commands"][0]["trek"].as_bool()), (Some("t9"), Some(true)));
-    send(&mut c, json!({"type": "set_settings", "id": "s3", "theme": "night"})).await;
+    assert_eq!(
+        (
+            commands["thread_id"].as_str(),
+            commands["commands"][0]["trek"].as_bool()
+        ),
+        (Some("t9"), Some(true))
+    );
+    send(
+        &mut c,
+        json!({"type": "set_settings", "id": "s3", "theme": "night"}),
+    )
+    .await;
     assert_eq!(recv(&mut c).await["theme"], "night");
 
     // Refusals keep their codes: a note changed on the Mac, a worktree with work to lose.
-    send(&mut c, json!({"type": "save_note", "id": "x1", "note_id": "n1", "body": "x", "modified": 1})).await;
+    send(
+        &mut c,
+        json!({"type": "save_note", "id": "x1", "note_id": "n1", "body": "x", "modified": 1}),
+    )
+    .await;
     assert_eq!(recv(&mut c).await["code"], "conflict");
-    send(&mut c, json!({"type": "worktree_remove", "id": "x2", "thread_id": "t1"})).await;
+    send(
+        &mut c,
+        json!({"type": "worktree_remove", "id": "x2", "thread_id": "t1"}),
+    )
+    .await;
     let refused = recv(&mut c).await;
-    assert_eq!((refused["code"].as_str(), refused["message"].as_str()), (Some("conflict"), Some("2 uncommitted changes in the worktree would be lost.")));
+    assert_eq!(
+        (refused["code"].as_str(), refused["message"].as_str()),
+        (
+            Some("conflict"),
+            Some("2 uncommitted changes in the worktree would be lost.")
+        )
+    );
     send(&mut c, json!({"type": "note", "id": "x3", "note_id": "zz"})).await;
     assert_eq!(recv(&mut c).await["code"], "not_found");
     // Malformed ones don't reach it.
-    send(&mut c, json!({"type": "git_diff", "id": "x4", "thread_id": "t1"})).await;
+    send(
+        &mut c,
+        json!({"type": "git_diff", "id": "x4", "thread_id": "t1"}),
+    )
+    .await;
     assert_eq!(recv(&mut c).await["code"], "bad_request");
-    send(&mut c, json!({"type": "basecamp", "id": "x5", "range": "decade"})).await;
+    send(
+        &mut c,
+        json!({"type": "basecamp", "id": "x5", "range": "decade"}),
+    )
+    .await;
     assert_eq!(recv(&mut c).await["code"], "bad_request");
 
     // `/new` sent to a thread asks the phone to open its new-thread sheet.
-    send(&mut c, json!({"type": "send", "id": "o", "thread_id": "t1", "text": "/new"})).await;
-    assert_eq!(recv(&mut c).await, json!({"type": "ack", "re": "o", "open": {"screen": "new_thread", "project_id": "p1"}}));
+    send(
+        &mut c,
+        json!({"type": "send", "id": "o", "thread_id": "t1", "text": "/new"}),
+    )
+    .await;
+    assert_eq!(
+        recv(&mut c).await,
+        json!({"type": "ack", "re": "o", "open": {"screen": "new_thread", "project_id": "p1"}})
+    );
 
     let calls = host.calls();
     for expected in [
@@ -1036,7 +1647,10 @@ async fn newer_requests_reach_the_host_over_the_wire() {
         "transcript_before long i5 2",
         "turn_action t1 i4 Fork None true",
     ] {
-        assert!(calls.iter().any(|c| c == expected), "{expected} not in {calls:?}");
+        assert!(
+            calls.iter().any(|c| c == expected),
+            "{expected} not in {calls:?}"
+        );
     }
 }
 
@@ -1045,10 +1659,17 @@ async fn a_connection_can_have_only_eight_queries_in_flight() {
     let (handle, _) = start().await;
     let (mut c, _) = pair(&handle, "dev-1").await;
     for n in 0..9 {
-        send(&mut c, json!({"type": "basecamp", "id": format!("q{n}"), "range": "all"})).await;
+        send(
+            &mut c,
+            json!({"type": "basecamp", "id": format!("q{n}"), "range": "all"}),
+        )
+        .await;
     }
     let limited = recv(&mut c).await;
-    assert_eq!((limited["re"].as_str(), limited["code"].as_str()), (Some("q8"), Some("rate_limited")));
+    assert_eq!(
+        (limited["re"].as_str(), limited["code"].as_str()),
+        (Some("q8"), Some("rate_limited"))
+    );
     let mut replies = Vec::new();
     for _ in 0..8 {
         replies.push(recv(&mut c).await["re"].as_str().unwrap().to_string());
@@ -1062,13 +1683,25 @@ async fn a_connection_can_have_only_eight_queries_in_flight() {
 async fn slow_reads_dont_hold_up_actions() {
     let (handle, _) = start().await;
     let (mut c, _) = pair(&handle, "dev-1").await;
-    send(&mut c, json!({"type": "basecamp", "id": "slow", "range": "all"})).await;
-    send(&mut c, json!({"type": "interrupt", "id": "fast", "thread_id": "t1"})).await;
+    send(
+        &mut c,
+        json!({"type": "basecamp", "id": "slow", "range": "all"}),
+    )
+    .await;
+    send(
+        &mut c,
+        json!({"type": "interrupt", "id": "fast", "thread_id": "t1"}),
+    )
+    .await;
     assert_eq!(recv(&mut c).await["re"], "fast");
     assert_eq!(recv(&mut c).await["re"], "slow");
     // Paging a long transcript in is a read too.
     send(&mut c, json!({"type": "transcript_before", "id": "page", "thread_id": "slow", "before": "i5", "limit": 2})).await;
-    send(&mut c, json!({"type": "interrupt", "id": "fast2", "thread_id": "t1"})).await;
+    send(
+        &mut c,
+        json!({"type": "interrupt", "id": "fast2", "thread_id": "t1"}),
+    )
+    .await;
     assert_eq!(recv(&mut c).await["re"], "fast2");
     assert_eq!(recv(&mut c).await["re"], "page");
 }
@@ -1079,42 +1712,104 @@ async fn a_limited_subscribe_sends_the_end_and_earlier_items_come_in_pages() {
     let (mut c, _) = pair(&handle, "dev-1").await;
 
     // The last three items and the open request; more before them.
-    send(&mut c, json!({"type": "subscribe", "id": "s", "thread_id": "long", "limit": 3})).await;
+    send(
+        &mut c,
+        json!({"type": "subscribe", "id": "s", "thread_id": "long", "limit": 3}),
+    )
+    .await;
     let t = recv(&mut c).await;
-    assert_eq!((t["type"].as_str(), t["reset"].as_bool(), t["more"].as_bool()), (Some("transcript"), Some(true), Some(true)));
+    assert_eq!(
+        (
+            t["type"].as_str(),
+            t["reset"].as_bool(),
+            t["more"].as_bool()
+        ),
+        (Some("transcript"), Some(true), Some(true))
+    );
     assert_eq!(ids(&t), ["i7", "i8", "i9", "rreq"]);
     // A turn's files go with the turn end they follow, and only with it.
-    send(&mut c, json!({"type": "subscribe", "id": "s", "thread_id": "long", "limit": 6})).await;
-    assert_eq!(ids(&recv(&mut c).await), ["i4", "c4", "i5", "i6", "i7", "i8", "i9", "rreq"]);
-    send(&mut c, json!({"type": "subscribe", "id": "s", "thread_id": "long", "limit": 5})).await;
-    assert_eq!(ids(&recv(&mut c).await), ["i5", "i6", "i7", "i8", "i9", "rreq"]);
+    send(
+        &mut c,
+        json!({"type": "subscribe", "id": "s", "thread_id": "long", "limit": 6}),
+    )
+    .await;
+    assert_eq!(
+        ids(&recv(&mut c).await),
+        ["i4", "c4", "i5", "i6", "i7", "i8", "i9", "rreq"]
+    );
+    send(
+        &mut c,
+        json!({"type": "subscribe", "id": "s", "thread_id": "long", "limit": 5}),
+    )
+    .await;
+    assert_eq!(
+        ids(&recv(&mut c).await),
+        ["i5", "i6", "i7", "i8", "i9", "rreq"]
+    );
     // All of it fits: no `more`.
-    send(&mut c, json!({"type": "subscribe", "id": "s", "thread_id": "long", "limit": 10})).await;
+    send(
+        &mut c,
+        json!({"type": "subscribe", "id": "s", "thread_id": "long", "limit": 10}),
+    )
+    .await;
     let t = recv(&mut c).await;
     assert_eq!((ids(&t).len(), t.get("more")), (12, None));
     // What changed since a seq is unchanged by a limit.
-    send(&mut c, json!({"type": "subscribe", "id": "s", "thread_id": "long", "after_seq": 9, "limit": 1})).await;
+    send(
+        &mut c,
+        json!({"type": "subscribe", "id": "s", "thread_id": "long", "after_seq": 9, "limit": 1}),
+    )
+    .await;
     let t = recv(&mut c).await;
-    assert_eq!((t["reset"].as_bool(), t.get("more"), ids(&t)), (Some(false), None, vec!["c4", "i9", "rreq"]));
+    assert_eq!(
+        (t["reset"].as_bool(), t.get("more"), ids(&t)),
+        (Some(false), None, vec!["c4", "i9", "rreq"])
+    );
 
     // Pages, back to the start.
     send(&mut c, json!({"type": "transcript_before", "id": "p1", "thread_id": "long", "before": "i7", "limit": 3})).await;
     let page = recv(&mut c).await;
-    assert_eq!((page["type"].as_str(), page["re"].as_str(), page["thread_id"].as_str(), page["more"].as_bool()), (Some("transcript_page"), Some("p1"), Some("long"), Some(true)));
+    assert_eq!(
+        (
+            page["type"].as_str(),
+            page["re"].as_str(),
+            page["thread_id"].as_str(),
+            page["more"].as_bool()
+        ),
+        (
+            Some("transcript_page"),
+            Some("p1"),
+            Some("long"),
+            Some(true)
+        )
+    );
     assert_eq!(ids(&page), ["i4", "c4", "i5", "i6"]);
     send(&mut c, json!({"type": "transcript_before", "id": "p2", "thread_id": "long", "before": "i4", "limit": 3})).await;
     let page = recv(&mut c).await;
-    assert_eq!((ids(&page), page["more"].as_bool()), (vec!["i1", "i2", "i3"], Some(true)));
+    assert_eq!(
+        (ids(&page), page["more"].as_bool()),
+        (vec!["i1", "i2", "i3"], Some(true))
+    );
     send(&mut c, json!({"type": "transcript_before", "id": "p3", "thread_id": "long", "before": "i1", "limit": 3})).await;
     let page = recv(&mut c).await;
-    assert_eq!((ids(&page), page["more"].as_bool()), (vec!["i0"], Some(false)));
+    assert_eq!(
+        (ids(&page), page["more"].as_bool()),
+        (vec!["i0"], Some(false))
+    );
     // The page size is capped on the Mac; unknown items and malformed requests are refused.
     send(&mut c, json!({"type": "transcript_before", "id": "p4", "thread_id": "long", "before": "i9", "limit": 100000})).await;
     assert_eq!(recv(&mut c).await["more"], false);
-    assert!(host.calls().contains(&"transcript_before long i9 500".to_string()));
+    assert!(
+        host.calls()
+            .contains(&"transcript_before long i9 500".to_string())
+    );
     send(&mut c, json!({"type": "transcript_before", "id": "p5", "thread_id": "long", "before": "i99", "limit": 3})).await;
     assert_eq!(recv(&mut c).await["code"], "not_found");
-    send(&mut c, json!({"type": "transcript_before", "id": "p6", "thread_id": "long", "before": "i3"})).await;
+    send(
+        &mut c,
+        json!({"type": "transcript_before", "id": "p6", "thread_id": "long", "before": "i3"}),
+    )
+    .await;
     assert_eq!(recv(&mut c).await["code"], "bad_request");
 }
 
@@ -1123,13 +1818,22 @@ async fn turn_actions_reach_the_host() {
     let (handle, host) = start().await;
     let (mut c, _) = pair(&handle, "dev-1").await;
     let requests = [
-        (json!({"type": "turn_action", "id": "1", "thread_id": "t1", "item_id": "i4", "action": "undo"}), json!({"type": "ack", "re": "1", "text": "Fix the parser"})),
+        (
+            json!({"type": "turn_action", "id": "1", "thread_id": "t1", "item_id": "i4", "action": "undo"}),
+            json!({"type": "ack", "re": "1", "text": "Fix the parser"}),
+        ),
         (
             json!({"type": "turn_action", "id": "2", "thread_id": "t1", "item_id": "i4", "action": "retry", "model": "gpt-6", "restore_files": false}),
             json!({"type": "ack", "re": "2"}),
         ),
-        (json!({"type": "turn_action", "id": "3", "thread_id": "t1", "item_id": "i4", "action": "fork"}), json!({"type": "ack", "re": "3", "thread_id": "t-fork"})),
-        (json!({"type": "turn_action", "id": "4", "thread_id": "t1", "item_id": "i0", "action": "rewind"}), json!({"type": "ack", "re": "4", "text": "Fix the parser"})),
+        (
+            json!({"type": "turn_action", "id": "3", "thread_id": "t1", "item_id": "i4", "action": "fork"}),
+            json!({"type": "ack", "re": "3", "thread_id": "t-fork"}),
+        ),
+        (
+            json!({"type": "turn_action", "id": "4", "thread_id": "t1", "item_id": "i0", "action": "rewind"}),
+            json!({"type": "ack", "re": "4", "text": "Fix the parser"}),
+        ),
         (
             json!({"type": "turn_action", "id": "5", "thread_id": "t1", "item_id": "i9", "action": "undo"}),
             json!({"type": "error", "re": "5", "code": "bad_request", "message": "Stop the running turn to undo"}),
@@ -1141,7 +1845,11 @@ async fn turn_actions_reach_the_host() {
     }
     send(&mut c, json!({"type": "turn_action", "id": "6", "thread_id": "t1", "item_id": "i4", "action": "explode"})).await;
     assert_eq!(recv(&mut c).await["code"], "bad_request");
-    let calls: Vec<String> = host.calls().into_iter().filter(|c| c.starts_with("turn_action")).collect();
+    let calls: Vec<String> = host
+        .calls()
+        .into_iter()
+        .filter(|c| c.starts_with("turn_action"))
+        .collect();
     assert_eq!(
         calls,
         [
@@ -1159,35 +1867,66 @@ async fn the_host_hears_when_no_phone_has_a_thread_open() {
     let (handle, host) = start().await;
     let (mut a, _) = pair(&handle, "dev-a").await;
     let (mut b, _) = pair(&handle, "dev-b").await;
-    let unwatched = |host: &FakeHost| host.calls().into_iter().filter(|c| c.starts_with("unwatch")).collect::<Vec<_>>();
+    let unwatched = |host: &FakeHost| {
+        host.calls()
+            .into_iter()
+            .filter(|c| c.starts_with("unwatch"))
+            .collect::<Vec<_>>()
+    };
     for c in [&mut a, &mut b] {
-        send(c, json!({"type": "subscribe", "id": "s", "thread_id": "t1"})).await;
+        send(
+            c,
+            json!({"type": "subscribe", "id": "s", "thread_id": "t1"}),
+        )
+        .await;
         assert_eq!(recv(c).await["type"], "transcript");
     }
     // Subscribing twice is still one subscription.
-    send(&mut a, json!({"type": "subscribe", "id": "s2", "thread_id": "t1"})).await;
+    send(
+        &mut a,
+        json!({"type": "subscribe", "id": "s2", "thread_id": "t1"}),
+    )
+    .await;
     assert_eq!(recv(&mut a).await["type"], "transcript");
-    send(&mut a, json!({"type": "unsubscribe", "id": "u", "thread_id": "t1"})).await;
+    send(
+        &mut a,
+        json!({"type": "unsubscribe", "id": "u", "thread_id": "t1"}),
+    )
+    .await;
     assert_eq!(recv(&mut a).await["type"], "ack");
     assert!(unwatched(&host).is_empty(), "b still has it open");
     // b goes away: nobody has it open.
     drop(b);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while unwatched(&host).is_empty() {
-        assert!(tokio::time::Instant::now() < deadline, "the host wasn't told");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the host wasn't told"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(unwatched(&host), ["unwatch t1"]);
     // Opened again, and let go again.
-    send(&mut a, json!({"type": "subscribe", "id": "s3", "thread_id": "t1"})).await;
+    send(
+        &mut a,
+        json!({"type": "subscribe", "id": "s3", "thread_id": "t1"}),
+    )
+    .await;
     assert_eq!(recv(&mut a).await["seq"], 3);
     send(&mut a, json!({"type": "unsubscribe", "thread_id": "t1"})).await;
     // A thread that couldn't be opened was never open.
-    send(&mut a, json!({"type": "subscribe", "id": "x", "thread_id": "nope"})).await;
+    send(
+        &mut a,
+        json!({"type": "subscribe", "id": "x", "thread_id": "nope"}),
+    )
+    .await;
     assert_eq!(recv(&mut a).await["code"], "not_found");
     send(&mut a, json!({"type": "ping", "id": "p"})).await;
     assert_eq!(recv(&mut a).await["type"], "pong");
-    assert_eq!(unwatched(&host), ["unwatch t1", "unwatch t1", "unwatch nope"]);
+    assert_eq!(
+        unwatched(&host),
+        ["unwatch t1", "unwatch t1", "unwatch nope"]
+    );
 }
 
 #[tokio::test]
@@ -1202,7 +1941,11 @@ async fn revoking_closes_the_connection() {
     assert!(!handle.revoke("dev-1"));
 
     let mut c = connect(&handle).await;
-    send(&mut c, json!({"type": "hello", "id": "1", "protocol": 1, "device_id": "dev-1", "token": token})).await;
+    send(
+        &mut c,
+        json!({"type": "hello", "id": "1", "protocol": 1, "device_id": "dev-1", "token": token}),
+    )
+    .await;
     assert_eq!(recv(&mut c).await["code"], "unauthorized");
     closed(&mut c).await;
 }
@@ -1234,7 +1977,11 @@ async fn shutdown_closes_everything() {
     handle.shutdown();
     closed(&mut c).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(tokio_tungstenite::connect_async(format!("ws://{}", handle.local_addr())).await.is_err());
+    assert!(
+        tokio_tungstenite::connect_async(format!("ws://{}", handle.local_addr()))
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -1242,14 +1989,22 @@ async fn oversized_messages_are_refused() {
     let (handle, host) = start_with(|c| c.max_message = 1024).await;
     let (mut c, _) = pair(&handle, "dev-1").await;
     let text = "x".repeat(4096);
-    let _ = c.send(Message::text(json!({"type": "send", "id": "1", "thread_id": "t1", "text": text}).to_string())).await;
+    let _ = c
+        .send(Message::text(
+            json!({"type": "send", "id": "1", "thread_id": "t1", "text": text}).to_string(),
+        ))
+        .await;
     closed(&mut c).await;
     assert!(host.calls().is_empty());
 }
 
 #[tokio::test]
 async fn devices_persist_across_restarts() {
-    let dir = std::env::temp_dir().join(format!("trek-remote-it-{}-{}", std::process::id(), rand_suffix()));
+    let dir = std::env::temp_dir().join(format!(
+        "trek-remote-it-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
     let path = dir.join("devices.json");
     let (handle, _) = start_with(|c| c.devices_path = Some(path.clone())).await;
     let (_c, token) = pair(&handle, "dev-1").await;
@@ -1263,7 +2018,11 @@ async fn devices_persist_across_restarts() {
 
 #[tokio::test]
 async fn a_stopped_server_leaves_devices_json_to_the_one_that_replaced_it() {
-    let dir = std::env::temp_dir().join(format!("trek-remote-it-{}-{}", std::process::id(), rand_suffix()));
+    let dir = std::env::temp_dir().join(format!(
+        "trek-remote-it-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
     let path = dir.join("devices.json");
     let (handle, _) = start_with(|c| c.devices_path = Some(path.clone())).await;
     let (mut c, _) = pair(&handle, "dev-1").await;
@@ -1275,7 +2034,10 @@ async fn a_stopped_server_leaves_devices_json_to_the_one_that_replaced_it() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let file = std::fs::read_to_string(&path).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(file, r#"{"devices":[]}"#, "the old server's session wrote its stale list back");
+    assert_eq!(
+        file, r#"{"devices":[]}"#,
+        "the old server's session wrote its stale list back"
+    );
 }
 
 /// Unique within the run: tests starting at once can read the same nanosecond, and two servers
@@ -1283,7 +2045,13 @@ async fn a_stopped_server_leaves_devices_json_to_the_one_that_replaced_it() {
 fn rand_suffix() -> String {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("{n}-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos())
+    format!(
+        "{n}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    )
 }
 
 #[tokio::test]
@@ -1294,9 +2062,14 @@ async fn channel_host_round_trip() {
         while let Ok(req) = requests.recv().await {
             match req {
                 HostRequest::Snapshot { reply } => {
-                    let _ = reply.send(Ok(Snapshot { threads: vec![thread("c1")], ..Default::default() }));
+                    let _ = reply.send(Ok(Snapshot {
+                        threads: vec![thread("c1")],
+                        ..Default::default()
+                    }));
                 }
-                HostRequest::Transcript { thread_id, reply, .. } => {
+                HostRequest::Transcript {
+                    thread_id, reply, ..
+                } => {
                     let _ = reply.send(Err(HostError::not_found(format!("No thread {thread_id}"))));
                 }
                 HostRequest::Send { req, reply } => {
@@ -1315,7 +2088,12 @@ async fn channel_host_round_trip() {
                     let _ = reply.send(Ok(()));
                 }
                 HostRequest::Notes { reply } => {
-                    let _ = reply.send(Ok(vec![NoteSummary { id: "n1".into(), title: "Groceries".into(), preview: String::new(), modified: 1 }]));
+                    let _ = reply.send(Ok(vec![NoteSummary {
+                        id: "n1".into(),
+                        title: "Groceries".into(),
+                        preview: String::new(),
+                        modified: 1,
+                    }]));
                 }
                 HostRequest::Settings { reply } => {
                     let _ = reply.send(Ok(settings()));
@@ -1328,16 +2106,41 @@ async fn channel_host_round_trip() {
     });
 
     assert_eq!(host.snapshot().await.unwrap().threads[0].id, "c1");
-    assert_eq!(host.transcript("zz").await.unwrap_err().code, ErrorCode::NotFound);
-    host.send(SendRequest { thread_id: "c1".into(), text: "hi".into(), mode: None, images: vec![] }).await.unwrap();
-    let req = NewThreadRequest { project_id: "p".into(), agent: "codex".into(), model: None, text: "go".into(), worktree: false, effort: None, access: None, plan: false, images: vec![] };
+    assert_eq!(
+        host.transcript("zz").await.unwrap_err().code,
+        ErrorCode::NotFound
+    );
+    host.send(SendRequest {
+        thread_id: "c1".into(),
+        text: "hi".into(),
+        mode: None,
+        images: vec![],
+    })
+    .await
+    .unwrap();
+    let req = NewThreadRequest {
+        project_id: "p".into(),
+        agent: "codex".into(),
+        model: None,
+        text: "go".into(),
+        worktree: false,
+        effort: None,
+        access: None,
+        plan: false,
+        images: vec![],
+    };
     assert_eq!(host.new_thread(req).await.unwrap(), "c2");
     let answer = AnswerRequest {
         thread_id: "c1".into(),
         request_id: "r".into(),
-        response: AnswerResponse::Approval { decision: Decision::Deny },
+        response: AnswerResponse::Approval {
+            decision: Decision::Deny,
+        },
     };
-    assert_eq!(host.answer(answer).await.unwrap_err().code, ErrorCode::HostError);
+    assert_eq!(
+        host.answer(answer).await.unwrap_err().code,
+        ErrorCode::HostError
+    );
     host.interrupt("c1").await.unwrap();
     host.mark_seen("c1").await.unwrap();
     assert_eq!(host.notes().await.unwrap()[0].title, "Groceries");
@@ -1347,13 +2150,19 @@ async fn channel_host_round_trip() {
     // Through the server too.
     let mut config = ServerConfig::new(host_info());
     config.bind = "127.0.0.1:0".parse().unwrap();
-    let handle = RemoteServer::start(config, Arc::new(host.clone())).await.unwrap();
+    let handle = RemoteServer::start(config, Arc::new(host.clone()))
+        .await
+        .unwrap();
     let offer = handle.pairing_offer();
     let mut c = connect(&handle).await;
     send(&mut c, json!({"type": "pair", "id": "1", "protocol": 1, "code": offer.code, "device_id": "d", "device_name": "P"})).await;
     assert_eq!(recv(&mut c).await["type"], "paired");
     assert_eq!(recv(&mut c).await["threads"][0]["id"], "c1");
-    send(&mut c, json!({"type": "send", "id": "2", "thread_id": "c1", "text": "from the phone"})).await;
+    send(
+        &mut c,
+        json!({"type": "send", "id": "2", "thread_id": "c1", "text": "from the phone"}),
+    )
+    .await;
     assert_eq!(recv(&mut c).await, json!({"type": "ack", "re": "2"}));
     handle.shutdown();
     drop(c);
@@ -1366,7 +2175,10 @@ async fn channel_host_round_trip() {
     // A host whose receiver is gone answers with host_error.
     let (host, requests) = ChannelHost::new();
     drop(requests);
-    assert_eq!(host.snapshot().await.unwrap_err().code, ErrorCode::HostError);
+    assert_eq!(
+        host.snapshot().await.unwrap_err().code,
+        ErrorCode::HostError
+    );
 }
 
 /// "Tailscale only" against a real tailnet: run with the Mac on Tailscale and its 100.x address
@@ -1375,7 +2187,8 @@ async fn channel_host_round_trip() {
 #[tokio::test]
 #[ignore = "needs a live tailnet: set TAILSCALE_ADDR to this Mac's 100.x address"]
 async fn serving_on_the_tailscale_address_only_answers_there() {
-    let Ok(ip) = std::env::var("TAILSCALE_ADDR").map(|s| s.parse::<std::net::IpAddr>().unwrap()) else {
+    let Ok(ip) = std::env::var("TAILSCALE_ADDR").map(|s| s.parse::<std::net::IpAddr>().unwrap())
+    else {
         return;
     };
     let mut config = ServerConfig::new(host_info());
@@ -1386,13 +2199,19 @@ async fn serving_on_the_tailscale_address_only_answers_there() {
 
     // A phone on the tailnet reaches it and can pair.
     let offer = handle.pairing_offer();
-    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}")).await.unwrap();
+    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+        .await
+        .unwrap();
     let mut c = ws;
     send(&mut c, json!({"type": "pair", "id": "1", "protocol": 1, "code": offer.code, "device_id": "ts-1", "device_name": "Tailnet iPhone", "app_version": "0.1.0"})).await;
     assert_eq!(recv(&mut c).await["type"], "paired");
 
     // Nothing answers on the other interfaces: loopback refuses the same port.
-    assert!(TcpStream::connect(("127.0.0.1", addr.port())).await.is_err());
+    assert!(
+        TcpStream::connect(("127.0.0.1", addr.port()))
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -1401,54 +2220,130 @@ async fn the_mac_lists_its_features_and_serves_search_sub_agents_and_the_thread_
     let (plain, _) = start().await;
     let (_, token) = pair(&plain, "dev-0").await;
     let mut c = connect(&plain).await;
-    send(&mut c, json!({"type": "hello", "id": "h", "protocol": 1, "device_id": "dev-0", "token": token})).await;
+    send(
+        &mut c,
+        json!({"type": "hello", "id": "h", "protocol": 1, "device_id": "dev-0", "token": token}),
+    )
+    .await;
     let welcome = recv(&mut c).await;
-    assert_eq!((welcome["type"].as_str(), welcome.get("features")), (Some("welcome"), None), "{welcome}");
+    assert_eq!(
+        (welcome["type"].as_str(), welcome.get("features")),
+        (Some("welcome"), None),
+        "{welcome}"
+    );
 
-    let (handle, host) = start_with(|config| config.features = vec![feature::SEARCH.into(), feature::SUB_AGENTS.into(), feature::DELETE.into()]).await;
+    let (handle, host) = start_with(|config| {
+        config.features = vec![
+            feature::SEARCH.into(),
+            feature::SUB_AGENTS.into(),
+            feature::DELETE.into(),
+        ]
+    })
+    .await;
     let offer = handle.pairing_offer();
     let mut c = connect(&handle).await;
     send(&mut c, json!({"type": "pair", "id": "1", "protocol": 1, "code": offer.code, "device_id": "dev-1", "device_name": "Test iPhone"})).await;
     let paired = recv(&mut c).await;
-    assert_eq!(paired["features"], json!(["search", "sub_agents", "delete"]), "{paired}");
+    assert_eq!(
+        paired["features"],
+        json!(["search", "sub_agents", "delete"]),
+        "{paired}"
+    );
     let token = paired["token"].as_str().unwrap().to_string();
     assert_eq!(recv(&mut c).await["type"], "snapshot");
     drop(c);
     let mut c = connect(&handle).await;
-    send(&mut c, json!({"type": "hello", "id": "h", "protocol": 1, "device_id": "dev-1", "token": token})).await;
-    assert_eq!(recv(&mut c).await["features"], json!(["search", "sub_agents", "delete"]));
+    send(
+        &mut c,
+        json!({"type": "hello", "id": "h", "protocol": 1, "device_id": "dev-1", "token": token}),
+    )
+    .await;
+    assert_eq!(
+        recv(&mut c).await["features"],
+        json!(["search", "sub_agents", "delete"])
+    );
     assert_eq!(recv(&mut c).await["type"], "snapshot");
 
     // Search: the host's results, whole.
-    send(&mut c, json!({"type": "search", "id": "s", "query": "race", "limit": 20})).await;
+    send(
+        &mut c,
+        json!({"type": "search", "id": "s", "query": "race", "limit": 20}),
+    )
+    .await;
     let found = recv(&mut c).await;
-    assert_eq!((found["type"].as_str(), found["re"].as_str(), found["query"].as_str()), (Some("search_results"), Some("s"), Some("race")), "{found}");
+    assert_eq!(
+        (
+            found["type"].as_str(),
+            found["re"].as_str(),
+            found["query"].as_str()
+        ),
+        (Some("search_results"), Some("s"), Some("race")),
+        "{found}"
+    );
     assert_eq!(found["results"][0]["thread"]["id"], "t2");
-    assert_eq!(found["results"][0].get("snippet"), None, "a title match has no excerpt");
-    assert_eq!((&found["results"][1]["thread"]["parent_id"], &found["results"][1]["ranges"]), (&json!("t1"), &json!([[14, 18]])));
+    assert_eq!(
+        found["results"][0].get("snippet"),
+        None,
+        "a title match has no excerpt"
+    );
+    assert_eq!(
+        (
+            &found["results"][1]["thread"]["parent_id"],
+            &found["results"][1]["ranges"]
+        ),
+        (&json!("t1"), &json!([[14, 18]]))
+    );
 
     // A sub-agent's row comes as `unlisted`.
-    handle.push(HostEvent::Unlisted(ThreadSummary { parent_id: Some("t1".into()), ..thread("kid") }));
+    handle.push(HostEvent::Unlisted(ThreadSummary {
+        parent_id: Some("t1".into()),
+        ..thread("kid")
+    }));
     let row = recv(&mut c).await;
-    assert_eq!((row["type"].as_str(), row["thread"]["id"].as_str(), row["thread"]["parent_id"].as_str()), (Some("unlisted"), Some("kid"), Some("t1")));
+    assert_eq!(
+        (
+            row["type"].as_str(),
+            row["thread"]["id"].as_str(),
+            row["thread"]["parent_id"].as_str()
+        ),
+        (Some("unlisted"), Some("kid"), Some("t1"))
+    );
 
     // The thread menu: a delete is asked about first, then done.
     send(&mut c, json!({"type": "thread_action", "id": "d1", "thread_id": "t1", "action": {"kind": "delete"}})).await;
     let asked = recv(&mut c).await;
-    assert_eq!((asked["type"].as_str(), asked["code"].as_str()), (Some("error"), Some("conflict")), "{asked}");
-    assert!(asked["message"].as_str().unwrap().contains("can't be undone"));
+    assert_eq!(
+        (asked["type"].as_str(), asked["code"].as_str()),
+        (Some("error"), Some("conflict")),
+        "{asked}"
+    );
+    assert!(
+        asked["message"]
+            .as_str()
+            .unwrap()
+            .contains("can't be undone")
+    );
     send(&mut c, json!({"type": "thread_action", "id": "d2", "thread_id": "t1", "action": {"kind": "delete", "confirmed": true}})).await;
     assert_eq!(recv(&mut c).await["type"], "ack");
     send(&mut c, json!({"type": "thread_action", "id": "z", "thread_id": "t1", "action": {"kind": "snooze", "preset": "tomorrow"}})).await;
     assert_eq!(recv(&mut c).await["type"], "ack");
     let calls = host.calls();
-    assert!(calls.contains(&"search race Some(20)".to_string()), "{calls:?}");
-    assert!(calls.contains(&"thread_action t1 Snooze { until: None, preset: Some(Tomorrow) }".to_string()), "{calls:?}");
+    assert!(
+        calls.contains(&"search race Some(20)".to_string()),
+        "{calls:?}"
+    );
+    assert!(
+        calls.contains(
+            &"thread_action t1 Snooze { until: None, preset: Some(Tomorrow) }".to_string()
+        ),
+        "{calls:?}"
+    );
 }
 
 #[tokio::test]
 async fn welcome_lists_the_features_and_a_host_without_them_says_so() {
-    let (handle, _host) = start_with(|c| c.features = feature::ALL.iter().map(|f| f.to_string()).collect()).await;
+    let (handle, _host) =
+        start_with(|c| c.features = feature::ALL.iter().map(|f| f.to_string()).collect()).await;
     let offer = handle.pairing_offer();
     let mut c = connect(&handle).await;
     send(&mut c, json!({"type": "pair", "id": "1", "protocol": 1, "code": offer.code, "device_id": "dev-f", "device_name": "Test iPhone"})).await;

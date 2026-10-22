@@ -51,7 +51,11 @@ impl Ignores {
             b.add(exclude);
             base.extend(b.build().ok());
         }
-        Self { root: root.to_path_buf(), base, dirs: HashMap::new() }
+        Self {
+            root: root.to_path_buf(),
+            base,
+            dirs: HashMap::new(),
+        }
     }
 
     /// Forget the rules read, so they're read again (a `.gitignore` changed).
@@ -79,7 +83,9 @@ impl Ignores {
     /// Whether git ignores `path` (under the root): the nearest `.gitignore` with a say decides,
     /// a folder ignored ignoring what's in it.
     pub(crate) fn ignored(&mut self, path: &Path, is_dir: bool) -> bool {
-        let Ok(rel) = path.strip_prefix(&self.root) else { return false };
+        let Ok(rel) = path.strip_prefix(&self.root) else {
+            return false;
+        };
         // Each folder from the root down to the path, and the path itself.
         let mut at = self.root.clone();
         let parts: Vec<_> = rel.components().collect();
@@ -116,7 +122,9 @@ impl Ignores {
         // `matched`, not `matched_path_or_any_parents`: that one panics on a path outside the
         // matcher's root (the global excludes are rooted at the process's folder, links
         // resolved). Folders are walked one by one above, so parents are decided already.
-        self.base.iter().any(|g| g.matched(path, is_dir).is_ignore())
+        self.base
+            .iter()
+            .any(|g| g.matched(path, is_dir).is_ignore())
     }
 }
 
@@ -131,7 +139,15 @@ pub(crate) struct Batch {
 /// Sort `paths` (as FSEvents names them, under `real`) into a `Batch` of paths under `given`.
 pub(crate) fn sort(paths: Vec<PathBuf>, real: &Path, given: &Path, ignores: &mut Ignores) -> Batch {
     let mut batch = Batch::default();
-    let mut paths: Vec<PathBuf> = paths.into_iter().filter_map(|p| p.strip_prefix(real).ok().or_else(|| p.strip_prefix(given).ok()).map(|r| given.join(r))).collect();
+    let mut paths: Vec<PathBuf> = paths
+        .into_iter()
+        .filter_map(|p| {
+            p.strip_prefix(real)
+                .ok()
+                .or_else(|| p.strip_prefix(given).ok())
+                .map(|r| given.join(r))
+        })
+        .collect();
     paths.sort();
     paths.dedup();
     // Rules first: a `.gitignore` that changed decides about the rest of the batch.
@@ -147,7 +163,10 @@ pub(crate) fn sort(paths: Vec<PathBuf>, real: &Path, given: &Path, ignores: &mut
         let rel = p.strip_prefix(given).unwrap_or(&p);
         if let Some(inside) = rel.components().position(|c| c.as_os_str() == ".git") {
             let under: PathBuf = rel.components().skip(inside + 1).collect();
-            if under == Path::new("index") || under == Path::new("HEAD") || under.starts_with("refs") {
+            if under == Path::new("index")
+                || under == Path::new("HEAD")
+                || under.starts_with("refs")
+            {
                 batch.git = true;
             }
             continue;
@@ -201,7 +220,9 @@ impl IdeWorkbench {
                 let batch = cx
                     .background_executor()
                     .spawn(async move {
-                        let mut guard = ignores.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let mut guard = ignores
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         // A panic on the dispatch queue would abort the app: a batch that can't be
                         // sorted is let through whole instead (rules read again next time).
                         let all = paths.clone();
@@ -211,19 +232,36 @@ impl IdeWorkbench {
                         }))
                         .unwrap_or_else(|_| {
                             *guard = None;
-                            Batch { files: all.into_iter().filter_map(|p| p.strip_prefix(&real).ok().map(|r| given.join(r))).collect(), git: true }
+                            Batch {
+                                files: all
+                                    .into_iter()
+                                    .filter_map(|p| {
+                                        p.strip_prefix(&real).ok().map(|r| given.join(r))
+                                    })
+                                    .collect(),
+                                git: true,
+                            }
                         })
                     })
                     .await;
                 if batch.files.is_empty() && !batch.git {
                     continue;
                 }
-                if this.update_in(cx, |this, window, cx| this.files_changed(&batch, window, cx)).is_err() {
+                if this
+                    .update_in(cx, |this, window, cx| {
+                        this.files_changed(&batch, window, cx)
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
         });
-        self.watch = Some(FolderWatch { root, _watcher: watcher, _task: task });
+        self.watch = Some(FolderWatch {
+            root,
+            _watcher: watcher,
+            _task: task,
+        });
     }
 
     /// Files changed on disk: their clean editors read them again, the Explorer its folders,
@@ -231,8 +269,16 @@ impl IdeWorkbench {
     fn files_changed(&mut self, batch: &Batch, window: &mut Window, cx: &mut Context<Self>) {
         for e in self.editors() {
             let path = e.read(cx).path.clone();
-            let canon = self.canonical.entry(path.clone()).or_insert_with(|| std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone())).clone();
-            if batch.files.iter().any(|p| *p == path || (p.file_name() == path.file_name() && std::fs::canonicalize(p).ok().as_ref() == Some(&canon))) {
+            let canon = self
+                .canonical
+                .entry(path.clone())
+                .or_insert_with(|| std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()))
+                .clone();
+            if batch.files.iter().any(|p| {
+                *p == path
+                    || (p.file_name() == path.file_name()
+                        && std::fs::canonicalize(p).ok().as_ref() == Some(&canon))
+            }) {
                 e.update(cx, |e, cx| e.reload_if_changed(window, cx));
             }
         }
@@ -242,7 +288,8 @@ impl IdeWorkbench {
         self.reload_diffs(cx);
         if let Some(root) = self.workspace.read(cx).ide_root.clone() {
             if batch.git || !batch.files.is_empty() {
-                self.workspace.update(cx, |ws, cx| ws.refresh_git_at(root, cx));
+                self.workspace
+                    .update(cx, |ws, cx| ws.refresh_git_at(root, cx));
             }
         }
         if let Some(scm) = &self.scm {
@@ -267,15 +314,39 @@ mod tests {
         // Paths outside the matchers' roots (the global one is rooted elsewhere) never panic.
         assert!(!ig.ignored(std::path::Path::new("/elsewhere/a.rs"), false));
         assert!(!ig.decide(&dir, std::path::Path::new("/elsewhere/a.rs"), false));
-        let paths = ["web/node_modules/x/a.js", "web/app.js", "debug.log", "web/keep.log", "src/main.rs", ".git/index", ".git/objects/ab/cd"].iter().map(|p| dir.join(p)).collect();
+        let paths = [
+            "web/node_modules/x/a.js",
+            "web/app.js",
+            "debug.log",
+            "web/keep.log",
+            "src/main.rs",
+            ".git/index",
+            ".git/objects/ab/cd",
+        ]
+        .iter()
+        .map(|p| dir.join(p))
+        .collect();
         let batch = sort(paths, &dir, &dir, &mut ig);
-        let rel: Vec<String> = batch.files.iter().map(|p| p.strip_prefix(&dir).unwrap().display().to_string()).collect();
+        let rel: Vec<String> = batch
+            .files
+            .iter()
+            .map(|p| p.strip_prefix(&dir).unwrap().display().to_string())
+            .collect();
         assert_eq!(rel, ["src/main.rs", "web/app.js", "web/keep.log"]);
         assert!(batch.git, "the index moved");
         // A .gitignore that changes counts at once.
         std::fs::write(dir.join("web/.gitignore"), "app.js\n").unwrap();
-        let batch = sort(vec![dir.join("web/.gitignore"), dir.join("web/app.js")], &dir, &dir, &mut ig);
-        let rel: Vec<String> = batch.files.iter().map(|p| p.strip_prefix(&dir).unwrap().display().to_string()).collect();
+        let batch = sort(
+            vec![dir.join("web/.gitignore"), dir.join("web/app.js")],
+            &dir,
+            &dir,
+            &mut ig,
+        );
+        let rel: Vec<String> = batch
+            .files
+            .iter()
+            .map(|p| p.strip_prefix(&dir).unwrap().display().to_string())
+            .collect();
         assert_eq!(rel, ["web/.gitignore"]);
         assert!(!batch.git);
         let _ = std::fs::remove_dir_all(&dir);

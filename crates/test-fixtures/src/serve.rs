@@ -56,7 +56,10 @@ fn answer(mut stream: TcpStream, dir: &Path) -> Option<String> {
         Ok(body) if plain && method == "GET" && file.is_file() => ("200 OK", body),
         _ => ("404 Not Found", Vec::new()),
     };
-    let head = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n", body.len());
+    let head = format!(
+        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
     stream.write_all(head.as_bytes()).ok()?;
     stream.write_all(&body).ok()?;
     stream.flush().ok()?;

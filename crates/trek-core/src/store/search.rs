@@ -114,7 +114,9 @@ const ITEM_TRIGGERS_VERSION: i64 = 2;
 fn body(data: &str) -> String {
     let text = format!("json_extract({data}, '$.text')");
     let added = format!("instr({text}, char(10) || char(10) || '<trek-')");
-    format!("substr(CASE WHEN json_extract({data}, '$.kind') = 'user' AND {added} > 0 THEN substr({text}, 1, {added} - 1) ELSE {text} END, 1, {MAX_INDEXED_CHARS})")
+    format!(
+        "substr(CASE WHEN json_extract({data}, '$.kind') = 'user' AND {added} > 0 THEN substr({text}, 1, {added} - 1) ELSE {text} END, 1, {MAX_INDEXED_CHARS})"
+    )
 }
 
 /// Make the item triggers, and index again the stored messages they'd index differently: user
@@ -125,15 +127,32 @@ fn ensure_item_triggers(conn: &Connection) -> rusqlite::Result<()> {
     }
     conn.execute_batch(&ITEM_TRIGGERS.replace("{new_body}", &body("new.data")))?;
     let added = "instr(data, '<trek-') > 0 AND json_extract(data, '$.kind') = 'user'";
-    conn.execute(&format!("DELETE FROM item_search WHERE rowid IN (SELECT pk FROM items WHERE {added})"), [])?;
-    conn.execute(&format!("INSERT INTO item_search (rowid, body) SELECT pk, {} FROM items WHERE {added}", body("data")), [])?;
+    conn.execute(
+        &format!("DELETE FROM item_search WHERE rowid IN (SELECT pk FROM items WHERE {added})"),
+        [],
+    )?;
+    conn.execute(
+        &format!(
+            "INSERT INTO item_search (rowid, body) SELECT pk, {} FROM items WHERE {added}",
+            body("data")
+        ),
+        [],
+    )?;
     set_state(conn, "item_triggers", ITEM_TRIGGERS_VERSION)
 }
 
 /// Create (or rebuild) the index. Cheap: rows that already exist are left to `backfill_search`.
 pub(super) fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS search_state (key TEXT PRIMARY KEY, value INTEGER NOT NULL)")?;
-    let version: Option<i64> = conn.query_row("SELECT value FROM search_state WHERE key = 'version'", [], |r| r.get(0)).optional()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS search_state (key TEXT PRIMARY KEY, value INTEGER NOT NULL)",
+    )?;
+    let version: Option<i64> = conn
+        .query_row(
+            "SELECT value FROM search_state WHERE key = 'version'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
     if version == Some(VERSION) {
         return ensure_item_triggers(conn);
     }
@@ -154,23 +173,45 @@ pub(super) fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 fn state(c: &Connection, key: &str) -> rusqlite::Result<i64> {
-    Ok(c.query_row("SELECT value FROM search_state WHERE key = ?1", [key], |r| r.get(0)).optional()?.unwrap_or(0))
+    Ok(c.query_row(
+        "SELECT value FROM search_state WHERE key = ?1",
+        [key],
+        |r| r.get(0),
+    )
+    .optional()?
+    .unwrap_or(0))
 }
 
 fn set_state(c: &Connection, key: &str, value: i64) -> rusqlite::Result<()> {
-    c.execute("INSERT OR REPLACE INTO search_state (key, value) VALUES (?1, ?2)", params![key, value]).map(|_| ())
+    c.execute(
+        "INSERT OR REPLACE INTO search_state (key, value) VALUES (?1, ?2)",
+        params![key, value],
+    )
+    .map(|_| ())
 }
 
 /// Index the next rows of one kind waiting in its backfill range: up to `chunk` of them, or
 /// about `CHUNK_BYTES` of text. Returns true while more remain.
-fn backfill(c: &Connection, name: &str, select: &str, table: &str, column: &str, chunk: usize) -> rusqlite::Result<bool> {
-    let (from, upto) = (state(c, &format!("{name}_from"))?, state(c, &format!("{name}_upto"))?);
+fn backfill(
+    c: &Connection,
+    name: &str,
+    select: &str,
+    table: &str,
+    column: &str,
+    chunk: usize,
+) -> rusqlite::Result<bool> {
+    let (from, upto) = (
+        state(c, &format!("{name}_from"))?,
+        state(c, &format!("{name}_upto"))?,
+    );
     if from >= upto {
         return Ok(false);
     }
     // Delete first: a trigger may have indexed the row already (it changed since).
     let mut delete = c.prepare(&format!("DELETE FROM {table} WHERE rowid = ?1"))?;
-    let mut insert = c.prepare(&format!("INSERT INTO {table} (rowid, {column}) VALUES (?1, ?2)"))?;
+    let mut insert = c.prepare(&format!(
+        "INSERT INTO {table} (rowid, {column}) VALUES (?1, ?2)"
+    ))?;
     let mut select = c.prepare(select)?;
     let mut rows = select.query(params![from, upto, chunk as i64])?;
     let (mut n, mut bytes, mut last) = (0, 0, from);
@@ -184,20 +225,32 @@ fn backfill(c: &Connection, name: &str, select: &str, table: &str, column: &str,
         }
     }
     // Fewer rows than asked for, none held back: the range is done.
-    let next = if n < chunk && bytes < CHUNK_BYTES { upto } else { last };
+    let next = if n < chunk && bytes < CHUNK_BYTES {
+        upto
+    } else {
+        last
+    };
     set_state(c, &format!("{name}_from"), next)?;
     Ok(next < upto)
 }
 
 /// Append rows without indexing them now: they join the backfill range instead.
-pub(super) fn append_unindexed<'a>(c: &Connection, thread_id: &str, items: impl IntoIterator<Item = (&'a str, &'a Item)>) -> rusqlite::Result<()> {
+pub(super) fn append_unindexed<'a>(
+    c: &Connection,
+    thread_id: &str,
+    items: impl IntoIterator<Item = (&'a str, &'a Item)>,
+) -> rusqlite::Result<()> {
     set_state(c, "defer_items", 1)?;
     let appended = super::append_rows(c, thread_id, items)?;
     c.execute("DELETE FROM search_state WHERE key = 'defer_items'", [])?;
     if let Some((first, last)) = appended {
         let (from, upto) = (state(c, "items_from")?, state(c, "items_upto")?);
         // A finished backfill restarts just before the new rows; one under way reaches them.
-        let from = if from >= upto { first - 1 } else { from.min(first - 1) };
+        let from = if from >= upto {
+            first - 1
+        } else {
+            from.min(first - 1)
+        };
         set_state(c, "items_from", from)?;
         set_state(c, "items_upto", upto.max(last))?;
     }
@@ -238,7 +291,10 @@ pub struct SearchHit {
 /// "stad light" finds "stadium lighting". `None` when there's nothing to look for. Control
 /// characters separate words: SQLite rejects a NUL even inside quotes.
 pub fn fts_query(input: &str) -> Option<String> {
-    let input: String = input.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let input: String = input
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
     let terms: Vec<String> = input
         .split_whitespace()
         .filter(|w| w.chars().any(char::is_alphanumeric))
@@ -299,14 +355,24 @@ pub struct ImportedToIndex {
 
 /// Messages of a transcript worth searching: (position, the indexed start of the text).
 fn messages(items: &[Item]) -> impl Iterator<Item = (usize, &str)> {
-    items.iter().enumerate().filter_map(|(pos, item)| match item {
-        Item::User { text, .. } | Item::Assistant { text } if !text.trim().is_empty() => {
-            let text = if matches!(item, Item::User { .. }) { crate::restate::as_written(text) } else { text };
-            let end = text.char_indices().nth(MAX_INDEXED_CHARS).map_or(text.len(), |(i, _)| i);
-            Some((pos, &text[..end]))
-        }
-        _ => None,
-    })
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(pos, item)| match item {
+            Item::User { text, .. } | Item::Assistant { text } if !text.trim().is_empty() => {
+                let text = if matches!(item, Item::User { .. }) {
+                    crate::restate::as_written(text)
+                } else {
+                    text
+                };
+                let end = text
+                    .char_indices()
+                    .nth(MAX_INDEXED_CHARS)
+                    .map_or(text.len(), |(i, _)| i);
+                Some((pos, &text[..end]))
+            }
+            _ => None,
+        })
 }
 
 /// Matches ranked per message index before grouping by thread: a common prefix matches most of
@@ -317,10 +383,19 @@ const RANKED_MATCHES: i64 = 2000;
 /// thread id). `sql` selects (rowid, thread_id, score, updated_at) from the index's best
 /// matches, `?3` of them. Grouping happens before the limit, so one thread with many matching
 /// messages can't crowd out the rest.
-fn best_per_thread(c: &Connection, sql: &str, query: &str, limit: i64) -> rusqlite::Result<Vec<(f64, i64, i64, String)>> {
-    let sql = format!("WITH m AS MATERIALIZED ({sql}) SELECT rowid, thread_id, MIN(score) AS best, updated_at FROM m GROUP BY thread_id ORDER BY best, updated_at DESC LIMIT ?2");
+fn best_per_thread(
+    c: &Connection,
+    sql: &str,
+    query: &str,
+    limit: i64,
+) -> rusqlite::Result<Vec<(f64, i64, i64, String)>> {
+    let sql = format!(
+        "WITH m AS MATERIALIZED ({sql}) SELECT rowid, thread_id, MIN(score) AS best, updated_at FROM m GROUP BY thread_id ORDER BY best, updated_at DESC LIMIT ?2"
+    );
     let mut st = c.prepare_cached(&sql)?;
-    let rows = st.query_map(params![query, limit, RANKED_MATCHES.max(limit * 4)], |r| Ok((r.get(2)?, r.get(3)?, r.get(0)?, r.get(1)?)))?;
+    let rows = st.query_map(params![query, limit, RANKED_MATCHES.max(limit * 4)], |r| {
+        Ok((r.get(2)?, r.get(3)?, r.get(0)?, r.get(1)?))
+    })?;
     rows.collect()
 }
 
@@ -329,7 +404,10 @@ fn best_per_thread(c: &Connection, sql: &str, query: &str, limit: i64) -> rusqli
 /// and term frequencies.
 fn relative_scores(found: &[(f64, i64, i64, String)]) -> Vec<f64> {
     let best = found.iter().map(|f| f.0).fold(0.0, f64::min);
-    found.iter().map(|f| if best < 0.0 { f.0 / best } else { 1.0 }).collect()
+    found
+        .iter()
+        .map(|f| if best < 0.0 { f.0 / best } else { 1.0 })
+        .collect()
 }
 
 /// The words of `query` worth looking for in messages: one-letter prefixes match most of the
@@ -340,7 +418,13 @@ fn message_query(query: &str) -> Option<String> {
     if !query.split_whitespace().any(|w| len(w) >= 3) {
         return None;
     }
-    fts_query(&query.split_whitespace().filter(|w| len(w) >= 2).collect::<Vec<_>>().join(" "))
+    fts_query(
+        &query
+            .split_whitespace()
+            .filter(|w| len(w) >= 2)
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 impl Store {
@@ -407,7 +491,9 @@ impl Store {
     /// up to `limit` hits. Messages are searched once a word has three characters (`message_query`).
     /// Runs on the read-only connection, so saves go on meanwhile.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        let Some(q) = fts_query(query) else { return Ok(vec![]) };
+        let Some(q) = fts_query(query) else {
+            return Ok(vec![]);
+        };
         let messages = message_query(query);
         let limit = limit.max(1) as i64;
         self.reading(|c| {
@@ -523,12 +609,19 @@ impl Store {
 
     /// Whether an imported thread's messages are fully indexed as of `updated_at`.
     pub fn imported_indexed(&self, thread_id: &str, updated_at: i64) -> Result<bool> {
-        Ok(self.import_state(thread_id)?.is_some_and(|(at, complete)| complete && at >= updated_at))
+        Ok(self
+            .import_state(thread_id)?
+            .is_some_and(|(at, complete)| complete && at >= updated_at))
     }
 
     fn import_state(&self, thread_id: &str) -> Result<Option<(i64, bool)>> {
         self.with(|c| {
-            c.query_row("SELECT updated_at, complete FROM import_indexed WHERE thread_id = ?1", [thread_id], |r| Ok((r.get(0)?, r.get(1)?))).optional()
+            c.query_row(
+                "SELECT updated_at, complete FROM import_indexed WHERE thread_id = ?1",
+                [thread_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
         })
     }
 
@@ -536,10 +629,18 @@ impl Store {
     /// the thread's `updated_at`. `None` records that the transcript was skipped (too big to read
     /// in the background) and keeps whatever was indexed before. Returns false when that version
     /// was indexed already. Works a chunk per transaction; searches meanwhile may see part of it.
-    pub fn index_imported(&self, thread_id: &str, items: Option<&[Item]>, updated_at: i64) -> Result<bool> {
+    pub fn index_imported(
+        &self,
+        thread_id: &str,
+        items: Option<&[Item]>,
+        updated_at: i64,
+    ) -> Result<bool> {
         // One indexer at a time, so chunks for the same thread can't interleave.
         let _one = super::lock(&self.indexer);
-        if self.import_state(thread_id)?.is_some_and(|(at, complete)| at >= updated_at && (complete || items.is_none())) {
+        if self
+            .import_state(thread_id)?
+            .is_some_and(|(at, complete)| at >= updated_at && (complete || items.is_none()))
+        {
             return Ok(false);
         }
         if let Some(items) = items {
@@ -549,11 +650,17 @@ impl Store {
                 self.with(|c| {
                     let tx = c.unchecked_transaction()?;
                     {
-                        let mut doc = tx.prepare_cached("INSERT INTO import_docs (thread_id, pos) VALUES (?1, ?2)")?;
-                        let mut text = tx.prepare_cached("INSERT INTO import_search (rowid, body) VALUES (?1, ?2)")?;
+                        let mut doc = tx.prepare_cached(
+                            "INSERT INTO import_docs (thread_id, pos) VALUES (?1, ?2)",
+                        )?;
+                        let mut text = tx.prepare_cached(
+                            "INSERT INTO import_search (rowid, body) VALUES (?1, ?2)",
+                        )?;
                         let mut bytes = 0;
                         while bytes < CHUNK_BYTES {
-                            let Some((pos, body)) = docs.next() else { break };
+                            let Some((pos, body)) = docs.next() else {
+                                break;
+                            };
                             doc.execute(params![thread_id, pos as i64])?;
                             text.execute(params![tx.last_insert_rowid(), body])?;
                             bytes += body.len();
@@ -578,8 +685,10 @@ impl Store {
         loop {
             let dropped = self.with(|c| {
                 let tx = c.unchecked_transaction()?;
-                let pks: Vec<i64> =
-                    tx.prepare_cached("SELECT pk FROM import_docs WHERE thread_id = ?1 LIMIT ?2")?.query_map(params![thread_id, DROP_CHUNK], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+                let pks: Vec<i64> = tx
+                    .prepare_cached("SELECT pk FROM import_docs WHERE thread_id = ?1 LIMIT ?2")?
+                    .query_map(params![thread_id, DROP_CHUNK], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
                 for pk in &pks {
                     tx.execute("DELETE FROM import_search WHERE rowid = ?1", [pk])?;
                     tx.execute("DELETE FROM import_docs WHERE pk = ?1", [pk])?;
@@ -602,14 +711,28 @@ mod tests {
     use crate::types::{AgentId, Effort, HandHolding};
 
     fn user(t: &str) -> Item {
-        Item::User { text: t.into(), images: vec![], at: None, resume: None, aside: false }
+        Item::User {
+            text: t.into(),
+            images: vec![],
+            at: None,
+            resume: None,
+            aside: false,
+        }
     }
     fn said(t: &str) -> Item {
         Item::Assistant { text: t.into() }
     }
 
     fn thread(s: &Store, title: &str) -> Thread {
-        let mut t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+        let mut t = s
+            .create_thread(
+                None,
+                AgentId::ClaudeCode,
+                None,
+                Effort::High,
+                HandHolding::Auto,
+            )
+            .unwrap();
         t.title = title.into();
         s.save_thread(&t).unwrap();
         t
@@ -631,11 +754,20 @@ mod tests {
 
     #[test]
     fn queries_are_quoted_prefixes() {
-        assert_eq!(fts_query("stad light").as_deref(), Some("\"stad\"* \"light\"*"));
-        assert_eq!(fts_query(r#"say "hi" NOT -x"#).as_deref(), Some(r#""say"* """hi"""* "NOT"* "-x"*"#));
+        assert_eq!(
+            fts_query("stad light").as_deref(),
+            Some("\"stad\"* \"light\"*")
+        );
+        assert_eq!(
+            fts_query(r#"say "hi" NOT -x"#).as_deref(),
+            Some(r#""say"* """hi"""* "NOT"* "-x"*"#)
+        );
         assert_eq!(fts_query("  - ** "), None);
         assert_eq!(fts_query("\0").as_deref(), None);
-        assert_eq!(fts_query("stad\0light\u{1}").as_deref(), Some("\"stad\"* \"light\"*"));
+        assert_eq!(
+            fts_query("stad\0light\u{1}").as_deref(),
+            Some("\"stad\"* \"light\"*")
+        );
     }
 
     #[test]
@@ -649,11 +781,18 @@ mod tests {
 
     #[test]
     fn marked_text_becomes_one_line_with_ranges() {
-        let (text, ranges) = parse_marked("…the **\u{1}stadium\u{2}**\n\n lights `\u{1}glow\u{2}` a*b __x__  ", true);
+        let (text, ranges) = parse_marked(
+            "…the **\u{1}stadium\u{2}**\n\n lights `\u{1}glow\u{2}` a*b __x__  ",
+            true,
+        );
         assert_eq!(text, "…the stadium lights glow a*b x");
-        assert_eq!(ranges.iter().map(|r| &text[r.clone()]).collect::<Vec<_>>(), ["stadium", "glow"]);
+        assert_eq!(
+            ranges.iter().map(|r| &text[r.clone()]).collect::<Vec<_>>(),
+            ["stadium", "glow"]
+        );
         // Titles keep every character; only line breaks fold.
-        let (text, ranges) = parse_marked("\u{1}Fix\u{2} __init__.py and **kwargs\nin `main`", false);
+        let (text, ranges) =
+            parse_marked("\u{1}Fix\u{2} __init__.py and **kwargs\nin `main`", false);
         assert_eq!(text, "Fix __init__.py and **kwargs in `main`");
         assert_eq!(&text[ranges[0].clone()], "Fix");
     }
@@ -665,16 +804,28 @@ mod tests {
         let b = thread(&s, "Kit colours");
         let mut tr = Transcript::default();
         tr.push(user("why are the kits pink"));
-        tr.push(Item::Tool { id: "t".into(), title: "Ran".into(), detail: "grep stadium".into(), output: "stadium.rs".into(), status: crate::store::ToolStatus::Done });
+        tr.push(Item::Tool {
+            id: "t".into(),
+            title: "Ran".into(),
+            detail: "grep stadium".into(),
+            output: "stadium.rs".into(),
+            status: crate::store::ToolStatus::Done,
+        });
         tr.push(said("The stadium shader overrides the kit tint."));
         s.save_transcript(&b.id, &mut tr).unwrap();
 
         let hits = s.search("stadium", 10).unwrap();
         assert_eq!(hits.len(), 2);
-        assert_eq!((hits[0].thread_id.as_str(), hits[0].position), (a.id.as_str(), None));
+        assert_eq!(
+            (hits[0].thread_id.as_str(), hits[0].position),
+            (a.id.as_str(), None)
+        );
         assert_eq!(marked(&hits[0]), ["stadium"]);
         // Tool output isn't indexed: the hit is the answer, third in the transcript.
-        assert_eq!((hits[1].thread_id.as_str(), hits[1].position), (b.id.as_str(), Some(2)));
+        assert_eq!(
+            (hits[1].thread_id.as_str(), hits[1].position),
+            (b.id.as_str(), Some(2))
+        );
         assert_eq!(hits[1].item_id.as_deref(), Some(tr.ids()[2].as_str()));
         assert_eq!(hits[1].title, "Kit colours");
         assert_eq!(marked(&hits[1]), ["stadium"]);
@@ -693,7 +844,10 @@ mod tests {
         let s = Store::in_memory().unwrap();
         let t = thread(&s, "Fix __init__.py and **kwargs in `main`");
         let hit = &s.search("fix", 5).unwrap()[0];
-        assert_eq!((hit.thread_id.as_str(), hit.title.as_str()), (t.id.as_str(), "Fix __init__.py and **kwargs in `main`"));
+        assert_eq!(
+            (hit.thread_id.as_str(), hit.title.as_str()),
+            (t.id.as_str(), "Fix __init__.py and **kwargs in `main`")
+        );
         assert_eq!(hit.snippet, hit.title);
         assert_eq!(marked(hit), ["Fix"]);
     }
@@ -703,18 +857,33 @@ mod tests {
         let s = Store::in_memory().unwrap();
         let t = thread(&s, "Chat");
         let consult = crate::orchestrate::Consult {
-            consultants: vec![crate::orchestrate::Consultant { agent: AgentId::Codex, model: "gpt-5.6-sol".into(), effort: Effort::High }],
+            consultants: vec![crate::orchestrate::Consultant {
+                agent: AgentId::Codex,
+                model: "gpt-5.6-sol".into(),
+                effort: Effort::High,
+            }],
             ..Default::default()
         };
-        let asked = crate::orchestrate::consult_prompt(&crate::restate::with_restate("Speed up the tarmac loader"), &consult, |_| "Sol".into());
+        let asked = crate::orchestrate::consult_prompt(
+            &crate::restate::with_restate("Speed up the tarmac loader"),
+            &consult,
+            |_| "Sol".into(),
+        );
         let mut tr = Transcript::default();
         tr.push(user(&asked));
         tr.push(said("I'll restate it in plain English first."));
         s.save_transcript(&t.id, &mut tr).unwrap();
         assert_eq!(s.search("tarmac", 5).unwrap().len(), 1);
-        assert!(s.search("delegate_task", 5).unwrap().is_empty(), "the consult isn't searched");
+        assert!(
+            s.search("delegate_task", 5).unwrap().is_empty(),
+            "the consult isn't searched"
+        );
         let plain = s.search("plain english", 5).unwrap();
-        assert_eq!(plain.iter().map(|h| h.position).collect::<Vec<_>>(), [Some(1)], "only what the agent said");
+        assert_eq!(
+            plain.iter().map(|h| h.position).collect::<Vec<_>>(),
+            [Some(1)],
+            "only what the agent said"
+        );
         // An index made before: the messages Trek added to are indexed again as written.
         s.with(|c| {
             c.execute("DELETE FROM item_search", [])?;
@@ -728,7 +897,10 @@ mod tests {
         .unwrap();
         assert_eq!(s.search("tarmac", 5).unwrap().len(), 1);
         // Imported transcripts are read the same way.
-        assert_eq!(messages(&[user(&asked)]).next().map(|(_, t)| t), Some("Speed up the tarmac loader"));
+        assert_eq!(
+            messages(&[user(&asked)]).next().map(|(_, t)| t),
+            Some("Speed up the tarmac loader")
+        );
     }
 
     #[test]
@@ -754,9 +926,15 @@ mod tests {
         assert_eq!(s.search("wind", 5).unwrap().len(), 1);
 
         // Renames reindex the title; archived threads and side chats don't show up.
-        s.update_thread(&t.id, |t| t.title = "Renamed thread".into()).unwrap();
+        s.update_thread(&t.id, |t| t.title = "Renamed thread".into())
+            .unwrap();
         assert_eq!(s.search("renamed", 5).unwrap().len(), 1);
-        assert!(s.search("thre", 5).unwrap().iter().all(|h| h.position.is_some() || h.title == "Renamed thread"));
+        assert!(
+            s.search("thre", 5)
+                .unwrap()
+                .iter()
+                .all(|h| h.position.is_some() || h.title == "Renamed thread")
+        );
         s.update_thread(&t.id, |t| t.archived_at = Some(1)).unwrap();
         assert!(s.search("renamed", 5).unwrap().is_empty());
         let mut side = thread(&s, "Side question");
@@ -772,7 +950,13 @@ mod tests {
         s.delete_thread(&gone.id).unwrap();
         assert!(s.search("ephemeral", 5).unwrap().is_empty());
         assert!(s.search("doomed", 5).unwrap().is_empty());
-        assert_eq!(count(&s, "SELECT COUNT(*) FROM title_docs WHERE thread_id NOT IN (SELECT id FROM threads)"), 0);
+        assert_eq!(
+            count(
+                &s,
+                "SELECT COUNT(*) FROM title_docs WHERE thread_id NOT IN (SELECT id FROM threads)"
+            ),
+            0
+        );
     }
 
     #[test]
@@ -822,8 +1006,14 @@ mod tests {
         s.save_transcript(&t.id, &mut tr).unwrap();
         assert_eq!(s.search("start", 5).unwrap().len(), 1);
         assert!(s.search("needle", 5).unwrap().is_empty());
-        assert_eq!(count(&s, "SELECT length(body) FROM item_search") as usize, MAX_INDEXED_CHARS);
-        assert_eq!(messages(&[said(&log)]).next().unwrap().1.chars().count(), MAX_INDEXED_CHARS);
+        assert_eq!(
+            count(&s, "SELECT length(body) FROM item_search") as usize,
+            MAX_INDEXED_CHARS
+        );
+        assert_eq!(
+            messages(&[said(&log)]).next().unwrap().1.chars().count(),
+            MAX_INDEXED_CHARS
+        );
     }
 
     #[test]
@@ -831,7 +1021,9 @@ mod tests {
         let s = Store::in_memory().unwrap();
         let t = thread(&s, "Imported");
         // An imported transcript saved for the first time: megabytes of history in one go.
-        let history: Vec<Item> = (0..40).map(|i| said(&format!("chapter {i} {}", "lorem ipsum ".repeat(1000)))).collect();
+        let history: Vec<Item> = (0..40)
+            .map(|i| said(&format!("chapter {i} {}", "lorem ipsum ".repeat(1000))))
+            .collect();
         let mut tr = Transcript::unsaved(history);
         assert!(s.save_transcript(&t.id, &mut tr).unwrap());
         assert!(s.search("chapter", 5).unwrap().is_empty());
@@ -848,7 +1040,13 @@ mod tests {
         let hit = &s.search("chapter", 5).unwrap()[0];
         assert_eq!(hit.item_id.as_deref(), Some(tr.ids()[0].as_str()));
         assert_eq!(count(&s, "SELECT COUNT(*) FROM item_search"), 41);
-        assert_eq!(count(&s, "SELECT COUNT(*) FROM search_state WHERE key = 'defer_items'"), 0);
+        assert_eq!(
+            count(
+                &s,
+                "SELECT COUNT(*) FROM search_state WHERE key = 'defer_items'"
+            ),
+            0
+        );
     }
 
     #[test]
@@ -900,20 +1098,38 @@ mod tests {
         let t = thread(&s, "Alpha stadium");
         // Trek before stable ids saved transcripts and threads like this.
         let data = serde_json::to_string(&said("legacy words")).unwrap();
-        s.with(|c| c.execute("INSERT INTO items(thread_id, seq, data, created_at) VALUES (?1, 0, ?2, 1)", params![t.id, data])).unwrap();
+        s.with(|c| {
+            c.execute(
+                "INSERT INTO items(thread_id, seq, data, created_at) VALUES (?1, 0, ?2, 1)",
+                params![t.id, data],
+            )
+        })
+        .unwrap();
         let rows = s.items_with_ids(&t.id).unwrap();
         assert_eq!(rows.len(), 1);
         assert!(uuid::Uuid::parse_str(&rows[0].0).is_ok());
-        assert_eq!(s.search("legacy", 5).unwrap()[0].item_id.as_deref(), Some(rows[0].0.as_str()));
+        assert_eq!(
+            s.search("legacy", 5).unwrap()[0].item_id.as_deref(),
+            Some(rows[0].0.as_str())
+        );
         let cols = Store::THREAD_COLS;
-        let renamed: Vec<&str> = cols.split(", ").map(|c| if c == "title" { "'Beta stadium'" } else { c }).collect();
-        let replace = format!("INSERT OR REPLACE INTO threads ({cols}) SELECT {} FROM threads WHERE id = ?1", renamed.join(", "));
+        let renamed: Vec<&str> = cols
+            .split(", ")
+            .map(|c| if c == "title" { "'Beta stadium'" } else { c })
+            .collect();
+        let replace = format!(
+            "INSERT OR REPLACE INTO threads ({cols}) SELECT {} FROM threads WHERE id = ?1",
+            renamed.join(", ")
+        );
         for _ in 0..2 {
             s.with(|c| c.execute(&replace, [&t.id])).unwrap();
         }
         let hits = s.search("stadium", 5).unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!((hits[0].thread_id.as_str(), hits[0].title.as_str()), (t.id.as_str(), "Beta stadium"));
+        assert_eq!(
+            (hits[0].thread_id.as_str(), hits[0].title.as_str()),
+            (t.id.as_str(), "Beta stadium")
+        );
         assert!(s.search("alpha", 5).unwrap().is_empty());
         assert_eq!(count(&s, "SELECT COUNT(*) FROM title_search"), 1);
     }
@@ -923,22 +1139,30 @@ mod tests {
         let s = Store::in_memory().unwrap();
         let t = thread(&s, "Kept");
         let continued = thread(&s, "Continued");
-        s.index_imported(&continued.id, Some(&[user("old history")]), 1).unwrap();
-        s.index_imported(&t.id, Some(&[user("still imported")]), 1).unwrap();
+        s.index_imported(&continued.id, Some(&[user("old history")]), 1)
+            .unwrap();
+        s.index_imported(&t.id, Some(&[user("still imported")]), 1)
+            .unwrap();
         let mut tr = Transcript::unsaved(vec![user("old history")]);
         s.save_transcript(&continued.id, &mut tr).unwrap();
         // A thread gone without its delete trigger (an older build's INSERT OR REPLACE).
         let gone = thread(&s, "Orphan");
-        s.index_imported(&gone.id, Some(&[user("orphaned words")]), 1).unwrap();
-        s.with(|c| c.execute_batch("DROP TRIGGER threads_search_delete")).unwrap();
-        s.with(|c| c.execute("DELETE FROM threads WHERE id = ?1", [&gone.id])).unwrap();
+        s.index_imported(&gone.id, Some(&[user("orphaned words")]), 1)
+            .unwrap();
+        s.with(|c| c.execute_batch("DROP TRIGGER threads_search_delete"))
+            .unwrap();
+        s.with(|c| c.execute("DELETE FROM threads WHERE id = ?1", [&gone.id]))
+            .unwrap();
         s.prune_search().unwrap();
         assert_eq!(count(&s, "SELECT COUNT(*) FROM title_docs"), 2);
         assert_eq!(count(&s, "SELECT COUNT(*) FROM title_search"), 2);
         assert_eq!(count(&s, "SELECT COUNT(*) FROM import_docs"), 1);
         assert_eq!(count(&s, "SELECT COUNT(*) FROM import_search"), 1);
         assert_eq!(s.search("still", 5).unwrap()[0].thread_id, t.id);
-        assert_eq!(s.search("history", 5).unwrap()[0].item_id.as_deref(), Some(tr.ids()[0].as_str()));
+        assert_eq!(
+            s.search("history", 5).unwrap()[0].item_id.as_deref(),
+            Some(tr.ids()[0].as_str())
+        );
     }
 
     #[test]
@@ -952,7 +1176,8 @@ mod tests {
             let mut tr = Transcript::default();
             tr.push(user(text));
             s.save_transcript(id, &mut tr).unwrap();
-            s.add_checkpoint(id, &tr.ids()[0], std::path::Path::new("/tmp/repo"), "abc").unwrap();
+            s.add_checkpoint(id, &tr.ids()[0], std::path::Path::new("/tmp/repo"), "abc")
+                .unwrap();
         }
         s.delete_thread(&t.id).unwrap();
         assert_eq!(count(&s, "SELECT COUNT(*) FROM items"), 0);
@@ -972,7 +1197,13 @@ mod tests {
         assert_eq!(count(&s, "SELECT COUNT(*) FROM items"), 0);
 
         // Rows older builds left behind go at the next prune.
-        s.with(|c| c.execute("INSERT INTO items (thread_id, seq, data, created_at) VALUES ('gone', 0, ?1, 1)", [serde_json::to_string(&user("stray words")).unwrap()])).unwrap();
+        s.with(|c| {
+            c.execute(
+                "INSERT INTO items (thread_id, seq, data, created_at) VALUES ('gone', 0, ?1, 1)",
+                [serde_json::to_string(&user("stray words")).unwrap()],
+            )
+        })
+        .unwrap();
         assert_eq!(count(&s, "SELECT COUNT(*) FROM item_search"), 1);
         s.prune_search().unwrap();
         assert_eq!(count(&s, "SELECT COUNT(*) FROM items"), 0);
@@ -993,10 +1224,19 @@ mod tests {
         let mut tr = Transcript::default();
         tr.push(user("draft words"));
         s.save_transcript(&draft.id, &mut tr).unwrap();
-        s.add_checkpoint(&draft.id, &tr.ids()[0], std::path::Path::new("/tmp/repo"), "abc").unwrap();
+        s.add_checkpoint(
+            &draft.id,
+            &tr.ids()[0],
+            std::path::Path::new("/tmp/repo"),
+            "abc",
+        )
+        .unwrap();
         let gone = s.drop_orphan_side_chats().unwrap();
         assert_eq!(gone.len(), 1);
-        assert_eq!((gone[0].0.id.as_str(), gone[0].1.len()), (draft.id.as_str(), 1));
+        assert_eq!(
+            (gone[0].0.id.as_str(), gone[0].1.len()),
+            (draft.id.as_str(), 1)
+        );
         assert!(s.thread(&draft.id).unwrap().is_none());
         assert!(s.thread(&kept.id).unwrap().is_some());
         assert_eq!(count(&s, "SELECT COUNT(*) FROM items"), 0);
@@ -1025,7 +1265,18 @@ mod tests {
         // there; in the imported one it's rare and weighs a lot. Raw scores would always put
         // imported history first.
         let imported = thread(&s, "Imported");
-        s.index_imported(&imported.id, Some(&[user("deploy it"), user("unrelated"), user("other"), user("more"), user("words")]), 1).unwrap();
+        s.index_imported(
+            &imported.id,
+            Some(&[
+                user("deploy it"),
+                user("unrelated"),
+                user("other"),
+                user("more"),
+                user("words"),
+            ]),
+            1,
+        )
+        .unwrap();
         let mut stored = thread(&s, "Stored");
         let mut tr = Transcript::default();
         tr.push(user("deploy it"));
@@ -1037,7 +1288,13 @@ mod tests {
         let imported_raw: f64 = s.with(|c| c.query_row("SELECT rank FROM import_search WHERE import_search MATCH '\"deploy\"*' ORDER BY rank LIMIT 1", [], |r| r.get(0))).unwrap();
         assert!(imported_raw < raw, "the imported hit scores better raw");
         // Each index's best is as good as the other's; the more recent thread goes first.
-        let hits: Vec<String> = s.search("deploy", 5).unwrap().into_iter().filter(|h| h.position.is_some()).map(|h| h.thread_id).collect();
+        let hits: Vec<String> = s
+            .search("deploy", 5)
+            .unwrap()
+            .into_iter()
+            .filter(|h| h.position.is_some())
+            .map(|h| h.thread_id)
+            .collect();
         assert_eq!(hits, [stored.id.clone(), imported.id.clone()]);
     }
 
@@ -1055,7 +1312,9 @@ mod tests {
         std::thread::spawn(move || {
             let _ = tx.send(searcher.search("lighthouse", 5).map(|h| h.len()).ok());
         });
-        let found = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("search waited for the writer");
+        let found = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("search waited for the writer");
         assert_eq!(found, Some(1));
         drop(held);
         drop(s);
@@ -1084,9 +1343,22 @@ mod tests {
         let todo = s.imported_to_index(10).unwrap();
         assert_eq!(todo.len(), 1);
         let id = todo[0].thread_id.clone();
-        assert_eq!((todo[0].source, todo[0].native_id.as_str(), todo[0].updated_at), (ThreadSource::Codex, "rollout-1", 100));
+        assert_eq!(
+            (
+                todo[0].source,
+                todo[0].native_id.as_str(),
+                todo[0].updated_at
+            ),
+            (ThreadSource::Codex, "rollout-1", 100)
+        );
 
-        let items = vec![user("where is the flux capacitor"), Item::Reasoning { text: "flux".into() }, said("The flux capacitor is in src/time.rs")];
+        let items = vec![
+            user("where is the flux capacitor"),
+            Item::Reasoning {
+                text: "flux".into(),
+            },
+            said("The flux capacitor is in src/time.rs"),
+        ];
         assert!(!s.imported_indexed(&id, 100).unwrap());
         assert!(s.index_imported(&id, Some(&items), 100).unwrap());
         assert!(s.imported_indexed(&id, 100).unwrap());
@@ -1094,17 +1366,26 @@ mod tests {
         assert!(s.imported_to_index(10).unwrap().is_empty());
         let hits = s.search("capacitor", 5).unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!((hits[0].position, hits[0].item_id.as_deref()), (Some(0), None));
+        assert_eq!(
+            (hits[0].position, hits[0].item_id.as_deref()),
+            (Some(0), None)
+        );
 
         // Newer activity outside Trek: indexed again. Skipped transcripts keep the old index.
-        s.upsert_imported(&[crate::import::ImportedThread { updated_at: 200, ..imp.clone() }]).unwrap();
+        s.upsert_imported(&[crate::import::ImportedThread {
+            updated_at: 200,
+            ..imp.clone()
+        }])
+        .unwrap();
         assert_eq!(s.imported_to_index(10).unwrap().len(), 1);
         assert!(s.index_imported(&id, None, 200).unwrap());
         assert!(!s.imported_indexed(&id, 200).unwrap());
         assert!(s.imported_to_index(10).unwrap().is_empty());
         assert_eq!(s.search("capacitor", 5).unwrap().len(), 1);
         // A full read replaces the old version, many transactions' worth of it.
-        let long: Vec<Item> = (0..200).map(|i| said(&format!("hoverboard {i} {}", "x".repeat(4000)))).collect();
+        let long: Vec<Item> = (0..200)
+            .map(|i| said(&format!("hoverboard {i} {}", "x".repeat(4000))))
+            .collect();
         assert!(s.index_imported(&id, Some(&long), 200).unwrap());
         assert_eq!(count(&s, "SELECT COUNT(*) FROM import_docs"), 200);
         assert!(s.search("capacitor", 5).unwrap().is_empty());

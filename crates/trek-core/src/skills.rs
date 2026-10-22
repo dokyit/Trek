@@ -45,7 +45,13 @@ impl SkillSource {
 
     /// Whether Trek may turn it off, edit or remove it.
     pub fn editable(&self) -> bool {
-        matches!(self, SkillSource::ClaudeCode | SkillSource::Codex | SkillSource::Shared | SkillSource::Project)
+        matches!(
+            self,
+            SkillSource::ClaudeCode
+                | SkillSource::Codex
+                | SkillSource::Shared
+                | SkillSource::Project
+        )
     }
 }
 
@@ -103,11 +109,23 @@ pub const CARD_RECIPES: [&str; 3] = [MAP_CARD, PULL_REQUEST_CARD, MIGRATION_CARD
 
 /// Skills Trek ships: (folder name, SKILL.md).
 pub const SHIPPED: [(&str, &str); 5] = [
-    (CREATE_VERIFICATION, include_str!("../skills/create-verification-skill/SKILL.md")),
-    (MAINTAIN_VERIFICATION, include_str!("../skills/maintain-verification-skill/SKILL.md")),
+    (
+        CREATE_VERIFICATION,
+        include_str!("../skills/create-verification-skill/SKILL.md"),
+    ),
+    (
+        MAINTAIN_VERIFICATION,
+        include_str!("../skills/maintain-verification-skill/SKILL.md"),
+    ),
     (MAP_CARD, include_str!("../skills/map-card/SKILL.md")),
-    (PULL_REQUEST_CARD, include_str!("../skills/pull-request-card/SKILL.md")),
-    (MIGRATION_CARD, include_str!("../skills/database-migration-card/SKILL.md")),
+    (
+        PULL_REQUEST_CARD,
+        include_str!("../skills/pull-request-card/SKILL.md"),
+    ),
+    (
+        MIGRATION_CARD,
+        include_str!("../skills/database-migration-card/SKILL.md"),
+    ),
 ];
 
 /// Writes every skill Trek ships into `shipped_root` (or brings it up to this version), so an
@@ -141,7 +159,14 @@ pub const SUGGESTED: [Suggestion; 1] = [Suggestion {
 
 /// The suggestions not among `installed` (by name, any case).
 pub fn suggestions(installed: &[Skill]) -> Vec<Suggestion> {
-    SUGGESTED.into_iter().filter(|s| !installed.iter().any(|i| i.name.eq_ignore_ascii_case(s.name))).collect()
+    SUGGESTED
+        .into_iter()
+        .filter(|s| {
+            !installed
+                .iter()
+                .any(|i| i.name.eq_ignore_ascii_case(s.name))
+        })
+        .collect()
 }
 
 /// Where Trek keeps the skills it ships. Not one of the agents' own skill folders: Trek points an
@@ -151,7 +176,15 @@ pub fn suggestions(installed: &[Skill]) -> Vec<Suggestion> {
 pub fn shipped_root() -> PathBuf {
     static WRITTEN: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
     let root = shipped_home();
-    let first = WRITTEN.lock().map(|mut done| !done.contains(&root) && { done.push(root.clone()); true }).unwrap_or(false);
+    let first = WRITTEN
+        .lock()
+        .map(|mut done| {
+            !done.contains(&root) && {
+                done.push(root.clone());
+                true
+            }
+        })
+        .unwrap_or(false);
     if first {
         write_shipped();
     }
@@ -164,7 +197,10 @@ fn shipped_home() -> PathBuf {
 
 /// The SKILL.md of shipped skill `name`, written (or brought up to this version) first.
 pub fn shipped(name: &str) -> anyhow::Result<PathBuf> {
-    let (_, text) = SHIPPED.iter().find(|(n, _)| *n == name).ok_or_else(|| anyhow::anyhow!("Trek ships no skill called {name}"))?;
+    let (_, text) = SHIPPED
+        .iter()
+        .find(|(n, _)| *n == name)
+        .ok_or_else(|| anyhow::anyhow!("Trek ships no skill called {name}"))?;
     let md = shipped_home().join(name).join("SKILL.md");
     if std::fs::read_to_string(&md).ok().as_deref() != Some(*text) {
         std::fs::create_dir_all(md.parent().unwrap_or(&md))?;
@@ -182,7 +218,11 @@ const ORIGIN_FILE: &str = ".trek-origin";
 /// `(name, description)` from SKILL.md front matter; the folder name when it has none.
 pub fn read_front_matter(skill_md: &Path) -> Option<(String, String)> {
     let text = std::fs::read_to_string(skill_md).ok()?;
-    let folder = skill_md.parent()?.file_name()?.to_string_lossy().to_string();
+    let folder = skill_md
+        .parent()?
+        .file_name()?
+        .to_string_lossy()
+        .to_string();
     let mut name = None;
     let mut desc = None;
     let mut body = text.as_str();
@@ -190,7 +230,10 @@ pub fn read_front_matter(skill_md: &Path) -> Option<(String, String)> {
         let close_pos = rest.find("\n---").or_else(|| rest.find("\r\n---"));
         if let Some(pos) = close_pos {
             let front = &rest[..pos];
-            let after_dash = rest[pos..].trim_start_matches(|c| c == '\r' || c == '\n').strip_prefix("---").unwrap_or_default();
+            let after_dash = rest[pos..]
+                .trim_start_matches(|c| c == '\r' || c == '\n')
+                .strip_prefix("---")
+                .unwrap_or_default();
             body = after_dash;
             let mut lines = front.lines().peekable();
             while let Some(line) = lines.next() {
@@ -198,13 +241,20 @@ pub fn read_front_matter(skill_md: &Path) -> Option<(String, String)> {
                     let mut v = v.trim().trim_matches('"').trim_matches('\'').to_string();
                     // A folded (`>-`) or literal (`|`) block: the text is on the indented lines below.
                     let mut block = v.chars();
-                    if matches!(block.next(), Some('>' | '|')) && block.all(|c| matches!(c, '+' | '-' | '0'..='9')) {
+                    if matches!(block.next(), Some('>' | '|'))
+                        && block.all(|c| matches!(c, '+' | '-' | '0'..='9'))
+                    {
                         let folded = v.starts_with('>');
                         let mut text = vec![];
-                        while let Some(next) = lines.next_if(|l| l.trim().is_empty() || l.starts_with([' ', '\t'])) {
+                        while let Some(next) =
+                            lines.next_if(|l| l.trim().is_empty() || l.starts_with([' ', '\t']))
+                        {
                             text.push(next.trim());
                         }
-                        v = text.join(if folded { " " } else { "\n" }).trim().to_string();
+                        v = text
+                            .join(if folded { " " } else { "\n" })
+                            .trim()
+                            .to_string();
                     }
                     match k.trim() {
                         "name" if !v.is_empty() => name = Some(v),
@@ -217,14 +267,19 @@ pub fn read_front_matter(skill_md: &Path) -> Option<(String, String)> {
     }
     let desc = desc.or_else(|| {
         // Fallback: the first prose line in the body.
-        body.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("---")).map(str::to_string)
+        body.lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("---"))
+            .map(str::to_string)
     });
     Some((name.unwrap_or(folder), desc.unwrap_or_default()))
 }
 
 /// Skill folders directly inside `root` (following symlinks).
 fn scan(root: &Path, source: SkillSource, out: &mut Vec<Skill>) {
-    let Ok(entries) = std::fs::read_dir(root) else { return };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
     for e in entries.flatten() {
         let dir = e.path();
         let file_name = e.file_name().to_string_lossy().to_string();
@@ -233,7 +288,13 @@ fn scan(root: &Path, source: SkillSource, out: &mut Vec<Skill>) {
         }
         let md = dir.join("SKILL.md");
         if let Some((name, description)) = md.exists().then(|| read_front_matter(&md)).flatten() {
-            out.push(Skill { name, description, dir, source: source.clone(), enabled: true });
+            out.push(Skill {
+                name,
+                description,
+                dir,
+                source: source.clone(),
+                enabled: true,
+            });
         }
     }
 }
@@ -243,7 +304,11 @@ pub fn discover(project: Option<&Path>) -> Vec<Skill> {
     let home = paths::agents_home();
     let codex_skills = codex_skills_dir(&codex_home_for(&home));
     let mut out = vec![];
-    scan(&home.join(".claude/skills"), SkillSource::ClaudeCode, &mut out);
+    scan(
+        &home.join(".claude/skills"),
+        SkillSource::ClaudeCode,
+        &mut out,
+    );
     scan(&codex_skills, SkillSource::Codex, &mut out);
     scan(&home.join(".agents/skills"), SkillSource::Shared, &mut out);
     if let Some(p) = project.filter(|p| *p != home.as_path()) {
@@ -256,7 +321,11 @@ pub fn discover(project: Option<&Path>) -> Vec<Skill> {
             scan(&b.path(), SkillSource::Synced, &mut out);
         }
     }
-    scan(&codex_skills.join(".system"), SkillSource::CodexSystem, &mut out);
+    scan(
+        &codex_skills.join(".system"),
+        SkillSource::CodexSystem,
+        &mut out,
+    );
     write_shipped();
     scan(&shipped_root(), SkillSource::Trek, &mut out);
     for (plugin, dir) in plugin_dirs() {
@@ -266,11 +335,19 @@ pub fn discover(project: Option<&Path>) -> Vec<Skill> {
     if let Ok(entries) = std::fs::read_dir(disabled_root()) {
         for e in entries.flatten() {
             let dir = e.path();
-            let Ok(origin) = std::fs::read_to_string(dir.join(ORIGIN_FILE)) else { continue };
+            let Ok(origin) = std::fs::read_to_string(dir.join(ORIGIN_FILE)) else {
+                continue;
+            };
             let origin = PathBuf::from(origin.trim());
             let source = source_for(&origin, project);
             if let Some((name, description)) = read_front_matter(&dir.join("SKILL.md")) {
-                out.push(Skill { name, description, dir, source, enabled: false });
+                out.push(Skill {
+                    name,
+                    description,
+                    dir,
+                    source,
+                    enabled: false,
+                });
             }
         }
     }
@@ -298,13 +375,20 @@ fn source_for(origin: &Path, project: Option<&Path>) -> SkillSource {
 /// Installed Claude Code plugins: `(name, install folder)`.
 fn plugin_dirs() -> Vec<(String, PathBuf)> {
     let file = paths::agents_home().join(".claude/plugins/installed_plugins.json");
-    let Ok(text) = std::fs::read_to_string(file) else { return vec![] };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return vec![] };
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return vec![];
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return vec![];
+    };
     let mut out = vec![];
     for (name, installs) in v["plugins"].as_object().into_iter().flatten() {
         for i in installs.as_array().into_iter().flatten() {
             if let Some(p) = i["installPath"].as_str() {
-                out.push((name.split('@').next().unwrap_or(name).to_string(), PathBuf::from(p)));
+                out.push((
+                    name.split('@').next().unwrap_or(name).to_string(),
+                    PathBuf::from(p),
+                ));
             }
         }
     }
@@ -313,13 +397,21 @@ fn plugin_dirs() -> Vec<(String, PathBuf)> {
 
 /// Turn a skill off (move it aside) or back on (move it home).
 pub fn set_enabled(skill: &Skill, on: bool) -> anyhow::Result<PathBuf> {
-    anyhow::ensure!(skill.source.editable(), "{} skills are managed elsewhere", skill.source.label());
+    anyhow::ensure!(
+        skill.source.editable(),
+        "{} skills are managed elsewhere",
+        skill.source.label()
+    );
     if on == skill.enabled {
         return Ok(skill.dir.clone());
     }
     if on {
         let origin = PathBuf::from(std::fs::read_to_string(skill.dir.join(ORIGIN_FILE))?.trim());
-        anyhow::ensure!(!origin.exists(), "A skill already exists at {}", origin.display());
+        anyhow::ensure!(
+            !origin.exists(),
+            "A skill already exists at {}",
+            origin.display()
+        );
         if let Some(parent) = origin.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -329,7 +421,11 @@ pub fn set_enabled(skill: &Skill, on: bool) -> anyhow::Result<PathBuf> {
     } else {
         let root = disabled_root();
         std::fs::create_dir_all(&root)?;
-        let folder = skill.dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| skill.name.clone());
+        let folder = skill
+            .dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| skill.name.clone());
         let mut dest = root.join(&folder);
         let mut n = 2;
         while dest.exists() {
@@ -359,7 +455,8 @@ fn move_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
                 std::fs::remove_file(from)?;
                 return Ok(());
             }
-            copy_dir(from, to).map_err(|e| e.context(format!("Couldn't move {}", from.display())))?;
+            copy_dir(from, to)
+                .map_err(|e| e.context(format!("Couldn't move {}", from.display())))?;
             std::fs::remove_dir_all(from)?;
             Ok(())
         }
@@ -372,7 +469,11 @@ fn move_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
 /// where links can't be made without a privilege (Windows) it is left out. A failed copy leaves
 /// no half-copied `to`.
 fn copy_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
-    anyhow::ensure!(std::fs::symlink_metadata(to).is_err(), "{} already exists", to.display());
+    anyhow::ensure!(
+        std::fs::symlink_metadata(to).is_err(),
+        "{} already exists",
+        to.display()
+    );
     let copied = (|| {
         // The folder itself may be a symlink to the real one; its contents are what is wanted, so
         // the walk starts from the real folder (walking a root that is a link failed on macOS).
@@ -401,18 +502,36 @@ fn copy_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
 
 /// Move a skill folder to the Trash.
 pub fn trash(skill: &Skill) -> anyhow::Result<()> {
-    anyhow::ensure!(skill.source.editable(), "{} skills are managed elsewhere", skill.source.label());
-    paths::trash(&skill.dir).map_err(|e| e.context(format!("Couldn't move {} to the Trash", skill.dir.display())))
+    anyhow::ensure!(
+        skill.source.editable(),
+        "{} skills are managed elsewhere",
+        skill.source.label()
+    );
+    paths::trash(&skill.dir).map_err(|e| {
+        e.context(format!(
+            "Couldn't move {} to the Trash",
+            skill.dir.display()
+        ))
+    })
 }
 
 /// Copy a skill folder (one containing SKILL.md) into `home`.
 pub fn install_from(folder: &Path, home: SkillHome) -> anyhow::Result<PathBuf> {
-    anyhow::ensure!(folder.join("SKILL.md").exists(), "That folder has no SKILL.md");
-    let name = folder.file_name().ok_or_else(|| anyhow::anyhow!("Not a folder"))?;
+    anyhow::ensure!(
+        folder.join("SKILL.md").exists(),
+        "That folder has no SKILL.md"
+    );
+    let name = folder
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("Not a folder"))?;
     let root = home.dir();
     std::fs::create_dir_all(&root)?;
     let dest = root.join(name);
-    anyhow::ensure!(!dest.exists(), "A skill named {} is already there", name.to_string_lossy());
+    anyhow::ensure!(
+        !dest.exists(),
+        "A skill named {} is already there",
+        name.to_string_lossy()
+    );
     copy_dir(folder, &dest).map_err(|e| e.context("Couldn't copy the skill"))?;
     Ok(dest)
 }
@@ -437,11 +556,18 @@ pub fn create(name: &str, description: &str, home: SkillHome) -> anyhow::Result<
     let dir = home.dir().join(&slug);
     anyhow::ensure!(!dir.exists(), "A skill named {slug} already exists");
     std::fs::create_dir_all(&dir)?;
-    let description = if description.trim().is_empty() { "Describe when an agent should use this skill." } else { description.trim() };
+    let description = if description.trim().is_empty() {
+        "Describe when an agent should use this skill."
+    } else {
+        description.trim()
+    };
     let md = dir.join("SKILL.md");
     std::fs::write(
         &md,
-        format!("---\nname: {slug}\ndescription: {description}\n---\n\n# {}\n\nWrite the instructions the agent should follow here.\n", name.trim()),
+        format!(
+            "---\nname: {slug}\ndescription: {description}\n---\n\n# {}\n\nWrite the instructions the agent should follow here.\n",
+            name.trim()
+        ),
     )?;
     Ok(md)
 }
@@ -455,29 +581,70 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("trek-skill-test-{}", std::process::id()));
         let s = dir.join("my-skill");
         std::fs::create_dir_all(&s).unwrap();
-        std::fs::write(s.join("SKILL.md"), "---\nname: grill-me\ndescription: \"Ask hard questions.\"\n---\nbody").unwrap();
-        assert_eq!(read_front_matter(&s.join("SKILL.md")), Some(("grill-me".into(), "Ask hard questions.".into())));
+        std::fs::write(
+            s.join("SKILL.md"),
+            "---\nname: grill-me\ndescription: \"Ask hard questions.\"\n---\nbody",
+        )
+        .unwrap();
+        assert_eq!(
+            read_front_matter(&s.join("SKILL.md")),
+            Some(("grill-me".into(), "Ask hard questions.".into()))
+        );
         std::fs::write(s.join("SKILL.md"), "# Title\n\nDoes a thing.").unwrap();
-        assert_eq!(read_front_matter(&s.join("SKILL.md")), Some(("my-skill".into(), "Does a thing.".into())));
+        assert_eq!(
+            read_front_matter(&s.join("SKILL.md")),
+            Some(("my-skill".into(), "Does a thing.".into()))
+        );
         // Front matter with name but no description does not use 'name:' as fallback description.
-        std::fs::write(s.join("SKILL.md"), "---\nname: no-desc\n---\n# Heading\n\nBody description line.").unwrap();
-        assert_eq!(read_front_matter(&s.join("SKILL.md")), Some(("no-desc".into(), "Body description line.".into())));
+        std::fs::write(
+            s.join("SKILL.md"),
+            "---\nname: no-desc\n---\n# Heading\n\nBody description line.",
+        )
+        .unwrap();
+        assert_eq!(
+            read_front_matter(&s.join("SKILL.md")),
+            Some(("no-desc".into(), "Body description line.".into()))
+        );
         // A folded or literal block holds its text on the indented lines below.
         std::fs::write(s.join("SKILL.md"), "---\nname: folded\ndescription: >-\n  Coordinate workers:\n  threaded messages.\n\nother: x\n---\nbody").unwrap();
-        assert_eq!(read_front_matter(&s.join("SKILL.md")), Some(("folded".into(), "Coordinate workers: threaded messages.".into())));
-        std::fs::write(s.join("SKILL.md"), "---\ndescription: |\n  line one\n  line two\nname: literal\n---\nbody").unwrap();
-        assert_eq!(read_front_matter(&s.join("SKILL.md")), Some(("literal".into(), "line one\nline two".into())));
+        assert_eq!(
+            read_front_matter(&s.join("SKILL.md")),
+            Some((
+                "folded".into(),
+                "Coordinate workers: threaded messages.".into()
+            ))
+        );
+        std::fs::write(
+            s.join("SKILL.md"),
+            "---\ndescription: |\n  line one\n  line two\nname: literal\n---\nbody",
+        )
+        .unwrap();
+        assert_eq!(
+            read_front_matter(&s.join("SKILL.md")),
+            Some(("literal".into(), "line one\nline two".into()))
+        );
         // Synced skill source classification
         let home = paths::agents_home();
-        assert_eq!(source_for(&home.join(".claude/skills/synced/bucket/my-skill"), None), SkillSource::Synced);
-        assert_eq!(source_for(&home.join(".claude/skills/local-skill"), None), SkillSource::ClaudeCode);
-        assert_eq!(source_for(Path::new("/somewhere/else/my-skill"), None), SkillSource::Shared);
+        assert_eq!(
+            source_for(&home.join(".claude/skills/synced/bucket/my-skill"), None),
+            SkillSource::Synced
+        );
+        assert_eq!(
+            source_for(&home.join(".claude/skills/local-skill"), None),
+            SkillSource::ClaudeCode
+        );
+        assert_eq!(
+            source_for(Path::new("/somewhere/else/my-skill"), None),
+            SkillSource::Shared
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn shipped_skills_are_written_and_kept_current() {
-        crate::paths::isolate_thread(std::env::temp_dir().join(format!("trek-shipped-skills-{}", std::process::id())));
+        crate::paths::isolate_thread(
+            std::env::temp_dir().join(format!("trek-shipped-skills-{}", std::process::id())),
+        );
         let md = shipped(CREATE_VERIFICATION).unwrap();
         assert!(md.starts_with(shipped_root()));
         let (name, desc) = read_front_matter(&md).unwrap();
@@ -486,9 +653,25 @@ mod tests {
         // An old copy is brought up to this version.
         std::fs::write(&md, "stale").unwrap();
         shipped(CREATE_VERIFICATION).unwrap();
-        assert!(std::fs::read_to_string(&md).unwrap().contains("metadata:\n  trek: verification"));
-        let listed: Vec<Skill> = discover(None).into_iter().filter(|s| s.source == SkillSource::Trek).collect();
-        assert_eq!(listed.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), [CREATE_VERIFICATION, MIGRATION_CARD, MAINTAIN_VERIFICATION, MAP_CARD, PULL_REQUEST_CARD]);
+        assert!(
+            std::fs::read_to_string(&md)
+                .unwrap()
+                .contains("metadata:\n  trek: verification")
+        );
+        let listed: Vec<Skill> = discover(None)
+            .into_iter()
+            .filter(|s| s.source == SkillSource::Trek)
+            .collect();
+        assert_eq!(
+            listed.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            [
+                CREATE_VERIFICATION,
+                MIGRATION_CARD,
+                MAINTAIN_VERIFICATION,
+                MAP_CARD,
+                PULL_REQUEST_CARD
+            ]
+        );
         assert!(!SkillSource::Trek.editable(), "read-only");
         assert!(shipped("nope").is_err());
     }
@@ -507,47 +690,113 @@ mod tests {
         use crate::artifact;
         for name in CARD_RECIPES {
             let (_, md) = SHIPPED.iter().find(|(n, _)| *n == name).expect("shipped");
-            let front = md.strip_prefix("---\n").and_then(|rest| rest.split_once("\n---\n")).map(|(front, _)| front).expect("front matter");
+            let front = md
+                .strip_prefix("---\n")
+                .and_then(|rest| rest.split_once("\n---\n"))
+                .map(|(front, _)| front)
+                .expect("front matter");
             assert!(front.contains(&format!("name: {name}\n")), "{name}");
-            let description = front.lines().find_map(|l| l.strip_prefix("description: ")).expect("a description");
-            assert!(description.contains("Use when") && !description.contains(": "), "{name}: says when, and stays plain YAML");
-            assert!(md.contains("## What you fill in") && md.contains("## Rules"), "{name}");
+            let description = front
+                .lines()
+                .find_map(|l| l.strip_prefix("description: "))
+                .expect("a description");
+            assert!(
+                description.contains("Use when") && !description.contains(": "),
+                "{name}: says when, and stays plain YAML"
+            );
+            assert!(
+                md.contains("## What you fill in") && md.contains("## Rules"),
+                "{name}"
+            );
 
             let html = recipe_card(md);
             // A whole document with a title, as the fence takes it, well under what agents are
             // asked to keep to (and what Trek runs at all).
             let block = format!("```{}\n{html}\n```", artifact::FENCE);
             assert!(artifact::fence_closed(&block), "{name}");
-            assert!(html.len() < artifact::ADVISED_BYTES / 4 && html.len() < artifact::MAX_BYTES, "{name}: {} bytes", html.len());
-            assert!(html.starts_with("<!doctype html>") && html.trim_end().ends_with("</html>"), "{name}");
-            assert!(artifact::title(html).is_some_and(|t| !t.is_empty()), "{name}: a title");
+            assert!(
+                html.len() < artifact::ADVISED_BYTES / 4 && html.len() < artifact::MAX_BYTES,
+                "{name}: {} bytes",
+                html.len()
+            );
+            assert!(
+                html.starts_with("<!doctype html>") && html.trim_end().ends_with("</html>"),
+                "{name}"
+            );
+            assert!(
+                artifact::title(html).is_some_and(|t| !t.is_empty()),
+                "{name}: a title"
+            );
             let doc = artifact::document(html, ":root{}");
-            assert!(doc.contains(artifact::CSP) && doc.contains("const DATA = {"), "{name}");
+            assert!(
+                doc.contains(artifact::CSP) && doc.contains("const DATA = {"),
+                "{name}"
+            );
             // Nothing the policy blocks: https only.
-            assert!(!html.contains("http://") && !html.contains("file://"), "{name}");
+            assert!(
+                !html.contains("http://") && !html.contains("file://"),
+                "{name}"
+            );
             for host in artifact::hosts(html, 8) {
-                assert!(["unpkg.com", "tile.openstreetmap.org", "basemaps.cartocdn.com", "github.com"].iter().any(|h| host.ends_with(h)), "{name}: {host}");
+                assert!(
+                    [
+                        "unpkg.com",
+                        "tile.openstreetmap.org",
+                        "basemaps.cartocdn.com",
+                        "github.com"
+                    ]
+                    .iter()
+                    .any(|h| host.ends_with(h)),
+                    "{name}: {host}"
+                );
             }
             // Themed by Trek, in Night and Paper alike.
-            for var in ["var(--trek-fg", "var(--trek-muted", "var(--trek-border", "var(--trek-surface", "var(--trek-font"] {
+            for var in [
+                "var(--trek-fg",
+                "var(--trek-muted",
+                "var(--trek-border",
+                "var(--trek-surface",
+                "var(--trek-font",
+            ] {
                 assert!(html.contains(var), "{name}: {var}");
             }
             // It acts only through the page's helper, and only when that's there.
-            assert!(html.contains("window.trek.send(") && html.contains("!window.trek"), "{name}");
-            for banned in ["window.webkit", "chrome.webview", "postMessage", "localStorage", "document.cookie"] {
+            assert!(
+                html.contains("window.trek.send(") && html.contains("!window.trek"),
+                "{name}"
+            );
+            for banned in [
+                "window.webkit",
+                "chrome.webview",
+                "postMessage",
+                "localStorage",
+                "document.cookie",
+            ] {
                 assert!(!html.contains(banned), "{name}: {banned}");
             }
         }
         // What each one sends.
         let card = |n: &str| recipe_card(SHIPPED.iter().find(|(name, _)| *name == n).unwrap().1);
-        assert!(card(MAP_CARD).contains(&format!("send: \"{}\"", artifact::OPEN_ON_PHONE)) && card(MAP_CARD).contains("leaflet@1.9.4") && card(MAP_CARD).contains("tile.openstreetmap.org"));
-        assert!(card(PULL_REQUEST_CARD).contains(r#""Resolve " + keep.dataset.name + ": keep " + b.dataset.keep"#));
-        assert!(card(MIGRATION_CARD).contains(r#"window.trek.send("Apply the migration")"#) && card(MIGRATION_CARD).contains("Applied in"));
+        assert!(
+            card(MAP_CARD).contains(&format!("send: \"{}\"", artifact::OPEN_ON_PHONE))
+                && card(MAP_CARD).contains("leaflet@1.9.4")
+                && card(MAP_CARD).contains("tile.openstreetmap.org")
+        );
+        assert!(
+            card(PULL_REQUEST_CARD)
+                .contains(r#""Resolve " + keep.dataset.name + ": keep " + b.dataset.keep"#)
+        );
+        assert!(
+            card(MIGRATION_CARD).contains(r#"window.trek.send("Apply the migration")"#)
+                && card(MIGRATION_CARD).contains("Applied in")
+        );
     }
 
     #[test]
     fn the_folder_agents_may_read_holds_the_card_recipes_once_asked_for() {
-        crate::paths::isolate_thread(std::env::temp_dir().join(format!("trek-shipped-root-{}", std::process::id())));
+        crate::paths::isolate_thread(
+            std::env::temp_dir().join(format!("trek-shipped-root-{}", std::process::id())),
+        );
         let root = shipped_root();
         for name in CARD_RECIPES {
             assert!(root.join(name).join("SKILL.md").is_file(), "{name}");
@@ -558,7 +807,13 @@ mod tests {
     fn suggestions_go_once_installed() {
         assert_eq!(SUGGESTED[0].command, "npx skills add wheresryan22/anatomy");
         assert_eq!(suggestions(&[]), SUGGESTED);
-        let installed = Skill { name: "Anatomy".into(), description: String::new(), dir: PathBuf::from("/x/anatomy"), source: SkillSource::ClaudeCode, enabled: true };
+        let installed = Skill {
+            name: "Anatomy".into(),
+            description: String::new(),
+            dir: PathBuf::from("/x/anatomy"),
+            source: SkillSource::ClaudeCode,
+            enabled: true,
+        };
         assert!(suggestions(&[installed]).is_empty());
     }
 
@@ -569,25 +824,39 @@ mod tests {
         // A CODEX_HOME elsewhere moves the skills with it, built-ins included.
         let moved = std::env::temp_dir().join("elsewhere-codex");
         assert_eq!(codex_skills_dir(&moved), moved.join("skills"));
-        assert_eq!(codex_skills_dir(&moved).join(".system"), moved.join("skills").join(".system"));
+        assert_eq!(
+            codex_skills_dir(&moved).join(".system"),
+            moved.join("skills").join(".system")
+        );
     }
 
     #[test]
     fn an_isolated_process_keeps_to_its_own_skills() {
-        let data = std::env::temp_dir().join(format!("trek-isolated-skills-{}", std::process::id()));
+        let data =
+            std::env::temp_dir().join(format!("trek-isolated-skills-{}", std::process::id()));
         crate::paths::isolate_thread(data.clone());
         let real = crate::paths::home();
         for h in [SkillHome::ClaudeCode, SkillHome::Codex, SkillHome::Shared] {
-            assert!(h.dir().starts_with(&data) && !h.dir().starts_with(real.join(".claude")), "{}", h.dir().display());
+            assert!(
+                h.dir().starts_with(&data) && !h.dir().starts_with(real.join(".claude")),
+                "{}",
+                h.dir().display()
+            );
         }
         // Created, listed, turned off and on again: all of it inside the data folder.
         let md = create("Isolated check", "", SkillHome::ClaudeCode).unwrap();
         assert!(md.starts_with(&data), "{}", md.display());
-        let found = discover(None).into_iter().find(|s| s.name == "isolated-check").expect("listed");
+        let found = discover(None)
+            .into_iter()
+            .find(|s| s.name == "isolated-check")
+            .expect("listed");
         assert_eq!(found.source, SkillSource::ClaudeCode);
         let off = set_enabled(&found, false).unwrap();
         assert!(off.starts_with(&data));
-        let off = discover(None).into_iter().find(|s| s.name == "isolated-check").expect("listed off");
+        let off = discover(None)
+            .into_iter()
+            .find(|s| s.name == "isolated-check")
+            .expect("listed off");
         assert!(set_enabled(&off, true).unwrap().starts_with(&data));
         let _ = std::fs::remove_dir_all(data);
     }
@@ -597,13 +866,21 @@ mod tests {
         let skill = dir.join("sample");
         std::fs::create_dir_all(skill.join("scripts/deep")).unwrap();
         std::fs::create_dir_all(skill.join("empty")).unwrap();
-        std::fs::write(skill.join("SKILL.md"), "---\nname: sample\ndescription: A sample.\n---\nbody").unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: sample\ndescription: A sample.\n---\nbody",
+        )
+        .unwrap();
         std::fs::write(skill.join("scripts/run.sh"), "#!/bin/sh\necho hi\n").unwrap();
         std::fs::write(skill.join("scripts/deep/data.bin"), [0u8, 159, 146, 150]).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(skill.join("scripts/run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(
+                skill.join("scripts/run.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
         }
         skill
     }
@@ -614,8 +891,18 @@ mod tests {
             .into_iter()
             .map(|e| {
                 let e = e.unwrap();
-                let rel = e.path().strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
-                (rel, e.file_type().is_file().then(|| std::fs::read(e.path()).unwrap()))
+                let rel = e
+                    .path()
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                (
+                    rel,
+                    e.file_type()
+                        .is_file()
+                        .then(|| std::fs::read(e.path()).unwrap()),
+                )
             })
             .collect();
         all.sort();
@@ -635,7 +922,11 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt as _;
             let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode(&copy.join("scripts/run.sh")), 0o755, "scripts stay executable");
+            assert_eq!(
+                mode(&copy.join("scripts/run.sh")),
+                0o755,
+                "scripts stay executable"
+            );
             assert_eq!(mode(&copy.join("SKILL.md")), mode(&skill.join("SKILL.md")));
         }
         // Like `cp -R` into a name that is taken: refused, and what was there is left alone.
@@ -658,9 +949,17 @@ mod tests {
         std::os::unix::fs::symlink("SKILL.md", skill.join("alias.md")).unwrap();
         let copy = dir.join("copy");
         copy_dir(&skill, &copy).unwrap();
-        assert!(std::fs::symlink_metadata(copy.join("out")).unwrap().file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(copy.join("out"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(std::fs::read_link(copy.join("out")).unwrap(), outside);
-        assert_eq!(std::fs::read_link(copy.join("alias.md")).unwrap(), Path::new("SKILL.md"));
+        assert_eq!(
+            std::fs::read_link(copy.join("alias.md")).unwrap(),
+            Path::new("SKILL.md")
+        );
         // The skill folder itself being a link is fine: its contents are copied.
         let linked = dir.join("linked");
         std::os::unix::fs::symlink(&skill, &linked).unwrap();
@@ -678,7 +977,12 @@ mod tests {
         let installed = install_from(&skill, SkillHome::ClaudeCode).unwrap();
         assert!(installed.starts_with(&data), "{}", installed.display());
         assert_eq!(listing(&installed), listing(&skill));
-        assert!(install_from(&skill, SkillHome::ClaudeCode).unwrap_err().to_string().contains("already there"));
+        assert!(
+            install_from(&skill, SkillHome::ClaudeCode)
+                .unwrap_err()
+                .to_string()
+                .contains("already there")
+        );
         let _ = std::fs::remove_dir_all(data);
     }
 

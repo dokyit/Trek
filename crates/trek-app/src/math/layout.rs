@@ -68,11 +68,17 @@ impl Face {
     }
 
     pub fn bold(self) -> bool {
-        matches!(self, Face::MainBold | Face::MainBoldItalic | Face::MathBoldItalic)
+        matches!(
+            self,
+            Face::MainBold | Face::MainBoldItalic | Face::MathBoldItalic
+        )
     }
 
     pub fn italic(self) -> bool {
-        matches!(self, Face::MainItalic | Face::MainBoldItalic | Face::MathItalic | Face::MathBoldItalic)
+        matches!(
+            self,
+            Face::MainItalic | Face::MainBoldItalic | Face::MathItalic | Face::MathBoldItalic
+        )
     }
 
     fn table(self) -> &'static [(u32, tables::Metrics)] {
@@ -99,7 +105,10 @@ impl Face {
     /// Depth, height, italic correction, skew and width of `ch`, when the face has it.
     pub fn metrics(self, ch: char) -> Option<tables::Metrics> {
         let table = self.table();
-        table.binary_search_by_key(&(ch as u32), |(c, _)| *c).ok().map(|i| table[i].1)
+        table
+            .binary_search_by_key(&(ch as u32), |(c, _)| *c)
+            .ok()
+            .map(|i| table[i].1)
     }
 }
 
@@ -141,19 +150,41 @@ pub enum Shape {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     /// Text on a baseline at (x, y), `size` ems tall.
-    Glyph { x: f32, y: f32, text: String, face: Face, size: f32 },
+    Glyph {
+        x: f32,
+        y: f32,
+        text: String,
+        face: Face,
+        size: f32,
+    },
     /// A filled rectangle; `y` its bottom.
     Rule { x: f32, y: f32, w: f32, h: f32 },
     /// A shape filling the rectangle; `y` its bottom; `t` its stroke.
-    Shape { x: f32, y: f32, w: f32, h: f32, t: f32, shape: Shape },
+    Shape {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        t: f32,
+        shape: Shape,
+    },
     /// A rectangle's outline, `t` thick; `y` its bottom.
-    Frame { x: f32, y: f32, w: f32, h: f32, t: f32 },
+    Frame {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        t: f32,
+    },
 }
 
 impl Item {
     fn shift(&mut self, dx: f32, dy: f32) {
         match self {
-            Item::Glyph { x, y, .. } | Item::Rule { x, y, .. } | Item::Shape { x, y, .. } | Item::Frame { x, y, .. } => {
+            Item::Glyph { x, y, .. }
+            | Item::Rule { x, y, .. }
+            | Item::Shape { x, y, .. }
+            | Item::Frame { x, y, .. } => {
                 *x += dx;
                 *y += dy;
             }
@@ -178,7 +209,10 @@ pub struct MBox {
 
 impl MBox {
     fn kern(w: f32) -> MBox {
-        MBox { w, ..MBox::default() }
+        MBox {
+            w,
+            ..MBox::default()
+        }
     }
 
     /// Place `other` with its origin at (x, y) in this box, without changing this box's size.
@@ -264,7 +298,10 @@ impl Env {
     }
 
     fn cramp(self) -> Env {
-        Env { cramped: true, ..self }
+        Env {
+            cramped: true,
+            ..self
+        }
     }
 
     fn sup(self) -> Env {
@@ -303,15 +340,28 @@ impl Env {
 
 /// Typeset `nodes`: display math, or inline (text style).
 pub fn typeset(nodes: &[Node], display: bool, measure: &dyn Measure) -> MBox {
-    let env = Env { style: if display { Style::Display } else { Style::Text }, cramped: false };
+    let env = Env {
+        style: if display { Style::Display } else { Style::Text },
+        cramped: false,
+    };
     let t = Typesetter { measure };
-    let (tags, body): (Vec<&Node>, Vec<&Node>) = nodes.iter().partition(|n| matches!(n, Node::Tag(_)));
+    let (tags, body): (Vec<&Node>, Vec<&Node>) =
+        nodes.iter().partition(|n| matches!(n, Node::Tag(_)));
     let body: Vec<Node> = body.into_iter().cloned().collect();
     // `\\` and `&` outside an environment: rows, aligned at the `&`s when there are any.
     let mut b = if body.iter().any(|n| matches!(n, Node::Newline | Node::Tab)) {
         let aligned = body.iter().any(|n| matches!(n, Node::Tab));
-        let kind = if aligned { ArrayKind::Aligned } else { ArrayKind::Gathered };
-        let array = super::parse::rows_of(body, kind, if aligned { vec![] } else { vec![Align::Center] }, (NO_DELIM, NO_DELIM));
+        let kind = if aligned {
+            ArrayKind::Aligned
+        } else {
+            ArrayKind::Gathered
+        };
+        let array = super::parse::rows_of(
+            body,
+            kind,
+            if aligned { vec![] } else { vec![Align::Center] },
+            (NO_DELIM, NO_DELIM),
+        );
         t.array(&array, env)
     } else {
         t.list(&body, env)
@@ -319,9 +369,17 @@ pub fn typeset(nodes: &[Node], display: bool, measure: &dyn Measure) -> MBox {
     for tag in tags {
         if let Node::Tag(inner) = tag {
             b.append(MBox::kern(2.));
-            let mut wrapped = vec![Node::Sym { ch: '(', face: Face::Main, class: Class::Open }];
+            let mut wrapped = vec![Node::Sym {
+                ch: '(',
+                face: Face::Main,
+                class: Class::Open,
+            }];
             wrapped.extend(inner.iter().cloned());
-            wrapped.push(Node::Sym { ch: ')', face: Face::Main, class: Class::Close });
+            wrapped.push(Node::Sym {
+                ch: ')',
+                face: Face::Main,
+                class: Class::Close,
+            });
             b.append(t.list(&wrapped, env.with(Style::Text)));
         }
     }
@@ -338,8 +396,14 @@ fn sanitize(mut b: MBox) -> MBox {
         b.d = -b.h;
     }
     b.items.retain(|item| match item {
-        Item::Glyph { x, y, size, .. } => x.is_finite() && y.is_finite() && size.is_finite() && *size > 0.,
-        Item::Rule { x, y, w, h } | Item::Shape { x, y, w, h, .. } | Item::Frame { x, y, w, h, .. } => [x, y, w, h].iter().all(|v| v.is_finite()) && *w >= 0. && *h >= 0.,
+        Item::Glyph { x, y, size, .. } => {
+            x.is_finite() && y.is_finite() && size.is_finite() && *size > 0.
+        }
+        Item::Rule { x, y, w, h }
+        | Item::Shape { x, y, w, h, .. }
+        | Item::Frame { x, y, w, h, .. } => {
+            [x, y, w, h].iter().all(|v| v.is_finite()) && *w >= 0. && *h >= 0.
+        }
     });
     b
 }
@@ -353,9 +417,28 @@ fn spacing(l: Class, r: Class, tight: bool) -> f32 {
     use Class::*;
     let (mu, always) = match (l, r) {
         (Ord, Op) | (Op, Ord) | (Op, Op) | (Close, Op) | (Inner, Op) => (3., true),
-        (Ord, Bin) | (Bin, Ord) | (Bin, Op) | (Bin, Open) | (Bin, Inner) | (Close, Bin) | (Inner, Bin) | (Op, Bin) => (4., false),
-        (Ord, Rel) | (Op, Rel) | (Rel, Ord) | (Rel, Op) | (Rel, Open) | (Rel, Inner) | (Close, Rel) | (Inner, Rel) => (5., false),
-        (Ord, Inner) | (Inner, Ord) | (Inner, Open) | (Inner, Punct) | (Inner, Inner) | (Close, Inner) => (3., false),
+        (Ord, Bin)
+        | (Bin, Ord)
+        | (Bin, Op)
+        | (Bin, Open)
+        | (Bin, Inner)
+        | (Close, Bin)
+        | (Inner, Bin)
+        | (Op, Bin) => (4., false),
+        (Ord, Rel)
+        | (Op, Rel)
+        | (Rel, Ord)
+        | (Rel, Op)
+        | (Rel, Open)
+        | (Rel, Inner)
+        | (Close, Rel)
+        | (Inner, Rel) => (5., false),
+        (Ord, Inner)
+        | (Inner, Ord)
+        | (Inner, Open)
+        | (Inner, Punct)
+        | (Inner, Inner)
+        | (Close, Inner) => (3., false),
         (Punct, Ord | Op | Rel | Open | Close | Punct | Inner) => (3., false),
         _ => (0., true),
     };
@@ -371,21 +454,32 @@ impl Typesetter<'_> {
                 Node::Space(em) => atoms.push((None, MBox::kern(em * env.size()))),
                 Node::Tab | Node::Newline => atoms.push((None, MBox::kern(0.5 * env.size()))),
                 Node::Styled { style, body } => {
-                    let inner = Env { style: *style, cramped: env.cramped };
+                    let inner = Env {
+                        style: *style,
+                        cramped: env.cramped,
+                    };
                     atoms.push((Some(Class::Ord), self.list(body, inner)));
                 }
                 _ => atoms.push(self.atom(node, env)),
             }
         }
         // A binary operator with nothing to operate on is an ordinary symbol (TeX's rules 5, 6).
-        let classed: Vec<usize> = atoms.iter().enumerate().filter(|(_, (c, _))| c.is_some()).map(|(i, _)| i).collect();
+        let classed: Vec<usize> = atoms
+            .iter()
+            .enumerate()
+            .filter(|(_, (c, _))| c.is_some())
+            .map(|(i, _)| i)
+            .collect();
         for (k, &i) in classed.iter().enumerate() {
             if atoms[i].0 != Some(Class::Bin) {
                 continue;
             }
             let prev = k.checked_sub(1).and_then(|p| atoms[classed[p]].0);
             let next = classed.get(k + 1).and_then(|&n| atoms[n].0);
-            let lonely = matches!(prev, None | Some(Class::Bin | Class::Op | Class::Rel | Class::Open | Class::Punct)) || matches!(next, None | Some(Class::Rel | Class::Close | Class::Punct));
+            let lonely = matches!(
+                prev,
+                None | Some(Class::Bin | Class::Op | Class::Rel | Class::Open | Class::Punct)
+            ) || matches!(next, None | Some(Class::Rel | Class::Close | Class::Punct));
             if lonely {
                 atoms[i].0 = Some(Class::Ord);
             }
@@ -417,12 +511,25 @@ impl Typesetter<'_> {
             Node::Sym { ch, face, class } => (*class, self.glyph(*ch, *face, env)),
             Node::Text { text, face } => (Class::Ord, self.text(text, *face, env)),
             Node::Group(body) => (Class::Ord, self.list(body, env)),
-            Node::Scripts { base, sup, sub, limits } => self.scripts(base, sup.as_deref(), sub.as_deref(), *limits, env),
-            Node::Frac { num, den, rule, style, delims } => (Class::Ord, self.frac(num, den, *rule, *style, *delims, env)),
+            Node::Scripts {
+                base,
+                sup,
+                sub,
+                limits,
+            } => self.scripts(base, sup.as_deref(), sub.as_deref(), *limits, env),
+            Node::Frac {
+                num,
+                den,
+                rule,
+                style,
+                delims,
+            } => (Class::Ord, self.frac(num, den, *rule, *style, *delims, env)),
             Node::Sqrt { index, body } => (Class::Ord, self.sqrt(index.as_deref(), body, env)),
             Node::Op { body, .. } => (Class::Op, self.op(body, env)),
             Node::Accent { accent, body } => (Class::Ord, self.accent(*accent, body, env)),
-            Node::LeftRight { delims, parts } => (Class::Inner, self.left_right(delims, parts, env)),
+            Node::LeftRight { delims, parts } => {
+                (Class::Inner, self.left_right(delims, parts, env))
+            }
             Node::Big { delim, size, class } => {
                 let heights = [1.0, 1.2, 1.8, 2.4, 3.0];
                 let height = heights[(*size as usize).min(4)] * env.size();
@@ -430,20 +537,45 @@ impl Typesetter<'_> {
             }
             Node::Boxed(body) => (Class::Ord, self.boxed(body, env)),
             Node::Array(array) => (Class::Ord, self.array(array, env)),
-            Node::Phantom { body, width, height } => {
+            Node::Phantom {
+                body,
+                width,
+                height,
+            } => {
                 let b = self.list(body, env);
-                (Class::Ord, MBox { w: if *width { b.w } else { 0. }, h: if *height { b.h } else { 0. }, d: if *height { b.d } else { 0. }, ..MBox::default() })
+                (
+                    Class::Ord,
+                    MBox {
+                        w: if *width { b.w } else { 0. },
+                        h: if *height { b.h } else { 0. },
+                        d: if *height { b.d } else { 0. },
+                        ..MBox::default()
+                    },
+                )
             }
-            Node::Cancel { body, forward, back } => (Class::Ord, self.cancel(body, *forward, *back, env)),
+            Node::Cancel {
+                body,
+                forward,
+                back,
+            } => (Class::Ord, self.cancel(body, *forward, *back, env)),
             Node::Stack { base, over, under } => {
                 let class = match base.as_slice() {
-                    [Node::Sym { class: Class::Rel, .. }] => Class::Rel,
+                    [
+                        Node::Sym {
+                            class: Class::Rel, ..
+                        },
+                    ] => Class::Rel,
                     _ => Class::Ord,
                 };
                 let b = self.list(base, env);
-                (class, self.limits(b, 0., over.as_deref(), under.as_deref(), env, 0.1))
+                (
+                    class,
+                    self.limits(b, 0., over.as_deref(), under.as_deref(), env, 0.1),
+                )
             }
-            Node::Arrow { right, over, under } => (Class::Rel, self.x_arrow(*right, over, under, env)),
+            Node::Arrow { right, over, under } => {
+                (Class::Rel, self.x_arrow(*right, over, under, env))
+            }
             Node::Not(inner) => {
                 let (class, b) = self.atom(inner, env);
                 (class.unwrap_or(Class::Rel), self.not(b, env))
@@ -451,20 +583,31 @@ impl Typesetter<'_> {
             Node::Class { class, body } => (*class, self.list(body, env)),
             Node::Tag(body) => (Class::Ord, self.list(body, env)),
             Node::Unknown(name) => (Class::Ord, self.text(name, Face::Main, env)),
-            Node::Space(_) | Node::Tab | Node::Newline | Node::Styled { .. } => (Class::Ord, MBox::default()),
+            Node::Space(_) | Node::Tab | Node::Newline | Node::Styled { .. } => {
+                (Class::Ord, MBox::default())
+            }
         };
         (Some(class), b)
     }
 
     fn glyph(&self, ch: char, face: Face, env: Env) -> MBox {
         let s = env.size();
-        let found = face.metrics(ch).map(|m| (face, m)).or_else(|| Face::Main.metrics(ch).map(|m| (Face::Main, m)));
+        let found = face
+            .metrics(ch)
+            .map(|m| (face, m))
+            .or_else(|| Face::Main.metrics(ch).map(|m| (Face::Main, m)));
         match found {
             Some((face, [d, h, italic, skew, w])) => MBox {
                 w: (w + italic) * s,
                 h: h * s,
                 d: d * s,
-                items: vec![Item::Glyph { x: 0., y: 0., text: ch.to_string(), face, size: s }],
+                items: vec![Item::Glyph {
+                    x: 0.,
+                    y: 0.,
+                    text: ch.to_string(),
+                    face,
+                    size: s,
+                }],
                 italic: italic * s,
                 skew: skew * s,
                 char_box: true,
@@ -499,12 +642,35 @@ impl Typesetter<'_> {
             h = 0.;
             d = 0.;
         }
-        let w = self.measure.width(text, face).filter(|w| w.is_finite() && *w >= 0.).unwrap_or(sum);
+        let w = self
+            .measure
+            .width(text, face)
+            .filter(|w| w.is_finite() && *w >= 0.)
+            .unwrap_or(sum);
         let _ = known;
-        MBox { w: w * s, h: h * s, d: d * s, items: vec![Item::Glyph { x: 0., y: 0., text: text.to_string(), face, size: s }], ..MBox::default() }
+        MBox {
+            w: w * s,
+            h: h * s,
+            d: d * s,
+            items: vec![Item::Glyph {
+                x: 0.,
+                y: 0.,
+                text: text.to_string(),
+                face,
+                size: s,
+            }],
+            ..MBox::default()
+        }
     }
 
-    fn scripts(&self, base: &Node, sup: Option<&[Node]>, sub: Option<&[Node]>, limits: Option<bool>, env: Env) -> (Class, MBox) {
+    fn scripts(
+        &self,
+        base: &Node,
+        sup: Option<&[Node]>,
+        sub: Option<&[Node]>,
+        limits: Option<bool>,
+        env: Env,
+    ) -> (Class, MBox) {
         let (class, b) = match base {
             Node::Group(g) if g.len() == 1 => self.atom(&g[0], env),
             _ => self.atom(base, env),
@@ -516,19 +682,51 @@ impl Typesetter<'_> {
             _ => limits == Some(true),
         };
         if op_limits {
-            let slant = if matches!(base, Node::Op { body: OpBody::Glyph(_), .. }) { b.italic } else { 0. };
-            let gap = if matches!(base, Node::Accent { .. }) { 0.1 * env.size() } else { 0. };
+            let slant = if matches!(
+                base,
+                Node::Op {
+                    body: OpBody::Glyph(_),
+                    ..
+                }
+            ) {
+                b.italic
+            } else {
+                0.
+            };
+            let gap = if matches!(base, Node::Accent { .. }) {
+                0.1 * env.size()
+            } else {
+                0.
+            };
             return (class, self.limits(b, slant, sup, sub, env, gap));
         }
-        let is_op_glyph = matches!(base, Node::Op { body: OpBody::Glyph(_), .. });
+        let is_op_glyph = matches!(
+            base,
+            Node::Op {
+                body: OpBody::Glyph(_),
+                ..
+            }
+        );
         let char_box = b.char_box && !is_op_glyph;
-        let italic = if char_box || is_op_glyph { b.italic } else { 0. };
+        let italic = if char_box || is_op_glyph {
+            b.italic
+        } else {
+            0.
+        };
         let sup_env = env.sup();
         let sub_env = env.sub();
         let sup_box = sup.map(|s| self.list(s, sup_env));
         let sub_box = sub.map(|s| self.list(s, sub_env));
-        let mut sup_shift = if char_box { 0. } else { b.h - sup_env.get(sigma::SUP_DROP) };
-        let mut sub_shift = if char_box { 0. } else { b.d + sub_env.get(sigma::SUB_DROP) };
+        let mut sup_shift = if char_box {
+            0.
+        } else {
+            b.h - sup_env.get(sigma::SUP_DROP)
+        };
+        let mut sub_shift = if char_box {
+            0.
+        } else {
+            b.d + sub_env.get(sigma::SUB_DROP)
+        };
         let min_sup = if env.style == Style::Display {
             env.get(sigma::SUP1)
         } else if env.cramped {
@@ -558,7 +756,12 @@ impl Typesetter<'_> {
         }
         let script_space = 0.05;
         let x = b.w;
-        let mut out = MBox { w: b.w, h: b.h, d: b.d, ..MBox::default() };
+        let mut out = MBox {
+            w: b.w,
+            h: b.h,
+            d: b.d,
+            ..MBox::default()
+        };
         out.put(b, 0., 0.);
         let mut right = x;
         if let Some(p) = sup_box {
@@ -578,23 +781,45 @@ impl Typesetter<'_> {
     }
 
     /// `base` with `sup` centred above it and `sub` below, as for `\sum` in display style.
-    fn limits(&self, base: MBox, slant: f32, sup: Option<&[Node]>, sub: Option<&[Node]>, env: Env, gap: f32) -> MBox {
+    fn limits(
+        &self,
+        base: MBox,
+        slant: f32,
+        sup: Option<&[Node]>,
+        sub: Option<&[Node]>,
+        env: Env,
+        gap: f32,
+    ) -> MBox {
         let sup_box = sup.map(|s| self.list(s, env.sup()));
         let sub_box = sub.map(|s| self.list(s, env.sub()));
-        let w = base.w.max(sup_box.as_ref().map_or(0., |b| b.w)).max(sub_box.as_ref().map_or(0., |b| b.w));
-        let mut out = MBox { w, h: base.h, d: base.d, ..MBox::default() };
+        let w = base
+            .w
+            .max(sup_box.as_ref().map_or(0., |b| b.w))
+            .max(sub_box.as_ref().map_or(0., |b| b.w));
+        let mut out = MBox {
+            w,
+            h: base.h,
+            d: base.d,
+            ..MBox::default()
+        };
         let base_w = base.w;
         let (base_h, base_d) = (base.h, base.d);
         out.put(base, (w - base_w) / 2., 0.);
         if let Some(p) = sup_box {
-            let kern = env.get(sigma::BIG_OP1).max(env.get(sigma::BIG_OP3) - p.d).max(gap);
+            let kern = env
+                .get(sigma::BIG_OP1)
+                .max(env.get(sigma::BIG_OP3) - p.d)
+                .max(gap);
             let y = base_h + kern + p.d;
             out.h = y + p.h + env.get(sigma::BIG_OP5);
             let pw = p.w;
             out.put(p, (w - pw) / 2. + slant / 2., y);
         }
         if let Some(q) = sub_box {
-            let kern = env.get(sigma::BIG_OP2).max(env.get(sigma::BIG_OP4) - q.h).max(gap);
+            let kern = env
+                .get(sigma::BIG_OP2)
+                .max(env.get(sigma::BIG_OP4) - q.h)
+                .max(gap);
             let y = base_d + kern + q.h;
             out.d = y + q.d + env.get(sigma::BIG_OP5);
             let qw = q.w;
@@ -603,9 +828,20 @@ impl Typesetter<'_> {
         out
     }
 
-    fn frac(&self, num: &[Node], den: &[Node], rule: bool, style: Option<Style>, delims: Option<(char, char)>, env: Env) -> MBox {
+    fn frac(
+        &self,
+        num: &[Node],
+        den: &[Node],
+        rule: bool,
+        style: Option<Style>,
+        delims: Option<(char, char)>,
+        env: Env,
+    ) -> MBox {
         let env = match style {
-            Some(style) => Env { style, cramped: env.cramped },
+            Some(style) => Env {
+                style,
+                cramped: env.cramped,
+            },
             None => env,
         };
         let n = self.list(num, env.num());
@@ -615,9 +851,21 @@ impl Typesetter<'_> {
         let axis = env.get(sigma::AXIS);
         let display = env.style == Style::Display;
         let (mut num_shift, clearance, mut den_shift) = if display {
-            (env.get(sigma::NUM1), if rule { 3. * t } else { 7. * rule_spacing }, env.get(sigma::DENOM1))
+            (
+                env.get(sigma::NUM1),
+                if rule { 3. * t } else { 7. * rule_spacing },
+                env.get(sigma::DENOM1),
+            )
         } else {
-            (if rule { env.get(sigma::NUM2) } else { env.get(sigma::NUM3) }, if rule { t } else { 3. * rule_spacing }, env.get(sigma::DENOM2))
+            (
+                if rule {
+                    env.get(sigma::NUM2)
+                } else {
+                    env.get(sigma::NUM3)
+                },
+                if rule { t } else { 3. * rule_spacing },
+                env.get(sigma::DENOM2),
+            )
         };
         if rule {
             let above = (num_shift - n.d) - (axis + t / 2.);
@@ -637,16 +885,30 @@ impl Typesetter<'_> {
         }
         let width = n.w.max(d.w);
         let pad = 0.12 * env.size();
-        let mut out = MBox { w: width + 2. * pad, h: num_shift + n.h, d: den_shift + d.d, ..MBox::default() };
+        let mut out = MBox {
+            w: width + 2. * pad,
+            h: num_shift + n.h,
+            d: den_shift + d.d,
+            ..MBox::default()
+        };
         let (nw, dw) = (n.w, d.w);
         out.put(n, pad + (width - nw) / 2., num_shift);
         out.put(d, pad + (width - dw) / 2., -den_shift);
         if rule {
-            out.items.push(Item::Rule { x: pad, y: axis - t / 2., w: width, h: t });
+            out.items.push(Item::Rule {
+                x: pad,
+                y: axis - t / 2.,
+                w: width,
+                h: t,
+            });
         }
         match delims {
             Some((l, r)) => {
-                let size = if display { env.get(sigma::DELIM1) } else { env.get(sigma::DELIM2) };
+                let size = if display {
+                    env.get(sigma::DELIM1)
+                } else {
+                    env.get(sigma::DELIM2)
+                };
                 let mut wrapped = self.delimiter(l, size, env);
                 // The delimiters stand in for the null space on either side.
                 out.w -= 2. * pad;
@@ -667,16 +929,26 @@ impl Typesetter<'_> {
             inner.h = env.get(sigma::X_HEIGHT);
         }
         let theta = env.get(sigma::RULE);
-        let phi = if env.style == Style::Display { env.get(sigma::X_HEIGHT) } else { theta };
+        let phi = if env.style == Style::Display {
+            env.get(sigma::X_HEIGHT)
+        } else {
+            theta
+        };
         let mut clearance = theta + phi / 4.;
         let min_height = inner.h + inner.d + clearance + theta;
         let s = env.size();
         // The radical sign: the font's, at the first size tall enough, else built from its
         // pieces (a hook at the bottom, a stem as long as it must be).
-        let surd = [Face::Main, Face::Size1, Face::Size2, Face::Size3, Face::Size4]
-            .into_iter()
-            .filter_map(|face| face.metrics('\u{221a}').map(|m| (face, m)))
-            .find(|(_, [d, h, ..])| (h + d) * s >= min_height);
+        let surd = [
+            Face::Main,
+            Face::Size1,
+            Face::Size2,
+            Face::Size3,
+            Face::Size4,
+        ]
+        .into_iter()
+        .filter_map(|face| face.metrics('\u{221a}').map(|m| (face, m)))
+        .find(|(_, [d, h, ..])| (h + d) * s >= min_height);
         let height = surd.map_or(min_height, |(_, [d, h, ..])| (h + d) * s);
         let advance = surd.map_or(1.056, |(_, m)| m[4]) * s;
         let rule = 0.04 * s;
@@ -687,19 +959,52 @@ impl Typesetter<'_> {
         let top = inner.h + clearance + rule;
         let bottom = top - height;
         let inner_w = inner.w;
-        let mut out = MBox { w: advance + inner_w, h: top + theta.min(rule), d: (-bottom).max(inner.d), ..MBox::default() };
+        let mut out = MBox {
+            w: advance + inner_w,
+            h: top + theta.min(rule),
+            d: (-bottom).max(inner.d),
+            ..MBox::default()
+        };
         match surd {
-            Some((face, [_, h, ..])) => out.items.push(Item::Glyph { x: 0., y: top - h * s, text: "\u{221a}".into(), face, size: s }),
-            None => out.items.extend(self.stacked(['\u{e001}', '\u{e000}', '\u{e000}', '\u{23b7}'], top, bottom, env).items),
+            Some((face, [_, h, ..])) => out.items.push(Item::Glyph {
+                x: 0.,
+                y: top - h * s,
+                text: "\u{221a}".into(),
+                face,
+                size: s,
+            }),
+            None => out.items.extend(
+                self.stacked(
+                    ['\u{e001}', '\u{e000}', '\u{e000}', '\u{23b7}'],
+                    top,
+                    bottom,
+                    env,
+                )
+                .items,
+            ),
         }
-        out.items.push(Item::Rule { x: advance - 0.0001, y: top - rule, w: inner_w + 0.0001, h: rule });
+        out.items.push(Item::Rule {
+            x: advance - 0.0001,
+            y: top - rule,
+            w: inner_w + 0.0001,
+            h: rule,
+        });
         out.put(inner, advance, 0.);
         let Some(index) = index else { return out };
-        let ix = self.list(index, Env { style: Style::ScriptScript, cramped: false });
+        let ix = self.list(
+            index,
+            Env {
+                style: Style::ScriptScript,
+                cramped: false,
+            },
+        );
         let raise = 0.6 * (out.h - out.d);
         let before = 5. * env.mu();
         let back = -10. * env.mu();
-        let mut root = MBox { w: before, ..MBox::default() };
+        let mut root = MBox {
+            w: before,
+            ..MBox::default()
+        };
         let ix_w = ix.w;
         root.h = root.h.max(raise + ix.h);
         root.d = root.d.max(ix.d - raise);
@@ -712,11 +1017,23 @@ impl Typesetter<'_> {
     /// A delimiter built from the largest font's pieces, as TeX builds tall ones: `top` and
     /// `bottom` ends (and a `middle`, for braces, when it isn't the `repeat`), with the
     /// `repeat` piece overlapping itself to fill between them. It spans `top` to `bottom`.
-    fn stacked(&self, [top_c, repeat, middle, bottom_c]: [char; 4], top: f32, bottom: f32, env: Env) -> MBox {
+    fn stacked(
+        &self,
+        [top_c, repeat, middle, bottom_c]: [char; 4],
+        top: f32,
+        bottom: f32,
+        env: Env,
+    ) -> MBox {
         let s = env.size();
         let face = Face::Size4;
         let m = |c: char| face.metrics(c).unwrap_or([0., 0.5, 0., 0., 0.5]);
-        let glyph = |c: char, y: f32| Item::Glyph { x: 0., y, text: c.to_string(), face, size: s };
+        let glyph = |c: char, y: f32| Item::Glyph {
+            x: 0.,
+            y,
+            text: c.to_string(),
+            face,
+            size: s,
+        };
         let [td, th, _, _, w] = m(top_c);
         let [bd, bh, ..] = m(bottom_c);
         let mut items = vec![glyph(top_c, top - th * s), glyph(bottom_c, bottom + bd * s)];
@@ -740,22 +1057,44 @@ impl Typesetter<'_> {
             }
             // Copies that overlap a little, so no seam shows; the last one ends at `lo`.
             let n = (((hi - lo - r) / (r * 0.9)).ceil().max(0.) as usize + 1).min(200);
-            let step = if n > 1 { (hi - lo - r) / (n - 1) as f32 } else { 0. };
+            let step = if n > 1 {
+                (hi - lo - r) / (n - 1) as f32
+            } else {
+                0.
+            };
             for i in 0..n {
-                let copy_top = if n > 1 { hi - i as f32 * step } else { (hi + lo + r) / 2. };
+                let copy_top = if n > 1 {
+                    hi - i as f32 * step
+                } else {
+                    (hi + lo + r) / 2.
+                };
                 items.push(glyph(repeat, copy_top - rh * s));
             }
         }
         // The ends go on top of the stem.
         items.rotate_left(if middle != repeat { 3 } else { 2 });
-        MBox { w: w * s, h: top, d: -bottom, items, ..MBox::default() }
+        MBox {
+            w: w * s,
+            h: top,
+            d: -bottom,
+            items,
+            ..MBox::default()
+        }
     }
 
     fn op(&self, body: &OpBody, env: Env) -> MBox {
         match body {
             OpBody::Glyph(ch) => {
-                let face = if env.style == Style::Display { Face::Size2 } else { Face::Size1 };
-                let face = if face.metrics(*ch).is_some() { face } else { Face::Main };
+                let face = if env.style == Style::Display {
+                    Face::Size2
+                } else {
+                    Face::Size1
+                };
+                let face = if face.metrics(*ch).is_some() {
+                    face
+                } else {
+                    Face::Main
+                };
                 let mut b = self.glyph(*ch, face, env);
                 let shift = (b.h - b.d) / 2. - env.get(sigma::AXIS);
                 b = b.shifted(-shift);
@@ -773,7 +1112,19 @@ impl Typesetter<'_> {
     /// `ch` in `face` at `size` ems, as a box.
     fn sized_glyph(&self, ch: char, face: Face, size: f32) -> MBox {
         let [d, h, _, _, w] = face.metrics(ch).unwrap_or([0., 0.7, 0., 0., 0.5]);
-        MBox { w: w * size, h: h * size, d: d * size, items: vec![Item::Glyph { x: 0., y: 0., text: ch.to_string(), face, size }], ..MBox::default() }
+        MBox {
+            w: w * size,
+            h: h * size,
+            d: d * size,
+            items: vec![Item::Glyph {
+                x: 0.,
+                y: 0.,
+                text: ch.to_string(),
+                face,
+                size,
+            }],
+            ..MBox::default()
+        }
     }
 
     fn accent(&self, accent: Accent, body: &[Node], env: Env) -> MBox {
@@ -784,7 +1135,13 @@ impl Typesetter<'_> {
         let theta = env.get(sigma::RULE);
         let xh = env.get(sigma::X_HEIGHT);
         let (bh, bd) = (b.h, b.d);
-        let mut out = MBox { w: b.w, h: b.h, d: b.d, italic: b.italic, ..MBox::default() };
+        let mut out = MBox {
+            w: b.w,
+            h: b.h,
+            d: b.d,
+            italic: b.italic,
+            ..MBox::default()
+        };
         let skew = if single { b.skew } else { 0. };
         out.put(b, 0., 0.);
         match accent {
@@ -793,11 +1150,21 @@ impl Typesetter<'_> {
                 let mark = match accent {
                     Accent::Glyph(c) => self.glyph(c, Face::Main, env),
                     _ => {
-                        let c = if accent == Accent::Hat { '\u{2c6}' } else { '\u{2dc}' };
-                        let face = [Face::Main, Face::Size1, Face::Size2, Face::Size3, Face::Size4]
-                            .into_iter()
-                            .find(|f| f.metrics(c).is_some_and(|m| m[4] * s >= ink_w * 0.9))
-                            .unwrap_or(Face::Size4);
+                        let c = if accent == Accent::Hat {
+                            '\u{2c6}'
+                        } else {
+                            '\u{2dc}'
+                        };
+                        let face = [
+                            Face::Main,
+                            Face::Size1,
+                            Face::Size2,
+                            Face::Size3,
+                            Face::Size4,
+                        ]
+                        .into_iter()
+                        .find(|f| f.metrics(c).is_some_and(|m| m[4] * s >= ink_w * 0.9))
+                        .unwrap_or(Face::Size4);
                         self.glyph(c, face, env)
                     }
                 };
@@ -819,12 +1186,22 @@ impl Typesetter<'_> {
             Accent::Overline => {
                 let y = bh + 3. * theta;
                 out.h = y + 2. * theta;
-                out.items.push(Item::Rule { x: 0., y, w: ink_w, h: theta });
+                out.items.push(Item::Rule {
+                    x: 0.,
+                    y,
+                    w: ink_w,
+                    h: theta,
+                });
             }
             Accent::Underline => {
                 let y = -(bd + 3. * theta) - theta;
                 out.d = bd + 5. * theta;
-                out.items.push(Item::Rule { x: 0., y, w: ink_w, h: theta });
+                out.items.push(Item::Rule {
+                    x: 0.,
+                    y,
+                    w: ink_w,
+                    h: theta,
+                });
             }
             Accent::OverArrow { left, right } => {
                 // The font's arrowheads with a rule between them, as long as the body.
@@ -843,7 +1220,12 @@ impl Typesetter<'_> {
                     from = head * 0.5;
                 }
                 if to > from {
-                    out.items.push(Item::Rule { x: from, y: base + 0.25 * k - t / 2., w: to - from, h: t });
+                    out.items.push(Item::Rule {
+                        x: from,
+                        y: base + 0.25 * k - t / 2.,
+                        w: to - from,
+                        h: t,
+                    });
                 }
                 out.w = out.w.max(w);
                 out.h = base + 0.367 * k;
@@ -854,13 +1236,32 @@ impl Typesetter<'_> {
                 let t = 0.05 * s;
                 let h = 0.22 * s;
                 let gap = 0.1 * s;
-                let (bar, end, tip) = if over { (bh + gap + h / 2., bh + gap, bh + gap + h / 2.) } else { (-(bd + gap + h / 2.), -(bd + gap + h / 2.), -(bd + gap + h)) };
+                let (bar, end, tip) = if over {
+                    (bh + gap + h / 2., bh + gap, bh + gap + h / 2.)
+                } else {
+                    (-(bd + gap + h / 2.), -(bd + gap + h / 2.), -(bd + gap + h))
+                };
                 let half = h / 2.;
-                out.items.push(Item::Rule { x: 0., y: bar - t / 2., w: ink_w, h: t });
+                out.items.push(Item::Rule {
+                    x: 0.,
+                    y: bar - t / 2.,
+                    w: ink_w,
+                    h: t,
+                });
                 for x in [0., ink_w - t] {
-                    out.items.push(Item::Rule { x, y: end, w: t, h: half });
+                    out.items.push(Item::Rule {
+                        x,
+                        y: end,
+                        w: t,
+                        h: half,
+                    });
                 }
-                out.items.push(Item::Rule { x: (ink_w - t) / 2., y: tip, w: t, h: half });
+                out.items.push(Item::Rule {
+                    x: (ink_w - t) / 2.,
+                    y: tip,
+                    w: t,
+                    h: half,
+                });
                 if over {
                     out.h = bh + gap + h;
                 } else {
@@ -914,7 +1315,17 @@ impl Typesetter<'_> {
             '\u{2016}' => '\u{2225}',
             c => c,
         };
-        let faces: &[Face] = if matches!(glyph, '\u{2223}' | '\u{2225}') { &[Face::Main] } else { &[Face::Main, Face::Size1, Face::Size2, Face::Size3, Face::Size4] };
+        let faces: &[Face] = if matches!(glyph, '\u{2223}' | '\u{2225}') {
+            &[Face::Main]
+        } else {
+            &[
+                Face::Main,
+                Face::Size1,
+                Face::Size2,
+                Face::Size3,
+                Face::Size4,
+            ]
+        };
         let mut last = None;
         for face in faces {
             if let Some([d, h, ..]) = face.metrics(glyph) {
@@ -957,8 +1368,22 @@ impl Typesetter<'_> {
         if !bars.is_empty() {
             let t = 0.056 * s;
             let w = if bars.len() == 1 { 0.278 } else { 0.5 } * s;
-            let items = bars.iter().map(|x| Item::Rule { x: x * s - t / 2., y: bottom, w: t, h: height }).collect();
-            return MBox { w, h: top, d: -bottom, items, ..MBox::default() };
+            let items = bars
+                .iter()
+                .map(|x| Item::Rule {
+                    x: x * s - t / 2.,
+                    y: bottom,
+                    w: t,
+                    h: height,
+                })
+                .collect();
+            return MBox {
+                w,
+                h: top,
+                d: -bottom,
+                items,
+                ..MBox::default()
+            };
         }
         // Nothing to build it from: the largest glyph there is.
         match last {
@@ -977,9 +1402,20 @@ impl Typesetter<'_> {
         let pad = 0.3 * s;
         let t = 0.04 * s;
         let (w, h, d) = (b.w + 2. * (pad + t), b.h + pad + t, b.d + pad + t);
-        let mut out = MBox { w, h, d, ..MBox::default() };
+        let mut out = MBox {
+            w,
+            h,
+            d,
+            ..MBox::default()
+        };
         out.put(b, pad + t, 0.);
-        out.items.push(Item::Frame { x: 0., y: -d, w, h: h + d, t });
+        out.items.push(Item::Frame {
+            x: 0.,
+            y: -d,
+            w,
+            h: h + d,
+            t,
+        });
         out
     }
 
@@ -989,10 +1425,24 @@ impl Typesetter<'_> {
         let over = 0.1 * s;
         let (x, y, w, h) = (0., -b.d - over * 0.5, b.w, b.h + b.d + over);
         if forward {
-            b.items.push(Item::Shape { x, y, w, h, t: 0.045 * s, shape: Shape::Strike { forward: true } });
+            b.items.push(Item::Shape {
+                x,
+                y,
+                w,
+                h,
+                t: 0.045 * s,
+                shape: Shape::Strike { forward: true },
+            });
         }
         if back {
-            b.items.push(Item::Shape { x, y, w, h, t: 0.045 * s, shape: Shape::Strike { forward: false } });
+            b.items.push(Item::Shape {
+                x,
+                y,
+                w,
+                h,
+                t: 0.045 * s,
+                shape: Shape::Strike { forward: false },
+            });
         }
         b.char_box = false;
         b
@@ -1019,12 +1469,26 @@ impl Typesetter<'_> {
         let w = w.max(1.4 * s);
         let axis = env.get(sigma::AXIS);
         let ah = 0.5 * s;
-        let mut out = MBox { w, h: axis + ah / 2., d: (ah / 2. - axis).max(0.), ..MBox::default() };
+        let mut out = MBox {
+            w,
+            h: axis + ah / 2.,
+            d: (ah / 2. - axis).max(0.),
+            ..MBox::default()
+        };
         // The font's arrowhead (its shaft sits on the axis) and a rule for the rest.
         let t = 0.04 * s;
         let head = self.sized_glyph(if right { '\u{2192}' } else { '\u{2190}' }, Face::Main, s);
-        let (from, to) = if right { (0., w - 0.5 * s) } else { (0.5 * s, w) };
-        out.items.push(Item::Rule { x: from, y: axis - t / 2., w: to - from, h: t });
+        let (from, to) = if right {
+            (0., w - 0.5 * s)
+        } else {
+            (0.5 * s, w)
+        };
+        out.items.push(Item::Rule {
+            x: from,
+            y: axis - t / 2.,
+            w: to - from,
+            h: t,
+        });
         out.put(head, if right { w - s } else { 0. }, 0.);
         if o.w > 0. {
             let y = axis + ah / 2. + 0.111 * s + o.d;
@@ -1044,11 +1508,19 @@ impl Typesetter<'_> {
     fn array(&self, array: &Array, env: Env) -> MBox {
         let s = env.size();
         let cell_env = match array.kind {
-            ArrayKind::Matrix => env.with(if env.style == Style::Display { Style::Text } else { env.style }),
+            ArrayKind::Matrix => env.with(if env.style == Style::Display {
+                Style::Text
+            } else {
+                env.style
+            }),
             ArrayKind::Small => env.with(Style::Script),
             ArrayKind::Aligned | ArrayKind::Gathered => env.with(Style::Display),
             ArrayKind::Cases { display: true } => env.with(Style::Display),
-            ArrayKind::Cases { display: false } => env.with(if env.style == Style::Display { Style::Text } else { env.style }),
+            ArrayKind::Cases { display: false } => env.with(if env.style == Style::Display {
+                Style::Text
+            } else {
+                env.style
+            }),
         };
         let cell_s = cell_env.size();
         let rows: Vec<Vec<MBox>> = array
@@ -1125,10 +1597,15 @@ impl Typesetter<'_> {
                 (h, d)
             })
             .collect();
-        let total: f32 = row_dims.iter().map(|(h, d)| h + d).sum::<f32>() + jot * row_dims.len().saturating_sub(1) as f32;
+        let total: f32 = row_dims.iter().map(|(h, d)| h + d).sum::<f32>()
+            + jot * row_dims.len().saturating_sub(1) as f32;
         let axis = env.get(sigma::AXIS);
         let top = total / 2. + axis;
-        let outer = if array.kind == ArrayKind::Matrix && !array.col_rules.is_empty() { 0.5 * s } else { 0. };
+        let outer = if array.kind == ArrayKind::Matrix && !array.col_rules.is_empty() {
+            0.5 * s
+        } else {
+            0.
+        };
         let mut xs = Vec::with_capacity(ncols);
         let mut x = outer;
         for (i, w) in widths.iter().enumerate() {
@@ -1137,7 +1614,12 @@ impl Typesetter<'_> {
             x += w;
         }
         let width = x + outer;
-        let mut out = MBox { w: width, h: top, d: total - top, ..MBox::default() };
+        let mut out = MBox {
+            w: width,
+            h: top,
+            d: total - top,
+            ..MBox::default()
+        };
         let mut y = top;
         let mut row_tops = Vec::with_capacity(rows.len() + 1);
         for (r, row) in rows.into_iter().enumerate() {
@@ -1161,7 +1643,12 @@ impl Typesetter<'_> {
         let t = 0.04 * s;
         for &r in &array.row_rules {
             if let Some(&ry) = row_tops.get(r) {
-                out.items.push(Item::Rule { x: 0., y: ry - t / 2., w: width, h: t });
+                out.items.push(Item::Rule {
+                    x: 0.,
+                    y: ry - t / 2.,
+                    w: width,
+                    h: t,
+                });
             }
         }
         for &c in &array.col_rules {
@@ -1172,14 +1659,23 @@ impl Typesetter<'_> {
             } else {
                 xs[c] - gap(c) / 2. - t / 2.
             };
-            out.items.push(Item::Rule { x: cx, y: -(total - top), w: t, h: total });
+            out.items.push(Item::Rule {
+                x: cx,
+                y: -(total - top),
+                w: t,
+                h: total,
+            });
         }
         let (l, r) = array.delims;
         if l == NO_DELIM && r == NO_DELIM {
             return out;
         }
         let height = self.delim_height(out.h, out.d, env);
-        let mut wrapped = if l == NO_DELIM { MBox::default() } else { self.delimiter(l, height, env) };
+        let mut wrapped = if l == NO_DELIM {
+            MBox::default()
+        } else {
+            self.delimiter(l, height, env)
+        };
         if matches!(array.kind, ArrayKind::Cases { .. }) {
             wrapped.append(MBox::kern(0.17 * s));
         }
@@ -1206,7 +1702,13 @@ mod tests {
         let missing: Vec<_> = tables::SYMBOLS
             .iter()
             .filter(|(_, ch, font, _, italic)| {
-                let face = if *italic { Face::MathItalic } else if *font == SymbolFont::Ams { Face::Ams } else { Face::Main };
+                let face = if *italic {
+                    Face::MathItalic
+                } else if *font == SymbolFont::Ams {
+                    Face::Ams
+                } else {
+                    Face::Main
+                };
                 face.metrics(*ch).is_none() && Face::Main.metrics(*ch).is_none()
             })
             .map(|(name, ..)| *name)
@@ -1217,27 +1719,75 @@ mod tests {
     #[test]
     fn a_fraction_stacks_around_the_axis() {
         let b = set(r"\frac{a}{b}", true);
-        let rule = b.items.iter().find_map(|i| if let Item::Rule { y, h, w, .. } = i { Some((*y, *h, *w)) } else { None }).expect("a rule");
-        assert!((rule.0 + rule.1 / 2. - 0.25).abs() < 1e-4, "the bar sits on the axis: {rule:?}");
+        let rule = b
+            .items
+            .iter()
+            .find_map(|i| {
+                if let Item::Rule { y, h, w, .. } = i {
+                    Some((*y, *h, *w))
+                } else {
+                    None
+                }
+            })
+            .expect("a rule");
+        assert!(
+            (rule.0 + rule.1 / 2. - 0.25).abs() < 1e-4,
+            "the bar sits on the axis: {rule:?}"
+        );
         assert!(b.h > 0.9 && b.d > 0.6, "{b:?}");
-        let glyphs: Vec<(f32, &str)> = b.items.iter().filter_map(|i| if let Item::Glyph { y, text, .. } = i { Some((*y, text.as_str())) } else { None }).collect();
+        let glyphs: Vec<(f32, &str)> = b
+            .items
+            .iter()
+            .filter_map(|i| {
+                if let Item::Glyph { y, text, .. } = i {
+                    Some((*y, text.as_str()))
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert!(glyphs.iter().any(|(y, t)| *t == "a" && *y > 0.5));
         assert!(glyphs.iter().any(|(y, t)| *t == "b" && *y < -0.5));
         // Inline, it's smaller and tighter.
         let inline = set(r"\frac{a}{b}", false);
         assert!(inline.h < b.h && inline.d < b.d);
-        assert!(inline.items.iter().any(|i| matches!(i, Item::Glyph { size, .. } if (*size - 0.7).abs() < 1e-6)));
+        assert!(
+            inline
+                .items
+                .iter()
+                .any(|i| matches!(i, Item::Glyph { size, .. } if (*size - 0.7).abs() < 1e-6))
+        );
     }
 
     #[test]
     fn scripts_are_smaller_and_offset() {
         let b = set("x^2", false);
-        let two = b.items.iter().find_map(|i| if let Item::Glyph { text, y, size, x, .. } = i { (text == "2").then_some((*x, *y, *size)) } else { None }).unwrap();
-        assert!(two.1 > 0.3 && (two.2 - 0.7).abs() < 1e-6 && two.0 > 0.5, "{two:?}");
+        let two = b
+            .items
+            .iter()
+            .find_map(|i| {
+                if let Item::Glyph {
+                    text, y, size, x, ..
+                } = i
+                {
+                    (text == "2").then_some((*x, *y, *size))
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        assert!(
+            two.1 > 0.3 && (two.2 - 0.7).abs() < 1e-6 && two.0 > 0.5,
+            "{two:?}"
+        );
         let nested = set("e^{x^{2}}", false);
         assert!(nested.items.iter().any(|i| matches!(i, Item::Glyph { text, size, .. } if text == "2" && (*size - 0.5).abs() < 1e-6)));
         let sub = set("x_i", false);
-        assert!(sub.items.iter().any(|i| matches!(i, Item::Glyph { text, y, .. } if text == "i" && *y < 0.)));
+        assert!(
+            sub.items
+                .iter()
+                .any(|i| matches!(i, Item::Glyph { text, y, .. } if text == "i" && *y < 0.))
+        );
     }
 
     #[test]
@@ -1245,7 +1795,10 @@ mod tests {
         let tight = set("ab", false).w;
         let rel = set("a=b", false).w;
         let eq = Face::Main.metrics('=').unwrap()[4];
-        assert!((rel - tight - eq - 2. * 5. / 18.).abs() < 1e-4, "{rel} {tight}");
+        assert!(
+            (rel - tight - eq - 2. * 5. / 18.).abs() < 1e-4,
+            "{rel} {tight}"
+        );
         // A leading minus is a sign, not an operator.
         let neg = set("-a", false).w;
         let minus = Face::Main.metrics('\u{2212}').unwrap()[4];
@@ -1258,25 +1811,55 @@ mod tests {
         let d = set(r"\sum_{i=1}^n i", true);
         let t = set(r"\sum_{i=1}^n i", false);
         assert!(d.h > t.h && d.d > t.d);
-        assert!(d.items.iter().any(|i| matches!(i, Item::Glyph { face: Face::Size2, .. })));
-        assert!(t.items.iter().any(|i| matches!(i, Item::Glyph { face: Face::Size1, .. })));
+        assert!(d.items.iter().any(|i| matches!(
+            i,
+            Item::Glyph {
+                face: Face::Size2,
+                ..
+            }
+        )));
+        assert!(t.items.iter().any(|i| matches!(
+            i,
+            Item::Glyph {
+                face: Face::Size1,
+                ..
+            }
+        )));
     }
 
     #[test]
     fn delimiters_grow_with_their_content() {
         let small = set(r"\left( x \right)", true);
         let big = set(r"\left( \frac{a}{b} \right)", true);
-        let tall = set(r"\left( \begin{matrix} a \\ b \\ c \\ d \\ e \end{matrix} \right)", true);
+        let tall = set(
+            r"\left( \begin{matrix} a \\ b \\ c \\ d \\ e \end{matrix} \right)",
+            true,
+        );
         assert!(small.h < big.h && big.h < tall.h);
-        assert!(tall.items.iter().any(|i| matches!(i, Item::Glyph { text, face: Face::Size4, .. } if text == "\u{239b}")), "built from pieces");
+        assert!(
+            tall.items.iter().any(
+                |i| matches!(i, Item::Glyph { text, face: Face::Size4, .. } if text == "\u{239b}")
+            ),
+            "built from pieces"
+        );
     }
 
     #[test]
     fn roots_boxes_and_rows() {
         let r = set(r"\sqrt{x}", false);
-        assert!(r.items.iter().any(|i| matches!(i, Item::Glyph { text, .. } if text == "\u{221a}")));
+        assert!(
+            r.items
+                .iter()
+                .any(|i| matches!(i, Item::Glyph { text, .. } if text == "\u{221a}"))
+        );
         let nth = set(r"\sqrt[3]{x}", false);
-        assert!(nth.w >= r.w && nth.items.iter().any(|i| matches!(i, Item::Glyph { text, .. } if text == "3")));
+        assert!(
+            nth.w >= r.w
+                && nth
+                    .items
+                    .iter()
+                    .any(|i| matches!(i, Item::Glyph { text, .. } if text == "3"))
+        );
         let boxed = set(r"\boxed{0.0162}", true);
         assert!(boxed.items.iter().any(|i| matches!(i, Item::Frame { .. })));
         let rows = set(r"a = b \\ c = d", true);
@@ -1286,7 +1869,19 @@ mod tests {
     #[test]
     fn inline_boxes_can_sit_on_a_baseline() {
         // The text view takes an inline object only with its baseline inside it.
-        for tex in [r"\vec{v}", r"\hat\theta", r"\bar{x}", "x", "-", "=", r"\cdot", ".", r"\overrightarrow{AB}", r"\not=", r"\cancel{x}"] {
+        for tex in [
+            r"\vec{v}",
+            r"\hat\theta",
+            r"\bar{x}",
+            "x",
+            "-",
+            "=",
+            r"\cdot",
+            ".",
+            r"\overrightarrow{AB}",
+            r"\not=",
+            r"\cancel{x}",
+        ] {
             let b = set(tex, false);
             assert!(b.h > 0. && b.d >= 0., "{tex}: {b:?}");
         }
@@ -1295,12 +1890,67 @@ mod tests {
     #[test]
     fn unknown_commands_show_their_names() {
         let b = set(r"\frobnicate{x}", false);
-        assert!(b.items.iter().any(|i| matches!(i, Item::Glyph { text, .. } if text == r"\frobnicate")));
+        assert!(
+            b.items
+                .iter()
+                .any(|i| matches!(i, Item::Glyph { text, .. } if text == r"\frobnicate"))
+        );
     }
 
     #[test]
     fn fuzz_layout_is_finite() {
-        let pieces = [r"\frac", r"\sqrt", "[", "]", "{", "}", "^", "_", "&", r"\\", r"\left(", r"\right)", r"\middle|", r"\begin{bmatrix}", r"\end{bmatrix}", r"\begin{cases}", r"\end{cases}", r"\begin{aligned}", r"\end{aligned}", "x", "1", " ", r"\alpha", r"\text{a b}", r"\boxed", r"\hat", r"\widehat", r"\overbrace", r"\underbrace", r"\over", r"\displaystyle", r"\not", r"\limits", "'", r"\hline", r"\Big(", r"\zzz", "é", r"\sum", r"\int", r"\lim", r"\xrightarrow", r"\cancel", r"\overset", r"\binom", r"\tag{1}", r"\kern-3mu", r"\hspace{2em}", r"\vec", r"\overline"];
+        let pieces = [
+            r"\frac",
+            r"\sqrt",
+            "[",
+            "]",
+            "{",
+            "}",
+            "^",
+            "_",
+            "&",
+            r"\\",
+            r"\left(",
+            r"\right)",
+            r"\middle|",
+            r"\begin{bmatrix}",
+            r"\end{bmatrix}",
+            r"\begin{cases}",
+            r"\end{cases}",
+            r"\begin{aligned}",
+            r"\end{aligned}",
+            "x",
+            "1",
+            " ",
+            r"\alpha",
+            r"\text{a b}",
+            r"\boxed",
+            r"\hat",
+            r"\widehat",
+            r"\overbrace",
+            r"\underbrace",
+            r"\over",
+            r"\displaystyle",
+            r"\not",
+            r"\limits",
+            "'",
+            r"\hline",
+            r"\Big(",
+            r"\zzz",
+            "é",
+            r"\sum",
+            r"\int",
+            r"\lim",
+            r"\xrightarrow",
+            r"\cancel",
+            r"\overset",
+            r"\binom",
+            r"\tag{1}",
+            r"\kern-3mu",
+            r"\hspace{2em}",
+            r"\vec",
+            r"\overline",
+        ];
         let mut seed = 0xdead_beef_cafe_f00du64;
         for _ in 0..3000 {
             seed ^= seed << 13;
@@ -1316,7 +1966,14 @@ mod tests {
             }
             for display in [false, true] {
                 let b = set(&s, display);
-                assert!(b.w.is_finite() && b.h.is_finite() && b.d.is_finite() && b.w >= 0. && b.h + b.d >= 0., "{s}: {b:?}");
+                assert!(
+                    b.w.is_finite()
+                        && b.h.is_finite()
+                        && b.d.is_finite()
+                        && b.w >= 0.
+                        && b.h + b.d >= 0.,
+                    "{s}: {b:?}"
+                );
             }
         }
     }

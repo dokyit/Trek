@@ -39,7 +39,10 @@ const TRAY_SIZES: [u32; 4] = [16, 20, 24, 32];
 
 /// The drawn size for a tray that wants `want` pixels: the smallest not under it, else the largest.
 fn tray_size(want: u32) -> u32 {
-    TRAY_SIZES.into_iter().find(|&s| s >= want).unwrap_or(TRAY_SIZES[TRAY_SIZES.len() - 1])
+    TRAY_SIZES
+        .into_iter()
+        .find(|&s| s >= want)
+        .unwrap_or(TRAY_SIZES[TRAY_SIZES.len() - 1])
 }
 
 /// The embedded PNG for glyph `name`. macOS has one template (the menu bar tints it). Windows
@@ -47,7 +50,10 @@ fn tray_size(want: u32) -> u32 {
 /// dark glyph.
 fn glyph_asset(name: &str, windows: bool, light: bool, px: u32) -> String {
     if windows {
-        format!("brand/tray/{name}-{}-{px}.png", if light { "light" } else { "dark" })
+        format!(
+            "brand/tray/{name}-{}-{px}.png",
+            if light { "light" } else { "dark" }
+        )
     } else {
         format!("brand/menubar-{name}.png")
     }
@@ -55,7 +61,11 @@ fn glyph_asset(name: &str, windows: bool, light: bool, px: u32) -> String {
 
 /// While agents work the summit beacon blinks between lit (the idle glyph) and ring (working).
 fn blink_name(lit: bool) -> &'static str {
-    if lit { Glyph::Idle.name() } else { Glyph::Working.name() }
+    if lit {
+        Glyph::Idle.name()
+    } else {
+        Glyph::Working.name()
+    }
 }
 
 /// The taskbar's theme and the size its icons are drawn at, as the system has them now.
@@ -67,7 +77,10 @@ struct Surface {
 
 impl Surface {
     fn current() -> Self {
-        Self { light: taskbar_is_light(), px: tray_size(tray_icon_px()) }
+        Self {
+            light: taskbar_is_light(),
+            px: tray_size(tray_icon_px()),
+        }
     }
 }
 
@@ -76,12 +89,25 @@ impl Surface {
 #[cfg(windows)]
 fn taskbar_is_light() -> bool {
     use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
-    let key: Vec<u16> = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize".encode_utf16().chain([0]).collect();
+    let key: Vec<u16> = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+        .encode_utf16()
+        .chain([0])
+        .collect();
     let name: Vec<u16> = "SystemUsesLightTheme".encode_utf16().chain([0]).collect();
     let mut value = 0u32;
     let mut size = std::mem::size_of::<u32>() as u32;
     // SAFETY: both names end in a NUL; `value` is the 4 bytes `size` says.
-    let status = unsafe { RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), RRF_RT_REG_DWORD, std::ptr::null_mut(), (&mut value as *mut u32).cast(), &mut size) };
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut value as *mut u32).cast(),
+            &mut size,
+        )
+    };
     status == 0 && value != 0
 }
 
@@ -125,7 +151,8 @@ pub struct Tray {
 }
 
 fn load_icon(name: &str, surface: Surface) -> Option<Icon> {
-    let bytes = crate::assets::brand_bytes(&glyph_asset(name, cfg!(windows), surface.light, surface.px))?;
+    let bytes =
+        crate::assets::brand_bytes(&glyph_asset(name, cfg!(windows), surface.light, surface.px))?;
     let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     let mut reader = decoder.read_info().ok()?;
     let mut buf = vec![0; reader.output_buffer_size()?];
@@ -159,7 +186,13 @@ struct Parts {
     icon: TrayIcon,
     status: MenuItem,
     behind: MenuItem,
-    ids: (tray_icon::menu::MenuId, tray_icon::menu::MenuId, tray_icon::menu::MenuId, tray_icon::menu::MenuId, tray_icon::menu::MenuId),
+    ids: (
+        tray_icon::menu::MenuId,
+        tray_icon::menu::MenuId,
+        tray_icon::menu::MenuId,
+        tray_icon::menu::MenuId,
+        tray_icon::menu::MenuId,
+    ),
     rx: async_channel::Receiver<tray_icon::menu::MenuId>,
 }
 
@@ -173,27 +206,46 @@ fn build() -> anyhow::Result<Parts> {
     let menu = Menu::new();
     // Background use is a Mac thing: Windows' computer use works in front, so there is never
     // a picture to show or hide.
-    let (first, second) = (PredefinedMenuItem::separator(), PredefinedMenuItem::separator());
+    let (first, second) = (
+        PredefinedMenuItem::separator(),
+        PredefinedMenuItem::separator(),
+    );
     let mut items: Vec<&dyn tray_icon::menu::IsMenuItem> = vec![&status];
     if !crate::words::is_windows() {
         items.push(&behind);
     }
-    items.extend([&first as &dyn tray_icon::menu::IsMenuItem, &open, &new_thread, &second, &settings, &quit]);
+    items.extend([
+        &first as &dyn tray_icon::menu::IsMenuItem,
+        &open,
+        &new_thread,
+        &second,
+        &settings,
+        &quit,
+    ]);
     menu.append_items(&items)?;
-    let icon = with_glyph(TrayIconBuilder::new(), load_icon(Glyph::Idle.name(), Surface::current()).ok_or_else(|| anyhow::anyhow!("tray icon glyph"))?)
-        .with_tooltip("Trek")
-        .with_menu(Box::new(menu))
-        // On Windows a left click opens the app, as taskbar programs do there; the menu is on
-        // the right button. On macOS either button opens the menu, as menu bar items do.
-        .with_menu_on_left_click(!cfg!(windows))
-        .build()?;
+    let icon = with_glyph(
+        TrayIconBuilder::new(),
+        load_icon(Glyph::Idle.name(), Surface::current())
+            .ok_or_else(|| anyhow::anyhow!("tray icon glyph"))?,
+    )
+    .with_tooltip("Trek")
+    .with_menu(Box::new(menu))
+    // On Windows a left click opens the app, as taskbar programs do there; the menu is on
+    // the right button. On macOS either button opens the menu, as menu bar items do.
+    .with_menu_on_left_click(!cfg!(windows))
+    .build()?;
     // Menu clicks arrive on the main thread; forward them into GPUI without polling.
     let (tx, rx) = async_channel::unbounded::<tray_icon::menu::MenuId>();
     if cfg!(windows) {
         // A left click is "Open Trek".
         let (tx, open) = (tx.clone(), open.id().clone());
         tray_icon::TrayIconEvent::set_event_handler(Some(move |e: tray_icon::TrayIconEvent| {
-            if let tray_icon::TrayIconEvent::Click { button: tray_icon::MouseButton::Left, button_state: tray_icon::MouseButtonState::Up, .. } = e {
+            if let tray_icon::TrayIconEvent::Click {
+                button: tray_icon::MouseButton::Left,
+                button_state: tray_icon::MouseButtonState::Up,
+                ..
+            } = e
+            {
                 let _ = tx.try_send(open.clone());
             }
         }));
@@ -201,13 +253,31 @@ fn build() -> anyhow::Result<Parts> {
     MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
         let _ = tx.try_send(e.id);
     }));
-    let ids = (open.id().clone(), new_thread.id().clone(), settings.id().clone(), quit.id().clone(), behind.id().clone());
-    Ok(Parts { icon, status, behind, ids, rx })
+    let ids = (
+        open.id().clone(),
+        new_thread.id().clone(),
+        settings.id().clone(),
+        quit.id().clone(),
+        behind.id().clone(),
+    );
+    Ok(Parts {
+        icon,
+        status,
+        behind,
+        ids,
+        rx,
+    })
 }
 
 impl Tray {
     fn new(parts: Parts, workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
-        let Parts { icon, status, behind, ids, rx } = parts;
+        let Parts {
+            icon,
+            status,
+            behind,
+            ids,
+            rx,
+        } = parts;
         // Weak: the menu's events can come for as long as the app lives.
         let ws = workspace.downgrade();
         let events = cx.spawn(async move |_, cx| {
@@ -224,7 +294,9 @@ impl Tray {
                         });
                     } else if id == ids.2 {
                         cx.activate(true);
-                        ws.update(cx, |ws, cx| ws.show_in_main(Route::Settings(SettingsPage::General), cx));
+                        ws.update(cx, |ws, cx| {
+                            ws.show_in_main(Route::Settings(SettingsPage::General), cx)
+                        });
                     } else if id == ids.3 {
                         crate::root::quit(cx);
                     } else if id == ids.4 {
@@ -239,12 +311,15 @@ impl Tray {
             this.sync(state, cx)
         });
         let background_use = workspace.read(cx).background_use.clone();
-        let behind_changed = cx.observe(&background_use, |this, b, cx| this.sync_behind(b.read(cx)));
+        let behind_changed =
+            cx.observe(&background_use, |this, b, cx| this.sync_behind(b.read(cx)));
         let surface = Surface::current();
         let follow = cfg!(windows).then(|| {
             cx.spawn(async move |this, cx| {
                 loop {
-                    cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(2))
+                        .await;
                     let now = Surface::current();
                     let ok = this.update(cx, |this, _| {
                         if this.surface != now {
@@ -258,7 +333,19 @@ impl Tray {
                 }
             })
         });
-        let mut this = Self { icon, status, behind, glyph: Glyph::Idle, shown: Glyph::Idle.name(), surface, blink: None, _subscription: subscription, _behind: behind_changed, _events: events, _surface: follow };
+        let mut this = Self {
+            icon,
+            status,
+            behind,
+            glyph: Glyph::Idle,
+            shown: Glyph::Idle.name(),
+            surface,
+            blink: None,
+            _subscription: subscription,
+            _behind: behind_changed,
+            _events: events,
+            _surface: follow,
+        };
         let state = Self::read_state(workspace.read(cx), cx);
         this.sync(state, cx);
         // The icon can come (the setting turned on) while an agent is using the computer.
@@ -271,7 +358,14 @@ impl Tray {
         // The same count as the Dock badge: archived threads don't call for the user.
         let needs = ws.needs_you_count();
         let working = if ws.any_turn_running() {
-            ws.threads.iter().filter(|t| t.run_state == trek_core::RunState::Working && ws.live.get(&t.id).is_some_and(|l| l.turn_started.is_some())).count().max(1)
+            ws.threads
+                .iter()
+                .filter(|t| {
+                    t.run_state == trek_core::RunState::Working
+                        && ws.live.get(&t.id).is_some_and(|l| l.turn_started.is_some())
+                })
+                .count()
+                .max(1)
         } else {
             0
         };
@@ -281,7 +375,11 @@ impl Tray {
     /// "Show Background Use" while an agent uses the computer in the background and its picture
     /// is away; "Hide" while it shows; greyed out otherwise.
     fn sync_behind(&mut self, b: &crate::background_use::BackgroundUse) {
-        self.behind.set_text(if b.showing() { HIDE_BEHIND } else { SHOW_BEHIND });
+        self.behind.set_text(if b.showing() {
+            HIDE_BEHIND
+        } else {
+            SHOW_BEHIND
+        });
         self.behind.set_enabled(!b.sessions.is_empty());
     }
 
@@ -296,7 +394,11 @@ impl Tray {
         let text = match (needs, working) {
             (0, 0) => "No agents running".to_string(),
             (0, w) => format!("{w} agent{} working", if w == 1 { "" } else { "s" }),
-            (n, _) => format!("{n} thread{} need{} you", if n == 1 { "" } else { "s" }, if n == 1 { "s" } else { "" }),
+            (n, _) => format!(
+                "{n} thread{} need{} you",
+                if n == 1 { "" } else { "s" },
+                if n == 1 { "s" } else { "" }
+            ),
         };
         self.status.set_text(text);
         if glyph != self.glyph {
@@ -306,7 +408,9 @@ impl Tray {
                 cx.spawn(async move |this, cx| {
                     let mut lit = false;
                     loop {
-                        cx.background_executor().timer(std::time::Duration::from_millis(700)).await;
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(700))
+                            .await;
                         lit = !lit;
                         let ok = this.update(cx, |this, _| this.show(blink_name(lit)));
                         if ok.is_err() {
@@ -362,8 +466,11 @@ mod tests {
     use super::{Glyph, TRAY_SIZES, blink_name, glyph_asset, tray_size};
 
     fn decode(path: &str) -> (png::OutputInfo, Vec<u8>) {
-        let bytes = crate::assets::brand_bytes(path).unwrap_or_else(|| panic!("{path} isn't embedded"));
-        let mut reader = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().unwrap();
+        let bytes =
+            crate::assets::brand_bytes(path).unwrap_or_else(|| panic!("{path} isn't embedded"));
+        let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+            .read_info()
+            .unwrap();
         let mut buf = vec![0; reader.output_buffer_size().unwrap()];
         let info = reader.next_frame(&mut buf).unwrap();
         buf.truncate(info.buffer_size());
@@ -375,8 +482,19 @@ mod tests {
         assert_eq!(Glyph::for_state(0, 0), Glyph::Idle);
         assert_eq!(Glyph::for_state(0, 3), Glyph::Working);
         assert_eq!(Glyph::for_state(1, 0), Glyph::Attention);
-        assert_eq!(Glyph::for_state(2, 5), Glyph::Attention, "a thread waiting outranks agents working");
-        assert_eq!(["idle", "working", "attention"], [Glyph::Idle.name(), Glyph::Working.name(), Glyph::Attention.name()]);
+        assert_eq!(
+            Glyph::for_state(2, 5),
+            Glyph::Attention,
+            "a thread waiting outranks agents working"
+        );
+        assert_eq!(
+            ["idle", "working", "attention"],
+            [
+                Glyph::Idle.name(),
+                Glyph::Working.name(),
+                Glyph::Attention.name()
+            ]
+        );
     }
 
     #[test]
@@ -387,7 +505,10 @@ mod tests {
 
     #[test]
     fn the_tray_draws_the_nearest_size_not_under_what_it_asks() {
-        assert_eq!([16, 17, 20, 21, 24, 25, 32].map(tray_size), [16, 20, 20, 24, 24, 32, 32]);
+        assert_eq!(
+            [16, 17, 20, 21, 24, 25, 32].map(tray_size),
+            [16, 20, 20, 24, 24, 32, 32]
+        );
         assert_eq!(tray_size(48), 32, "bigger than any: the largest");
         assert_eq!(tray_size(0), 16);
     }
@@ -397,7 +518,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_glyph_is_cut_for_the_taskbar_s_scale() {
-        let drawn = [96, 120, 144, 168, 192].map(|dpi| tray_size(u32::try_from(crate::winsys::icon_edges(dpi).0).unwrap()));
+        let drawn = [96, 120, 144, 168, 192]
+            .map(|dpi| tray_size(u32::try_from(crate::winsys::icon_edges(dpi).0).unwrap()));
         assert_eq!(drawn, [16, 20, 24, 32, 32]);
     }
 
@@ -407,7 +529,10 @@ mod tests {
             // macOS: the template, whatever the taskbar.
             let (info, _) = decode(&glyph_asset(glyph.name(), false, false, 16));
             assert_eq!((info.width, info.height), (44, 44));
-            assert_eq!(glyph_asset(glyph.name(), false, true, 32), glyph_asset(glyph.name(), false, false, 16));
+            assert_eq!(
+                glyph_asset(glyph.name(), false, true, 32),
+                glyph_asset(glyph.name(), false, false, 16)
+            );
             for light in [false, true] {
                 for px in TRAY_SIZES {
                     let (info, pixels) = decode(&glyph_asset(glyph.name(), true, light, px));
@@ -415,7 +540,15 @@ mod tests {
                     // A light taskbar takes the dark glyph, a dark one the white: every drawn pixel.
                     let drawn: Vec<&[u8]> = pixels.chunks_exact(4).filter(|p| p[3] > 0).collect();
                     assert!(!drawn.is_empty());
-                    assert!(drawn.iter().all(|p| p[..3].iter().all(|&c| if light { c == 0 } else { c == 255 })), "{} {light} {px}", glyph.name());
+                    assert!(
+                        drawn.iter().all(|p| p[..3].iter().all(|&c| if light {
+                            c == 0
+                        } else {
+                            c == 255
+                        })),
+                        "{} {light} {px}",
+                        glyph.name()
+                    );
                 }
             }
         }

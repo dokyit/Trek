@@ -34,18 +34,30 @@ impl Workspace {
     /// output going to `progress` as it comes; then the folder registered as a project named
     /// `req.name`, and its id the reply. A folder that exists and isn't empty is refused
     /// (`conflict`) before git runs; a clone that fails is `clone_failed` with what git said.
-    pub(super) fn remote_clone_project(&mut self, req: tr::CloneProjectRequest, progress: tr::CloneProgress, reply: tr::Reply<String>, cx: &mut Context<Self>) {
+    pub(super) fn remote_clone_project(
+        &mut self,
+        req: tr::CloneProjectRequest,
+        progress: tr::CloneProgress,
+        reply: tr::Reply<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(folder) = clone_folder(&req.folder) else {
-            let _ = reply.send(Err(tr::HostError::bad_request("The folder must be absolute or under ~/")));
+            let _ = reply.send(Err(tr::HostError::bad_request(
+                "The folder must be absolute or under ~/",
+            )));
             return;
         };
         let (done, cloned) = tokio::sync::oneshot::channel();
         let (url, into) = (req.url, folder.clone());
-        let spawned = std::thread::Builder::new().name("trek-clone".into()).spawn(move || {
-            let _ = done.send(clone_into(&url, &into, &progress));
-        });
+        let spawned = std::thread::Builder::new()
+            .name("trek-clone".into())
+            .spawn(move || {
+                let _ = done.send(clone_into(&url, &into, &progress));
+            });
         if let Err(e) = spawned {
-            let _ = reply.send(Err(tr::HostError::other(format!("Couldn't start the clone: {e}"))));
+            let _ = reply.send(Err(tr::HostError::other(format!(
+                "Couldn't start the clone: {e}"
+            ))));
             return;
         }
         let name = req.name;
@@ -65,12 +77,22 @@ impl Workspace {
     /// `folder` as a project named `name`, among the user's own (as opening the folder makes
     /// it, without taking this Mac's window there); its id. Phones and machines hear of it with
     /// the next snapshot.
-    pub(crate) fn register_remote_project(&mut self, folder: &Path, name: &str, cx: &mut Context<Self>) -> tr::HostResult<String> {
+    pub(crate) fn register_remote_project(
+        &mut self,
+        folder: &Path,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) -> tr::HostResult<String> {
         let folder = crate::system::canonical(folder).unwrap_or_else(|| folder.to_path_buf());
-        let project = self.store.ensure_project(&folder).map_err(|e| tr::HostError::other(format!("Couldn't add the project: {e}")))?;
+        let project = self
+            .store
+            .ensure_project(&folder)
+            .map_err(|e| tr::HostError::other(format!("Couldn't add the project: {e}")))?;
         let name = name.trim();
         if !name.is_empty() && name != project.name {
-            self.store.rename_project(&project.id, name).map_err(|e| tr::HostError::other(format!("Couldn't name the project: {e}")))?;
+            self.store
+                .rename_project(&project.id, name)
+                .map_err(|e| tr::HostError::other(format!("Couldn't name the project: {e}")))?;
         }
         let key = project.path.display().to_string();
         let hidden = self.settings.hidden_projects.contains(&key);
@@ -89,7 +111,13 @@ impl Workspace {
     /// Write `files` under the project's folder, off the main thread: every path is checked
     /// before anything is written (inside the folder, no symbolic link on the way or at the end),
     /// then each file is written whole beside its place and moved there, with its mode.
-    pub(super) fn remote_put_files(&mut self, project_id: &str, files: Vec<tr::FileUpload>, reply: tr::Reply<()>, cx: &mut Context<Self>) {
+    pub(super) fn remote_put_files(
+        &mut self,
+        project_id: &str,
+        files: Vec<tr::FileUpload>,
+        reply: tr::Reply<()>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(root) = self.project(project_id).map(|p| p.path.clone()) else {
             let _ = reply.send(Err(tr::HostError::not_found("No such project")));
             return;
@@ -112,17 +140,36 @@ fn clone_folder(folder: &str) -> Option<PathBuf> {
 }
 
 /// `git clone --progress -- <url> <folder>`, its output (stderr) to `progress` line by line.
-pub(crate) fn clone_into(url: &str, folder: &Path, progress: &tr::CloneProgress) -> tr::HostResult<()> {
+pub(crate) fn clone_into(
+    url: &str,
+    folder: &Path,
+    progress: &tr::CloneProgress,
+) -> tr::HostResult<()> {
     match std::fs::symlink_metadata(folder) {
         Ok(meta) if meta.is_dir() => {
-            let mut entries = std::fs::read_dir(folder).map_err(|e| tr::HostError::other(format!("Couldn't read {}: {e}", folder.display())))?;
+            let mut entries = std::fs::read_dir(folder).map_err(|e| {
+                tr::HostError::other(format!("Couldn't read {}: {e}", folder.display()))
+            })?;
             if entries.next().is_some() {
-                return Err(tr::HostError::conflict(format!("{} already exists and isn't empty", folder.display())));
+                return Err(tr::HostError::conflict(format!(
+                    "{} already exists and isn't empty",
+                    folder.display()
+                )));
             }
         }
-        Ok(_) => return Err(tr::HostError::conflict(format!("{} already exists and isn't a folder", folder.display()))),
+        Ok(_) => {
+            return Err(tr::HostError::conflict(format!(
+                "{} already exists and isn't a folder",
+                folder.display()
+            )));
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(tr::HostError::other(format!("Couldn't look at {}: {e}", folder.display()))),
+        Err(e) => {
+            return Err(tr::HostError::other(format!(
+                "Couldn't look at {}: {e}",
+                folder.display()
+            )));
+        }
     }
     let mut command = trek_core::procs::command("git");
     command
@@ -134,7 +181,9 @@ pub(crate) fn clone_into(url: &str, folder: &Path, progress: &tr::CloneProgress)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    let mut child = command.spawn().map_err(|e| tr::HostError::clone_failed(format!("Couldn't run git: {e}")))?;
+    let mut child = command
+        .spawn()
+        .map_err(|e| tr::HostError::clone_failed(format!("Couldn't run git: {e}")))?;
     let mut output = GitOutput::new(progress);
     if let Some(mut stderr) = child.stderr.take() {
         let mut buf = [0u8; 4096];
@@ -148,8 +197,18 @@ pub(crate) fn clone_into(url: &str, folder: &Path, progress: &tr::CloneProgress)
         }
     }
     output.finish();
-    let status = child.wait().map_err(|e| tr::HostError::clone_failed(format!("git: {e}")))?;
-    if status.success() { Ok(()) } else { Err(tr::HostError::clone_failed(output.failure().unwrap_or_else(|| format!("git clone failed ({status})")))) }
+    let status = child
+        .wait()
+        .map_err(|e| tr::HostError::clone_failed(format!("git: {e}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(tr::HostError::clone_failed(
+            output
+                .failure()
+                .unwrap_or_else(|| format!("git clone failed ({status})")),
+        ))
+    }
 }
 
 /// git's stderr, cut into lines (`\n`, and the `\r` its progress counters rewrite themselves
@@ -165,7 +224,12 @@ struct GitOutput<'a> {
 
 impl<'a> GitOutput<'a> {
     fn new(progress: &'a tr::CloneProgress) -> Self {
-        Self { progress, partial: Vec::new(), sent_at: None, tail: Default::default() }
+        Self {
+            progress,
+            partial: Vec::new(),
+            sent_at: None,
+            tail: Default::default(),
+        }
     }
 
     fn feed(&mut self, bytes: &[u8]) {
@@ -203,20 +267,38 @@ impl<'a> GitOutput<'a> {
 
     /// What git said went wrong: its `fatal:` and `error:` lines, else its last few.
     fn failure(&self) -> Option<String> {
-        let said: Vec<&str> = self.tail.iter().map(String::as_str).filter(|l| l.starts_with("fatal:") || l.starts_with("error:")).collect();
-        let lines: Vec<&str> = if said.is_empty() { self.tail.iter().rev().take(5).rev().map(String::as_str).collect() } else { said };
+        let said: Vec<&str> = self
+            .tail
+            .iter()
+            .map(String::as_str)
+            .filter(|l| l.starts_with("fatal:") || l.starts_with("error:"))
+            .collect();
+        let lines: Vec<&str> = if said.is_empty() {
+            self.tail
+                .iter()
+                .rev()
+                .take(5)
+                .rev()
+                .map(String::as_str)
+                .collect()
+        } else {
+            said
+        };
         (!lines.is_empty()).then(|| lines.join("\n"))
     }
 }
 
 /// Every file checked, then every file written; the first that can't be is the error.
 pub(crate) fn write_files(root: &Path, files: &[tr::FileUpload]) -> tr::HostResult<()> {
-    let root = crate::system::canonical(root).filter(|r| r.is_dir()).ok_or_else(|| tr::HostError::not_found("The project's folder is gone"))?;
+    let root = crate::system::canonical(root)
+        .filter(|r| r.is_dir())
+        .ok_or_else(|| tr::HostError::not_found("The project's folder is gone"))?;
     for file in files {
         check_target(&root, &file.path)?;
     }
     for file in files {
-        write_file(&root, file).map_err(|e| tr::HostError::other(format!("Couldn't write {}: {e}", file.path)))?;
+        write_file(&root, file)
+            .map_err(|e| tr::HostError::other(format!("Couldn't write {}: {e}", file.path)))?;
     }
     Ok(())
 }
@@ -225,7 +307,9 @@ pub(crate) fn write_files(root: &Path, files: &[tr::FileUpload]) -> tr::HostResu
 /// itself is a symbolic link (or a file where a folder should be, or the other way round).
 fn check_target(root: &Path, rel: &str) -> tr::HostResult<()> {
     if !tr::safe_relative_path(rel) {
-        return Err(tr::HostError::bad_request(format!("{rel:?} isn't a path inside the project")));
+        return Err(tr::HostError::bad_request(format!(
+            "{rel:?} isn't a path inside the project"
+        )));
     }
     let parts: Vec<&str> = rel.split(['/', '\\']).collect();
     let mut at = root.to_path_buf();
@@ -235,14 +319,26 @@ fn check_target(root: &Path, rel: &str) -> tr::HostResult<()> {
         let shown = parts[..=i].join("/");
         match std::fs::symlink_metadata(&at) {
             Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(tr::HostError::conflict(format!("{shown} is a symbolic link: Trek doesn't write through one")));
+                return Err(tr::HostError::conflict(format!(
+                    "{shown} is a symbolic link: Trek doesn't write through one"
+                )));
             }
-            Ok(meta) if !last && !meta.is_dir() => return Err(tr::HostError::conflict(format!("{shown} is a file, not a folder"))),
-            Ok(meta) if last && meta.is_dir() => return Err(tr::HostError::conflict(format!("{shown} is a folder"))),
+            Ok(meta) if !last && !meta.is_dir() => {
+                return Err(tr::HostError::conflict(format!(
+                    "{shown} is a file, not a folder"
+                )));
+            }
+            Ok(meta) if last && meta.is_dir() => {
+                return Err(tr::HostError::conflict(format!("{shown} is a folder")));
+            }
             Ok(_) => {}
             // The rest is made as it's written.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(tr::HostError::other(format!("Couldn't look at {shown}: {e}"))),
+            Err(e) => {
+                return Err(tr::HostError::other(format!(
+                    "Couldn't look at {shown}: {e}"
+                )));
+            }
         }
     }
     Ok(())
@@ -254,7 +350,9 @@ fn check_target(root: &Path, rel: &str) -> tr::HostResult<()> {
 fn write_file(root: &Path, file: &tr::FileUpload) -> std::io::Result<()> {
     static N: AtomicUsize = AtomicUsize::new(0);
     let parts: Vec<&str> = file.path.split(['/', '\\']).collect();
-    let Some((name, folders)) = parts.split_last() else { return Err(std::io::Error::other("no file name")) };
+    let Some((name, folders)) = parts.split_last() else {
+        return Err(std::io::Error::other("no file name"));
+    };
     let mut dir = root.to_path_buf();
     for part in folders {
         dir.push(part);
@@ -263,14 +361,21 @@ fn write_file(root: &Path, file: &tr::FileUpload) -> std::io::Result<()> {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 let meta = std::fs::symlink_metadata(&dir)?;
                 if meta.file_type().is_symlink() || !meta.is_dir() {
-                    return Err(std::io::Error::other(format!("{} isn't a folder of the project's", dir.display())));
+                    return Err(std::io::Error::other(format!(
+                        "{} isn't a folder of the project's",
+                        dir.display()
+                    )));
                 }
             }
             Err(e) => return Err(e),
         }
     }
     let target = dir.join(name);
-    let temp = dir.join(format!(".trek-upload-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let temp = dir.join(format!(
+        ".trek-upload-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
     let written = (|| {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);

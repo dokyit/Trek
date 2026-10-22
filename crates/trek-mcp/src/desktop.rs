@@ -63,9 +63,22 @@ pub type Rect = (f64, f64, f64, f64);
 #[derive(Debug, Clone, PartialEq)]
 pub enum Input {
     Move(f64, f64),
-    Click { x: f64, y: f64, button: Button, count: u32 },
-    Drag { from: (f64, f64), to: (f64, f64) },
-    Scroll { x: f64, y: f64, dx: i32, dy: i32 },
+    Click {
+        x: f64,
+        y: f64,
+        button: Button,
+        count: u32,
+    },
+    Drag {
+        from: (f64, f64),
+        to: (f64, f64),
+    },
+    Scroll {
+        x: f64,
+        y: f64,
+        dx: i32,
+        dy: i32,
+    },
     Type(String),
     Key(Combo),
 }
@@ -120,7 +133,12 @@ pub trait Desktop {
     }
     /// `w` by itself, as it looks under whatever covers it, as a PNG whose longest side is at
     /// most `max_side`; or `region` of it (in its own coordinates).
-    fn capture_window(&self, _w: &WindowInfo, _region: Option<Rect>, _max_side: u32) -> Result<Capture, String> {
+    fn capture_window(
+        &self,
+        _w: &WindowInfo,
+        _region: Option<Rect>,
+        _max_side: u32,
+    ) -> Result<Capture, String> {
         Err(NOT_BEHIND.into())
     }
     /// Deliver `input` to `w`'s app alone: the pointer stays where the user has it, and their
@@ -149,16 +167,39 @@ pub mod fake {
 
     #[derive(Debug, Clone, PartialEq)]
     pub enum Event {
-        Capture { region: Option<Rect>, max_side: u32 },
+        Capture {
+            region: Option<Rect>,
+            max_side: u32,
+        },
         Move(f64, f64),
-        Click { x: f64, y: f64, button: Button, count: u32 },
-        Drag { from: (f64, f64), to: (f64, f64) },
-        Scroll { x: f64, y: f64, dx: i32, dy: i32 },
+        Click {
+            x: f64,
+            y: f64,
+            button: Button,
+            count: u32,
+        },
+        Drag {
+            from: (f64, f64),
+            to: (f64, f64),
+        },
+        Scroll {
+            x: f64,
+            y: f64,
+            dx: i32,
+            dy: i32,
+        },
         Type(String),
         Key(Combo),
         OpenApp(String),
-        CaptureWindow { id: i64, region: Option<Rect>, max_side: u32 },
-        Behind { window: i64, input: Input },
+        CaptureWindow {
+            id: i64,
+            region: Option<Rect>,
+            max_side: u32,
+        },
+        Behind {
+            window: i64,
+            input: Input,
+        },
         OpenAppBehind(String),
     }
 
@@ -187,7 +228,11 @@ pub mod fake {
             Self {
                 events: Rc::default(),
                 trusted: true,
-                display: Display { width: 1512.0, height: 982.0, physical: None },
+                display: Display {
+                    width: 1512.0,
+                    height: 982.0,
+                    physical: None,
+                },
                 windows: Ok(vec![]),
                 owner_at: None,
                 key_window: None,
@@ -226,15 +271,27 @@ pub mod fake {
         /// A capture the display's size fitted to `max_side` (or the region's), with no pixels.
         fn capture(&self, region: Option<Rect>, max_side: u32) -> Result<Capture, String> {
             self.record(Event::Capture { region, max_side })?;
-            let (w, h) = region.map(|r| (r.2, r.3)).unwrap_or((self.display.width, self.display.height));
+            let (w, h) = region
+                .map(|r| (r.2, r.3))
+                .unwrap_or((self.display.width, self.display.height));
             let s = (max_side as f64 / w.max(h)).min(1.0);
-            Ok(Capture { png_base64: "UE5H".into(), width: (w * s).round() as u32, height: (h * s).round() as u32, note: "" })
+            Ok(Capture {
+                png_base64: "UE5H".into(),
+                width: (w * s).round() as u32,
+                height: (h * s).round() as u32,
+                note: "",
+            })
         }
         fn move_to(&self, x: f64, y: f64) -> Result<(), String> {
             self.record(Event::Move(x, y))
         }
         fn click(&self, x: f64, y: f64, button: Button, count: u32) -> Result<(), String> {
-            self.record(Event::Click { x, y, button, count })
+            self.record(Event::Click {
+                x,
+                y,
+                button,
+                count,
+            })
         }
         fn drag(&self, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
             self.record(Event::Drag { from, to })
@@ -261,26 +318,46 @@ pub mod fake {
         }
         /// The window's size fitted to `max_side` (or the region's), with no pixels; at twice
         /// its size, like a Retina capture, where that fits.
-        fn capture_window(&self, w: &WindowInfo, region: Option<Rect>, max_side: u32) -> Result<Capture, String> {
+        fn capture_window(
+            &self,
+            w: &WindowInfo,
+            region: Option<Rect>,
+            max_side: u32,
+        ) -> Result<Capture, String> {
             if !self.behind {
                 return Err(NOT_BEHIND.into());
             }
-            self.record(Event::CaptureWindow { id: w.id, region, max_side })?;
+            self.record(Event::CaptureWindow {
+                id: w.id,
+                region,
+                max_side,
+            })?;
             let (rw, rh) = region.map(|r| (r.2, r.3)).unwrap_or((w.w, w.h));
             let s = (max_side as f64 / rw.max(rh)).min(2.0);
-            Ok(Capture { png_base64: "UE5H".into(), width: (rw * s).round() as u32, height: (rh * s).round() as u32, note: "" })
+            Ok(Capture {
+                png_base64: "UE5H".into(),
+                width: (rw * s).round() as u32,
+                height: (rh * s).round() as u32,
+                note: "",
+            })
         }
         fn behind(&self, w: &WindowInfo, input: &Input) -> Result<(), String> {
             if !self.behind {
                 return Err(NOT_BEHIND.into());
             }
-            self.record(Event::Behind { window: w.id, input: input.clone() })
+            self.record(Event::Behind {
+                window: w.id,
+                input: input.clone(),
+            })
         }
         fn open_app_behind(&self, name: &str) -> Result<(), String> {
             self.record(Event::OpenAppBehind(name.into()))
         }
         fn app_pid(&self, name: &str) -> Option<i64> {
-            self.pids.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, p)| *p)
+            self.pids
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|(_, p)| *p)
         }
     }
 }

@@ -8,29 +8,39 @@
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT};
-use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
-use windows_sys::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
-    DeleteDC, DeleteObject, GdiFlush, GetDC, HALFTONE, HBITMAP, HDC, HGDIOBJ, ReleaseDC, SRCCOPY, SelectObject,
-    SetBrushOrgEx, SetStretchBltMode, StretchBlt,
+use windows_sys::Win32::Graphics::Dwm::{
+    DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
-use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx};
-use windows_sys::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+use windows_sys::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, GdiFlush, GetDC, HALFTONE, HBITMAP, HDC, HGDIOBJ,
+    ReleaseDC, SRCCOPY, SelectObject, SetBrushOrgEx, SetStretchBltMode, StretchBlt,
+};
+use windows_sys::Win32::System::Com::{
+    COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx,
+};
+use windows_sys::Win32::System::Registry::{
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW,
+};
 use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
-use windows_sys::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
+use windows_sys::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-    MAPVK_VK_TO_VSC, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, MapVirtualKeyW,
+    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, MapVirtualKeyW,
     SendInput,
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GA_ROOT, GWL_EXSTYLE, GetAncestor, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowLongW,
-    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SM_CXSCREEN, SM_CXVIRTUALSCREEN,
-    SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETWHEELSCROLLLINES, SW_SHOWNORMAL,
+    EnumWindows, GA_ROOT, GWL_EXSTYLE, GetAncestor, GetClassNameW, GetForegroundWindow,
+    GetSystemMetrics, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+    IsIconic, IsWindowVisible, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETWHEELSCROLLLINES, SW_SHOWNORMAL,
     SystemParametersInfoW, WS_EX_TRANSPARENT, WindowFromPoint,
 };
 
@@ -55,7 +65,10 @@ fn fit(w: u32, h: u32, max_side: u32) -> (u32, u32) {
         return (w.max(1), h.max(1));
     }
     let s = max_side as f64 / long as f64;
-    (((w as f64 * s).round() as u32).max(1), ((h as f64 * s).round() as u32).max(1))
+    (
+        ((w as f64 * s).round() as u32).max(1),
+        ((h as f64 * s).round() as u32).max(1),
+    )
 }
 
 /// Wheel units for `lines` lines: a notch (120) scrolls the user's lines-per-notch setting, so a
@@ -79,10 +92,26 @@ enum Stroke {
 /// A combo's strokes: the modifiers down in order, the key down and up, the modifiers up in
 /// reverse.
 fn chord_strokes(combo: &VkCombo) -> Vec<Stroke> {
-    let mut out: Vec<Stroke> = combo.held.iter().map(|&vk| Stroke::Key { vk, up: false }).collect();
-    out.push(Stroke::Key { vk: combo.vk, up: false });
-    out.push(Stroke::Key { vk: combo.vk, up: true });
-    out.extend(combo.held.iter().rev().map(|&vk| Stroke::Key { vk, up: true }));
+    let mut out: Vec<Stroke> = combo
+        .held
+        .iter()
+        .map(|&vk| Stroke::Key { vk, up: false })
+        .collect();
+    out.push(Stroke::Key {
+        vk: combo.vk,
+        up: false,
+    });
+    out.push(Stroke::Key {
+        vk: combo.vk,
+        up: true,
+    });
+    out.extend(
+        combo
+            .held
+            .iter()
+            .rev()
+            .map(|&vk| Stroke::Key { vk, up: true }),
+    );
     out
 }
 
@@ -103,7 +132,10 @@ fn text_strokes(s: &str) -> Vec<Stroke> {
         }
         let mut buf = [0u16; 2];
         for &unit in ch.encode_utf16(&mut buf).iter() {
-            out.extend([Stroke::Unit { unit, up: false }, Stroke::Unit { unit, up: true }]);
+            out.extend([
+                Stroke::Unit { unit, up: false },
+                Stroke::Unit { unit, up: true },
+            ]);
         }
     }
     out
@@ -127,7 +159,9 @@ fn is_extended(vk: u16) -> bool {
 fn exe_name(path: &str) -> String {
     let file = path.rsplit(['\\', '/']).next().unwrap_or(path);
     match file.len().checked_sub(4) {
-        Some(cut) if file.is_char_boundary(cut) && file[cut..].eq_ignore_ascii_case(".exe") => file[..cut].to_string(),
+        Some(cut) if file.is_char_boundary(cut) && file[cut..].eq_ignore_ascii_case(".exe") => {
+            file[..cut].to_string()
+        }
         _ => file.to_string(),
     }
 }
@@ -160,10 +194,17 @@ fn listed(r: &Raw) -> bool {
 /// What to hand `ShellExecuteW` for an app `name`: a path or URI as given; else a Start menu
 /// shortcut named like it ("Visual Studio Code"); else the program App Paths registers for it
 /// ("chrome" → chrome.exe's path); else the name itself, for Windows to find on PATH.
-fn resolve_app(name: &str, shortcut: impl Fn(&str) -> Option<String>, app_path: impl Fn(&str) -> Option<String>) -> String {
+fn resolve_app(
+    name: &str,
+    shortcut: impl Fn(&str) -> Option<String>,
+    app_path: impl Fn(&str) -> Option<String>,
+) -> String {
     let is_path = name.contains(['\\', '/']);
     let is_uri = name.split_once(':').is_some_and(|(scheme, _)| {
-        scheme.len() >= 2 && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        scheme.len() >= 2
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
     });
     if is_path || is_uri {
         return name.to_string();
@@ -171,7 +212,11 @@ fn resolve_app(name: &str, shortcut: impl Fn(&str) -> Option<String>, app_path: 
     if let Some(lnk) = shortcut(name) {
         return lnk;
     }
-    let exe = if name.to_ascii_lowercase().ends_with(".exe") { name.to_string() } else { format!("{name}.exe") };
+    let exe = if name.to_ascii_lowercase().ends_with(".exe") {
+        name.to_string()
+    } else {
+        format!("{name}.exe")
+    };
     app_path(&exe).unwrap_or_else(|| name.to_string())
 }
 
@@ -203,7 +248,10 @@ impl Default for Win {
                 // on every display whatever its scaling. Fails only if already set, which is fine.
                 SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
                 // ShellExecute may hand off to shell extensions that need COM on this thread.
-                CoInitializeEx(std::ptr::null(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32);
+                CoInitializeEx(
+                    std::ptr::null(),
+                    (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+                );
             }
         });
         Win
@@ -219,7 +267,11 @@ impl Desktop for Win {
     fn display(&self) -> Display {
         // SAFETY: `GetSystemMetrics` takes an index and no pointers.
         let (w, h) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
-        Display { width: w.max(1) as f64, height: h.max(1) as f64, physical: None }
+        Display {
+            width: w.max(1) as f64,
+            height: h.max(1) as f64,
+            physical: None,
+        }
     }
 
     fn windows(&self) -> Result<Vec<WindowInfo>, String> {
@@ -236,7 +288,11 @@ impl Desktop for Win {
             return Err("EnumWindows failed".into());
         }
         let mut names = std::collections::HashMap::new();
-        Ok(hwnds.into_iter().filter(|&h| listed(&raw(h))).map(|h| describe(h, &mut names)).collect())
+        Ok(hwnds
+            .into_iter()
+            .filter(|&h| listed(&raw(h)))
+            .map(|h| describe(h, &mut names))
+            .collect())
     }
 
     /// The foreground window takes the keys, whichever window is topmost.
@@ -251,7 +307,12 @@ impl Desktop for Win {
     fn owner_at(&self, x: f64, y: f64) -> Option<String> {
         // SAFETY: a point by value in, a handle out; Windows validates the handle (null is
         // allowed and answers null) in `GetAncestor` as everywhere below.
-        let child = unsafe { WindowFromPoint(POINT { x: x.round() as i32, y: y.round() as i32 }) };
+        let child = unsafe {
+            WindowFromPoint(POINT {
+                x: x.round() as i32,
+                y: y.round() as i32,
+            })
+        };
         let root = unsafe { GetAncestor(child, GA_ROOT) };
         let hwnd = if root.is_null() { child } else { root };
         (!hwnd.is_null()).then(|| process_name(window_pid(hwnd)))
@@ -259,7 +320,12 @@ impl Desktop for Win {
 
     fn capture(&self, region: Option<Rect>, max_side: u32) -> Result<Capture, String> {
         let (sx, sy, sw, sh) = match region {
-            Some((x, y, w, h)) => (x.round() as i32, y.round() as i32, w.round().max(1.0) as i32, h.round().max(1.0) as i32),
+            Some((x, y, w, h)) => (
+                x.round() as i32,
+                y.round() as i32,
+                w.round().max(1.0) as i32,
+                h.round().max(1.0) as i32,
+            ),
             None => {
                 let d = self.display();
                 (0, 0, d.width as i32, d.height as i32)
@@ -277,7 +343,12 @@ impl Desktop for Win {
             .and_then(|mut w| w.write_image_data(&rgb))
             .map_err(|e| format!("Couldn't encode the screenshot: {e}"))?;
         use base64::Engine as _;
-        Ok(Capture { png_base64: base64::engine::general_purpose::STANDARD.encode(&png), width: tw, height: th, note: "" })
+        Ok(Capture {
+            png_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+            width: tw,
+            height: th,
+            note: "",
+        })
     }
 
     fn move_to(&self, x: f64, y: f64) -> Result<(), String> {
@@ -293,7 +364,10 @@ impl Desktop for Win {
         sleep_ms(30);
         for i in 1..=count {
             // Down and up together, so nothing slips between them.
-            send(&[mouse(x, y, MOUSEEVENTF_MOVE | down, 0), mouse(x, y, MOUSEEVENTF_MOVE | up, 0)])?;
+            send(&[
+                mouse(x, y, MOUSEEVENTF_MOVE | down, 0),
+                mouse(x, y, MOUSEEVENTF_MOVE | up, 0),
+            ])?;
             if i < count {
                 sleep_ms(40);
             }
@@ -310,7 +384,12 @@ impl Desktop for Win {
         let moved = (1..=STEPS).try_for_each(|i| {
             let t = i as f64 / STEPS as f64;
             sleep_ms(12);
-            send(&[mouse(ax + (bx - ax) * t, ay + (by - ay) * t, MOUSEEVENTF_MOVE, 0)])
+            send(&[mouse(
+                ax + (bx - ax) * t,
+                ay + (by - ay) * t,
+                MOUSEEVENTF_MOVE,
+                0,
+            )])
         });
         sleep_ms(40);
         // Let go even if a move failed, so the button isn't left held.
@@ -324,7 +403,14 @@ impl Desktop for Win {
         let mut lines: u32 = 3;
         // SAFETY: for SPI_GETWHEELSCROLLLINES the pointer is a `UINT` to fill, which `lines` is;
         // on failure it keeps the default.
-        unsafe { SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &mut lines as *mut u32 as *mut _, 0) };
+        unsafe {
+            SystemParametersInfoW(
+                SPI_GETWHEELSCROLLLINES,
+                0,
+                &mut lines as *mut u32 as *mut _,
+                0,
+            )
+        };
         let mut inputs = Vec::new();
         // The wheel is positive away from the user (up); our dy is positive down. A horizontal
         // wheel is positive to the right, like dx.
@@ -363,7 +449,14 @@ impl Desktop for Win {
         // SAFETY: `verb` and `file` are NUL-terminated and outlive the call; the other pointers are
         // null (no window, parameters or directory), all of which `ShellExecuteW` allows.
         let code = unsafe {
-            ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL)
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
         } as isize;
         if code <= 32 {
             return Err(shell_error(code));
@@ -410,7 +503,11 @@ fn key_input(stroke: Stroke) -> INPUT {
             wVk: vk,
             // SAFETY: a plain lookup of a virtual-key code; no pointers.
             wScan: unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16,
-            dwFlags: if is_extended(vk) { KEYEVENTF_EXTENDEDKEY } else { 0 } | if up { KEYEVENTF_KEYUP } else { 0 },
+            dwFlags: if is_extended(vk) {
+                KEYEVENTF_EXTENDEDKEY
+            } else {
+                0
+            } | if up { KEYEVENTF_KEYUP } else { 0 },
             time: 0,
             dwExtraInfo: 0,
         },
@@ -422,7 +519,10 @@ fn key_input(stroke: Stroke) -> INPUT {
             dwExtraInfo: 0,
         },
     };
-    INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki } }
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 { ki },
+    }
 }
 
 fn send(inputs: &[INPUT]) -> Result<(), String> {
@@ -430,7 +530,13 @@ fn send(inputs: &[INPUT]) -> Result<(), String> {
         return Ok(());
     }
     // SAFETY: `inputs` is a valid slice of `INPUT` for the count given, and `cbSize` is `INPUT`'s size.
-    let sent = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
+    let sent = unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
     if sent as usize != inputs.len() {
         return Err(format!(
             "Windows didn't take the input ({}). The screen may be locked, or a UAC prompt is up.",
@@ -446,7 +552,12 @@ fn raw(hwnd: HWND) -> Raw {
     // SAFETY: DWMWA_CLOAKED fills a `DWORD`: `cloaked`, four bytes. A window that has gone just
     // fails the call and leaves it 0.
     unsafe {
-        DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED as u32, &mut cloaked as *mut u32 as *mut _, 4);
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED as u32,
+            &mut cloaked as *mut u32 as *mut _,
+            4,
+        );
     }
     let mut class = [0u16; 64];
     // SAFETY: the buffer and the length passed are `class`'s.
@@ -465,15 +576,32 @@ fn raw(hwnd: HWND) -> Raw {
 
 /// A window's frame as drawn (without the invisible resize borders), else its rectangle.
 fn bounds(hwnd: HWND) -> (f64, f64, f64, f64) {
-    let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    let mut r = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
     let size = std::mem::size_of::<RECT>() as u32;
     // SAFETY: DWMWA_EXTENDED_FRAME_BOUNDS fills a `RECT`: `r`, `size` bytes.
-    let ok = unsafe { DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS as u32, &mut r as *mut RECT as *mut _, size) } == 0;
+    let ok = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS as u32,
+            &mut r as *mut RECT as *mut _,
+            size,
+        )
+    } == 0;
     if !ok {
         // SAFETY: `r` is a `RECT` for it to fill.
         unsafe { GetWindowRect(hwnd, &mut r) };
     }
-    (r.left as f64, r.top as f64, (r.right - r.left) as f64, (r.bottom - r.top) as f64)
+    (
+        r.left as f64,
+        r.top as f64,
+        (r.right - r.left) as f64,
+        (r.bottom - r.top) as f64,
+    )
 }
 
 fn window_pid(hwnd: HWND) -> u32 {
@@ -485,12 +613,24 @@ fn window_pid(hwnd: HWND) -> u32 {
 
 fn describe(hwnd: HWND, names: &mut std::collections::HashMap<u32, String>) -> WindowInfo {
     let pid = window_pid(hwnd);
-    let owner = names.entry(pid).or_insert_with(|| process_name(pid)).clone();
+    let owner = names
+        .entry(pid)
+        .or_insert_with(|| process_name(pid))
+        .clone();
     let mut title = [0u16; 512];
     // SAFETY: the buffer and the length passed are `title`'s.
     let n = unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32) }.max(0) as usize;
     let (x, y, w, h) = bounds(hwnd);
-    WindowInfo { owner, title: String::from_utf16_lossy(&title[..n]), pid: pid as i64, id: hwnd as i64, x, y, w, h }
+    WindowInfo {
+        owner,
+        title: String::from_utf16_lossy(&title[..n]),
+        pid: pid as i64,
+        id: hwnd as i64,
+        x,
+        y,
+        w,
+        h,
+    }
 }
 
 /// The executable's name for a process, or "" when Windows won't say (a protected process).
@@ -504,10 +644,16 @@ fn process_name(pid: u32) -> String {
     let mut len = buf.len() as u32;
     // SAFETY: `process` is a live handle with query access; `buf` holds `len` units, and `len`
     // comes back as how many were written.
-    let ok = unsafe { QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len) } != 0;
+    let ok = unsafe {
+        QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len)
+    } != 0;
     // SAFETY: `process` was opened above and is closed exactly once, here.
     unsafe { CloseHandle(process) };
-    if ok { exe_name(&String::from_utf16_lossy(&buf[..len as usize])) } else { String::new() }
+    if ok {
+        exe_name(&String::from_utf16_lossy(&buf[..len as usize]))
+    } else {
+        String::new()
+    }
 }
 
 /// Releases GDI objects whatever way `grab` leaves.
@@ -539,14 +685,21 @@ impl Drop for Gdi {
 
 /// The screen's pixels in (`sx`, `sy`, `sw`, `sh`), scaled to `tw`×`th`, as RGB rows top down.
 fn grab(sx: i32, sy: i32, sw: i32, sh: i32, tw: i32, th: i32) -> Result<Vec<u8>, String> {
-    let fail = |what: &str| format!("Couldn't capture the screen ({what} failed). The screen may be locked.");
+    let fail = |what: &str| {
+        format!("Couldn't capture the screen ({what} failed). The screen may be locked.")
+    };
     // SAFETY: a null window asks for the whole screen's DC; null (failure) is checked below. `Gdi`
     // releases it, and what's made from it, whichever way this function leaves.
     let screen = unsafe { GetDC(std::ptr::null_mut()) };
     if screen.is_null() {
         return Err(fail("GetDC"));
     }
-    let mut gdi = Gdi { screen, mem: std::ptr::null_mut(), dib: std::ptr::null_mut(), old: std::ptr::null_mut() };
+    let mut gdi = Gdi {
+        screen,
+        mem: std::ptr::null_mut(),
+        dib: std::ptr::null_mut(),
+        old: std::ptr::null_mut(),
+    };
     // SAFETY: `screen` is a live DC.
     gdi.mem = unsafe { CreateCompatibleDC(screen) };
     if gdi.mem.is_null() {
@@ -567,7 +720,16 @@ fn grab(sx: i32, sy: i32, sw: i32, sh: i32, tw: i32, th: i32) -> Result<Vec<u8>,
     let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
     // SAFETY: `info` describes a 32-bit top-down bitmap and outlives the call; `bits` is where it
     // writes the pixels' address; no file mapping is used (null, 0).
-    gdi.dib = unsafe { CreateDIBSection(gdi.mem, &info, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0) };
+    gdi.dib = unsafe {
+        CreateDIBSection(
+            gdi.mem,
+            &info,
+            DIB_RGB_COLORS,
+            &mut bits,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
     if gdi.dib.is_null() || bits.is_null() {
         return Err(fail("CreateDIBSection"));
     }
@@ -581,7 +743,19 @@ fn grab(sx: i32, sy: i32, sw: i32, sh: i32, tw: i32, th: i32) -> Result<Vec<u8>,
         } else {
             SetStretchBltMode(gdi.mem, HALFTONE);
             SetBrushOrgEx(gdi.mem, 0, 0, std::ptr::null_mut());
-            StretchBlt(gdi.mem, 0, 0, tw, th, screen, sx, sy, sw, sh, SRCCOPY | CAPTUREBLT)
+            StretchBlt(
+                gdi.mem,
+                0,
+                0,
+                tw,
+                th,
+                screen,
+                sx,
+                sy,
+                sw,
+                sh,
+                SRCCOPY | CAPTUREBLT,
+            )
         }
     };
     if copied == 0 {
@@ -605,7 +779,10 @@ fn grab(sx: i32, sy: i32, sw: i32, sh: i32, tw: i32, th: i32) -> Result<Vec<u8>,
 /// A Start menu shortcut called `name` (the user's, then everyone's), as a path.
 fn start_menu_shortcut(name: &str) -> Option<String> {
     let want = format!("{name}.lnk").to_lowercase();
-    let roots = [("APPDATA", r"Microsoft\Windows\Start Menu\Programs"), ("ProgramData", r"Microsoft\Windows\Start Menu\Programs")];
+    let roots = [
+        ("APPDATA", r"Microsoft\Windows\Start Menu\Programs"),
+        ("ProgramData", r"Microsoft\Windows\Start Menu\Programs"),
+    ];
     roots.iter().find_map(|(var, sub)| {
         let root = std::path::PathBuf::from(std::env::var_os(var)?).join(sub);
         find_file(&root, &want, 4)
@@ -614,7 +791,9 @@ fn start_menu_shortcut(name: &str) -> Option<String> {
 
 fn find_file(dir: &std::path::Path, lowercase_name: &str, depth: u32) -> Option<String> {
     let entries: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().collect();
-    let here = entries.iter().find(|e| e.file_name().to_string_lossy().to_lowercase() == lowercase_name);
+    let here = entries
+        .iter()
+        .find(|e| e.file_name().to_string_lossy().to_lowercase() == lowercase_name);
     if let Some(e) = here {
         return Some(e.path().display().to_string());
     }
@@ -629,22 +808,38 @@ fn find_file(dir: &std::path::Path, lowercase_name: &str, depth: u32) -> Option<
 
 /// The program App Paths registers for `exe` (the user's, then the machine's). Read only.
 fn app_path(exe: &str) -> Option<String> {
-    let key: Vec<u16> = format!(r"Software\Microsoft\Windows\CurrentVersion\App Paths\{exe}").encode_utf16().chain([0]).collect();
-    [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE].into_iter().find_map(|hive: HKEY| {
-        let mut buf = [0u16; 1024];
-        let mut size = std::mem::size_of_val(&buf) as u32;
-        // SAFETY: `key` is NUL-terminated; `buf` has `size` bytes, and `size` comes back as the
-        // bytes written (a string value is always NUL-terminated with RRF_RT_REG_SZ).
-        let err = unsafe {
-            RegGetValueW(hive, key.as_ptr(), std::ptr::null(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr() as *mut _, &mut size)
-        };
-        if err != 0 {
-            return None;
-        }
-        let n = (size as usize / 2).saturating_sub(1).min(buf.len());
-        let path = String::from_utf16_lossy(&buf[..n]).trim().trim_matches('"').to_string();
-        (!path.is_empty()).then_some(path)
-    })
+    let key: Vec<u16> = format!(r"Software\Microsoft\Windows\CurrentVersion\App Paths\{exe}")
+        .encode_utf16()
+        .chain([0])
+        .collect();
+    [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE]
+        .into_iter()
+        .find_map(|hive: HKEY| {
+            let mut buf = [0u16; 1024];
+            let mut size = std::mem::size_of_val(&buf) as u32;
+            // SAFETY: `key` is NUL-terminated; `buf` has `size` bytes, and `size` comes back as the
+            // bytes written (a string value is always NUL-terminated with RRF_RT_REG_SZ).
+            let err = unsafe {
+                RegGetValueW(
+                    hive,
+                    key.as_ptr(),
+                    std::ptr::null(),
+                    RRF_RT_REG_SZ,
+                    std::ptr::null_mut(),
+                    buf.as_mut_ptr() as *mut _,
+                    &mut size,
+                )
+            };
+            if err != 0 {
+                return None;
+            }
+            let n = (size as usize / 2).saturating_sub(1).min(buf.len());
+            let path = String::from_utf16_lossy(&buf[..n])
+                .trim()
+                .trim_matches('"')
+                .to_string();
+            (!path.is_empty()).then_some(path)
+        })
 }
 
 #[cfg(test)]
@@ -691,10 +886,18 @@ mod tests {
     #[test]
     fn a_line_is_a_share_of_a_wheel_notch() {
         assert_eq!(wheel_delta(1, 3), 40);
-        assert_eq!(wheel_delta(3, 3), 120, "three lines are one notch at the default setting");
+        assert_eq!(
+            wheel_delta(3, 3),
+            120,
+            "three lines are one notch at the default setting"
+        );
         assert_eq!(wheel_delta(-5, 3), -200);
         assert_eq!(wheel_delta(2, 1), 240);
-        assert_eq!(wheel_delta(1, u32::MAX), 120, "one screen at a time: a notch a line");
+        assert_eq!(
+            wheel_delta(1, u32::MAX),
+            120,
+            "one screen at a time: a notch a line"
+        );
         assert_eq!(wheel_delta(1, 0), 120);
     }
 
@@ -703,14 +906,30 @@ mod tests {
         let k = |vk, up| Stroke::Key { vk, up };
         assert_eq!(
             chord_strokes(&parse_vk("ctrl+shift+t").unwrap()),
-            vec![k(VK_CONTROL, false), k(VK_SHIFT, false), k(0x54, false), k(0x54, true), k(VK_SHIFT, true), k(VK_CONTROL, true)]
+            vec![
+                k(VK_CONTROL, false),
+                k(VK_SHIFT, false),
+                k(0x54, false),
+                k(0x54, true),
+                k(VK_SHIFT, true),
+                k(VK_CONTROL, true)
+            ]
         );
-        assert_eq!(chord_strokes(&parse_vk("escape").unwrap()), vec![k(0x1B, false), k(0x1B, true)]);
-        assert_eq!(chord_strokes(&parse_vk("win+r").unwrap())[0], k(VK_LWIN, false));
+        assert_eq!(
+            chord_strokes(&parse_vk("escape").unwrap()),
+            vec![k(0x1B, false), k(0x1B, true)]
+        );
+        assert_eq!(
+            chord_strokes(&parse_vk("win+r").unwrap())[0],
+            k(VK_LWIN, false)
+        );
         // Every down has its up.
         for combo in ["cmd+alt+shift+win+f5", "a", "ctrl++"] {
             let s = chord_strokes(&parse_vk(combo).unwrap());
-            let downs = s.iter().filter(|s| matches!(s, Stroke::Key { up: false, .. })).count();
+            let downs = s
+                .iter()
+                .filter(|s| matches!(s, Stroke::Key { up: false, .. }))
+                .count();
             assert_eq!(downs * 2, s.len(), "{combo}");
         }
     }
@@ -721,17 +940,48 @@ mod tests {
         let u = |unit, up| Stroke::Unit { unit, up };
         assert_eq!(
             text_strokes("é\r\n\tb"),
-            vec![u(0xE9, false), u(0xE9, true), k(0x0D, false), k(0x0D, true), k(0x09, false), k(0x09, true), u(0x62, false), u(0x62, true)]
+            vec![
+                u(0xE9, false),
+                u(0xE9, true),
+                k(0x0D, false),
+                k(0x0D, true),
+                k(0x09, false),
+                k(0x09, true),
+                u(0x62, false),
+                u(0x62, true)
+            ]
         );
         // A character beyond the BMP goes as its surrogate pair, each unit down and up.
-        assert_eq!(text_strokes("😀"), vec![u(0xD83D, false), u(0xD83D, true), u(0xDE00, false), u(0xDE00, true)]);
-        assert_eq!(text_strokes("a\rb").len(), 6, "a lone carriage return presses Return too");
+        assert_eq!(
+            text_strokes("😀"),
+            vec![
+                u(0xD83D, false),
+                u(0xD83D, true),
+                u(0xDE00, false),
+                u(0xDE00, true)
+            ]
+        );
+        assert_eq!(
+            text_strokes("a\rb").len(),
+            6,
+            "a lone carriage return presses Return too"
+        );
         assert!(text_strokes("").is_empty());
     }
 
     #[test]
     fn navigation_keys_are_extended_and_letters_are_not() {
-        for name in ["left", "right", "up", "down", "home", "end", "pageup", "pagedown", "forwarddelete"] {
+        for name in [
+            "left",
+            "right",
+            "up",
+            "down",
+            "home",
+            "end",
+            "pageup",
+            "pagedown",
+            "forwarddelete",
+        ] {
             assert!(is_extended(keys::vk(name).unwrap()), "{name}");
         }
         for name in ["a", "return", "delete", "escape", "f5", "space", "tab"] {
@@ -753,37 +1003,115 @@ mod tests {
 
     #[test]
     fn the_window_list_keeps_what_a_click_could_land_on() {
-        let app = || Raw { visible: true, cloaked: false, iconic: false, ex_style: 0, class: "Chrome_WidgetWin_1".into(), w: 1200.0, h: 800.0 };
+        let app = || Raw {
+            visible: true,
+            cloaked: false,
+            iconic: false,
+            ex_style: 0,
+            class: "Chrome_WidgetWin_1".into(),
+            w: 1200.0,
+            h: 800.0,
+        };
         assert!(listed(&app()));
-        assert!(!listed(&Raw { visible: false, ..app() }), "hidden");
-        assert!(!listed(&Raw { cloaked: true, ..app() }), "on another virtual desktop");
-        assert!(!listed(&Raw { iconic: true, ..app() }), "minimised");
-        assert!(!listed(&Raw { ex_style: WS_EX_TRANSPARENT | 0x80000, ..app() }), "click-through overlay");
-        assert!(!listed(&Raw { class: "Progman".into(), ..app() }), "the desktop");
-        assert!(!listed(&Raw { class: "WorkerW".into(), ..app() }), "the desktop's wallpaper layer");
+        assert!(
+            !listed(&Raw {
+                visible: false,
+                ..app()
+            }),
+            "hidden"
+        );
+        assert!(
+            !listed(&Raw {
+                cloaked: true,
+                ..app()
+            }),
+            "on another virtual desktop"
+        );
+        assert!(
+            !listed(&Raw {
+                iconic: true,
+                ..app()
+            }),
+            "minimised"
+        );
+        assert!(
+            !listed(&Raw {
+                ex_style: WS_EX_TRANSPARENT | 0x80000,
+                ..app()
+            }),
+            "click-through overlay"
+        );
+        assert!(
+            !listed(&Raw {
+                class: "Progman".into(),
+                ..app()
+            }),
+            "the desktop"
+        );
+        assert!(
+            !listed(&Raw {
+                class: "WorkerW".into(),
+                ..app()
+            }),
+            "the desktop's wallpaper layer"
+        );
         assert!(!listed(&Raw { w: 1.0, ..app() }), "a sliver");
         // Tool windows (menus, popovers, the taskbar) stay: a click on them doesn't reach what's
         // behind, and Trek's own popovers must count as Trek's.
-        assert!(listed(&Raw { ex_style: 0x80 /* WS_EX_TOOLWINDOW */, ..app() }));
-        assert!(listed(&Raw { ex_style: 0x80000 /* WS_EX_LAYERED */, ..app() }));
+        assert!(listed(&Raw {
+            ex_style: 0x80, /* WS_EX_TOOLWINDOW */
+            ..app()
+        }));
+        assert!(listed(&Raw {
+            ex_style: 0x80000, /* WS_EX_LAYERED */
+            ..app()
+        }));
     }
 
     #[test]
     fn apps_resolve_by_start_menu_name_then_app_paths_then_as_given() {
-        let shortcut = |name: &str| (name.eq_ignore_ascii_case("visual studio code")).then(|| r"C:\Start\Visual Studio Code.lnk".to_string());
-        let app_path = |exe: &str| (exe.eq_ignore_ascii_case("chrome.exe")).then(|| r"C:\Chrome\chrome.exe".to_string());
-        assert_eq!(resolve_app("Visual Studio Code", shortcut, app_path), r"C:\Start\Visual Studio Code.lnk");
-        assert_eq!(resolve_app("chrome", shortcut, app_path), r"C:\Chrome\chrome.exe");
-        assert_eq!(resolve_app("chrome.exe", shortcut, app_path), r"C:\Chrome\chrome.exe");
-        assert_eq!(resolve_app("notepad", shortcut, app_path), "notepad", "left to PATH");
+        let shortcut = |name: &str| {
+            (name.eq_ignore_ascii_case("visual studio code"))
+                .then(|| r"C:\Start\Visual Studio Code.lnk".to_string())
+        };
+        let app_path = |exe: &str| {
+            (exe.eq_ignore_ascii_case("chrome.exe")).then(|| r"C:\Chrome\chrome.exe".to_string())
+        };
+        assert_eq!(
+            resolve_app("Visual Studio Code", shortcut, app_path),
+            r"C:\Start\Visual Studio Code.lnk"
+        );
+        assert_eq!(
+            resolve_app("chrome", shortcut, app_path),
+            r"C:\Chrome\chrome.exe"
+        );
+        assert_eq!(
+            resolve_app("chrome.exe", shortcut, app_path),
+            r"C:\Chrome\chrome.exe"
+        );
+        assert_eq!(
+            resolve_app("notepad", shortcut, app_path),
+            "notepad",
+            "left to PATH"
+        );
         // Paths and URIs go as given, never looked up.
-        assert_eq!(resolve_app(r"C:\Tools\app.exe", shortcut, app_path), r"C:\Tools\app.exe");
-        assert_eq!(resolve_app("ms-settings:display", shortcut, app_path), "ms-settings:display");
-        assert_eq!(resolve_app("https://example.com", shortcut, app_path), "https://example.com");
+        assert_eq!(
+            resolve_app(r"C:\Tools\app.exe", shortcut, app_path),
+            r"C:\Tools\app.exe"
+        );
+        assert_eq!(
+            resolve_app("ms-settings:display", shortcut, app_path),
+            "ms-settings:display"
+        );
+        assert_eq!(
+            resolve_app("https://example.com", shortcut, app_path),
+            "https://example.com"
+        );
         assert!(shell_error(2).contains("no app"));
         assert!(shell_error(31).contains("nothing is set to open it"));
         // SE_ERR_SHARE (26) is a file in use; SE_ERR_DLLNOTFOUND (32) a missing library.
-        assert!(shell_error(26).contains("in use") && shell_error(32).contains("library"));    }
+        assert!(shell_error(26).contains("in use") && shell_error(32).contains("library"));
+    }
 
     /// Lists the windows on screen and captures the primary display: nothing else, and no input.
     /// Run by hand: `cargo test -p trek-mcp -- --ignored --exact desktop::windows::tests::smoke_lists_windows_and_captures_the_screen --nocapture`.
@@ -792,29 +1120,55 @@ mod tests {
     fn smoke_lists_windows_and_captures_the_screen() {
         let desktop = Win::default();
         let display = desktop.display();
-        assert!(display.width >= 640.0 && display.height >= 480.0, "{display:?}");
+        assert!(
+            display.width >= 640.0 && display.height >= 480.0,
+            "{display:?}"
+        );
         let windows = desktop.windows().unwrap();
         assert!(!windows.is_empty(), "something is on screen");
         for w in &windows {
-            eprintln!("{:>16} {:>6} {:>6}x{:<6} at {:>6},{:<6} {}", w.owner, w.pid, w.w, w.h, w.x, w.y, w.title);
+            eprintln!(
+                "{:>16} {:>6} {:>6}x{:<6} at {:>6},{:<6} {}",
+                w.owner, w.pid, w.w, w.h, w.x, w.y, w.title
+            );
         }
         assert!(windows.iter().all(|w| w.w >= 2.0 && w.h >= 2.0));
         let front = desktop.key_window().unwrap();
         eprintln!("in front: {:?}", front.map(|w| w.owner));
         let shot = desktop.capture(None, crate::util::MAX_IMAGE_SIDE).unwrap();
-        let (fw, fh) = fit(display.width as u32, display.height as u32, crate::util::MAX_IMAGE_SIDE);
+        let (fw, fh) = fit(
+            display.width as u32,
+            display.height as u32,
+            crate::util::MAX_IMAGE_SIDE,
+        );
         assert_eq!((shot.width, shot.height), (fw, fh));
         use base64::Engine as _;
-        let png = base64::engine::general_purpose::STANDARD.decode(&shot.png_base64).unwrap();
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(&shot.png_base64)
+            .unwrap();
         assert_eq!(crate::util::png_size(&png), Some((fw, fh)));
         // Not a blank frame: a real screen has more than one colour.
-        let mut reader = png::Decoder::new(std::io::Cursor::new(&png)).read_info().unwrap();
+        let mut reader = png::Decoder::new(std::io::Cursor::new(&png))
+            .read_info()
+            .unwrap();
         let mut buf = vec![0; reader.output_buffer_size().unwrap()];
         reader.next_frame(&mut buf).unwrap();
-        assert!(buf.chunks_exact(3).any(|p| p != &buf[..3]), "the capture is one flat colour");
+        assert!(
+            buf.chunks_exact(3).any(|p| p != &buf[..3]),
+            "the capture is one flat colour"
+        );
         // A zoom is captured at the screen's own resolution.
-        let zoom = desktop.capture(Some((0.0, 0.0, 300.0, 200.0)), crate::util::MAX_IMAGE_SIDE).unwrap();
+        let zoom = desktop
+            .capture(Some((0.0, 0.0, 300.0, 200.0)), crate::util::MAX_IMAGE_SIDE)
+            .unwrap();
         assert_eq!((zoom.width, zoom.height), (300, 200));
-        eprintln!("display {}x{}, screenshot {}x{} ({} KB)", display.width, display.height, shot.width, shot.height, png.len() / 1024);
+        eprintln!(
+            "display {}x{}, screenshot {}x{} ({} KB)",
+            display.width,
+            display.height,
+            shot.width,
+            shot.height,
+            png.len() / 1024
+        );
     }
 }

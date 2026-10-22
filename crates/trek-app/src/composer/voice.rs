@@ -31,7 +31,11 @@ pub(crate) enum Event {
     /// The take is recording. `live`: partial text will come (the audio-buffer request); else
     /// the text arrives once, after ✓ (the recorded-file fallback). `value` and `cursor` are the
     /// composer's text and caret at that moment: the preview splices into them.
-    Started { live: bool, value: String, cursor: usize },
+    Started {
+        live: bool,
+        value: String,
+        cursor: usize,
+    },
     /// The recognizer's best text for the whole take so far.
     Partial(String),
     /// The recognizer is done; this is its text.
@@ -86,7 +90,15 @@ pub(crate) struct Voice {
 
 impl Default for Voice {
     fn default() -> Self {
-        Self { phase: Phase::Idle, live: false, interim: String::new(), value: String::new(), cursor: 0, levels: Levels::default(), take: 0 }
+        Self {
+            phase: Phase::Idle,
+            live: false,
+            interim: String::new(),
+            value: String::new(),
+            cursor: 0,
+            levels: Levels::default(),
+            take: 0,
+        }
     }
 }
 
@@ -102,9 +114,19 @@ impl Voice {
             (Idle, Event::Mic) => {
                 self.phase = Asking;
                 self.take += 1;
-                Effect { ask: true, ..Default::default() }
+                Effect {
+                    ask: true,
+                    ..Default::default()
+                }
             }
-            (Idle | Asking, Event::Started { live, value, cursor }) => {
+            (
+                Idle | Asking,
+                Event::Started {
+                    live,
+                    value,
+                    cursor,
+                },
+            ) => {
                 self.phase = Listening;
                 self.live = live;
                 self.interim.clear();
@@ -118,11 +140,18 @@ impl Voice {
             }
             (Asking, Event::Failed(why)) => {
                 self.phase = Idle;
-                Effect { end: true, toast: Some(why), ..Default::default() }
+                Effect {
+                    end: true,
+                    toast: Some(why),
+                    ..Default::default()
+                }
             }
             (Asking, Event::Cancel) => {
                 self.phase = Idle;
-                Effect { end: true, ..Default::default() }
+                Effect {
+                    end: true,
+                    ..Default::default()
+                }
             }
             (Listening | Finishing, Event::Partial(text)) => {
                 self.interim = text;
@@ -130,12 +159,19 @@ impl Voice {
             }
             (Listening, Event::Mic | Event::Confirm) => {
                 self.phase = Finishing;
-                Effect { finish: true, ..Default::default() }
+                Effect {
+                    finish: true,
+                    ..Default::default()
+                }
             }
             (Listening | Finishing, Event::Cancel) => self.close(None, None),
             // The recognizer ended on its own, or settled after ✓: its text goes in.
             (Listening | Finishing, Event::Final(text)) => {
-                let text = if text.trim().is_empty() { std::mem::take(&mut self.interim) } else { text };
+                let text = if text.trim().is_empty() {
+                    std::mem::take(&mut self.interim)
+                } else {
+                    text
+                };
                 self.close(Some(text), None)
             }
             (Finishing, Event::GraceOver) if self.live => {
@@ -156,7 +192,10 @@ impl Voice {
             }
             (Listening, Event::Background) => {
                 let text = std::mem::take(&mut self.interim);
-                self.close(Some(text), Some("Dictation stopped when the window went to the background.".into()))
+                self.close(
+                    Some(text),
+                    Some("Dictation stopped when the window went to the background.".into()),
+                )
             }
             _ => Effect::default(),
         }
@@ -170,7 +209,12 @@ impl Voice {
         let nothing = text.as_ref().is_some_and(|t| t.trim().is_empty());
         let commit = text.filter(|t| !t.trim().is_empty());
         let toast = toast.or_else(|| nothing.then(|| "Nothing heard.".to_string()));
-        Effect { end: true, commit, toast, ..Default::default() }
+        Effect {
+            end: true,
+            commit,
+            toast,
+            ..Default::default()
+        }
     }
 
     /// The text area while listening: the composer's text with what's heard so far at the
@@ -194,7 +238,12 @@ pub(crate) fn spaced(value: &str, cursor: usize, text: &str) -> String {
     let cursor = cursor.min(value.len());
     let left = cursor > 0 && !value[..cursor].ends_with(char::is_whitespace);
     let right = cursor < value.len() && !value[cursor..].starts_with(char::is_whitespace);
-    format!("{}{}{}", if left { " " } else { "" }, text.trim(), if right { " " } else { "" })
+    format!(
+        "{}{}{}",
+        if left { " " } else { "" },
+        text.trim(),
+        if right { " " } else { "" }
+    )
 }
 
 /// The waveform's history: one smoothed level per tick, newest last, each 0 (silence, a dot)
@@ -212,7 +261,10 @@ pub(crate) const PITCH: f32 = 4.;
 
 impl Default for Levels {
     fn default() -> Self {
-        Self { bars: VecDeque::with_capacity(KEPT), now: 0. }
+        Self {
+            bars: VecDeque::with_capacity(KEPT),
+            now: 0.,
+        }
     }
 }
 
@@ -220,7 +272,11 @@ impl Levels {
     /// Take one reading (0 to 1, the loudest since the last tick). Rises quickly and falls
     /// back more slowly, so syllables read as bursts rather than flicker.
     pub fn push(&mut self, raw: f32) {
-        let raw = if raw.is_finite() { raw.clamp(0., 1.) } else { 0. };
+        let raw = if raw.is_finite() {
+            raw.clamp(0., 1.)
+        } else {
+            0.
+        };
         let rate = if raw > self.now { 0.7 } else { 0.35 };
         self.now += (raw - self.now) * rate;
         if self.now < 0.01 {
@@ -254,11 +310,23 @@ pub(crate) fn waveform(levels: Vec<f32>, color: Hsla) -> impl IntoElement {
             for (i, level) in heard.take(slots).enumerate() {
                 let x = right - (i as f32 + 1.) * PITCH;
                 let from_left = x - f32::from(bounds.origin.x);
-                let alpha = if fade > 0. { (from_left / fade).clamp(0., 1.) } else { 1. };
+                let alpha = if fade > 0. {
+                    (from_left / fade).clamp(0., 1.)
+                } else {
+                    1.
+                };
                 let bar = (2. + level * (h - 2.)).min(h);
-                let shade = if level > 0. { color } else { color.opacity(0.45) };
+                let shade = if level > 0. {
+                    color
+                } else {
+                    color.opacity(0.45)
+                };
                 window.paint_quad(
-                    fill(Bounds::new(point(px(x), px(mid - bar / 2.)), size(px(2.), px(bar))), shade.opacity(shade.a * alpha)).corner_radii(px(1.)),
+                    fill(
+                        Bounds::new(point(px(x), px(mid - bar / 2.)), size(px(2.), px(bar))),
+                        shade.opacity(shade.a * alpha),
+                    )
+                    .corner_radii(px(1.)),
                 );
             }
         },

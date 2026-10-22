@@ -48,7 +48,9 @@ pub const WORD_EVERY: u64 = 4;
 /// [`WORD_EVERY`] seconds, and `seed` (the thread) keeps threads from moving in lockstep.
 pub fn word(seed: &str, secs: u64) -> &'static str {
     let n = WORDS.len() as u64;
-    let h = seed.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    let h = seed.bytes().fold(0xcbf29ce484222325u64, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x100000001b3)
+    });
     // Each thread strides through the list from its own start, by a stride that shares no factor
     // with its length: every word comes round once a lap, never twice in a row.
     let gcd = |mut a: u64, mut b: u64| {
@@ -57,7 +59,10 @@ pub fn word(seed: &str, secs: u64) -> &'static str {
         }
         a
     };
-    let stride = (1..n).map(|k| (h >> 7).wrapping_add(k) % n).find(|&s| s > 1 && gcd(s, n) == 1).unwrap_or(1);
+    let stride = (1..n)
+        .map(|k| (h >> 7).wrapping_add(k) % n)
+        .find(|&s| s > 1 && gcd(s, n) == 1)
+        .unwrap_or(1);
     let i = (h % n + (secs / WORD_EVERY) % n * stride) % n;
     WORDS[i as usize]
 }
@@ -91,13 +96,38 @@ const TOP: [&str; 12] = [
 ];
 /// Four-frame walk: near leg forward, passing, far leg forward, passing.
 const LEGS: [[&str; 4]; 4] = [
-    ["....PP.pp.....", "...PP...pp....", "...P.....p....", "..kk.....kk..."],
-    ["....Pppp......", ".....Pp.......", ".....Pp.......", ".....kkk......"],
-    ["....pp.PP.....", "...pp...PP....", "...p.....P....", "..kk.....kk..."],
-    ["....pPPP......", ".....pP.......", ".....pP.......", ".....kkk......"],
+    [
+        "....PP.pp.....",
+        "...PP...pp....",
+        "...P.....p....",
+        "..kk.....kk...",
+    ],
+    [
+        "....Pppp......",
+        ".....Pp.......",
+        ".....Pp.......",
+        ".....kkk......",
+    ],
+    [
+        "....pp.PP.....",
+        "...pp...PP....",
+        "...p.....P....",
+        "..kk.....kk...",
+    ],
+    [
+        "....pPPP......",
+        ".....pP.......",
+        ".....pP.......",
+        ".....kkk......",
+    ],
 ];
 /// Pole from under the grip to the ground: planted ahead on contact frames.
-const POLE: [(f32, f32, f32, f32); 4] = [(10., 9., 13., 15.), (10., 9., 11., 15.), (10., 9., 13., 15.), (10., 9., 11., 15.)];
+const POLE: [(f32, f32, f32, f32); 4] = [
+    (10., 9., 13., 15.),
+    (10., 9., 11., 15.),
+    (10., 9., 13., 15.),
+    (10., 9., 11., 15.),
+];
 
 fn color(c: char) -> Option<u32> {
     Some(match c {
@@ -124,7 +154,8 @@ fn color(c: char) -> Option<u32> {
 /// cost, drawing included, can be measured while Trek stays in the background. A measurement aid,
 /// not a setting.
 pub fn force_active() -> bool {
-    static FORCE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("TREK_FORCE_ACTIVE").is_ok_and(|v| v == "1"));
+    static FORCE: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var("TREK_FORCE_ACTIVE").is_ok_and(|v| v == "1"));
     *FORCE
 }
 
@@ -145,8 +176,22 @@ const STEPS: f32 = 8.;
 /// near the left end. The caller re-renders at [`FPS`] while it wants motion (see `WorkingBar`).
 pub fn trail(phase: f32, gait: f32, still: bool, cx: &App) -> AnyElement {
     let dots = cx.theme().foreground.opacity(0.16);
-    let (pos, frame, right) = if still { (0.06, 1, true) } else { hike(phase, gait) };
-    div().h(px(HEIGHT)).w_full().child(canvas(|_, _, _| {}, move |b, _, window, _| paint(b, pos, frame, right, dots, window)).size_full()).into_any_element()
+    let (pos, frame, right) = if still {
+        (0.06, 1, true)
+    } else {
+        hike(phase, gait)
+    };
+    div()
+        .h(px(HEIGHT))
+        .w_full()
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |b, _, window, _| paint(b, pos, frame, right, dots, window),
+            )
+            .size_full(),
+        )
+        .into_any_element()
 }
 
 /// Where a `phase` (0 to 1) of the way through a lap there and back leaves the hiker: its place
@@ -154,11 +199,19 @@ pub fn trail(phase: f32, gait: f32, still: bool, cx: &App) -> AnyElement {
 pub(crate) fn hike(phase: f32, gait: f32) -> (f32, usize, bool) {
     let t = phase % 1.;
     // Triangle wave: walk right for half the lap, back left for the other half.
-    let (raw, right) = if t < 0.5 { (t * 2., true) } else { (2. - t * 2., false) };
+    let (raw, right) = if t < 0.5 {
+        (t * 2., true)
+    } else {
+        (2. - t * 2., false)
+    };
     // Ease at the ends so the hiker slows to a stop, turns, and sets off again.
     let pos = 0.5 - 0.5 * (std::f32::consts::PI * raw).cos();
     let speed = (std::f32::consts::PI * raw).sin();
-    let frame = if speed < 0.15 { 1 } else { (gait * STEPS) as usize % 4 };
+    let frame = if speed < 0.15 {
+        1
+    } else {
+        (gait * STEPS) as usize % 4
+    };
     (pos, frame, right)
 }
 
@@ -195,7 +248,16 @@ fn paint(b: Bounds<Pixels>, pos: f32, frame: usize, right: bool, dots: Hsla, win
     let dot = ((2. * scale).round() / scale).max(1. / scale);
     let mut x = b.origin.x.as_f32() + 2.;
     while x < b.origin.x.as_f32() + w - 2. {
-        window.paint_quad(fill(Bounds::new(point(px(snap(x, scale)), px(snap(ground - 1., scale))), size(px(dot), px(dot))), dots).corner_radii(px(dot / 2.)));
+        window.paint_quad(
+            fill(
+                Bounds::new(
+                    point(px(snap(x, scale)), px(snap(ground - 1., scale))),
+                    size(px(dot), px(dot)),
+                ),
+                dots,
+            )
+            .corner_radii(px(dot / 2.)),
+        );
         x += 7.;
     }
     let sprite_w = SPRITE_W as f32 * cell_size(scale);
@@ -209,7 +271,13 @@ fn sprite(left: f32, ground: f32, cell_px: f32, frame: usize, right: bool, windo
     let top = ground - SPRITE_H as f32 * cell_px;
     let cell = |x: f32, y: f32, rgb: u32, window: &mut Window| {
         let col = if right { x } else { SPRITE_W as f32 - 1. - x };
-        window.paint_quad(fill(Bounds::new(point(px(left + col * cell_px), px(top + y * cell_px)), size(px(cell_px), px(cell_px))), gpui_kit::rgb(rgb)));
+        window.paint_quad(fill(
+            Bounds::new(
+                point(px(left + col * cell_px), px(top + y * cell_px)),
+                size(px(cell_px), px(cell_px)),
+            ),
+            gpui_kit::rgb(rgb),
+        ));
     };
     for (y, row) in TOP.iter().chain(LEGS[frame].iter()).enumerate() {
         for (x, ch) in row.chars().enumerate() {
@@ -222,7 +290,12 @@ fn sprite(left: f32, ground: f32, cell_px: f32, frame: usize, right: bool, windo
     let n = (y1 - y0) as usize;
     for i in 0..=n {
         let f = i as f32 / n as f32;
-        cell((x0 + (x1 - x0) * f).round(), y0 + i as f32, 0xA8A29E, window);
+        cell(
+            (x0 + (x1 - x0) * f).round(),
+            y0 + i as f32,
+            0xA8A29E,
+            window,
+        );
     }
 }
 
@@ -260,22 +333,40 @@ mod tests {
             // The ends of the trail at the lap's ends: left at the start, right halfway, home at
             // a whole lap — standing at each.
             let (pos, frame, right) = at(0.);
-            assert!(pos.abs() < 1e-4 && right && frame == 1, "standing at the left end, facing out");
+            assert!(
+                pos.abs() < 1e-4 && right && frame == 1,
+                "standing at the left end, facing out"
+            );
             let (pos, frame, right) = at(secs * 0.5);
-            assert!((pos - 1.).abs() < 1e-4 && !right && frame == 1, "standing at the right end, turned round");
+            assert!(
+                (pos - 1.).abs() < 1e-4 && !right && frame == 1,
+                "standing at the right end, turned round"
+            );
             let (pos, frame, right) = at(secs);
-            assert!(pos.abs() < 1e-4 && right && frame == 1, "back where it started");
+            assert!(
+                pos.abs() < 1e-4 && right && frame == 1,
+                "back where it started"
+            );
             // In between it's on the trail in one of the four stride poses.
             for i in 0..400 {
                 let (pos, frame, _) = at(i as f32 * secs / 400.);
-                assert!((0. ..=1.).contains(&pos) && frame < 4, "on the trail, in stride");
+                assert!(
+                    (0. ..=1.).contains(&pos) && frame < 4,
+                    "on the trail, in stride"
+                );
             }
             // And lap after lap the same walk comes round.
             for i in 0..50 {
                 let clock = i as f32 * secs / 50.;
                 let (a, b) = (at(clock), at(clock + secs));
-                assert!((a.0 - b.0).abs() < 1e-4 && a.2 == b.2, "lap {i}: same place, same way");
-                assert!((a.1 + 4 - b.1) % 4 <= 1 || (b.1 + 4 - a.1) % 4 <= 1, "lap {i}: legs within a pose");
+                assert!(
+                    (a.0 - b.0).abs() < 1e-4 && a.2 == b.2,
+                    "lap {i}: same place, same way"
+                );
+                assert!(
+                    (a.1 + 4 - b.1) % 4 <= 1 || (b.1 + 4 - a.1) % 4 <= 1,
+                    "lap {i}: legs within a pose"
+                );
             }
         }
         // The wait's pace is a visibly different lap, not the working walk again.
@@ -292,23 +383,46 @@ mod tests {
     fn the_sprite_keeps_its_size_on_a_retina_screen() {
         assert_eq!(super::cell_size(2.), 1.5, "1.5 pt is 3 device pixels at 2x");
         let (left, feet, cell) = super::grid(40.2, 25., 2.);
-        assert_eq!((left, feet, cell), (40.5, 25., 1.5), "steps by 1.5 pt, as before");
+        assert_eq!(
+            (left, feet, cell),
+            (40.5, 25., 1.5),
+            "steps by 1.5 pt, as before"
+        );
     }
 
     #[test]
     fn the_sprite_lands_on_whole_device_pixels_at_every_scale() {
         for scale in [1., 1.25, 1.5, 1.75, 2., 2.25, 2.5, 3.] {
             let cell = super::cell_size(scale);
-            assert!(whole(cell, scale) && cell * scale >= 1., "{scale}: a pixel of the art is {} device px", cell * scale);
+            assert!(
+                whole(cell, scale) && cell * scale >= 1.,
+                "{scale}: a pixel of the art is {} device px",
+                cell * scale
+            );
             // It fits the trail it's drawn on, and isn't far from the art's size.
-            assert!(cell * super::SPRITE_H as f32 <= super::HEIGHT, "{scale}: {} pt tall in a {} pt trail", cell * super::SPRITE_H as f32, super::HEIGHT);
-            assert!(cell >= super::PX * 0.6 && cell <= super::PX * 1.4, "{scale}: a pixel of {cell} pt for {} pt", super::PX);
+            assert!(
+                cell * super::SPRITE_H as f32 <= super::HEIGHT,
+                "{scale}: {} pt tall in a {} pt trail",
+                cell * super::SPRITE_H as f32,
+                super::HEIGHT
+            );
+            assert!(
+                cell >= super::PX * 0.6 && cell <= super::PX * 1.4,
+                "{scale}: a pixel of {cell} pt for {} pt",
+                super::PX
+            );
             // Wherever the hiker is on the trail, edge and feet are on device pixels too.
             for i in 0..200 {
                 let (left, feet, c) = super::grid(4. + i as f32 * 1.37, 25.3, scale);
-                assert!(whole(left, scale) && whole(feet, scale) && c == cell, "{scale}: left {left} feet {feet}");
+                assert!(
+                    whole(left, scale) && whole(feet, scale) && c == cell,
+                    "{scale}: left {left} feet {feet}"
+                );
                 // Each of the art's pixels begins on one.
-                assert!(whole(left + 13. * c, scale) && whole(feet - 16. * c, scale), "{scale}: art pixels at {left}, {feet}");
+                assert!(
+                    whole(left + 13. * c, scale) && whole(feet - 16. * c, scale),
+                    "{scale}: art pixels at {left}, {feet}"
+                );
             }
         }
     }

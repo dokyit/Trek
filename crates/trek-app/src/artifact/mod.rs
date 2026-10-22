@@ -82,14 +82,30 @@ impl Doc {
 
     /// The player for the video file at `path`, titled `title`; `source` is what named it.
     pub fn video(path: std::path::PathBuf, title: String, source: &str) -> Self {
-        Self { html: core::VIDEO_HTML.into(), hash: core::content_hash(&path.to_string_lossy()), title: Some(title), hosts: Vec::new(), source: source.into(), media: Some(path), remote: None }
+        Self {
+            html: core::VIDEO_HTML.into(),
+            hash: core::content_hash(&path.to_string_lossy()),
+            title: Some(title),
+            hosts: Vec::new(),
+            source: source.into(),
+            media: Some(path),
+            remote: None,
+        }
     }
 
     /// The player for a video on the web (`url`, from `trek_core::media::remote_video`).
     pub fn remote_video(url: String, title: String) -> Self {
         let html = core::remote_video_html(&url);
         let hosts = core::hosts(&html, 1);
-        Self { hash: core::content_hash(&html), html: html.into(), title: Some(title), hosts, source: url.as_str().into(), media: None, remote: Some(url) }
+        Self {
+            hash: core::content_hash(&html),
+            html: html.into(),
+            title: Some(title),
+            hosts,
+            source: url.as_str().into(),
+            media: None,
+            remote: Some(url),
+        }
     }
 
     fn is_video(&self) -> bool {
@@ -101,9 +117,16 @@ impl Doc {
 enum Block {
     Ready(Arc<Doc>),
     /// Its fence hasn't closed: the title so far, how much is written, the block as written.
-    Building { title: Option<String>, bytes: usize, source: Arc<str> },
+    Building {
+        title: Option<String>,
+        bytes: usize,
+        source: Arc<str>,
+    },
     /// Closed, but too big to run.
-    TooBig { bytes: usize, source: Arc<str> },
+    TooBig {
+        bytes: usize,
+        source: Arc<str>,
+    },
 }
 
 /// Claims every `trek-html` fence in an answer. `live`: the answer is still being written, so a
@@ -125,8 +148,14 @@ impl MarkdownPlugin for ArtifactPlugin {
 
     // Runs on each delta while the block is the answer's last: a title scan and a hash, off the
     // main thread.
-    fn parse(&self, node: &markdown_ast::Node, cx: &MarkdownParseContext<'_>) -> Option<MarkdownNode> {
-        let markdown_ast::Node::Code(code) = node else { return None };
+    fn parse(
+        &self,
+        node: &markdown_ast::Node,
+        cx: &MarkdownParseContext<'_>,
+    ) -> Option<MarkdownNode> {
+        let markdown_ast::Node::Code(code) = node else {
+            return None;
+        };
         if code.lang.as_deref() != Some(core::FENCE) {
             return None;
         }
@@ -134,14 +163,37 @@ impl MarkdownPlugin for ArtifactPlugin {
         let html = code.value.as_str();
         let title = core::title(html);
         let block = if !core::fence_closed(source) {
-            Block::Building { title: title.clone(), bytes: html.len(), source: source.into() }
+            Block::Building {
+                title: title.clone(),
+                bytes: html.len(),
+                source: source.into(),
+            }
         } else if html.len() > core::MAX_BYTES {
-            Block::TooBig { bytes: html.len(), source: source.into() }
+            Block::TooBig {
+                bytes: html.len(),
+                source: source.into(),
+            }
         } else {
-            Block::Ready(Arc::new(Doc { html: html.into(), hash: core::content_hash(html), title: title.clone(), hosts: core::hosts(html, 3), source: source.into(), media: None, remote: None }))
+            Block::Ready(Arc::new(Doc {
+                html: html.into(),
+                hash: core::content_hash(html),
+                title: title.clone(),
+                hosts: core::hosts(html, 3),
+                source: source.into(),
+                media: None,
+                remote: None,
+            }))
         };
-        let text = format!("Interactive artifact{}", title.map(|t| format!(": {t}")).unwrap_or_default());
-        Some(MarkdownNode::new(PLUGIN, block).text(text.clone()).markdown(source.to_string()).accessibility_label(text))
+        let text = format!(
+            "Interactive artifact{}",
+            title.map(|t| format!(": {t}")).unwrap_or_default()
+        );
+        Some(
+            MarkdownNode::new(PLUGIN, block)
+                .text(text.clone())
+                .markdown(source.to_string())
+                .accessibility_label(text),
+        )
     }
 
     fn render(&self, node: &MarkdownNode, window: &mut Window, cx: &mut App) -> impl IntoElement {
@@ -151,9 +203,27 @@ impl MarkdownPlugin for ArtifactPlugin {
             Some(Block::Ready(doc)) if on => card(doc, key, window, cx),
             Some(Block::Ready(doc)) => as_code(&doc.source, key, self.size, cx),
             Some(Block::Building { source, .. }) if !on => as_code(source, key, self.size, cx),
-            Some(Block::Building { title, bytes, .. }) if self.live => building(title.as_deref(), *bytes, key, window, cx),
-            Some(Block::Building { source, .. }) => note("the answer ended before the block was finished", source, key, self.size, cx),
-            Some(Block::TooBig { bytes, source }) => note(&format!("it's {} KB, past the {} KB Trek runs", bytes / 1024, core::MAX_BYTES / 1024), source, key, self.size, cx),
+            Some(Block::Building { title, bytes, .. }) if self.live => {
+                building(title.as_deref(), *bytes, key, window, cx)
+            }
+            Some(Block::Building { source, .. }) => note(
+                "the answer ended before the block was finished",
+                source,
+                key,
+                self.size,
+                cx,
+            ),
+            Some(Block::TooBig { bytes, source }) => note(
+                &format!(
+                    "it's {} KB, past the {} KB Trek runs",
+                    bytes / 1024,
+                    core::MAX_BYTES / 1024
+                ),
+                source,
+                key,
+                self.size,
+                cx,
+            ),
             None => return div().into_any_element(),
         };
         // Padding, not margin: a margin here collapses through the Markdown block it sits in.
@@ -168,21 +238,73 @@ impl MarkdownPlugin for ArtifactPlugin {
 /// still reach Trek; Esc that the page doesn't use gives the keys back (`Message::Escape`).
 pub fn key_bindings() -> Vec<KeyBinding> {
     let editing: &[&str] = if cfg!(target_os = "macos") {
-        &["cmd-c", "cmd-v", "cmd-x", "cmd-a", "cmd-z", "cmd-shift-z", "cmd-f", "cmd-g", "cmd-shift-g"]
+        &[
+            "cmd-c",
+            "cmd-v",
+            "cmd-x",
+            "cmd-a",
+            "cmd-z",
+            "cmd-shift-z",
+            "cmd-f",
+            "cmd-g",
+            "cmd-shift-g",
+        ]
     } else {
-        &["ctrl-c", "ctrl-v", "ctrl-x", "ctrl-a", "ctrl-z", "ctrl-y", "ctrl-shift-z", "ctrl-f"]
+        &[
+            "ctrl-c",
+            "ctrl-v",
+            "ctrl-x",
+            "ctrl-a",
+            "ctrl-z",
+            "ctrl-y",
+            "ctrl-shift-z",
+            "ctrl-f",
+        ]
     };
-    let plain = ["escape", "enter", "space", "tab", "shift-tab", "backspace", "delete", "up", "down", "left", "right", "home", "end", "pageup", "pagedown"];
-    editing.iter().copied().chain(plain).map(|k| KeyBinding::new(k, NoAction {}, Some("Artifact"))).collect()
+    let plain = [
+        "escape",
+        "enter",
+        "space",
+        "tab",
+        "shift-tab",
+        "backspace",
+        "delete",
+        "up",
+        "down",
+        "left",
+        "right",
+        "home",
+        "end",
+        "pageup",
+        "pagedown",
+    ];
+    editing
+        .iter()
+        .copied()
+        .chain(plain)
+        .map(|k| KeyBinding::new(k, NoAction {}, Some("Artifact")))
+        .collect()
 }
 
 /// Interactive artifacts are on (Settings › General).
 fn enabled(cx: &App) -> bool {
-    cx.try_global::<crate::workspace::GlobalWorkspace>().is_none_or(|ws| ws.0.read(cx).settings.general.interactive_artifacts)
+    cx.try_global::<crate::workspace::GlobalWorkspace>()
+        .is_none_or(|ws| ws.0.read(cx).settings.general.interactive_artifacts)
 }
 
 fn as_code(source: &str, key: usize, size: Pixels, cx: &App) -> AnyElement {
-    crate::md::keyed(SharedString::from(format!("artifact-code-{key}")), source.to_string(), None, None, size, false, false, None, cx).into_any_element()
+    crate::md::keyed(
+        SharedString::from(format!("artifact-code-{key}")),
+        source.to_string(),
+        None,
+        None,
+        size,
+        false,
+        false,
+        None,
+        cx,
+    )
+    .into_any_element()
 }
 
 /// A block that can't run: a short note saying why, over it as written.
@@ -208,7 +330,18 @@ fn note(reason: &str, source: &str, key: usize, size: Pixels, cx: &App) -> AnyEl
                 .bg(crate::palette::amber(cx).opacity(if look.dark { 0.06 } else { 0.07 }))
                 .text_size(px(12.))
                 .line_height(relative(1.45))
-                .child(div().flex_none().h(px(12. * 1.45)).flex().items_center().child(Icon::new(IconName::TriangleAlert).size(px(13.)).text_color(crate::palette::amber(cx))))
+                .child(
+                    div()
+                        .flex_none()
+                        .h(px(12. * 1.45))
+                        .flex()
+                        .items_center()
+                        .child(
+                            Icon::new(IconName::TriangleAlert)
+                                .size(px(13.))
+                                .text_color(crate::palette::amber(cx)),
+                        ),
+                )
                 .child(div().flex_1().min_w_0().text_color(look.muted).child(text)),
         )
         .child(as_code(source, key, size, cx))
@@ -220,11 +353,25 @@ fn note(reason: &str, source: &str, key: usize, size: Pixels, cx: &App) -> AnyEl
 /// "Building…", breathing: the corner of a card still being written.
 fn building_label(phase: f32, look: &Look) -> AnyElement {
     let breath = 0.55 + 0.45 * (phase * std::f32::consts::TAU).cos().abs();
-    h_flex().flex_none().h(px(24.)).pr_1().text_size(px(11.)).text_color(look.muted).opacity(breath).child("Building…").into_any_element()
+    h_flex()
+        .flex_none()
+        .h(px(24.))
+        .pr_1()
+        .text_size(px(11.))
+        .text_color(look.muted)
+        .opacity(breath)
+        .child("Building…")
+        .into_any_element()
 }
 
 /// The card while the agent is still writing the document: nothing runs until it's whole.
-fn building(title: Option<&str>, bytes: usize, key: usize, window: &mut Window, cx: &mut App) -> AnyElement {
+fn building(
+    title: Option<&str>,
+    bytes: usize,
+    key: usize,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     let look = Look::of(cx);
     let motion = crate::visualization::motion(cx);
     let phase = crate::visualization::shimmer(motion, window);
@@ -232,29 +379,75 @@ fn building(title: Option<&str>, bytes: usize, key: usize, window: &mut Window, 
     let bar = |w: f32, h: f32| div().w(relative(w)).h(px(h)).rounded(px(h / 2.)).bg(stub);
     let title_el = match title {
         Some(t) => title_text(t.to_string(), &look),
-        None => div().h(px(17.)).flex().items_center().child(bar(0.42, 10.)).into_any_element(),
+        None => div()
+            .h(px(17.))
+            .flex()
+            .items_center()
+            .child(bar(0.42, 10.))
+            .into_any_element(),
     };
-    let summary = format!("Interactive · {} KB written; it runs once it's finished", bytes.div_ceil(1024));
+    let summary = format!(
+        "Interactive · {} KB written; it runs once it's finished",
+        bytes.div_ceil(1024)
+    );
     let band = look.fg.opacity(if look.dark { 0.05 } else { 0.055 });
     const SLICES: usize = 16;
-    let sweep = h_flex().absolute().top_0().bottom_0().left(relative(phase * 1.6 - 0.4)).w(relative(0.4)).children((0..SLICES).map(|i| {
-        let k = ((i as f32 + 0.5) / SLICES as f32 * std::f32::consts::PI).sin();
-        div().flex_1().h_full().bg(band.opacity(k * k))
-    }));
-    shell(SharedString::from(format!("artifact-building-{key}")), &look, cx)
-        .aria_label(format!("Interactive artifact being written{}", title.map(|t| format!(": {t}")).unwrap_or_default()))
-        .test_support()
-        .child(header(Lucide::Box, title_el, building_label(phase, &look), summary_text(summary, &look), &look))
-        .child(div().w_full().px_4().pb_4().child(crate::visualization::inset(&look).relative().overflow_hidden().w_full().h(px(200.)).when(motion, |el| el.child(sweep))))
-        .into_any_element()
+    let sweep = h_flex()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(relative(phase * 1.6 - 0.4))
+        .w(relative(0.4))
+        .children((0..SLICES).map(|i| {
+            let k = ((i as f32 + 0.5) / SLICES as f32 * std::f32::consts::PI).sin();
+            div().flex_1().h_full().bg(band.opacity(k * k))
+        }));
+    shell(
+        SharedString::from(format!("artifact-building-{key}")),
+        &look,
+        cx,
+    )
+    .aria_label(format!(
+        "Interactive artifact being written{}",
+        title.map(|t| format!(": {t}")).unwrap_or_default()
+    ))
+    .test_support()
+    .child(header(
+        Lucide::Box,
+        title_el,
+        building_label(phase, &look),
+        summary_text(summary, &look),
+        &look,
+    ))
+    .child(
+        div().w_full().px_4().pb_4().child(
+            crate::visualization::inset(&look)
+                .relative()
+                .overflow_hidden()
+                .w_full()
+                .h(px(200.))
+                .when(motion, |el| el.child(sweep)),
+        ),
+    )
+    .into_any_element()
 }
 
 /// What the header says under the title: that it's live, and where it reaches.
 fn summary_of(doc: &Doc) -> String {
     if let Some(file) = &doc.media {
-        let kind = file.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
-        let size = std::fs::metadata(file).ok().map(|m| crate::image_preview::file_size(m.len()));
-        return ["Video".to_string(), kind].into_iter().filter(|p| !p.is_empty()).chain(size).collect::<Vec<_>>().join(" · ");
+        let kind = file
+            .extension()
+            .map(|e| e.to_string_lossy().to_uppercase())
+            .unwrap_or_default();
+        let size = std::fs::metadata(file)
+            .ok()
+            .map(|m| crate::image_preview::file_size(m.len()));
+        return ["Video".to_string(), kind]
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .chain(size)
+            .collect::<Vec<_>>()
+            .join(" · ");
     }
     if doc.remote.is_some() {
         return match doc.hosts.first() {
@@ -270,12 +463,21 @@ fn summary_of(doc: &Doc) -> String {
 
 /// A video in a note, played in place in a card; `None` when interactive artifacts are off (the
 /// note shows its file chip instead).
-pub(crate) fn video_card(doc: &Arc<Doc>, key: usize, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
+pub(crate) fn video_card(
+    doc: &Arc<Doc>,
+    key: usize,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<AnyElement> {
     enabled(cx).then(|| card(doc, key, window, cx))
 }
 
 fn card(doc: &Arc<Doc>, key: usize, window: &mut Window, cx: &mut App) -> AnyElement {
-    let state = window.use_keyed_state(SharedString::from(format!("trek-artifact-state-{key}")), cx, |window, cx| ArtifactState::new(doc.clone(), Mode::Inline, window, cx));
+    let state = window.use_keyed_state(
+        SharedString::from(format!("trek-artifact-state-{key}")),
+        cx,
+        |window, cx| ArtifactState::new(doc.clone(), Mode::Inline, window, cx),
+    );
     let css = theme_css(cx);
     let background = card_rgb(cx);
     state.update(cx, |s, cx| s.sync_doc(doc, css, background, cx));
@@ -286,28 +488,69 @@ fn card(doc: &Arc<Doc>, key: usize, window: &mut Window, cx: &mut App) -> AnyEle
     let focus = s.focus.clone();
     let video = doc.media.clone();
     let remote = doc.remote.clone();
-    let title = doc.title.clone().unwrap_or_else(|| if doc.is_video() { "Video" } else { "Interactive artifact" }.to_string());
+    let title = doc.title.clone().unwrap_or_else(|| {
+        if doc.is_video() {
+            "Video"
+        } else {
+            "Interactive artifact"
+        }
+        .to_string()
+    });
     let group = SharedString::from(format!("artifact-group-{key}"));
     let actions = {
         let (reload, expand, html) = (state.clone(), doc.clone(), doc.html.to_string());
-        let bar = h_flex().flex_none().gap(px(2.)).opacity(0.72).group_hover(group.clone(), |s| s.opacity(1.));
-        let expand_button = action(SharedString::from(format!("artifact-expand-{key}")), Lucide::Maximize2, "Expand", &look, move |window, cx| expand_artifact(&expand, window, cx));
+        let bar = h_flex()
+            .flex_none()
+            .gap(px(2.))
+            .opacity(0.72)
+            .group_hover(group.clone(), |s| s.opacity(1.));
+        let expand_button = action(
+            SharedString::from(format!("artifact-expand-{key}")),
+            Lucide::Maximize2,
+            "Expand",
+            &look,
+            move |window, cx| expand_artifact(&expand, window, cx),
+        );
         match (video, remote) {
             // A video: open it in its own app, or expand it. No reload or source to copy.
             (Some(file), _) => bar
-                .child(action(SharedString::from(format!("artifact-open-{key}")), Lucide::SquareArrowOutUpRight, "Open in the default app", &look, move |_, cx| cx.open_with_system(&file)))
+                .child(action(
+                    SharedString::from(format!("artifact-open-{key}")),
+                    Lucide::SquareArrowOutUpRight,
+                    "Open in the default app",
+                    &look,
+                    move |_, cx| cx.open_with_system(&file),
+                ))
                 .child(expand_button)
                 .into_any_element(),
             (None, Some(url)) => bar
-                .child(action(SharedString::from(format!("artifact-open-{key}")), Lucide::SquareArrowOutUpRight, "Open in the browser", &look, move |_, cx| cx.open_url(&url)))
+                .child(action(
+                    SharedString::from(format!("artifact-open-{key}")),
+                    Lucide::SquareArrowOutUpRight,
+                    "Open in the browser",
+                    &look,
+                    move |_, cx| cx.open_url(&url),
+                ))
                 .child(expand_button)
                 .into_any_element(),
             (None, None) => bar
-                .child(action(SharedString::from(format!("artifact-reload-{key}")), Lucide::RefreshCw, "Reload", &look, move |_, cx| reload.update(cx, |s, cx| s.reload(cx))))
-                .child(action(SharedString::from(format!("artifact-copy-{key}")), Lucide::Copy, "Copy source", &look, move |window, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(html.clone()));
-                    crate::toast::push(window, "Artifact source copied", cx);
-                }))
+                .child(action(
+                    SharedString::from(format!("artifact-reload-{key}")),
+                    Lucide::RefreshCw,
+                    "Reload",
+                    &look,
+                    move |_, cx| reload.update(cx, |s, cx| s.reload(cx)),
+                ))
+                .child(action(
+                    SharedString::from(format!("artifact-copy-{key}")),
+                    Lucide::Copy,
+                    "Copy source",
+                    &look,
+                    move |window, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(html.clone()));
+                        crate::toast::push(window, "Artifact source copied", cx);
+                    },
+                ))
                 .child(expand_button)
                 .into_any_element(),
         }
@@ -324,14 +567,34 @@ fn card(doc: &Arc<Doc>, key: usize, window: &mut Window, cx: &mut App) -> AnyEle
         .border_t_1()
         .border_color(look.hairline)
         .child(status_layer(status, &look))
-        .child(SurfaceElement { state: state.clone() });
-    shell(SharedString::from(format!("trek-artifact-{key}")), &look, cx)
-        .aria_label(if doc.is_video() { format!("Video: {title}") } else { format!("Interactive artifact: {title}") })
-        .test_support()
-        .group(group)
-        .child(header(if doc.is_video() { Lucide::Play } else { Lucide::Box }, title_text(title, &look), actions, summary_text(summary_of(doc), &look), &look))
-        .child(body)
-        .into_any_element()
+        .child(SurfaceElement {
+            state: state.clone(),
+        });
+    shell(
+        SharedString::from(format!("trek-artifact-{key}")),
+        &look,
+        cx,
+    )
+    .aria_label(if doc.is_video() {
+        format!("Video: {title}")
+    } else {
+        format!("Interactive artifact: {title}")
+    })
+    .test_support()
+    .group(group)
+    .child(header(
+        if doc.is_video() {
+            Lucide::Play
+        } else {
+            Lucide::Box
+        },
+        title_text(title, &look),
+        actions,
+        summary_text(summary_of(doc), &look),
+        &look,
+    ))
+    .child(body)
+    .into_any_element()
 }
 
 /// What a card shows under its page: a word while it starts, or why it can't.
@@ -364,7 +627,13 @@ fn status_layer(status: Status, look: &Look) -> AnyElement {
 
 /// A header button. Its tooltip blocks the mouse, as every overlay does, so a card's web view
 /// steps aside for it (`surface::analyze`) rather than covering it.
-fn action(id: SharedString, icon: Lucide, tip: &'static str, look: &Look, on_click: impl Fn(&mut Window, &mut App) + 'static) -> AnyElement {
+fn action(
+    id: SharedString,
+    icon: Lucide,
+    tip: &'static str,
+    look: &Look,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
     let (muted, hover) = (look.muted, look.fg.opacity(0.06));
     h_flex()
         .id(id)
@@ -410,10 +679,20 @@ fn expand_artifact(doc: &Arc<Doc>, window: &mut Window, cx: &mut App) {
     let css = theme_css(cx);
     let background = card_rgb(cx);
     state.update(cx, |s, cx| s.sync_doc(doc, css, background, cx));
-    let title = doc.title.clone().unwrap_or_else(|| if doc.is_video() { "Video" } else { "Interactive artifact" }.to_string());
+    let title = doc.title.clone().unwrap_or_else(|| {
+        if doc.is_video() {
+            "Video"
+        } else {
+            "Interactive artifact"
+        }
+        .to_string()
+    });
     window.open_dialog(cx, move |dialog, window, cx| {
         let size = window.viewport_size();
-        let (w, h) = ((size.width - px(96.)).max(px(420.)), (size.height - px(220.)).max(px(280.)));
+        let (w, h) = (
+            (size.width - px(96.)).max(px(420.)),
+            (size.height - px(220.)).max(px(280.)),
+        );
         let css = theme_css(cx);
         let background = card_rgb(cx);
         let doc = state.read(cx).doc.clone();
@@ -423,7 +702,12 @@ fn expand_artifact(doc: &Arc<Doc>, window: &mut Window, cx: &mut App) {
         dialog
             .w(w)
             .margin_top(px(56.))
-            .title(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(title.clone()))
+            .title(
+                div()
+                    .text_size(px(14.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(title.clone()),
+            )
             .child(
                 div()
                     .id("artifact-expanded")
@@ -436,7 +720,9 @@ fn expand_artifact(doc: &Arc<Doc>, window: &mut Window, cx: &mut App) {
                     .rounded(px(8.))
                     .overflow_hidden()
                     .child(status_layer(status, &look))
-                    .child(SurfaceElement { state: state.clone() }),
+                    .child(SurfaceElement {
+                        state: state.clone(),
+                    }),
             )
     });
 }
@@ -445,15 +731,29 @@ fn expand_artifact(doc: &Arc<Doc>, window: &mut Window, cx: &mut App) {
 
 fn css_color(c: Hsla) -> String {
     let c = c.to_rgb();
-    format!("rgba({:.0},{:.0},{:.0},{:.3})", c.r * 255., c.g * 255., c.b * 255., c.a)
+    format!(
+        "rgba({:.0},{:.0},{:.0},{:.3})",
+        c.r * 255.,
+        c.g * 255.,
+        c.b * 255.,
+        c.a
+    )
 }
 
 /// A font as CSS: the system's UI font for GPUI's (`.SystemUIFont`), else the named one, then the
 /// system's as fallbacks (a font Trek embeds isn't one the web view knows).
 fn font_stack(name: &str, mono: bool) -> String {
-    let fallback = if mono { "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" } else { "-apple-system, BlinkMacSystemFont, \"Segoe UI Variable Text\", \"Segoe UI\", system-ui, sans-serif" };
+    let fallback = if mono {
+        "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+    } else {
+        "-apple-system, BlinkMacSystemFont, \"Segoe UI Variable Text\", \"Segoe UI\", system-ui, sans-serif"
+    };
     let name = name.trim();
-    if name.is_empty() || name.starts_with('.') || name.eq_ignore_ascii_case("system-ui") || name.contains(['"', ';', '{', '}', '<', '\\']) {
+    if name.is_empty()
+        || name.starts_with('.')
+        || name.eq_ignore_ascii_case("system-ui")
+        || name.contains(['"', ';', '{', '}', '<', '\\'])
+    {
         fallback.to_string()
     } else {
         format!("\"{name}\", {fallback}")
@@ -464,7 +764,10 @@ fn font_stack(name: &str, mono: bool) -> String {
 pub(crate) fn theme(cx: &App) -> core::Theme {
     let t = cx.theme();
     let dark = t.mode.is_dark();
-    let size = cx.try_global::<crate::workspace::GlobalWorkspace>().map(|ws| ws.0.read(cx).settings.appearance.transcript_font_size()).unwrap_or(14.5);
+    let size = cx
+        .try_global::<crate::workspace::GlobalWorkspace>()
+        .map(|ws| ws.0.read(cx).settings.appearance.transcript_font_size())
+        .unwrap_or(14.5);
     core::Theme {
         dark,
         background: css_color(t.background),
@@ -491,8 +794,17 @@ fn theme_css(cx: &App) -> String {
 /// The card's colour, opaque: what a page shows through to where WebView2 can't be see-through.
 fn card_rgb(cx: &App) -> (u8, u8, u8) {
     let t = cx.theme();
-    let c = if t.mode.is_dark() { t.background.blend(t.foreground.opacity(0.022)) } else { t.background }.to_rgb();
-    ((c.r * 255.).round() as u8, (c.g * 255.).round() as u8, (c.b * 255.).round() as u8)
+    let c = if t.mode.is_dark() {
+        t.background.blend(t.foreground.opacity(0.022))
+    } else {
+        t.background
+    }
+    .to_rgb();
+    (
+        (c.r * 255.).round() as u8,
+        (c.g * 255.).round() as u8,
+        (c.b * 255.).round() as u8,
+    )
 }
 
 // ---------- state ----------
@@ -567,8 +879,17 @@ impl ArtifactState {
         let me = cx.weak_entity();
         let registry = cx.default_global::<Registry>();
         registry.windows.entry(id).or_default().states.push(me);
-        let height = registry.heights.get(&doc.hash).copied().unwrap_or(core::DEFAULT_HEIGHT);
-        let shot = registry.shots.iter().rev().find(|(h, _)| *h == doc.hash).map(|(_, s)| s.clone());
+        let height = registry
+            .heights
+            .get(&doc.hash)
+            .copied()
+            .unwrap_or(core::DEFAULT_HEIGHT);
+        let shot = registry
+            .shots
+            .iter()
+            .rev()
+            .find(|(h, _)| *h == doc.hash)
+            .map(|(_, s)| s.clone());
         Self {
             served: Rc::new(RefCell::new(String::new())),
             doc,
@@ -605,14 +926,23 @@ impl ArtifactState {
 
     /// Keep the document and its theme as the card has them: a new document (the same place in
     /// an answer that changed) loads afresh; a theme switch reaches the page in place.
-    fn sync_doc(&mut self, doc: &Arc<Doc>, css: String, background: (u8, u8, u8), cx: &mut Context<Self>) {
+    fn sync_doc(
+        &mut self,
+        doc: &Arc<Doc>,
+        css: String,
+        background: (u8, u8, u8),
+        cx: &mut Context<Self>,
+    ) {
         let new_doc = doc.hash != self.doc.hash;
         if !new_doc && css == self.css {
             return;
         }
         if new_doc {
             self.doc = doc.clone();
-            self.height = cx.try_global::<Registry>().and_then(|r| r.heights.get(&doc.hash).copied()).unwrap_or(core::DEFAULT_HEIGHT);
+            self.height = cx
+                .try_global::<Registry>()
+                .and_then(|r| r.heights.get(&doc.hash).copied())
+                .unwrap_or(core::DEFAULT_HEIGHT);
             self.shot = None;
             self.height_changes = 0;
         }
@@ -670,7 +1000,10 @@ impl ArtifactState {
                 self.loaded = false;
                 self._events = Some(cx.spawn_in(window, async move |this, cx| {
                     while let Ok(event) = rx.recv().await {
-                        if this.update_in(cx, |this, window, cx| this.on_event(event, window, cx)).is_err() {
+                        if this
+                            .update_in(cx, |this, window, cx| this.on_event(event, window, cx))
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -678,7 +1011,11 @@ impl ArtifactState {
             }
             Err(why) => {
                 tracing::warn!("artifact: no web view: {why}");
-                self.unavailable = Some(if cfg!(windows) { "Interactive artifacts need Microsoft's WebView2 runtime.".to_string() } else { format!("Couldn't start a web view: {why}") });
+                self.unavailable = Some(if cfg!(windows) {
+                    "Interactive artifacts need Microsoft's WebView2 runtime.".to_string()
+                } else {
+                    format!("Couldn't start a web view: {why}")
+                });
                 cx.notify();
             }
         }
@@ -748,7 +1085,11 @@ impl ArtifactState {
         if !self.sends.allow(Instant::now()) {
             return;
         }
-        let title = self.doc.title.clone().unwrap_or_else(|| "Interactive page".to_string());
+        let title = self
+            .doc
+            .title
+            .clone()
+            .unwrap_or_else(|| "Interactive page".to_string());
         let ws = crate::workspace::workspace_global(cx);
         let html = self.doc.html.clone();
         let thread = ws.read(cx).card_thread(&html);
@@ -757,8 +1098,16 @@ impl ArtifactState {
                 ws.update(cx, |ws, cx| ws.send_as(&id, text, Vec::new(), None, cx));
                 crate::toast::push(window, format!("Sent from {title}"), cx);
             }
-            Some((_, true)) => crate::toast::push(window, "This card's thread is archived, so it can't send.", cx),
-            None => crate::toast::push(window, "This card isn't in a thread, so it has nowhere to send.", cx),
+            Some((_, true)) => crate::toast::push(
+                window,
+                "This card's thread is archived, so it can't send.",
+                cx,
+            ),
+            None => crate::toast::push(
+                window,
+                "This card isn't in a thread, so it has nowhere to send.",
+                cx,
+            ),
         }
     }
 
@@ -773,13 +1122,19 @@ impl ArtifactState {
         if visible.size.height <= px(0.) {
             return;
         }
-        let event = ScrollWheelEvent { position: visible.center(), delta: ScrollDelta::Pixels(point(px(-dx), px(-dy))), ..Default::default() };
+        let event = ScrollWheelEvent {
+            position: visible.center(),
+            delta: ScrollDelta::Pixels(point(px(-dx), px(-dy))),
+            ..Default::default()
+        };
         window.dispatch_event(event.to_platform_input(), cx);
     }
 
     /// A link from the page, to the user's browser: web or mail only, one a second at most.
     fn open_link(&mut self, url: &str, cx: &mut Context<Self>) {
-        let Some(url) = core::external(url) else { return };
+        let Some(url) = core::external(url) else {
+            return;
+        };
         if self.opened_at.is_some_and(|at| at.elapsed() < OPEN_EVERY) {
             return;
         }
@@ -797,7 +1152,9 @@ impl ArtifactState {
         }
         self.height_changes += 1;
         self.height = h;
-        cx.default_global::<Registry>().heights.insert(self.doc.hash, h);
+        cx.default_global::<Registry>()
+            .heights
+            .insert(self.doc.hash, h);
         cx.notify();
         crate::visualization::relayout(cx);
         self.settle_then_snap(cx);
@@ -836,22 +1193,36 @@ impl ArtifactState {
         if self.snapping || !self.loaded {
             return;
         }
-        let (Some(surface), Some(geom)) = (&self.surface, &self.geom) else { return };
+        let (Some(surface), Some(geom)) = (&self.surface, &self.geom) else {
+            return;
+        };
         let Some(rx) = surface.snapshot() else { return };
         self.snapping = true;
         let (size, css, hash) = (geom.body.size, self.css.clone(), self.doc.hash);
         cx.spawn(async move |this, cx| {
             let shot = match rx.recv().await {
-                Ok(Ok(bytes)) => cx.background_executor().spawn(async move { native::decode(&bytes) }).await,
+                Ok(Ok(bytes)) => {
+                    cx.background_executor()
+                        .spawn(async move { native::decode(&bytes) })
+                        .await
+                }
                 Ok(Err(e)) => Err(e),
                 Err(_) => Err("the view went".to_string()),
             };
             let _ = this.update(cx, |this, cx| {
                 this.snapping = false;
-                match shot.and_then(|s| image::RgbaImage::from_raw(s.width, s.height, s.bgra).ok_or_else(|| "a short picture".to_string())) {
+                match shot.and_then(|s| {
+                    image::RgbaImage::from_raw(s.width, s.height, s.bgra)
+                        .ok_or_else(|| "a short picture".to_string())
+                }) {
                     Ok(pixels) => {
-                        let snap = Snap { image: Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])), size, css };
-                        cx.default_global::<Registry>().keep_shot(hash, snap.clone());
+                        let snap = Snap {
+                            image: Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])),
+                            size,
+                            css,
+                        };
+                        cx.default_global::<Registry>()
+                            .keep_shot(hash, snap.clone());
                         this.shot = Some(snap);
                         cx.notify();
                     }
@@ -864,7 +1235,14 @@ impl ArtifactState {
 
     /// Place the view for this frame, `frame`, from where the card was laid out and what covers
     /// it. `overlay`: a Trek surface over the window that hides native views (the palette).
-    fn sync(&mut self, frame: u64, overlay: bool, on: bool, window: &mut Window, cx: &mut Context<Self>) -> (bool, f32) {
+    fn sync(
+        &mut self,
+        frame: u64,
+        overlay: bool,
+        on: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (bool, f32) {
         // Trek moved its focus elsewhere while the page had the keys (⌘K's palette, ⌘L): the
         // keys follow it, or what's typed into the palette would go to the page.
         if self.has_keys && !self.focus.is_focused(window) {
@@ -879,27 +1257,56 @@ impl ArtifactState {
         let gap = surface::gap(g.body, g.mask);
         let viewport = f32::from(g.mask.size.height).max(200.);
         // The hit box that's in the frame on screen: this frame's isn't, yet.
-        let probe = if g.cur_frame == frame { g.prev.clone() } else { g.cur.clone() };
+        let probe = if g.cur_frame == frame {
+            g.prev.clone()
+        } else {
+            g.cur.clone()
+        };
         let coverage = match &probe {
             Some(hb) if visible.size.width > px(0.) && visible.size.height > px(0.) => {
                 let known = hb.bounds.intersect(&hb.content_mask.bounds);
                 // Where it wasn't last frame (scrolled in since), nothing is known to cover it.
-                surface::analyze(visible, |p| !known.contains(&p) || hb.is_hovered_at(p, window))
+                surface::analyze(visible, |p| {
+                    !known.contains(&p) || hb.is_hovered_at(p, window)
+                })
             }
-            _ => Coverage { clip: None, covered: false },
+            _ => Coverage {
+                clip: None,
+                covered: false,
+            },
         };
-        if on && self.surface.is_none() && self.unavailable.is_none() && gap <= viewport && window.is_window_active() {
+        if on
+            && self.surface.is_none()
+            && self.unavailable.is_none()
+            && gap <= viewport
+            && window.is_window_active()
+        {
             self.make(window, cx);
         }
         if self.surface.is_some() && (gap > viewport * 2. || !on) {
             self.drop_surface(window, cx);
         }
         let placement = match coverage {
-            Coverage { clip: Some(clip), covered: false } if on && !overlay => Some(Placement { body: g.body, clip, round_bottom: self.mode == Mode::Inline && clip.bottom() >= g.body.bottom() - px(0.5) }),
+            Coverage {
+                clip: Some(clip),
+                covered: false,
+            } if on && !overlay => Some(Placement {
+                body: g.body,
+                clip,
+                round_bottom: self.mode == Mode::Inline
+                    && clip.bottom() >= g.body.bottom() - px(0.5),
+            }),
             _ => None,
         };
         self.show(placement, window, cx);
-        (self.surface.is_some(), if visible.size.height > px(0.) { 0. } else { gap })
+        (
+            self.surface.is_some(),
+            if visible.size.height > px(0.) {
+                0.
+            } else {
+                gap
+            },
+        )
     }
 
     fn show(&mut self, placement: Option<Placement>, window: &mut Window, cx: &mut Context<Self>) {
@@ -960,16 +1367,43 @@ impl Element for SurfaceElement {
         None
     }
 
-    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
-        let inset = Edges::<Length> { top: px(0.).into(), left: px(0.).into(), ..Default::default() };
-        let style = Style { position: Position::Absolute, inset, size: Size::full(), ..Default::default() };
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let inset = Edges::<Length> {
+            top: px(0.).into(),
+            left: px(0.).into(),
+            ..Default::default()
+        };
+        let style = Style {
+            position: Position::Absolute,
+            inset,
+            size: Size::full(),
+            ..Default::default()
+        };
         (window.request_layout(style, [], cx), ())
     }
 
-    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) {
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let mask = window.content_mask().bounds;
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-        let frame = cx.default_global::<Registry>().windows.get(&window.window_handle().window_id()).map_or(0, |w| w.frame);
+        let frame = cx
+            .default_global::<Registry>()
+            .windows
+            .get(&window.window_handle().window_id())
+            .map_or(0, |w| w.frame);
         self.state.update(cx, |s, _| {
             let (prev, cur) = match s.geom.take() {
                 // Laid out twice in a frame: the earlier one never reached the screen.
@@ -977,25 +1411,54 @@ impl Element for SurfaceElement {
                 Some(g) => (g.cur, Some(hitbox)),
                 None => (None, Some(hitbox)),
             };
-            s.geom = Some(Geom { body: bounds, mask, prev, cur, cur_frame: frame });
+            s.geom = Some(Geom {
+                body: bounds,
+                mask,
+                prev,
+                cur,
+                cur_frame: frame,
+            });
         });
     }
 
-    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) {
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let s = self.state.read(cx);
         if !s.live
-            && let Some(shot) = s.shot.as_ref().filter(|shot| shot.css == s.css && (shot.size.width - bounds.size.width).abs() < px(1.5))
+            && let Some(shot) = s.shot.as_ref().filter(|shot| {
+                shot.css == s.css && (shot.size.width - bounds.size.width).abs() < px(1.5)
+            })
         {
             let image = Bounds::new(bounds.origin, shot.size);
-            let r = if s.mode == Mode::Inline { px(RADIUS) } else { px(0.) };
-            let corners = Corners { top_left: px(0.), top_right: px(0.), bottom_left: r, bottom_right: r };
+            let r = if s.mode == Mode::Inline {
+                px(RADIUS)
+            } else {
+                px(0.)
+            };
+            let corners = Corners {
+                top_left: px(0.),
+                top_right: px(0.),
+                bottom_left: r,
+                bottom_right: r,
+            };
             let _ = window.paint_image(bounds, image, corners, shot.image.clone(), 0, false);
         }
         // A click anywhere else in Trek takes the keys back from the page (GPUI's view doesn't
         // take them by itself when it's clicked).
         let state = self.state.clone();
         window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
-            if phase == DispatchPhase::Capture && !bounds.contains(&e.position) && state.read(cx).has_keys {
+            if phase == DispatchPhase::Capture
+                && !bounds.contains(&e.position)
+                && state.read(cx).has_keys
+            {
                 state.update(cx, |s, cx| {
                     s.had_focus = None;
                     s.release_keys(window, cx);
@@ -1077,21 +1540,53 @@ impl Element for Layer {
         None
     }
 
-    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
-        let style = Style { position: Position::Absolute, size: size(px(0.).into(), px(0.).into()), ..Default::default() };
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let style = Style {
+            position: Position::Absolute,
+            size: size(px(0.).into(), px(0.).into()),
+            ..Default::default()
+        };
         (window.request_layout(style, [], cx), ())
     }
 
-    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) {
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let id = window.window_handle().window_id();
         if !self.end {
-            cx.default_global::<Registry>().windows.entry(id).or_default().frame += 1;
+            cx.default_global::<Registry>()
+                .windows
+                .entry(id)
+                .or_default()
+                .frame += 1;
             return;
         }
         sync_window(window, cx);
     }
 
-    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), _: &mut (), _: &mut Window, _: &mut App) {}
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        _: &mut Window,
+        _: &mut App,
+    ) {
+    }
 }
 
 fn sync_window(window: &mut Window, cx: &mut App) {
@@ -1103,7 +1598,9 @@ fn sync_window(window: &mut Window, cx: &mut App) {
             let _ = window.drop_image(image);
         }
     }
-    let Some(entry) = registry.windows.get_mut(&id) else { return };
+    let Some(entry) = registry.windows.get_mut(&id) else {
+        return;
+    };
     entry.states.retain(|s| s.upgrade().is_some());
     if entry.states.is_empty() {
         registry.windows.remove(&id);
@@ -1115,11 +1612,14 @@ fn sync_window(window: &mut Window, cx: &mut App) {
     if entry.followup {
         window.request_animation_frame();
     }
-    let states: Vec<Entity<ArtifactState>> = entry.states.iter().filter_map(|s| s.upgrade()).collect();
-    let overlay = cx.try_global::<crate::workspace::GlobalWorkspace>().is_some_and(|ws| {
-        let ws = ws.0.read(cx);
-        ws.overlay_open && ws.main_window == Some(window.window_handle())
-    });
+    let states: Vec<Entity<ArtifactState>> =
+        entry.states.iter().filter_map(|s| s.upgrade()).collect();
+    let overlay = cx
+        .try_global::<crate::workspace::GlobalWorkspace>()
+        .is_some_and(|ws| {
+            let ws = ws.0.read(cx);
+            ws.overlay_open && ws.main_window == Some(window.window_handle())
+        });
     let on = enabled(cx);
     let mut views: Vec<(Entity<ArtifactState>, f32)> = Vec::new();
     for state in states {
@@ -1142,7 +1642,12 @@ fn sync_window(window: &mut Window, cx: &mut App) {
 /// Take the video playing `hash` in `window` (its card in the transcript) to `secs`. False when no
 /// card plays it there.
 pub(crate) fn seek(hash: u64, secs: f64, window: &Window, cx: &mut App) -> bool {
-    let Some(entry) = cx.try_global::<Registry>().and_then(|r| r.windows.get(&window.window_handle().window_id())) else { return false };
+    let Some(entry) = cx
+        .try_global::<Registry>()
+        .and_then(|r| r.windows.get(&window.window_handle().window_id()))
+    else {
+        return false;
+    };
     let states: Vec<_> = entry.states.iter().filter_map(|s| s.upgrade()).collect();
     let mut found = false;
     for state in states {
@@ -1169,7 +1674,11 @@ fn make_surface(spec: native::Spec, window: &mut Window) -> Result<Box<dyn Surfa
                     log.made += 1;
                     log.bootstraps.push(spec.bootstrap.clone());
                 }
-                Ok(Box::new(FakeSurface { log, spec, placed: None }))
+                Ok(Box::new(FakeSurface {
+                    log,
+                    spec,
+                    placed: None,
+                }))
             }
             None => Err("no web view in tests".to_string()),
         }
@@ -1237,7 +1746,12 @@ impl Surface for FakeSurface {
 /// The cards in `window` as the layer last placed them: whether each is live, and where.
 #[cfg(any(test, feature = "shots"))]
 pub(crate) fn placements(window: &Window, cx: &App) -> Vec<ArtifactReport> {
-    let Some(entry) = cx.try_global::<Registry>().and_then(|r| r.windows.get(&window.window_handle().window_id())) else { return Vec::new() };
+    let Some(entry) = cx
+        .try_global::<Registry>()
+        .and_then(|r| r.windows.get(&window.window_handle().window_id()))
+    else {
+        return Vec::new();
+    };
     entry
         .states
         .iter()
@@ -1285,7 +1799,12 @@ pub(crate) struct ArtifactReport {
 /// every card in the window. `{nonce}` in `body` is replaced by each view's secret.
 #[cfg(test)]
 pub(crate) fn post(window: &mut Window, body: &str, cx: &mut App) {
-    let Some(entry) = cx.try_global::<Registry>().and_then(|r| r.windows.get(&window.window_handle().window_id())) else { return };
+    let Some(entry) = cx
+        .try_global::<Registry>()
+        .and_then(|r| r.windows.get(&window.window_handle().window_id()))
+    else {
+        return;
+    };
     let states: Vec<_> = entry.states.iter().filter_map(|s| s.upgrade()).collect();
     for state in states {
         state.update(cx, |s, cx| {
@@ -1300,7 +1819,12 @@ pub(crate) fn post(window: &mut Window, body: &str, cx: &mut App) {
 /// Tell every test view in the window that its page has loaded, as the engine would.
 #[cfg(test)]
 pub(crate) fn load_all(window: &mut Window, cx: &mut App) {
-    let Some(entry) = cx.try_global::<Registry>().and_then(|r| r.windows.get(&window.window_handle().window_id())) else { return };
+    let Some(entry) = cx
+        .try_global::<Registry>()
+        .and_then(|r| r.windows.get(&window.window_handle().window_id()))
+    else {
+        return;
+    };
     let states: Vec<_> = entry.states.iter().filter_map(|s| s.upgrade()).collect();
     for state in states {
         state.update(cx, |s, cx| {
@@ -1320,6 +1844,9 @@ mod tests {
         assert!(font_stack(".SystemUIFont", false).starts_with("-apple-system"));
         assert!(font_stack("Inter", false).starts_with("\"Inter\", -apple-system"));
         assert!(font_stack("Lilex", true).starts_with("\"Lilex\", ui-monospace"));
-        assert!(font_stack("x\"; } body { color: red", false).starts_with("-apple-system"), "nothing that breaks out of the stylesheet");
+        assert!(
+            font_stack("x\"; } body { color: red", false).starts_with("-apple-system"),
+            "nothing that breaks out of the stylesheet"
+        );
     }
 }

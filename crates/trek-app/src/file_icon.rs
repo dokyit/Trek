@@ -13,7 +13,12 @@ use std::sync::LazyLock;
 /// neutral.
 pub fn type_colour(path: &str) -> Option<u32> {
     let name = base_name(path).to_lowercase();
-    if name.ends_with(".lock") || matches!(name.as_str(), "package-lock.json" | "pnpm-lock.yaml" | "npm-shrinkwrap.json" | "go.sum") {
+    if name.ends_with(".lock")
+        || matches!(
+            name.as_str(),
+            "package-lock.json" | "pnpm-lock.yaml" | "npm-shrinkwrap.json" | "go.sum"
+        )
+    {
         return None;
     }
     let Some((_, ext)) = name.rsplit_once('.') else {
@@ -37,7 +42,8 @@ pub fn type_colour(path: &str) -> Option<u32> {
         "css" | "scss" | "sass" | "less" => 0x6B45B5,
         "sh" | "bash" | "zsh" | "fish" => 0x4E9A2E,
         "sql" => 0x336791,
-        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" | "heic" | "bmp" | "tiff" | "avif" => 0x8E6CC9,
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" | "heic" | "bmp" | "tiff"
+        | "avif" => 0x8E6CC9,
         _ => return None,
     })
 }
@@ -58,7 +64,11 @@ pub fn tint(path: &str, cx: &App) -> Tint {
         Some(c) => tint_of(rgb(c).into(), cx),
         None => {
             let theme = cx.theme();
-            Tint { fill: theme.foreground.opacity(0.06), edge: theme.foreground.opacity(0.14), ink: theme.foreground.opacity(0.9) }
+            Tint {
+                fill: theme.foreground.opacity(0.06),
+                edge: theme.foreground.opacity(0.14),
+                ink: theme.foreground.opacity(0.9),
+            }
         }
     }
 }
@@ -72,10 +82,27 @@ pub fn tint_of(color: Hsla, cx: &App) -> Tint {
 pub fn tint_in(color: Hsla, dark: bool) -> Tint {
     // Yellows through cyans are bright for their shade: on paper their ink comes down further.
     let bright = (0.09..0.55).contains(&color.h);
-    let ink = Hsla { s: color.s.min(0.75), l: if dark { 0.78 } else if bright { 0.26 } else { 0.34 - (color.l - 0.5).max(0.) * 0.3 }, a: 1., ..color };
+    let ink = Hsla {
+        s: color.s.min(0.75),
+        l: if dark {
+            0.78
+        } else if bright {
+            0.26
+        } else {
+            0.34 - (color.l - 0.5).max(0.) * 0.3
+        },
+        a: 1.,
+        ..color
+    };
     Tint {
-        fill: Hsla { a: if dark { 0.16 } else { 0.11 }, ..color },
-        edge: Hsla { a: if dark { 0.38 } else { 0.3 }, ..color },
+        fill: Hsla {
+            a: if dark { 0.16 } else { 0.11 },
+            ..color
+        },
+        edge: Hsla {
+            a: if dark { 0.38 } else { 0.3 },
+            ..color
+        },
         ink,
     }
 }
@@ -83,7 +110,13 @@ pub fn tint_in(color: Hsla, dark: bool) -> Tint {
 /// A file's name in a chip of its type's colour, with its badge: what tool rows, live rows and
 /// path chips show for a file. `label` is what's written (a name, or a path); `path` picks the
 /// type.
-pub fn chip(id: impl Into<ElementId>, path: &str, label: impl Into<SharedString>, size: Pixels, cx: &App) -> Stateful<Div> {
+pub fn chip(
+    id: impl Into<ElementId>,
+    path: &str,
+    label: impl Into<SharedString>,
+    size: Pixels,
+    cx: &App,
+) -> Stateful<Div> {
     let t = tint(path, cx);
     div()
         .id(id)
@@ -118,17 +151,25 @@ struct IconMap {
     folders: HashMap<String, String>,
 }
 
-static ICONS: LazyLock<IconMap> =
-    LazyLock::new(|| crate::assets::brand_bytes("file-icons/map.json").and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default());
+static ICONS: LazyLock<IconMap> = LazyLock::new(|| {
+    crate::assets::brand_bytes("file-icons/map.json")
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+});
 
 /// The last component of `path`, whichever separator it uses (Windows paths reach here as written).
 fn base_name(path: &str) -> &str {
-    path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(path)
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
 }
 
 /// Looks `key` up as written, then in lower case.
 fn find<'a>(map: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
-    map.get(key).or_else(|| map.get(&key.to_lowercase())).map(String::as_str)
+    map.get(key)
+        .or_else(|| map.get(&key.to_lowercase()))
+        .map(String::as_str)
 }
 
 /// The icon for a file at `path`: by its whole name, then by its suffixes, longest first.
@@ -138,19 +179,35 @@ pub fn icon_name(path: &str) -> &'static str {
     if let Some(icon) = find(&icons.names, name).or_else(|| find(&icons.suffixes, name)) {
         return icon;
     }
-    name.match_indices('.').filter(|(at, _)| *at > 0 || name.len() > 1).find_map(|(at, _)| find(&icons.suffixes, &name[at + 1..])).unwrap_or("_file")
+    name.match_indices('.')
+        .filter(|(at, _)| *at > 0 || name.len() > 1)
+        .find_map(|(at, _)| find(&icons.suffixes, &name[at + 1..]))
+        .unwrap_or("_file")
 }
 
 /// The icon for a folder at `path` (`src`, `docs`, `.github`), open or closed.
 pub fn folder_icon_name(path: &str, open: bool) -> String {
     let name = base_name(path);
     let icon = find(&ICONS.folders, name).unwrap_or("_folder");
-    if open { format!("{icon}_open") } else { icon.to_string() }
+    if open {
+        format!("{icon}_open")
+    } else {
+        icon.to_string()
+    }
 }
 
 fn icon(name: &str, size: Pixels, cx: &App) -> AnyElement {
-    let flavour = if cx.theme().mode.is_dark() { "mocha" } else { "latte" };
-    img(SharedString::from(format!("file-icons/{flavour}/{name}.svg"))).size(size).flex_none().into_any_element()
+    let flavour = if cx.theme().mode.is_dark() {
+        "mocha"
+    } else {
+        "latte"
+    };
+    img(SharedString::from(format!(
+        "file-icons/{flavour}/{name}.svg"
+    )))
+    .size(size)
+    .flex_none()
+    .into_any_element()
 }
 
 /// The icon for `path`'s type, `size` points square.
@@ -171,9 +228,20 @@ mod tests {
     fn types_have_their_colours_and_the_rest_stay_neutral() {
         assert_eq!(type_colour("src/main.rs"), Some(0xC8572D));
         assert_eq!(type_colour("web/App.tsx"), type_colour("index.ts"));
-        assert_eq!(type_colour("assets/logo.PNG"), Some(0x8E6CC9), "case doesn't matter");
+        assert_eq!(
+            type_colour("assets/logo.PNG"),
+            Some(0x8E6CC9),
+            "case doesn't matter"
+        );
         assert_eq!(type_colour("Makefile"), type_colour("scripts/release.sh"));
-        for neutral in ["Cargo.lock", "frontend/package-lock.json", "pnpm-lock.yaml", "LICENSE", "notes.xyz", "src/"] {
+        for neutral in [
+            "Cargo.lock",
+            "frontend/package-lock.json",
+            "pnpm-lock.yaml",
+            "LICENSE",
+            "notes.xyz",
+            "src/",
+        ] {
             assert_eq!(type_colour(neutral), None, "{neutral}");
         }
     }
@@ -208,9 +276,20 @@ mod tests {
         assert_eq!(folder_icon_name("crates/app/src", false), "folder_src");
         assert_eq!(folder_icon_name("src/", true), "folder_src_open");
         assert_eq!(folder_icon_name("zzz-not-a-name", false), "_folder");
-        for name in ["readme", "markdown", "rust", "_file", "folder_src_open", "_folder"] {
+        for name in [
+            "readme",
+            "markdown",
+            "rust",
+            "_file",
+            "folder_src_open",
+            "_folder",
+        ] {
             for flavour in ["mocha", "latte"] {
-                assert!(crate::assets::brand_bytes(&format!("file-icons/{flavour}/{name}.svg")).is_some(), "{flavour}/{name}");
+                assert!(
+                    crate::assets::brand_bytes(&format!("file-icons/{flavour}/{name}.svg"))
+                        .is_some(),
+                    "{flavour}/{name}"
+                );
             }
         }
     }

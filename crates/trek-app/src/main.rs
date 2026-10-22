@@ -7,6 +7,7 @@
 mod activity;
 mod add_agent;
 mod agent_updates;
+mod artifact;
 mod assets;
 mod attachments;
 mod background_strip;
@@ -20,8 +21,6 @@ mod composer;
 mod cost;
 mod deep_link;
 mod dictate;
-mod logging;
-mod lsp_client;
 mod editor;
 mod file_icon;
 mod fonts;
@@ -30,14 +29,15 @@ mod ide;
 mod image_preview;
 mod integrations;
 mod ipc;
+#[cfg(windows)]
+mod job;
 mod keys;
 mod languages;
 mod line_breakdown;
-#[cfg(windows)]
-mod job;
+mod logging;
+mod lsp_client;
 mod machines;
 mod mascot;
-mod artifact;
 mod math;
 mod md;
 mod mentions;
@@ -45,8 +45,8 @@ mod motion;
 mod note_images;
 mod notes;
 mod onboarding;
-mod panels;
 mod palette;
+mod panels;
 mod perf;
 mod push;
 mod remote;
@@ -72,12 +72,12 @@ mod video;
 mod visualization;
 mod window_place;
 mod winlook;
-mod words;
-mod workspace;
-mod working_bar;
-mod worktree_ui;
 #[cfg(any(windows, test))]
 mod winsys;
+mod words;
+mod working_bar;
+mod workspace;
+mod worktree_ui;
 
 #[cfg(test)]
 mod tests;
@@ -145,10 +145,17 @@ fn apply_theme(choice: ThemeChoice, window: Option<&mut Window>, cx: &mut App) {
     // Trek's theme files leave syntax colours out, so code blocks would keep the light palette on
     // Night: give each mode its own (the markdown views' highlighter follows it).
     Theme::update(cx, |theme| {
-        theme.highlight_theme = if theme.mode.is_dark() { HighlightTheme::default_dark() } else { HighlightTheme::default_light() };
+        theme.highlight_theme = if theme.mode.is_dark() {
+            HighlightTheme::default_dark()
+        } else {
+            HighlightTheme::default_light()
+        };
     });
     // Loading a theme resets the rem to the theme file's size; put the user's back.
-    if let Some(ws) = cx.try_global::<workspace::GlobalWorkspace>().map(|g| g.0.clone()) {
+    if let Some(ws) = cx
+        .try_global::<workspace::GlobalWorkspace>()
+        .map(|g| g.0.clone())
+    {
         let size = ws.read(cx).settings.appearance.ui_font_size();
         system::apply_ui_font_size(size, cx);
     }
@@ -208,7 +215,10 @@ fn menus() -> Vec<Menu> {
         },
         Menu {
             name: "Window".into(),
-            items: vec![MenuItem::action("Minimize", Minimize), MenuItem::action("Close Window", CloseWindow)],
+            items: vec![
+                MenuItem::action("Minimize", Minimize),
+                MenuItem::action("Close Window", CloseWindow),
+            ],
             disabled: false,
         },
     ]
@@ -227,7 +237,11 @@ fn main() {
 
     // On Windows, one Trek per data folder: a second launch hands its links and paths to the
     // running one and exits (macOS does this itself, through `on_open_urls` and `on_reopen`).
-    let single_instance::Primary { lock, forwarded, own } = match single_instance::claim() {
+    let single_instance::Primary {
+        lock,
+        forwarded,
+        own,
+    } = match single_instance::claim() {
         single_instance::Claim::Primary(primary) => primary,
         single_instance::Claim::Forwarded => std::process::exit(0),
         single_instance::Claim::Failed(why) => {
@@ -244,7 +258,8 @@ fn main() {
     let app = gpui_kit::application().with_assets(assets::Assets);
     perf::phase("platform");
     #[cfg(target_os = "macos")]
-    if std::env::var_os("TREK_SHOT_DIR").is_some() || std::env::var_os("TREK_BACKGROUND").is_some() {
+    if std::env::var_os("TREK_SHOT_DIR").is_some() || std::env::var_os("TREK_BACKGROUND").is_some()
+    {
         // Capture and test runs are invisible: no Dock tile, no recent-apps entry.
         if let Some(mtm) = objc2::MainThreadMarker::new() {
             objc2_app_kit::NSApplication::sharedApplication(mtm)
@@ -265,15 +280,18 @@ fn main() {
     app.run(|cx| {
         perf::phase("run");
         #[cfg(target_os = "macos")]
-        if std::env::var_os("TREK_SHOT_DIR").is_some() || std::env::var_os("TREK_BACKGROUND").is_some() {
+        if std::env::var_os("TREK_SHOT_DIR").is_some()
+            || std::env::var_os("TREK_BACKGROUND").is_some()
+        {
             if let Some(mtm) = objc2::MainThreadMarker::new() {
                 objc2_app_kit::NSApplication::sharedApplication(mtm)
                     .setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
             }
             cx.defer(|_| {
                 if let Some(mtm) = objc2::MainThreadMarker::new() {
-                    objc2_app_kit::NSApplication::sharedApplication(mtm)
-                        .setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
+                    objc2_app_kit::NSApplication::sharedApplication(mtm).setActivationPolicy(
+                        objc2_app_kit::NSApplicationActivationPolicy::Accessory,
+                    );
                 }
             });
         }
@@ -308,7 +326,9 @@ fn main() {
             let dir = std::env::var_os("TREK_DATA_DIR")
                 .map(std::path::PathBuf::from)
                 .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or_else(|| std::env::temp_dir().join(format!("trek-shots-{}", std::process::id())));
+                .unwrap_or_else(|| {
+                    std::env::temp_dir().join(format!("trek-shots-{}", std::process::id()))
+                });
             trek_core::paths::isolate(dir);
         }
         if let Some(lock) = lock {
@@ -359,22 +379,46 @@ fn app_actions(cx: &mut App) {
     cx.on_action(|_: &HideApp, cx| cx.hide());
     cx.on_action(|_: &NewThread, cx| in_main(cx, |ws, cx| ws.new_thread(cx)));
     cx.on_action(|_: &OpenFolder, cx| in_main(cx, |ws, cx| ws.open_folder(cx)));
-    cx.on_action(|_: &OpenSettings, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Settings(workspace::SettingsPage::General), cx)));
-    cx.on_action(|_: &About, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Settings(workspace::SettingsPage::About), cx)));
+    cx.on_action(|_: &OpenSettings, cx| {
+        in_main(cx, |ws, cx| {
+            ws.navigate(
+                workspace::Route::Settings(workspace::SettingsPage::General),
+                cx,
+            )
+        })
+    });
+    cx.on_action(|_: &About, cx| {
+        in_main(cx, |ws, cx| {
+            ws.navigate(
+                workspace::Route::Settings(workspace::SettingsPage::About),
+                cx,
+            )
+        })
+    });
     cx.on_action(|_: &OpenPalette, cx| root::show_palette(workspace::workspace_global(cx), cx));
-    cx.on_action(|_: &OpenBasecamp, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Basecamp, cx)));
-    cx.on_action(|_: &OpenNotes, cx| in_main(cx, |ws, cx| ws.navigate(workspace::Route::Notes, cx)));
+    cx.on_action(|_: &OpenBasecamp, cx| {
+        in_main(cx, |ws, cx| ws.navigate(workspace::Route::Basecamp, cx))
+    });
+    cx.on_action(|_: &OpenNotes, cx| {
+        in_main(cx, |ws, cx| ws.navigate(workspace::Route::Notes, cx))
+    });
     cx.on_action(|_: &SwitchMode, cx| in_main(cx, |ws, cx| ws.toggle_ide(cx)));
     cx.on_action(|_: &CheckForUpdates, cx| {
         in_main(cx, |ws, cx| {
             ws.check_for_updates(true, cx);
-            ws.navigate(workspace::Route::Settings(workspace::SettingsPage::Updates), cx)
+            ws.navigate(
+                workspace::Route::Settings(workspace::SettingsPage::Updates),
+                cx,
+            )
         })
     });
 }
 
 /// Act on the workspace, then bring the main window forward (reopening it if it was closed).
-fn in_main(cx: &mut App, f: impl FnOnce(&mut workspace::Workspace, &mut Context<workspace::Workspace>)) {
+fn in_main(
+    cx: &mut App,
+    f: impl FnOnce(&mut workspace::Workspace, &mut Context<workspace::Workspace>),
+) {
     workspace::workspace_global(cx).update(cx, |ws, cx| {
         f(ws, cx);
         cx.emit(workspace::WorkspaceEvent::ActivateMain);

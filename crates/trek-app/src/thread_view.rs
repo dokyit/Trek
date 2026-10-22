@@ -5,16 +5,19 @@
 use crate::activity::{Place, ToolKind, kind_icon, placement, summarize, tool_kind};
 use crate::palette;
 use crate::workspace::{ForkAt, ItemRef, Scope, Workspace, WorkspaceEvent};
+use crate::workspace::{LineageRow, TaskState, ThreadState};
+use gpui_kit::component::StyledExt as _;
 use gpui_kit::component::button::Button;
+use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::TextViewState;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex};
-use gpui_kit::component::StyledExt as _;
-use gpui_kit::component::button::ButtonVariants as _;
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
@@ -22,7 +25,6 @@ use trek_agents::Decision;
 use trek_core::checkpoint::{Change, FileChange};
 use trek_core::orchestrate as orch;
 use trek_core::store::{Item, ToolStatus};
-use crate::workspace::{LineageRow, TaskState, ThreadState};
 
 /// How long a message a search result led to stays tinted (it holds, then fades).
 const FLASH: std::time::Duration = std::time::Duration::from_millis(2200);
@@ -34,30 +36,76 @@ const FLASH: std::time::Duration = std::time::Duration::from_millis(2200);
 /// thoughts are dropped at the end of a turn.
 #[derive(Clone)]
 enum Row {
-    User { ix: usize, key: SharedString, open: bool },
+    User {
+        ix: usize,
+        key: SharedString,
+        open: bool,
+    },
     /// End of a response: copy the whole answer, when it finished, how long it took.
-    TurnEnd { ix: usize },
+    TurnEnd {
+        ix: usize,
+    },
     /// An answer, or one part of a long one (`answer_parts`): `part` from 0, `last` the one that
     /// grows while it streams.
-    Assistant { ix: usize, key: SharedString, part: usize, last: bool },
-    Reasoning { ix: usize, key: SharedString, open: bool },
-    Tool { ix: usize, key: SharedString, open: bool, activity: Option<SharedString> },
+    Assistant {
+        ix: usize,
+        key: SharedString,
+        part: usize,
+        last: bool,
+    },
+    Reasoning {
+        ix: usize,
+        key: SharedString,
+        open: bool,
+    },
+    Tool {
+        ix: usize,
+        key: SharedString,
+        open: bool,
+        activity: Option<SharedString>,
+    },
     /// Consecutive tool calls folded into one summary line ("Ran 3 commands and edited 2 files").
-    ToolGroup { ix: usize, key: SharedString, summary: SharedString, kind: ToolKind, running: bool, open: bool, tools: Vec<Row> },
+    ToolGroup {
+        ix: usize,
+        key: SharedString,
+        summary: SharedString,
+        kind: ToolKind,
+        running: bool,
+        open: bool,
+        tools: Vec<Row>,
+    },
     /// A sub-agent: one Trek runs as a thread of its own (`delegate_task`), or the agent's own
     /// (Claude's Task, Codex's agents). `open`: its answer shows in full.
-    SubAgent { ix: usize, key: SharedString, open: bool },
+    SubAgent {
+        ix: usize,
+        key: SharedString,
+        open: bool,
+    },
     /// Trek woke the agent with what its sub-agents came back with (a message the user didn't write).
-    Wake { ix: usize, key: SharedString, open: bool },
-    Notice { ix: usize },
-    Error { ix: usize },
+    Wake {
+        ix: usize,
+        key: SharedString,
+        open: bool,
+    },
+    Notice {
+        ix: usize,
+    },
+    Error {
+        ix: usize,
+    },
     /// The agent stopped at a usage limit.
-    Limit { ix: usize },
+    Limit {
+        ix: usize,
+    },
     /// The thread moved to another agent, which picks up from a recap.
-    Handoff { ix: usize },
+    Handoff {
+        ix: usize,
+    },
     /// A link to another thread: one this thread's agent started or handed its work to, or the
     /// one that started this thread or that it continues (`trek_core::lineage`).
-    Lineage { ix: usize },
+    Lineage {
+        ix: usize,
+    },
 }
 
 impl Row {
@@ -130,7 +178,10 @@ pub(crate) fn answer_parts(text: &str) -> Vec<usize> {
         let indent = body.len() - body.trim_start_matches(' ').len();
         let rest = &body[indent..];
         if open.is_none() {
-            if after_blank && here - start >= PART_MIN && first.is_some_and(|b| !b.is_ascii_whitespace()) {
+            if after_blank
+                && here - start >= PART_MIN
+                && first.is_some_and(|b| !b.is_ascii_whitespace())
+            {
                 cuts.push(here);
                 start = here;
             }
@@ -150,9 +201,17 @@ pub(crate) fn answer_parts(text: &str) -> Vec<usize> {
             .filter(|_| indent <= 3)
             .map(|(c, n, _)| (c, n));
         open = match (open, found) {
-            (None, Some((c, n))) if matches!(c, b'`' | b'$') && rest[n..].as_bytes().contains(&c) => None,
+            (None, Some((c, n)))
+                if matches!(c, b'`' | b'$') && rest[n..].as_bytes().contains(&c) =>
+            {
+                None
+            }
             (None, Some((c, n))) => Some(Raw::Fence(c, n)),
-            (Some(Raw::Fence(c, n)), Some((d, m))) if c == d && m >= n && rest[m..].trim().is_empty() => None,
+            (Some(Raw::Fence(c, n)), Some((d, m)))
+                if c == d && m >= n && rest[m..].trim().is_empty() =>
+            {
+                None
+            }
             (open, _) => open,
         };
         if open.is_none() && indent <= 3 {
@@ -174,13 +233,18 @@ enum Raw {
 /// Whether row `ix` is tinted when a search result scrolled to row `at`: that row, and the other
 /// parts when it's one of a long answer's.
 fn flashes(rows: &[Row], at: usize, ix: usize) -> bool {
-    at == ix || matches!((rows.get(at), rows.get(ix)), (Some(Row::Assistant { ix: a, .. }), Some(Row::Assistant { ix: b, .. })) if a == b)
+    at == ix
+        || matches!((rows.get(at), rows.get(ix)), (Some(Row::Assistant { ix: a, .. }), Some(Row::Assistant { ix: b, .. })) if a == b)
 }
 
 /// A link reference definition: `[label]: destination`, not a footnote's.
 fn is_definition(line: &str) -> bool {
-    let Some(inner) = line.strip_prefix('[').filter(|r| !r.starts_with('^')) else { return false };
-    let Some(close) = inner.find("]:") else { return false };
+    let Some(inner) = line.strip_prefix('[').filter(|r| !r.starts_with('^')) else {
+        return false;
+    };
+    let Some(close) = inner.find("]:") else {
+        return false;
+    };
     let label = &inner[..close];
     !label.trim().is_empty() && !label.contains(['[', ']']) && !inner[close + 2..].trim().is_empty()
 }
@@ -200,9 +264,19 @@ fn html_block_end(line: &str) -> Option<&'static str> {
     } else if lower.starts_with("<![cdata[") {
         ("]]>", 9)
     } else {
-        let tag = [("pre", "</pre>"), ("script", "</script>"), ("style", "</style>"), ("textarea", "</textarea>")]
-            .into_iter()
-            .find(|(name, _)| lower.strip_prefix('<').and_then(|r| r.strip_prefix(name)).is_some_and(|r| r.is_empty() || r.starts_with([' ', '\t', '>'])))?;
+        let tag = [
+            ("pre", "</pre>"),
+            ("script", "</script>"),
+            ("style", "</style>"),
+            ("textarea", "</textarea>"),
+        ]
+        .into_iter()
+        .find(|(name, _)| {
+            lower
+                .strip_prefix('<')
+                .and_then(|r| r.strip_prefix(name))
+                .is_some_and(|r| r.is_empty() || r.starts_with([' ', '\t', '>']))
+        })?;
         (tag.1, 1 + tag.0.len())
     };
     (!lower[from..].contains(end)).then_some(end)
@@ -218,19 +292,33 @@ fn split_long_answers(rows: Vec<Row>, item_row: Vec<usize>, items: &[Item]) -> R
     for row in rows {
         moved.push(out.len());
         match (&row, items.get(row.item())) {
-            (Row::Assistant { ix, key, .. }, Some(Item::Assistant { text })) if text.len() >= SPLIT_FROM => {
+            (Row::Assistant { ix, key, .. }, Some(Item::Assistant { text }))
+                if text.len() >= SPLIT_FROM =>
+            {
                 let parts = answer_parts(text).len() + 1;
                 if parts > 1 {
                     split.push((*ix, parts));
                 }
-                out.extend((0..parts).map(|part| Row::Assistant { ix: *ix, key: key.clone(), part, last: part + 1 == parts }));
+                out.extend((0..parts).map(|part| Row::Assistant {
+                    ix: *ix,
+                    key: key.clone(),
+                    part,
+                    last: part + 1 == parts,
+                }));
             }
             _ => out.push(row),
         }
     }
     moved.push(out.len());
-    let item_row = item_row.into_iter().map(|r| moved.get(r).copied().unwrap_or(out.len())).collect();
-    Rows { rows: out, item_row, split }
+    let item_row = item_row
+        .into_iter()
+        .map(|r| moved.get(r).copied().unwrap_or(out.len()))
+        .collect();
+    Rows {
+        rows: out,
+        item_row,
+        split,
+    }
 }
 
 /// Part `n` of `text` cut at `cuts`, or `None` past the last.
@@ -243,7 +331,11 @@ pub(crate) fn part_of<'a>(text: &'a str, cuts: &[usize], n: usize) -> Option<&'a
 /// The key of part `n` of item `key`'s document: the item's own for the first, so an answer that
 /// grows long enough to be cut keeps the document it had.
 fn part_key(key: &str, n: usize) -> String {
-    if n == 0 { key.to_string() } else { format!("{key}/{n}") }
+    if n == 0 {
+        key.to_string()
+    } else {
+        format!("{key}/{n}")
+    }
 }
 
 impl Rows {
@@ -292,20 +384,26 @@ fn layout(items: &[Item], live_reasoning: Option<usize>) -> (Vec<Slot>, Vec<usiz
     for (ix, item) in items.iter().enumerate() {
         match item {
             // What `watch_video` saw shows under its row, so it has one of its own.
-            Item::Tool { title, status, .. } => match if trek_core::media::is_watch_call(title) && *status == ToolStatus::Done { Place::Own } else { placement(item) } {
-                Place::Group => {
-                    // The group's row is the next one pushed.
-                    resolve(&mut hidden, &mut item_row, slots.len());
-                    group.push(ix);
+            Item::Tool { title, status, .. } => {
+                match if trek_core::media::is_watch_call(title) && *status == ToolStatus::Done {
+                    Place::Own
+                } else {
+                    placement(item)
+                } {
+                    Place::Group => {
+                        // The group's row is the next one pushed.
+                        resolve(&mut hidden, &mut item_row, slots.len());
+                        group.push(ix);
+                    }
+                    Place::Hidden => hidden.push(ix),
+                    Place::Own => {
+                        flush(&mut group, &mut slots, &mut item_row);
+                        resolve(&mut hidden, &mut item_row, slots.len());
+                        item_row[ix] = slots.len();
+                        slots.push(Slot::Item(ix));
+                    }
                 }
-                Place::Hidden => hidden.push(ix),
-                Place::Own => {
-                    flush(&mut group, &mut slots, &mut item_row);
-                    resolve(&mut hidden, &mut item_row, slots.len());
-                    item_row[ix] = slots.len();
-                    slots.push(Slot::Item(ix));
-                }
-            },
+            }
             Item::Reasoning { text } => {
                 item_row[ix] = slots.len();
                 if live_reasoning != Some(ix) && !text.trim().is_empty() {
@@ -325,401 +423,6 @@ fn layout(items: &[Item], live_reasoning: Option<usize>) -> (Vec<Slot>, Vec<usiz
     (slots, item_row)
 }
 
-// ----- Thinking process timeline -------------------------------------------
-//
-// While a turn works, and once it has, the thread view shows what the agent did as a vertical
-// timeline: a header ("Thinking Ns", shimmering while it runs; "Thought for Ns" once done) and a
-// node per step — a thought, a tool call with its file chips — each a small tinted tile whose
-// icon says what the step is (terminal for commands, file for reads, sparkles for thoughts).
-// Parallel calls fan out on curved elbows and merge back at a hollow node; a call that failed is
-// a red dead end, and a turn that ends closes with a blue "Finished thinking" node. Steps settle
-// in with a short rise-and-fade, staggered so a batch reads as one flow rather than a wall of
-// text. When the turn ends the whole thing collapses to its header, and Settings › Appearance's
-// "Thinking timeline" switch hides it entirely for those who don't want it.
-
-/// One step of the timeline.
-#[derive(Clone, PartialEq)]
-struct ThinkingStep {
-    kind: ThinkingKind,
-    /// The active-form label ("Reading src/auth.rs"); `past` turns it past tense once done.
-    label: String,
-    /// The tool's own title ("Run command"), for the tile's icon; empty for thoughts.
-    raw_title: String,
-    /// Files the step read or edited, for file chips.
-    files: Vec<String>,
-    running: bool,
-    /// The agent's own reasoning text (the existing collapsed "Thought" content), when the step
-    /// is a thought.
-    thought: Option<String>,
-    /// Stable key for the node's id (a tool call's id, or `thought-<ix>`).
-    key: String,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum ThinkingKind {
-    Main,
-    Child,
-    DeadEnd,
-    Merge,
-    Final,
-}
-
-/// A turn's thinking, ready to draw.
-struct Thinking {
-    steps: Vec<ThinkingStep>,
-    /// Older steps folded away (`…and N earlier steps`), so a long turn stays cheap to draw.
-    earlier: usize,
-    /// The turn is still running.
-    running: bool,
-    /// Whole seconds the turn took (or has run for).
-    secs: u64,
-}
-
-/// The most timeline nodes a turn shows; older steps fold into "…and N earlier steps".
-const TIMELINE_CAP: usize = 40;
-
-/// The current turn's thinking, `None` when the agent hasn't thought or called anything yet.
-fn thinking(live: &crate::workspace::LiveThread) -> Option<Thinking> {
-    let start = live.items.iter().rposition(|i| matches!(i, Item::User { aside: false, .. }))?;
-    if start + 1 >= live.items.len() {
-        return None;
-    }
-    let running = live.turn_started.is_some();
-    let finished = live.items[start + 1..].iter().any(|i| matches!(i, Item::TurnEnd { .. }));
-    let secs = live.items[start + 1..]
-        .iter()
-        .find_map(|i| if let Item::TurnEnd { took_secs, .. } = i { Some(*took_secs as u64) } else { None })
-        .or_else(|| live.turn_started.map(|t| t.elapsed().as_secs()))
-        .unwrap_or(0);
-
-    struct Raw {
-        key: String,
-        label: String,
-        /// The tool's own title, for the step tile's icon.
-        title: String,
-        files: Vec<String>,
-        running: bool,
-        dead: bool,
-        parallel: bool,
-        thought: Option<String>,
-    }
-    let mut raw: Vec<Raw> = Vec::new();
-    for (ix, item) in live.items.iter().enumerate().skip(start + 1) {
-        match item {
-            Item::Reasoning { text } if !text.trim().is_empty() => {
-                raw.push(Raw {
-                    key: format!("thought-{ix}"),
-                    label: crate::activity::headline(text).unwrap_or_else(|| "Thinking".to_string()),
-                    title: String::new(),
-                    files: vec![],
-                    running: live.reasoning == Some(ix),
-                    dead: false,
-                    parallel: false,
-                    thought: Some(text.clone()),
-                });
-            }
-            Item::Tool { id, title, detail, status, .. } => {
-                let op = crate::activity::op(title, detail, None);
-                let kind = tool_kind(title);
-                let files: Vec<String> = if matches!(kind, ToolKind::Read | ToolKind::Edit) {
-                    detail.split(", ").filter(|p| !p.is_empty()).map(str::to_string).collect()
-                } else {
-                    vec![]
-                };
-                let label = if op.verb.is_empty() { op.text.clone() } else { format!("{} {}", op.verb, op.text) };
-                raw.push(Raw {
-                    key: id.clone(),
-                    label: label.trim().to_string(),
-                    title: title.clone(),
-                    files,
-                    running: *status == ToolStatus::Running,
-                    dead: matches!(status, ToolStatus::Failed | ToolStatus::Denied),
-                    parallel: live.parallel.contains(id),
-                    thought: None,
-                });
-            }
-            _ => {}
-        }
-    }
-    if raw.is_empty() {
-        return None;
-    }
-    let earlier = raw.len().saturating_sub(TIMELINE_CAP);
-    if earlier > 0 {
-        raw.drain(..earlier);
-    }
-
-    // Fan out runs of parallel calls and merge back after each.
-    let mut steps: Vec<ThinkingStep> = Vec::new();
-    let mut i = 0;
-    let step = |r: &Raw, kind: ThinkingKind| ThinkingStep {
-        kind,
-        label: r.label.clone(),
-        raw_title: r.title.clone(),
-        files: r.files.clone(),
-        running: r.running,
-        thought: r.thought.clone(),
-        key: r.key.clone(),
-    };
-    while i < raw.len() {
-        let r = &raw[i];
-        if r.dead {
-            steps.push(step(r, ThinkingKind::DeadEnd));
-            i += 1;
-            continue;
-        }
-        if r.parallel {
-            let mut j = i;
-            while j < raw.len() && raw[j].parallel && !raw[j].dead {
-                j += 1;
-            }
-            if j - i >= 2 {
-                for k in i..j {
-                    steps.push(step(&raw[k], ThinkingKind::Child));
-                }
-                steps.push(ThinkingStep {
-                    kind: ThinkingKind::Merge,
-                    label: "Merged".to_string(),
-                    raw_title: String::new(),
-                    files: vec![],
-                    running: false,
-                    thought: None,
-                    key: raw[i].key.clone(),
-                });
-                i = j;
-                continue;
-            }
-        }
-        steps.push(step(r, ThinkingKind::Main));
-        i += 1;
-    }
-    if finished {
-        steps.push(ThinkingStep {
-            kind: ThinkingKind::Final,
-            label: "Finished thinking".to_string(),
-            raw_title: String::new(),
-            files: vec![],
-            running: false,
-            thought: None,
-            key: "final".to_string(),
-        });
-    }
-    Some(Thinking { steps, earlier, running, secs })
-}
-
-/// A leading gerund to its past tense, so a done step reads "Ran" where a running one reads
-/// "Running". Anything unknown is left alone.
-fn past(phrase: &str) -> String {
-    let mut it = phrase.splitn(2, ' ');
-    let Some(first) = it.next() else { return phrase.to_string() };
-    let rest = it.next().unwrap_or("");
-    let done = match first {
-        "Searching" => "Searched", "Reading" => "Read", "Writing" => "Wrote", "Editing" => "Edited",
-        "Running" => "Ran", "Exploring" => "Explored", "Fetching" => "Fetched", "Calling" => "Called",
-        "Building" => "Built", "Committing" => "Committed", "Checking" => "Checked", "Formatting" => "Formatted",
-        "Sending" => "Sent", "Using" => "Used", "Working" => "Worked", "Planning" => "Planned",
-        "Asking" => "Asked", "Thinking" => "Thought", "Merging" => "Merged", "Drafting" => "Drafted",
-        "Spotting" => "Spotted", "Mapping" => "Mapped", "Installing" => "Installed", "Pushing" => "Pushed",
-        "Pulling" => "Pulled", "Reviewing" => "Reviewed", "Starting" => "Started",
-        _ => first,
-    };
-    if rest.is_empty() { done.to_string() } else { format!("{done} {rest}") }
-}
-
-/// How far a step slides up from as it fades in.
-const STEP_RISE: f32 = 5.;
-
-/// The timeline, from its header down: `open` draws the nodes, otherwise just the header.
-fn thinking_element(thinking: &Thinking, open: bool, animate: bool, clock: f32, toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    let muted = theme.muted_foreground;
-    let blue = crate::palette::sky(cx);
-    let red = crate::palette::failed(cx);
-    let text_size = px(13.);
-    let rail = if thinking.running { blue.opacity(0.22) } else { theme.foreground.opacity(0.08) };
-
-    let header = h_flex()
-        .id("thinking-header")
-        .test_support()
-        .gap_1()
-        .py_1()
-        .text_size(text_size)
-        .cursor_pointer()
-        .on_click(toggle)
-        .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(muted))
-        .child(if thinking.running {
-            h_flex()
-                .gap_1()
-                .child(crate::working_bar::shimmer("Thinking".into(), clock, false, theme.foreground, theme.foreground))
-                .child(div().text_color(muted).child(format!("{}s", thinking.secs)))
-                .into_any_element()
-        } else {
-            div().text_color(muted).child(format!("Thought for {}s", thinking.secs)).into_any_element()
-        })
-        .child(div().flex_1())
-        .child(div().text_size(px(11.5)).text_color(muted.opacity(0.8)).child(format!("{} {}", thinking.steps.len() + thinking.earlier, if thinking.steps.len() + thinking.earlier == 1 { "step" } else { "steps" })));
-
-    let mut body = None;
-    if open {
-        // A step's tile: the kind's icon on a tint saying how it went — accent while it works,
-        // neutral once done, red on a dead end.
-        let tile = |icon: AnyElement, bg: Hsla, fg: Hsla| -> AnyElement {
-            div()
-                .w(px(16.))
-                .h(px(16.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(5.))
-                .bg(bg)
-                .text_color(fg)
-                .child(icon)
-                .into_any_element()
-        };
-        let node = |ix: usize, s: &ThinkingStep, cx: &App| -> AnyElement {
-            let shown = if s.running { s.label.clone() } else { past(&s.label) };
-            let failed = s.kind == ThinkingKind::DeadEnd;
-            let kind = if s.thought.is_some() { ToolKind::Thought } else { tool_kind(&s.raw_title) };
-            let (id, icon): (String, AnyElement) = match s.kind {
-                ThinkingKind::Merge => (format!("thinking-merge-{}", s.key), tile(
-                    div().size(px(9.)).rounded_full().border_2().border_color(muted.opacity(0.9)).bg(theme.background).into_any_element(),
-                    gpui_kit::transparent_black(),
-                    muted,
-                )),
-                ThinkingKind::DeadEnd => (format!("thinking-deadend-{}", s.key), tile(
-                    Icon::new(IconName::CircleX).size(px(10.5)).into_any_element(),
-                    red.opacity(0.14),
-                    red,
-                )),
-                ThinkingKind::Final => ("thinking-final".to_string(), tile(
-                    Icon::new(IconName::Check).size(px(10.)).into_any_element(),
-                    blue,
-                    theme.background,
-                )),
-                ThinkingKind::Child if s.running => (format!("thinking-node-{}", s.key), tile(
-                    Spinner::new().xsmall().color(muted).into_any_element(),
-                    theme.foreground.opacity(0.07),
-                    muted,
-                )),
-                ThinkingKind::Child => (format!("thinking-node-{}", s.key), tile(
-                    crate::activity::kind_icon(kind).size(px(10.5)).into_any_element(),
-                    theme.foreground.opacity(0.06),
-                    muted.opacity(0.9),
-                )),
-                ThinkingKind::Main if s.running => (format!("thinking-node-{}", s.key), tile(
-                    crate::activity::kind_icon(kind).size(px(10.5)).into_any_element(),
-                    blue.opacity(0.16),
-                    blue,
-                )),
-                ThinkingKind::Main => (format!("thinking-node-{}", s.key), tile(
-                    crate::activity::kind_icon(kind).size(px(10.5)).into_any_element(),
-                    theme.foreground.opacity(0.06),
-                    muted,
-                )),
-            };
-            let mut text_colour = if s.running { theme.foreground } else { muted };
-            if failed {
-                text_colour = red.opacity(0.85);
-            }
-            // A parallel child hangs off the main rail on a curved elbow.
-            let elbow = (s.kind == ThinkingKind::Child).then(|| {
-                canvas(
-                    |_, _, _| {},
-                    move |b, _, window, _| {
-                        let mut path = PathBuilder::stroke(px(1.5));
-                        let x0 = b.origin.x.as_f32() - 8.5;
-                        let y_mid = b.origin.y.as_f32() + 10.;
-                        path.move_to(point(px(x0), px(b.origin.y.as_f32() - 6.)));
-                        path.curve_to(point(px(x0 + 8.5 + 6.), px(y_mid)), point(px(x0), px(y_mid)));
-                        if let Ok(p) = path.build() {
-                            window.paint_path(p, rail);
-                        }
-                    },
-                )
-                .absolute()
-                .inset_0()
-                .into_any_element()
-            });
-            let row = h_flex()
-                .id(id.clone())
-                .test_support()
-                .relative()
-                .gap(px(9.))
-                .py(px(2.5))
-                .when(s.kind == ThinkingKind::Child, |el| el.ml(px(22.)))
-                .children(elbow)
-                .child(div().w(px(16.)).flex_none().flex().items_center().justify_center().child(icon))
-                .child(
-                    v_flex()
-                        .min_w_0()
-                        .flex_1()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .min_w_0()
-                                .text_size(text_size)
-                                .text_color(text_colour)
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .when(kind == ToolKind::Command, |el| el.text_size(px(12.)).font_family(theme.mono_font_family.clone()))
-                                        .child(shown),
-                                )
-                                .children(s.files.iter().map(|f| crate::file_icon::chip(format!("{}-file", if failed { format!("thinking-deadend-{}", s.key) } else { format!("thinking-node-{}", s.key) }), f, file_name(f), px(10.5), cx))),
-                        )
-                        .when_some(s.thought.clone().filter(|_| s.kind != ThinkingKind::Final), |el, t| {
-                            el.child(div().mt(px(2.)).pl_0().text_size(px(12.)).text_color(muted.opacity(0.85)).line_height(relative(1.45)).line_clamp(3).child(t.trim().to_string()))
-                        }),
-                );
-            // Steps settle in from a touch below, staggered a breath so a batch flows in.
-            if !animate {
-                return row.into_any_element();
-            }
-            let delay = (ix.min(6) as u64) * 35;
-            let dur = 190 + delay;
-            row.with_animation(
-                    SharedString::from(format!("thinking-enter-{id}")),
-                    Animation::new(std::time::Duration::from_millis(dur)).with_easing(move |t| {
-                        let u = ((t * dur as f32 - delay as f32) / (dur - delay) as f32).clamp(0., 1.);
-                        ease_out_quint()(u)
-                    }),
-                    |el, t| el.opacity(t).mt(px(STEP_RISE * (1. - t))),
-                )
-                .into_any_element()
-        };
-        let summary = (thinking.earlier > 0).then(|| {
-            h_flex().id("thinking-earlier").test_support().gap(px(9.)).py(px(2.)).text_size(px(12.5)).text_color(muted).child(div().w(px(16.)).flex_none()).child(div().child(format!("…and {} earlier steps", thinking.earlier)))
-        });
-        body = Some(
-            v_flex()
-                .id("thinking-body")
-                .test_support()
-                .relative()
-                .max_h(px(360.))
-                .overflow_y_scroll()
-                .pl(px(2.))
-                .child(div().absolute().top(px(8.)).bottom(px(8.)).left(px(10.)).w(px(1.5)).rounded_full().bg(rail))
-                .children(summary)
-                .children(thinking.steps.iter().enumerate().map(|(ix, s)| node(ix, s, cx))),
-        );
-    }
-
-    v_flex()
-        .id("thinking")
-        .test_support()
-        .pb_1()
-        .child(header)
-        .when_some(body, |el, b| el.child(b))
-        .into_any_element()
-}
-
-/// The last component of `path`, for a chip's label.
-fn file_name(path: &str) -> &str {
-    path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(path)
-}
-
 pub struct ThreadView {
     workspace: Entity<Workspace>,
     /// The main window's transcript follows its route; a thread window's shows one thread.
@@ -735,9 +438,6 @@ pub struct ThreadView {
     draws: u64,
     /// Items (by id) opened by the user: long messages, thoughts, tool groups, tool output.
     expanded: HashSet<String>,
-    /// The thinking timeline is expanded (a finished turn starts collapsed; a running one is
-    /// always shown).
-    thinking_open: bool,
     /// What a thread off screen kept: documents, expansion, scroll. Cycling back to it restores
     /// this instead of parsing and measuring again. `stash_order` is oldest first, capped.
     stashed: HashMap<String, Stashed>,
@@ -749,7 +449,8 @@ pub struct ThreadView {
     plan_md: Option<(String, Entity<TextViewState>, Subscription)>,
     /// Rows built for (thread, transcript revision, expansion state, where the transcript stops);
     /// rebuilt only when one changes.
-    rows_cache: std::cell::RefCell<Option<((Option<String>, u64, u64, Option<usize>), std::rc::Rc<Rows>)>>,
+    rows_cache:
+        std::cell::RefCell<Option<((Option<String>, u64, u64, Option<usize>), std::rc::Rc<Rows>)>>,
     /// Where the transcript stops for now: the live group of tool calls (and anything after it)
     /// shows in the working bar instead (`activity::transcript_end`).
     end: Option<usize>,
@@ -836,7 +537,6 @@ const STASH_KEPT: usize = 12;
 struct Stashed {
     md: HashMap<String, Markdown>,
     expanded: HashSet<String>,
-    thinking_open: bool,
     expanded_gen: u64,
     count: usize,
     revision: u64,
@@ -892,34 +592,73 @@ pub(crate) fn handoff_name(agent: &trek_core::AgentId, model: Option<&str>) -> S
         trek_core::AgentId::ClaudeCode => "Claude".to_string(),
         other => other.display_name(),
     };
-    let Some(model) = model.filter(|m| !m.trim().is_empty()) else { return agent_name };
+    let Some(model) = model.filter(|m| !m.trim().is_empty()) else {
+        return agent_name;
+    };
     let lower = model.to_lowercase();
     // "Mock Swift" from the Mock agent, "GPT-5.6-Sol" from Codex: the model says whose it is.
-    let named = agent_name.split_whitespace().any(|w| w.len() > 2 && lower.contains(&w.to_lowercase())) || (*agent == trek_core::AgentId::Codex && lower.starts_with("gpt"));
-    if named { model.to_string() } else { format!("{agent_name} {model}") }
+    let named = agent_name
+        .split_whitespace()
+        .any(|w| w.len() > 2 && lower.contains(&w.to_lowercase()))
+        || (*agent == trek_core::AgentId::Codex && lower.starts_with("gpt"));
+    if named {
+        model.to_string()
+    } else {
+        format!("{agent_name} {model}")
+    }
 }
 
 /// What a usage-limit row says after "Usage limit reached": "5-hour limit resets 3:27 PM".
-pub(crate) fn limit_when(scope: &trek_core::limit::LimitScope, resets_at: Option<i64>, now: i64) -> String {
+pub(crate) fn limit_when(
+    scope: &trek_core::limit::LimitScope,
+    resets_at: Option<i64>,
+    now: i64,
+) -> String {
     match resets_at {
-        Some(r) if r > now => format!("{} resets {}", scope.label(), crate::time::reset_clock(r, now)),
-        Some(r) => format!("{} reset {}", scope.label(), crate::time::reset_clock(r, now)),
+        Some(r) if r > now => format!(
+            "{} resets {}",
+            scope.label(),
+            crate::time::reset_clock(r, now)
+        ),
+        Some(r) => format!(
+            "{} reset {}",
+            scope.label(),
+            crate::time::reset_clock(r, now)
+        ),
         None => scope.label(),
     }
 }
 
 impl ThreadView {
-    pub fn new(workspace: Entity<Workspace>, scope: Scope, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: Entity<Workspace>,
+        scope: Scope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
         let subscriptions = vec![
             cx.observe(&workspace, |this, _, cx| this.sync(false, cx)),
-            cx.subscribe(&workspace, |this, _, event: &WorkspaceEvent, cx| match event {
-                WorkspaceEvent::Transcript { id, appended } if this.current.as_ref() == Some(id) => this.sync(*appended, cx),
-                WorkspaceEvent::TurnChanges { id, end } if this.current.as_ref() == Some(id) => this.changes_in(end, cx),
-                _ => {}
-            }),
+            cx.subscribe(
+                &workspace,
+                |this, _, event: &WorkspaceEvent, cx| match event {
+                    WorkspaceEvent::Transcript { id, appended }
+                        if this.current.as_ref() == Some(id) =>
+                    {
+                        this.sync(*appended, cx)
+                    }
+                    WorkspaceEvent::TurnChanges { id, end }
+                        if this.current.as_ref() == Some(id) =>
+                    {
+                        this.changes_in(end, cx)
+                    }
+                    _ => {}
+                },
+            ),
             // A visualization in an answer settled to a new height: measure the rows again.
-            cx.observe_global::<crate::visualization::Relayout>(|this, cx| this.scroller.update(cx, |s, cx| s.remeasure(cx))),
+            cx.observe_global::<crate::visualization::Relayout>(|this, cx| {
+                this.scroller.update(cx, |s, cx| s.remeasure(cx))
+            }),
             cx.observe_window_activation(window, |this, window, cx| {
                 this.active = window.is_window_active() || crate::mascot::force_active();
                 if this.flash.is_some() {
@@ -938,7 +677,6 @@ impl ThreadView {
             md: HashMap::new(),
             draws: 0,
             expanded: HashSet::new(),
-            thinking_open: false,
             stashed: HashMap::new(),
             stash_order: Default::default(),
             secrets: (None, vec![]),
@@ -972,7 +710,9 @@ impl ThreadView {
     /// Park the thread leaving the screen: its parsed documents, expansion, measured rows and
     /// scroll position go into `stashed` (the few most recent), so cycling back doesn't rebuild.
     fn park(&mut self, cx: &mut Context<Self>) {
-        let Some(old) = self.current.clone() else { return };
+        let Some(old) = self.current.clone() else {
+            return;
+        };
         if self.workspace.read(cx).thread(&old).is_none() {
             return;
         }
@@ -982,7 +722,6 @@ impl ThreadView {
             Stashed {
                 md: std::mem::take(&mut self.md),
                 expanded: std::mem::take(&mut self.expanded),
-                thinking_open: self.thinking_open,
                 expanded_gen: self.expanded_gen,
                 count: self.count,
                 revision: self.revision,
@@ -1009,11 +748,12 @@ impl ThreadView {
 
     /// Bring back what `id` was parked with. False when it was never parked (or was evicted).
     fn restore(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
-        let Some(s) = self.stashed.remove(id) else { return false };
+        let Some(s) = self.stashed.remove(id) else {
+            return false;
+        };
         self.stash_order.retain(|t| t != id);
         self.md = s.md;
         self.expanded = s.expanded;
-        self.thinking_open = s.thinking_open;
         self.expanded_gen = s.expanded_gen;
         self.count = s.count;
         self.revision = s.revision;
@@ -1031,7 +771,11 @@ impl ThreadView {
     /// this view once the new text is parsed, so it doesn't redraw before that (it would show the
     /// same text again).
     fn sync(&mut self, appended: bool, cx: &mut Context<Self>) {
-        let id = self.workspace.read(cx).thread_id_in(&self.scope).map(str::to_string);
+        let id = self
+            .workspace
+            .read(cx)
+            .thread_id_in(&self.scope)
+            .map(str::to_string);
         let switched = id != self.current;
         // What the thread leaving the screen was parked with comes out of the way first, so a
         // restored thread's documents diff and re-measure like a thread still on screen.
@@ -1049,32 +793,67 @@ impl ThreadView {
             thread: id.clone(),
             draft: ws.is_draft_in(&self.scope),
             revision,
-            agent: id.as_ref().and_then(|id| ws.thread(id)).map(|t| t.agent.clone()),
+            agent: id
+                .as_ref()
+                .and_then(|id| ws.thread(id))
+                .map(|t| t.agent.clone()),
             loading: live.is_some_and(|l| l.loading),
             picks: live.map(|l| l.picks.clone()).unwrap_or_default(),
-            end: id.as_ref().and_then(|id| crate::activity::transcript_end(ws, id)),
+            end: id
+                .as_ref()
+                .and_then(|id| crate::activity::transcript_end(ws, id)),
             appearance: ws.settings.appearance.clone(),
-            tasks: id.as_ref().map(|id| ws.children(id).into_iter().map(|t| (t.id.clone(), ws.task_state(&t.id))).collect()).unwrap_or_default(),
-            folder: id.as_ref().and_then(|id| ws.thread(id)).and_then(|t| ws.thread_project_tint(t, cx)),
+            tasks: id
+                .as_ref()
+                .map(|id| {
+                    ws.children(id)
+                        .into_iter()
+                        .map(|t| (t.id.clone(), ws.task_state(&t.id)))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            folder: id
+                .as_ref()
+                .and_then(|id| ws.thread(id))
+                .and_then(|t| ws.thread_project_tint(t, cx)),
         };
         let end = shown.end;
-        let ticking = ws.any_task_live_in(&self.scope) || ws.thread_id_in(&self.scope).is_some_and(|id| ws.turn_running(&id));
+        let ticking = ws.any_task_live_in(&self.scope)
+            || ws
+                .thread_id_in(&self.scope)
+                .is_some_and(|id| ws.turn_running(&id));
         // Text added to messages already streaming moves no row: the rows built for the last
         // revision stand for this one (building them reads every item, and this runs for each
         // batch of tokens).
         // Unless the answer streaming in has just grown a part (`answer_parts`): that's a row.
         // Where the latest answer is cut, worked out once here for both.
-        let tail_cuts: Option<(usize, Vec<usize>)> = live.filter(|_| !switched && revision != self.revision).and_then(|l| {
-            let ix = l.items.iter().rposition(|i| matches!(i, Item::Assistant { .. }))?;
-            match &l.items[ix] {
-                Item::Assistant { text } => Some((ix, answer_parts(text))),
-                _ => None,
-            }
-        });
+        let tail_cuts: Option<(usize, Vec<usize>)> = live
+            .filter(|_| !switched && revision != self.revision)
+            .and_then(|l| {
+                let ix = l
+                    .items
+                    .iter()
+                    .rposition(|i| matches!(i, Item::Assistant { .. }))?;
+                match &l.items[ix] {
+                    Item::Assistant { text } => Some((ix, answer_parts(text))),
+                    _ => None,
+                }
+            });
         if appended && !switched && end == self.end {
             if let Some((key, rows)) = self.rows_cache.borrow_mut().as_mut() {
-                let same_parts = tail_cuts.as_ref().is_none_or(|(ix, cuts)| cuts.len() + 1 == rows.split.iter().find(|(i, _)| i == ix).map_or(1, |(_, n)| *n));
-                if key.0 == self.current && key.1 == self.revision && same_parts && live.is_some_and(|l| l.items.len() == rows.item_row.len()) {
+                let same_parts = tail_cuts.as_ref().is_none_or(|(ix, cuts)| {
+                    cuts.len() + 1
+                        == rows
+                            .split
+                            .iter()
+                            .find(|(i, _)| i == ix)
+                            .map_or(1, |(_, n)| *n)
+                });
+                if key.0 == self.current
+                    && key.1 == self.revision
+                    && same_parts
+                    && live.is_some_and(|l| l.items.len() == rows.item_row.len())
+                {
                     key.1 = revision;
                 }
             }
@@ -1088,25 +867,43 @@ impl ThreadView {
             // Each answer is cut once, however many of its parts have documents.
             let mut cuts: HashMap<usize, Vec<usize>> = tail_cuts.into_iter().collect();
             for (key, m) in &self.md {
-                let ix = if l.items.id_at(m.ix) == Some(m.item.as_str()) { Some(m.ix) } else { l.items.position(&m.item) };
+                let ix = if l.items.id_at(m.ix) == Some(m.item.as_str()) {
+                    Some(m.ix)
+                } else {
+                    l.items.position(&m.item)
+                };
                 let now = ix.and_then(|ix| match &l.items[ix] {
-                    Item::Assistant { text } => part_of(text, cuts.entry(ix).or_insert_with(|| answer_parts(text)), m.part).map(|t| (ix, t)),
-                    Item::Reasoning { text } | Item::Tool { output: text, .. } if m.part == 0 => Some((ix, text.as_str())),
+                    Item::Assistant { text } => part_of(
+                        text,
+                        cuts.entry(ix).or_insert_with(|| answer_parts(text)),
+                        m.part,
+                    )
+                    .map(|t| (ix, t)),
+                    Item::Reasoning { text } | Item::Tool { output: text, .. } if m.part == 0 => {
+                        Some((ix, text.as_str()))
+                    }
                     _ => None,
                 });
                 match now {
                     None => docs.push((key.clone(), None)),
-                    Some((ix, text)) if ix != m.ix || text != m.text => docs.push((key.clone(), Some((ix, (text != m.text).then(|| text.to_string()))))),
+                    Some((ix, text)) if ix != m.ix || text != m.text => docs.push((
+                        key.clone(),
+                        Some((ix, (text != m.text).then(|| text.to_string()))),
+                    )),
                     Some(_) => {}
                 }
             }
         }
-        let fonts = (ws.settings.appearance.transcript_font_size(), ws.settings.appearance.ui_font_size());
+        let fonts = (
+            ws.settings.appearance.transcript_font_size(),
+            ws.settings.appearance.ui_font_size(),
+        );
         if fonts != self.fonts {
             self.fonts = fonts;
             let count = self.count;
             if count > 0 {
-                self.scroller.update(cx, |s, cx| _ = s.remeasure_items(0..count, cx));
+                self.scroller
+                    .update(cx, |s, cx| _ = s.remeasure_items(0..count, cx));
             }
         }
         if switched {
@@ -1114,7 +911,6 @@ impl ThreadView {
             self.confirm = None;
             self.md.clear();
             self.expanded.clear();
-            self.thinking_open = false;
             self.expanded_gen += 1;
             self.count = 0;
             self.revision = 0;
@@ -1125,9 +921,18 @@ impl ThreadView {
             self.confirm = None;
             self.flash = None;
         }
-        let quiet = appended && !switched && self.shown.as_ref().is_some_and(|s| Shown { revision, ..s.clone() } == shown);
+        let quiet = appended
+            && !switched
+            && self.shown.as_ref().is_some_and(|s| {
+                Shown {
+                    revision,
+                    ..s.clone()
+                } == shown
+            });
         // A sub-agent that moved on may have changed its row's height (its answer's preview).
-        let tasks_moved = !switched && (revision != self.revision || self.shown.as_ref().is_some_and(|s| s.tasks != shown.tasks));
+        let tasks_moved = !switched
+            && (revision != self.revision
+                || self.shown.as_ref().is_some_and(|s| s.tasks != shown.tasks));
         self.sync_ticker(ticking, cx);
         if self.shown.as_ref() != Some(&shown) {
             self.shown = Some(shown);
@@ -1150,8 +955,16 @@ impl ThreadView {
             self.opened = opened.clone();
             if let Some(o) = opened {
                 let rows = self.rows(cx);
-                let group = self.workspace.read(cx).live.get(self.current.as_deref().unwrap_or_default()).and_then(|l| l.items.position(&o.first));
-                if let Some(Row::ToolGroup { key, .. }) = group.and_then(|ix| rows.row_of(ix)).and_then(|r| rows.rows.get(r)) {
+                let group = self
+                    .workspace
+                    .read(cx)
+                    .live
+                    .get(self.current.as_deref().unwrap_or_default())
+                    .and_then(|l| l.items.position(&o.first));
+                if let Some(Row::ToolGroup { key, .. }) = group
+                    .and_then(|ix| rows.row_of(ix))
+                    .and_then(|r| rows.rows.get(r))
+                {
                     self.expanded.insert(key.to_string());
                 }
                 self.expanded.extend(o.call);
@@ -1164,7 +977,9 @@ impl ThreadView {
                 self.md.remove(&key);
                 continue;
             };
-            let Some(m) = self.md.get_mut(&key) else { continue };
+            let Some(m) = self.md.get_mut(&key) else {
+                continue;
+            };
             m.ix = ix;
             if let Some(text) = text {
                 // Streaming appends (parsed incrementally); anything else replaces the document.
@@ -1221,22 +1036,35 @@ impl ThreadView {
             self.activity_lines.clear();
             return;
         }
-        let thinking_live = self.current.as_ref().is_some_and(|id| self.workspace.read(cx).turn_running(id));
+        let thinking_live = self
+            .current
+            .as_ref()
+            .is_some_and(|id| self.workspace.read(cx).turn_running(id));
         let shimmer = !self.open_activity(cx).is_empty() || thinking_live;
         if self._ticker.as_ref().is_some_and(|(s, _)| *s == shimmer) {
             return;
         }
-        let task = cx.spawn(async move |this, cx| loop {
-            let Ok(moving) = this.update(cx, |this, cx| {
-                cx.notify();
-                this.remeasure_activity(cx);
-                this.active && this.workspace.read(cx).motion(cx)
-            }) else {
-                break;
-            };
-            let fps = if shimmer { crate::mascot::FPS } else { PULSE_FPS };
-            let wait = if moving { std::time::Duration::from_millis(1000 / fps) } else { std::time::Duration::from_secs(1) };
-            cx.background_executor().timer(wait).await;
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(moving) = this.update(cx, |this, cx| {
+                    cx.notify();
+                    this.remeasure_activity(cx);
+                    this.active && this.workspace.read(cx).motion(cx)
+                }) else {
+                    break;
+                };
+                let fps = if shimmer {
+                    crate::mascot::FPS
+                } else {
+                    PULSE_FPS
+                };
+                let wait = if moving {
+                    std::time::Duration::from_millis(1000 / fps)
+                } else {
+                    std::time::Duration::from_secs(1)
+                };
+                cx.background_executor().timer(wait).await;
+            }
         });
         self._ticker = Some((shimmer, task));
     }
@@ -1245,10 +1073,21 @@ impl ThreadView {
     /// row is measured again, with or without its card.
     fn changes_in(&mut self, end: &str, cx: &mut Context<Self>) {
         let ws = self.workspace.read(cx);
-        let Some(ix) = self.current.as_ref().and_then(|id| ws.live.get(id)).and_then(|l| l.items.position(end)) else { return };
+        let Some(ix) = self
+            .current
+            .as_ref()
+            .and_then(|id| ws.live.get(id))
+            .and_then(|l| l.items.position(end))
+        else {
+            return;
+        };
         let rows = self.rows(cx);
-        if let Some(row) = rows.row_of(ix).filter(|r| matches!(rows.rows.get(*r), Some(Row::TurnEnd { ix: i }) if *i == ix)) {
-            self.scroller.update(cx, |s, cx| _ = s.remeasure_items(row..row + 1, cx));
+        if let Some(row) = rows
+            .row_of(ix)
+            .filter(|r| matches!(rows.rows.get(*r), Some(Row::TurnEnd { ix: i }) if *i == ix))
+        {
+            self.scroller
+                .update(cx, |s, cx| _ = s.remeasure_items(row..row + 1, cx));
         }
         cx.notify();
     }
@@ -1256,15 +1095,37 @@ impl ThreadView {
     /// Opened sub-agent rows showing what their sub-agent is doing: (row, key, lines shown).
     fn open_activity(&self, cx: &App) -> Vec<(usize, String, usize)> {
         let ws = self.workspace.read(cx);
-        let Some((thread, live)) = self.current.as_ref().and_then(|t| Some((t, ws.live.get(t)?))) else { return vec![] };
-        let agent = ws.thread(thread).map(|t| t.agent.clone()).unwrap_or(trek_core::AgentId::ClaudeCode);
+        let Some((thread, live)) = self
+            .current
+            .as_ref()
+            .and_then(|t| Some((t, ws.live.get(t)?)))
+        else {
+            return vec![];
+        };
+        let agent = ws
+            .thread(thread)
+            .map(|t| t.agent.clone())
+            .unwrap_or(trek_core::AgentId::ClaudeCode);
         self.rows(cx)
             .rows
             .iter()
             .enumerate()
             .filter_map(|(r, row)| match (row, row.item()) {
-                (Row::SubAgent { key, open: true, .. }, ix) => match live.items.get(ix)? {
-                    Item::Tool { id, detail, output, status, .. } => SubAgentRow::read(ws, thread, &agent, id, detail, output, *status).activity.map(|g| (r, key.to_string(), g.lines())),
+                (
+                    Row::SubAgent {
+                        key, open: true, ..
+                    },
+                    ix,
+                ) => match live.items.get(ix)? {
+                    Item::Tool {
+                        id,
+                        detail,
+                        output,
+                        status,
+                        ..
+                    } => SubAgentRow::read(ws, thread, &agent, id, detail, output, *status)
+                        .activity
+                        .map(|g| (r, key.to_string(), g.lines())),
                     _ => None,
                 },
                 _ => None,
@@ -1275,7 +1136,11 @@ impl ThreadView {
     /// Measure again the opened sub-agent rows whose activity grew or shrank since last time.
     fn remeasure_activity(&mut self, cx: &mut Context<Self>) {
         let open = self.open_activity(cx);
-        let changed: Vec<usize> = open.iter().filter(|(_, key, n)| self.activity_lines.get(key) != Some(n)).map(|(r, ..)| *r).collect();
+        let changed: Vec<usize> = open
+            .iter()
+            .filter(|(_, key, n)| self.activity_lines.get(key) != Some(n))
+            .map(|(r, ..)| *r)
+            .collect();
         self.activity_lines = open.into_iter().map(|(_, key, n)| (key, n)).collect();
         if changed.is_empty() {
             return;
@@ -1289,7 +1154,14 @@ impl ThreadView {
 
     /// Measure the sub-agent rows again (their answers' previews come and go).
     fn remeasure_sub_agents(&mut self, cx: &mut Context<Self>) {
-        let rows: Vec<usize> = self.rows(cx).rows.iter().enumerate().filter(|(_, r)| matches!(r, Row::SubAgent { .. })).map(|(i, _)| i).collect();
+        let rows: Vec<usize> = self
+            .rows(cx)
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r, Row::SubAgent { .. }))
+            .map(|(i, _)| i)
+            .collect();
         if rows.is_empty() {
             return;
         }
@@ -1303,7 +1175,13 @@ impl ThreadView {
 
     /// The markdown document for part `part` of item `key` (at `ix`; a long answer is drawn in
     /// parts, anything else whole), built the first time its row is drawn.
-    fn markdown(&mut self, key: &str, part: usize, ix: usize, cx: &mut Context<Self>) -> Option<Entity<TextViewState>> {
+    fn markdown(
+        &mut self,
+        key: &str,
+        part: usize,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<TextViewState>> {
         let drawn = self.draws;
         let doc = part_key(key, part);
         if let Some(m) = self.md.get_mut(&doc) {
@@ -1312,7 +1190,10 @@ impl ThreadView {
         }
         let ws = self.workspace.read(cx);
         let items = &ws.live.get(self.current.as_ref()?)?.items;
-        let text = match (items.id_at(ix) == Some(key)).then(|| items.get(ix)).flatten()? {
+        let text = match (items.id_at(ix) == Some(key))
+            .then(|| items.get(ix))
+            .flatten()?
+        {
             Item::Assistant { text } => part_of(text, &answer_parts(text), part)?.to_string(),
             // A sub-agent's answer is markdown too.
             Item::Reasoning { text } | Item::Tool { output: text, .. } if part == 0 => text.clone(),
@@ -1320,10 +1201,22 @@ impl ThreadView {
         };
         let state = cx.new(|cx| TextViewState::markdown(&text, cx));
         let changed = cx.observe(&state, |_, _, cx| cx.notify());
-        self.md.insert(doc, Markdown { state: state.clone(), item: key.to_string(), part, text, ix, drawn, _changed: changed });
+        self.md.insert(
+            doc,
+            Markdown {
+                state: state.clone(),
+                item: key.to_string(),
+                part,
+                text,
+                ix,
+                drawn,
+                _changed: changed,
+            },
+        );
         if self.md.len() > MD_KEPT {
             // Down to three quarters, so this isn't done for every row scrolled into view.
-            let mut by_age: Vec<(u64, String)> = self.md.iter().map(|(k, m)| (m.drawn, k.clone())).collect();
+            let mut by_age: Vec<(u64, String)> =
+                self.md.iter().map(|(k, m)| (m.drawn, k.clone())).collect();
             by_age.sort();
             for (_, k) in by_age.into_iter().take(self.md.len() - MD_KEPT * 3 / 4) {
                 self.md.remove(&k);
@@ -1339,26 +1232,34 @@ impl ThreadView {
             return;
         }
         let ws = self.workspace.read(cx);
-        let Some(r) = ws.reveal.clone().filter(|r| r.seq > self.revealed) else { return };
+        let Some(r) = ws.reveal.clone().filter(|r| r.seq > self.revealed) else {
+            return;
+        };
         // Asked for another thread: the user has moved on before it loaded.
         if self.current.as_ref() != Some(&r.thread) {
             self.revealed = r.seq;
             return;
         }
-        let Some(live) = ws.live.get(&r.thread).filter(|l| l.loaded && !l.loading) else { return };
+        let Some(live) = ws.live.get(&r.thread).filter(|l| l.loaded && !l.loading) else {
+            return;
+        };
         let item = match &r.item {
             ItemRef::Id(id) => live.items.position(id),
             ItemRef::Position(p) => Some(*p),
         };
         // A long message of yours shows ten lines until opened; the match may lie further down.
-        let open = item.filter(|ix| matches!(live.items.get(*ix), Some(Item::User { .. }))).and_then(|ix| live.item_ids().get(ix).cloned());
+        let open = item
+            .filter(|ix| matches!(live.items.get(*ix), Some(Item::User { .. })))
+            .and_then(|ix| live.item_ids().get(ix).cloned());
         self.revealed = r.seq;
         if let Some(key) = open {
             if self.expanded.insert(key) {
                 self.expanded_gen += 1;
             }
         }
-        let Some(row) = item.and_then(|ix| self.rows(cx).row_of(ix)) else { return };
+        let Some(row) = item.and_then(|ix| self.rows(cx).row_of(ix)) else {
+            return;
+        };
         self.flash = Some((row, r.seq));
         let seq = r.seq;
         self._flash_timer = Some(cx.spawn(async move |this, cx| {
@@ -1378,7 +1279,12 @@ impl ThreadView {
     }
 
     fn rows(&self, cx: &App) -> std::rc::Rc<Rows> {
-        let revision = self.current.as_ref().and_then(|id| self.workspace.read(cx).live.get(id)).map(|l| l.revision).unwrap_or(0);
+        let revision = self
+            .current
+            .as_ref()
+            .and_then(|id| self.workspace.read(cx).live.get(id))
+            .map(|l| l.revision)
+            .unwrap_or(0);
         // As of the last sync, so the rows match the count the scroller was given.
         let end = self.end;
         let key = (self.current.clone(), revision, self.expanded_gen, end);
@@ -1389,7 +1295,11 @@ impl ThreadView {
         }
         let mut rows = self.build_rows(cx);
         if let Some(end) = end {
-            let keep = rows.rows.iter().position(|r| r.item() >= end).unwrap_or(rows.rows.len());
+            let keep = rows
+                .rows
+                .iter()
+                .position(|r| r.item() >= end)
+                .unwrap_or(rows.rows.len());
             rows.rows.truncate(keep);
         }
         let rows = std::rc::Rc::new(rows);
@@ -1399,7 +1309,13 @@ impl ThreadView {
 
     fn build_rows(&self, cx: &App) -> Rows {
         let ws = self.workspace.read(cx);
-        let Some(live) = self.current.as_ref().and_then(|id| ws.live.get(id)) else { return Rows { rows: vec![], item_row: vec![], split: vec![] } };
+        let Some(live) = self.current.as_ref().and_then(|id| ws.live.get(id)) else {
+            return Rows {
+                rows: vec![],
+                item_row: vec![],
+                split: vec![],
+            };
+        };
         let ids = live.item_ids();
         let (slots, item_row) = layout(&live.items, live.reasoning);
         let rows = slots
@@ -1415,26 +1331,55 @@ impl ThreadView {
                         .map(|ix| {
                             let key = &ids[ix];
                             match &live.items[ix] {
-                                Item::Tool { id: tool_id, title, status, .. } => {
+                                Item::Tool {
+                                    id: tool_id,
+                                    title,
+                                    status,
+                                    ..
+                                } => {
                                     // A running sub-agent shows what it's doing right now.
-                                    let activity = live.tasks.iter().find(|t| &t.id == tool_id && t.done.is_none()).map(|t| {
-                                        let steps = if t.tool_uses == 1 { "1 step".to_string() } else { format!("{} steps", t.tool_uses) };
-                                        SharedString::from(if t.activity.is_empty() { steps } else { format!("{} · {steps}", t.activity) })
-                                    });
+                                    let activity = live
+                                        .tasks
+                                        .iter()
+                                        .find(|t| &t.id == tool_id && t.done.is_none())
+                                        .map(|t| {
+                                            let steps = if t.tool_uses == 1 {
+                                                "1 step".to_string()
+                                            } else {
+                                                format!("{} steps", t.tool_uses)
+                                            };
+                                            SharedString::from(if t.activity.is_empty() {
+                                                steps
+                                            } else {
+                                                format!("{} · {steps}", t.activity)
+                                            })
+                                        });
                                     kinds.push(tool_kind(title));
                                     running |= *status == ToolStatus::Running;
-                                    Row::Tool { ix, key: key.clone().into(), open: self.expanded.contains(key), activity }
+                                    Row::Tool {
+                                        ix,
+                                        key: key.clone().into(),
+                                        open: self.expanded.contains(key),
+                                        activity,
+                                    }
                                 }
                                 // Finished thoughts fold into the group; live thinking has no row
                                 // (the working bar above the composer is the one "working" indicator).
                                 _ => {
                                     kinds.push(ToolKind::Thought);
-                                    Row::Reasoning { ix, key: key.clone().into(), open: self.expanded.contains(key) }
+                                    Row::Reasoning {
+                                        ix,
+                                        key: key.clone().into(),
+                                        open: self.expanded.contains(key),
+                                    }
                                 }
                             }
                         })
                         .collect();
-                    let tool_kinds: Vec<ToolKind> = kinds.into_iter().filter(|k| *k != ToolKind::Thought).collect();
+                    let tool_kinds: Vec<ToolKind> = kinds
+                        .into_iter()
+                        .filter(|k| *k != ToolKind::Thought)
+                        .collect();
                     Row::ToolGroup {
                         ix,
                         open: self.expanded.contains(key.as_ref()),
@@ -1448,14 +1393,40 @@ impl ThreadView {
                 Slot::Item(ix) => {
                     let key = &ids[ix];
                     match &live.items[ix] {
-                        Item::User { text, .. } if orch::is_wake(text) => Row::Wake { ix, key: key.clone().into(), open: self.expanded.contains(key) },
-                        Item::User { .. } => Row::User { ix, key: key.clone().into(), open: self.expanded.contains(key) },
-                        Item::Tool { id, .. } if trek_core::lineage::of_row(id).is_some() => Row::Lineage { ix },
-                        Item::Tool { title, .. } if trek_core::media::is_watch_call(title) => Row::Tool { ix, key: key.clone().into(), open: self.expanded.contains(key), activity: None },
+                        Item::User { text, .. } if orch::is_wake(text) => Row::Wake {
+                            ix,
+                            key: key.clone().into(),
+                            open: self.expanded.contains(key),
+                        },
+                        Item::User { .. } => Row::User {
+                            ix,
+                            key: key.clone().into(),
+                            open: self.expanded.contains(key),
+                        },
+                        Item::Tool { id, .. } if trek_core::lineage::of_row(id).is_some() => {
+                            Row::Lineage { ix }
+                        }
+                        Item::Tool { title, .. } if trek_core::media::is_watch_call(title) => {
+                            Row::Tool {
+                                ix,
+                                key: key.clone().into(),
+                                open: self.expanded.contains(key),
+                                activity: None,
+                            }
+                        }
                         // `TREK_OPEN_BACKGROUND=1` (design review) opens them all.
-                        Item::Tool { .. } => Row::SubAgent { ix, key: key.clone().into(), open: self.expanded.contains(key) || review_open() },
+                        Item::Tool { .. } => Row::SubAgent {
+                            ix,
+                            key: key.clone().into(),
+                            open: self.expanded.contains(key) || review_open(),
+                        },
                         Item::TurnEnd { .. } => Row::TurnEnd { ix },
-                        Item::Assistant { .. } => Row::Assistant { ix, key: key.clone().into(), part: 0, last: true },
+                        Item::Assistant { .. } => Row::Assistant {
+                            ix,
+                            key: key.clone().into(),
+                            part: 0,
+                            last: true,
+                        },
                         Item::Notice { .. } => Row::Notice { ix },
                         Item::Error { .. } => Row::Error { ix },
                         Item::Limit { .. } => Row::Limit { ix },
@@ -1471,10 +1442,19 @@ impl ThreadView {
     /// Everything the agent said between the user's message before `ix` and `ix`.
     fn response_text(items: &[Item], ix: usize) -> String {
         let ix = ix.min(items.len());
-        let start = items[..ix].iter().rposition(|i| matches!(i, Item::User { .. })).map_or(0, |u| u + 1);
+        let start = items[..ix]
+            .iter()
+            .rposition(|i| matches!(i, Item::User { .. }))
+            .map_or(0, |u| u + 1);
         items[start..ix]
             .iter()
-            .filter_map(|i| if let Item::Assistant { text } = i { Some(text.trim()) } else { None })
+            .filter_map(|i| {
+                if let Item::Assistant { text } = i {
+                    Some(text.trim())
+                } else {
+                    None
+                }
+            })
             .filter(|t| !t.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n")
@@ -1482,30 +1462,68 @@ impl ThreadView {
 
     /// One transcript row. `row_ix` is its place in the list (tool rows inside a group pass the
     /// group's); `flash` tints it for a moment after a search result scrolled to it.
-    fn render_row(row: Row, row_ix: usize, flash: Option<u64>, view: &WeakEntity<ThreadView>, at: &RowContext, cx: &mut App) -> AnyElement {
+    fn render_row(
+        row: Row,
+        row_ix: usize,
+        flash: Option<u64>,
+        view: &WeakEntity<ThreadView>,
+        at: &RowContext,
+        cx: &mut App,
+    ) -> AnyElement {
         // Documents and nested rows need the app mutably; everything else only reads it.
         let md = match &row {
-            Row::Assistant { ix, key, part, .. } => view.update(cx, |this, cx| this.markdown(key, *part, *ix, cx)).ok().flatten(),
-            Row::Reasoning { ix, key, open: true } | Row::SubAgent { ix, key, open: true } => view.update(cx, |this, cx| this.markdown(key, 0, *ix, cx)).ok().flatten(),
+            Row::Assistant { ix, key, part, .. } => view
+                .update(cx, |this, cx| this.markdown(key, *part, *ix, cx))
+                .ok()
+                .flatten(),
+            Row::Reasoning {
+                ix,
+                key,
+                open: true,
+            }
+            | Row::SubAgent {
+                ix,
+                key,
+                open: true,
+            } => view
+                .update(cx, |this, cx| this.markdown(key, 0, *ix, cx))
+                .ok()
+                .flatten(),
             _ => None,
         };
         let children: Vec<AnyElement> = match &row {
-            Row::ToolGroup { open: true, tools, .. } => tools.iter().map(|t| Self::render_row(t.clone(), row_ix, None, view, at, cx)).collect(),
+            Row::ToolGroup {
+                open: true, tools, ..
+            } => tools
+                .iter()
+                .map(|t| Self::render_row(t.clone(), row_ix, None, view, at, cx))
+                .collect(),
             _ => vec![],
         };
         // What a finished turn changed, worked out (off the main thread) the first time its
         // footer is drawn.
         let changes = match &row {
-            Row::TurnEnd { ix } => at.workspace.update(cx, |ws, cx| ws.load_turn_changes(&at.thread, *ix, cx)),
+            Row::TurnEnd { ix } => at
+                .workspace
+                .update(cx, |ws, cx| ws.load_turn_changes(&at.thread, *ix, cx)),
             _ => None,
         };
         let cx: &App = cx;
         // An answer's row draws its document, not the item's text: that isn't copied each frame
         // (a long answer's is megabytes, and each of its parts on screen would copy all of it).
-        let Some(item) = at.workspace.read(cx).live.get(&at.thread).and_then(|l| l.items.get(row.item())).map(|i| match i {
-            Item::Assistant { .. } => Item::Assistant { text: String::new() },
-            i => i.clone(),
-        }) else {
+        let Some(item) = at
+            .workspace
+            .read(cx)
+            .live
+            .get(&at.thread)
+            .and_then(|l| l.items.get(row.item()))
+            .map(|i| match i {
+                Item::Assistant { .. } => Item::Assistant {
+                    text: String::new(),
+                },
+                i => i.clone(),
+            })
+        else {
             return div().into_any_element();
         };
         let theme = cx.theme();
@@ -1524,10 +1542,21 @@ impl ThreadView {
             let el = match flash {
                 // A soft band behind the message that holds briefly, then fades.
                 Some(seq) => {
-                    let band = div().absolute().top(px(if reaches_up { -2. } else { 0. })).bottom(px(if reaches_down { -2. } else { 0. })).left(px(-12.)).right(px(-12.)).bg(tint);
-                    let band = band.rounded_t(px(if reaches_up { 10. } else { 0. })).rounded_b(px(if reaches_down { 10. } else { 0. }));
+                    let band = div()
+                        .absolute()
+                        .top(px(if reaches_up { -2. } else { 0. }))
+                        .bottom(px(if reaches_down { -2. } else { 0. }))
+                        .left(px(-12.))
+                        .right(px(-12.))
+                        .bg(tint);
+                    let band = band
+                        .rounded_t(px(if reaches_up { 10. } else { 0. }))
+                        .rounded_b(px(if reaches_down { 10. } else { 0. }));
                     let band = if animate {
-                        band.with_animation(("reveal", seq), Animation::new(FLASH), |el, t| el.opacity(1. - ((t - 0.45) / 0.55).clamp(0., 1.))).into_any_element()
+                        band.with_animation(("reveal", seq), Animation::new(FLASH), |el, t| {
+                            el.opacity(1. - ((t - 0.45) / 0.55).clamp(0., 1.))
+                        })
+                        .into_any_element()
                     } else {
                         band.into_any_element()
                     };
@@ -1545,7 +1574,8 @@ impl ThreadView {
                         this.expanded.insert(key.to_string());
                     }
                     this.expanded_gen += 1;
-                    this.scroller.update(cx, |s, cx| _ = s.remeasure_items(row_ix..row_ix + 1, cx));
+                    this.scroller
+                        .update(cx, |s, cx| _ = s.remeasure_items(row_ix..row_ix + 1, cx));
                     // An opened sub-agent's activity shimmers at the working bar's rate.
                     let live = this.workspace.read(cx).any_task_live_in(&this.scope);
                     this.sync_ticker(live, cx);
@@ -1555,19 +1585,37 @@ impl ThreadView {
         };
         let ends_turn = trek_core::rewind::ends_turn(&item);
         // The confirmation open on this row, if any.
-        let asking = view.upgrade().and_then(|v| v.read(cx).confirm.as_ref().map(|c| (c.anchor.clone(), c.ask.clone())));
+        let asking = view.upgrade().and_then(|v| {
+            v.read(cx)
+                .confirm
+                .as_ref()
+                .map(|c| (c.anchor.clone(), c.ask.clone()))
+        });
         let muted = theme.muted_foreground;
-        let action = |id: (&'static str, usize), icon: Icon, tooltip: SharedString| Button::new(id).ghost().xsmall().icon(icon.text_color(muted)).tooltip(tooltip);
+        let action = |id: (&'static str, usize), icon: Icon, tooltip: SharedString| {
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .icon(icon.text_color(muted))
+                .tooltip(tooltip)
+        };
         let live = at.workspace.read(cx).live.get(&at.thread);
         // A tooltip, with why the files won't be restored when they won't (message `pos`).
         let with_files = |tooltip: &str, pos: Option<usize>| -> SharedString {
-            match live.zip(pos).and_then(|(l, pos)| crate::workspace::NoCheckpoint::now(l, pos, at.in_repo, at.worktree_missing)) {
+            match live.zip(pos).and_then(|(l, pos)| {
+                crate::workspace::NoCheckpoint::now(l, pos, at.in_repo, at.worktree_missing)
+            }) {
                 Some(why) => format!("{tooltip} ({})", why.short()).into(),
                 None => tooltip.to_string().into(),
             }
         };
         // The popover a rewind, undo or retry asks for confirmation in.
-        let confirm_popover = |id: (&'static str, usize), anchor: Anchor, ask: Ask, item: &str, open: bool, trigger: Button| {
+        let confirm_popover = |id: (&'static str, usize),
+                               anchor: Anchor,
+                               ask: Ask,
+                               item: &str,
+                               open: bool,
+                               trigger: Button| {
             let (v1, v2, item) = (view.clone(), view.clone(), item.to_string());
             Popover::new(id)
                 .anchor(anchor)
@@ -1576,19 +1624,34 @@ impl ThreadView {
                 .open(open)
                 .on_open_change(move |open, _, cx| {
                     let (ask, item) = (ask.clone(), item.clone());
-                    let _ = v1.update(cx, |this, cx| if *open { this.open_confirm(ask, item, cx) } else { this.close_confirm(cx) });
+                    let _ = v1.update(cx, |this, cx| {
+                        if *open {
+                            this.open_confirm(ask, item, cx)
+                        } else {
+                            this.close_confirm(cx)
+                        }
+                    });
                 })
                 .trigger(trigger)
-                .content(move |_, _, cx| v2.update(cx, |this, cx| this.confirm_card(cx)).unwrap_or_else(|_| div().into_any_element()))
+                .content(move |_, _, cx| {
+                    v2.update(cx, |this, cx| this.confirm_card(cx))
+                        .unwrap_or_else(|_| div().into_any_element())
+                })
         };
         // Undo, retry (or with another model) and fork for the turn ending at item `ix` (its
         // footer, its error, or its interruption). The latest turn's are always there; earlier
         // ones show on hover.
         let turn_actions = |ix: usize| -> AnyElement {
-            let end = live.and_then(|l| l.items.id_at(ix)).unwrap_or_default().to_string();
+            let end = live
+                .and_then(|l| l.items.id_at(ix))
+                .unwrap_or_default()
+                .to_string();
             // A turn the agent started itself (a sub-agent reporting back) has no message to take back.
             let start = live.and_then(|l| trek_core::rewind::turn_start(&l.items, ix));
-            let ask = asking.as_ref().filter(|(a, _)| *a == end).map(|(_, ask)| ask.clone());
+            let ask = asking
+                .as_ref()
+                .filter(|(a, _)| *a == end)
+                .map(|(_, ask)| ask.clone());
             let busy = at.busy;
             let tip = |what: &str, label: &str| -> SharedString {
                 if busy {
@@ -1609,53 +1672,129 @@ impl ThreadView {
                 Ask::Undo,
                 &end,
                 ask == Some(Ask::Undo),
-                action(("undo-turn", ix), Icon::new(crate::assets::Lucide::Undo2), tip("undo", "Undo this turn")).disabled(off),
+                action(
+                    ("undo-turn", ix),
+                    Icon::new(crate::assets::Lucide::Undo2),
+                    tip("undo", "Undo this turn"),
+                )
+                .disabled(off),
             );
-            let retry_with = ask.as_ref().and_then(|a| if let Ask::Retry(m) = a { Some(m.clone()) } else { None });
+            let retry_with = ask.as_ref().and_then(|a| {
+                if let Ask::Retry(m) = a {
+                    Some(m.clone())
+                } else {
+                    None
+                }
+            });
             let retry = confirm_popover(
                 ("retry-pop", ix),
                 Anchor::TopLeft,
                 Ask::Retry(retry_with.clone().flatten()),
                 &end,
                 retry_with.is_some(),
-                action(("retry-turn", ix), Icon::new(crate::assets::Lucide::RefreshCw), tip("retry", "Retry")).disabled(off),
+                action(
+                    ("retry-turn", ix),
+                    Icon::new(crate::assets::Lucide::RefreshCw),
+                    tip("retry", "Retry"),
+                )
+                .disabled(off),
             );
             let models = {
-                let (ws, view, end, agent, current) = (at.workspace.clone(), view.clone(), end.clone(), at.agent.clone(), at.model.clone());
-                let tooltip = if off { tip("retry", "") } else { "Retry with another model".into() };
-                action(("retry-with", ix), Icon::new(IconName::ChevronDown), tooltip).disabled(off).dropdown_menu_with_anchor(Anchor::BottomLeft, move |mut menu, _, cx| {
-                    menu = menu.min_w(px(220.)).max_h(px(320.)).scrollable(true).label("Retry with");
-                    let models = ws.read(cx).models_for(&agent);
-                    // The model it ran with: the thread's, else the agent's default (as the composer shows it).
-                    let current = current.clone().or_else(|| crate::composer::default_model(&models).map(|m| m.id.clone()));
-                    for m in models.iter().filter(|m| current.as_deref().is_none_or(|c| !crate::composer::same_model(c, &m.id))).cloned() {
-                        let (view, end) = (view.clone(), end.clone());
-                        menu = menu.item(PopupMenuItem::new(m.name.clone()).on_click(move |_, _, cx| {
-                            let (id, end) = (m.id.clone(), end.clone());
-                            let _ = view.update(cx, |this, cx| this.open_confirm(Ask::Retry(Some(id)), end, cx));
-                        }));
-                    }
-                    menu
-                })
+                let (ws, view, end, agent, current) = (
+                    at.workspace.clone(),
+                    view.clone(),
+                    end.clone(),
+                    at.agent.clone(),
+                    at.model.clone(),
+                );
+                let tooltip = if off {
+                    tip("retry", "")
+                } else {
+                    "Retry with another model".into()
+                };
+                action(
+                    ("retry-with", ix),
+                    Icon::new(IconName::ChevronDown),
+                    tooltip,
+                )
+                .disabled(off)
+                .dropdown_menu_with_anchor(
+                    Anchor::BottomLeft,
+                    move |mut menu, _, cx| {
+                        menu = menu
+                            .min_w(px(220.))
+                            .max_h(px(320.))
+                            .scrollable(true)
+                            .label("Retry with");
+                        let models = ws.read(cx).models_for(&agent);
+                        // The model it ran with: the thread's, else the agent's default (as the composer shows it).
+                        let current = current.clone().or_else(|| {
+                            crate::composer::default_model(&models).map(|m| m.id.clone())
+                        });
+                        for m in models
+                            .iter()
+                            .filter(|m| {
+                                current
+                                    .as_deref()
+                                    .is_none_or(|c| !crate::composer::same_model(c, &m.id))
+                            })
+                            .cloned()
+                        {
+                            let (view, end) = (view.clone(), end.clone());
+                            menu = menu.item(PopupMenuItem::new(m.name.clone()).on_click(
+                                move |_, _, cx| {
+                                    let (id, end) = (m.id.clone(), end.clone());
+                                    let _ = view.update(cx, |this, cx| {
+                                        this.open_confirm(Ask::Retry(Some(id)), end, cx)
+                                    });
+                                },
+                            ));
+                        }
+                        menu
+                    },
+                )
             };
             let fork = {
-                let (ws, thread, scope, end) = (at.workspace.clone(), at.thread.clone(), at.scope.clone(), end.clone());
-                action(("fork-turn", ix), Icon::new(crate::assets::Lucide::GitFork), "Fork from here: a new thread with the conversation up to this point".into()).on_click(move |_, _, cx| {
+                let (ws, thread, scope, end) = (
+                    at.workspace.clone(),
+                    at.thread.clone(),
+                    at.scope.clone(),
+                    end.clone(),
+                );
+                action(
+                    ("fork-turn", ix),
+                    Icon::new(crate::assets::Lucide::GitFork),
+                    "Fork from here: a new thread with the conversation up to this point".into(),
+                )
+                .on_click(move |_, _, cx| {
                     let (thread, scope, end) = (thread.clone(), scope.clone(), end.clone());
-                    ws.update(cx, |ws, cx| _ = ws.fork_thread(&thread, ForkAt::After(end), &scope, cx));
+                    ws.update(cx, |ws, cx| {
+                        _ = ws.fork_thread(&thread, ForkAt::After(end), &scope, cx)
+                    });
                 })
             };
             let shown = at.last_end == Some(ix) || ask.is_some();
             h_flex()
                 .gap(px(2.))
-                .when(!shown, |el| el.invisible().group_hover("turn-end", |s| s.visible()))
+                .when(!shown, |el| {
+                    el.invisible().group_hover("turn-end", |s| s.visible())
+                })
                 .child(undo)
                 .child(h_flex().child(retry).child(models))
                 .child(fork)
                 .into_any_element()
         };
         match (row, item) {
-            (Row::User { ix, key, open }, Item::User { text: full, images, at: sent, aside, .. }) => {
+            (
+                Row::User { ix, key, open },
+                Item::User {
+                    text: full,
+                    images,
+                    at: sent,
+                    aside,
+                    ..
+                },
+            ) => {
                 // A message sent with consultants shows as written, with who it consults under it.
                 let (said, consult) = orch::split_consult(&full);
                 let (said, restated) = trek_core::restate::split_restate(said);
@@ -1665,20 +1804,49 @@ impl ThreadView {
                     let ws = at.workspace.read(cx);
                     let name = |k: &orch::Consultant| {
                         let models = ws.models_for(&k.agent);
-                        let name = models.iter().find(|m| crate::composer::same_model(&k.model, &m.id)).map(|m| m.name.clone()).unwrap_or_else(|| k.model.clone());
+                        let name = models
+                            .iter()
+                            .find(|m| crate::composer::same_model(&k.model, &m.id))
+                            .map(|m| m.name.clone())
+                            .unwrap_or_else(|| k.model.clone());
                         format!("{name} · {}", k.effort.label())
                     };
                     let who: Vec<String> = c.consultants.iter().map(name).collect();
-                    let then = if c.implement { "then implement" } else { "then report" };
+                    let then = if c.implement {
+                        "then implement"
+                    } else {
+                        "then report"
+                    };
                     let line = match c.style {
-                        orch::Style::Advise => format!("Consulting {} · {}", who.join(", "), if c.implement { "advice, then implement" } else { "advice only" }),
-                        orch::Style::Discuss => format!("Consulting {} · discuss, {then}", who.join(", ")),
+                        orch::Style::Advise => format!(
+                            "Consulting {} · {}",
+                            who.join(", "),
+                            if c.implement {
+                                "advice, then implement"
+                            } else {
+                                "advice only"
+                            }
+                        ),
+                        orch::Style::Discuss => {
+                            format!("Consulting {} · discuss, {then}", who.join(", "))
+                        }
                         orch::Style::Arena => match &c.judge {
-                            Some(j) => format!("Design arena: {} · judged by {} · {then}", who.join(", "), name(j)),
+                            Some(j) => format!(
+                                "Design arena: {} · judged by {} · {then}",
+                                who.join(", "),
+                                name(j)
+                            ),
                             None => format!("Design arena: {} · {then}", who.join(", ")),
                         },
                     };
-                    (c.consultants.iter().chain(c.judge.iter()).map(|k| k.agent.clone()).collect::<Vec<_>>(), line)
+                    (
+                        c.consultants
+                            .iter()
+                            .chain(c.judge.iter())
+                            .map(|k| k.agent.clone())
+                            .collect::<Vec<_>>(),
+                        line,
+                    )
                 });
                 // Videos attached to it (`@path`) play under it.
                 let videos = trek_core::media::mentioned_videos(said, at.cwd.as_deref());
@@ -1686,18 +1854,54 @@ impl ThreadView {
                 let long = text.len() > 700 || text.lines().count() > 10;
                 let has_text = !text.trim().is_empty();
                 let copy_text = text.clone();
-                let rewinding = asking.as_ref().is_some_and(|(a, ask)| *a == *key && *ask == Ask::Rewind);
+                let rewinding = asking
+                    .as_ref()
+                    .is_some_and(|(a, ask)| *a == *key && *ask == Ask::Rewind);
                 let busy = at.busy;
-                let (ws, thread, scope, item) = (at.workspace.clone(), at.thread.clone(), at.scope.clone(), key.to_string());
+                let (ws, thread, scope, item) = (
+                    at.workspace.clone(),
+                    at.thread.clone(),
+                    at.scope.clone(),
+                    key.to_string(),
+                );
                 let edit = {
-                    let (ws, thread, scope, item, text) = (ws.clone(), thread.clone(), scope.clone(), item.clone(), full.clone());
-                    let images: Vec<std::path::PathBuf> = images.iter().map(std::path::PathBuf::from).collect();
-                    action(("edit-user", ix), Icon::new(crate::assets::Lucide::Pencil), if busy { "Stop the running turn to edit".into() } else { with_files("Edit and send again", Some(ix)) })
-                        .disabled(busy)
-                        .on_click(move |_, _, cx| {
-                            let (thread, scope, item, text, images) = (thread.clone(), scope.clone(), item.clone(), text.clone(), images.clone());
-                            ws.update(cx, |_, cx| cx.emit(WorkspaceEvent::ComposeIn { scope, thread, text, images, edit: Some(item) }));
-                        })
+                    let (ws, thread, scope, item, text) = (
+                        ws.clone(),
+                        thread.clone(),
+                        scope.clone(),
+                        item.clone(),
+                        full.clone(),
+                    );
+                    let images: Vec<std::path::PathBuf> =
+                        images.iter().map(std::path::PathBuf::from).collect();
+                    action(
+                        ("edit-user", ix),
+                        Icon::new(crate::assets::Lucide::Pencil),
+                        if busy {
+                            "Stop the running turn to edit".into()
+                        } else {
+                            with_files("Edit and send again", Some(ix))
+                        },
+                    )
+                    .disabled(busy)
+                    .on_click(move |_, _, cx| {
+                        let (thread, scope, item, text, images) = (
+                            thread.clone(),
+                            scope.clone(),
+                            item.clone(),
+                            text.clone(),
+                            images.clone(),
+                        );
+                        ws.update(cx, |_, cx| {
+                            cx.emit(WorkspaceEvent::ComposeIn {
+                                scope,
+                                thread,
+                                text,
+                                images,
+                                edit: Some(item),
+                            })
+                        });
+                    })
                 };
                 let rewind = confirm_popover(
                     ("rewind-pop", ix),
@@ -1705,165 +1909,326 @@ impl ThreadView {
                     Ask::Rewind,
                     &item,
                     rewinding,
-                    action(("rewind-user", ix), Icon::new(crate::assets::Lucide::Undo2), if busy { "Stop the running turn to rewind".into() } else { with_files("Rewind to here", Some(ix)) }).disabled(busy),
+                    action(
+                        ("rewind-user", ix),
+                        Icon::new(crate::assets::Lucide::Undo2),
+                        if busy {
+                            "Stop the running turn to rewind".into()
+                        } else {
+                            with_files("Rewind to here", Some(ix))
+                        },
+                    )
+                    .disabled(busy),
                 );
-                let fork = action(("fork-user", ix), Icon::new(crate::assets::Lucide::GitFork), "Fork from here: a new thread with the conversation before this message".into())
-                    .on_click(move |_, _, cx| {
-                        let (thread, scope, item) = (thread.clone(), scope.clone(), item.clone());
-                        ws.update(cx, |ws, cx| _ = ws.fork_thread(&thread, ForkAt::Before(item), &scope, cx));
+                let fork = action(
+                    ("fork-user", ix),
+                    Icon::new(crate::assets::Lucide::GitFork),
+                    "Fork from here: a new thread with the conversation before this message".into(),
+                )
+                .on_click(move |_, _, cx| {
+                    let (thread, scope, item) = (thread.clone(), scope.clone(), item.clone());
+                    ws.update(cx, |ws, cx| {
+                        _ = ws.fork_thread(&thread, ForkAt::Before(item), &scope, cx)
                     });
+                });
                 // Time sent and the message's actions, shown while the pointer is over it.
                 let meta = h_flex()
                     .h(px(20.))
                     .gap(px(6.))
                     .text_xs()
                     .text_color(muted)
-                    .when(!rewinding, |el| el.invisible().group_hover("user-msg", |s| s.visible()))
+                    .when(!rewinding, |el| {
+                        el.invisible().group_hover("user-msg", |s| s.visible())
+                    })
                     .children(sent.map(crate::time::clock))
                     // A command Trek answered or an answer to the agent's question isn't somewhere
                     // to go back to: it only gets copy.
-                    .child(h_flex().gap(px(2.)).when(!aside, |el| el.child(edit).child(rewind).child(fork)).child(
-                        Button::new(("copy-user", ix))
-                            .ghost()
-                            .xsmall()
-                            .icon(Icon::new(IconName::Copy).text_color(muted))
-                            .tooltip("Copy message")
-                            .on_click(move |_, window, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(copy_text.to_string()));
-                                crate::toast::push(window, "Copied", cx);
-                            }),
-                    ));
-                column(div().w_full().child(
-                    v_flex().id(("user-msg", ix)).test_support().w_full().group("user-msg").items_end().pt_4().gap(px(4.))
-                    .when(!images.is_empty(), |el| {
-                        // A click previews them here, from that one.
-                        let all: Vec<std::path::PathBuf> = images.iter().map(std::path::PathBuf::from).collect();
-                        el.child(h_flex().gap_2().flex_wrap().justify_end().children(images.into_iter().enumerate().map(|(i, p)| {
-                            let all = all.clone();
-                            let path = std::path::PathBuf::from(&p);
-                            // In its own proportions: an image left to size itself here draws at
-                            // its full size, cropped to its corner.
-                            div()
-                                .id(("user-img", ix * 100 + i))
-                                .test_support()
-                                .relative()
-                                .h(px(120.))
-                                .w(crate::image_preview::tile_width(&path, px(120.), px(64.), px(220.)))
-                                .rounded(px(12.))
-                                .overflow_hidden()
-                                .border_1()
-                                .border_color(theme.border)
-                                .cursor_pointer()
-                                .hover(|s| s.border_color(theme.foreground.opacity(0.35)))
-                                .child(img(path.clone()).size_full().object_fit(ObjectFit::Cover))
-                                .child(crate::image_preview::thumb(path))
-                                .on_click(move |_, window, cx| crate::image_preview::open(all.clone(), i, window, cx))
-                        })))
-                    })
-                    .when(has_text, |el| el.child(
+                    .child(
+                        h_flex()
+                            .gap(px(2.))
+                            .when(!aside, |el| el.child(edit).child(rewind).child(fork))
+                            .child(
+                                Button::new(("copy-user", ix))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(Icon::new(IconName::Copy).text_color(muted))
+                                    .tooltip("Copy message")
+                                    .on_click(move |_, window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            copy_text.to_string(),
+                                        ));
+                                        crate::toast::push(window, "Copied", cx);
+                                    }),
+                            ),
+                    );
+                column(
+                    div().w_full().child(
                         v_flex()
-                            .max_w(relative(0.78))
-                            .px(px(16.))
-                            .py(px(10.))
-                            .gap_1()
-                            .rounded(px(18.))
-                            .bg(theme.secondary)
-                            .text_size(text_size)
-                            .line_height(relative(1.5))
-                            .child(div().when(long && !open, |el| el.line_clamp(10)).child(text))
-                            .when(long, |el| {
+                            .id(("user-msg", ix))
+                            .test_support()
+                            .w_full()
+                            .group("user-msg")
+                            .items_end()
+                            .pt_4()
+                            .gap(px(4.))
+                            .when(!images.is_empty(), |el| {
+                                // A click previews them here, from that one.
+                                let all: Vec<std::path::PathBuf> =
+                                    images.iter().map(std::path::PathBuf::from).collect();
+                                el.child(h_flex().gap_2().flex_wrap().justify_end().children(
+                                    images.into_iter().enumerate().map(|(i, p)| {
+                                        let all = all.clone();
+                                        let path = std::path::PathBuf::from(&p);
+                                        // In its own proportions: an image left to size itself here draws at
+                                        // its full size, cropped to its corner.
+                                        div()
+                                            .id(("user-img", ix * 100 + i))
+                                            .test_support()
+                                            .relative()
+                                            .h(px(120.))
+                                            .w(crate::image_preview::tile_width(
+                                                &path,
+                                                px(120.),
+                                                px(64.),
+                                                px(220.),
+                                            ))
+                                            .rounded(px(12.))
+                                            .overflow_hidden()
+                                            .border_1()
+                                            .border_color(theme.border)
+                                            .cursor_pointer()
+                                            .hover(|s| {
+                                                s.border_color(theme.foreground.opacity(0.35))
+                                            })
+                                            .child(
+                                                img(path.clone())
+                                                    .size_full()
+                                                    .object_fit(ObjectFit::Cover),
+                                            )
+                                            .child(crate::image_preview::thumb(path))
+                                            .on_click(move |_, window, cx| {
+                                                crate::image_preview::open(
+                                                    all.clone(),
+                                                    i,
+                                                    window,
+                                                    cx,
+                                                )
+                                            })
+                                    }),
+                                ))
+                            })
+                            .when(has_text, |el| {
                                 el.child(
-                                    div()
-                                        .id(("user-more", ix))
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .cursor_pointer()
-                                        .hover(|s| s.text_color(theme.foreground))
-                                        .child(if open { "Show less" } else { "Show more" })
-                                        .on_click(toggle(key.clone())),
+                                    v_flex()
+                                        .max_w(relative(0.78))
+                                        .px(px(16.))
+                                        .py(px(10.))
+                                        .gap_1()
+                                        .rounded(px(18.))
+                                        .bg(theme.secondary)
+                                        .text_size(text_size)
+                                        .line_height(relative(1.5))
+                                        .child(
+                                            div()
+                                                .when(long && !open, |el| el.line_clamp(10))
+                                                .child(text),
+                                        )
+                                        .when(long, |el| {
+                                            el.child(
+                                                div()
+                                                    .id(("user-more", ix))
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .cursor_pointer()
+                                                    .hover(|s| s.text_color(theme.foreground))
+                                                    .child(if open {
+                                                        "Show less"
+                                                    } else {
+                                                        "Show more"
+                                                    })
+                                                    .on_click(toggle(key.clone())),
+                                            )
+                                        }),
                                 )
-                            }),
-                    ))
-                    .when(!videos.is_empty(), |el| el.child(crate::video::AttachedVideos { paths: videos, ix }))
-                    .when_some(consulting, |el, (agents, line)| {
-                        el.child(
-                            h_flex()
-                                .id(("consulting", ix))
-                                .test_support()
-                                .gap(px(6.))
-                                .max_w(relative(0.78))
-                                .text_size(px(12.))
-                                .text_color(muted)
-                                .child(h_flex().children(agents.iter().take(4).enumerate().map(|(i, a)| div().when(i > 0, |el| el.ml(px(-4.))).child(crate::ui::agent_logo(a, px(13.), cx)))))
-                                .child(div().min_w_0().truncate().child(line)),
-                        )
-                    })
-                    .when(restated, |el| {
-                        el.child(
-                            h_flex()
-                                .id(("restating", ix))
-                                .test_support()
-                                .gap(px(6.))
-                                .text_size(px(12.))
-                                .text_color(muted)
-                                .child(Icon::new(crate::assets::Lucide::MessageSquareQuote).xsmall())
-                                .child("Asked to restate it first"),
-                        )
-                    })
-                    .child(meta),
-                ))
+                            })
+                            .when(!videos.is_empty(), |el| {
+                                el.child(crate::video::AttachedVideos { paths: videos, ix })
+                            })
+                            .when_some(consulting, |el, (agents, line)| {
+                                el.child(
+                                    h_flex()
+                                        .id(("consulting", ix))
+                                        .test_support()
+                                        .gap(px(6.))
+                                        .max_w(relative(0.78))
+                                        .text_size(px(12.))
+                                        .text_color(muted)
+                                        .child(h_flex().children(
+                                            agents.iter().take(4).enumerate().map(|(i, a)| {
+                                                div()
+                                                    .when(i > 0, |el| el.ml(px(-4.)))
+                                                    .child(crate::ui::agent_logo(a, px(13.), cx))
+                                            }),
+                                        ))
+                                        .child(div().min_w_0().truncate().child(line)),
+                                )
+                            })
+                            .when(restated, |el| {
+                                el.child(
+                                    h_flex()
+                                        .id(("restating", ix))
+                                        .test_support()
+                                        .gap(px(6.))
+                                        .text_size(px(12.))
+                                        .text_color(muted)
+                                        .child(
+                                            Icon::new(crate::assets::Lucide::MessageSquareQuote)
+                                                .xsmall(),
+                                        )
+                                        .child("Asked to restate it first"),
+                                )
+                            })
+                            .child(meta),
+                    ),
+                )
                 .into_any_element()
             }
-            (Row::TurnEnd { ix }, Item::TurnEnd { at: finished, took_secs }) => {
+            (
+                Row::TurnEnd { ix },
+                Item::TurnEnd {
+                    at: finished,
+                    took_secs,
+                },
+            ) => {
                 let (workspace, thread) = (at.workspace.clone(), at.thread.clone());
                 let items = live.map(|l| &l.items[..]).unwrap_or_default();
-                let from = items[..ix.min(items.len())].iter().rposition(trek_core::rewind::ends_turn).map_or(0, |b| b + 1);
+                let from = items[..ix.min(items.len())]
+                    .iter()
+                    .rposition(trek_core::rewind::ends_turn)
+                    .map_or(0, |b| b + 1);
                 let turn = &items[from.min(ix)..ix.min(items.len())];
                 // Did the turn run the project's verification CLI, and did its last run pass?
-                let verdict = at.verify_probe.as_ref().and_then(|p| trek_core::verification::verdict(turn, p));
+                let verdict = at
+                    .verify_probe
+                    .as_ref()
+                    .and_then(|p| trek_core::verification::verdict(turn, p));
                 let verified = verdict.map(|v| {
-                    let color = if v.passed { palette::emerald(cx) } else { palette::amber(cx) };
+                    let color = if v.passed {
+                        palette::emerald(cx)
+                    } else {
+                        palette::amber(cx)
+                    };
                     let n = v.commands.len();
                     let tip = format!(
                         "{} the project's verification skill {}:\n{}",
-                        if v.passed { "Checked with" } else { "The last check with" },
-                        if v.passed { format!("({} run{})", n, if n == 1 { "" } else { "s" }) } else { "failed".into() },
-                        v.commands.iter().rev().take(3).map(|c| format!("$ {}", orch::preview(c, 90))).collect::<Vec<_>>().join("\n")
+                        if v.passed {
+                            "Checked with"
+                        } else {
+                            "The last check with"
+                        },
+                        if v.passed {
+                            format!("({} run{})", n, if n == 1 { "" } else { "s" })
+                        } else {
+                            "failed".into()
+                        },
+                        v.commands
+                            .iter()
+                            .rev()
+                            .take(3)
+                            .map(|c| format!("$ {}", orch::preview(c, 90)))
+                            .collect::<Vec<_>>()
+                            .join("\n")
                     );
                     h_flex()
-                        .id((if v.passed { "verified" } else { "verify-failed" }, ix))
+                        .id((
+                            if v.passed {
+                                "verified"
+                            } else {
+                                "verify-failed"
+                            },
+                            ix,
+                        ))
                         .test_support()
                         .gap(px(4.))
                         .text_color(color)
-                        .child(Icon::new(if v.passed { crate::assets::Lucide::BadgeCheck } else { crate::assets::Lucide::TriangleAlert }).xsmall())
-                        .child(if v.passed { "Verified" } else { "Verification failed" })
-                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                        .child(
+                            Icon::new(if v.passed {
+                                crate::assets::Lucide::BadgeCheck
+                            } else {
+                                crate::assets::Lucide::TriangleAlert
+                            })
+                            .xsmall(),
+                        )
+                        .child(if v.passed {
+                            "Verified"
+                        } else {
+                            "Verification failed"
+                        })
+                        .tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                                .build(window, cx)
+                        })
                 });
                 // The agent said back what it was asked: the user confirms or corrects it.
                 let restated = trek_core::restate::asked_in_turn(items, ix);
                 let confirm = (restated && at.last_end == Some(ix) && !at.busy).then(|| {
-                    let (ws, ws2, thread, thread2, scope) = (at.workspace.clone(), at.workspace.clone(), at.thread.clone(), at.thread.clone(), at.scope.clone());
+                    let (ws, ws2, thread, thread2, scope) = (
+                        at.workspace.clone(),
+                        at.workspace.clone(),
+                        at.thread.clone(),
+                        at.thread.clone(),
+                        at.scope.clone(),
+                    );
                     h_flex()
                         .id(("restate-check", ix))
                         .test_support()
                         .pt(px(6.))
                         .pb(px(4.))
                         .gap(px(8.))
-                        .child(div().min_w_0().pr(px(4.)).text_size(px(12.5)).text_color(muted).child("Is that what you meant?"))
-                        .child(Button::new(("restate-yes", ix)).small().primary().label("That's right — go ahead").on_click(move |_, _, cx| {
-                            let thread = thread2.clone();
-                            ws2.update(cx, |ws, cx| ws.go_ahead(&thread, cx));
-                        }))
-                        .child(Button::new(("restate-no", ix)).small().ghost().label("Not quite…").on_click(move |_, _, cx| {
-                            let (scope, thread) = (scope.clone(), thread.clone());
-                            ws.update(cx, |_, cx| cx.emit(WorkspaceEvent::CorrectRestatement { scope, thread }));
-                        }))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .pr(px(4.))
+                                .text_size(px(12.5))
+                                .text_color(muted)
+                                .child("Is that what you meant?"),
+                        )
+                        .child(
+                            Button::new(("restate-yes", ix))
+                                .small()
+                                .primary()
+                                .label("That's right — go ahead")
+                                .on_click(move |_, _, cx| {
+                                    let thread = thread2.clone();
+                                    ws2.update(cx, |ws, cx| ws.go_ahead(&thread, cx));
+                                }),
+                        )
+                        .child(
+                            Button::new(("restate-no", ix))
+                                .small()
+                                .ghost()
+                                .label("Not quite…")
+                                .on_click(move |_, _, cx| {
+                                    let (scope, thread) = (scope.clone(), thread.clone());
+                                    ws.update(cx, |_, cx| {
+                                        cx.emit(WorkspaceEvent::CorrectRestatement {
+                                            scope,
+                                            thread,
+                                        })
+                                    });
+                                }),
+                        )
                 });
                 let card = changes.map(|c| {
-                    let end = live.and_then(|l| l.items.id_at(ix)).unwrap_or_default().to_string();
+                    let end = live
+                        .and_then(|l| l.items.id_at(ix))
+                        .unwrap_or_default()
+                        .to_string();
                     // The card's "Show N more" is an expanded key like the rows'.
                     let more_key = format!("changes:{end}:more");
-                    let shown_all = view.upgrade().is_some_and(|v| v.read(cx).expanded.contains(&more_key));
+                    let shown_all = view
+                        .upgrade()
+                        .is_some_and(|v| v.read(cx).expanded.contains(&more_key));
                     let show_more = {
                         let (view, more_key) = (view.clone(), more_key.clone());
                         std::rc::Rc::new(move |all: bool, cx: &mut App| {
@@ -1873,41 +2238,61 @@ impl ThreadView {
                                     false => this.expanded.remove(&more_key),
                                 };
                                 this.expanded_gen += 1;
-                                this.scroller.update(cx, |s, cx| _ = s.remeasure_items(row_ix..row_ix + 1, cx));
+                                this.scroller.update(cx, |s, cx| {
+                                    _ = s.remeasure_items(row_ix..row_ix + 1, cx)
+                                });
                                 cx.notify();
                             });
                         }) as std::rc::Rc<dyn Fn(bool, &mut App)>
                     };
                     // The diff shows in the Git tool, which only the main window has.
-                    let view_diff = (c.counted == trek_core::changes::Counted::Checkpoints && at.scope == Scope::Main).then(|| {
-                        let (ws, thread, end) = (at.workspace.clone(), at.thread.clone(), end.clone());
-                        std::rc::Rc::new(move |path: Option<String>, _: &mut Window, cx: &mut App| {
-                            let (thread, end) = (thread.clone(), end.clone());
-                            ws.update(cx, |_, cx| cx.emit(WorkspaceEvent::ShowTurnDiff { thread, end, path }));
-                        }) as std::rc::Rc<dyn Fn(Option<String>, &mut Window, &mut App)>
-                    });
+                    let view_diff = (c.counted == trek_core::changes::Counted::Checkpoints
+                        && at.scope == Scope::Main)
+                        .then(|| {
+                            let (ws, thread, end) =
+                                (at.workspace.clone(), at.thread.clone(), end.clone());
+                            std::rc::Rc::new(
+                                move |path: Option<String>, _: &mut Window, cx: &mut App| {
+                                    let (thread, end) = (thread.clone(), end.clone());
+                                    ws.update(cx, |_, cx| {
+                                        cx.emit(WorkspaceEvent::ShowTurnDiff { thread, end, path })
+                                    });
+                                },
+                            )
+                                as std::rc::Rc<dyn Fn(Option<String>, &mut Window, &mut App)>
+                        });
                     // Undo asks the same confirmation the turn-end controls do; its popover
                     // opens on the row's undo button.
-                    let undo = (!at.busy && live.is_some_and(|l| trek_core::rewind::turn_start(&l.items, ix).is_some())).then(|| {
+                    let undo = (!at.busy
+                        && live.is_some_and(|l| {
+                            trek_core::rewind::turn_start(&l.items, ix).is_some()
+                        }))
+                    .then(|| {
                         let (view, end) = (view.clone(), end.clone());
                         std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
-                            let _ = view.update(cx, |this, cx| this.open_confirm(Ask::Undo, end.clone(), cx));
+                            let _ = view.update(cx, |this, cx| {
+                                this.open_confirm(Ask::Undo, end.clone(), cx)
+                            });
                         }) as std::rc::Rc<dyn Fn(&mut Window, &mut App)>
                     });
                     let root = c.root.clone();
                     let actions = crate::changes_card::Actions {
                         view_diff,
-                        reveal: std::rc::Rc::new(move |f: &trek_core::changes::FileChange, _: &mut Window, cx: &mut App| {
-                            let path = root.join(&f.path);
-                            match path.exists() {
-                                true => cx.reveal_path(&path),
-                                false => {
-                                    if let Some(dir) = path.parent().filter(|d| d.is_dir()) {
-                                        cx.open_with_system(dir);
+                        reveal: std::rc::Rc::new(
+                            move |f: &trek_core::changes::FileChange,
+                                  _: &mut Window,
+                                  cx: &mut App| {
+                                let path = root.join(&f.path);
+                                match path.exists() {
+                                    true => cx.reveal_path(&path),
+                                    false => {
+                                        if let Some(dir) = path.parent().filter(|d| d.is_dir()) {
+                                            cx.open_with_system(dir);
+                                        }
                                     }
                                 }
-                            }
-                        }),
+                            },
+                        ),
                         undo,
                         show_more,
                     };
@@ -1929,24 +2314,54 @@ impl ThreadView {
                                     .icon(Icon::new(IconName::Copy).text_color(muted))
                                     .tooltip("Copy response")
                                     .on_click(move |_, window, cx| {
-                                        let text = workspace.read(cx).live.get(&thread).map(|l| Self::response_text(&l.items, ix)).unwrap_or_default();
+                                        let text = workspace
+                                            .read(cx)
+                                            .live
+                                            .get(&thread)
+                                            .map(|l| Self::response_text(&l.items, ix))
+                                            .unwrap_or_default();
                                         cx.write_to_clipboard(ClipboardItem::new_string(text));
                                         crate::toast::push(window, "Copied", cx);
                                     }),
                             )
                             .child(crate::time::clock(finished))
-                            .when(took_secs >= 1, |el| el.child(div().text_color(muted.opacity(0.7)).child(format!("· {}", crate::time::took(took_secs)))))
+                            .when(took_secs >= 1, |el| {
+                                el.child(
+                                    div()
+                                        .text_color(muted.opacity(0.7))
+                                        .child(format!("· {}", crate::time::took(took_secs))),
+                                )
+                            })
                             .children(verified)
                             .child(turn_actions(ix)),
                     ),
                 )
                 .into_any_element()
             }
-            (Row::Assistant { ix, part: 0, last, .. }, _) => match md {
-                Some(md) => column(div().pt_2().when(last, |el| el.pb_2()).child(div().id(("answer-text", ix)).test_support().child(crate::md::answer(&md, at.cwd.clone(), at.folder, text_size, last && at.streaming == Some(ix), cx).motion(crate::md::streaming()))))
-                    .id(("answer", ix))
-                    .test_support()
-                    .into_any_element(),
+            (
+                Row::Assistant {
+                    ix, part: 0, last, ..
+                },
+                _,
+            ) => match md {
+                Some(md) => column(
+                    div().pt_2().when(last, |el| el.pb_2()).child(
+                        div().id(("answer-text", ix)).test_support().child(
+                            crate::md::answer(
+                                &md,
+                                at.cwd.clone(),
+                                at.folder,
+                                text_size,
+                                last && at.streaming == Some(ix),
+                                cx,
+                            )
+                            .motion(crate::md::streaming()),
+                        ),
+                    ),
+                )
+                .id(("answer", ix))
+                .test_support()
+                .into_any_element(),
                 None => div().into_any_element(),
             },
             // A long answer's later parts follow on as its next blocks would: a paragraph's gap
@@ -1956,9 +2371,22 @@ impl ThreadView {
                     div()
                         .pt(crate::md::Metrics::at(text_size).paragraph_gap)
                         .when(last, |el| el.pb_2())
-                        .child(crate::md::answer(&md, at.cwd.clone(), at.folder, text_size, last && at.streaming == Some(ix), cx).motion(crate::md::streaming())),
+                        .child(
+                            crate::md::answer(
+                                &md,
+                                at.cwd.clone(),
+                                at.folder,
+                                text_size,
+                                last && at.streaming == Some(ix),
+                                cx,
+                            )
+                            .motion(crate::md::streaming()),
+                        ),
                 )
-                .id(ElementId::NamedInteger("answer-part".into(), ((ix as u64) << 20) | part as u64))
+                .id(ElementId::NamedInteger(
+                    "answer-part".into(),
+                    ((ix as u64) << 20) | part as u64,
+                ))
                 .test_support()
                 .into_any_element(),
                 None => div().into_any_element(),
@@ -1974,18 +2402,48 @@ impl ThreadView {
                             .text_sm()
                             .text_color(theme.muted_foreground)
                             .cursor_pointer()
-                            .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall())
+                            .child(
+                                Icon::new(if open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .xsmall(),
+                            )
                             .child(div().child("Thought"))
                             .on_click(toggle(key.clone())),
                     )
                     .when_some(md.filter(|_| open), |el, md| {
                         el.child(
-                            div().ml_2().pl_3().py_1().border_l_2().border_color(theme.border).child(crate::md::thought(&md, at.cwd.clone(), at.folder, text_size * 0.93, cx)),
+                            div()
+                                .ml_2()
+                                .pl_3()
+                                .py_1()
+                                .border_l_2()
+                                .border_color(theme.border)
+                                .child(crate::md::thought(
+                                    &md,
+                                    at.cwd.clone(),
+                                    at.folder,
+                                    text_size * 0.93,
+                                    cx,
+                                )),
                         )
                     }),
             )
             .into_any_element(),
-            (Row::ToolGroup { ix, key, summary, kind, running, open, .. }, _) => {
+            (
+                Row::ToolGroup {
+                    ix,
+                    key,
+                    summary,
+                    kind,
+                    running,
+                    open,
+                    ..
+                },
+                _,
+            ) => {
                 let muted = theme.muted_foreground;
                 column(
                     v_flex()
@@ -2001,28 +2459,84 @@ impl ThreadView {
                                 .cursor_pointer()
                                 .hover(|s| s.text_color(theme.foreground))
                                 .child(crate::activity::group_icon(kind).small())
-                                .child(div().when(running, |el| el.text_color(theme.foreground.opacity(0.85))).child(summary))
-                                .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().opacity(0.6))
+                                .child(
+                                    div()
+                                        .when(running, |el| {
+                                            el.text_color(theme.foreground.opacity(0.85))
+                                        })
+                                        .child(summary),
+                                )
+                                .child(
+                                    Icon::new(if open {
+                                        IconName::ChevronDown
+                                    } else {
+                                        IconName::ChevronRight
+                                    })
+                                    .xsmall()
+                                    .opacity(0.6),
+                                )
                                 .on_click(toggle(key.clone())),
                         )
-                        .when(open, |el| el.child(v_flex().ml(px(7.)).pl_4().border_l_1().border_color(theme.border).children(children))),
+                        .when(open, |el| {
+                            el.child(
+                                v_flex()
+                                    .ml(px(7.))
+                                    .pl_4()
+                                    .border_l_1()
+                                    .border_color(theme.border)
+                                    .children(children),
+                            )
+                        }),
                 )
                 .into_any_element()
             }
-            (Row::Tool { ix, key, open, activity }, Item::Tool { id: tool_id, title, detail, output, status }) => {
+            (
+                Row::Tool {
+                    ix,
+                    key,
+                    open,
+                    activity,
+                },
+                Item::Tool {
+                    id: tool_id,
+                    title,
+                    detail,
+                    output,
+                    status,
+                },
+            ) => {
                 let kind = tool_kind(&title);
                 let icon = kind_icon(kind);
                 // Files read or changed get their type's badge; changes, the lines they touched.
-                let file = matches!(kind, ToolKind::Read | ToolKind::Edit).then(|| detail.split(", ").next().unwrap_or_default().to_string()).filter(|f| !f.is_empty());
-                let lines = live.and_then(|l| l.lines.get(&tool_id)).copied().filter(|_| !matches!(status, ToolStatus::Failed | ToolStatus::Denied));
+                let file = matches!(kind, ToolKind::Read | ToolKind::Edit)
+                    .then(|| detail.split(", ").next().unwrap_or_default().to_string())
+                    .filter(|f| !f.is_empty());
+                let lines = live
+                    .and_then(|l| l.lines.get(&tool_id))
+                    .copied()
+                    .filter(|_| !matches!(status, ToolStatus::Failed | ToolStatus::Denied));
                 let status_el = match status {
-                    ToolStatus::Running => Icon::new(crate::assets::Lucide::LoaderCircle).xsmall().text_color(theme.muted_foreground).into_any_element(),
-                    ToolStatus::Done => Icon::new(IconName::Check).xsmall().text_color(theme.muted_foreground).into_any_element(),
-                    ToolStatus::Failed | ToolStatus::Denied => Icon::new(IconName::CircleX).xsmall().text_color(palette::red(cx)).into_any_element(),
+                    ToolStatus::Running => Icon::new(crate::assets::Lucide::LoaderCircle)
+                        .xsmall()
+                        .text_color(theme.muted_foreground)
+                        .into_any_element(),
+                    ToolStatus::Done => Icon::new(IconName::Check)
+                        .xsmall()
+                        .text_color(theme.muted_foreground)
+                        .into_any_element(),
+                    ToolStatus::Failed | ToolStatus::Denied => Icon::new(IconName::CircleX)
+                        .xsmall()
+                        .text_color(palette::red(cx))
+                        .into_any_element(),
                 };
                 let has_output = !output.is_empty();
                 // A finished `watch_video` row has the video and its frames under it.
-                let watched = (trek_core::media::is_watch_call(&title) && status == ToolStatus::Done).then(|| crate::video::WatchedVideo { output: output.clone(), ix });
+                let watched = (trek_core::media::is_watch_call(&title)
+                    && status == ToolStatus::Done)
+                    .then(|| crate::video::WatchedVideo {
+                        output: output.clone(),
+                        ix,
+                    });
                 let subagent = title == "Subagent";
                 // Trek's own orchestration tools read as what they did; their arguments are noise.
                 let ours = orch::tool_label(&title).or_else(|| orch::spawn_failed_label(&title));
@@ -2048,26 +2562,47 @@ impl ThreadView {
                             .py_1()
                             .rounded(theme.radius)
                             .text_sm()
-                            .when(has_output, |el| el.cursor_pointer().hover(|s| s.bg(theme.list_hover)).on_click(toggle(key.clone())))
+                            .when(has_output, |el| {
+                                el.cursor_pointer()
+                                    .hover(|s| s.bg(theme.list_hover))
+                                    .on_click(toggle(key.clone()))
+                            })
                             .child(icon.small().text_color(theme.muted_foreground))
-                            .child(div().font_medium().flex_none().max_w(relative(0.5)).truncate().child(label))
+                            .child(
+                                div()
+                                    .font_medium()
+                                    .flex_none()
+                                    .max_w(relative(0.5))
+                                    .truncate()
+                                    .child(label),
+                            )
                             // A file read or changed sits in a chip of its type's colour.
                             .map(|el| match file {
-                                Some(f) => el.child(
-                                    div().flex_1().min_w_0().flex().child(crate::file_icon::chip(("tool-file", ix), &f, detail.clone(), px(11.5), cx)),
-                                ),
+                                Some(f) => el.child(div().flex_1().min_w_0().flex().child(
+                                    crate::file_icon::chip(
+                                        ("tool-file", ix),
+                                        &f,
+                                        detail.clone(),
+                                        px(11.5),
+                                        cx,
+                                    ),
+                                )),
                                 None => el.child(
                                     div()
                                         .flex_1()
                                         .min_w_0()
                                         .truncate()
-                                        .when(code, |el| el.font_family(theme.mono_font_family.clone()))
+                                        .when(code, |el| {
+                                            el.font_family(theme.mono_font_family.clone())
+                                        })
                                         .text_xs()
                                         .text_color(theme.muted_foreground)
                                         .child(detail),
                                 ),
                             })
-                            .when_some(lines, |el, (a, r)| el.child(crate::working_bar::lines_chip(a, r, cx)))
+                            .when_some(lines, |el, (a, r)| {
+                                el.child(crate::working_bar::lines_chip(a, r, cx))
+                            })
                             .child(status_el),
                     )
                     .when(open && has_output, |el| {
@@ -2093,11 +2628,22 @@ impl ThreadView {
                     None => row.into_any_element(),
                 }
             }
-            (Row::SubAgent { ix, key, open }, Item::Tool { id: row_id, detail, output, status, .. }) => {
+            (
+                Row::SubAgent { ix, key, open },
+                Item::Tool {
+                    id: row_id,
+                    detail,
+                    output,
+                    status,
+                    ..
+                },
+            ) => {
                 let ws = at.workspace.read(cx);
-                let sub = SubAgentRow::read(ws, &at.thread, &at.agent, &row_id, &detail, &output, status);
+                let sub =
+                    SubAgentRow::read(ws, &at.thread, &at.agent, &row_id, &detail, &output, status);
                 let finished = !sub.state.live();
-                let has_result = finished && !output.trim().is_empty() && sub.state != TaskState::Failed;
+                let has_result =
+                    finished && !output.trim().is_empty() && sub.state != TaskState::Failed;
                 // Open, it shows what it's doing while it works, and its answer once it's done.
                 let expandable = has_result || sub.activity.is_some();
                 let dot = match sub.state {
@@ -2108,30 +2654,62 @@ impl ThreadView {
                     TaskState::Cancelled => muted.opacity(0.7),
                 };
                 // A slow breath while it works (the view re-renders on a ticker meanwhile).
-                let breath = if sub.state == TaskState::Running && at.pulse { 0.45 + 0.55 * (0.5 - 0.5 * (at.clock * std::f32::consts::TAU / 2.4).cos()) } else { 1. };
+                let breath = if sub.state == TaskState::Running && at.pulse {
+                    0.45 + 0.55 * (0.5 - 0.5 * (at.clock * std::f32::consts::TAU / 2.4).cos())
+                } else {
+                    1.
+                };
                 let logo = div()
                     .relative()
                     .flex_none()
                     .size(px(22.))
                     .child(match &sub.agent {
                         Some(a) => crate::ui::agent_logo(a, px(22.), cx),
-                        None => Icon::new(crate::assets::Lucide::Users).size(px(18.)).text_color(muted).into_any_element(),
+                        None => Icon::new(crate::assets::Lucide::Users)
+                            .size(px(18.))
+                            .text_color(muted)
+                            .into_any_element(),
                     })
-                    .child(div().absolute().right(px(-2.)).bottom(px(-2.)).size(px(9.)).rounded_full().border_2().border_color(theme.background).bg(dot.opacity(breath)));
+                    .child(
+                        div()
+                            .absolute()
+                            .right(px(-2.))
+                            .bottom(px(-2.))
+                            .size(px(9.))
+                            .rounded_full()
+                            .border_2()
+                            .border_color(theme.background)
+                            .bg(dot.opacity(breath)),
+                    );
                 let opener = sub.child.clone().map(|child| {
                     let ws = at.workspace.clone();
                     Button::new(("subagent-open", ix))
                         .ghost()
                         .xsmall()
-                        .icon(Icon::new(crate::assets::Lucide::SquareArrowOutUpRight).text_color(muted))
+                        .icon(
+                            Icon::new(crate::assets::Lucide::SquareArrowOutUpRight)
+                                .text_color(muted),
+                        )
                         .tooltip("Open the sub-agent's thread in a window")
                         .on_click(move |_, _, cx| {
                             cx.stop_propagation();
                             crate::thread_window::open(ws.clone(), &child, cx);
                         })
                 });
-                let chevron = expandable.then(|| Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(muted));
-                let activity = sub.activity.clone().filter(|_| open).map(|g| g.element(at.clock, !at.pulse, cx));
+                let chevron = expandable.then(|| {
+                    Icon::new(if open {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .xsmall()
+                    .text_color(muted)
+                });
+                let activity = sub
+                    .activity
+                    .clone()
+                    .filter(|_| open)
+                    .map(|g| g.element(at.clock, !at.pulse, cx));
                 let preview = (has_result && !open).then(|| orch::plain_preview(&output, 240));
                 column(
                     v_flex()
@@ -2145,22 +2723,66 @@ impl ThreadView {
                                 .py(px(6.))
                                 .mx(px(-8.))
                                 .rounded(px(8.))
-                                .when(expandable, |el| el.cursor_pointer().hover(|s| s.bg(theme.list_hover)).on_click(toggle(key.clone())))
+                                .when(expandable, |el| {
+                                    el.cursor_pointer()
+                                        .hover(|s| s.bg(theme.list_hover))
+                                        .on_click(toggle(key.clone()))
+                                })
                                 .child(logo)
                                 .child(
                                     v_flex()
                                         .flex_1()
                                         .min_w_0()
-                                        .child(div().text_size(px(13.5)).font_medium().truncate().child(sub.label))
-                                        .child(div().text_size(px(12.5)).text_color(muted).truncate().child(sub.detail)),
+                                        .child(
+                                            div()
+                                                .text_size(px(13.5))
+                                                .font_medium()
+                                                .truncate()
+                                                .child(sub.label),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(12.5))
+                                                .text_color(muted)
+                                                .truncate()
+                                                .child(sub.detail),
+                                        ),
                                 )
-                                .when_some(sub.elapsed, |el, d| el.child(div().flex_none().text_xs().text_color(muted).child(crate::time::elapsed(d))))
+                                .when_some(sub.elapsed, |el, d| {
+                                    el.child(
+                                        div()
+                                            .flex_none()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(crate::time::elapsed(d)),
+                                    )
+                                })
                                 .children(opener)
                                 .children(chevron),
                         )
-                        .when_some(activity, |el, a| el.child(div().id(("subagent-activity", ix)).test_support().pl(px(32.)).pr(px(28.)).pb(px(2.)).child(a)))
+                        .when_some(activity, |el, a| {
+                            el.child(
+                                div()
+                                    .id(("subagent-activity", ix))
+                                    .test_support()
+                                    .pl(px(32.))
+                                    .pr(px(28.))
+                                    .pb(px(2.))
+                                    .child(a),
+                            )
+                        })
                         .when_some(preview, |el, p| {
-                            el.child(div().pl(px(32.)).pr(px(28.)).pb(px(2.)).text_size(px(12.5)).line_height(relative(1.45)).text_color(muted).line_clamp(2).child(p))
+                            el.child(
+                                div()
+                                    .pl(px(32.))
+                                    .pr(px(28.))
+                                    .pb(px(2.))
+                                    .text_size(px(12.5))
+                                    .line_height(relative(1.45))
+                                    .text_color(muted)
+                                    .line_clamp(2)
+                                    .child(p),
+                            )
                         })
                         .when_some(md.filter(|_| open && has_result), |el, md| {
                             el.child(
@@ -2170,7 +2792,13 @@ impl ThreadView {
                                     .pl(px(21.))
                                     .border_l_1()
                                     .border_color(theme.foreground.opacity(0.07))
-                                    .child(crate::md::view(&md, at.cwd.clone(), at.folder, text_size * 0.93, cx)),
+                                    .child(crate::md::view(
+                                        &md,
+                                        at.cwd.clone(),
+                                        at.folder,
+                                        text_size * 0.93,
+                                        cx,
+                                    )),
                             )
                         }),
                 )
@@ -2190,7 +2818,15 @@ impl ThreadView {
                             .hover(|s| s.text_color(theme.foreground))
                             .child(Icon::new(crate::assets::Lucide::CornerDownRight).xsmall())
                             .child(div().min_w_0().truncate().child(orch::wake_summary(&text)))
-                            .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().opacity(0.6))
+                            .child(
+                                Icon::new(if open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .xsmall()
+                                .opacity(0.6),
+                            )
                             .on_click(toggle(key.clone())),
                     )
                     .when(open, |el| {
@@ -2216,7 +2852,8 @@ impl ThreadView {
             // Notices are plain text; drop the light markdown the built-in commands use.
             (Row::Notice { ix }, Item::Notice { text }) => {
                 // An interrupted turn can be taken back or tried again from here.
-                let turn = ends_turn && live.is_some_and(|l| trek_core::rewind::turn_start(&l.items, ix).is_some());
+                let turn = ends_turn
+                    && live.is_some_and(|l| trek_core::rewind::turn_start(&l.items, ix).is_some());
                 column(
                     h_flex()
                         .group("turn-end")
@@ -2231,7 +2868,8 @@ impl ThreadView {
                 .into_any_element()
             }
             (Row::Error { ix }, Item::Error { text }) => {
-                let turn = live.is_some_and(|l| trek_core::rewind::turn_start(&l.items, ix).is_some());
+                let turn =
+                    live.is_some_and(|l| trek_core::rewind::turn_start(&l.items, ix).is_some());
                 column(
                     v_flex()
                         .group("turn-end")
@@ -2252,41 +2890,85 @@ impl ThreadView {
                 )
                 .into_any_element()
             }
-            (Row::Limit { ix }, Item::Limit { text, resets_at, scope }) => {
-                let turn = live.is_some_and(|l| trek_core::rewind::turn_start(&l.items, ix).is_some());
+            (
+                Row::Limit { ix },
+                Item::Limit {
+                    text,
+                    resets_at,
+                    scope,
+                },
+            ) => {
+                let turn =
+                    live.is_some_and(|l| trek_core::rewind::turn_start(&l.items, ix).is_some());
                 let amber = palette::amber(cx);
                 let when = limit_when(&scope, resets_at, at.workspace.read(cx).now());
                 let words = SharedString::from(text);
                 column(
-                    v_flex().group("turn-end").my_1().gap(px(2.)).child(
-                        h_flex()
-                            .id(("limit-row", ix))
-                            .test_support()
-                            .min_w_0()
-                            .gap(px(8.))
-                            .py_1()
-                            .text_sm()
-                            // What the agent said, in its words.
-                            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(words.clone()).build(window, cx))
-                            .child(Icon::new(crate::assets::Lucide::Gauge).small().text_color(amber))
-                            .child(div().flex_none().font_medium().text_color(amber).child("Usage limit reached"))
-                            .child(div().min_w_0().truncate().text_color(muted).child(when)),
-                    )
-                    .when(turn, |el| el.child(turn_actions(ix))),
+                    v_flex()
+                        .group("turn-end")
+                        .my_1()
+                        .gap(px(2.))
+                        .child(
+                            h_flex()
+                                .id(("limit-row", ix))
+                                .test_support()
+                                .min_w_0()
+                                .gap(px(8.))
+                                .py_1()
+                                .text_sm()
+                                // What the agent said, in its words.
+                                .tooltip(move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(words.clone())
+                                        .build(window, cx)
+                                })
+                                .child(
+                                    Icon::new(crate::assets::Lucide::Gauge)
+                                        .small()
+                                        .text_color(amber),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .font_medium()
+                                        .text_color(amber)
+                                        .child("Usage limit reached"),
+                                )
+                                .child(div().min_w_0().truncate().text_color(muted).child(when)),
+                        )
+                        .when(turn, |el| el.child(turn_actions(ix))),
                 )
                 .into_any_element()
             }
-            (Row::Handoff { ix }, Item::Handoff { from, from_model, to, to_model, from_name, to_name }) => {
+            (
+                Row::Handoff { ix },
+                Item::Handoff {
+                    from,
+                    from_model,
+                    to,
+                    to_model,
+                    from_name,
+                    to_name,
+                },
+            ) => {
                 let ws = at.workspace.read(cx);
                 let side = |agent: &str, model: &Option<String>, name: Option<String>| {
                     let agent = trek_core::AgentId::from_key(agent);
                     // Named when it was written; else by its model, or today's default.
                     let name = name.filter(|n| !n.is_empty()).unwrap_or_else(|| {
                         let models = ws.models_for(&agent);
-                        let model = model.as_deref().map(|m| crate::composer::model_name(&models, m)).or_else(|| crate::composer::default_model(&models).map(|m| m.name.clone()));
+                        let model = model
+                            .as_deref()
+                            .map(|m| crate::composer::model_name(&models, m))
+                            .or_else(|| {
+                                crate::composer::default_model(&models).map(|m| m.name.clone())
+                            });
                         handoff_name(&agent, model.as_deref())
                     });
-                    h_flex().gap(px(6.)).text_color(theme.foreground.opacity(0.8)).child(crate::ui::agent_glyph(&agent, cx)).child(name)
+                    h_flex()
+                        .gap(px(6.))
+                        .text_color(theme.foreground.opacity(0.8))
+                        .child(crate::ui::agent_glyph(&agent, cx))
+                        .child(name)
                 };
                 column(
                     h_flex().justify_center().child(
@@ -2297,8 +2979,17 @@ impl ThreadView {
                             .py_2()
                             .text_xs()
                             .text_color(muted)
-                            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("The new agent picks the conversation up from a recap of it").build(window, cx))
-                            .child(Icon::new(crate::assets::Lucide::ArrowLeftRight).xsmall().text_color(muted))
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(
+                                    "The new agent picks the conversation up from a recap of it",
+                                )
+                                .build(window, cx)
+                            })
+                            .child(
+                                Icon::new(crate::assets::Lucide::ArrowLeftRight)
+                                    .xsmall()
+                                    .text_color(muted),
+                            )
                             .child("Context handoff")
                             .child(side(&from, &from_model, from_name))
                             .child(Icon::new(IconName::ArrowRight).xsmall().text_color(muted))
@@ -2307,8 +2998,15 @@ impl ThreadView {
                 )
                 .into_any_element()
             }
-            (Row::Lineage { ix }, Item::Tool { id: row_id, detail, .. }) => {
-                let Some(link) = LineageRow::read(at.workspace.read(cx), &row_id, &detail) else { return div().into_any_element() };
+            (
+                Row::Lineage { ix },
+                Item::Tool {
+                    id: row_id, detail, ..
+                },
+            ) => {
+                let Some(link) = LineageRow::read(at.workspace.read(cx), &row_id, &detail) else {
+                    return div().into_any_element();
+                };
                 use trek_core::lineage::Link;
                 // It opens its thread: in the main window, from a thread's own window too.
                 let from_window = matches!(at.scope, Scope::Thread(_));
@@ -2322,7 +3020,9 @@ impl ThreadView {
                 let icon = match link.link {
                     Link::Started => crate::assets::Lucide::MessageSquarePlus,
                     Link::StartedBy => crate::assets::Lucide::CornerDownRight,
-                    Link::ContinuedIn | Link::ContinuedFrom => crate::assets::Lucide::ArrowLeftRight,
+                    Link::ContinuedIn | Link::ContinuedFrom => {
+                        crate::assets::Lucide::ArrowLeftRight
+                    }
                 };
                 let tip = match (link.open, link.link) {
                     (false, _) => "That thread was archived or deleted",
@@ -2340,16 +3040,34 @@ impl ThreadView {
                             ThreadState::Finished => palette::emerald(cx),
                             ThreadState::Failed => palette::red(cx),
                         };
-                        let breath = if state == ThreadState::Working && at.pulse { 0.45 + 0.55 * (0.5 - 0.5 * (at.clock * std::f32::consts::TAU / 2.4).cos()) } else { 1. };
+                        let breath = if state == ThreadState::Working && at.pulse {
+                            0.45 + 0.55
+                                * (0.5 - 0.5 * (at.clock * std::f32::consts::TAU / 2.4).cos())
+                        } else {
+                            1.
+                        };
                         let logo = div()
                             .relative()
                             .flex_none()
                             .size(px(22.))
                             .child(match &link.agent {
                                 Some(a) => crate::ui::agent_logo(a, px(22.), cx),
-                                None => Icon::new(icon).size(px(18.)).text_color(muted).into_any_element(),
+                                None => Icon::new(icon)
+                                    .size(px(18.))
+                                    .text_color(muted)
+                                    .into_any_element(),
                             })
-                            .child(div().absolute().right(px(-2.)).bottom(px(-2.)).size(px(9.)).rounded_full().border_2().border_color(theme.background).bg(dot.opacity(breath)));
+                            .child(
+                                div()
+                                    .absolute()
+                                    .right(px(-2.))
+                                    .bottom(px(-2.))
+                                    .size(px(9.))
+                                    .rounded_full()
+                                    .border_2()
+                                    .border_color(theme.background)
+                                    .bg(dot.opacity(breath)),
+                            );
                         column(
                             v_flex().py(px(3.)).child(
                                 h_flex()
@@ -2360,8 +3078,15 @@ impl ThreadView {
                                     .py(px(6.))
                                     .mx(px(-8.))
                                     .rounded(px(8.))
-                                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
-                                    .when_some(go, |el, go| el.cursor_pointer().hover(|s| s.bg(theme.list_hover)).on_click(go))
+                                    .tooltip(move |window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(tip)
+                                            .build(window, cx)
+                                    })
+                                    .when_some(go, |el, go| {
+                                        el.cursor_pointer()
+                                            .hover(|s| s.bg(theme.list_hover))
+                                            .on_click(go)
+                                    })
                                     .child(logo)
                                     .child(
                                         v_flex()
@@ -2372,12 +3097,35 @@ impl ThreadView {
                                                     .gap(px(6.))
                                                     .text_size(px(13.5))
                                                     .min_w_0()
-                                                    .child(div().flex_none().text_color(muted).child(link.link.label()))
-                                                    .child(div().min_w_0().font_medium().truncate().child(link.title.clone())),
+                                                    .child(
+                                                        div()
+                                                            .flex_none()
+                                                            .text_color(muted)
+                                                            .child(link.link.label()),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .min_w_0()
+                                                            .font_medium()
+                                                            .truncate()
+                                                            .child(link.title.clone()),
+                                                    ),
                                             )
-                                            .child(div().text_size(px(12.5)).text_color(muted).truncate().child(state.label())),
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.5))
+                                                    .text_color(muted)
+                                                    .truncate()
+                                                    .child(state.label()),
+                                            ),
                                     )
-                                    .when(link.open, |el| el.child(Icon::new(IconName::ArrowRight).xsmall().text_color(muted))),
+                                    .when(link.open, |el| {
+                                        el.child(
+                                            Icon::new(IconName::ArrowRight)
+                                                .xsmall()
+                                                .text_color(muted),
+                                        )
+                                    }),
                             ),
                         )
                         .into_any_element()
@@ -2394,12 +3142,30 @@ impl ThreadView {
                                 .rounded(px(6.))
                                 .text_xs()
                                 .text_color(muted)
-                                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
-                                .when_some(go, |el, go| el.cursor_pointer().hover(|s| s.bg(theme.list_hover)).on_click(go))
+                                .tooltip(move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(tip)
+                                        .build(window, cx)
+                                })
+                                .when_some(go, |el, go| {
+                                    el.cursor_pointer()
+                                        .hover(|s| s.bg(theme.list_hover))
+                                        .on_click(go)
+                                })
                                 .child(Icon::new(icon).xsmall().text_color(muted))
                                 .child(link.link.label())
-                                .child(div().max_w(px(360.)).truncate().font_medium().text_color(theme.foreground.opacity(0.85)).child(link.title.clone()))
-                                .when(link.open, |el| el.child(Icon::new(IconName::ArrowRight).xsmall().text_color(muted))),
+                                .child(
+                                    div()
+                                        .max_w(px(360.))
+                                        .truncate()
+                                        .font_medium()
+                                        .text_color(theme.foreground.opacity(0.85))
+                                        .child(link.title.clone()),
+                                )
+                                .when(link.open, |el| {
+                                    el.child(
+                                        Icon::new(IconName::ArrowRight).xsmall().text_color(muted),
+                                    )
+                                }),
                         ),
                     )
                     .into_any_element(),
@@ -2413,7 +3179,9 @@ impl ThreadView {
     /// Ask before `ask` on `anchor` (a message for a rewind, a turn's footer otherwise), and
     /// find out, off the main thread, which files restoring its checkpoint would change.
     fn open_confirm(&mut self, ask: Ask, anchor: String, cx: &mut Context<Self>) {
-        let Some(thread) = self.current.clone() else { return };
+        let Some(thread) = self.current.clone() else {
+            return;
+        };
         let ws = self.workspace.read(cx);
         if ws.turn_running(&thread) {
             return;
@@ -2427,12 +3195,19 @@ impl ThreadView {
         let checkpoint = ws.rewind_files(&thread, &message);
         let files = match &checkpoint {
             Some(_) => Files::Checking,
-            None => Files::Unavailable(ws.no_checkpoint(&thread, &message).unwrap_or(crate::workspace::NoCheckpoint::Missing).explain()),
+            None => Files::Unavailable(
+                ws.no_checkpoint(&thread, &message)
+                    .unwrap_or(crate::workspace::NoCheckpoint::Missing)
+                    .explain(),
+            ),
         };
         let restore = checkpoint.is_some();
         let check = checkpoint.map(|files| {
             cx.spawn(async move |this, cx| {
-                let result = cx.background_executor().spawn(async move { files.changes() }).await;
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { files.changes() })
+                    .await;
                 let _ = this.update(cx, |this, cx| {
                     if let Some(c) = this.confirm.as_mut() {
                         c.files = match result {
@@ -2444,7 +3219,14 @@ impl ThreadView {
                 });
             })
         });
-        self.confirm = Some(Confirm { ask, anchor, message, files, restore, _check: check });
+        self.confirm = Some(Confirm {
+            ask,
+            anchor,
+            message,
+            files,
+            restore,
+            _check: check,
+        });
         cx.notify();
     }
 
@@ -2456,7 +3238,9 @@ impl ThreadView {
 
     /// Do what the open confirmation asked. A rewound message goes back into this composer.
     fn run_confirm(&mut self, cx: &mut Context<Self>) {
-        let (Some(c), Some(thread)) = (self.confirm.take(), self.current.clone()) else { return };
+        let (Some(c), Some(thread)) = (self.confirm.take(), self.current.clone()) else {
+            return;
+        };
         // Nothing to put back when the files are as they were (or when there's no checkpoint).
         let nothing = match &c.files {
             Files::Unavailable(_) => true,
@@ -2475,7 +3259,13 @@ impl ThreadView {
                 }
             };
             if let Some((text, images)) = back {
-                cx.emit(WorkspaceEvent::ComposeIn { scope, thread, text, images, edit: None });
+                cx.emit(WorkspaceEvent::ComposeIn {
+                    scope,
+                    thread,
+                    text,
+                    images,
+                    edit: None,
+                });
             }
         });
         cx.notify();
@@ -2483,11 +3273,16 @@ impl ThreadView {
 
     /// The open confirmation: what will happen, the files restoring would change, and the go-ahead.
     fn confirm_card(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(c) = &self.confirm else { return div().into_any_element() };
+        let Some(c) = &self.confirm else {
+            return div().into_any_element();
+        };
         let ws = self.workspace.read(cx);
-        let Some(thread) = self.current.as_ref().and_then(|id| ws.thread(id)) else { return div().into_any_element() };
+        let Some(thread) = self.current.as_ref().and_then(|id| ws.thread(id)) else {
+            return div().into_any_element();
+        };
         let agent = thread.agent.display_name();
-        let recap = ws.rewind_plan(&thread.id, &c.message) == Some(trek_core::rewind::Reopen::Recap);
+        let recap =
+            ws.rewind_plan(&thread.id, &c.message) == Some(trek_core::rewind::Reopen::Recap);
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let (title, action) = match &c.ask {
@@ -2495,14 +3290,25 @@ impl ThreadView {
             Ask::Undo => ("Undo this turn?".to_string(), "Undo turn"),
             Ask::Retry(None) => ("Retry this turn?".to_string(), "Retry"),
             Ask::Retry(Some(m)) => {
-                let name = ws.models_for(&thread.agent).into_iter().find(|i| crate::composer::same_model(m, &i.id)).map(|i| i.name).unwrap_or_else(|| m.clone());
+                let name = ws
+                    .models_for(&thread.agent)
+                    .into_iter()
+                    .find(|i| crate::composer::same_model(m, &i.id))
+                    .map(|i| i.name)
+                    .unwrap_or_else(|| m.clone());
                 (format!("Retry with {name}?"), "Retry")
             }
         };
         let mut body = match &c.ask {
-            Ask::Rewind => format!("This message and everything after it leave the conversation, and {agent} forgets them. Your message goes back in the composer."),
-            Ask::Undo => format!("This turn and everything after it leave the conversation, and {agent} forgets them. Your message goes back in the composer."),
-            Ask::Retry(_) => format!("This turn and everything after it leave the conversation, and {agent} gets your message again."),
+            Ask::Rewind => format!(
+                "This message and everything after it leave the conversation, and {agent} forgets them. Your message goes back in the composer."
+            ),
+            Ask::Undo => format!(
+                "This turn and everything after it leave the conversation, and {agent} forgets them. Your message goes back in the composer."
+            ),
+            Ask::Retry(_) => format!(
+                "This turn and everything after it leave the conversation, and {agent} gets your message again."
+            ),
         };
         if recap {
             body.push_str(&format!(" {agent} can't take its own session back to this point, so it continues in a new one with a recap."));
@@ -2514,13 +3320,32 @@ impl ThreadView {
                 cx.notify();
             }
         });
-        let note = |text: String| div().text_size(px(12.5)).line_height(relative(1.45)).text_color(muted).child(text).into_any_element();
+        let note = |text: String| {
+            div()
+                .text_size(px(12.5))
+                .line_height(relative(1.45))
+                .text_color(muted)
+                .child(text)
+                .into_any_element()
+        };
         let files: AnyElement = match &c.files {
-            Files::Checking => h_flex().gap(px(8.)).text_size(px(12.5)).text_color(muted).child(Spinner::new().xsmall()).child("Checking which files changed…").into_any_element(),
-            Files::Changes(changes) if changes.is_empty() => note("Nothing to put back: the files these turns changed are as they were.".into()),
+            Files::Checking => h_flex()
+                .gap(px(8.))
+                .text_size(px(12.5))
+                .text_color(muted)
+                .child(Spinner::new().xsmall())
+                .child("Checking which files changed…")
+                .into_any_element(),
+            Files::Changes(changes) if changes.is_empty() => {
+                note("Nothing to put back: the files these turns changed are as they were.".into())
+            }
             Files::Changes(changes) => v_flex()
                 .gap(px(6.))
-                .child(crate::ui::check_row("restore-files", "Also restore files", restore, false, cx).on_click(toggle).test_support())
+                .child(
+                    crate::ui::check_row("restore-files", "Also restore files", restore, false, cx)
+                        .on_click(toggle)
+                        .test_support(),
+                )
                 .child(
                     v_flex()
                         .pl(px(22.))
@@ -2537,15 +3362,35 @@ impl ThreadView {
                             h_flex()
                                 .gap(px(8.))
                                 .text_xs()
-                                .child(div().flex_1().min_w_0().truncate().font_family(theme.mono_font_family.clone()).child(f.path.clone()))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family(theme.mono_font_family.clone())
+                                        .child(f.path.clone()),
+                                )
                                 .child(div().flex_none().text_color(muted).child(what))
                         }))
-                        .when(changes.len() > FILES_SHOWN, |el| el.child(div().text_xs().text_color(muted).child(format!("and {} more", changes.len() - FILES_SHOWN)))),
+                        .when(changes.len() > FILES_SHOWN, |el| {
+                            el.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(format!("and {} more", changes.len() - FILES_SHOWN)),
+                            )
+                        }),
                 )
                 .into_any_element(),
             Files::Unavailable(why) => v_flex()
                 .gap(px(6.))
-                .child(crate::ui::check_row("restore-files", "Also restore files", false, true, cx))
+                .child(crate::ui::check_row(
+                    "restore-files",
+                    "Also restore files",
+                    false,
+                    true,
+                    cx,
+                ))
                 .child(note(why.to_string()))
                 .into_any_element(),
             Files::Failed(e) => note(format!("Couldn't check the files: {e}")),
@@ -2556,22 +3401,51 @@ impl ThreadView {
             .w(px(340.))
             .p(px(12.))
             .gap(px(10.))
-            .child(div().text_size(px(13.5)).font_medium().text_color(theme.foreground).child(title))
+            .child(
+                div()
+                    .text_size(px(13.5))
+                    .font_medium()
+                    .text_color(theme.foreground)
+                    .child(title),
+            )
             .child(note(body))
-            .child(div().pt(px(10.)).border_t_1().border_color(theme.foreground.opacity(0.07)).child(files))
+            .child(
+                div()
+                    .pt(px(10.))
+                    .border_t_1()
+                    .border_color(theme.foreground.opacity(0.07))
+                    .child(files),
+            )
             .child(
                 h_flex()
                     .justify_end()
                     .gap_2()
-                    .child(Button::new("confirm-cancel").small().ghost().label("Cancel").on_click(cx.listener(|this, _, _, cx| this.close_confirm(cx))))
-                    .child(Button::new("confirm-go").small().primary().label(action).on_click(cx.listener(|this, _, _, cx| this.run_confirm(cx)))),
+                    .child(
+                        Button::new("confirm-cancel")
+                            .small()
+                            .ghost()
+                            .label("Cancel")
+                            .on_click(cx.listener(|this, _, _, cx| this.close_confirm(cx))),
+                    )
+                    .child(
+                        Button::new("confirm-go")
+                            .small()
+                            .primary()
+                            .label(action)
+                            .on_click(cx.listener(|this, _, _, cx| this.run_confirm(cx))),
+                    ),
             )
             .into_any_element()
     }
 
     /// Answers from the question card: picked options, and the masked fields for secrets. `None`
     /// until every question has one.
-    fn card_answers(&self, request_id: &str, questions: &[trek_agents::Question], cx: &App) -> Option<Vec<(String, String)>> {
+    fn card_answers(
+        &self,
+        request_id: &str,
+        questions: &[trek_agents::Question],
+        cx: &App,
+    ) -> Option<Vec<(String, String)>> {
         let ws = self.workspace.read(cx);
         let picks = &ws.live.get(self.current.as_ref()?)?.picks;
         let mut fields = self.secrets.1.iter();
@@ -2579,25 +3453,45 @@ impl ThreadView {
             .iter()
             .enumerate()
             .map(|(i, q)| {
-                let picked = picks.get(&(request_id.to_string(), i)).filter(|v| !v.is_empty()).map(|v| v.join(", "));
-                let typed = q.secret.then(|| fields.next()).flatten().map(|(f, _)| f.read(cx).value().trim().to_string()).filter(|v| !v.is_empty());
+                let picked = picks
+                    .get(&(request_id.to_string(), i))
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v.join(", "));
+                let typed = q
+                    .secret
+                    .then(|| fields.next())
+                    .flatten()
+                    .map(|(f, _)| f.read(cx).value().trim().to_string())
+                    .filter(|v| !v.is_empty());
                 typed.or(picked).map(|a| (q.question.clone(), a))
             })
             .collect()
     }
 
     /// One masked field per secret question, empty for each new card.
-    fn secret_fields(&mut self, request_id: &str, questions: &[trek_agents::Question], window: &mut Window, cx: &mut Context<Self>) {
+    fn secret_fields(
+        &mut self,
+        request_id: &str,
+        questions: &[trek_agents::Question],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.secrets.0.as_deref() != Some(request_id) {
             self.secrets.0 = Some(request_id.to_string());
             self.clear_secrets(window, cx);
         }
         while self.secrets.1.len() < questions.iter().filter(|q| q.secret).count() {
-            let field = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Type it here"));
-            let sub = cx.subscribe_in(&field, window, |this, _, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { .. } => this.submit_answers(window, cx),
-                InputEvent::Change => cx.notify(),
-                _ => {}
+            let field = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .masked(true)
+                    .placeholder("Type it here")
+            });
+            let sub = cx.subscribe_in(&field, window, |this, _, event: &InputEvent, window, cx| {
+                match event {
+                    InputEvent::PressEnter { .. } => this.submit_answers(window, cx),
+                    InputEvent::Change => cx.notify(),
+                    _ => {}
+                }
             });
             self.secrets.1.push((field, sub));
         }
@@ -2611,98 +3505,193 @@ impl ThreadView {
 
     /// Send the question card's answers, if it's complete.
     fn submit_answers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.current.clone() else { return };
-        let pending = self.workspace.read(cx).live.get(&id).and_then(|l| l.permissions.first()).and_then(|p| match &p.prompt {
-            Some(trek_agents::Prompt::Questions(q)) => Some((p.request_id.clone(), q.clone())),
-            _ => None,
-        });
-        let Some((request_id, questions)) = pending else { return };
-        let Some(answers) = self.card_answers(&request_id, &questions, cx) else { return };
+        let Some(id) = self.current.clone() else {
+            return;
+        };
+        let pending = self
+            .workspace
+            .read(cx)
+            .live
+            .get(&id)
+            .and_then(|l| l.permissions.first())
+            .and_then(|p| match &p.prompt {
+                Some(trek_agents::Prompt::Questions(q)) => Some((p.request_id.clone(), q.clone())),
+                _ => None,
+            });
+        let Some((request_id, questions)) = pending else {
+            return;
+        };
+        let Some(answers) = self.card_answers(&request_id, &questions, cx) else {
+            return;
+        };
         self.clear_secrets(window, cx);
-        self.workspace.update(cx, |ws, cx| ws.answer(&id, &request_id, answers, cx));
+        self.workspace
+            .update(cx, |ws, cx| ws.answer(&id, &request_id, answers, cx));
     }
 
     /// The agent asked something only a person can answer: multiple-choice questions, or a secret.
-    fn question_card(&mut self, id: String, request_id: String, questions: Vec<trek_agents::Question>, agent: String, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn question_card(
+        &mut self,
+        id: String,
+        request_id: String,
+        questions: Vec<trek_agents::Question>,
+        agent: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         self.secret_fields(&request_id, &questions, window, cx);
-        let mut fields = self.secrets.1.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>().into_iter();
+        let mut fields = self
+            .secrets
+            .1
+            .iter()
+            .map(|(f, _)| f.clone())
+            .collect::<Vec<_>>()
+            .into_iter();
         let theme = cx.theme().clone();
         let ember = palette::ember(cx);
         let complete = self.card_answers(&request_id, &questions, cx).is_some();
-        let picks = self.workspace.read(cx).live.get(&id).map(|l| l.picks.clone()).unwrap_or_default();
+        let picks = self
+            .workspace
+            .read(cx)
+            .live
+            .get(&id)
+            .map(|l| l.picks.clone())
+            .unwrap_or_default();
         let (id2, rid2) = (id.clone(), request_id.clone());
         let width = self.workspace.read(cx).column();
-        let hint = if questions.len() > 1 { "Or type below to answer the first open question in your own words." } else { "Or type your own answer below and send it." };
-        let body = v_flex().gap(px(14.)).children(questions.iter().enumerate().map(|(qi, q)| {
-            let picked = picks.get(&(request_id.clone(), qi)).cloned().unwrap_or_default();
-            v_flex()
-                .gap(px(6.))
-                .child(div().text_size(px(13.5)).font_medium().child(q.question.clone()))
-                .when(q.multi, |el| el.child(div().text_xs().text_color(theme.muted_foreground).child("Choose any that apply.")))
-                .children(q.options.iter().enumerate().map(|(oi, (label, desc))| {
-                    let on = picked.contains(label);
-                    let (ws, id, rid, label2, multi) = (self.workspace.clone(), id.clone(), request_id.clone(), label.clone(), q.multi);
-                    h_flex()
-                        .id(SharedString::from(format!("q-{request_id}-{qi}-{oi}")))
-                        .test_support()
-                        .px(px(10.))
-                        .py(px(7.))
-                        .gap(px(10.))
-                        .items_start()
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(if on { ember.opacity(0.7) } else { theme.foreground.opacity(0.1) })
-                        .when(on, |el| el.bg(ember.opacity(0.08)))
-                        .when(!on, |el| el.hover(|s| s.bg(theme.foreground.opacity(0.04))))
-                        .cursor_pointer()
-                        .child(
+        let hint = if questions.len() > 1 {
+            "Or type below to answer the first open question in your own words."
+        } else {
+            "Or type your own answer below and send it."
+        };
+        let body = v_flex()
+            .gap(px(14.))
+            .children(questions.iter().enumerate().map(|(qi, q)| {
+                let picked = picks
+                    .get(&(request_id.clone(), qi))
+                    .cloned()
+                    .unwrap_or_default();
+                v_flex()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(13.5))
+                            .font_medium()
+                            .child(q.question.clone()),
+                    )
+                    .when(q.multi, |el| {
+                        el.child(
                             div()
-                                .mt(px(3.))
-                                .size(px(14.))
-                                .flex_none()
-                                .when(!multi, |el| el.rounded_full())
-                                .when(multi, |el| el.rounded(px(3.)))
-                                .border_1()
-                                .border_color(if on { ember } else { theme.foreground.opacity(0.3) })
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .when(on, |el| el.child(div().size(px(7.)).when(!multi, |d| d.rounded_full()).when(multi, |d| d.rounded(px(1.))).bg(ember))),
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child("Choose any that apply."),
                         )
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .child(div().text_size(px(13.)).child(label.clone()))
-                                .when(!desc.is_empty(), |el| el.child(div().text_xs().line_height(relative(1.45)).text_color(theme.muted_foreground).child(desc.clone()))),
-                        )
-                        .on_click(move |_, _, cx| {
-                            ws.update(cx, |ws, cx| {
-                                let Some(live) = ws.live.get_mut(&id) else { return };
-                                let entry = live.picks.entry((rid.clone(), qi)).or_default();
-                                if multi {
-                                    if let Some(pos) = entry.iter().position(|l| *l == label2) {
-                                        entry.remove(pos);
-                                    } else {
-                                        entry.push(label2.clone());
-                                    }
-                                } else {
-                                    *entry = vec![label2.clone()];
-                                }
-                                cx.notify();
+                    })
+                    .children(q.options.iter().enumerate().map(|(oi, (label, desc))| {
+                        let on = picked.contains(label);
+                        let (ws, id, rid, label2, multi) = (
+                            self.workspace.clone(),
+                            id.clone(),
+                            request_id.clone(),
+                            label.clone(),
+                            q.multi,
+                        );
+                        h_flex()
+                            .id(SharedString::from(format!("q-{request_id}-{qi}-{oi}")))
+                            .test_support()
+                            .px(px(10.))
+                            .py(px(7.))
+                            .gap(px(10.))
+                            .items_start()
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(if on {
+                                ember.opacity(0.7)
+                            } else {
+                                theme.foreground.opacity(0.1)
                             })
-                        })
-                }))
-                .when_some(q.secret.then(|| fields.next()).flatten(), |el, field| {
-                    el.child(Input::new(&field).small().mask_toggle())
-                        .child(div().text_xs().text_color(theme.muted_foreground).child("Private: Trek sends it to the agent without showing or saving it."))
-                })
-        }));
+                            .when(on, |el| el.bg(ember.opacity(0.08)))
+                            .when(!on, |el| el.hover(|s| s.bg(theme.foreground.opacity(0.04))))
+                            .cursor_pointer()
+                            .child(
+                                div()
+                                    .mt(px(3.))
+                                    .size(px(14.))
+                                    .flex_none()
+                                    .when(!multi, |el| el.rounded_full())
+                                    .when(multi, |el| el.rounded(px(3.)))
+                                    .border_1()
+                                    .border_color(if on {
+                                        ember
+                                    } else {
+                                        theme.foreground.opacity(0.3)
+                                    })
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(on, |el| {
+                                        el.child(
+                                            div()
+                                                .size(px(7.))
+                                                .when(!multi, |d| d.rounded_full())
+                                                .when(multi, |d| d.rounded(px(1.)))
+                                                .bg(ember),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(div().text_size(px(13.)).child(label.clone()))
+                                    .when(!desc.is_empty(), |el| {
+                                        el.child(
+                                            div()
+                                                .text_xs()
+                                                .line_height(relative(1.45))
+                                                .text_color(theme.muted_foreground)
+                                                .child(desc.clone()),
+                                        )
+                                    }),
+                            )
+                            .on_click(move |_, _, cx| {
+                                ws.update(cx, |ws, cx| {
+                                    let Some(live) = ws.live.get_mut(&id) else {
+                                        return;
+                                    };
+                                    let entry = live.picks.entry((rid.clone(), qi)).or_default();
+                                    if multi {
+                                        if let Some(pos) = entry.iter().position(|l| *l == label2) {
+                                            entry.remove(pos);
+                                        } else {
+                                            entry.push(label2.clone());
+                                        }
+                                    } else {
+                                        *entry = vec![label2.clone()];
+                                    }
+                                    cx.notify();
+                                })
+                            })
+                    }))
+                    .when_some(q.secret.then(|| fields.next()).flatten(), |el, field| {
+                        el.child(Input::new(&field).small().mask_toggle()).child(
+                            div().text_xs().text_color(theme.muted_foreground).child(
+                                "Private: Trek sends it to the agent without showing or saving it.",
+                            ),
+                        )
+                    })
+            }));
         // Tall enough that a few questions show their options whole; a longer card scrolls.
         // The room is the transcript's (last layout; the list's top padding comes off), not the
         // window's: chrome and the composer already took theirs. Before the first layout, guess.
         let room = self.room.get() - px(20.);
-        let tall = (if room > px(0.) { room } else { window.viewport_size().height * 0.6 }).max(px(240.)).min(px(640.));
+        let tall = (if room > px(0.) {
+            room
+        } else {
+            window.viewport_size().height * 0.6
+        })
+        .max(px(240.))
+        .min(px(640.));
         v_flex()
             .w_full()
             .max_w(width)
@@ -2713,25 +3702,81 @@ impl ThreadView {
             .border_1()
             .border_color(theme.foreground.opacity(0.12))
             .bg(theme.secondary)
-            .child(h_flex().gap_2().text_sm().child(Icon::new(crate::assets::Lucide::MessageSquare).small().text_color(theme.muted_foreground)).child(div().font_semibold().child(format!("{agent} has a question"))))
-            .child(div().id("question-scroll").test_support().flex_1().min_h_0().overflow_y_scroll().child(body))
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().flex_1().text_xs().text_color(theme.muted_foreground).child(hint))
-                    .child(Button::new("q-skip").small().ghost().label("Skip").on_click(cx.listener(move |this, _, window, cx| {
-                        this.clear_secrets(window, cx);
-                        this.workspace.update(cx, |ws, cx| ws.respond(&id2, &rid2, Decision::Deny, cx));
-                    })))
-                    .child(Button::new("q-send").small().primary().label("Answer").disabled(!complete).on_click(cx.listener(|this, _, window, cx| this.submit_answers(window, cx)))),
+                    .text_sm()
+                    .child(
+                        Icon::new(crate::assets::Lucide::MessageSquare)
+                            .small()
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child(
+                        div()
+                            .font_semibold()
+                            .child(format!("{agent} has a question")),
+                    ),
+            )
+            .child(
+                div()
+                    .id("question-scroll")
+                    .test_support()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(body),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(hint),
+                    )
+                    .child(
+                        Button::new("q-skip")
+                            .small()
+                            .ghost()
+                            .label("Skip")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.clear_secrets(window, cx);
+                                this.workspace.update(cx, |ws, cx| {
+                                    ws.respond(&id2, &rid2, Decision::Deny, cx)
+                                });
+                            })),
+                    )
+                    .child(
+                        Button::new("q-send")
+                            .small()
+                            .primary()
+                            .label("Answer")
+                            .disabled(!complete)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.submit_answers(window, cx)),
+                            ),
+                    ),
             )
             .into_any_element()
     }
 
     /// The agent finished planning and wants a go-ahead before changing anything.
-    fn plan_card(&mut self, id: String, request_id: String, plan: String, agent: String, cx: &mut Context<Self>) -> AnyElement {
+    fn plan_card(
+        &mut self,
+        id: String,
+        request_id: String,
+        plan: String,
+        agent: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
-        if self.plan_md.as_ref().is_none_or(|(rid, _, _)| *rid != request_id) {
+        if self
+            .plan_md
+            .as_ref()
+            .is_none_or(|(rid, _, _)| *rid != request_id)
+        {
             let text = plan.clone();
             let md = cx.new(|cx| TextViewState::markdown(&text, cx));
             let parsed = cx.observe(&md, |_, _, cx| cx.notify());
@@ -2739,7 +3784,11 @@ impl ThreadView {
         }
         let md = self.plan_md.as_ref().map(|(_, m, _)| m.clone());
         let cwd = self.workspace.read(cx).cwd_in(&self.scope);
-        let folder = self.workspace.read(cx).thread_in(&self.scope).and_then(|t| self.workspace.read(cx).thread_project_tint(t, cx));
+        let folder = self
+            .workspace
+            .read(cx)
+            .thread_in(&self.scope)
+            .and_then(|t| self.workspace.read(cx).thread_project_tint(t, cx));
         let (ws, ws2) = (self.workspace.clone(), self.workspace.clone());
         let (id2, rid2, id3, rid3) = (id.clone(), request_id.clone(), id, request_id);
         let width = self.workspace.read(cx).column();
@@ -2753,14 +3802,53 @@ impl ThreadView {
             .border_1()
             .border_color(palette::indigo(cx).opacity(0.45))
             .bg(theme.secondary)
-            .child(h_flex().gap_2().text_sm().child(Icon::new(crate::assets::Lucide::ListChecks).small().text_color(palette::indigo(cx))).child(div().font_semibold().child(format!("{agent}'s plan"))))
-            .child(div().id("plan-scroll").flex_1().min_h_0().overflow_y_scroll().children(md.map(|m| crate::md::view(&m, cwd, folder, px(13.5), cx))))
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().flex_1().text_xs().text_color(theme.muted_foreground).child("Nothing has been changed yet."))
-                    .child(Button::new("plan-revise").small().outline().label("Keep planning").on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.respond(&id2, &rid2, Decision::Deny, cx))))
-                    .child(Button::new("plan-approve").small().primary().label("Approve and start").on_click(move |_, _, cx| ws2.update(cx, |ws, cx| ws.approve_plan(&id3, &rid3, cx)))),
+                    .text_sm()
+                    .child(
+                        Icon::new(crate::assets::Lucide::ListChecks)
+                            .small()
+                            .text_color(palette::indigo(cx)),
+                    )
+                    .child(div().font_semibold().child(format!("{agent}'s plan"))),
+            )
+            .child(
+                div()
+                    .id("plan-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(md.map(|m| crate::md::view(&m, cwd, folder, px(13.5), cx))),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Nothing has been changed yet."),
+                    )
+                    .child(
+                        Button::new("plan-revise")
+                            .small()
+                            .outline()
+                            .label("Keep planning")
+                            .on_click(move |_, _, cx| {
+                                ws.update(cx, |ws, cx| ws.respond(&id2, &rid2, Decision::Deny, cx))
+                            }),
+                    )
+                    .child(
+                        Button::new("plan-approve")
+                            .small()
+                            .primary()
+                            .label("Approve and start")
+                            .on_click(move |_, _, cx| {
+                                ws2.update(cx, |ws, cx| ws.approve_plan(&id3, &rid3, cx))
+                            }),
+                    ),
             )
             .into_any_element()
     }
@@ -2773,14 +3861,30 @@ impl ThreadView {
             let ws = self.workspace.read(cx);
             let live = ws.live.get(&id)?;
             let agent = ws.thread(&id)?.agent.display_name();
-            live.permissions.first().and_then(|p| p.prompt.clone().map(|prompt| (p.request_id.clone(), prompt, agent)))
+            live.permissions.first().and_then(|p| {
+                p.prompt
+                    .clone()
+                    .map(|prompt| (p.request_id.clone(), prompt, agent))
+            })
         };
         if let Some((request_id, prompt, agent)) = special {
             let card = match prompt {
-                trek_agents::Prompt::Questions(q) => self.question_card(id.clone(), request_id, q, agent, window, cx),
-                trek_agents::Prompt::Plan(plan) => self.plan_card(id.clone(), request_id, plan, agent, cx),
+                trek_agents::Prompt::Questions(q) => {
+                    self.question_card(id.clone(), request_id, q, agent, window, cx)
+                }
+                trek_agents::Prompt::Plan(plan) => {
+                    self.plan_card(id.clone(), request_id, plan, agent, cx)
+                }
             };
-            return Some(h_flex().w_full().justify_center().px_6().pb_2().child(card).into_any_element());
+            return Some(
+                h_flex()
+                    .w_full()
+                    .justify_center()
+                    .px_6()
+                    .pb_2()
+                    .child(card)
+                    .into_any_element(),
+            );
         }
         let ws = self.workspace.read(cx);
         let live = ws.live.get(&id)?;
@@ -2820,8 +3924,16 @@ impl ThreadView {
                                 h_flex()
                                     .gap_2()
                                     .text_sm()
-                                    .child(Icon::new(crate::assets::Lucide::ShieldCheck).small().text_color(amber))
-                                    .child(div().font_semibold().child(format!("{agent} wants to: {}", p.title))),
+                                    .child(
+                                        Icon::new(crate::assets::Lucide::ShieldCheck)
+                                            .small()
+                                            .text_color(amber),
+                                    )
+                                    .child(
+                                        div()
+                                            .font_semibold()
+                                            .child(format!("{agent} wants to: {}", p.title)),
+                                    ),
                             )
                             .when(!p.detail.is_empty(), |el| {
                                 el.child(
@@ -2839,7 +3951,13 @@ impl ThreadView {
                                 h_flex()
                                     .gap_2()
                                     .justify_end()
-                                    .child(Button::new("deny").small().ghost().label("Deny").on_click(respond(Decision::Deny)))
+                                    .child(
+                                        Button::new("deny")
+                                            .small()
+                                            .ghost()
+                                            .label("Deny")
+                                            .on_click(respond(Decision::Deny)),
+                                    )
                                     .child(
                                         Button::new("allow-session")
                                             .small()
@@ -2847,13 +3965,20 @@ impl ThreadView {
                                             .label("Always allow")
                                             .on_click(respond(Decision::AllowForSession)),
                                     )
-                                    .child(Button::new("allow").small().primary().label("Allow").on_click(respond(Decision::Allow))),
+                                    .child(
+                                        Button::new("allow")
+                                            .small()
+                                            .primary()
+                                            .label("Allow")
+                                            .on_click(respond(Decision::Allow)),
+                                    ),
                             ),
                     )
                     // Keyed on the request, not the transcript revision, so streaming doesn't replay it.
                     .with_animation(
                         SharedString::from(format!("perm-in-{rid_anim}")),
-                        Animation::new(std::time::Duration::from_millis(220)).with_easing(ease_out_quint()),
+                        Animation::new(std::time::Duration::from_millis(220))
+                            .with_easing(ease_out_quint()),
                         |el, t| el.opacity(t).mt(px(10. * (1. - t))),
                     )
                     .into_any_element(),
@@ -2864,14 +3989,32 @@ impl ThreadView {
 
     fn empty_state(&self, cx: &mut Context<Self>) -> AnyElement {
         let ws = self.workspace.read(cx);
-        let loading = self.current.as_ref().and_then(|id| ws.live.get(id)).is_some_and(|l| l.loading);
+        let loading = self
+            .current
+            .as_ref()
+            .and_then(|id| ws.live.get(id))
+            .is_some_and(|l| l.loading);
         if loading {
-            return v_flex().size_full().items_center().justify_center().child(Spinner::new()).into_any_element();
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .child(Spinner::new())
+                .into_any_element();
         }
         let a = &ws.settings.appearance;
-        let show = a.background_placement == trek_core::settings::BackgroundPlacement::NewThread && ws.is_draft_in(&self.scope);
+        let show = a.background_placement == trek_core::settings::BackgroundPlacement::NewThread
+            && ws.is_draft_in(&self.scope);
         let spec = if show { a.background.clone() } else { None };
-        div().relative().size_full().child(crate::ui::hero_background(spec.as_deref(), a.background_dim, cx)).into_any_element()
+        div()
+            .relative()
+            .size_full()
+            .child(crate::ui::hero_background(
+                spec.as_deref(),
+                a.background_dim,
+                cx,
+            ))
+            .into_any_element()
     }
 }
 
@@ -2893,7 +4036,15 @@ pub(crate) struct SubAgentRow {
 
 impl SubAgentRow {
     /// The row for transcript item `row_id` of `thread` (whose agent is `agent`).
-    pub(crate) fn read(ws: &Workspace, thread: &str, agent: &trek_core::AgentId, row_id: &str, detail: &str, output: &str, status: ToolStatus) -> SubAgentRow {
+    pub(crate) fn read(
+        ws: &Workspace,
+        thread: &str,
+        agent: &trek_core::AgentId,
+        row_id: &str,
+        detail: &str,
+        output: &str,
+        status: ToolStatus,
+    ) -> SubAgentRow {
         let by_status = match status {
             ToolStatus::Running => TaskState::Running,
             ToolStatus::Done => TaskState::Done,
@@ -2901,14 +4052,28 @@ impl SubAgentRow {
             ToolStatus::Denied => TaskState::Cancelled,
         };
         let with_error = |state: TaskState| match state {
-            TaskState::Failed if !output.trim().is_empty() => format!("{} · {}", state.label(), orch::preview(output, 140)),
+            TaskState::Failed if !output.trim().is_empty() => {
+                format!("{} · {}", state.label(), orch::preview(output, 140))
+            }
             _ => state.label().to_string(),
         };
         if let Some(child) = orch::task_of_row(row_id) {
             let Some(t) = ws.thread(child) else {
                 // Its thread is gone (deleted, or archived on its own): what the row kept.
-                let state = if by_status == TaskState::Running { TaskState::Cancelled } else { by_status };
-                return SubAgentRow { agent: None, label: detail.to_string(), detail: with_error(state), state, elapsed: None, child: None, activity: None };
+                let state = if by_status == TaskState::Running {
+                    TaskState::Cancelled
+                } else {
+                    by_status
+                };
+                return SubAgentRow {
+                    agent: None,
+                    label: detail.to_string(),
+                    detail: with_error(state),
+                    state,
+                    elapsed: None,
+                    child: None,
+                    activity: None,
+                };
             };
             let state = ws.task_state(child);
             let detail = match state {
@@ -2918,13 +4083,20 @@ impl SubAgentRow {
                         l.items.iter().rev().find_map(|i| match i {
                             Item::Tool { title, detail, .. } => {
                                 let op = crate::activity::op(title, detail, t.cwd.as_deref());
-                                let words = if op.verb.is_empty() || op.text.is_empty() { format!("{}{}", op.verb, op.text) } else { format!("{} {}", op.verb, op.text) };
+                                let words = if op.verb.is_empty() || op.text.is_empty() {
+                                    format!("{}{}", op.verb, op.text)
+                                } else {
+                                    format!("{} {}", op.verb, op.text)
+                                };
                                 Some(orch::preview(&words, 90))
                             }
                             _ => None,
                         })
                     });
-                    step.map_or_else(|| state.label().to_string(), |s| format!("{} · {s}", state.label()))
+                    step.map_or_else(
+                        || state.label().to_string(),
+                        |s| format!("{} · {s}", state.label()),
+                    )
                 }
                 other => with_error(other),
             };
@@ -2935,34 +4107,61 @@ impl SubAgentRow {
                 state,
                 elapsed: Some(ws.task_elapsed(child)),
                 child: Some(child.to_string()),
-                activity: state.live().then(|| crate::working_bar::child_group(ws, child)).flatten(),
+                activity: state
+                    .live()
+                    .then(|| crate::working_bar::child_group(ws, child))
+                    .flatten(),
             };
         }
         // One of the agent's own.
-        let task = ws.live.get(thread).and_then(|l| l.tasks.iter().find(|t| t.id == row_id));
+        let task = ws
+            .live
+            .get(thread)
+            .and_then(|l| l.tasks.iter().find(|t| t.id == row_id));
         let state = match task.map(|t| t.done) {
             Some(None) => TaskState::Running,
             Some(Some(true)) => TaskState::Done,
             Some(Some(false)) => TaskState::Failed,
             None => by_status,
         };
-        let steps = |n: u64| if n == 1 { "1 step".to_string() } else { format!("{n} steps") };
+        let steps = |n: u64| {
+            if n == 1 {
+                "1 step".to_string()
+            } else {
+                format!("{n} steps")
+            }
+        };
         let line = match task {
-            Some(t) if state == TaskState::Running && !t.activity.is_empty() => format!("{} · {}", t.activity, steps(t.tool_uses)),
+            Some(t) if state == TaskState::Running && !t.activity.is_empty() => {
+                format!("{} · {}", t.activity, steps(t.tool_uses))
+            }
             Some(t) if t.tool_uses > 0 => format!("{} · {}", state.label(), steps(t.tool_uses)),
             _ => with_error(state),
         };
         let cwd = ws.thread(thread).and_then(|t| t.cwd.clone());
         SubAgentRow {
             agent: Some(agent.clone()),
-            label: if detail.trim().is_empty() { "Sub-agent".into() } else { detail.to_string() },
+            label: if detail.trim().is_empty() {
+                "Sub-agent".into()
+            } else {
+                detail.to_string()
+            },
             detail: line,
             state,
-            elapsed: task.map(|t| t.ended.unwrap_or_else(std::time::Instant::now).saturating_duration_since(t.started)),
+            elapsed: task.map(|t| {
+                t.ended
+                    .unwrap_or_else(std::time::Instant::now)
+                    .saturating_duration_since(t.started)
+            }),
             child: None,
-            activity: task
-                .filter(|_| state.live())
-                .and_then(|t| crate::working_bar::steps_group(&t.steps, t.stepped.saturating_sub(t.steps.len()), true, cwd.as_deref())),
+            activity: task.filter(|_| state.live()).and_then(|t| {
+                crate::working_bar::steps_group(
+                    &t.steps,
+                    t.stepped.saturating_sub(t.steps.len()),
+                    true,
+                    cwd.as_deref(),
+                )
+            }),
         }
     }
 }
@@ -2974,7 +4173,8 @@ const PULSE_FPS: u64 = 5;
 /// `TREK_OPEN_BACKGROUND=1`: sub-agents' rows (and the background strip) open at launch, for
 /// design review.
 fn review_open() -> bool {
-    static OPEN: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("TREK_OPEN_BACKGROUND").is_ok_and(|v| v == "1"));
+    static OPEN: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var("TREK_OPEN_BACKGROUND").is_ok_and(|v| v == "1"));
     *OPEN
 }
 
@@ -3020,13 +4220,23 @@ impl Render for ThreadView {
         // Where the last row ends is noted as it's laid out below; until then (and when it's out
         // of view, or a card sits under it) there's no tail.
         let tail = self.tail.clone();
-        let forget = canvas(move |_, _, _| tail.set(None), |_, _, _, _| {}).absolute().size_0();
+        let forget = canvas(move |_, _, _| tail.set(None), |_, _, _, _| {})
+            .absolute()
+            .size_0();
         let room = {
             let room = self.room.clone();
-            canvas(move |b, _, _| room.set(b.size.height), |_, _, _, _| {}).absolute().inset_0()
+            canvas(move |b, _, _| room.set(b.size.height), |_, _, _, _| {})
+                .absolute()
+                .inset_0()
         };
         let (Some(thread), false) = (self.current.clone(), rows.rows.is_empty()) else {
-            return v_flex().size_full().relative().child(forget).child(room).child(self.empty_state(cx)).children(footer);
+            return v_flex()
+                .size_full()
+                .relative()
+                .child(forget)
+                .child(room)
+                .child(self.empty_state(cx))
+                .children(footer);
         };
         let tail = (footer.is_none()).then(|| self.tail.clone());
         let last = rows.rows.len() - 1;
@@ -3037,12 +4247,19 @@ impl Render for ThreadView {
         let at = RowContext {
             workspace: self.workspace.clone(),
             scope: self.scope.clone(),
-            agent: t.map(|t| t.agent.clone()).unwrap_or(trek_core::AgentId::ClaudeCode),
+            agent: t
+                .map(|t| t.agent.clone())
+                .unwrap_or(trek_core::AgentId::ClaudeCode),
             model: t.and_then(|t| t.model.clone()),
             busy: ws.turn_running(&thread),
-            last_end: ws.live.get(&thread).and_then(|l| l.items.iter().rposition(trek_core::rewind::ends_turn)),
+            last_end: ws
+                .live
+                .get(&thread)
+                .and_then(|l| l.items.iter().rposition(trek_core::rewind::ends_turn)),
             in_repo: crate::system::lately::in_repo(t.and_then(|t| t.cwd.as_deref())),
-            worktree_missing: t.and_then(|t| t.worktree.as_ref()).is_some_and(crate::system::lately::worktree_missing),
+            worktree_missing: t
+                .and_then(|t| t.worktree.as_ref())
+                .is_some_and(crate::system::lately::worktree_missing),
             thread,
             text_size: px(ws.settings.appearance.transcript_font_size()),
             column: ws.column(),
@@ -3050,57 +4267,61 @@ impl Render for ThreadView {
             folder: t.and_then(|t| ws.thread_project_tint(t, cx)),
             animate: self.animate(window, cx),
             pulse: self.animate(window, cx) && self._ticker.is_some(),
-            clock: (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() % 1_000_000).unwrap_or(0) as f32) / 1000.,
+            clock: (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() % 1_000_000)
+                .unwrap_or(0) as f32)
+                / 1000.,
             verify_probe: t.and_then(|t| ws.verify_probe(t)),
             streaming,
         };
         let flash = self.flash;
-        // The thinking timeline: shown open while the turn works, collapsed to its header once
-        // it's over (a click or the chevron reopens it). Built before `jump` takes `cx` mutably.
-        let timeline = ws.settings.appearance.show_thinking.then(|| ws.live.get(&at.thread).and_then(thinking)).flatten();
-        let thinking_open = timeline.as_ref().is_some_and(|t| t.running) || self.thinking_open;
-        let thinking_block = timeline.as_ref().map(|t| {
-            let view = cx.entity().downgrade();
-            let toggle = move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                if let Some(view) = view.upgrade() {
-                    view.update(cx, |this, cx| {
-                        this.thinking_open = !this.thinking_open;
-                        cx.notify();
-                    });
-                }
-            };
-            thinking_element(t, thinking_open, at.animate, at.clock, toggle, cx)
-        });
         let jump = self.jump_to_latest(window, cx);
         v_flex()
             .size_full()
             .relative()
             .child(forget)
             .child(room)
-            .children(thinking_block)
             .child(
-                div().relative().flex_1().min_h_0().child(
-                    MessageScroller::new("transcript", self.scroller.clone(), move |ix, _, cx| match rows.rows.get(ix).cloned() {
-                        Some(row) => {
-                            // An answer in parts flashes all of them.
-                            let flash = flash.filter(|(at, _)| flashes(&rows.rows, *at, ix)).map(|(_, seq)| seq);
-                            let el = ThreadView::render_row(row, ix, flash, &view, &at, cx);
-                            match tail.clone().filter(|_| ix == last) {
-                                Some(tail) => v_flex()
-                                    .w_full()
-                                    .child(el)
-                                    .child(canvas(move |b, _, _| tail.set(Some(b.bottom())), |_, _, _, _| {}).w_full().h(px(0.)))
-                                    .into_any_element(),
-                                None => el,
-                            }
-                        }
-                        None => div().into_any_element(),
-                    })
-                    .with_list_style(StyleRefinement::default().pt_4().pb(px(TAIL_ROOM)))
-                    .with_row_style(StyleRefinement::default().pb_0())
-                    .jump_button(false),
-                )
-                .children(jump),
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        MessageScroller::new(
+                            "transcript",
+                            self.scroller.clone(),
+                            move |ix, _, cx| match rows.rows.get(ix).cloned() {
+                                Some(row) => {
+                                    // An answer in parts flashes all of them.
+                                    let flash = flash
+                                        .filter(|(at, _)| flashes(&rows.rows, *at, ix))
+                                        .map(|(_, seq)| seq);
+                                    let el = ThreadView::render_row(row, ix, flash, &view, &at, cx);
+                                    match tail.clone().filter(|_| ix == last) {
+                                        Some(tail) => v_flex()
+                                            .w_full()
+                                            .child(el)
+                                            .child(
+                                                canvas(
+                                                    move |b, _, _| tail.set(Some(b.bottom())),
+                                                    |_, _, _, _| {},
+                                                )
+                                                .w_full()
+                                                .h(px(0.)),
+                                            )
+                                            .into_any_element(),
+                                        None => el,
+                                    }
+                                }
+                                None => div().into_any_element(),
+                            },
+                        )
+                        .with_list_style(StyleRefinement::default().pt_4().pb(px(TAIL_ROOM)))
+                        .with_row_style(StyleRefinement::default().pb_0())
+                        .jump_button(false),
+                    )
+                    .children(jump),
             )
             .children(footer)
     }
@@ -3121,8 +4342,18 @@ impl ThreadView {
     /// brings them back down. It eases in and out (at once with reduced motion).
     fn jump_to_latest(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let away = self.scroller.read(cx).is_scrolled_up();
-        let pace = if self.animate(window, cx) { JUMP_IN } else { std::time::Duration::ZERO };
-        let shown: f32 = gpui_kit::base::motion::transition("transcript-jump", if away { 1. } else { 0. }, gpui_kit::base::motion::Transition::new(pace), window, cx);
+        let pace = if self.animate(window, cx) {
+            JUMP_IN
+        } else {
+            std::time::Duration::ZERO
+        };
+        let shown: f32 = gpui_kit::base::motion::transition(
+            "transcript-jump",
+            if away { 1. } else { 0. },
+            gpui_kit::base::motion::Transition::new(pace),
+            window,
+            cx,
+        );
         if shown <= 0. {
             return None;
         }
@@ -3153,8 +4384,21 @@ impl ThreadView {
                 // It covers the rows under it: clicks and hovers stop here (a hidden path chip
                 // mustn't open), the wheel still scrolls the transcript.
                 .block_mouse_except_scroll()
-                .child(div().w_full().h(px(JUMP_FADE)).bg(linear_gradient(180., linear_color_stop(bg.opacity(0.), 0.), linear_color_stop(bg, 1.))))
-                .child(h_flex().w_full().flex_1().justify_center().items_center().bg(bg).pb(px(4. * (1. - shown))).child(button))
+                .child(div().w_full().h(px(JUMP_FADE)).bg(linear_gradient(
+                    180.,
+                    linear_color_stop(bg.opacity(0.), 0.),
+                    linear_color_stop(bg, 1.),
+                )))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .flex_1()
+                        .justify_center()
+                        .items_center()
+                        .bg(bg)
+                        .pb(px(4. * (1. - shown)))
+                        .child(button),
+                )
                 .into_any_element(),
         )
     }
@@ -3164,14 +4408,8 @@ impl ThreadView {
 impl ThreadView {
     /// Scroll the transcript to its first row, as a reader going back up would.
     pub(crate) fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
-        self.scroller.update(cx, |s, cx| _ = s.scroll_to_item(0, cx));
-    }
-
-    /// The thinking timeline's header text ("Thinking Ns" or "Thought for Ns"), for tests.
-    pub(crate) fn thinking_header(&self, cx: &App) -> Option<String> {
-        let ws = self.workspace.read(cx);
-        let t = thinking(ws.live.get(self.current.as_ref()?)?)?;
-        Some(if t.running { format!("Thinking {}s", t.secs) } else { format!("Thought for {}s", t.secs) })
+        self.scroller
+            .update(cx, |s, cx| _ = s.scroll_to_item(0, cx));
     }
 
     /// Whether the transcript redraws on a ticker, and at the working bar's rate if so.
@@ -3200,7 +4438,13 @@ impl ThreadView {
     pub(crate) fn confirm_files(&self) -> Option<String> {
         self.confirm.as_ref().map(|c| match &c.files {
             Files::Checking => "checking".to_string(),
-            Files::Changes(v) => format!("changes: {}", v.iter().map(|f| f.path.as_str()).collect::<Vec<_>>().join(" ")),
+            Files::Changes(v) => format!(
+                "changes: {}",
+                v.iter()
+                    .map(|f| f.path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
             Files::Unavailable(_) => "unavailable".to_string(),
             Files::Failed(e) => format!("failed: {e}"),
         })
@@ -3215,8 +4459,14 @@ impl ThreadView {
     /// answer's parts in order).
     pub(crate) fn markdown_documents(&self, cx: &App) -> Vec<(usize, Entity<TextViewState>)> {
         let ws = self.workspace.read(cx);
-        let Some(l) = self.current.as_ref().and_then(|id| ws.live.get(id)) else { return vec![] };
-        let mut docs: Vec<_> = self.md.values().filter_map(|m| Some((l.items.position(&m.item)?, m.part, m.state.clone()))).collect();
+        let Some(l) = self.current.as_ref().and_then(|id| ws.live.get(id)) else {
+            return vec![];
+        };
+        let mut docs: Vec<_> = self
+            .md
+            .values()
+            .filter_map(|m| Some((l.items.position(&m.item)?, m.part, m.state.clone())))
+            .collect();
         docs.sort_by_key(|(ix, part, _)| (*ix, *part));
         docs.into_iter().map(|(ix, _, state)| (ix, state)).collect()
     }
@@ -3226,10 +4476,14 @@ impl ThreadView {
     pub(crate) fn describe_changes(&self, cx: &App) -> Vec<String> {
         let ws = self.workspace.read(cx);
         let thread = self.current.clone().unwrap_or_default();
-        let Some(live) = ws.live.get(&thread) else { return vec![] };
+        let Some(live) = ws.live.get(&thread) else {
+            return vec![];
+        };
         let mut out = vec![];
         for (ix, item) in live.items.iter().enumerate() {
-            let (Item::TurnEnd { .. }, Some(c)) = (item, ws.turn_changes(&thread, ix)) else { continue };
+            let (Item::TurnEnd { .. }, Some(c)) = (item, ws.turn_changes(&thread, ix)) else {
+                continue;
+            };
             let (a, r) = c.totals();
             out.push(format!("changes ({}): +{a} −{r}", c.files.len()));
             for f in &c.files {
@@ -3256,13 +4510,27 @@ impl ThreadView {
     pub(crate) fn describe(&self, cx: &App) -> Vec<String> {
         let ws = self.workspace.read(cx);
         let thread = self.current.clone().unwrap_or_default();
-        let agent = ws.thread(&thread).map(|t| t.agent.clone()).unwrap_or(trek_core::AgentId::ClaudeCode);
-        let items = ws.live.get(&thread).map(|l| l.items.to_vec()).unwrap_or_default();
+        let agent = ws
+            .thread(&thread)
+            .map(|t| t.agent.clone())
+            .unwrap_or(trek_core::AgentId::ClaudeCode);
+        let items = ws
+            .live
+            .get(&thread)
+            .map(|l| l.items.to_vec())
+            .unwrap_or_default();
         let line = |row: &Row, out: &mut Vec<String>, indent: &str| {
             out.push(match row {
                 Row::SubAgent { ix, .. } => match items.get(*ix) {
-                    Some(Item::Tool { id, detail, output, status, .. }) => {
-                        let sub = SubAgentRow::read(ws, &thread, &agent, id, detail, output, *status);
+                    Some(Item::Tool {
+                        id,
+                        detail,
+                        output,
+                        status,
+                        ..
+                    }) => {
+                        let sub =
+                            SubAgentRow::read(ws, &thread, &agent, id, detail, output, *status);
                         format!("{indent}subagent: {} ({})", sub.label, sub.detail)
                     }
                     _ => format!("{indent}subagent"),
@@ -3270,18 +4538,40 @@ impl ThreadView {
                 Row::Wake { .. } => format!("{indent}wake"),
                 Row::User { .. } => format!("{indent}user"),
                 Row::TurnEnd { .. } => format!("{indent}end"),
-                Row::Assistant { part: 0, last: true, .. } => format!("{indent}assistant"),
+                Row::Assistant {
+                    part: 0,
+                    last: true,
+                    ..
+                } => format!("{indent}assistant"),
                 Row::Assistant { part, .. } => format!("{indent}assistant part {}", part + 1),
                 Row::Reasoning { .. } => format!("{indent}thought"),
-                Row::Tool { activity, .. } => format!("{indent}tool{}", activity.as_ref().map(|a| format!(" ({a})")).unwrap_or_default()),
-                Row::ToolGroup { summary, running, .. } => format!("{indent}group: {summary}{}", if *running { " (running)" } else { "" }),
+                Row::Tool { activity, .. } => format!(
+                    "{indent}tool{}",
+                    activity
+                        .as_ref()
+                        .map(|a| format!(" ({a})"))
+                        .unwrap_or_default()
+                ),
+                Row::ToolGroup {
+                    summary, running, ..
+                } => format!(
+                    "{indent}group: {summary}{}",
+                    if *running { " (running)" } else { "" }
+                ),
                 Row::Notice { .. } => format!("{indent}notice"),
                 Row::Error { .. } => format!("{indent}error"),
                 Row::Limit { .. } => format!("{indent}limit"),
                 Row::Handoff { .. } => format!("{indent}handoff"),
                 Row::Lineage { ix } => match items.get(*ix) {
                     Some(Item::Tool { id, detail, .. }) => match LineageRow::read(ws, id, detail) {
-                        Some(l) => format!("{indent}lineage: {}: {}{}", l.link.label(), l.title, l.state.map(|s| format!(" ({})", s.label())).unwrap_or_default()),
+                        Some(l) => format!(
+                            "{indent}lineage: {}: {}{}",
+                            l.link.label(),
+                            l.title,
+                            l.state
+                                .map(|s| format!(" ({})", s.label()))
+                                .unwrap_or_default()
+                        ),
                         None => format!("{indent}lineage"),
                     },
                     _ => format!("{indent}lineage"),
@@ -3291,14 +4581,32 @@ impl ThreadView {
         let mut out = vec![];
         for row in self.rows(cx).rows.iter() {
             line(row, &mut out, "");
-            if let Row::ToolGroup { open: true, tools, .. } = row {
+            if let Row::ToolGroup {
+                open: true, tools, ..
+            } = row
+            {
                 for t in tools {
                     line(t, &mut out, "  ");
                 }
             }
-            if let (Row::SubAgent { open: true, .. }, Some(Item::Tool { id, detail, output, status, .. })) = (row, items.get(row.item())) {
+            if let (
+                Row::SubAgent { open: true, .. },
+                Some(Item::Tool {
+                    id,
+                    detail,
+                    output,
+                    status,
+                    ..
+                }),
+            ) = (row, items.get(row.item()))
+            {
                 let sub = SubAgentRow::read(ws, &thread, &agent, id, detail, output, *status);
-                out.extend(sub.activity.iter().flat_map(|g| g.describe()).map(|l| format!("  {l}")));
+                out.extend(
+                    sub.activity
+                        .iter()
+                        .flat_map(|g| g.describe())
+                        .map(|l| format!("  {l}")),
+                );
             }
         }
         out
@@ -3307,22 +4615,43 @@ impl ThreadView {
 
 #[cfg(test)]
 mod tests {
-    use super::{PART_MIN, Row, SPLIT_FROM, Slot, answer_parts, handoff_name, layout, part_of, row_of, split_long_answers};
+    use super::{
+        PART_MIN, Row, SPLIT_FROM, Slot, answer_parts, handoff_name, layout, part_of, row_of,
+        split_long_answers,
+    };
     use trek_core::AgentId;
     use trek_core::store::{Item, ToolStatus};
 
     #[test]
     fn handoff_sides_name_the_agent_with_its_model() {
-        assert_eq!(handoff_name(&AgentId::ClaudeCode, Some("Opus 5.5")), "Claude Opus 5.5");
+        assert_eq!(
+            handoff_name(&AgentId::ClaudeCode, Some("Opus 5.5")),
+            "Claude Opus 5.5"
+        );
         assert_eq!(handoff_name(&AgentId::Codex, Some("Sol")), "Codex Sol");
-        assert_eq!(handoff_name(&AgentId::Codex, Some("GPT-5.6-Sol")), "GPT-5.6-Sol");
-        assert_eq!(handoff_name(&AgentId::Direct("mock".into()), Some("Mock Swift")), "Mock Swift");
-        assert_eq!(handoff_name(&AgentId::Direct("mock-relay".into()), Some("Relay Swift")), "Relay Swift");
+        assert_eq!(
+            handoff_name(&AgentId::Codex, Some("GPT-5.6-Sol")),
+            "GPT-5.6-Sol"
+        );
+        assert_eq!(
+            handoff_name(&AgentId::Direct("mock".into()), Some("Mock Swift")),
+            "Mock Swift"
+        );
+        assert_eq!(
+            handoff_name(&AgentId::Direct("mock-relay".into()), Some("Relay Swift")),
+            "Relay Swift"
+        );
         assert_eq!(handoff_name(&AgentId::Codex, None), "Codex");
     }
 
     fn user(t: &str) -> Item {
-        Item::User { text: t.into(), images: vec![], at: None, resume: None, aside: false }
+        Item::User {
+            text: t.into(),
+            images: vec![],
+            at: None,
+            resume: None,
+            aside: false,
+        }
     }
     fn said(t: &str) -> Item {
         Item::Assistant { text: t.into() }
@@ -3331,14 +4660,38 @@ mod tests {
         Item::Reasoning { text: t.into() }
     }
     fn tool(id: &str) -> Item {
-        Item::Tool { id: id.into(), title: "Ran ls".into(), detail: String::new(), output: String::new(), status: ToolStatus::Done }
+        Item::Tool {
+            id: id.into(),
+            title: "Ran ls".into(),
+            detail: String::new(),
+            output: String::new(),
+            status: ToolStatus::Done,
+        }
     }
 
     #[test]
     fn tool_calls_and_finished_thoughts_fold_into_one_row() {
-        let items = [user("go"), thought("plan"), tool("a"), tool("b"), said("done"), Item::TurnEnd { at: 1, took_secs: 2 }];
+        let items = [
+            user("go"),
+            thought("plan"),
+            tool("a"),
+            tool("b"),
+            said("done"),
+            Item::TurnEnd {
+                at: 1,
+                took_secs: 2,
+            },
+        ];
         let (slots, item_row) = layout(&items, None);
-        assert_eq!(slots, [Slot::Item(0), Slot::Group(vec![1, 2, 3]), Slot::Item(4), Slot::Item(5)]);
+        assert_eq!(
+            slots,
+            [
+                Slot::Item(0),
+                Slot::Group(vec![1, 2, 3]),
+                Slot::Item(4),
+                Slot::Item(5)
+            ]
+        );
         assert_eq!(item_row, [0, 1, 1, 1, 2, 3]);
         // A message hit on the answer lands on its own row, past the folded group.
         assert_eq!(row_of(&item_row, slots.len(), 4), Some(2));
@@ -3347,7 +4700,13 @@ mod tests {
     #[test]
     fn empty_and_live_thoughts_point_at_the_next_row() {
         // An empty thought between two messages; a live one at the tail.
-        let items = [user("go"), thought(" "), said("answer"), tool("a"), thought("still thinking")];
+        let items = [
+            user("go"),
+            thought(" "),
+            said("answer"),
+            tool("a"),
+            thought("still thinking"),
+        ];
         let (slots, item_row) = layout(&items, Some(4));
         assert_eq!(slots, [Slot::Item(0), Slot::Item(2), Slot::Group(vec![3])]);
         assert_eq!(item_row[1], 1);
@@ -3364,13 +4723,52 @@ mod tests {
 
     #[test]
     fn sub_agents_get_rows_of_their_own_and_stand_for_the_call_that_started_them() {
-        let call = |status| Item::Tool { id: "c".into(), title: "mcp__trek-orchestrate__delegate_task".into(), detail: String::new(), output: String::new(), status };
-        let task = Item::Tool { id: trek_core::orchestrate::task_row("child"), title: "Sub-agent".into(), detail: "Review".into(), output: String::new(), status: ToolStatus::Running };
-        let native = Item::Tool { id: "n".into(), title: "Subagent".into(), detail: "Scout".into(), output: String::new(), status: ToolStatus::Running };
-        let items = [user("go"), tool("a"), call(ToolStatus::Running), task, tool("b"), native, said("done")];
+        let call = |status| Item::Tool {
+            id: "c".into(),
+            title: "mcp__trek-orchestrate__delegate_task".into(),
+            detail: String::new(),
+            output: String::new(),
+            status,
+        };
+        let task = Item::Tool {
+            id: trek_core::orchestrate::task_row("child"),
+            title: "Sub-agent".into(),
+            detail: "Review".into(),
+            output: String::new(),
+            status: ToolStatus::Running,
+        };
+        let native = Item::Tool {
+            id: "n".into(),
+            title: "Subagent".into(),
+            detail: "Scout".into(),
+            output: String::new(),
+            status: ToolStatus::Running,
+        };
+        let items = [
+            user("go"),
+            tool("a"),
+            call(ToolStatus::Running),
+            task,
+            tool("b"),
+            native,
+            said("done"),
+        ];
         let (slots, item_row) = layout(&items, None);
-        assert_eq!(slots, [Slot::Item(0), Slot::Group(vec![1]), Slot::Item(3), Slot::Group(vec![4]), Slot::Item(5), Slot::Item(6)]);
-        assert_eq!(item_row[2], 2, "the hidden call maps to the sub-agent's row");
+        assert_eq!(
+            slots,
+            [
+                Slot::Item(0),
+                Slot::Group(vec![1]),
+                Slot::Item(3),
+                Slot::Group(vec![4]),
+                Slot::Item(5),
+                Slot::Item(6)
+            ]
+        );
+        assert_eq!(
+            item_row[2], 2,
+            "the hidden call maps to the sub-agent's row"
+        );
         // A call that failed started nothing: it shows, with why.
         let (slots, _) = layout(&[call(ToolStatus::Failed)], None);
         assert_eq!(slots, [Slot::Group(vec![0])]);
@@ -3378,15 +4776,36 @@ mod tests {
 
     #[test]
     fn groups_split_at_messages() {
-        let items = [tool("a"), said("between"), thought("t"), tool("b"), user("next")];
+        let items = [
+            tool("a"),
+            said("between"),
+            thought("t"),
+            tool("b"),
+            user("next"),
+        ];
         let (slots, item_row) = layout(&items, None);
-        assert_eq!(slots, [Slot::Group(vec![0]), Slot::Item(1), Slot::Group(vec![2, 3]), Slot::Item(4)]);
+        assert_eq!(
+            slots,
+            [
+                Slot::Group(vec![0]),
+                Slot::Item(1),
+                Slot::Group(vec![2, 3]),
+                Slot::Item(4)
+            ]
+        );
         assert_eq!(item_row, [0, 1, 2, 2, 3]);
     }
 
     /// `n` paragraphs of about 300 bytes, numbered.
     fn paragraphs(n: usize) -> String {
-        (0..n).map(|i| format!("Paragraph {i}: {}\n\n", "the retry loop backs off and the log lines up. ".repeat(6))).collect()
+        (0..n)
+            .map(|i| {
+                format!(
+                    "Paragraph {i}: {}\n\n",
+                    "the retry loop backs off and the log lines up. ".repeat(6)
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -3405,11 +4824,16 @@ mod tests {
         let mut start = 0;
         for (n, &cut) in cuts.iter().enumerate() {
             assert!(cut - start >= PART_MIN, "part {n} is {} bytes", cut - start);
-            assert!(text[..cut].ends_with("\n\n") && text[cut..].starts_with("Paragraph"), "cut {n} isn't between paragraphs");
+            assert!(
+                text[..cut].ends_with("\n\n") && text[cut..].starts_with("Paragraph"),
+                "cut {n} isn't between paragraphs"
+            );
             start = cut;
         }
         // The parts put back together are the answer.
-        let parts: String = (0..=cuts.len()).map(|n| part_of(&text, &cuts, n).unwrap()).collect();
+        let parts: String = (0..=cuts.len())
+            .map(|n| part_of(&text, &cuts, n).unwrap())
+            .collect();
         assert_eq!(parts, text);
         assert_eq!(part_of(&text, &cuts, cuts.len() + 1), None);
     }
@@ -3417,39 +4841,77 @@ mod tests {
     #[test]
     fn fenced_code_is_never_cut() {
         // A code block with blank lines in it, long enough that a cut would fall inside.
-        let code: String = (0..400).map(|i| if i % 4 == 0 { "\n".to_string() } else { format!("let x{i} = compute({i});\n") }).collect();
+        let code: String = (0..400)
+            .map(|i| {
+                if i % 4 == 0 {
+                    "\n".to_string()
+                } else {
+                    format!("let x{i} = compute({i});\n")
+                }
+            })
+            .collect();
         for fence in ["```", "~~~~"] {
-            let text = format!("{}{fence}rust\n{code}{fence}\n\nAfter the code.\n\n{}", paragraphs(8), paragraphs(20));
+            let text = format!(
+                "{}{fence}rust\n{code}{fence}\n\nAfter the code.\n\n{}",
+                paragraphs(8),
+                paragraphs(20)
+            );
             let open = text.find(fence).unwrap();
-            let close = open + fence.len() + text[open + fence.len()..].find(&format!("\n{fence}\n")).unwrap() + 1;
+            let close = open
+                + fence.len()
+                + text[open + fence.len()..]
+                    .find(&format!("\n{fence}\n"))
+                    .unwrap()
+                + 1;
             for cut in answer_parts(&text) {
-                assert!(cut <= open || cut > close, "{fence}: cut at {cut} inside the block ({open}..{close})");
+                assert!(
+                    cut <= open || cut > close,
+                    "{fence}: cut at {cut} inside the block ({open}..{close})"
+                );
             }
         }
         // A fence closes only with as many of its own marks: ``` doesn't close ~~~~.
         let text = format!("~~~~\n{}```\n\n{}~~~~\n", paragraphs(30), paragraphs(2));
-        assert_eq!(answer_parts(&text), Vec::<usize>::new(), "all of it is one code block");
+        assert_eq!(
+            answer_parts(&text),
+            Vec::<usize>::new(),
+            "all of it is one code block"
+        );
     }
 
     #[test]
     fn indented_lines_and_list_continuations_are_never_where_a_part_starts() {
-        let item = format!("- an item\n\n    {}\n\n", "a continuation of the item, indented under it. ".repeat(8));
+        let item = format!(
+            "- an item\n\n    {}\n\n",
+            "a continuation of the item, indented under it. ".repeat(8)
+        );
         let text = format!("{}{}", paragraphs(10), item.repeat(30));
         for cut in answer_parts(&text) {
             let first = text[cut..].as_bytes()[0];
-            assert!(!first.is_ascii_whitespace(), "a part starts with {:?}", &text[cut..cut + 12]);
+            assert!(
+                !first.is_ascii_whitespace(),
+                "a part starts with {:?}",
+                &text[cut..cut + 12]
+            );
         }
     }
 
     #[test]
     fn cuts_made_while_an_answer_streams_stay_put_as_it_grows() {
-        let full = format!("{}```\ncode\n\nmore code\n```\n\n{}", paragraphs(30), paragraphs(30));
+        let full = format!(
+            "{}```\ncode\n\nmore code\n```\n\n{}",
+            paragraphs(30),
+            paragraphs(30)
+        );
         let mut seen: Vec<usize> = vec![];
         // Every few bytes, as tokens arrive: earlier cuts never move or go.
         for end in (0..=full.len()).step_by(7).chain([full.len()]) {
             let cuts = answer_parts(&full[..end]);
             if end >= SPLIT_FROM {
-                assert!(cuts.starts_with(&seen) || seen.is_empty(), "at {end}: {cuts:?} lost {seen:?}");
+                assert!(
+                    cuts.starts_with(&seen) || seen.is_empty(),
+                    "at {end}: {cuts:?} lost {seen:?}"
+                );
                 seen = cuts;
             }
         }
@@ -3459,16 +4921,42 @@ mod tests {
     #[test]
     fn rows_after_a_long_answer_move_down_by_its_extra_parts() {
         let long = paragraphs(60);
-        let items = [user("go"), said(&long), Item::TurnEnd { at: 1, took_secs: 2 }, user("next"), said("short")];
+        let items = [
+            user("go"),
+            said(&long),
+            Item::TurnEnd {
+                at: 1,
+                took_secs: 2,
+            },
+            user("next"),
+            said("short"),
+        ];
         let (slots, item_row) = layout(&items, None);
         let key = |s: &str| gpui_kit::SharedString::from(s.to_string());
         let rows: Vec<Row> = slots
             .iter()
-            .map(|s| match (s, &items[match s { Slot::Item(i) => *i, Slot::Group(g) => g[0] }]) {
-                (Slot::Item(ix), Item::Assistant { .. }) => Row::Assistant { ix: *ix, key: key("a"), part: 0, last: true },
-                (Slot::Item(ix), Item::TurnEnd { .. }) => Row::TurnEnd { ix: *ix },
-                (Slot::Item(ix), _) => Row::User { ix: *ix, key: key("u"), open: false },
-                _ => unreachable!(),
+            .map(|s| {
+                match (
+                    s,
+                    &items[match s {
+                        Slot::Item(i) => *i,
+                        Slot::Group(g) => g[0],
+                    }],
+                ) {
+                    (Slot::Item(ix), Item::Assistant { .. }) => Row::Assistant {
+                        ix: *ix,
+                        key: key("a"),
+                        part: 0,
+                        last: true,
+                    },
+                    (Slot::Item(ix), Item::TurnEnd { .. }) => Row::TurnEnd { ix: *ix },
+                    (Slot::Item(ix), _) => Row::User {
+                        ix: *ix,
+                        key: key("u"),
+                        open: false,
+                    },
+                    _ => unreachable!(),
+                }
             })
             .collect();
         let rows = split_long_answers(rows, item_row, &items);
@@ -3476,7 +4964,14 @@ mod tests {
         assert!(parts > 1);
         assert_eq!(rows.split, [(1, parts)]);
         assert_eq!(rows.rows.len(), 4 + parts);
-        let shape: Vec<(usize, usize, bool)> = rows.rows.iter().filter_map(|r| match r { Row::Assistant { ix, part, last, .. } => Some((*ix, *part, *last)), _ => None }).collect();
+        let shape: Vec<(usize, usize, bool)> = rows
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Assistant { ix, part, last, .. } => Some((*ix, *part, *last)),
+                _ => None,
+            })
+            .collect();
         assert_eq!(shape.len(), parts + 1);
         assert_eq!(shape[0], (1, 0, false));
         assert_eq!(shape[parts - 1], (1, parts - 1, true));
@@ -3496,19 +4991,35 @@ mod tests {
     fn raw_blocks_that_run_on_past_blank_lines_are_never_cut() {
         // Blank lines and unindented lines inside; none of it is ever where a part starts.
         let inside = paragraphs(10);
-        for (open, close) in [("<!--\n", "-->"), ("<pre>\n", "</pre>"), ("<SCRIPT type=\"x\">\n", "</Script>"), ("<style>", "</style>"), ("$$\n", "$$"), ("<?php\n", "?>")] {
+        for (open, close) in [
+            ("<!--\n", "-->"),
+            ("<pre>\n", "</pre>"),
+            ("<SCRIPT type=\"x\">\n", "</Script>"),
+            ("<style>", "</style>"),
+            ("$$\n", "$$"),
+            ("<?php\n", "?>"),
+        ] {
             let (text, block) = around(&format!("{open}{inside}{close}"));
             let cuts = answer_parts(&text);
             assert!(!cuts.is_empty(), "{open}: nothing cut at all");
             for cut in &cuts {
-                assert!(*cut <= block.start || *cut > block.end, "{open}: cut at {cut} inside the block {block:?}");
+                assert!(
+                    *cut <= block.start || *cut > block.end,
+                    "{open}: cut at {cut} inside the block {block:?}"
+                );
             }
-            assert!(cuts.iter().any(|c| *c > block.end), "{open}: nothing cut after the block ends");
+            assert!(
+                cuts.iter().any(|c| *c > block.end),
+                "{open}: nothing cut after the block ends"
+            );
         }
         // One that ends on its own line (or isn't one: `<pre-x>`) holds nothing back.
         for line in ["<!-- a note -->", "<pre>x</pre>", "<pre-x>", "<premium>"] {
             let (text, block) = around(line);
-            assert!(answer_parts(&text).iter().any(|c| *c > block.end), "{line}: held the cuts back");
+            assert!(
+                answer_parts(&text).iter().any(|c| *c > block.end),
+                "{line}: held the cuts back"
+            );
         }
     }
 
@@ -3520,27 +5031,57 @@ mod tests {
         // A fence indented four spaces is code, not a fence; its blank lines are indented too.
         let (text, block) = around("- item\n\n      ```\n      code\n\n      more\n      ```");
         for cut in answer_parts(&text) {
-            assert!(cut <= block.start || cut > block.end, "cut at {cut} inside {block:?}");
+            assert!(
+                cut <= block.start || cut > block.end,
+                "cut at {cut} inside {block:?}"
+            );
         }
         // Indented three, a fence holds its unindented lines and blank ones to the closing mark.
         let (text, block) = around(&format!("   ```\n{}   ```", paragraphs(10)));
         for cut in answer_parts(&text) {
-            assert!(cut <= block.start || cut > block.end, "cut at {cut} inside {block:?}");
+            assert!(
+                cut <= block.start || cut > block.end,
+                "cut at {cut} inside {block:?}"
+            );
         }
     }
 
     #[test]
     fn link_reference_definitions_keep_an_answer_whole_footnotes_and_code_do_not() {
-        let prose = format!("{}See [the docs][1] and a note.[^1]\n\n{}", paragraphs(15), paragraphs(15));
+        let prose = format!(
+            "{}See [the docs][1] and a note.[^1]\n\n{}",
+            paragraphs(15),
+            paragraphs(15)
+        );
         assert!(!answer_parts(&prose).is_empty());
         // A definition at the end (as they're written) takes every cut back, however many were made.
-        assert_eq!(answer_parts(&format!("{prose}[1]: https://example.com/docs \"Docs\"\n")), Vec::<usize>::new());
-        assert_eq!(answer_parts(&format!("{prose}   [a b]:<https://example.com/>\n")), Vec::<usize>::new());
+        assert_eq!(
+            answer_parts(&format!("{prose}[1]: https://example.com/docs \"Docs\"\n")),
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            answer_parts(&format!("{prose}   [a b]:<https://example.com/>\n")),
+            Vec::<usize>::new()
+        );
         // Not one: a footnote's, a task, an indented line (code), and one inside a fence.
-        for line in ["[^1]: A footnote, and what it says.", "[x] done: yes", "    [1]: https://example.com", "[1]:"] {
-            assert!(!answer_parts(&format!("{prose}{line}\n\n{}", paragraphs(10))).is_empty(), "{line}");
+        for line in [
+            "[^1]: A footnote, and what it says.",
+            "[x] done: yes",
+            "    [1]: https://example.com",
+            "[1]:",
+        ] {
+            assert!(
+                !answer_parts(&format!("{prose}{line}\n\n{}", paragraphs(10))).is_empty(),
+                "{line}"
+            );
         }
-        assert!(!answer_parts(&format!("{prose}```\n[1]: https://example.com\n```\n\n{}", paragraphs(10))).is_empty());
+        assert!(
+            !answer_parts(&format!(
+                "{prose}```\n[1]: https://example.com\n```\n\n{}",
+                paragraphs(10)
+            ))
+            .is_empty()
+        );
     }
 
     #[test]
@@ -3552,7 +5093,11 @@ mod tests {
         // Cut after the same paragraph, once the \r that each line gained is counted (a part has
         // to hold 2 KB, which a gained byte per line can satisfy sooner).
         for cut in &b {
-            assert!(crlf[..*cut].ends_with("\r\n\r\n") && crlf[*cut..].starts_with("Paragraph"), "{:?}", &crlf[cut - 6..cut + 6]);
+            assert!(
+                crlf[..*cut].ends_with("\r\n\r\n") && crlf[*cut..].starts_with("Paragraph"),
+                "{:?}",
+                &crlf[cut - 6..cut + 6]
+            );
         }
         assert!(b.len() >= a.len());
     }
@@ -3561,9 +5106,15 @@ mod tests {
     fn the_threshold_is_exact() {
         let text = paragraphs(60);
         assert!(answer_parts(&text[..SPLIT_FROM - 1]).is_empty());
-        assert!(!answer_parts(&text[..SPLIT_FROM]).is_empty(), "6,000 bytes are cut");
+        assert!(
+            !answer_parts(&text[..SPLIT_FROM]).is_empty(),
+            "6,000 bytes are cut"
+        );
         // The same text, a byte either side: the parts are the same (the first cut is the same).
-        assert_eq!(answer_parts(&text[..SPLIT_FROM])[0], answer_parts(&text[..SPLIT_FROM + 1])[0]);
+        assert_eq!(
+            answer_parts(&text[..SPLIT_FROM])[0],
+            answer_parts(&text[..SPLIT_FROM + 1])[0]
+        );
     }
 
     #[test]
@@ -3571,13 +5122,37 @@ mod tests {
         let key = || gpui_kit::SharedString::from("a");
         let rows: Vec<Row> = vec![
             Row::TurnEnd { ix: 0 },
-            Row::Assistant { ix: 1, key: key(), part: 0, last: false },
-            Row::Assistant { ix: 1, key: key(), part: 1, last: true },
-            Row::Assistant { ix: 4, key: key(), part: 0, last: true },
+            Row::Assistant {
+                ix: 1,
+                key: key(),
+                part: 0,
+                last: false,
+            },
+            Row::Assistant {
+                ix: 1,
+                key: key(),
+                part: 1,
+                last: true,
+            },
+            Row::Assistant {
+                ix: 4,
+                key: key(),
+                part: 0,
+                last: true,
+            },
         ];
         // The result scrolled to the first part: both are tinted; the other answer, and what's before, aren't.
-        assert_eq!([0, 1, 2, 3].map(|ix| super::flashes(&rows, 1, ix)), [false, true, true, false]);
-        assert_eq!([0, 1, 2, 3].map(|ix| super::flashes(&rows, 3, ix)), [false, false, false, true]);
-        assert_eq!([0, 1, 2, 3].map(|ix| super::flashes(&rows, 0, ix)), [true, false, false, false]);
+        assert_eq!(
+            [0, 1, 2, 3].map(|ix| super::flashes(&rows, 1, ix)),
+            [false, true, true, false]
+        );
+        assert_eq!(
+            [0, 1, 2, 3].map(|ix| super::flashes(&rows, 3, ix)),
+            [false, false, false, true]
+        );
+        assert_eq!(
+            [0, 1, 2, 3].map(|ix| super::flashes(&rows, 0, ix)),
+            [true, false, false, false]
+        );
     }
 }

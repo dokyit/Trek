@@ -13,7 +13,12 @@ use trek_core::store::now_ms;
 use trek_remote as tr;
 
 impl Workspace {
-    pub(super) fn remote_basecamp(&mut self, range: tr::BasecampRange, reply: tr::Reply<tr::Basecamp>, cx: &mut Context<Self>) {
+    pub(super) fn remote_basecamp(
+        &mut self,
+        range: tr::BasecampRange,
+        reply: tr::Reply<tr::Basecamp>,
+        cx: &mut Context<Self>,
+    ) {
         let range = match range {
             tr::BasecampRange::Today => Range::Today,
             tr::BasecampRange::Week => Range::Week,
@@ -27,14 +32,18 @@ impl Workspace {
         let (store, cache) = (self.store.clone(), self.basecamp_cache.clone());
         let work = cx.background_executor().spawn(async move {
             let now = chrono::Local::now();
-            cache.with(&store, |g| screen::summary(g, range, &now)).unwrap_or_else(|e| {
-                tracing::warn!("basecamp: {e:#}");
-                Summary::compute(range, &now, range.window(&now), &[])
-            })
+            cache
+                .with(&store, |g| screen::summary(g, range, &now))
+                .unwrap_or_else(|e| {
+                    tracing::warn!("basecamp: {e:#}");
+                    Summary::compute(range, &now, range.window(&now), &[])
+                })
         });
         cx.spawn(async move |this, cx| {
             let summary = work.await;
-            let out = this.read_with(cx, |ws, _| ws.basecamp_for_phone(range, &summary)).map_err(|_| tr::HostError::other("Trek is closing"));
+            let out = this
+                .read_with(cx, |ws, _| ws.basecamp_for_phone(range, &summary))
+                .map_err(|_| tr::HostError::other("Trek is closing"));
             let _ = reply.send(out);
         })
         .detach();
@@ -42,8 +51,21 @@ impl Workspace {
 
     fn basecamp_for_phone(&self, range: Range, summary: &Summary) -> tr::Basecamp {
         let recap = &summary.recap;
-        let project_ref = |id: &str| self.project(id).map(|p| tr::ProjectRef { id: p.id.clone(), name: p.name.clone(), hue: tr::project_hue(&p.name, self.project_prefs(&p.path).color), monogram: tr::monogram(&p.name), icon: super::icons::project_icon(self.project_prefs(&p.path).icon.as_deref()) });
-        let by_name = |name: &str| self.projects.iter().find(|p| p.name == name).and_then(|p| project_ref(&p.id));
+        let project_ref = |id: &str| {
+            self.project(id).map(|p| tr::ProjectRef {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                hue: tr::project_hue(&p.name, self.project_prefs(&p.path).color),
+                monogram: tr::monogram(&p.name),
+                icon: super::icons::project_icon(self.project_prefs(&p.path).icon.as_deref()),
+            })
+        };
+        let by_name = |name: &str| {
+            self.projects
+                .iter()
+                .find(|p| p.name == name)
+                .and_then(|p| project_ref(&p.id))
+        };
         let empty = recap.is_empty();
         let rows = |rows: &[screen::Row]| -> Vec<tr::BasecampRow> {
             rows.iter()
@@ -72,7 +94,11 @@ impl Workspace {
                 agent_time: screen::agent_time(recap.agent_secs),
             }),
             chart: (!empty).then(|| chart(&summary.chart)),
-            projects: if empty { vec![] } else { rows(&summary.projects) },
+            projects: if empty {
+                vec![]
+            } else {
+                rows(&summary.projects)
+            },
             models: if empty { vec![] } else { rows(&summary.models) },
             range: match range {
                 Range::Today => tr::BasecampRange::Today,
@@ -91,8 +117,14 @@ impl Workspace {
                 .map(|s| match s {
                     Span::Text(text) => tr::Span::Text { text },
                     Span::Strong(text) => tr::Span::Strong { text },
-                    Span::Project(name) => tr::Span::Project { project: by_name(&name), text: name },
-                    Span::Model { agent, label } => tr::Span::Model { text: label, agent: agent_ref(&agent) },
+                    Span::Project(name) => tr::Span::Project {
+                        project: by_name(&name),
+                        text: name,
+                    },
+                    Span::Model { agent, label } => tr::Span::Model {
+                        text: label,
+                        agent: agent_ref(&agent),
+                    },
                 })
                 .collect(),
             summary: (!empty).then(|| tr::RecapSummary {
@@ -103,7 +135,13 @@ impl Workspace {
                 agent_time: basecamp::duration(recap.agent_secs),
                 tokens: recap.tokens.total(),
                 failed: recap.failed as u32,
-                top_project: recap.projects.first().and_then(|p| Some(tr::ProjectShare { project: project_ref(&p.id).or_else(|| by_name(&p.name))?, prompts: p.prompts as u32, tokens: p.tokens })),
+                top_project: recap.projects.first().and_then(|p| {
+                    Some(tr::ProjectShare {
+                        project: project_ref(&p.id).or_else(|| by_name(&p.name))?,
+                        prompts: p.prompts as u32,
+                        tokens: p.tokens,
+                    })
+                }),
                 best_model: recap.best_model().map(|m| tr::ModelShare {
                     agent: agent_ref(&m.agent),
                     label: basecamp::model_label(&m.agent, m.model.as_deref()),
@@ -113,7 +151,11 @@ impl Workspace {
                 }),
             }),
             profile: Some(profile(recap)),
-            tiles: if empty { vec![] } else { self.tiles_for_phone(recap, project_ref) },
+            tiles: if empty {
+                vec![]
+            } else {
+                self.tiles_for_phone(recap, project_ref)
+            },
         }
     }
 
@@ -130,11 +172,16 @@ impl Workspace {
                     _ => None,
                 };
                 let (status, label) = match (t.run_state, waiting) {
-                    (RunState::NeedsYou, w) | (_, w @ Some(Waiting::SubAgent)) => (tr::ReviewStatus::NeedsYou, Some(w.unwrap_or(Waiting::Unknown).label().to_string())),
+                    (RunState::NeedsYou, w) | (_, w @ Some(Waiting::SubAgent)) => (
+                        tr::ReviewStatus::NeedsYou,
+                        Some(w.unwrap_or(Waiting::Unknown).label().to_string()),
+                    ),
                     (RunState::Failed, _) => (tr::ReviewStatus::Failed, Some("Failed".to_string())),
                     (RunState::Idle, _) if t.paused.is_some() => {
                         let until = match t.paused.as_ref().and_then(|p| p.resets_at) {
-                            Some(at) => format!("Paused until {}", crate::time::reset_clock(at, now)),
+                            Some(at) => {
+                                format!("Paused until {}", crate::time::reset_clock(at, now))
+                            }
                             None => "Paused at its limit".to_string(),
                         };
                         (tr::ReviewStatus::Paused, Some(until))
@@ -147,13 +194,19 @@ impl Workspace {
                     status,
                     label,
                     agent: agent_ref(&t.agent),
-                    project: t.project_id.as_deref().and_then(|p| self.project(p)).map(|p| tr::ProjectRef {
-                        id: p.id.clone(),
-                        name: p.name.clone(),
-                        hue: tr::project_hue(&p.name, self.project_prefs(&p.path).color),
-                        monogram: tr::monogram(&p.name),
-                        icon: super::icons::project_icon(self.project_prefs(&p.path).icon.as_deref()),
-                    }),
+                    project: t
+                        .project_id
+                        .as_deref()
+                        .and_then(|p| self.project(p))
+                        .map(|p| tr::ProjectRef {
+                            id: p.id.clone(),
+                            name: p.name.clone(),
+                            hue: tr::project_hue(&p.name, self.project_prefs(&p.path).color),
+                            monogram: tr::monogram(&p.name),
+                            icon: super::icons::project_icon(
+                                self.project_prefs(&p.path).icon.as_deref(),
+                            ),
+                        }),
                     additions: t.additions.max(0) as u32,
                     deletions: t.deletions.max(0) as u32,
                     updated_at: t.updated_at,
@@ -165,7 +218,11 @@ impl Workspace {
             .collect()
     }
 
-    fn tiles_for_phone(&self, recap: &Recap, project_ref: impl Fn(&str) -> Option<tr::ProjectRef>) -> Vec<tr::Tile> {
+    fn tiles_for_phone(
+        &self,
+        recap: &Recap,
+        project_ref: impl Fn(&str) -> Option<tr::ProjectRef>,
+    ) -> Vec<tr::Tile> {
         screen::tile_data(recap, self)
             .into_iter()
             .map(|t| tr::Tile {
@@ -176,7 +233,11 @@ impl Workspace {
                     TileKind::AgentTime => tr::TileKind::AgentTime,
                     TileKind::PlanLeft => tr::TileKind::PlanLeft,
                 },
-                sparkline: if t.kind == TileKind::Tokens { sparkline(recap) } else { vec![] },
+                sparkline: if t.kind == TileKind::Tokens {
+                    sparkline(recap)
+                } else {
+                    vec![]
+                },
                 label: t.label,
                 figure: t.figure,
                 note: t.note,
@@ -194,8 +255,24 @@ fn chart(chart: &screen::Chart) -> tr::BasecampChart {
     let turns: usize = chart.bars.iter().map(|b| b.turns).sum();
     tr::BasecampChart {
         step: chart.step.noun(),
-        bars: chart.bars.iter().map(|b| tr::BasecampBar { label: b.label.clone(), turns: b.turns as u32, tokens: b.tokens, line: b.line() }).collect(),
-        ticks: chart.ticks.iter().map(|(bar, label)| tr::BasecampTick { bar: *bar as u32, label: label.clone() }).collect(),
+        bars: chart
+            .bars
+            .iter()
+            .map(|b| tr::BasecampBar {
+                label: b.label.clone(),
+                turns: b.turns as u32,
+                tokens: b.tokens,
+                line: b.line(),
+            })
+            .collect(),
+        ticks: chart
+            .ticks
+            .iter()
+            .map(|(bar, label)| tr::BasecampTick {
+                bar: *bar as u32,
+                label: label.clone(),
+            })
+            .collect(),
         turns: turns as u32,
         total: basecamp::count(turns, "turn", "turns"),
     }
@@ -224,7 +301,10 @@ fn profile(recap: &Recap) -> tr::Profile {
         now_at: ((recap.now.min(now_ms()) - w.start) as f32 / span).clamp(0., 1.),
         line: screen::profile_line(recap, None),
         total: basecamp::count(recap.prompts, "prompt", "prompts"),
-        ticks: screen::ticks(w).into_iter().map(|(at, label)| tr::Tick { at, label }).collect(),
+        ticks: screen::ticks(w)
+            .into_iter()
+            .map(|(at, label)| tr::Tick { at, label })
+            .collect(),
     }
 }
 
@@ -237,7 +317,11 @@ fn sparkline(recap: &Recap) -> Vec<f32> {
         .iter()
         .map(|b| {
             sum += b.tokens;
-            if total > 0 { sum as f32 / total as f32 } else { 0. }
+            if total > 0 {
+                sum as f32 / total as f32
+            } else {
+                0.
+            }
         })
         .collect()
 }

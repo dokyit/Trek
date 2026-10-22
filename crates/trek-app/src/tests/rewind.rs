@@ -4,8 +4,8 @@
 
 use super::harness::{Trek, mock, open, open_with, run};
 use crate::workspace::{ForkAt, ItemRef, Route, Scope};
-use gpui_kit::{AppContext as _, TestAppContext};
 use gpui_kit::test::TestWindowExt as _;
+use gpui_kit::{AppContext as _, TestAppContext};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use trek_core::rewind::Reopen;
@@ -13,8 +13,16 @@ use trek_core::store::{Item, ResumePoint};
 use trek_core::{AgentId, Effort, HandHolding, RunState, ThreadSource};
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git").args(args).current_dir(dir).output().expect("git");
-    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
@@ -25,7 +33,20 @@ fn git_project(dir: &Path) {
     git(dir, &["config", "core.autocrlf", "false"]);
     std::fs::write(dir.join("notes.txt"), "v1\n").unwrap();
     git(dir, &["add", "-A"]);
-    git(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "init"]);
+    git(
+        dir,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "-qm",
+            "init",
+        ],
+    );
 }
 
 fn read(dir: &Path, file: &str) -> Option<String> {
@@ -34,27 +55,47 @@ fn read(dir: &Path, file: &str) -> Option<String> {
 
 /// The user's messages in `id`, in order.
 fn said(trek: &Trek, cx: &TestAppContext, id: &str) -> Vec<String> {
-    trek.items(cx, id).into_iter().filter_map(|i| if let Item::User { text, .. } = i { Some(text) } else { None }).collect()
+    trek.items(cx, id)
+        .into_iter()
+        .filter_map(|i| {
+            if let Item::User { text, .. } = i {
+                Some(text)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn user_ix(trek: &Trek, cx: &TestAppContext, id: &str, text: &str) -> usize {
-    trek.item_ix(cx, id, |i| matches!(i, Item::User { text: t, .. } if t == text))
+    trek.item_ix(
+        cx,
+        id,
+        |i| matches!(i, Item::User { text: t, .. } if t == text),
+    )
 }
 
 fn last_end(trek: &Trek, cx: &TestAppContext, id: &str) -> usize {
-    trek.items(cx, id).iter().rposition(|i| matches!(i, Item::TurnEnd { .. })).expect("a finished turn")
+    trek.items(cx, id)
+        .iter()
+        .rposition(|i| matches!(i, Item::TurnEnd { .. }))
+        .expect("a finished turn")
 }
 
 /// Scroll the transcript to message `ix` and put the pointer on it (its actions show).
 fn hover_message(trek: &Trek, cx: &mut TestAppContext, id: &str, ix: usize) {
-    trek.update(cx, |ws, cx| ws.open_thread_at(id, ItemRef::Position(ix), cx));
+    trek.update(cx, |ws, cx| {
+        ws.open_thread_at(id, ItemRef::Position(ix), cx)
+    });
     trek.render(cx);
     trek.window(cx, |window, cx| window.hover(("user-msg", ix), cx));
 }
 
 fn set_composer(trek: &Trek, cx: &mut TestAppContext, text: &str) {
     let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
-    trek.window(cx, |window, cx| composer.update(cx, |c, cx| c.set_text(text, window, cx)));
+    trek.window(cx, |window, cx| {
+        composer.update(cx, |c, cx| c.set_text(text, window, cx))
+    });
     cx.run_until_parked();
 }
 
@@ -103,7 +144,11 @@ async fn files(trek: &Trek, cx: &mut TestAppContext, what: &str, f: impl Fn(&Pat
 
 /// As the next turn ends (before the checkpoint that closes it), `f` changes the project's
 /// files: what that turn's agent did.
-pub(super) fn during_next_turn(trek: &Trek, cx: &mut TestAppContext, f: impl FnOnce(&Path) + 'static) {
+pub(super) fn during_next_turn(
+    trek: &Trek,
+    cx: &mut TestAppContext,
+    f: impl FnOnce(&Path) + 'static,
+) {
     let dir = trek.project.clone();
     trek.update(cx, |ws, _| ws.at_turn_end = Some(Box::new(move || f(&dir))));
 }
@@ -128,15 +173,21 @@ async fn two_turns(trek: &Trek, cx: &mut TestAppContext) -> String {
 }
 
 /// The Undo of every toast `trek` shows from now on, with its message.
-pub(super) fn toasts(trek: &Trek, cx: &mut TestAppContext) -> std::rc::Rc<std::cell::RefCell<Vec<(String, Option<crate::workspace::UndoAction>)>>> {
+pub(super) fn toasts(
+    trek: &Trek,
+    cx: &mut TestAppContext,
+) -> std::rc::Rc<std::cell::RefCell<Vec<(String, Option<crate::workspace::UndoAction>)>>> {
     let toasts = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
     let sink = toasts.clone();
     cx.update(|cx| {
-        cx.subscribe(&trek.ws, move |_, event: &crate::workspace::WorkspaceEvent, _| {
-            if let crate::workspace::WorkspaceEvent::Toast { message, undo } = event {
-                sink.borrow_mut().push((message.clone(), undo.clone()));
-            }
-        })
+        cx.subscribe(
+            &trek.ws,
+            move |_, event: &crate::workspace::WorkspaceEvent, _| {
+                if let crate::workspace::WorkspaceEvent::Toast { message, undo } = event {
+                    sink.borrow_mut().push((message.clone(), undo.clone()));
+                }
+            },
+        )
         .detach()
     });
     toasts
@@ -151,7 +202,19 @@ fn rewinding_takes_back_the_conversation_the_files_and_what_the_agent_knows() {
         // repo and in the store.
         let checkpoints = trek.read(cx, |ws, _| ws.store.checkpoints(&id).unwrap());
         assert_eq!(checkpoints.len(), 4);
-        assert_eq!(git(&trek.project, &["for-each-ref", "--format=%(refname)", "refs/trek/checkpoints/"]).lines().count(), 4);
+        assert_eq!(
+            git(
+                &trek.project,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "refs/trek/checkpoints/"
+                ]
+            )
+            .lines()
+            .count(),
+            4
+        );
         let head = git(&trek.project, &["rev-parse", "HEAD"]);
 
         // "Rewind to here" on the second message: the popover lists what restoring changes.
@@ -159,26 +222,62 @@ fn rewinding_takes_back_the_conversation_the_files_and_what_the_agent_knows() {
         hover_message(&trek, cx, &id, banana);
         trek.click(cx, ("rewind-user", banana));
         assert!(trek.visible(cx, "confirm-card"));
-        assert_eq!(files_checked(&trek, cx).await, "changes: extra.txt new.txt notes.txt");
+        assert_eq!(
+            files_checked(&trek, cx).await,
+            "changes: extra.txt new.txt notes.txt"
+        );
         trek.click(cx, "confirm-go");
 
         files(&trek, cx, "the files as they were before \"banana\"", |p| {
-            read(p, "notes.txt").as_deref() == Some("v2\n") && read(p, "new.txt").is_some() && read(p, "extra.txt").is_none()
+            read(p, "notes.txt").as_deref() == Some("v2\n")
+                && read(p, "new.txt").is_some()
+                && read(p, "extra.txt").is_none()
         })
         .await;
         assert_eq!(said(&trek, cx, &id), ["apple"]);
-        assert!(matches!(trek.items(cx, &id).last(), Some(Item::TurnEnd { .. })), "the first turn is left whole");
-        assert_eq!(trek.composer_text(cx), "banana", "the message is back in the composer");
-        assert_eq!(git(&trek.project, &["rev-parse", "HEAD"]), head, "HEAD untouched");
+        assert!(
+            matches!(trek.items(cx, &id).last(), Some(Item::TurnEnd { .. })),
+            "the first turn is left whole"
+        );
+        assert_eq!(
+            trek.composer_text(cx),
+            "banana",
+            "the message is back in the composer"
+        );
+        assert_eq!(
+            git(&trek.project, &["rev-parse", "HEAD"]),
+            head,
+            "HEAD untouched"
+        );
         // The rewound turn's checkpoints went with it.
-        let left: Vec<String> = trek.read(cx, |ws, _| ws.store.checkpoints(&id).unwrap()).into_iter().map(|c| c.item_id).collect();
-        assert_eq!(left, [checkpoints[0].item_id.clone(), checkpoints[1].item_id.clone()]);
+        let left: Vec<String> = trek
+            .read(cx, |ws, _| ws.store.checkpoints(&id).unwrap())
+            .into_iter()
+            .map(|c| c.item_id)
+            .collect();
+        assert_eq!(
+            left,
+            [
+                checkpoints[0].item_id.clone(),
+                checkpoints[1].item_id.clone()
+            ]
+        );
         // The agent was taken back too (its own session, cut back): it never heard "banana".
-        assert!(matches!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().reopen.clone()), Some(Reopen::Native { fork: false, .. })));
+        assert!(matches!(
+            trek.read(cx, |ws, _| ws.thread(&id).unwrap().reopen.clone()),
+            Some(Reopen::Native { fork: false, .. })
+        ));
         assert_eq!(recall(&trek, cx, &id).await, "I remember: apple");
-        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().reopen.clone()), None, "picked up by the new session");
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.thread(&id).unwrap().reopen.clone()),
+            None,
+            "picked up by the new session"
+        );
         // What was saved is what's on screen.
-        assert_eq!(trek.read(cx, |ws, _| ws.store.items(&id).unwrap()), trek.items(cx, &id));
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.store.items(&id).unwrap()),
+            trek.items(cx, &id)
+        );
     });
 }
 
@@ -190,7 +289,10 @@ fn undoing_a_turn_can_leave_the_files_alone() {
         let end = last_end(&trek, cx, &id);
         // The latest turn's actions are always on show.
         trek.click(cx, ("undo-turn", end));
-        assert_eq!(files_checked(&trek, cx).await, "changes: extra.txt new.txt notes.txt");
+        assert_eq!(
+            files_checked(&trek, cx).await,
+            "changes: extra.txt new.txt notes.txt"
+        );
         trek.click(cx, "restore-files");
         trek.click(cx, "confirm-go");
         assert_eq!(said(&trek, cx, &id), ["apple"]);
@@ -224,14 +326,24 @@ fn edit_and_resend_replaces_the_message() {
         trek.press(cx, "enter");
         trek.wait_done(cx, &id, RunState::Idle).await;
         // The edit took the first message's place; the files went back to before it.
-        files(&trek, cx, "the files as they were before \"apple\"", |p| read(p, "notes.txt").as_deref() == Some("v1\n") && read(p, "extra.txt").is_none()).await;
+        files(&trek, cx, "the files as they were before \"apple\"", |p| {
+            read(p, "notes.txt").as_deref() == Some("v1\n") && read(p, "extra.txt").is_none()
+        })
+        .await;
         assert_eq!(said(&trek, cx, &id), ["cherry"]);
         assert!(!trek.visible(cx, "edit-banner"));
-        assert_eq!(trek.composer_text(cx), "a draft of mine", "the draft from before the edit is back");
+        assert_eq!(
+            trek.composer_text(cx),
+            "a draft of mine",
+            "the draft from before the edit is back"
+        );
         // The first message started the session: the edit starts a new one.
         assert_eq!(recall(&trek, cx, &id).await, "I remember: cherry");
         // The edited message's turn has checkpoints of its own (as did "recall"'s).
-        assert_eq!(trek.read(cx, |ws, _| ws.store.checkpoints(&id).unwrap().len()), 4);
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.store.checkpoints(&id).unwrap().len()),
+            4
+        );
     });
 }
 
@@ -247,8 +359,15 @@ fn retry_sends_the_message_again_with_the_model_asked_for() {
         trek.click(cx, "confirm-go");
         trek.wait_done(cx, &id, RunState::Idle).await;
         assert_eq!(said(&trek, cx, &id), ["apple", "banana"]);
-        assert_eq!(trek.answers(cx, &id), answers_before, "the same message, answered again");
-        files(&trek, cx, "the files restored", |p| read(p, "notes.txt").as_deref() == Some("v2\n")).await;
+        assert_eq!(
+            trek.answers(cx, &id),
+            answers_before,
+            "the same message, answered again"
+        );
+        files(&trek, cx, "the files restored", |p| {
+            read(p, "notes.txt").as_deref() == Some("v2\n")
+        })
+        .await;
 
         // "Retry with…" another model of the same agent, from the chevron's menu.
         let end = last_end(&trek, cx, &id);
@@ -256,19 +375,34 @@ fn retry_sends_the_message_again_with_the_model_asked_for() {
             // The thread has no model of its own: it runs the agent's default, which the menu
             // leaves out (picking it would be a plain retry).
             let models = ws.models_for(&mock());
-            let current = ws.thread(&id).unwrap().model.clone().or_else(|| crate::composer::default_model(&models).map(|m| m.id.clone())).unwrap();
-            models.into_iter().find(|m| !crate::composer::same_model(&current, &m.id)).unwrap().id
+            let current = ws
+                .thread(&id)
+                .unwrap()
+                .model
+                .clone()
+                .or_else(|| crate::composer::default_model(&models).map(|m| m.id.clone()))
+                .unwrap();
+            models
+                .into_iter()
+                .find(|m| !crate::composer::same_model(&current, &m.id))
+                .unwrap()
+                .id
         });
         trek.click(cx, ("retry-with", end));
         // The menu's first row is its label; the models follow.
-        trek.window(cx, |window, cx| window.within("popup-menu").click(1usize, cx));
+        trek.window(cx, |window, cx| {
+            window.within("popup-menu").click(1usize, cx)
+        });
         cx.run_until_parked();
         assert!(trek.visible(cx, "confirm-card"));
         // The files are as they were when it was sent (the retry above put them back).
         assert_eq!(files_checked(&trek, cx).await, "changes: ");
         trek.click(cx, "confirm-go");
         trek.wait_done(cx, &id, RunState::Idle).await;
-        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().model.clone()), Some(other));
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.thread(&id).unwrap().model.clone()),
+            Some(other)
+        );
         assert_eq!(said(&trek, cx, &id), ["apple", "banana"]);
         assert_eq!(recall(&trek, cx, &id).await, "I remember: apple | banana");
     });
@@ -283,21 +417,42 @@ fn forking_copies_the_conversation_and_leaves_the_original_alone() {
         let title = trek.read(cx, |ws, _| ws.thread(&id).unwrap().title.clone());
         // An earlier turn's actions show while the pointer is on its footer (scrolled to: the
         // turns' change cards are tall).
-        trek.update(cx, |ws, cx| ws.open_thread_at(&id, ItemRef::Position(first_end), cx));
+        trek.update(cx, |ws, cx| {
+            ws.open_thread_at(&id, ItemRef::Position(first_end), cx)
+        });
         trek.render(cx);
         trek.window(cx, |window, cx| window.hover(("copy-turn", first_end), cx));
         trek.click(cx, ("fork-turn", first_end));
         let fork = trek.thread_id(cx);
         assert_ne!(fork, id, "the fork opens");
         let t = trek.read(cx, |ws, _| ws.thread(&fork).cloned().unwrap());
-        assert_eq!((t.title.as_str(), t.agent.clone(), t.cwd.as_deref()), (format!("{title} (fork)").as_str(), mock(), Some(trek.project.as_path())));
+        assert_eq!(
+            (t.title.as_str(), t.agent.clone(), t.cwd.as_deref()),
+            (
+                format!("{title} (fork)").as_str(),
+                mock(),
+                Some(trek.project.as_path())
+            )
+        );
         assert_eq!(said(&trek, cx, &fork), ["apple"]);
         assert!(matches!(t.reopen, Some(Reopen::Native { fork: true, .. })));
         // Its message keeps its checkpoints, as it went and as its turn ended (the fork can take
         // its files back too).
-        trek.wait(cx, "the fork's checkpoints", |ws| ws.store.checkpoints(&fork).is_ok_and(|c| c.len() == 2)).await;
+        trek.wait(cx, "the fork's checkpoints", |ws| {
+            ws.store.checkpoints(&fork).is_ok_and(|c| c.len() == 2)
+        })
+        .await;
         let link = trek.read(cx, |ws, _| ws.store.checkpoints(&fork).unwrap()[0].clone());
-        assert_eq!(git(&trek.project, &["rev-parse", &trek_core::checkpoint::ref_name(&fork, &link.item_id)]), link.sha);
+        assert_eq!(
+            git(
+                &trek.project,
+                &[
+                    "rev-parse",
+                    &trek_core::checkpoint::ref_name(&fork, &link.item_id)
+                ]
+            ),
+            link.sha
+        );
         // The agent's session was forked at that point; the original's is as it was.
         assert_eq!(recall(&trek, cx, &fork).await, "I remember: apple");
         assert_eq!(said(&trek, cx, &id), ["apple", "banana"]);
@@ -306,42 +461,76 @@ fn forking_copies_the_conversation_and_leaves_the_original_alone() {
 
         // From a message: the conversation before it, and the message waiting in the composer.
         let banana = user_ix(&trek, cx, &id, "banana");
-        let before = trek.update(cx, |ws, cx| ws.fork_thread(&id, ForkAt::Before(ws.live[&id].items.id_at(banana).unwrap().to_string()), &Scope::Main, cx)).unwrap();
+        let before = trek
+            .update(cx, |ws, cx| {
+                ws.fork_thread(
+                    &id,
+                    ForkAt::Before(ws.live[&id].items.id_at(banana).unwrap().to_string()),
+                    &Scope::Main,
+                    cx,
+                )
+            })
+            .unwrap();
         assert_eq!(said(&trek, cx, &before), ["apple"]);
         assert_eq!(trek.composer_text(cx), "banana");
 
         // "Fork thread" from the sidebar's menu: all of it.
         set_composer(&trek, cx, "");
         trek.render(cx);
-        trek.window(cx, |window, cx| window.right_click(format!("live-line-{id}"), cx));
+        trek.window(cx, |window, cx| {
+            window.right_click(format!("live-line-{id}"), cx)
+        });
         cx.run_until_parked();
         // After "Open in new window".
-        trek.window(cx, |window, cx| window.within("popup-menu").click(1usize, cx));
+        trek.window(cx, |window, cx| {
+            window.within("popup-menu").click(1usize, cx)
+        });
         cx.run_until_parked();
         let whole = trek.thread_id(cx);
-        assert!(whole != id && whole != fork && whole != before, "the fork opens");
-        assert_eq!(trek.read(cx, |ws, _| ws.thread(&whole).unwrap().title.clone()), format!("{title} (fork)"));
+        assert!(
+            whole != id && whole != fork && whole != before,
+            "the fork opens"
+        );
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.thread(&whole).unwrap().title.clone()),
+            format!("{title} (fork)")
+        );
         assert_eq!(said(&trek, cx, &whole), said(&trek, cx, &id));
-        assert_eq!(recall(&trek, cx, &whole).await, "I remember: apple | banana | recall");
+        assert_eq!(
+            recall(&trek, cx, &whole).await,
+            "I remember: apple | banana | recall"
+        );
     });
 }
 
 #[test]
 fn agents_that_cant_rewind_their_session_get_a_recap() {
     run(async |cx| {
-        let trek = open_with(cx, |s| s.general.default_model = Some(trek_agents::mock::RECAP_MODEL.into()));
+        let trek = open_with(cx, |s| {
+            s.general.default_model = Some(trek_agents::mock::RECAP_MODEL.into())
+        });
         let id = turn(&trek, cx, "apple").await;
         turn(&trek, cx, "banana").await;
         turn(&trek, cx, "cherry").await;
-        let cherry = trek.read(cx, |ws, _| ws.live[&id].items.ids()[user_ix(&trek, cx, &id, "cherry")].clone());
+        let cherry = trek.read(cx, |ws, _| {
+            ws.live[&id].items.ids()[user_ix(&trek, cx, &id, "cherry")].clone()
+        });
         let back = trek.update(cx, |ws, cx| ws.rewind(&id, &cherry, true, cx));
         assert_eq!(back.map(|(t, _)| t).as_deref(), Some("cherry"));
         // Said in the transcript, so the user knows.
-        assert!(matches!(trek.items(cx, &id).last(), Some(Item::Notice { text }) if text.contains("recap")));
-        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().reopen.clone()), Some(Reopen::Recap));
+        assert!(
+            matches!(trek.items(cx, &id).last(), Some(Item::Notice { text }) if text.contains("recap"))
+        );
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.thread(&id).unwrap().reopen.clone()),
+            Some(Reopen::Recap)
+        );
         // A new session, told what was said before.
         assert_eq!(recall(&trek, cx, &id).await, "I remember: apple | banana");
-        assert_eq!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().reopen.clone()), None);
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.thread(&id).unwrap().reopen.clone()),
+            None
+        );
     });
 }
 
@@ -353,8 +542,19 @@ fn a_session_with_no_history_of_its_own_restarts_with_a_recap() {
         turn(&trek, cx, "banana").await;
         // Like a direct model's (it keeps none), and the session ends: idle, or a relaunch.
         trek.update(cx, |ws, _| {
-            ws.threads.iter_mut().find(|t| t.id == id).unwrap().native_id = None;
-            let _ = ws.live.get_mut(&id).unwrap().commands.take().unwrap().try_send(trek_agents::Command::Shutdown);
+            ws.threads
+                .iter_mut()
+                .find(|t| t.id == id)
+                .unwrap()
+                .native_id = None;
+            let _ = ws
+                .live
+                .get_mut(&id)
+                .unwrap()
+                .commands
+                .take()
+                .unwrap()
+                .try_send(trek_agents::Command::Shutdown);
         });
         assert_eq!(recall(&trek, cx, &id).await, "I remember: apple | banana");
     });
@@ -365,20 +565,30 @@ fn settings_read_at_launch_apply_once_the_turn_is_over() {
     run(async |cx| {
         let trek = open(cx);
         let id = turn(&trek, cx, "apple").await;
-        trek.update(cx, |ws, cx| ws.send_to(&id, "mock:long 600s".into(), vec![], cx));
-        trek.wait(cx, "the long turn", |ws| ws.turn_running(&id)).await;
+        trek.update(cx, |ws, cx| {
+            ws.send_to(&id, "mock:long 600s".into(), vec![], cx)
+        });
+        trek.wait(cx, "the long turn", |ws| ws.turn_running(&id))
+            .await;
         // Plan mode is read at launch: the running turn isn't cut short for it.
         trek.update(cx, |ws, cx| {
             let mut p = ws.prefs_in(&Scope::Main);
             p.plan = true;
             ws.set_prefs_in(&Scope::Main, p, cx);
         });
-        assert!(trek.read(cx, |ws, _| ws.live[&id].commands.is_some() && ws.turn_running(&id)));
+        assert!(trek.read(cx, |ws, _| ws.live[&id].commands.is_some()
+            && ws.turn_running(&id)));
         trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
         trek.wait_done(cx, &id, RunState::Idle).await;
-        assert!(trek.read(cx, |ws, _| ws.live[&id].commands.is_none()), "the session restarts after the turn");
+        assert!(
+            trek.read(cx, |ws, _| ws.live[&id].commands.is_none()),
+            "the session restarts after the turn"
+        );
         // It resumes: the conversation goes on.
-        assert_eq!(recall(&trek, cx, &id).await, "I remember: apple | mock:long 600s");
+        assert_eq!(
+            recall(&trek, cx, &id).await,
+            "I remember: apple | mock:long 600s"
+        );
     });
 }
 
@@ -387,18 +597,31 @@ fn nothing_is_taken_back_while_a_turn_runs() {
     run(async |cx| {
         let trek = open(cx);
         let id = turn(&trek, cx, "apple").await;
-        trek.update(cx, |ws, cx| ws.send_to(&id, "mock:long 600s".into(), vec![], cx));
-        trek.wait(cx, "the long turn", |ws| ws.turn_running(&id)).await;
+        trek.update(cx, |ws, cx| {
+            ws.send_to(&id, "mock:long 600s".into(), vec![], cx)
+        });
+        trek.wait(cx, "the long turn", |ws| ws.turn_running(&id))
+            .await;
         let apple = user_ix(&trek, cx, &id, "apple");
         let item = trek.read(cx, |ws, _| ws.live[&id].items.ids()[apple].clone());
-        assert!(trek.update(cx, |ws, cx| ws.rewind(&id, &item, false, cx)).is_none());
+        assert!(
+            trek.update(cx, |ws, cx| ws.rewind(&id, &item, false, cx))
+                .is_none()
+        );
         hover_message(&trek, cx, &id, apple);
         trek.click(cx, ("rewind-user", apple));
-        assert_eq!(trek.thread_view(cx).read_with(cx, |v, _| v.confirm_files()), None, "nothing to confirm");
+        assert_eq!(
+            trek.thread_view(cx).read_with(cx, |v, _| v.confirm_files()),
+            None,
+            "nothing to confirm"
+        );
         assert_eq!(said(&trek, cx, &id).len(), 2);
         trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
         trek.wait_done(cx, &id, RunState::Idle).await;
-        assert!(trek.update(cx, |ws, cx| ws.rewind(&id, &item, false, cx)).is_some());
+        assert!(
+            trek.update(cx, |ws, cx| ws.rewind(&id, &item, false, cx))
+                .is_some()
+        );
         assert!(said(&trek, cx, &id).is_empty());
     });
 }
@@ -432,7 +655,10 @@ fn edits_go_to_the_window_they_were_asked_in() {
         .unwrap();
         cx.run_until_parked();
         assert!(trek.visible_in(cx, own, "edit-banner"));
-        assert!(!trek.visible(cx, "edit-banner"), "not the main window's composer");
+        assert!(
+            !trek.visible(cx, "edit-banner"),
+            "not the main window's composer"
+        );
         cx.update_window(own, |_, window, cx| {
             window.input(" pie", cx);
             window.press("enter", cx);
@@ -453,21 +679,33 @@ fn commands_trek_answers_are_neither_turns_nor_rewind_points() {
         turn(&trek, cx, "banana").await;
         // Undoing the last turn takes back "banana", not the command before it.
         let end = last_end(&trek, cx, &id);
-        let end_id = trek.read(cx, |ws, _| ws.live[&id].items.id_at(end).unwrap().to_string());
-        let start = trek.read(cx, |ws, _| ws.turn_start_item(&id, &end_id)).unwrap();
-        assert_eq!(trek.read(cx, |ws, _| ws.live[&id].items.position(&start)), Some(user_ix(&trek, cx, &id, "banana")));
+        let end_id = trek.read(cx, |ws, _| {
+            ws.live[&id].items.id_at(end).unwrap().to_string()
+        });
+        let start = trek
+            .read(cx, |ws, _| ws.turn_start_item(&id, &end_id))
+            .unwrap();
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.live[&id].items.position(&start)),
+            Some(user_ix(&trek, cx, &id, "banana"))
+        );
         trek.click(cx, ("undo-turn", end));
         files_checked(&trek, cx).await;
         trek.click(cx, "confirm-go");
         assert_eq!(said(&trek, cx, &id), ["apple", "/model"]);
         assert_eq!(trek.composer_text(cx), "banana");
         // The agent's own session was cut back, not swapped for a recap.
-        assert!(matches!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().reopen.clone()), Some(Reopen::Native { fork: false, .. })));
+        assert!(matches!(
+            trek.read(cx, |ws, _| ws.thread(&id).unwrap().reopen.clone()),
+            Some(Reopen::Native { fork: false, .. })
+        ));
         assert_eq!(recall(&trek, cx, &id).await, "I remember: apple");
         // The command's row has only copy.
         hover_message(&trek, cx, &id, model);
         assert!(trek.visible(cx, ("copy-user", model)));
-        assert!(!trek.visible(cx, ("rewind-user", model)) && !trek.visible(cx, ("edit-user", model)));
+        assert!(
+            !trek.visible(cx, ("rewind-user", model)) && !trek.visible(cx, ("edit-user", model))
+        );
     });
 }
 
@@ -485,12 +723,24 @@ fn threads_that_dont_know_where_their_session_stands_find_out_before_sending() {
         turn(&trek, cx, "banana").await;
         let banana = user_ix(&trek, cx, &id, "banana");
         assert!(
-            matches!(&trek.items(cx, &id)[banana], Item::User { resume: Some(ResumePoint { after: Some(_), .. }), .. }),
+            matches!(
+                &trek.items(cx, &id)[banana],
+                Item::User {
+                    resume: Some(ResumePoint { after: Some(_), .. }),
+                    ..
+                }
+            ),
             "read from the agent's session before the message went"
         );
         let item = trek.read(cx, |ws, _| ws.live[&id].items.ids()[banana].clone());
-        assert!(trek.update(cx, |ws, cx| ws.rewind(&id, &item, false, cx)).is_some());
-        assert!(matches!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().reopen.clone()), Some(Reopen::Native { fork: false, .. })));
+        assert!(
+            trek.update(cx, |ws, cx| ws.rewind(&id, &item, false, cx))
+                .is_some()
+        );
+        assert!(matches!(
+            trek.read(cx, |ws, _| ws.thread(&id).unwrap().reopen.clone()),
+            Some(Reopen::Native { fork: false, .. })
+        ));
         assert_eq!(recall(&trek, cx, &id).await, "I remember: apple");
     });
 }
@@ -505,17 +755,33 @@ fn a_restore_can_be_undone() {
         trek.click(cx, ("undo-turn", end));
         files_checked(&trek, cx).await;
         trek.click(cx, "confirm-go");
-        files(&trek, cx, "the files restored", |p| read(p, "notes.txt").as_deref() == Some("v2\n")).await;
+        files(&trek, cx, "the files restored", |p| {
+            read(p, "notes.txt").as_deref() == Some("v2\n")
+        })
+        .await;
         // Meanwhile something else writes a file of its own: the undo leaves it be.
         std::fs::write(trek.project.join("later.txt"), "not the turn's\n").unwrap();
         // The toast's Undo puts back what the restore replaced, and only that.
         let (message, undo) = shown.borrow().last().cloned().expect("a toast");
         assert_eq!(message, "Restored 3 files");
-        let Some(undo @ crate::workspace::UndoAction::Unrestore { .. }) = undo else { panic!("no Undo on {message}") };
+        let Some(undo @ crate::workspace::UndoAction::Unrestore { .. }) = undo else {
+            panic!("no Undo on {message}")
+        };
         trek.update(cx, |ws, cx| ws.undo(undo, cx));
-        files(&trek, cx, "the files as they were", |p| read(p, "notes.txt").as_deref() == Some("v3\n") && read(p, "extra.txt").is_some() && read(p, "new.txt").is_none()).await;
-        assert_eq!(read(&trek.project, "later.txt").as_deref(), Some("not the turn's\n"));
-        assert!(crate::root::UNDO_RESTORE_TOAST >= Duration::from_secs(20), "the Undo stays up long enough to reach");
+        files(&trek, cx, "the files as they were", |p| {
+            read(p, "notes.txt").as_deref() == Some("v3\n")
+                && read(p, "extra.txt").is_some()
+                && read(p, "new.txt").is_none()
+        })
+        .await;
+        assert_eq!(
+            read(&trek.project, "later.txt").as_deref(),
+            Some("not the turn's\n")
+        );
+        assert!(
+            crate::root::UNDO_RESTORE_TOAST >= Duration::from_secs(20),
+            "the Undo stays up long enough to reach"
+        );
     });
 }
 
@@ -524,14 +790,20 @@ fn failed_and_stopped_turns_can_be_retried() {
     run(async |cx| {
         let trek = open(cx);
         let id = turn(&trek, cx, "apple").await;
-        trek.update(cx, |ws, cx| ws.send_to(&id, "mock:error".into(), vec![], cx));
+        trek.update(cx, |ws, cx| {
+            ws.send_to(&id, "mock:error".into(), vec![], cx)
+        });
         trek.wait_done(cx, &id, RunState::Failed).await;
         let failed = trek.item_ix(cx, &id, |i| matches!(i, Item::Error { .. }));
         trek.click(cx, ("retry-turn", failed));
         files_checked(&trek, cx).await;
         trek.click(cx, "confirm-go");
         trek.wait_done(cx, &id, RunState::Failed).await;
-        assert_eq!(said(&trek, cx, &id), ["apple", "mock:error"], "sent again in its place");
+        assert_eq!(
+            said(&trek, cx, &id),
+            ["apple", "mock:error"],
+            "sent again in its place"
+        );
 
         // A stopped turn: undo from its "Interrupted" line.
         let failed = trek.item_ix(cx, &id, |i| matches!(i, Item::Error { .. }));
@@ -540,11 +812,18 @@ fn failed_and_stopped_turns_can_be_retried() {
         trek.click(cx, "confirm-go");
         assert_eq!(trek.composer_text(cx), "mock:error");
         set_composer(&trek, cx, "");
-        trek.update(cx, |ws, cx| ws.send_to(&id, "mock:long 600s".into(), vec![], cx));
-        trek.wait(cx, "the long turn", |ws| ws.turn_running(&id)).await;
+        trek.update(cx, |ws, cx| {
+            ws.send_to(&id, "mock:long 600s".into(), vec![], cx)
+        });
+        trek.wait(cx, "the long turn", |ws| ws.turn_running(&id))
+            .await;
         trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
         trek.wait_done(cx, &id, RunState::Idle).await;
-        let stopped = trek.item_ix(cx, &id, |i| matches!(i, Item::Notice { text } if text == "Interrupted"));
+        let stopped = trek.item_ix(
+            cx,
+            &id,
+            |i| matches!(i, Item::Notice { text } if text == "Interrupted"),
+        );
         trek.render(cx);
         trek.click(cx, ("undo-turn", stopped));
         files_checked(&trek, cx).await;
@@ -564,7 +843,10 @@ fn a_stop_while_the_checkpoint_is_taken_keeps_the_message_from_the_agent() {
         // stop follows the send in the same update, so a fraction of a second is slow enough. The
         // filter runs in every snapshot from here on, and at a second each the test took 13 s of
         // its 20 s on a loaded two-core machine: a runner's slower git ran out of time.
-        git(&trek.project, &["config", "filter.slow.clean", "sleep 0.3; cat"]);
+        git(
+            &trek.project,
+            &["config", "filter.slow.clean", "sleep 0.3; cat"],
+        );
         std::fs::write(trek.project.join(".gitattributes"), "*.big filter=slow\n").unwrap();
         std::fs::write(trek.project.join("data.big"), "lots\n").unwrap();
         // Stopped before the git work gets to run.
@@ -572,10 +854,18 @@ fn a_stop_while_the_checkpoint_is_taken_keeps_the_message_from_the_agent() {
             ws.send_to(&id, "banana".into(), vec![], cx);
             ws.interrupt(&id, cx);
         });
-        assert!(!trek.read(cx, |ws, _| ws.turn_running(&id)), "stopped at once");
-        assert!(matches!(trek.items(cx, &id).last(), Some(Item::Notice { text }) if text == "Interrupted"));
+        assert!(
+            !trek.read(cx, |ws, _| ws.turn_running(&id)),
+            "stopped at once"
+        );
+        assert!(
+            matches!(trek.items(cx, &id).last(), Some(Item::Notice { text }) if text == "Interrupted")
+        );
         // The checkpoint still lands (and the stopped turn's end one); the agent never heard "banana".
-        trek.wait_up_to(cx, "the checkpoint", Duration::from_secs(90), |ws| ws.store.checkpoints(&id).is_ok_and(|c| c.len() == 4)).await;
+        trek.wait_up_to(cx, "the checkpoint", Duration::from_secs(90), |ws| {
+            ws.store.checkpoints(&id).is_ok_and(|c| c.len() == 4)
+        })
+        .await;
         assert_eq!(recall(&trek, cx, &id).await, "I remember: apple");
     });
 }
@@ -589,17 +879,27 @@ fn notes_a_stop_kept_from_the_agent_with_its_message_arent_recorded_as_told() {
         // Its session has project notes to give with the next message, as an agent told them in
         // a message (not in its system prompt, as the mock is) does.
         let notes = "Verify with ./app check.";
-        trek.update(cx, |ws, _| ws.live.get_mut(&id).unwrap().notes_pending = Some(notes.into()));
+        trek.update(cx, |ws, _| {
+            ws.live.get_mut(&id).unwrap().notes_pending = Some(notes.into())
+        });
         // Stopped while the message waits for its checkpoint: neither reached the agent.
         trek.update(cx, |ws, cx| {
             ws.send_to(&id, "banana".into(), vec![], cx);
             ws.interrupt(&id, cx);
         });
-        assert_eq!(trek.read(cx, |ws, _| ws.store.told_notes(&id).unwrap()), None, "a resumed session would leave them out");
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.store.told_notes(&id).unwrap()),
+            None,
+            "a resumed session would leave them out"
+        );
         // The next message that does reach it takes them.
         trek.update(cx, |ws, cx| ws.send_to(&id, "cherry".into(), vec![], cx));
         trek.wait_done(cx, &id, RunState::Idle).await;
-        assert_eq!(trek.read(cx, |ws, _| ws.store.told_notes(&id).unwrap()).as_deref(), Some(notes));
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.store.told_notes(&id).unwrap())
+                .as_deref(),
+            Some(notes)
+        );
     });
 }
 
@@ -621,14 +921,43 @@ fn imported_threads_rewind_and_fork_their_agents_session() {
     run(async |cx| {
         let trek = open(cx);
         // A Claude Code session imported from its history, with where each message stood in it.
-        let point = |after: Option<&str>| Some(ResumePoint { session: "claude-s1".into(), after: after.map(String::from) });
-        let user = |t: &str, after: Option<&str>| Item::User { text: t.into(), images: vec![], at: None, resume: point(after), aside: false };
+        let point = |after: Option<&str>| {
+            Some(ResumePoint {
+                session: "claude-s1".into(),
+                after: after.map(String::from),
+            })
+        };
+        let user = |t: &str, after: Option<&str>| Item::User {
+            text: t.into(),
+            images: vec![],
+            at: None,
+            resume: point(after),
+            aside: false,
+        };
         let id = trek.update(cx, |ws, cx| {
-            let mut t = ws.store.create_thread(Some(&trek.project), AgentId::ClaudeCode, None, Effort::Low, HandHolding::Auto).unwrap();
+            let mut t = ws
+                .store
+                .create_thread(
+                    Some(&trek.project),
+                    AgentId::ClaudeCode,
+                    None,
+                    Effort::Low,
+                    HandHolding::Auto,
+                )
+                .unwrap();
             t.source = ThreadSource::ClaudeCode;
             t.native_id = Some("claude-s1".into());
             ws.store.save_thread(&t).unwrap();
-            super::harness::store_items(&ws.store, &t.id, vec![user("one", None), Item::Assistant { text: "1".into() }, user("two", Some("msg-a")), Item::Assistant { text: "2".into() }]);
+            super::harness::store_items(
+                &ws.store,
+                &t.id,
+                vec![
+                    user("one", None),
+                    Item::Assistant { text: "1".into() },
+                    user("two", Some("msg-a")),
+                    Item::Assistant { text: "2".into() },
+                ],
+            );
             ws.reload(cx);
             ws.navigate(Route::Thread(t.id.clone()), cx);
             t.id
@@ -636,9 +965,20 @@ fn imported_threads_rewind_and_fork_their_agents_session() {
         trek.render(cx);
         let two = trek.read(cx, |ws, _| ws.live[&id].items.ids()[2].clone());
         // A fork from there resumes a copy of the session cut back to the message before it.
-        let fork = trek.update(cx, |ws, cx| ws.fork_thread(&id, ForkAt::Before(two.clone()), &Scope::Main, cx)).unwrap();
+        let fork = trek
+            .update(cx, |ws, cx| {
+                ws.fork_thread(&id, ForkAt::Before(two.clone()), &Scope::Main, cx)
+            })
+            .unwrap();
         let f = trek.read(cx, |ws, _| ws.thread(&fork).cloned().unwrap());
-        assert_eq!(f.reopen, Some(Reopen::Native { session: "claude-s1".into(), at: Some("msg-a".into()), fork: true }));
+        assert_eq!(
+            f.reopen,
+            Some(Reopen::Native {
+                session: "claude-s1".into(),
+                at: Some("msg-a".into()),
+                fork: true
+            })
+        );
         assert_eq!(f.source, ThreadSource::Trek);
         // Rewinding the original cuts its own session back in place; past messages have no
         // checkpoints, so there are no files to restore.
@@ -649,13 +989,26 @@ fn imported_threads_rewind_and_fork_their_agents_session() {
         assert_eq!(files_checked(&trek, cx).await, "unavailable");
         trek.click(cx, "confirm-go");
         let t = trek.read(cx, |ws, _| ws.thread(&id).cloned().unwrap());
-        assert_eq!(t.reopen, Some(Reopen::Native { session: "claude-s1".into(), at: Some("msg-a".into()), fork: false }));
-        assert_eq!((t.native_id.as_deref(), t.source), (Some("claude-s1"), ThreadSource::ClaudeCode));
+        assert_eq!(
+            t.reopen,
+            Some(Reopen::Native {
+                session: "claude-s1".into(),
+                at: Some("msg-a".into()),
+                fork: false
+            })
+        );
+        assert_eq!(
+            (t.native_id.as_deref(), t.source),
+            (Some("claude-s1"), ThreadSource::ClaudeCode)
+        );
         assert_eq!(said(&trek, cx, &id), ["one"]);
         // "two" is back in the composer, which warms a session up for it: in tests that's never
         // the real Claude Code, and the thread says so.
         assert!(trek.composer_text(cx).ends_with("two"));
-        trek.wait(cx, "the warm-up to end", |ws| ws.live[&id].commands.is_none()).await;
+        trek.wait(cx, "the warm-up to end", |ws| {
+            ws.live[&id].commands.is_none()
+        })
+        .await;
         assert!(trek.items(cx, &id).iter().any(|i| matches!(i, Item::Error { text } if text == "Claude Code isn't started in tests.")), "{:?}", trek.items(cx, &id));
     });
 }
@@ -677,31 +1030,48 @@ fn live_rewind_and_fork() {
             s.general.default_model = Some(model.into());
             s.general.default_effort = Effort::Low;
         });
-        let project = std::env::temp_dir().join("trek-timetravel-e2e").join(format!("app-{}", agent.key()));
+        let project = std::env::temp_dir()
+            .join("trek-timetravel-e2e")
+            .join(format!("app-{}", agent.key()));
         let _ = std::fs::remove_dir_all(&project);
         std::fs::create_dir_all(&project).unwrap();
         git_project(&project);
         trek.update(cx, |ws, cx| {
             ws.store.ensure_project(&project).unwrap();
             ws.reload(cx);
-            ws.navigate(Route::Draft { project: Some(project.clone()) }, cx);
+            ws.navigate(
+                Route::Draft {
+                    project: Some(project.clone()),
+                },
+                cx,
+            );
         });
         let done = async |cx: &mut TestAppContext, id: &str| {
             let deadline = Instant::now() + Duration::from_secs(240);
             loop {
                 cx.run_until_parked();
                 // The file the second turn makes is allowed when the agent asks.
-                if let Some(rid) = trek.read(cx, |ws, _| ws.pending_request(id).map(|p| p.request_id.clone())) {
-                    trek.update(cx, |ws, cx| ws.respond(id, &rid, trek_agents::Decision::Allow, cx));
+                if let Some(rid) = trek.read(cx, |ws, _| {
+                    ws.pending_request(id).map(|p| p.request_id.clone())
+                }) {
+                    trek.update(cx, |ws, cx| {
+                        ws.respond(id, &rid, trek_agents::Decision::Allow, cx)
+                    });
                 }
-                let state = trek.read(cx, |ws, _| (ws.thread(id).map(|t| t.run_state), ws.turn_running(id)));
+                let state = trek.read(cx, |ws, _| {
+                    (ws.thread(id).map(|t| t.run_state), ws.turn_running(id))
+                });
                 match state {
                     (Some(RunState::Idle), false) => return,
-                    (Some(RunState::Failed), _) => panic!("the turn failed: {:?}", trek.items(cx, id)),
+                    (Some(RunState::Failed), _) => {
+                        panic!("the turn failed: {:?}", trek.items(cx, id))
+                    }
                     _ => {}
                 }
                 assert!(Instant::now() < deadline, "timed out");
-                cx.background_executor.timer(Duration::from_millis(50)).await;
+                cx.background_executor
+                    .timer(Duration::from_millis(50))
+                    .await;
             }
         };
         trek.update(cx, |ws, cx| ws.send("Just for this conversation (don't save it to memory or to any file), remember the word APPLE. Reply with just OK.".into(), vec![], cx));
@@ -720,34 +1090,100 @@ fn live_rewind_and_fork() {
         let banana_text = "Just for this conversation (don't save the word to memory), also remember the word BANANA. Also create the file made.txt in this folder containing the single line banana. Reply with just OK.";
         trek.update(cx, |ws, cx| ws.send_to(&id, banana_text.into(), vec![], cx));
         done(cx, &id).await;
-        assert_eq!(read(&project, "made.txt").map(|s| s.trim().to_string()).as_deref(), Some("banana"), "the agent made the file: {:?}", trek.items(cx, &id));
+        assert_eq!(
+            read(&project, "made.txt")
+                .map(|s| s.trim().to_string())
+                .as_deref(),
+            Some("banana"),
+            "the agent made the file: {:?}",
+            trek.items(cx, &id)
+        );
         // Each turn is checkpointed as it starts and as it ends; the end of the second lands in
         // the background, so the user's later edit waits for it (as the mock tests' do).
-        trek.wait(cx, "the second turn's end checkpoint", |ws| ws.store.checkpoints(&id).is_ok_and(|c| c.len() == 4)).await;
+        trek.wait(cx, "the second turn's end checkpoint", |ws| {
+            ws.store.checkpoints(&id).is_ok_and(|c| c.len() == 4)
+        })
+        .await;
         std::fs::write(project.join("notes.txt"), "v3\n").unwrap();
 
-        let banana = trek.read(cx, |ws, _| ws.live[&id].items.ids()[user_ix(&trek, cx, &id, banana_text)].clone());
-        let point = trek.read(cx, |ws, _| ws.live[&id].items.get(ws.live[&id].items.position(&banana).unwrap()).cloned());
-        assert!(matches!(point, Some(Item::User { resume: Some(ResumePoint { after: Some(_), .. }), .. })), "found in the agent's files: {point:?}");
-        assert!(trek.update(cx, |ws, cx| ws.rewind(&id, &banana, true, cx)).is_some());
-        files(&trek, cx, "made.txt gone", |_| read(&project, "made.txt").is_none()).await;
-        trek.wait(cx, "the restore to finish", |ws| ws.live.get(&id).is_some_and(|l| l.git_jobs_idle())).await;
-        assert_eq!(read(&project, "notes.txt").as_deref(), Some("v3\n"), "the user's edit stays");
-        assert!(matches!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().reopen.clone()), Some(Reopen::Native { fork: false, .. })));
+        let banana = trek.read(cx, |ws, _| {
+            ws.live[&id].items.ids()[user_ix(&trek, cx, &id, banana_text)].clone()
+        });
+        let point = trek.read(cx, |ws, _| {
+            ws.live[&id]
+                .items
+                .get(ws.live[&id].items.position(&banana).unwrap())
+                .cloned()
+        });
+        assert!(
+            matches!(
+                point,
+                Some(Item::User {
+                    resume: Some(ResumePoint { after: Some(_), .. }),
+                    ..
+                })
+            ),
+            "found in the agent's files: {point:?}"
+        );
+        assert!(
+            trek.update(cx, |ws, cx| ws.rewind(&id, &banana, true, cx))
+                .is_some()
+        );
+        files(&trek, cx, "made.txt gone", |_| {
+            read(&project, "made.txt").is_none()
+        })
+        .await;
+        trek.wait(cx, "the restore to finish", |ws| {
+            ws.live.get(&id).is_some_and(|l| l.git_jobs_idle())
+        })
+        .await;
+        assert_eq!(
+            read(&project, "notes.txt").as_deref(),
+            Some("v3\n"),
+            "the user's edit stays"
+        );
+        assert!(matches!(
+            trek.read(cx, |ws, _| ws.thread(&id).unwrap().reopen.clone()),
+            Some(Reopen::Native { fork: false, .. })
+        ));
         let ask = "List every word I asked you to remember, comma separated, nothing else.";
         trek.update(cx, |ws, cx| ws.send_to(&id, ask.into(), vec![], cx));
         done(cx, &id).await;
         let answer = trek.answers(cx, &id).to_uppercase();
         let last = answer.lines().last().unwrap_or_default().to_string();
-        assert!(last.contains("APPLE") && !last.contains("BANANA"), "the agent forgot the rewound turn: {last}");
+        assert!(
+            last.contains("APPLE") && !last.contains("BANANA"),
+            "the agent forgot the rewound turn: {last}"
+        );
 
-        let fork = trek.update(cx, |ws, cx| ws.fork_thread(&id, ForkAt::End, &Scope::Main, cx)).unwrap();
+        let fork = trek
+            .update(cx, |ws, cx| {
+                ws.fork_thread(&id, ForkAt::End, &Scope::Main, cx)
+            })
+            .unwrap();
         trek.update(cx, |ws, cx| ws.send_to(&fork, "Just for this conversation (don't save it anywhere), also remember the word CHERRY. Then list every word I asked you to remember, comma separated, nothing else.".into(), vec![], cx));
         done(cx, &fork).await;
-        let last = trek.answers(cx, &fork).to_uppercase().lines().last().unwrap_or_default().to_string();
-        assert!(last.contains("APPLE") && last.contains("CHERRY") && !last.contains("BANANA"), "the fork carries on the conversation: {last}");
-        let (a, b) = trek.read(cx, |ws, _| (ws.thread(&id).unwrap().native_id.clone(), ws.thread(&fork).unwrap().native_id.clone()));
-        assert!(a.is_some() && b.is_some() && a != b, "the fork has a session of its own");
+        let last = trek
+            .answers(cx, &fork)
+            .to_uppercase()
+            .lines()
+            .last()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            last.contains("APPLE") && last.contains("CHERRY") && !last.contains("BANANA"),
+            "the fork carries on the conversation: {last}"
+        );
+        let (a, b) = trek.read(cx, |ws, _| {
+            (
+                ws.thread(&id).unwrap().native_id.clone(),
+                ws.thread(&fork).unwrap().native_id.clone(),
+            )
+        });
+        assert!(
+            a.is_some() && b.is_some() && a != b,
+            "the fork has a session of its own"
+        );
         println!("live {}: ok (sessions {a:?}, fork {b:?})", agent.key());
     });
 }
@@ -760,40 +1196,70 @@ fn live_rewind_and_fork() {
 #[test]
 #[ignore = "live: runs a real agent"]
 fn live_opencode_turn() {
-    assert_eq!(std::env::var("TREK_LIVE_AGENT").as_deref(), Ok("opencode"), "needs TREK_LIVE_AGENT=opencode");
-    let model = std::env::var("TREK_LIVE_OPENCODE_MODEL").unwrap_or_else(|_| "opencode/ling-3.1-flash-free".into());
+    assert_eq!(
+        std::env::var("TREK_LIVE_AGENT").as_deref(),
+        Ok("opencode"),
+        "needs TREK_LIVE_AGENT=opencode"
+    );
+    let model = std::env::var("TREK_LIVE_OPENCODE_MODEL")
+        .unwrap_or_else(|_| "opencode/ling-3.1-flash-free".into());
     run(async |cx| {
         let trek = open_with(cx, |s| {
             s.general.default_agent = AgentId::OpenCode.key();
             s.general.default_model = Some(model.clone());
             s.general.default_effort = Effort::Low;
         });
-        let project = std::env::temp_dir().join("trek-timetravel-e2e").join("app-opencode");
+        let project = std::env::temp_dir()
+            .join("trek-timetravel-e2e")
+            .join("app-opencode");
         let _ = std::fs::remove_dir_all(&project);
         std::fs::create_dir_all(&project).unwrap();
         git_project(&project);
         trek.update(cx, |ws, cx| {
             ws.store.ensure_project(&project).unwrap();
             ws.reload(cx);
-            ws.navigate(Route::Draft { project: Some(project.clone()) }, cx);
+            ws.navigate(
+                Route::Draft {
+                    project: Some(project.clone()),
+                },
+                cx,
+            );
         });
-        trek.update(cx, |ws, cx| ws.send("Reply with just OK.".into(), vec![], cx));
+        trek.update(cx, |ws, cx| {
+            ws.send("Reply with just OK.".into(), vec![], cx)
+        });
         let id = trek.thread_id(cx);
         let deadline = Instant::now() + Duration::from_secs(240);
         loop {
             cx.run_until_parked();
-            let state = trek.read(cx, |ws, _| (ws.thread(&id).map(|t| t.run_state), ws.turn_running(&id)));
+            let state = trek.read(cx, |ws, _| {
+                (ws.thread(&id).map(|t| t.run_state), ws.turn_running(&id))
+            });
             match state {
                 (Some(RunState::Idle), false) => break,
                 (Some(RunState::Failed), _) => panic!("the turn failed: {:?}", trek.items(cx, &id)),
                 _ => {}
             }
-            assert!(Instant::now() < deadline, "timed out: {:?}", trek.items(cx, &id));
-            cx.background_executor.timer(Duration::from_millis(50)).await;
+            assert!(
+                Instant::now() < deadline,
+                "timed out: {:?}",
+                trek.items(cx, &id)
+            );
+            cx.background_executor
+                .timer(Duration::from_millis(50))
+                .await;
         }
         let answer = trek.answers(cx, &id);
-        assert!(!answer.trim().is_empty(), "the reply: {:?}", trek.items(cx, &id));
-        assert!(trek.items(cx, &id).iter().any(|i| matches!(i, Item::Assistant { .. })));
+        assert!(
+            !answer.trim().is_empty(),
+            "the reply: {:?}",
+            trek.items(cx, &id)
+        );
+        assert!(
+            trek.items(cx, &id)
+                .iter()
+                .any(|i| matches!(i, Item::Assistant { .. }))
+        );
         println!("live opencode: ok ({} chars)", answer.len());
     });
 }
@@ -806,18 +1272,38 @@ fn undoing_a_restore_waits_for_the_running_turn() {
         let toasts = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
         let sink = toasts.clone();
         cx.update(|cx| {
-            cx.subscribe(&trek.ws, move |_, event: &crate::workspace::WorkspaceEvent, _| {
-                if let crate::workspace::WorkspaceEvent::Toast { message, .. } = event {
-                    sink.borrow_mut().push(message.clone());
-                }
-            })
+            cx.subscribe(
+                &trek.ws,
+                move |_, event: &crate::workspace::WorkspaceEvent, _| {
+                    if let crate::workspace::WorkspaceEvent::Toast { message, .. } = event {
+                        sink.borrow_mut().push(message.clone());
+                    }
+                },
+            )
             .detach()
         });
         // The resent turn has started when "Restored N files · Undo" is clicked.
-        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![trek_agents::AgentEvent::TextDelta("Editing the parser".into())], cx));
-        let undo = crate::workspace::UndoAction::Unrestore { thread: id.clone(), repo: trek.project.clone(), sha: "0".repeat(40), paths: vec!["notes.txt".into()] };
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![trek_agents::AgentEvent::TextDelta(
+                    "Editing the parser".into(),
+                )],
+                cx,
+            )
+        });
+        let undo = crate::workspace::UndoAction::Unrestore {
+            thread: id.clone(),
+            repo: trek.project.clone(),
+            sha: "0".repeat(40),
+            paths: vec!["notes.txt".into()],
+        };
         trek.update(cx, |ws, cx| ws.undo(undo, cx));
-        assert_eq!(*toasts.borrow(), ["Stop the running turn first."], "nothing was put back under the agent");
+        assert_eq!(
+            *toasts.borrow(),
+            ["Stop the running turn first."],
+            "nothing was put back under the agent"
+        );
     });
 }
 
@@ -827,18 +1313,33 @@ fn files_are_not_put_back_under_another_threads_agent_at_work() {
         let trek = open(cx);
         let id = two_turns(&trek, cx).await;
         // A second thread in the same folder, mid-turn.
-        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
+        trek.update(cx, |ws, cx| {
+            ws.navigate(
+                Route::Draft {
+                    project: Some(trek.project.clone()),
+                },
+                cx,
+            )
+        });
         trek.update(cx, |ws, cx| ws.send("mock:long 600s".into(), vec![], cx));
         let other = trek.thread_id(cx);
         assert_ne!(other, id);
-        trek.wait(cx, "the other thread's turn", |ws| ws.turn_running(&other)).await;
+        trek.wait(cx, "the other thread's turn", |ws| ws.turn_running(&other))
+            .await;
         let banana = user_ix(&trek, cx, &id, "banana");
         let item = trek.read(cx, |ws, _| ws.live[&id].items.ids()[banana].clone());
-        assert!(trek.update(cx, |ws, cx| ws.rewind(&id, &item, true, cx)).is_none(), "refused while it works");
+        assert!(
+            trek.update(cx, |ws, cx| ws.rewind(&id, &item, true, cx))
+                .is_none(),
+            "refused while it works"
+        );
         assert_eq!(said(&trek, cx, &id), ["apple", "banana"]);
         assert_eq!(read(&trek.project, "notes.txt").as_deref(), Some("v3\n"));
         // The conversation alone can still go back.
-        assert!(trek.update(cx, |ws, cx| ws.rewind(&id, &item, false, cx)).is_some());
+        assert!(
+            trek.update(cx, |ws, cx| ws.rewind(&id, &item, false, cx))
+                .is_some()
+        );
         assert_eq!(said(&trek, cx, &id), ["apple"]);
         assert_eq!(read(&trek.project, "notes.txt").as_deref(), Some("v3\n"));
         trek.update(cx, |ws, cx| ws.interrupt(&other, cx));
@@ -854,35 +1355,84 @@ fn undoing_a_turn_that_changed_nothing_leaves_other_threads_work_alone() {
         // Thread A answers a question: no files change.
         let a = turn(&trek, cx, "How does the app start up?").await;
         // Thread B, in the same folder, makes a file, the user edits another, and commits it all.
-        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
+        trek.update(cx, |ws, cx| {
+            ws.navigate(
+                Route::Draft {
+                    project: Some(trek.project.clone()),
+                },
+                cx,
+            )
+        });
         let b = turn(&trek, cx, "mock:write notes.md").await;
         assert_ne!(a, b);
         assert!(read(&trek.project, "notes.md").is_some());
         std::fs::write(trek.project.join("notes.txt"), "the user's\n").unwrap();
         git(&trek.project, &["add", "-A"]);
-        git(&trek.project, &["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "theirs"]);
+        git(
+            &trek.project,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgSign=false",
+                "commit",
+                "-qm",
+                "theirs",
+            ],
+        );
 
         // Back on A: its turn changed nothing, and undoing it puts nothing back.
         trek.update(cx, |ws, cx| ws.navigate(Route::Thread(a.clone()), cx));
         trek.render(cx);
         let end = last_end(&trek, cx, &a);
         let a2 = a.clone();
-        trek.wait(cx, "A's changes counted", move |ws| ws.turn_changes_settled(&a2, end)).await;
-        assert_eq!(trek.read(cx, |ws, _| ws.turn_changes(&a, end)), None, "no card: B's file and the user's edit aren't A's");
+        trek.wait(cx, "A's changes counted", move |ws| {
+            ws.turn_changes_settled(&a2, end)
+        })
+        .await;
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.turn_changes(&a, end)),
+            None,
+            "no card: B's file and the user's edit aren't A's"
+        );
         trek.click(cx, ("undo-turn", end));
-        assert_eq!(files_checked(&trek, cx).await, "changes: ", "nothing to restore");
+        assert_eq!(
+            files_checked(&trek, cx).await,
+            "changes: ",
+            "nothing to restore"
+        );
         trek.click(cx, "confirm-go");
         assert!(said(&trek, cx, &a).is_empty());
         // And the restore itself, asked for outright, finds nothing of A's to put back.
-        trek.update(cx, |ws, cx| ws.send_to(&a, "How does the app start up?".into(), vec![], cx));
+        trek.update(cx, |ws, cx| {
+            ws.send_to(&a, "How does the app start up?".into(), vec![], cx)
+        });
         trek.wait_done(cx, &a, RunState::Idle).await;
         let ix = last_end(&trek, cx, &a);
         let end = trek.read(cx, |ws, _| ws.live[&a].items.ids()[ix].clone());
-        assert!(trek.update(cx, |ws, cx| ws.undo_turn(&a, &end, true, cx)).is_some());
-        trek.wait(cx, "A's git work", |ws| ws.live.get(&a).is_some_and(|l| l.git_jobs_idle())).await;
-        assert_eq!(read(&trek.project, "notes.md").as_deref(), Some("# Notes\n\n- Note 1\n"));
-        assert_eq!(read(&trek.project, "notes.txt").as_deref(), Some("the user's\n"));
-        assert_eq!(git(&trek.project, &["status", "--porcelain"]), "", "nothing moved");
+        assert!(
+            trek.update(cx, |ws, cx| ws.undo_turn(&a, &end, true, cx))
+                .is_some()
+        );
+        trek.wait(cx, "A's git work", |ws| {
+            ws.live.get(&a).is_some_and(|l| l.git_jobs_idle())
+        })
+        .await;
+        assert_eq!(
+            read(&trek.project, "notes.md").as_deref(),
+            Some("# Notes\n\n- Note 1\n")
+        );
+        assert_eq!(
+            read(&trek.project, "notes.txt").as_deref(),
+            Some("the user's\n")
+        );
+        assert_eq!(
+            git(&trek.project, &["status", "--porcelain"]),
+            "",
+            "nothing moved"
+        );
     });
 }
 
@@ -897,22 +1447,56 @@ fn undoing_a_turn_puts_back_only_what_it_changed() {
         });
         let a = turn(&trek, cx, "tidy the notes").await;
         // Afterwards: another thread makes a file, and the user edits one and makes one.
-        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
+        trek.update(cx, |ws, cx| {
+            ws.navigate(
+                Route::Draft {
+                    project: Some(trek.project.clone()),
+                },
+                cx,
+            )
+        });
         turn(&trek, cx, "mock:write notes.md").await;
         std::fs::write(trek.project.join("user.txt"), "the user's\n").unwrap();
         trek.update(cx, |ws, cx| ws.navigate(Route::Thread(a.clone()), cx));
         trek.render(cx);
         let end = last_end(&trek, cx, &a);
         let a2 = a.clone();
-        trek.wait(cx, "A's changes counted", move |ws| ws.turn_changes_settled(&a2, end)).await;
-        let counted: Vec<String> = trek.read(cx, |ws, _| ws.turn_changes(&a, end)).expect("a card").files.into_iter().map(|f| f.path).collect();
-        assert_eq!(counted, ["made.txt", "notes.txt"], "the card counts the turn alone");
+        trek.wait(cx, "A's changes counted", move |ws| {
+            ws.turn_changes_settled(&a2, end)
+        })
+        .await;
+        let counted: Vec<String> = trek
+            .read(cx, |ws, _| ws.turn_changes(&a, end))
+            .expect("a card")
+            .files
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert_eq!(
+            counted,
+            ["made.txt", "notes.txt"],
+            "the card counts the turn alone"
+        );
 
         trek.click(cx, ("undo-turn", end));
-        assert_eq!(files_checked(&trek, cx).await, "changes: made.txt notes.txt", "the sheet lists exactly what goes back");
+        assert_eq!(
+            files_checked(&trek, cx).await,
+            "changes: made.txt notes.txt",
+            "the sheet lists exactly what goes back"
+        );
         trek.click(cx, "confirm-go");
-        files(&trek, cx, "A's files put back", |p| read(p, "notes.txt").as_deref() == Some("v1\n") && read(p, "made.txt").is_none()).await;
-        assert!(read(&trek.project, "notes.md").is_some(), "the other thread's file stays");
-        assert_eq!(read(&trek.project, "user.txt").as_deref(), Some("the user's\n"), "the user's file stays");
+        files(&trek, cx, "A's files put back", |p| {
+            read(p, "notes.txt").as_deref() == Some("v1\n") && read(p, "made.txt").is_none()
+        })
+        .await;
+        assert!(
+            read(&trek.project, "notes.md").is_some(),
+            "the other thread's file stays"
+        );
+        assert_eq!(
+            read(&trek.project, "user.txt").as_deref(),
+            Some("the user's\n"),
+            "the user's file stays"
+        );
     });
 }

@@ -19,13 +19,19 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let started = std::time::Instant::now();
             while started.elapsed() < WAIT {
-                let busy = this.read_with(cx, |ws, _| ws.usage_loading || ws.devin_loading).unwrap_or(false);
+                let busy = this
+                    .read_with(cx, |ws, _| ws.usage_loading || ws.devin_loading)
+                    .unwrap_or(false);
                 if !busy {
                     break;
                 }
-                cx.background_executor().timer(Duration::from_millis(100)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
             }
-            let usage = this.read_with(cx, |ws, _| ws.usage_now()).map_err(|_| tr::HostError::other("Trek is closing"));
+            let usage = this
+                .read_with(cx, |ws, _| ws.usage_now())
+                .map_err(|_| tr::HostError::other("Trek is closing"));
             let _ = reply.send(usage);
         })
         .detach();
@@ -41,36 +47,82 @@ impl Workspace {
             .map(|u| {
                 // As the card says it: only for a provider with no limits to show.
                 let today = u.limits.is_empty().then(|| match &u.today {
-                    Some((n, spend)) if spend.priced() => Some(format!("Today in Trek: {} tokens · ≈ {}", crate::cost::fmt_tokens(*n), crate::cost::usd(spend.usd()))),
-                    Some((n, _)) => Some(format!("Today in Trek: {} tokens", crate::cost::fmt_tokens(*n))),
-                    None if u.plan.is_none() && !u.no_limits && u.error.is_none() => Some("Nothing used today.".to_string()),
+                    Some((n, spend)) if spend.priced() => Some(format!(
+                        "Today in Trek: {} tokens · ≈ {}",
+                        crate::cost::fmt_tokens(*n),
+                        crate::cost::usd(spend.usd())
+                    )),
+                    Some((n, _)) => Some(format!(
+                        "Today in Trek: {} tokens",
+                        crate::cost::fmt_tokens(*n)
+                    )),
+                    None if u.plan.is_none() && !u.no_limits && u.error.is_none() => {
+                        Some("Nothing used today.".to_string())
+                    }
                     None => None,
                 });
                 tr::ProviderUsage {
                     agent: agent_ref(&u.agent),
                     plan: u.plan,
-                    limits: u.limits.iter().map(|l| tr::UsageLimit { label: l.label.clone(), percent: l.percent, resets_at: l.resets_at, window: l.window.clone() }).collect(),
+                    limits: u
+                        .limits
+                        .iter()
+                        .map(|l| tr::UsageLimit {
+                            label: l.label.clone(),
+                            percent: l.percent,
+                            resets_at: l.resets_at,
+                            window: l.window.clone(),
+                        })
+                        .collect(),
                     note: u.note,
                     error: u.error,
                     no_limits: u.no_limits,
                     as_of: u.as_of,
                     today: today.flatten(),
-                    resets: u.resets.into_iter().map(|r| tr::ResetCredit { id: r.id, title: r.title, description: r.description, expires_at: r.expires_at }).collect(),
+                    resets: u
+                        .resets
+                        .into_iter()
+                        .map(|r| tr::ResetCredit {
+                            id: r.id,
+                            title: r.title,
+                            description: r.description,
+                            expires_at: r.expires_at,
+                        })
+                        .collect(),
                 }
             })
             .collect();
-        tr::Usage { providers, loading: self.usage_loading || self.devin_loading, picked: Some(self.usage_picked()) }
+        tr::Usage {
+            providers,
+            loading: self.usage_loading || self.devin_loading,
+            picked: Some(self.usage_picked()),
+        }
     }
 
     /// "Use reset" from the phone (it asks first, as the Mac's dialog does): answered once the
     /// reset is spent, or not.
-    pub(super) fn remote_use_reset(&mut self, credit_id: String, reply: tr::Reply<()>, cx: &mut Context<Self>) {
-        if !self.agent_status.values().any(|st| st.resets.iter().any(|r| r.id == credit_id)) {
-            let _ = reply.send(Err(tr::HostError::not_found("That reset isn't available any more")));
+    pub(super) fn remote_use_reset(
+        &mut self,
+        credit_id: String,
+        reply: tr::Reply<()>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .agent_status
+            .values()
+            .any(|st| st.resets.iter().any(|r| r.id == credit_id))
+        {
+            let _ = reply.send(Err(tr::HostError::not_found(
+                "That reset isn't available any more",
+            )));
             return;
         }
-        self.use_reset_credit_then(credit_id, move |done| {
-            let _ = reply.send(done.map_err(tr::HostError::other));
-        }, cx);
+        self.use_reset_credit_then(
+            credit_id,
+            move |done| {
+                let _ = reply.send(done.map_err(tr::HostError::other));
+            },
+            cx,
+        );
     }
 }

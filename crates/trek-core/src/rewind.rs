@@ -27,7 +27,10 @@ impl Reopen {
     /// Where a message sent before this session starts goes in it.
     pub fn point(&self) -> Option<ResumePoint> {
         match self {
-            Reopen::Native { session, at, .. } => Some(ResumePoint { session: session.clone(), after: at.clone() }),
+            Reopen::Native { session, at, .. } => Some(ResumePoint {
+                session: session.clone(),
+                after: at.clone(),
+            }),
             Reopen::Recap => None,
         }
     }
@@ -37,15 +40,27 @@ impl Reopen {
 /// message on goes. `kept`: the items before that message; `point`: where the agent's session
 /// stood when it was sent; `current`: the session the thread uses now; `native`: the agent can
 /// resume part of a session. `None`: nothing worth keeping, so a plain new session.
-pub fn reopen_before(kept: &[Item], point: Option<&ResumePoint>, current: Option<&str>, native: bool) -> Option<Reopen> {
+pub fn reopen_before(
+    kept: &[Item],
+    point: Option<&ResumePoint>,
+    current: Option<&str>,
+    native: bool,
+) -> Option<Reopen> {
     if !kept.iter().any(|i| matches!(i, Item::User { .. })) {
         return None;
     }
     match point {
-        Some(ResumePoint { session, after: Some(at) }) if native => {
+        Some(ResumePoint {
+            session,
+            after: Some(at),
+        }) if native => {
             // Cut back in place only in the session the thread is on: the point may lie in one
             // this thread was forked from, which belongs to another thread.
-            Some(Reopen::Native { session: session.clone(), at: Some(at.clone()), fork: current != Some(session.as_str()) })
+            Some(Reopen::Native {
+                session: session.clone(),
+                at: Some(at.clone()),
+                fork: current != Some(session.as_str()),
+            })
         }
         _ => Some(Reopen::Recap),
     }
@@ -58,7 +73,10 @@ pub fn turn_start(items: &[Item], end: usize) -> Option<usize> {
     let end = end.min(items.len());
     let boundary = items[..end].iter().rposition(ends_turn);
     let from = boundary.map_or(0, |b| b + 1);
-    items[from..end].iter().position(|i| matches!(i, Item::User { aside: false, .. })).map(|p| from + p)
+    items[from..end]
+        .iter()
+        .position(|i| matches!(i, Item::User { aside: false, .. }))
+        .map(|p| from + p)
 }
 
 /// Whether `item` ends a turn: its footer, a failure, a usage limit, or an interruption.
@@ -85,13 +103,22 @@ pub fn recap(items: &[Item]) -> String {
             Item::User { text, images, .. } => {
                 let mut e = format!("User: {}", clip(text.trim(), RECAP_MESSAGE));
                 if !images.is_empty() {
-                    e.push_str(&format!(" [{} image{} attached]", images.len(), if images.len() == 1 { "" } else { "s" }));
+                    e.push_str(&format!(
+                        " [{} image{} attached]",
+                        images.len(),
+                        if images.len() == 1 { "" } else { "s" }
+                    ));
                 }
                 entries.push(e);
             }
-            Item::Assistant { text } if !text.trim().is_empty() => entries.push(format!("Assistant: {}", clip(text.trim(), RECAP_MESSAGE))),
+            Item::Assistant { text } if !text.trim().is_empty() => {
+                entries.push(format!("Assistant: {}", clip(text.trim(), RECAP_MESSAGE)))
+            }
             Item::Tool { title, detail, .. } => {
-                let line = format!("(The assistant used a tool: {title} {})", clip(detail.lines().next().unwrap_or_default(), 160));
+                let line = format!(
+                    "(The assistant used a tool: {title} {})",
+                    clip(detail.lines().next().unwrap_or_default(), 160)
+                );
                 // Runs of tool calls stay one line each, without blank lines between them.
                 match entries.last_mut() {
                     Some(last) if last.starts_with("(The assistant used a tool") => {
@@ -134,87 +161,238 @@ mod tests {
     use crate::store::ToolStatus;
 
     fn user(t: &str) -> Item {
-        Item::User { text: t.into(), images: vec![], at: None, resume: None, aside: false }
+        Item::User {
+            text: t.into(),
+            images: vec![],
+            at: None,
+            resume: None,
+            aside: false,
+        }
     }
     fn said(t: &str) -> Item {
         Item::Assistant { text: t.into() }
     }
     fn end() -> Item {
-        Item::TurnEnd { at: 1, took_secs: 1 }
+        Item::TurnEnd {
+            at: 1,
+            took_secs: 1,
+        }
     }
     fn point(session: &str, after: Option<&str>) -> ResumePoint {
-        ResumePoint { session: session.into(), after: after.map(String::from) }
+        ResumePoint {
+            session: session.into(),
+            after: after.map(String::from),
+        }
     }
 
     #[test]
     fn turns_start_at_their_first_message() {
-        let items = [user("a"), said("1"), end(), user("b"), said("2"), user("steer"), said("3"), end()];
+        let items = [
+            user("a"),
+            said("1"),
+            end(),
+            user("b"),
+            said("2"),
+            user("steer"),
+            said("3"),
+            end(),
+        ];
         assert_eq!(turn_start(&items, 2), Some(0));
-        assert_eq!(turn_start(&items, 7), Some(3), "a steering message is part of the turn");
+        assert_eq!(
+            turn_start(&items, 7),
+            Some(3),
+            "a steering message is part of the turn"
+        );
         // An interrupted or failed turn ends there too.
-        let items = [user("a"), Item::Notice { text: "Interrupted".into() }, user("b"), said("2"), end()];
+        let items = [
+            user("a"),
+            Item::Notice {
+                text: "Interrupted".into(),
+            },
+            user("b"),
+            said("2"),
+            end(),
+        ];
         assert_eq!(turn_start(&items, 4), Some(2));
-        let items = [user("a"), Item::Error { text: "boom".into() }, user("b"), said("2"), end()];
+        let items = [
+            user("a"),
+            Item::Error {
+                text: "boom".into(),
+            },
+            user("b"),
+            said("2"),
+            end(),
+        ];
         assert_eq!(turn_start(&items, 4), Some(2));
         // An agent's own notice mid-turn doesn't end it.
-        let items = [user("a"), Item::Notice { text: "Codex couldn't reopen".into() }, said("2"), end()];
+        let items = [
+            user("a"),
+            Item::Notice {
+                text: "Codex couldn't reopen".into(),
+            },
+            said("2"),
+            end(),
+        ];
         assert_eq!(turn_start(&items, 3), Some(0));
         assert_eq!(turn_start(&[said("woke up"), end()], 1), None);
     }
 
     #[test]
     fn asides_dont_start_turns() {
-        let aside = |t: &str| Item::User { text: t.into(), images: vec![], at: None, resume: None, aside: true };
+        let aside = |t: &str| Item::User {
+            text: t.into(),
+            images: vec![],
+            at: None,
+            resume: None,
+            aside: true,
+        };
         // A command Trek answered itself between two turns.
-        let items = [user("remember APPLE"), said("ok"), end(), aside("/model"), Item::Notice { text: "Model: haiku".into() }, user("remember PEAR"), said("ok"), end()];
+        let items = [
+            user("remember APPLE"),
+            said("ok"),
+            end(),
+            aside("/model"),
+            Item::Notice {
+                text: "Model: haiku".into(),
+            },
+            user("remember PEAR"),
+            said("ok"),
+            end(),
+        ];
         assert_eq!(turn_start(&items, 7), Some(5));
         // An answer to the agent's question mid-turn is part of the turn its message started.
-        let items = [user("set it up"), said("Which port?"), aside("8080"), said("done"), end()];
+        let items = [
+            user("set it up"),
+            said("Which port?"),
+            aside("8080"),
+            said("done"),
+            end(),
+        ];
         assert_eq!(turn_start(&items, 4), Some(0));
         // A turn only an answer started has no message to take back.
         let items = [user("a"), said("1"), end(), aside("yes"), said("2"), end()];
         assert_eq!(turn_start(&items, 5), None);
-        assert!(ends_turn(&end()) && ends_turn(&Item::Error { text: "x".into() }) && ends_turn(&Item::Notice { text: "Interrupted".into() }));
-        assert!(!ends_turn(&Item::Notice { text: "Model: haiku".into() }));
+        assert!(
+            ends_turn(&end())
+                && ends_turn(&Item::Error { text: "x".into() })
+                && ends_turn(&Item::Notice {
+                    text: "Interrupted".into()
+                })
+        );
+        assert!(!ends_turn(&Item::Notice {
+            text: "Model: haiku".into()
+        }));
     }
 
     #[test]
     fn sessions_resume_natively_where_they_can() {
         let kept = [user("a"), said("1"), end()];
         let at = point("s1", Some("m7"));
-        assert_eq!(reopen_before(&kept, Some(&at), Some("s1"), true), Some(Reopen::Native { session: "s1".into(), at: Some("m7".into()), fork: false }));
+        assert_eq!(
+            reopen_before(&kept, Some(&at), Some("s1"), true),
+            Some(Reopen::Native {
+                session: "s1".into(),
+                at: Some("m7".into()),
+                fork: false
+            })
+        );
         // The point is in another session (this thread is a fork of it): a copy, never in place.
-        assert_eq!(reopen_before(&kept, Some(&at), Some("s2"), true), Some(Reopen::Native { session: "s1".into(), at: Some("m7".into()), fork: true }));
-        assert_eq!(reopen_before(&kept, Some(&at), None, true), Some(Reopen::Native { session: "s1".into(), at: Some("m7".into()), fork: true }));
+        assert_eq!(
+            reopen_before(&kept, Some(&at), Some("s2"), true),
+            Some(Reopen::Native {
+                session: "s1".into(),
+                at: Some("m7".into()),
+                fork: true
+            })
+        );
+        assert_eq!(
+            reopen_before(&kept, Some(&at), None, true),
+            Some(Reopen::Native {
+                session: "s1".into(),
+                at: Some("m7".into()),
+                fork: true
+            })
+        );
         // Agents that can't, messages without a point, and messages that started their session.
-        assert_eq!(reopen_before(&kept, Some(&at), Some("s1"), false), Some(Reopen::Recap));
-        assert_eq!(reopen_before(&kept, None, Some("s1"), true), Some(Reopen::Recap));
-        assert_eq!(reopen_before(&kept, Some(&point("s1", None)), Some("s1"), true), Some(Reopen::Recap));
+        assert_eq!(
+            reopen_before(&kept, Some(&at), Some("s1"), false),
+            Some(Reopen::Recap)
+        );
+        assert_eq!(
+            reopen_before(&kept, None, Some("s1"), true),
+            Some(Reopen::Recap)
+        );
+        assert_eq!(
+            reopen_before(&kept, Some(&point("s1", None)), Some("s1"), true),
+            Some(Reopen::Recap)
+        );
         // Nothing said before it: just a new session.
         assert_eq!(reopen_before(&[], Some(&at), Some("s1"), true), None);
-        assert_eq!(reopen_before(&[Item::Notice { text: "hi".into() }], None, None, false), None);
-        assert_eq!(Reopen::Native { session: "s".into(), at: Some("m".into()), fork: true }.point(), Some(point("s", Some("m"))));
+        assert_eq!(
+            reopen_before(&[Item::Notice { text: "hi".into() }], None, None, false),
+            None
+        );
+        assert_eq!(
+            Reopen::Native {
+                session: "s".into(),
+                at: Some("m".into()),
+                fork: true
+            }
+            .point(),
+            Some(point("s", Some("m")))
+        );
     }
 
     #[test]
     fn reopen_round_trips_as_json() {
-        for r in [Reopen::Recap, Reopen::Native { session: "s".into(), at: None, fork: true }, Reopen::Native { session: "s".into(), at: Some("m".into()), fork: false }] {
-            assert_eq!(serde_json::from_str::<Reopen>(&serde_json::to_string(&r).unwrap()).unwrap(), r);
+        for r in [
+            Reopen::Recap,
+            Reopen::Native {
+                session: "s".into(),
+                at: None,
+                fork: true,
+            },
+            Reopen::Native {
+                session: "s".into(),
+                at: Some("m".into()),
+                fork: false,
+            },
+        ] {
+            assert_eq!(
+                serde_json::from_str::<Reopen>(&serde_json::to_string(&r).unwrap()).unwrap(),
+                r
+            );
         }
     }
 
     #[test]
     fn recaps_keep_the_conversation_and_drop_the_noise() {
-        let tool = |d: &str| Item::Tool { id: "t".into(), title: "Edit".into(), detail: d.into(), output: "lots of output".into(), status: ToolStatus::Done };
+        let tool = |d: &str| Item::Tool {
+            id: "t".into(),
+            title: "Edit".into(),
+            detail: d.into(),
+            output: "lots of output".into(),
+            status: ToolStatus::Done,
+        };
         let items = [
-            Item::User { text: "fix the parser".into(), images: vec!["/tmp/s.png".into()], at: None, resume: None, aside: false },
+            Item::User {
+                text: "fix the parser".into(),
+                images: vec!["/tmp/s.png".into()],
+                at: None,
+                resume: None,
+                aside: false,
+            },
             Item::Reasoning { text: "hmm".into() },
             tool("src/parser.rs"),
             tool("src/lib.rs"),
             said("Fixed it."),
             end(),
-            Item::Notice { text: "Interrupted".into() },
-            Item::Error { text: "boom".into() },
+            Item::Notice {
+                text: "Interrupted".into(),
+            },
+            Item::Error {
+                text: "boom".into(),
+            },
             user("thanks"),
         ];
         assert_eq!(
@@ -226,11 +404,22 @@ mod tests {
     #[test]
     fn long_recaps_keep_the_latest_messages() {
         let long = "x".repeat(5_000);
-        let items: Vec<Item> = (0..30).map(|i| if i % 2 == 0 { user(&format!("{i} {long}")) } else { said(&format!("{i} {long}")) }).collect();
+        let items: Vec<Item> = (0..30)
+            .map(|i| {
+                if i % 2 == 0 {
+                    user(&format!("{i} {long}"))
+                } else {
+                    said(&format!("{i} {long}"))
+                }
+            })
+            .collect();
         let r = recap(&items);
         assert!(r.len() <= RECAP_MAX + 100, "{}", r.len());
         assert!(r.starts_with("(Earlier messages left out.)"));
-        assert!(r.ends_with("29 ") || r.contains("Assistant: 29 "), "the latest message is in");
+        assert!(
+            r.ends_with("29 ") || r.contains("Assistant: 29 "),
+            "the latest message is in"
+        );
         assert!(!r.contains("User: 0 "));
         assert!(r.contains(" …"), "each message is shortened");
     }

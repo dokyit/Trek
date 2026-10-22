@@ -22,24 +22,44 @@ pub(crate) fn command(dir: &Path) -> Command {
         .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
         .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_EXTERNAL_DIFF")
-        .args(["--literal-pathspecs", "-c", "core.quotepath=off", "-c", "diff.noprefix=false", "-c", "core.fsmonitor=false", "-c", "color.ui=false"]);
+        .args([
+            "--literal-pathspecs",
+            "-c",
+            "core.quotepath=off",
+            "-c",
+            "diff.noprefix=false",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "color.ui=false",
+        ]);
     c
 }
 
 /// Run git in `dir`: its output, or what it said on failure.
 pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = command(dir).args(args).output().map_err(|e| e.to_string())?;
+    let out = command(dir)
+        .args(args)
+        .output()
+        .map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     } else {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        Err(if err.is_empty() { format!("git {} failed", args.first().unwrap_or(&"")) } else { err })
+        Err(if err.is_empty() {
+            format!("git {} failed", args.first().unwrap_or(&""))
+        } else {
+            err
+        })
     }
 }
 
 /// The repository's top folder holding `dir`, named the way `dir` is (`/var/…`, not git's
 /// `/private/var/…`), so paths built on it match the editor's.
 pub(crate) fn top(dir: &Path) -> Option<std::path::PathBuf> {
-    let real = run(dir, &["rev-parse", "--show-toplevel"]).ok().map(|s| std::path::PathBuf::from(s.trim())).filter(|p| !p.as_os_str().is_empty())?;
+    let real = run(dir, &["rev-parse", "--show-toplevel"])
+        .ok()
+        .map(|s| std::path::PathBuf::from(s.trim()))
+        .filter(|p| !p.as_os_str().is_empty())?;
     Some(crate::workspace::as_given(&real, dir))
 }

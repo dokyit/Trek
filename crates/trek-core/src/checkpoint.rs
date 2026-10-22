@@ -9,8 +9,8 @@
 //! way. Everything here blocks on git: run it off the main thread.
 
 use anyhow::{Context as _, Result, bail};
-use std::io::Write as _;
 use std::collections::HashSet;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -101,8 +101,16 @@ pub struct Restored {
 impl Restored {
     /// Files put back (changed, recreated or removed).
     pub fn restored(&self) -> usize {
-        let touched = self.changes.iter().filter(|c| !matches!(c.change, Change::Nested | Change::Kept)).count();
-        let kept = self.changes.iter().filter(|c| c.change == Change::Kept).count();
+        let touched = self
+            .changes
+            .iter()
+            .filter(|c| !matches!(c.change, Change::Nested | Change::Kept))
+            .count();
+        let kept = self
+            .changes
+            .iter()
+            .filter(|c| c.change == Change::Kept)
+            .count();
         touched.saturating_sub(self.failed.len().saturating_sub(kept))
     }
 }
@@ -113,7 +121,12 @@ fn git_bin() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
         let git = crate::git::git_program();
-        let exec_path = crate::procs::command(git).arg("--exec-path").stdin(Stdio::null()).output().ok().filter(|o| o.status.success());
+        let exec_path = crate::procs::command(git)
+            .arg("--exec-path")
+            .stdin(Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success());
         exec_path
             .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()).join("git"))
             .filter(|p| p.exists())
@@ -127,7 +140,11 @@ struct TempIndex(PathBuf);
 impl TempIndex {
     fn new() -> TempIndex {
         static N: AtomicU64 = AtomicU64::new(0);
-        let name = format!("trek-index-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed));
+        let name = format!(
+            "trek-index-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        );
         TempIndex(std::env::temp_dir().join(name))
     }
 }
@@ -154,7 +171,13 @@ impl Repo {
     /// The working tree `dir` is in; `None` when it isn't in one (or git is missing).
     pub fn find(dir: &Path) -> Option<Repo> {
         let out = base_command(dir)
-            .args(["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-path", "index"])
+            .args([
+                "rev-parse",
+                "--path-format=absolute",
+                "--show-toplevel",
+                "--git-path",
+                "index",
+            ])
             .output()
             .ok()
             .filter(|o| o.status.success())?;
@@ -162,7 +185,11 @@ impl Repo {
         let mut lines = text.lines();
         let top = PathBuf::from(lines.next()?.trim());
         let index = PathBuf::from(lines.next()?.trim());
-        (!top.as_os_str().is_empty()).then_some(Repo { top, index, limit: SNAPSHOT_LIMIT })
+        (!top.as_os_str().is_empty()).then_some(Repo {
+            top,
+            index,
+            limit: SNAPSHOT_LIMIT,
+        })
     }
 
     /// The working tree `dir` is in, or why git can't open it there (`find` says only `None`):
@@ -171,10 +198,21 @@ impl Repo {
         if let Some(repo) = Repo::find(dir) {
             return Ok(repo);
         }
-        let out = base_command(dir).args(["rev-parse", "--show-toplevel"]).output().map_err(crate::git::run_error)?;
+        let out = base_command(dir)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .map_err(crate::git::run_error)?;
         let why = String::from_utf8_lossy(&out.stderr);
-        let why = why.lines().find(|l| l.starts_with("fatal:") || l.starts_with("error:")).unwrap_or(why.trim()).trim();
-        bail!("git can't open {}: {}", dir.display(), if why.is_empty() { "unknown error" } else { why })
+        let why = why
+            .lines()
+            .find(|l| l.starts_with("fatal:") || l.starts_with("error:"))
+            .unwrap_or(why.trim())
+            .trim();
+        bail!(
+            "git can't open {}: {}",
+            dir.display(),
+            if why.is_empty() { "unknown error" } else { why }
+        )
     }
 
     /// The same repository, with snapshots stopped after `limit`.
@@ -190,22 +228,43 @@ impl Repo {
         c
     }
 
-    fn run(&self, index: Option<&TempIndex>, args: &[&str], input: Option<&[u8]>) -> Result<String> {
-        self.run_raw(index, args, input).map(|out| out.trim_end().to_string())
+    fn run(
+        &self,
+        index: Option<&TempIndex>,
+        args: &[&str],
+        input: Option<&[u8]>,
+    ) -> Result<String> {
+        self.run_raw(index, args, input)
+            .map(|out| out.trim_end().to_string())
     }
 
     /// `run`, its output as git wrote it: a patch's last lines may be blank context, or end in
     /// spaces, and trimming them would make it another patch.
-    fn run_raw(&self, index: Option<&TempIndex>, args: &[&str], input: Option<&[u8]>) -> Result<String> {
+    fn run_raw(
+        &self,
+        index: Option<&TempIndex>,
+        args: &[&str],
+        input: Option<&[u8]>,
+    ) -> Result<String> {
         let out = self.output(index, args, input, None)?;
         if !out.status.success() {
-            bail!("git {} failed: {}", command_name(args), String::from_utf8_lossy(&out.stderr).trim());
+            bail!(
+                "git {} failed: {}",
+                command_name(args),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     /// Run git; with `limit`, it's stopped if it runs longer.
-    fn output(&self, index: Option<&TempIndex>, args: &[&str], input: Option<&[u8]>, limit: Option<Duration>) -> Result<std::process::Output> {
+    fn output(
+        &self,
+        index: Option<&TempIndex>,
+        args: &[&str],
+        input: Option<&[u8]>,
+        limit: Option<Duration>,
+    ) -> Result<std::process::Output> {
         let mut c = self.git(index);
         c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
         if input.is_some() {
@@ -241,8 +300,18 @@ impl Repo {
                 buf
             })
         };
-        let stdout = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
-        let stderr = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
+        let stdout = drain(
+            child
+                .stdout
+                .take()
+                .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+        );
+        let stderr = drain(
+            child
+                .stderr
+                .take()
+                .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+        );
         let deadline = Instant::now() + limit;
         let status = loop {
             if let Some(status) = child.try_wait()? {
@@ -258,7 +327,11 @@ impl Repo {
         if let Some(f) = feed {
             let _ = f.join();
         }
-        Ok(std::process::Output { status, stdout: stdout.join().unwrap_or_default(), stderr: stderr.join().unwrap_or_default() })
+        Ok(std::process::Output {
+            status,
+            stdout: stdout.join().unwrap_or_default(),
+            stderr: stderr.join().unwrap_or_default(),
+        })
     }
 
     /// The tree the working directory holds right now: tracked and untracked files that aren't
@@ -277,39 +350,75 @@ impl Repo {
         let out = if big.is_empty() {
             self.output(Some(&index), &["add", "-A", "--ignore-errors"], None, limit)?
         } else {
-            let spec: String = std::iter::once(".".to_string()).chain(big.iter().map(|p| format!(":(exclude,literal){p}"))).map(|p| p + "\0").collect();
-            self.output(Some(&index), &["add", "-A", "--ignore-errors", "--pathspec-from-file=-", "--pathspec-file-nul"], Some(spec.as_bytes()), limit)?
+            let spec: String = std::iter::once(".".to_string())
+                .chain(big.iter().map(|p| format!(":(exclude,literal){p}")))
+                .map(|p| p + "\0")
+                .collect();
+            self.output(
+                Some(&index),
+                &[
+                    "add",
+                    "-A",
+                    "--ignore-errors",
+                    "--pathspec-from-file=-",
+                    "--pathspec-file-nul",
+                ],
+                Some(spec.as_bytes()),
+                limit,
+            )?
         };
         // 1: some files were left out (see above); anything else is git failing outright.
         if !matches!(out.status.code(), Some(0 | 1)) {
-            bail!("git add failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+            bail!(
+                "git add failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
         self.run(Some(&index), &["write-tree"], None)
     }
 
     /// Untracked files (not ignored) over `UNTRACKED_MAX`, relative to the top folder.
     fn big_untracked(&self, index: &TempIndex) -> Result<Vec<String>> {
-        let out = self.output(Some(index), &["ls-files", "-z", "--others", "--exclude-standard"], None, Some(self.limit))?;
+        let out = self.output(
+            Some(index),
+            &["ls-files", "-z", "--others", "--exclude-standard"],
+            None,
+            Some(self.limit),
+        )?;
         if !out.status.success() {
-            bail!("git ls-files failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+            bail!(
+                "git ls-files failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
         let listed = String::from_utf8_lossy(&out.stdout);
         Ok(listed
             .split('\0')
-            .filter(|p| !p.is_empty() && std::fs::symlink_metadata(self.top.join(p)).is_ok_and(|m| m.is_file() && m.len() > UNTRACKED_MAX))
+            .filter(|p| {
+                !p.is_empty()
+                    && std::fs::symlink_metadata(self.top.join(p))
+                        .is_ok_and(|m| m.is_file() && m.len() > UNTRACKED_MAX)
+            })
             .map(str::to_string)
             .collect())
     }
 
     /// The branch checked out, `None` on a detached HEAD.
     fn branch(&self) -> Option<String> {
-        self.run(None, &["symbolic-ref", "--short", "-q", "HEAD"], None).ok().filter(|b| !b.is_empty())
+        self.run(None, &["symbolic-ref", "--short", "-q", "HEAD"], None)
+            .ok()
+            .filter(|b| !b.is_empty())
     }
 
     /// The branch checkpoint `sha` was taken on, as its message records it (older ones don't).
     fn branch_of(&self, sha: &str) -> Option<String> {
         let message = self.run(None, &["cat-file", "commit", sha], None).ok()?;
-        message.lines().rev().find_map(|l| l.strip_prefix(BRANCH_TRAILER)).map(|b| b.trim().to_string()).filter(|b| !b.is_empty())
+        message
+            .lines()
+            .rev()
+            .find_map(|l| l.strip_prefix(BRANCH_TRAILER))
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty())
     }
 
     /// Whether checkpoint `from` and `to` (another checkpoint; `None`: the files now) are of the
@@ -332,7 +441,14 @@ impl Repo {
             None => "Trek checkpoint".to_string(),
         };
         let commit = |parent: bool| {
-            let mut args = vec!["-c", "commit.gpgSign=false", "commit-tree", tree, "-m", message.as_str()];
+            let mut args = vec![
+                "-c",
+                "commit.gpgSign=false",
+                "commit-tree",
+                tree,
+                "-m",
+                message.as_str(),
+            ];
             if parent {
                 args.extend(["-p", "HEAD"]);
             }
@@ -367,24 +483,38 @@ impl Repo {
         // file the branches differ in, with HEAD left where it is.
         if let (Some(then), Some(now)) = (self.branch_of(sha), self.branch()) {
             if then != now {
-                bail!("the checkpoint was taken on {then}, and {now} is checked out now. Switch back to {then} to put its files back");
+                bail!(
+                    "the checkpoint was taken on {then}, and {now} is checked out now. Switch back to {then} to put its files back"
+                );
             }
         }
-        let now = self.clone().with_limit(self.limit.max(RESTORE_LIMIT)).tree_now()?;
+        let now = self
+            .clone()
+            .with_limit(self.limit.max(RESTORE_LIMIT))
+            .tree_now()?;
         let mut changes = self.diff(sha, &now)?;
         if let Some(only) = only {
             changes.retain(|c| only.contains(&c.path));
         }
         // Removed by the restore: what stands in a deleted file's way may be one of these.
-        let removed: HashSet<String> = changes.iter().filter(|c| c.change == Change::Added).map(|c| c.path.clone()).collect();
+        let removed: HashSet<String> = changes
+            .iter()
+            .filter(|c| c.change == Change::Added)
+            .map(|c| c.path.clone())
+            .collect();
         for c in changes.iter_mut().filter(|c| c.change == Change::Deleted) {
             // On disk, yet not in the snapshot: ignored or too big now. Or a file the snapshot
             // doesn't hold stands where its folder was (an ignored `build` where `build/x` was):
             // writing it back would delete that file, and the undo couldn't bring it back.
             let path = Path::new(&c.path);
-            let blocked = path.ancestors().skip(1).filter(|a| !a.as_os_str().is_empty()).any(|a| {
-                std::fs::symlink_metadata(self.top.join(a)).is_ok_and(|m| !m.is_dir()) && !removed.contains(a.to_string_lossy().as_ref())
-            });
+            let blocked = path
+                .ancestors()
+                .skip(1)
+                .filter(|a| !a.as_os_str().is_empty())
+                .any(|a| {
+                    std::fs::symlink_metadata(self.top.join(a)).is_ok_and(|m| !m.is_dir())
+                        && !removed.contains(a.to_string_lossy().as_ref())
+                });
             if blocked || std::fs::symlink_metadata(self.top.join(path)).is_ok() {
                 c.change = Change::Kept;
             }
@@ -395,7 +525,11 @@ impl Repo {
     /// `to` against `from`, as what restoring `from` does to each file.
     fn diff(&self, from: &str, to: &str) -> Result<Vec<FileChange>> {
         // Raw output, for the modes: a nested repository is an entry of mode 160000.
-        let out = self.run(None, &["diff-tree", "-r", "-z", "--no-renames", "--raw", from, to], None)?;
+        let out = self.run(
+            None,
+            &["diff-tree", "-r", "-z", "--no-renames", "--raw", from, to],
+            None,
+        )?;
         let mut fields = out.split('\0').filter(|f| !f.is_empty());
         let mut changes = vec![];
         while let (Some(meta), Some(path)) = (fields.next(), fields.next()) {
@@ -408,12 +542,22 @@ impl Repo {
                 Some('D') => Change::Deleted,
                 _ => Change::Modified,
             };
-            changes.push(FileChange { path: path.to_string(), change });
+            changes.push(FileChange {
+                path: path.to_string(),
+                change,
+            });
         }
         // Nothing inside a nested repository is touched either (one the turn turned into a plain
         // folder, say).
-        let nested: Vec<String> = changes.iter().filter(|c| c.change == Change::Nested).map(|c| format!("{}/", c.path)).collect();
-        for c in changes.iter_mut().filter(|c| nested.iter().any(|n| c.path.starts_with(n.as_str()))) {
+        let nested: Vec<String> = changes
+            .iter()
+            .filter(|c| c.change == Change::Nested)
+            .map(|c| format!("{}/", c.path))
+            .collect();
+        for c in changes
+            .iter_mut()
+            .filter(|c| nested.iter().any(|n| c.path.starts_with(n.as_str())))
+        {
             c.change = Change::Nested;
         }
         Ok(changes)
@@ -423,14 +567,44 @@ impl Repo {
     /// with how it changed and the lines added and removed, renames found. Nested repositories
     /// are left out (their history isn't in the checkpoints).
     pub fn diff_stat(&self, from: &str, to: &str) -> Result<Vec<crate::changes::FileChange>> {
-        let out = self.run(None, &["diff-tree", "-r", "-z", "-M", "--raw", "--numstat", from, to], None)?;
+        let out = self.run(
+            None,
+            &[
+                "diff-tree",
+                "-r",
+                "-z",
+                "-M",
+                "--raw",
+                "--numstat",
+                from,
+                to,
+            ],
+            None,
+        )?;
         Ok(crate::changes::parse_diff_stat(&out))
     }
 
     /// The patch of one file from `from` to `to` (as `diff_stat` takes them); `old` is where a
     /// renamed file was, so the rename shows as one.
-    pub fn diff_patch(&self, from: &str, to: &str, path: &str, old: Option<&str>) -> Result<String> {
-        let mut args = vec!["diff-tree", "-p", "-M", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", from, to, "--"];
+    pub fn diff_patch(
+        &self,
+        from: &str,
+        to: &str,
+        path: &str,
+        old: Option<&str>,
+    ) -> Result<String> {
+        let mut args = vec![
+            "diff-tree",
+            "-p",
+            "-M",
+            "--no-color",
+            "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            from,
+            to,
+            "--",
+        ];
         args.extend(old);
         args.push(path);
         self.run(None, &args, None)
@@ -451,7 +625,12 @@ impl Repo {
         self.restore_plan(sha, thread, Some(only))
     }
 
-    fn restore_plan(&self, sha: &str, thread: &str, only: Option<&HashSet<String>>) -> Result<Restored> {
+    fn restore_plan(
+        &self,
+        sha: &str,
+        thread: &str,
+        only: Option<&HashSet<String>>,
+    ) -> Result<Restored> {
         let (now, changes) = self.plan(sha, only)?;
         // The undo couldn't hold these: writing the old version over one would lose the new one
         // for good.
@@ -468,16 +647,30 @@ impl Repo {
             })
             .collect();
         if changes.iter().all(|c| c.change == Change::Nested) {
-            return Ok(Restored { changes, ..Restored::default() });
+            return Ok(Restored {
+                changes,
+                ..Restored::default()
+            });
         }
-        if changes.iter().all(|c| matches!(c.change, Change::Nested | Change::Kept)) {
-            return Ok(Restored { changes, failed, undo: None });
+        if changes
+            .iter()
+            .all(|c| matches!(c.change, Change::Nested | Change::Kept))
+        {
+            return Ok(Restored {
+                changes,
+                failed,
+                undo: None,
+            });
         }
         let undo = self.commit(&now)?;
         self.run(None, &["update-ref", &undo_ref(thread), &undo], None)?;
         let touch = |c: &&FileChange| !matches!(c.change, Change::Nested | Change::Kept);
         // Removals first: a new file may stand where the checkpoint has a folder, or the reverse.
-        for c in changes.iter().filter(touch).filter(|c| c.change == Change::Added) {
+        for c in changes
+            .iter()
+            .filter(touch)
+            .filter(|c| c.change == Change::Added)
+        {
             let path = self.top.join(&c.path);
             match std::fs::remove_file(&path) {
                 Ok(()) => self.prune_empty_dirs(&path),
@@ -485,13 +678,23 @@ impl Repo {
                 Err(e) => failed.push((c.path.clone(), e.to_string())),
             }
         }
-        let back: Vec<&str> = changes.iter().filter(touch).filter(|c| c.change != Change::Added).map(|c| c.path.as_str()).collect();
+        let back: Vec<&str> = changes
+            .iter()
+            .filter(touch)
+            .filter(|c| c.change != Change::Added)
+            .map(|c| c.path.as_str())
+            .collect();
         if !back.is_empty() {
             let index = TempIndex::new();
             self.run(Some(&index), &["read-tree", sha], None)?;
             let mut input = back.join("\0").into_bytes();
             input.push(0);
-            let out = self.output(Some(&index), &["checkout-index", "-f", "-z", "--stdin"], Some(&input), Some(RESTORE_LIMIT))?;
+            let out = self.output(
+                Some(&index),
+                &["checkout-index", "-f", "-z", "--stdin"],
+                Some(&input),
+                Some(RESTORE_LIMIT),
+            )?;
             if !out.status.success() {
                 // It writes what it can and names the rest, one line each: "error: unable to
                 // create file <path>: <why>", "error: unable to unlink old '<path>': <why>".
@@ -503,7 +706,11 @@ impl Repo {
                 failed.extend(named);
             }
         }
-        Ok(Restored { changes, failed, undo: Some(undo) })
+        Ok(Restored {
+            changes,
+            failed,
+            undo: Some(undo),
+        })
     }
 
     /// Put just `paths` (relative to the top folder) back as `sha` (a checkpoint, or a tree) has
@@ -528,7 +735,10 @@ impl Repo {
         let mut back = vec![];
         for p in paths.iter().copied().filter(|p| listed.contains_key(*p)) {
             match listed.get(p) {
-                Some((mode, _)) if mode == "160000" => failed.push((p.to_string(), "it's a repository of its own, so it was left as it is".into())),
+                Some((mode, _)) if mode == "160000" => failed.push((
+                    p.to_string(),
+                    "it's a repository of its own, so it was left as it is".into(),
+                )),
                 _ => back.push(p),
             }
         }
@@ -537,7 +747,12 @@ impl Repo {
             self.run(Some(&index), &["read-tree", sha], None)?;
             let mut input = back.join("\0").into_bytes();
             input.push(0);
-            let out = self.output(Some(&index), &["checkout-index", "-f", "-z", "--stdin"], Some(&input), Some(RESTORE_LIMIT))?;
+            let out = self.output(
+                Some(&index),
+                &["checkout-index", "-f", "-z", "--stdin"],
+                Some(&input),
+                Some(RESTORE_LIMIT),
+            )?;
             if !out.status.success() {
                 let err = String::from_utf8_lossy(&out.stderr);
                 let named = checkout_failures(&err, &back);
@@ -552,7 +767,11 @@ impl Repo {
 
     /// The tree a checkpoint (or a tree) is.
     pub fn tree_of(&self, rev: &str) -> Result<String> {
-        self.run(None, &["rev-parse", "--verify", "-q", &format!("{rev}^{{tree}}")], None)
+        self.run(
+            None,
+            &["rev-parse", "--verify", "-q", &format!("{rev}^{{tree}}")],
+            None,
+        )
     }
 
     /// Every path that differs between the two ends of any of `spans` (checkpoints or trees),
@@ -561,8 +780,25 @@ impl Repo {
     pub fn paths_changed(&self, spans: &[(String, String)]) -> Result<HashSet<String>> {
         let mut out = HashSet::new();
         for (from, to) in spans {
-            let listed = self.run_raw(None, &["diff-tree", "-r", "-z", "--no-renames", "--name-only", from, to], None)?;
-            out.extend(listed.split('\0').filter(|p| !p.is_empty()).map(str::to_string));
+            let listed = self.run_raw(
+                None,
+                &[
+                    "diff-tree",
+                    "-r",
+                    "-z",
+                    "--no-renames",
+                    "--name-only",
+                    from,
+                    to,
+                ],
+                None,
+            )?;
+            out.extend(
+                listed
+                    .split('\0')
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string),
+            );
         }
         Ok(out)
     }
@@ -570,7 +806,10 @@ impl Repo {
     /// Keep the files as they are now under `undo_ref(thread)`, ahead of putting some back by
     /// other means (`restore_paths`, `undo_hunk`); returns the commit, for `restore_in`.
     pub fn save_undo(&self, thread: &str) -> Result<String> {
-        let now = self.clone().with_limit(self.limit.max(RESTORE_LIMIT)).tree_now()?;
+        let now = self
+            .clone()
+            .with_limit(self.limit.max(RESTORE_LIMIT))
+            .tree_now()?;
         let undo = self.commit(&now)?;
         self.run(None, &["update-ref", &undo_ref(thread), &undo], None)?;
         Ok(undo)
@@ -605,7 +844,11 @@ impl Repo {
                 None => info.push_str(&format!("0 {none}\t{p}\0")),
             }
         }
-        self.run(Some(&index), &["update-index", "-z", "--index-info"], Some(info.as_bytes()))?;
+        self.run(
+            Some(&index),
+            &["update-index", "-z", "--index-info"],
+            Some(info.as_bytes()),
+        )?;
         self.run(Some(&index), &["write-tree"], None)
     }
 
@@ -618,17 +861,36 @@ impl Repo {
         self.run(Some(&index), &["read-tree", base], None)?;
         let on_disk = std::fs::symlink_metadata(self.top.join(path)).is_ok_and(|m| m.is_file());
         if on_disk {
-            self.run(None, &["--literal-pathspecs", "hash-object", "-w", "--", path], None)?;
+            self.run(
+                None,
+                &["--literal-pathspecs", "hash-object", "-w", "--", path],
+                None,
+            )?;
             if !self.ls_tree(base, &[path])?.contains_key(path) {
                 // Not in the baseline: an intent-to-add entry makes it show as a new file.
-                self.run(Some(&index), &["--literal-pathspecs", "add", "-N", "-f", "--", path], None)?;
+                self.run(
+                    Some(&index),
+                    &["--literal-pathspecs", "add", "-N", "-f", "--", path],
+                    None,
+                )?;
             }
         }
         // `a/` and `b/` whatever the user's config says (`diff.noprefix`): `git apply` takes the
         // first part of the path off. Untrimmed: a hunk may end in blank lines, or in spaces.
         let out = self.run_raw(
             Some(&index),
-            &["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/", "-U3", "--", path],
+            &[
+                "--literal-pathspecs",
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-renames",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                "-U3",
+                "--",
+                path,
+            ],
             None,
         )?;
         Ok(crate::hunks::FileDiff::parse(&out))
@@ -652,17 +914,40 @@ impl Repo {
         let first = String::from_utf8_lossy(&out.stderr).trim().to_string();
         // A three-way merge needs the file in an index: Trek's own, so the user's isn't touched.
         let file = self.top.join(path);
-        let Ok(before) = std::fs::read(&file) else { bail!("the hunk doesn't apply any more: {first}") };
+        let Ok(before) = std::fs::read(&file) else {
+            bail!("the hunk doesn't apply any more: {first}")
+        };
         let index = TempIndex::new();
         let merged = (|| -> Result<bool> {
-            let blob = self.run(None, &["--literal-pathspecs", "hash-object", "-w", "--", path], None)?;
+            let blob = self.run(
+                None,
+                &["--literal-pathspecs", "hash-object", "-w", "--", path],
+                None,
+            )?;
             let mode = self.file_mode(&file, path);
-            self.run(Some(&index), &["update-index", "--add", "--cacheinfo", &format!("{mode},{blob},{path}")], None)?;
+            self.run(
+                Some(&index),
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("{mode},{blob},{path}"),
+                ],
+                None,
+            )?;
             // Stat data for the entry, so the file reads as matching it.
-            self.output(Some(&index), &["update-index", "-q", "--refresh"], None, None)?;
+            self.output(
+                Some(&index),
+                &["update-index", "-q", "--refresh"],
+                None,
+                None,
+            )?;
             let out = apply(Some(&index), &["--3way"])?;
             let text = std::fs::read(&file).unwrap_or_default();
-            Ok(out.status.success() && !String::from_utf8_lossy(&text).lines().any(|l| l.starts_with("<<<<<<< ")))
+            Ok(out.status.success()
+                && !String::from_utf8_lossy(&text)
+                    .lines()
+                    .any(|l| l.starts_with("<<<<<<< ")))
         })();
         if merged.as_ref().is_ok_and(|ok| *ok) {
             return Ok(());
@@ -676,7 +961,11 @@ impl Repo {
     #[cfg(unix)]
     fn file_mode(&self, file: &Path, _path: &str) -> &'static str {
         use std::os::unix::fs::PermissionsExt as _;
-        if std::fs::metadata(file).is_ok_and(|m| m.permissions().mode() & 0o111 != 0) { "100755" } else { "100644" }
+        if std::fs::metadata(file).is_ok_and(|m| m.permissions().mode() & 0o111 != 0) {
+            "100755"
+        } else {
+            "100644"
+        }
     }
 
     /// The git tree mode of the file at `path`. Windows has no execute bit to read, and git
@@ -684,9 +973,19 @@ impl Repo {
     /// read from; a file the index doesn't have is an ordinary one.
     #[cfg(windows)]
     fn file_mode(&self, _file: &Path, path: &str) -> &'static str {
-        let staged = self.run(None, &["--literal-pathspecs", "ls-files", "--stage", "--", path], None).unwrap_or_default();
+        let staged = self
+            .run(
+                None,
+                &["--literal-pathspecs", "ls-files", "--stage", "--", path],
+                None,
+            )
+            .unwrap_or_default();
         // "<mode> <object> <stage>\t<path>"
-        if staged.split_whitespace().next() == Some("100755") { "100755" } else { "100644" }
+        if staged.split_whitespace().next() == Some("100755") {
+            "100755"
+        } else {
+            "100644"
+        }
     }
 
     /// A tree like `base` with one hunk of `path` (`patch`, as `file_diff` cut it) taken in: a
@@ -694,15 +993,27 @@ impl Repo {
     pub fn keep_hunk(&self, base: &str, patch: &str) -> Result<String> {
         let index = TempIndex::new();
         self.run(Some(&index), &["read-tree", base], None)?;
-        let out = self.output(Some(&index), &["apply", "--cached", "--recount", "--whitespace=nowarn", "-"], Some(patch.as_bytes()), None)?;
+        let out = self.output(
+            Some(&index),
+            &["apply", "--cached", "--recount", "--whitespace=nowarn", "-"],
+            Some(patch.as_bytes()),
+            None,
+        )?;
         if !out.status.success() {
-            bail!("the hunk doesn't fit the baseline: {}", String::from_utf8_lossy(&out.stderr).trim());
+            bail!(
+                "the hunk doesn't fit the baseline: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
         self.run(Some(&index), &["write-tree"], None)
     }
 
     /// The entries `tree` has for `paths` (files, taken literally): path → (mode, object).
-    fn ls_tree(&self, tree: &str, paths: &[&str]) -> Result<std::collections::HashMap<String, (String, String)>> {
+    fn ls_tree(
+        &self,
+        tree: &str,
+        paths: &[&str],
+    ) -> Result<std::collections::HashMap<String, (String, String)>> {
         let mut args = vec!["--literal-pathspecs", "ls-tree", "-r", "-z", tree, "--"];
         args.extend(paths);
         let out = self.run(None, &args, None)?;
@@ -732,26 +1043,44 @@ impl Repo {
     /// Point checkpoints of `thread` at commits that already exist (a fork's copies of another
     /// thread's checkpoints): `(item, commit)`.
     pub fn link(&self, thread: &str, checkpoints: &[(String, String)]) -> Result<()> {
-        let script: String = checkpoints.iter().map(|(item, sha)| format!("update {} {sha}\n", ref_name(thread, item))).collect();
+        let script: String = checkpoints
+            .iter()
+            .map(|(item, sha)| format!("update {} {sha}\n", ref_name(thread, item)))
+            .collect();
         if script.is_empty() {
             return Ok(());
         }
-        self.run(None, &["update-ref", "--stdin"], Some(script.as_bytes())).map(|_| ())
+        self.run(None, &["update-ref", "--stdin"], Some(script.as_bytes()))
+            .map(|_| ())
     }
 
     /// Drop checkpoints of `thread` by item.
     pub fn delete(&self, thread: &str, items: &[String]) -> Result<()> {
-        let script: String = items.iter().map(|item| format!("delete {}\n", ref_name(thread, item))).collect();
+        let script: String = items
+            .iter()
+            .map(|item| format!("delete {}\n", ref_name(thread, item)))
+            .collect();
         if script.is_empty() {
             return Ok(());
         }
-        self.run(None, &["update-ref", "--stdin"], Some(script.as_bytes())).map(|_| ())
+        self.run(None, &["update-ref", "--stdin"], Some(script.as_bytes()))
+            .map(|_| ())
     }
 
     /// Drop every checkpoint of `thread` (it was deleted), and what would undo its last restore;
     /// returns how many checkpoints went.
     pub fn delete_all(&self, thread: &str) -> Result<usize> {
-        let refs = self.run(None, &["for-each-ref", "--format=%(refname)", &format!("{REF_ROOT}/{thread}/"), &undo_ref(thread), &review_ref(thread)], None)?;
+        let refs = self.run(
+            None,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                &format!("{REF_ROOT}/{thread}/"),
+                &undo_ref(thread),
+                &review_ref(thread),
+            ],
+            None,
+        )?;
         let refs: Vec<&str> = refs.lines().filter(|r| !r.is_empty()).collect();
         let script: String = refs.iter().map(|r| format!("delete {r}\n")).collect();
         if !script.is_empty() {
@@ -763,16 +1092,28 @@ impl Repo {
     /// Keep `tree`, the baseline of `thread`'s review, from `git gc` (`None`: the review closed).
     pub fn pin_review(&self, thread: &str, tree: Option<&str>) -> Result<()> {
         match tree {
-            Some(t) => self.run(None, &["update-ref", &review_ref(thread), t], None).map(|_| ()),
-            None => self.run(None, &["update-ref", "-d", &review_ref(thread)], None).map(|_| ()),
+            Some(t) => self
+                .run(None, &["update-ref", &review_ref(thread), t], None)
+                .map(|_| ()),
+            None => self
+                .run(None, &["update-ref", "-d", &review_ref(thread)], None)
+                .map(|_| ()),
         }
     }
 
     /// Checkpoint items of `thread` that have a ref.
     pub fn items(&self, thread: &str) -> Result<Vec<String>> {
         let prefix = format!("{REF_ROOT}/{thread}/");
-        let refs = self.run(None, &["for-each-ref", "--format=%(refname)", &prefix], None)?;
-        Ok(refs.lines().filter_map(|r| r.strip_prefix(&prefix)).map(str::to_string).collect())
+        let refs = self.run(
+            None,
+            &["for-each-ref", "--format=%(refname)", &prefix],
+            None,
+        )?;
+        Ok(refs
+            .lines()
+            .filter_map(|r| r.strip_prefix(&prefix))
+            .map(str::to_string)
+            .collect())
     }
 }
 
@@ -797,7 +1138,13 @@ pub fn prune_stale(store: &crate::store::Store, now: i64) -> Result<usize> {
             }
         }
         if cleared {
-            store.delete_checkpoints(thread, &checkpoints.iter().map(|c| c.item_id.clone()).collect::<Vec<_>>())?;
+            store.delete_checkpoints(
+                thread,
+                &checkpoints
+                    .iter()
+                    .map(|c| c.item_id.clone())
+                    .collect::<Vec<_>>(),
+            )?;
         }
     }
     Ok(stale.len())
@@ -808,7 +1155,12 @@ pub fn prune_stale(store: &crate::store::Store, now: i64) -> Result<usize> {
 pub fn refs_repo(store: &crate::store::Store, thread: &str, repo: &Path) -> Option<Repo> {
     Repo::find(repo).or_else(|| {
         let project = store.thread(thread).ok().flatten()?.project_id?;
-        let path = store.projects().ok()?.into_iter().find(|p| p.id == project)?.path;
+        let path = store
+            .projects()
+            .ok()?
+            .into_iter()
+            .find(|p| p.id == project)?
+            .path;
         Repo::find(&path)
     })
 }
@@ -818,12 +1170,29 @@ fn checkout_failures(stderr: &str, tried: &[&str]) -> Vec<(String, String)> {
     let mut out = vec![];
     for line in stderr.lines() {
         let rest = line.trim().trim_start_matches("error:").trim();
-        for lead in ["unable to create file ", "unable to unlink old '", "unable to create symlink ", "unable to stat just-written file "] {
-            let Some(tail) = rest.strip_prefix(lead) else { continue };
+        for lead in [
+            "unable to create file ",
+            "unable to unlink old '",
+            "unable to create symlink ",
+            "unable to stat just-written file ",
+        ] {
+            let Some(tail) = rest.strip_prefix(lead) else {
+                continue;
+            };
             // The path is followed by ": <why>" (or "': <why>"); it may hold ": " itself, so the
             // longest tried path that fits wins.
-            if let Some(path) = tried.iter().filter(|p| tail.starts_with(**p) && tail[p.len()..].trim_start_matches('\'').starts_with(':')).max_by_key(|p| p.len()) {
-                let why = tail[path.len()..].trim_start_matches('\'').trim_start_matches(':').trim();
+            if let Some(path) = tried
+                .iter()
+                .filter(|p| {
+                    tail.starts_with(**p)
+                        && tail[p.len()..].trim_start_matches('\'').starts_with(':')
+                })
+                .max_by_key(|p| p.len())
+            {
+                let why = tail[path.len()..]
+                    .trim_start_matches('\'')
+                    .trim_start_matches(':')
+                    .trim();
                 if !out.iter().any(|(p, _): &(String, String)| p == path) {
                     out.push((path.to_string(), why.to_string()));
                 }
@@ -874,7 +1243,14 @@ fn base_command(dir: &Path) -> Command {
         .args(["-c", "core.splitIndex=false"])
         // Patches Trek builds go back through `git apply`: the paths in them keep their `a/` and
         // `b/`, and blank context lines their space.
-        .args(["-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "-c", "diff.suppressBlankEmpty=false"])
+        .args([
+            "-c",
+            "diff.noprefix=false",
+            "-c",
+            "diff.mnemonicPrefix=false",
+            "-c",
+            "diff.suppressBlankEmpty=false",
+        ])
         .stdin(Stdio::null());
     c
 }
@@ -890,7 +1266,11 @@ mod tests {
     impl Scratch {
         fn new(commit: bool) -> Scratch {
             static N: AtomicU64 = AtomicU64::new(0);
-            let dir = std::env::temp_dir().join(format!("trek-checkpoint-test-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+            let dir = std::env::temp_dir().join(format!(
+                "trek-checkpoint-test-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(dir.join("keep")).unwrap();
             let s = Scratch(dir);
@@ -904,14 +1284,32 @@ mod tests {
             s.write("keep/old.txt", "old\n");
             if commit {
                 s.git(&["add", "-A"]);
-                s.git(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "init"]);
+                s.git(&[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgSign=false",
+                    "commit",
+                    "-qm",
+                    "init",
+                ]);
             }
             s
         }
 
         fn git(&self, args: &[&str]) -> String {
-            let out = Command::new("git").args(args).current_dir(&self.0).output().unwrap();
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&self.0)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         }
 
@@ -952,11 +1350,24 @@ mod tests {
         s.write(".gitignore", "*.log\nnotes/\n");
         s.write("notes/todo.md", "NEW WORK\n");
         let preview = repo.changes_since(&sha).unwrap();
-        assert!(preview.iter().any(|c| c.path == "notes/todo.md" && c.change == Change::Kept), "{preview:?}");
+        assert!(
+            preview
+                .iter()
+                .any(|c| c.path == "notes/todo.md" && c.change == Change::Kept),
+            "{preview:?}"
+        );
         let restored = repo.restore(&sha, "t1").unwrap();
         assert_eq!(s.read("notes/todo.md").as_deref(), Some("NEW WORK\n"));
-        assert_eq!(s.read(".gitignore").as_deref(), Some("*.log\n"), "the rest is put back");
-        assert!(restored.failed.iter().any(|(p, _)| p == "notes/todo.md"), "{:?}", restored.failed);
+        assert_eq!(
+            s.read(".gitignore").as_deref(),
+            Some("*.log\n"),
+            "the rest is put back"
+        );
+        assert!(
+            restored.failed.iter().any(|(p, _)| p == "notes/todo.md"),
+            "{:?}",
+            restored.failed
+        );
         assert_eq!(restored.restored(), 1);
     }
 
@@ -969,9 +1380,16 @@ mod tests {
         s.git(&["switch", "-qc", "feature"]);
         s.write("a.txt", "on feature\n");
         let err = repo.restore(&sha, "t1").unwrap_err().to_string();
-        assert!(err.contains("taken on main") && err.contains("feature is checked out"), "{err}");
+        assert!(
+            err.contains("taken on main") && err.contains("feature is checked out"),
+            "{err}"
+        );
         assert!(repo.changes_since(&sha).is_err(), "the preview says so too");
-        assert_eq!(s.read("a.txt").as_deref(), Some("on feature\n"), "nothing was touched");
+        assert_eq!(
+            s.read("a.txt").as_deref(),
+            Some("on feature\n"),
+            "nothing was touched"
+        );
         // Back on main it restores as ever.
         s.write("a.txt", "one\n");
         s.git(&["switch", "-q", "main"]);
@@ -987,11 +1405,23 @@ mod tests {
         let b = repo.snapshot("t1", "u2").unwrap();
         assert!(repo.same_branch(&a, Some(&b)) && repo.same_branch(&a, None));
         s.git(&["switch", "-qc", "feature"]);
-        assert!(!repo.same_branch(&a, None), "a turn counted across the switch would list the branch's files");
+        assert!(
+            !repo.same_branch(&a, None),
+            "a turn counted across the switch would list the branch's files"
+        );
         let c = repo.snapshot("t1", "u3").unwrap();
         assert!(!repo.same_branch(&a, Some(&c)));
         // Older checkpoints don't say: they count as ever.
-        let old = s.git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", &format!("{a}^{{tree}}"), "-m", "Trek checkpoint"]);
+        let old = s.git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit-tree",
+            &format!("{a}^{{tree}}"),
+            "-m",
+            "Trek checkpoint",
+        ]);
         assert!(repo.same_branch(&old, None));
     }
 
@@ -1005,7 +1435,10 @@ mod tests {
         s.git(&["-c", "gc.pruneExpire=now", "gc", "-q", "--prune=now"]);
         assert_eq!(s.git(&["cat-file", "-t", &tree]), "tree", "kept by its ref");
         assert_eq!(repo.delete_all("t1").unwrap(), 0);
-        assert!(s.git(&["for-each-ref", &review_ref("t1")]).is_empty(), "a deleted thread's pin goes too");
+        assert!(
+            s.git(&["for-each-ref", &review_ref("t1")]).is_empty(),
+            "a deleted thread's pin goes too"
+        );
         repo.pin_review("t1", Some(&tree)).unwrap();
         repo.pin_review("t1", None).unwrap();
         assert!(s.git(&["for-each-ref", &review_ref("t1")]).is_empty());
@@ -1017,7 +1450,10 @@ mod tests {
         let tried = ["a.txt", "ro/a.txt.bak", "x: y.txt", "x"];
         assert_eq!(
             checkout_failures(err, &tried),
-            vec![("ro/a.txt.bak".to_string(), "Permission denied".to_string()), ("x: y.txt".to_string(), "Busy".to_string())]
+            vec![
+                ("ro/a.txt.bak".to_string(), "Permission denied".to_string()),
+                ("x: y.txt".to_string(), "Busy".to_string())
+            ]
         );
     }
 
@@ -1045,8 +1481,14 @@ mod tests {
         // Restoring leaves it be, whatever became of it.
         std::fs::remove_file(s.0.join("notes.txt")).unwrap();
         let restored = repo.restore(&sha, "t1").unwrap();
-        assert_eq!(sorted(restored.changes), [("notes.txt".to_string(), Change::Deleted)]);
-        assert_eq!(std::fs::metadata(s.0.join("data set.bin")).unwrap().len(), UNTRACKED_MAX + 1);
+        assert_eq!(
+            sorted(restored.changes),
+            [("notes.txt".to_string(), Change::Deleted)]
+        );
+        assert_eq!(
+            std::fs::metadata(s.0.join("data set.bin")).unwrap().len(),
+            UNTRACKED_MAX + 1
+        );
     }
 
     #[test]
@@ -1057,7 +1499,15 @@ mod tests {
         let repo = s.repo();
         let store = Store::in_memory().unwrap();
         let new = |f: &dyn Fn(&mut crate::store::Thread)| {
-            let mut t = store.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+            let mut t = store
+                .create_thread(
+                    None,
+                    AgentId::ClaudeCode,
+                    None,
+                    Effort::High,
+                    HandHolding::Auto,
+                )
+                .unwrap();
             f(&mut t);
             store.save_thread(&t).unwrap();
             let sha = repo.snapshot(&t.id, "u1").unwrap();
@@ -1074,10 +1524,21 @@ mod tests {
             t.pinned_at = Some(old);
         });
         let recent = new(&|t| t.archived_at = Some(now - 1));
-        repo.restore(&store.checkpoints(&archived).unwrap()[0].sha, &archived).unwrap();
+        repo.restore(&store.checkpoints(&archived).unwrap()[0].sha, &archived)
+            .unwrap();
         assert_eq!(prune_stale(&store, now).unwrap(), 2);
-        for (thread, kept) in [(&active, true), (&archived, false), (&settled, false), (&pinned, true), (&recent, true)] {
-            assert_eq!(!store.checkpoints(thread).unwrap().is_empty(), kept, "{thread}");
+        for (thread, kept) in [
+            (&active, true),
+            (&archived, false),
+            (&settled, false),
+            (&pinned, true),
+            (&recent, true),
+        ] {
+            assert_eq!(
+                !store.checkpoints(thread).unwrap().is_empty(),
+                kept,
+                "{thread}"
+            );
             assert_eq!(!repo.items(thread).unwrap().is_empty(), kept, "{thread}");
         }
         assert!(s.git(&["for-each-ref", &undo_ref(&archived)]).is_empty());
@@ -1091,7 +1552,11 @@ mod tests {
         let repo = s.repo();
         let sha = repo.snapshot("t1", "u1").unwrap();
         assert_eq!(s.git(&["rev-parse", &ref_name("t1", "u1")]), sha);
-        assert_eq!(s.git(&["rev-parse", &format!("{sha}^")]), s.git(&["rev-parse", "HEAD"]), "hung on HEAD");
+        assert_eq!(
+            s.git(&["rev-parse", &format!("{sha}^")]),
+            s.git(&["rev-parse", "HEAD"]),
+            "hung on HEAD"
+        );
 
         // The agent's turn: edits, creates (nested), deletes, renames, rewrites the binary,
         // touches an ignored file.
@@ -1116,12 +1581,22 @@ mod tests {
         assert_eq!((restored.restored(), restored.failed.len()), (6, 0));
 
         assert_eq!(s.read("a.txt").as_deref(), Some("one\n"));
-        assert_eq!(std::fs::read(s.0.join("bin.dat")).unwrap(), [0u8, 159, 146, 150, 0, 1, 2]);
-        assert_eq!(s.read("draft.txt").as_deref(), Some("untracked before the turn\n"));
+        assert_eq!(
+            std::fs::read(s.0.join("bin.dat")).unwrap(),
+            [0u8, 159, 146, 150, 0, 1, 2]
+        );
+        assert_eq!(
+            s.read("draft.txt").as_deref(),
+            Some("untracked before the turn\n")
+        );
         assert_eq!(s.read("keep/old.txt").as_deref(), Some("old\n"));
         assert!(!s.0.join("keep/renamed.txt").exists());
         assert!(!s.0.join("src").exists(), "folders left empty go too");
-        assert_eq!(s.read("build.log").as_deref(), Some("changed by the turn\n"), "ignored files are left alone");
+        assert_eq!(
+            s.read("build.log").as_deref(),
+            Some("changed by the turn\n"),
+            "ignored files are left alone"
+        );
         assert!(repo.changes_since(&sha).unwrap().is_empty());
 
         // The restore itself can be undone: the files as they were just before it come back.
@@ -1146,15 +1621,33 @@ mod tests {
         s.write("src/deep/new.rs", "fn main() {}\n");
         std::fs::remove_file(s.0.join(".gitignore")).unwrap();
 
-        let failed = repo.restore_paths(&sha, &["a.txt", "src/deep/new.rs", ".gitignore"]).unwrap();
+        let failed = repo
+            .restore_paths(&sha, &["a.txt", "src/deep/new.rs", ".gitignore"])
+            .unwrap();
         assert!(failed.is_empty(), "{failed:?}");
-        assert_eq!(s.read("a.txt").as_deref(), Some("one\n"), "changed: its old contents");
-        assert!(!s.0.join("src").exists(), "created since: removed, and the folders it leaves empty");
-        assert_eq!(s.read(".gitignore").as_deref(), Some("*.log\n"), "deleted since: back");
-        assert_eq!(s.read("keep/old.txt").as_deref(), Some("edited by hand\n"), "files not named are left alone");
+        assert_eq!(
+            s.read("a.txt").as_deref(),
+            Some("one\n"),
+            "changed: its old contents"
+        );
+        assert!(
+            !s.0.join("src").exists(),
+            "created since: removed, and the folders it leaves empty"
+        );
+        assert_eq!(
+            s.read(".gitignore").as_deref(),
+            Some("*.log\n"),
+            "deleted since: back"
+        );
+        assert_eq!(
+            s.read("keep/old.txt").as_deref(),
+            Some("edited by hand\n"),
+            "files not named are left alone"
+        );
         // From a tree as well as a checkpoint, and nothing to do is nothing done.
         s.write("a.txt", "three\n");
-        repo.restore_paths(&repo.tree_of(&sha).unwrap(), &["a.txt"]).unwrap();
+        repo.restore_paths(&repo.tree_of(&sha).unwrap(), &["a.txt"])
+            .unwrap();
         assert_eq!(s.read("a.txt").as_deref(), Some("one\n"));
         assert!(repo.restore_paths(&sha, &[]).unwrap().is_empty());
     }
@@ -1171,18 +1664,34 @@ mod tests {
         let now = repo.tree_now().unwrap();
 
         // a.txt and new.txt kept, bin.dat's deletion kept: only keep/old.txt still differs.
-        let kept = repo.tree_with(&base, &now, &["a.txt", "new.txt", "bin.dat"]).unwrap();
-        let left: Vec<String> = repo.diff_stat(&kept, &now).unwrap().into_iter().map(|f| f.path).collect();
+        let kept = repo
+            .tree_with(&base, &now, &["a.txt", "new.txt", "bin.dat"])
+            .unwrap();
+        let left: Vec<String> = repo
+            .diff_stat(&kept, &now)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
         assert_eq!(left, ["keep/old.txt"]);
         // What wasn't named is still the base's.
-        let from_base: Vec<String> = repo.diff_stat(&base, &kept).unwrap().into_iter().map(|f| f.path).collect();
+        let from_base: Vec<String> = repo
+            .diff_stat(&base, &kept)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
         assert_eq!(from_base, ["a.txt", "bin.dat", "new.txt"]);
         // Undoing against the kept tree puts back the kept version, not the base's.
         s.write("a.txt", "three\n");
-        repo.restore_paths(&kept, &["a.txt", "keep/old.txt"]).unwrap();
+        repo.restore_paths(&kept, &["a.txt", "keep/old.txt"])
+            .unwrap();
         assert_eq!(s.read("a.txt").as_deref(), Some("two\n"));
         assert_eq!(s.read("keep/old.txt").as_deref(), Some("old\n"));
-        assert_eq!(repo.tree_with(&base, &now, &[]).unwrap(), repo.tree_of(&base).unwrap());
+        assert_eq!(
+            repo.tree_with(&base, &now, &[]).unwrap(),
+            repo.tree_of(&base).unwrap()
+        );
     }
 
     #[test]
@@ -1196,16 +1705,33 @@ mod tests {
         s.write("lit1.txt", "changed\n");
         repo.restore_paths(&sha, &["lit[1].txt"]).unwrap();
         assert_eq!(s.read("lit[1].txt").as_deref(), Some("one\n"));
-        assert_eq!(s.read("lit1.txt").as_deref(), Some("changed\n"), "not matched as a glob");
+        assert_eq!(
+            s.read("lit1.txt").as_deref(),
+            Some("changed\n"),
+            "not matched as a glob"
+        );
     }
 
     #[test]
     fn diff_stat_counts_lines_between_checkpoints_and_against_the_files_now() {
         use crate::changes::FileStatus;
         let s = Scratch::new(true);
-        s.write("keep/long.txt", &(1..=20).map(|i| format!("line {i}\n")).collect::<String>());
+        s.write(
+            "keep/long.txt",
+            &(1..=20).map(|i| format!("line {i}\n")).collect::<String>(),
+        );
         s.git(&["add", "-A"]);
-        s.git(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "long"]);
+        s.git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "-qm",
+            "long",
+        ]);
         let repo = s.repo();
         let start = repo.snapshot("t", "u1").unwrap();
         // The turn: an edit, a new file (untracked), a deletion, a rename with a small change,
@@ -1215,25 +1741,54 @@ mod tests {
         std::fs::remove_file(s.0.join("keep/old.txt")).unwrap();
         let long = s.read("keep/long.txt").unwrap();
         std::fs::remove_file(s.0.join("keep/long.txt")).unwrap();
-        s.write("keep/moved.txt", &long.replace("line 20\n", "line twenty\n"));
+        s.write(
+            "keep/moved.txt",
+            &long.replace("line 20\n", "line twenty\n"),
+        );
         std::fs::write(s.0.join("bin.dat"), [7u8, 0, 7]).unwrap();
         s.write("build.log", "ignored\n");
         let now = repo.tree_now().unwrap();
         let files = repo.diff_stat(&start, &now).unwrap();
-        let got: Vec<(&str, FileStatus, u32, u32, bool)> = files.iter().map(|f| (f.path.as_str(), f.status.clone(), f.added, f.removed, f.binary)).collect();
+        let got: Vec<(&str, FileStatus, u32, u32, bool)> = files
+            .iter()
+            .map(|f| {
+                (
+                    f.path.as_str(),
+                    f.status.clone(),
+                    f.added,
+                    f.removed,
+                    f.binary,
+                )
+            })
+            .collect();
         assert_eq!(
             got,
             [
                 ("a.txt", FileStatus::Modified, 2, 0, false),
                 ("bin.dat", FileStatus::Modified, 0, 0, true),
-                ("keep/moved.txt", FileStatus::Renamed { from: "keep/long.txt".into() }, 1, 1, false),
+                (
+                    "keep/moved.txt",
+                    FileStatus::Renamed {
+                        from: "keep/long.txt".into()
+                    },
+                    1,
+                    1,
+                    false
+                ),
                 ("keep/old.txt", FileStatus::Deleted, 0, 1, false),
                 ("src/new.rs", FileStatus::Added, 2, 0, false),
             ]
         );
         // A file's patch, a rename as one.
-        let patch = repo.diff_patch(&start, &now, "keep/moved.txt", Some("keep/long.txt")).unwrap();
-        assert!(patch.contains("rename from keep/long.txt") && patch.contains("-line 20") && patch.contains("+line twenty"), "{patch}");
+        let patch = repo
+            .diff_patch(&start, &now, "keep/moved.txt", Some("keep/long.txt"))
+            .unwrap();
+        assert!(
+            patch.contains("rename from keep/long.txt")
+                && patch.contains("-line 20")
+                && patch.contains("+line twenty"),
+            "{patch}"
+        );
         let patch = repo.diff_patch(&start, &now, "src/new.rs", None).unwrap();
         assert!(patch.contains("+fn b() {}"), "{patch}");
         // The next turn's checkpoint bounds this one: what came after it doesn't count.
@@ -1251,9 +1806,23 @@ mod tests {
         s.git(&["add", "a.txt"]);
         s.write("a.txt", "staged then edited\n");
         s.write("keep/old.txt", "stashed\n");
-        s.git(&["-c", "user.name=t", "-c", "user.email=t@t", "stash", "push", "-q", "--", "keep/old.txt"]);
-        let (head, branches, stash, staged) =
-            (s.git(&["rev-parse", "HEAD"]), s.git(&["branch", "--list"]), s.git(&["stash", "list"]), s.git(&["diff", "--cached", "--name-only"]));
+        s.git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "stash",
+            "push",
+            "-q",
+            "--",
+            "keep/old.txt",
+        ]);
+        let (head, branches, stash, staged) = (
+            s.git(&["rev-parse", "HEAD"]),
+            s.git(&["branch", "--list"]),
+            s.git(&["stash", "list"]),
+            s.git(&["diff", "--cached", "--name-only"]),
+        );
         let index_before = std::fs::read(s.0.join(".git/index")).unwrap();
 
         let repo = s.repo();
@@ -1264,12 +1833,20 @@ mod tests {
 
         assert_eq!(s.read("a.txt").as_deref(), Some("staged then edited\n"));
         assert!(!s.0.join("new.txt").exists());
-        assert_eq!(std::fs::read(s.0.join(".git/index")).unwrap(), index_before, "the index file wasn't rewritten");
+        assert_eq!(
+            std::fs::read(s.0.join(".git/index")).unwrap(),
+            index_before,
+            "the index file wasn't rewritten"
+        );
         assert_eq!(s.git(&["rev-parse", "HEAD"]), head);
         assert_eq!(s.git(&["branch", "--list"]), branches);
         assert_eq!(s.git(&["stash", "list"]), stash);
         assert_eq!(s.git(&["diff", "--cached", "--name-only"]), staged);
-        assert_eq!(s.git(&["show", ":a.txt"]), "staged", "what was staged stays staged");
+        assert_eq!(
+            s.git(&["show", ":a.txt"]),
+            "staged",
+            "what was staged stays staged"
+        );
     }
 
     #[test]
@@ -1277,17 +1854,33 @@ mod tests {
         let s = Scratch::new(false);
         let repo = s.repo();
         let sha = repo.snapshot("t", "u").unwrap();
-        assert!(Command::new("git").args(["rev-parse", "-q", "--verify", "HEAD"]).current_dir(&s.0).output().unwrap().status.code() != Some(0));
+        assert!(
+            Command::new("git")
+                .args(["rev-parse", "-q", "--verify", "HEAD"])
+                .current_dir(&s.0)
+                .output()
+                .unwrap()
+                .status
+                .code()
+                != Some(0)
+        );
         s.write("a.txt", "changed\n");
         s.write("b.txt", "new\n");
-        assert_eq!(sorted(repo.restore(&sha, "t").unwrap().changes), vec![("a.txt".to_string(), Change::Modified), ("b.txt".into(), Change::Added)]);
+        assert_eq!(
+            sorted(repo.restore(&sha, "t").unwrap().changes),
+            vec![
+                ("a.txt".to_string(), Change::Modified),
+                ("b.txt".into(), Change::Added)
+            ]
+        );
         assert_eq!(s.read("a.txt").as_deref(), Some("one\n"));
         assert!(!s.0.join("b.txt").exists());
     }
 
     #[test]
     fn folders_outside_git_have_no_repo() {
-        let dir = std::env::temp_dir().join(format!("trek-checkpoint-plain-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("trek-checkpoint-plain-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // Unless the temp folder itself sits in a repo, which it doesn't on a normal Mac.
         assert_eq!(Repo::find(&dir), None);
@@ -1312,14 +1905,19 @@ mod tests {
         let a = repo.snapshot("t1", "u1").unwrap();
         let b = repo.snapshot("t1", "u2").unwrap();
         repo.snapshot("t2", "u9").unwrap();
-        repo.link("fork", &[("v1".into(), a.clone()), ("v2".into(), b)]).unwrap();
+        repo.link("fork", &[("v1".into(), a.clone()), ("v2".into(), b)])
+            .unwrap();
         assert_eq!(repo.items("fork").unwrap(), ["v1", "v2"]);
         assert_eq!(s.git(&["rev-parse", &ref_name("fork", "v1")]), a);
         repo.delete("t1", &["u1".into()]).unwrap();
         assert_eq!(repo.items("t1").unwrap(), ["u2"]);
         assert_eq!(repo.delete_all("t1").unwrap(), 1);
         assert!(repo.items("t1").unwrap().is_empty());
-        assert_eq!(repo.items("t2").unwrap(), ["u9"], "other threads keep theirs");
+        assert_eq!(
+            repo.items("t2").unwrap(),
+            ["u9"],
+            "other threads keep theirs"
+        );
         // The fork's copies outlive the original's refs.
         assert_eq!(repo.restore(&a, "fork").unwrap(), Restored::default());
         // A thread's undo goes with it too.
@@ -1327,12 +1925,24 @@ mod tests {
         repo.restore(&a, "t2").unwrap();
         assert!(!s.git(&["for-each-ref", &undo_ref("t2")]).is_empty());
         assert_eq!(repo.delete_all("t2").unwrap(), 1);
-        assert!(s.git(&["for-each-ref", "refs/trek/"]).lines().all(|r| !r.contains("t2")));
+        assert!(
+            s.git(&["for-each-ref", "refs/trek/"])
+                .lines()
+                .all(|r| !r.contains("t2"))
+        );
     }
 
     fn git_in(dir: &Path, args: &[&str]) {
-        let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// A repository of its own in `dir`, with one commit.
@@ -1342,7 +1952,20 @@ mod tests {
         git_in(dir, &["config", "core.autocrlf", "false"]);
         std::fs::write(dir.join("lib.rs"), "// vendored\n").unwrap();
         git_in(dir, &["add", "-A"]);
-        git_in(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "v"]);
+        git_in(
+            dir,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgSign=false",
+                "commit",
+                "-qm",
+                "v",
+            ],
+        );
     }
 
     #[test]
@@ -1362,13 +1985,21 @@ mod tests {
         s.write("b_new.txt", "new\n");
         assert_eq!(
             sorted(repo.changes_since(&sha).unwrap()),
-            vec![("a.txt".to_string(), Change::Modified), ("b_new.txt".into(), Change::Added), ("vendor/lib".into(), Change::Nested)]
+            vec![
+                ("a.txt".to_string(), Change::Modified),
+                ("b_new.txt".into(), Change::Added),
+                ("vendor/lib".into(), Change::Nested)
+            ]
         );
         let restored = repo.restore(&sha, "t").unwrap();
         assert_eq!((restored.restored(), restored.failed.clone()), (2, vec![]));
         assert_eq!(s.read("a.txt").as_deref(), Some("one\n"));
         assert!(!s.0.join("b_new.txt").exists());
-        assert_eq!(s.read("vendor/lib/lib.rs").as_deref(), Some("// vendored\n"), "the clone is still there");
+        assert_eq!(
+            s.read("vendor/lib/lib.rs").as_deref(),
+            Some("// vendored\n"),
+            "the clone is still there"
+        );
         assert!(s.0.join("vendor/lib/.git").exists());
         assert_eq!(s.read("empty/x.txt").as_deref(), Some("x\n"));
     }
@@ -1387,7 +2018,11 @@ mod tests {
         let _held = {
             use std::os::windows::fs::OpenOptionsExt as _;
             const FILE_SHARE_READ: u32 = 1;
-            std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(locked.join("new.txt")).unwrap()
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ)
+                .open(locked.join("new.txt"))
+                .unwrap()
         };
         #[cfg(unix)]
         {
@@ -1400,9 +2035,20 @@ mod tests {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        assert_eq!(restored.failed.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["locked/new.txt"]);
+        assert_eq!(
+            restored
+                .failed
+                .iter()
+                .map(|(p, _)| p.as_str())
+                .collect::<Vec<_>>(),
+            ["locked/new.txt"]
+        );
         assert_eq!(restored.restored(), 1);
-        assert_eq!(s.read("a.txt").as_deref(), Some("one\n"), "the other file came back");
+        assert_eq!(
+            s.read("a.txt").as_deref(),
+            Some("one\n"),
+            "the other file came back"
+        );
         assert!(restored.undo.is_some());
     }
 
@@ -1415,44 +2061,107 @@ mod tests {
         s.write("run.sh", "#!/bin/sh\n");
         s.git(&["add", "-A"]);
         s.git(&["update-index", "--chmod=+x", "run.sh"]);
-        s.git(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "init"]);
+        s.git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "-qm",
+            "init",
+        ]);
         let repo = s.repo();
-        let mode = |sha: &str, path: &str| s.git(&["ls-tree", sha, "--", path]).split_whitespace().next().unwrap_or_default().to_string();
+        let mode = |sha: &str, path: &str| {
+            s.git(&["ls-tree", sha, "--", path])
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        };
         let sha = repo.snapshot("t", "u").unwrap();
-        assert_eq!((mode(&sha, "run.sh"), mode(&sha, "a.txt")), ("100755".into(), "100644".into()));
+        assert_eq!(
+            (mode(&sha, "run.sh"), mode(&sha, "a.txt")),
+            ("100755".into(), "100644".into())
+        );
         s.write("run.sh", "#!/bin/sh\necho changed\n");
         s.write("new.sh", "#!/bin/sh\n");
         let sha = repo.snapshot("t", "v").unwrap();
-        assert_eq!((mode(&sha, "run.sh"), mode(&sha, "new.sh")), ("100755".into(), "100644".into()), "tracked keeps its mode, untracked is ordinary");
-        assert_eq!((repo.file_mode(&s.0.join("run.sh"), "run.sh"), repo.file_mode(&s.0.join("new.sh"), "new.sh")), ("100755", "100644"));
+        assert_eq!(
+            (mode(&sha, "run.sh"), mode(&sha, "new.sh")),
+            ("100755".into(), "100644".into()),
+            "tracked keeps its mode, untracked is ordinary"
+        );
+        assert_eq!(
+            (
+                repo.file_mode(&s.0.join("run.sh"), "run.sh"),
+                repo.file_mode(&s.0.join("new.sh"), "new.sh")
+            ),
+            ("100755", "100644")
+        );
     }
 
     #[test]
     fn a_snapshot_that_takes_too_long_is_stopped() {
         let s = Scratch::new(true);
         // A clean filter that hangs (an LFS server that doesn't answer, say).
-        let filter = format!("\"{}\" cat --delay 5", trek_test_fixtures::bin("fixture").display());
+        let filter = format!(
+            "\"{}\" cat --delay 5",
+            trek_test_fixtures::bin("fixture").display()
+        );
         s.git(&["config", "filter.slow.clean", &filter]);
         s.write(".gitattributes", "*.big filter=slow\n");
         s.write("data.big", "lots\n");
         let started = std::time::Instant::now();
-        let err = s.repo().with_limit(Duration::from_millis(300)).snapshot("t", "u").unwrap_err();
-        assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+        let err = s
+            .repo()
+            .with_limit(Duration::from_millis(300))
+            .snapshot("t", "u")
+            .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            started.elapsed()
+        );
         assert!(format!("{err:#}").contains("took longer"), "{err:#}");
         assert!(s.repo().items("t").unwrap().is_empty());
     }
 
     /// A tracked file of twenty numbered lines, committed; returns the baseline (HEAD's tree).
     fn numbered(s: &Scratch) -> String {
-        s.write("n.txt", &(1..=20).map(|i| format!("line {i}\n")).collect::<String>());
+        s.write(
+            "n.txt",
+            &(1..=20).map(|i| format!("line {i}\n")).collect::<String>(),
+        );
         s.git(&["add", "-A"]);
-        s.git(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "n"]);
+        s.git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "-qm",
+            "n",
+        ]);
         s.repo().tree_of("HEAD").unwrap()
     }
 
     fn edit_line(s: &Scratch, n: usize, to: &str) {
         let text = s.read("n.txt").unwrap();
-        let out: String = text.lines().enumerate().map(|(i, l)| if i + 1 == n { format!("{to}\n") } else { format!("{l}\n") }).collect();
+        let out: String = text
+            .lines()
+            .enumerate()
+            .map(|(i, l)| {
+                if i + 1 == n {
+                    format!("{to}\n")
+                } else {
+                    format!("{l}\n")
+                }
+            })
+            .collect();
         s.write("n.txt", &out);
     }
 
@@ -1470,13 +2179,24 @@ mod tests {
         let left = repo.file_diff(&kept, "n.txt").unwrap();
         assert_eq!(left.hunks.len(), 1);
         assert!(left.hunks[0].body.contains("+EIGHTEEN"), "{left:?}");
-        assert_eq!(s.read("n.txt").unwrap().lines().nth(1), Some("TWO"), "keeping leaves the file alone");
+        assert_eq!(
+            s.read("n.txt").unwrap().lines().nth(1),
+            Some("TWO"),
+            "keeping leaves the file alone"
+        );
         // Undo the second: the file loses it, and nothing's left against the new baseline.
         repo.undo_hunk("n.txt", &left.patch(0).unwrap()).unwrap();
         let text = s.read("n.txt").unwrap();
-        assert_eq!((text.lines().nth(1), text.lines().nth(17)), (Some("TWO"), Some("line 18")));
+        assert_eq!(
+            (text.lines().nth(1), text.lines().nth(17)),
+            (Some("TWO"), Some("line 18"))
+        );
         assert!(repo.file_diff(&kept, "n.txt").unwrap().hunks.is_empty());
-        assert_eq!(s.git(&["status", "--porcelain", "--", "n.txt"]), "M n.txt", "the user's index is untouched");
+        assert_eq!(
+            s.git(&["status", "--porcelain", "--", "n.txt"]),
+            "M n.txt",
+            "the user's index is untouched"
+        );
     }
 
     #[test]
@@ -1490,14 +2210,23 @@ mod tests {
         edit_line(&s, 12, "twelve, by the user");
         repo.undo_hunk("n.txt", &diff.patch(0).unwrap()).unwrap();
         let text = s.read("n.txt").unwrap();
-        assert_eq!((text.lines().nth(9), text.lines().nth(11)), (Some("line 10"), Some("twelve, by the user")));
+        assert_eq!(
+            (text.lines().nth(9), text.lines().nth(11)),
+            (Some("line 10"), Some("twelve, by the user"))
+        );
         // The hunk's own line changed since: refused, and the file is as it was.
         edit_line(&s, 5, "FIVE");
         let diff = repo.file_diff(&base, "n.txt").unwrap();
-        let five = diff.hunks.iter().position(|h| h.body.contains("+FIVE")).unwrap();
+        let five = diff
+            .hunks
+            .iter()
+            .position(|h| h.body.contains("+FIVE"))
+            .unwrap();
         edit_line(&s, 5, "five, rewritten");
         let before = s.read("n.txt").unwrap();
-        let err = repo.undo_hunk("n.txt", &diff.patch(five).unwrap()).unwrap_err();
+        let err = repo
+            .undo_hunk("n.txt", &diff.patch(five).unwrap())
+            .unwrap_err();
         assert!(format!("{err:#}").contains("changed since"), "{err:#}");
         assert_eq!(s.read("n.txt").unwrap(), before);
     }
@@ -1510,35 +2239,91 @@ mod tests {
         s.write("src/new.rs", "fn a() {}\nfn b() {}\n");
         let diff = repo.file_diff(&base, "src/new.rs").unwrap();
         assert_eq!(diff.hunks.len(), 1);
-        assert_eq!(diff.marks(), [crate::hunks::Mark::Added { start: 0, end: 2 }]);
+        assert_eq!(
+            diff.marks(),
+            [crate::hunks::Mark::Added { start: 0, end: 2 }]
+        );
         let kept = repo.keep_hunk(&base, &diff.patch(0).unwrap()).unwrap();
-        assert!(repo.file_diff(&kept, "src/new.rs").unwrap().hunks.is_empty(), "kept: the baseline has it");
-        repo.undo_hunk("src/new.rs", &diff.patch(0).unwrap()).unwrap();
+        assert!(
+            repo.file_diff(&kept, "src/new.rs")
+                .unwrap()
+                .hunks
+                .is_empty(),
+            "kept: the baseline has it"
+        );
+        repo.undo_hunk("src/new.rs", &diff.patch(0).unwrap())
+            .unwrap();
         assert!(s.read("src/new.rs").is_none(), "undone: it goes");
-        assert!(s.git(&["status", "--porcelain"]).is_empty(), "and nothing else moved");
+        assert!(
+            s.git(&["status", "--porcelain"]).is_empty(),
+            "and nothing else moved"
+        );
     }
 
     #[test]
     fn hunks_patch_the_right_file_whatever_the_users_diff_prefixes() {
         let s = Scratch::new(true);
-        s.write("src/lib.rs", &(1..=8).map(|i| format!("line {i}\n")).collect::<String>());
+        s.write(
+            "src/lib.rs",
+            &(1..=8).map(|i| format!("line {i}\n")).collect::<String>(),
+        );
         s.write("lib.rs", "a top-level file of the same name\n");
         s.git(&["add", "-A"]);
-        s.git(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "libs"]);
+        s.git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "-qm",
+            "libs",
+        ]);
         // Headers without `a/` and `b/`: `--- src/lib.rs`, which `git apply` would read as `lib.rs`.
         s.git(&["config", "diff.noprefix", "true"]);
         s.git(&["config", "diff.mnemonicPrefix", "true"]);
         let repo = s.repo();
         let base = repo.tree_of("HEAD").unwrap();
-        s.write("src/lib.rs", &(1..=8).map(|i| if i == 4 { "FOUR\n".to_string() } else { format!("line {i}\n") }).collect::<String>());
+        s.write(
+            "src/lib.rs",
+            &(1..=8)
+                .map(|i| {
+                    if i == 4 {
+                        "FOUR\n".to_string()
+                    } else {
+                        format!("line {i}\n")
+                    }
+                })
+                .collect::<String>(),
+        );
         let diff = repo.file_diff(&base, "src/lib.rs").unwrap();
-        assert!(diff.header.contains("--- a/src/lib.rs") && diff.header.contains("+++ b/src/lib.rs"), "{}", diff.header);
+        assert!(
+            diff.header.contains("--- a/src/lib.rs") && diff.header.contains("+++ b/src/lib.rs"),
+            "{}",
+            diff.header
+        );
         let kept = repo.keep_hunk(&base, &diff.patch(0).unwrap()).unwrap();
-        assert!(repo.file_diff(&kept, "src/lib.rs").unwrap().hunks.is_empty(), "kept into src/lib.rs");
-        assert_eq!(repo.entries(&kept, &["lib.rs"]).unwrap(), repo.entries(&base, &["lib.rs"]).unwrap(), "not into lib.rs");
-        repo.undo_hunk("src/lib.rs", &diff.patch(0).unwrap()).unwrap();
+        assert!(
+            repo.file_diff(&kept, "src/lib.rs")
+                .unwrap()
+                .hunks
+                .is_empty(),
+            "kept into src/lib.rs"
+        );
+        assert_eq!(
+            repo.entries(&kept, &["lib.rs"]).unwrap(),
+            repo.entries(&base, &["lib.rs"]).unwrap(),
+            "not into lib.rs"
+        );
+        repo.undo_hunk("src/lib.rs", &diff.patch(0).unwrap())
+            .unwrap();
         assert_eq!(s.read("src/lib.rs").unwrap().lines().nth(3), Some("line 4"));
-        assert_eq!(s.read("lib.rs").as_deref(), Some("a top-level file of the same name\n"), "the other file is untouched");
+        assert_eq!(
+            s.read("lib.rs").as_deref(),
+            Some("a top-level file of the same name\n"),
+            "the other file is untouched"
+        );
     }
 
     #[test]
@@ -1547,12 +2332,26 @@ mod tests {
         // A file ending in blank lines: the last hunk's trailing context is blank.
         s.write("tail.txt", "a\nb\nc\n\n\n");
         s.git(&["add", "-A"]);
-        s.git(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-qm", "tail"]);
+        s.git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "-qm",
+            "tail",
+        ]);
         let repo = s.repo();
         let base = repo.tree_of("HEAD").unwrap();
         s.write("tail.txt", "a\nb\nC\n\n\n");
         let diff = repo.file_diff(&base, "tail.txt").unwrap();
-        assert!(diff.hunks[0].body.ends_with(" \n \n"), "{:?}", diff.hunks[0].body);
+        assert!(
+            diff.hunks[0].body.ends_with(" \n \n"),
+            "{:?}",
+            diff.hunks[0].body
+        );
         let kept = repo.keep_hunk(&base, &diff.patch(0).unwrap()).unwrap();
         assert!(repo.file_diff(&kept, "tail.txt").unwrap().hunks.is_empty());
         repo.undo_hunk("tail.txt", &diff.patch(0).unwrap()).unwrap();
@@ -1562,9 +2361,16 @@ mod tests {
         s.write("tail.txt", "a\nb\nc\n\n\ny\t \n");
         let diff = repo.file_diff(&base, "tail.txt").unwrap();
         let kept = repo.keep_hunk(&base, &diff.patch(0).unwrap()).unwrap();
-        assert!(repo.file_diff(&kept, "tail.txt").unwrap().hunks.is_empty(), "nothing left pending");
+        assert!(
+            repo.file_diff(&kept, "tail.txt").unwrap().hunks.is_empty(),
+            "nothing left pending"
+        );
         let back = repo.tree_now().unwrap();
-        assert_eq!(repo.entries(&kept, &["tail.txt"]).unwrap(), repo.entries(&back, &["tail.txt"]).unwrap(), "the baseline holds the file byte for byte");
+        assert_eq!(
+            repo.entries(&kept, &["tail.txt"]).unwrap(),
+            repo.entries(&back, &["tail.txt"]).unwrap(),
+            "the baseline holds the file byte for byte"
+        );
     }
 
     #[test]
@@ -1579,11 +2385,31 @@ mod tests {
         s.write("build", "ignored output\n");
         s.write("a.txt", "two\n");
         let preview = repo.changes_since(&sha).unwrap();
-        assert!(preview.iter().any(|c| c.path == "build/x.txt" && c.change == Change::Kept), "{preview:?}");
+        assert!(
+            preview
+                .iter()
+                .any(|c| c.path == "build/x.txt" && c.change == Change::Kept),
+            "{preview:?}"
+        );
         let restored = repo.restore(&sha, "t").unwrap();
-        assert_eq!(s.read("build").as_deref(), Some("ignored output\n"), "the ignored file is still there");
-        assert!(restored.failed.iter().any(|(p, why)| p == "build/x.txt" && why.contains("folder")), "{:?}", restored.failed);
-        assert_eq!(s.read("a.txt").as_deref(), Some("one\n"), "the rest is put back");
+        assert_eq!(
+            s.read("build").as_deref(),
+            Some("ignored output\n"),
+            "the ignored file is still there"
+        );
+        assert!(
+            restored
+                .failed
+                .iter()
+                .any(|(p, why)| p == "build/x.txt" && why.contains("folder")),
+            "{:?}",
+            restored.failed
+        );
+        assert_eq!(
+            s.read("a.txt").as_deref(),
+            Some("one\n"),
+            "the rest is put back"
+        );
         // A tracked file the turn put there is removed first, so the folder comes back.
         let s = Scratch::new(true);
         s.write("out/y.txt", "y\n");
@@ -1600,15 +2426,22 @@ mod tests {
         let s = Scratch::new(true);
         let repo = s.repo();
         s.write("blob.txt", &"x".repeat(1024));
-        let blob = repo.run(None, &["hash-object", "-w", "blob.txt"], None).unwrap();
+        let blob = repo
+            .run(None, &["hash-object", "-w", "blob.txt"], None)
+            .unwrap();
         // `cat-file --batch` answers each line as it reads it: 2 MB out for 80 KB in.
         let input = format!("{blob}\n").repeat(2000);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let out = repo.output(None, &["cat-file", "--batch"], Some(input.as_bytes()), None).map(|o| o.stdout.len());
+            let out = repo
+                .output(None, &["cat-file", "--batch"], Some(input.as_bytes()), None)
+                .map(|o| o.stdout.len());
             let _ = tx.send(out.map_err(|e| e.to_string()));
         });
-        let got = rx.recv_timeout(Duration::from_secs(30)).expect("git and Trek waited on each other").unwrap();
+        let got = rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("git and Trek waited on each other")
+            .unwrap();
         assert!(got > 2000 * 1024, "{got}");
         let _ = s;
     }
@@ -1626,17 +2459,31 @@ mod tests {
         s.write("other.txt", "not the turn's\n");
         s.write("keep/old.txt", "not the turn's\n");
         let only = repo.paths_changed(&[(start.clone(), end)]).unwrap();
-        assert_eq!(only, HashSet::from(["a.txt".to_string(), "new.txt".to_string()]));
-        assert_eq!(sorted(repo.changes_since_in(&start, &only).unwrap()), [("a.txt".to_string(), Change::Modified), ("new.txt".into(), Change::Added)]);
+        assert_eq!(
+            only,
+            HashSet::from(["a.txt".to_string(), "new.txt".to_string()])
+        );
+        assert_eq!(
+            sorted(repo.changes_since_in(&start, &only).unwrap()),
+            [
+                ("a.txt".to_string(), Change::Modified),
+                ("new.txt".into(), Change::Added)
+            ]
+        );
         let restored = repo.restore_in(&start, "t", &only).unwrap();
         assert_eq!(restored.restored(), 2);
         assert_eq!(s.read("a.txt").as_deref(), Some("one\n"));
         assert!(s.read("new.txt").is_none());
-        assert_eq!(s.read("other.txt").as_deref(), Some("not the turn's\n"), "not the turn's: left alone");
+        assert_eq!(
+            s.read("other.txt").as_deref(),
+            Some("not the turn's\n"),
+            "not the turn's: left alone"
+        );
         assert_eq!(s.read("keep/old.txt").as_deref(), Some("not the turn's\n"));
         // Undone in the same paths: other.txt, written since, stays.
         s.write("later.txt", "after the restore\n");
-        repo.restore_in(&restored.undo.unwrap(), "t", &only).unwrap();
+        repo.restore_in(&restored.undo.unwrap(), "t", &only)
+            .unwrap();
         assert_eq!(s.read("a.txt").as_deref(), Some("the turn's\n"));
         assert_eq!(s.read("new.txt").as_deref(), Some("the turn's\n"));
         assert_eq!(s.read("later.txt").as_deref(), Some("after the restore\n"));
@@ -1644,7 +2491,8 @@ mod tests {
         let undo = repo.save_undo("t").unwrap();
         repo.restore_paths(&start, &["a.txt"]).unwrap();
         assert_eq!(s.read("a.txt").as_deref(), Some("one\n"));
-        repo.restore_in(&undo, "t", &HashSet::from(["a.txt".to_string()])).unwrap();
+        repo.restore_in(&undo, "t", &HashSet::from(["a.txt".to_string()]))
+            .unwrap();
         assert_eq!(s.read("a.txt").as_deref(), Some("the turn's\n"));
     }
 
@@ -1662,7 +2510,11 @@ mod tests {
             let snap = t.elapsed();
             let t = std::time::Instant::now();
             let changes = repo.changes_since(&sha).unwrap();
-            println!("snapshot {snap:?}, changes {:?} ({} files)", t.elapsed(), changes.len());
+            println!(
+                "snapshot {snap:?}, changes {:?} ({} files)",
+                t.elapsed(),
+                changes.len()
+            );
         }
         repo.delete_all("bench").unwrap();
     }

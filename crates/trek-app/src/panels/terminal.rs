@@ -27,11 +27,22 @@ fn line_height_for(font_size: f32) -> f32 {
 const BELL: Duration = Duration::from_millis(150);
 
 /// Prefer an installed Nerd Font so prompt glyphs (powerline, icons) render.
-const PREFERRED: &[&str] = &["FiraCode Nerd Font Mono", "JetBrainsMono Nerd Font Mono", "MesloLGS NF", "MesloLGM Nerd Font Mono", "Hack Nerd Font Mono", "SauceCodePro Nerd Font Mono"];
+const PREFERRED: &[&str] = &[
+    "FiraCode Nerd Font Mono",
+    "JetBrainsMono Nerd Font Mono",
+    "MesloLGS NF",
+    "MesloLGM Nerd Font Mono",
+    "Hack Nerd Font Mono",
+    "SauceCodePro Nerd Font Mono",
+];
 
 fn terminal_font(window: &Window, fallback: SharedString) -> SharedString {
     let names = window.text_system().all_font_names();
-    PREFERRED.iter().find(|p| names.iter().any(|n| n == *p)).map(|p| SharedString::from(*p)).unwrap_or(fallback)
+    PREFERRED
+        .iter()
+        .find(|p| names.iter().any(|n| n == *p))
+        .map(|p| SharedString::from(*p))
+        .unwrap_or(fallback)
 }
 
 /// What the shell's output asked of the terminal besides drawing it, kept until the view looks:
@@ -61,7 +72,12 @@ type Screen = Arc<Mutex<Parser>>;
 
 /// A screen `rows` by `cols`, keeping `scrollback` lines that have scrolled off it.
 fn new_screen(rows: u16, cols: u16, scrollback: usize) -> Screen {
-    Arc::new(Mutex::new(Parser::new_with_callbacks(rows, cols, scrollback, Events::default())))
+    Arc::new(Mutex::new(Parser::new_with_callbacks(
+        rows,
+        cols,
+        scrollback,
+        Events::default(),
+    )))
 }
 
 /// Repaints at most this often while output streams in.
@@ -82,7 +98,10 @@ const CURSOR_QUERY: &[u8] = b"\x1b[6n";
 /// (`carry`, at most the query's length less one) and ends in this one.
 fn cursor_queries(carry: &[u8], chunk: &[u8]) -> usize {
     let joined = [carry, chunk].concat();
-    joined.windows(CURSOR_QUERY.len()).filter(|w| *w == CURSOR_QUERY).count()
+    joined
+        .windows(CURSOR_QUERY.len())
+        .filter(|w| *w == CURSOR_QUERY)
+        .count()
 }
 
 /// The cursor-position report for a cursor at `(row, col)`, which count from 0: `ESC [ row ; col R`.
@@ -93,7 +112,12 @@ fn cursor_report((row, col): (u16, u16)) -> String {
 /// Feed the shell's output into `screen` until it ends, waking the view after each read. `wake`
 /// holds one wake-up at most: while one is waiting, more output only changes the screen. `reply`
 /// writes back to the shell what its output asks for (the cursor position, on Windows).
-fn pump(mut reader: impl Read, screen: &Screen, wake: &async_channel::Sender<()>, reply: impl Fn(&[u8])) {
+fn pump(
+    mut reader: impl Read,
+    screen: &Screen,
+    wake: &async_channel::Sender<()>,
+    reply: impl Fn(&[u8]),
+) {
     let mut buf = [0u8; 16384];
     let mut carry: Vec<u8> = Vec::new();
     loop {
@@ -140,8 +164,15 @@ fn flavor(program: &str, windows: bool) -> Flavor {
     if !windows {
         return Flavor::Posix;
     }
-    let name = program.rsplit(['/', '\\']).next().unwrap_or(program).to_ascii_lowercase();
-    match name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem) {
+    let name = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    match name
+        .rsplit_once('.')
+        .map_or(name.as_str(), |(stem, _)| stem)
+    {
         "pwsh" | "powershell" => Flavor::PowerShell,
         "cmd" => Flavor::Cmd,
         _ => Flavor::Posix,
@@ -151,13 +182,20 @@ fn flavor(program: &str, windows: bool) -> Flavor {
 /// The shell to start. `setting` is `[terminal] shell`: a path is used as written, a bare name is
 /// looked up with `find`. Empty, it's `$SHELL` (zsh without one) on a Mac; on Windows PowerShell 7,
 /// else Windows PowerShell, else `%COMSPEC%` (cmd.exe).
-fn choose_shell(setting: &str, env_shell: Option<&str>, windows: bool, find: impl Fn(&str) -> Option<PathBuf>, comspec: Option<&str>) -> String {
+fn choose_shell(
+    setting: &str,
+    env_shell: Option<&str>,
+    windows: bool,
+    find: impl Fn(&str) -> Option<PathBuf>,
+    comspec: Option<&str>,
+) -> String {
     let setting = setting.trim().trim_matches('"');
     if !setting.is_empty() {
         if setting.contains(['/', '\\']) {
             return setting.to_string();
         }
-        return find(setting).map_or_else(|| setting.to_string(), |p| p.to_string_lossy().into_owned());
+        return find(setting)
+            .map_or_else(|| setting.to_string(), |p| p.to_string_lossy().into_owned());
     }
     if !windows {
         return env_shell.unwrap_or("/bin/zsh").to_string();
@@ -196,7 +234,9 @@ fn shell_args(flavor: Flavor, command: Option<&str>) -> Vec<String> {
             vec![
                 "-l".into(),
                 "-c".into(),
-                format!("printf '\\033[1m$ %s\\033[0m\\n\\n' {quoted}; {c}; code=$?; printf '\\n\\033[2m[finished with exit code %s]\\033[0m\\n' $code; exit $code"),
+                format!(
+                    "printf '\\033[1m$ %s\\033[0m\\n\\n' {quoted}; {c}; code=$?; printf '\\n\\033[2m[finished with exit code %s]\\033[0m\\n' $code; exit $code"
+                ),
             ]
         }
         (Flavor::PowerShell, None) => vec!["-NoLogo".into()],
@@ -213,14 +253,19 @@ fn shell_args(flavor: Flavor, command: Option<&str>) -> Vec<String> {
         // cmd reads the rest of its command line as the command, quotes and all; `^%` defers
         // `%errorlevel%` to when `call` reaches it, after the command has set it. Only that one
         // `call`: another before it (`call echo.`) would reset the level to 0.
-        (Flavor::Cmd, Some(c)) => vec!["/c".into(), format!("{c} & echo. & call echo [finished with exit code %^errorlevel%]")],
+        (Flavor::Cmd, Some(c)) => vec![
+            "/c".into(),
+            format!("{c} & echo. & call echo [finished with exit code %^errorlevel%]"),
+        ],
     }
 }
 
 /// `path` without the `\\?\` that canonicalising puts on a Windows path: `\\?\C:\dir` is `C:\dir`
 /// and `\\?\UNC\host\share` is `\\host\share`. Shells show the prefix and `cmd.exe` mishandles it.
 fn plain_path(path: PathBuf) -> PathBuf {
-    let Some(text) = path.to_str() else { return path };
+    let Some(text) = path.to_str() else {
+        return path;
+    };
     if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
         return PathBuf::from(format!(r"\\{unc}"));
     }
@@ -234,13 +279,23 @@ fn plain_path(path: PathBuf) -> PathBuf {
 /// network one for `cmd.exe`, which can't be in one and would start in the Windows folder. A folder
 /// that's gone is home, and with no home either (`None`) the shell starts where Trek is, so a
 /// terminal always opens.
-fn shell_cwd(cwd: Option<PathBuf>, flavor: Flavor, windows: bool, home: PathBuf, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+fn shell_cwd(
+    cwd: Option<PathBuf>,
+    flavor: Flavor,
+    windows: bool,
+    home: PathBuf,
+    exists: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
     let cwd = cwd.unwrap_or_else(|| home.clone());
     let cwd = if !windows {
         cwd
     } else {
         let cwd = plain_path(cwd);
-        if flavor == Flavor::Cmd && cwd.to_str().is_some_and(|p| p.starts_with(r"\\")) { home.clone() } else { cwd }
+        if flavor == Flavor::Cmd && cwd.to_str().is_some_and(|p| p.starts_with(r"\\")) {
+            home.clone()
+        } else {
+            cwd
+        }
     };
     [cwd, home].into_iter().find(|dir| exists(dir))
 }
@@ -265,8 +320,19 @@ impl Job {
 
 /// The shell to start for `job` (none: an interactive shell). The setting picks the interactive
 /// shell and the user's own commands' shell; Trek's own commands get the automatic choice.
-fn shell_for(setting: &str, job: Option<&Job>, env_shell: Option<&str>, windows: bool, find: impl Fn(&str) -> Option<PathBuf>, comspec: Option<&str>) -> String {
-    let setting = if matches!(job, Some(Job::Setup(_))) { "" } else { setting };
+fn shell_for(
+    setting: &str,
+    job: Option<&Job>,
+    env_shell: Option<&str>,
+    windows: bool,
+    find: impl Fn(&str) -> Option<PathBuf>,
+    comspec: Option<&str>,
+) -> String {
+    let setting = if matches!(job, Some(Job::Setup(_))) {
+        ""
+    } else {
+        setting
+    };
     choose_shell(setting, env_shell, windows, find, comspec)
 }
 
@@ -275,13 +341,31 @@ fn shell_for(setting: &str, job: Option<&Job>, env_shell: Option<&str>, windows:
 /// The shell's name, as a terminal tab shows it ("zsh", "pwsh"): what `[terminal] shell` (`setting`)
 /// resolves to on this machine, without its folder or extension.
 pub fn shell_name(setting: &str) -> String {
-    let shell = shell_for(setting, None, std::env::var("SHELL").ok().as_deref(), cfg!(windows), |name| trek_core::detect::which(name), std::env::var("COMSPEC").ok().as_deref());
-    std::path::Path::new(&shell).file_stem().map(|s| s.to_string_lossy().to_string()).filter(|s| !s.is_empty()).unwrap_or(shell)
+    let shell = shell_for(
+        setting,
+        None,
+        std::env::var("SHELL").ok().as_deref(),
+        cfg!(windows),
+        |name| trek_core::detect::which(name),
+        std::env::var("COMSPEC").ok().as_deref(),
+    );
+    std::path::Path::new(&shell)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(shell)
 }
 
 fn shell_command(setting: &str, cwd: Option<PathBuf>, job: Option<&Job>) -> CommandBuilder {
     let windows = cfg!(windows);
-    let shell = shell_for(setting, job, std::env::var("SHELL").ok().as_deref(), windows, |name| trek_core::detect::which(name), std::env::var("COMSPEC").ok().as_deref());
+    let shell = shell_for(
+        setting,
+        job,
+        std::env::var("SHELL").ok().as_deref(),
+        windows,
+        |name| trek_core::detect::which(name),
+        std::env::var("COMSPEC").ok().as_deref(),
+    );
     let command = job.map(Job::command);
     let flavor = flavor(&shell, windows);
     let mut cmd = CommandBuilder::new(shell);
@@ -294,7 +378,9 @@ fn shell_command(setting: &str, cwd: Option<PathBuf>, job: Option<&Job>) -> Comm
         // has the one Windows would give a new session (and `login_path` adds agent CLIs' folders).
         cmd.env("PATH", trek_core::detect::login_path());
     }
-    if let Some(dir) = shell_cwd(cwd, flavor, windows, trek_core::paths::home(), |dir| dir.is_dir()) {
+    if let Some(dir) = shell_cwd(cwd, flavor, windows, trek_core::paths::home(), |dir| {
+        dir.is_dir()
+    }) {
         cmd.cwd(dir);
     }
     cmd
@@ -368,13 +454,24 @@ fn home_end(end: bool, application: bool) -> &'static [u8] {
 
 /// What a wheel turned `up` (or down) a notch over the cell at `(row, col)` sends a program that
 /// asked for the mouse: button 64 or 65, in the encoding it asked for.
-fn wheel_report(up: bool, (row, col): (u16, u16), encoding: vt100::MouseProtocolEncoding) -> Vec<u8> {
+fn wheel_report(
+    up: bool,
+    (row, col): (u16, u16),
+    encoding: vt100::MouseProtocolEncoding,
+) -> Vec<u8> {
     let button: u32 = if up { 64 } else { 65 };
     let (x, y) = (col as u32 + 1, row as u32 + 1);
     match encoding {
         vt100::MouseProtocolEncoding::Sgr => format!("\x1b[<{button};{x};{y}M").into_bytes(),
         // X10: each value plus 32 in a byte, which only goes so far.
-        vt100::MouseProtocolEncoding::Default => vec![0x1b, b'[', b'M', (32 + button) as u8, (32 + x).min(255) as u8, (32 + y).min(255) as u8],
+        vt100::MouseProtocolEncoding::Default => vec![
+            0x1b,
+            b'[',
+            b'M',
+            (32 + button) as u8,
+            (32 + x).min(255) as u8,
+            (32 + y).min(255) as u8,
+        ],
         vt100::MouseProtocolEncoding::Utf8 => {
             let mut out = b"\x1b[M".to_vec();
             for v in [32 + button, 32 + x, 32 + y] {
@@ -388,8 +485,16 @@ fn wheel_report(up: bool, (row, col): (u16, u16), encoding: vt100::MouseProtocol
 /// What to write to the shell for pasted `text`: wrapped when it asked for bracketed paste, and
 /// on Windows with line ends as Enter (CR) like a typed line, not the clipboard's CRLF.
 fn paste_bytes(text: &str, bracketed: bool, windows: bool) -> String {
-    let text = if windows { text.replace("\r\n", "\r").replace('\n', "\r") } else { text.to_string() };
-    if bracketed { format!("\x1b[200~{text}\x1b[201~") } else { text }
+    let text = if windows {
+        text.replace("\r\n", "\r").replace('\n', "\r")
+    } else {
+        text.to_string()
+    };
+    if bracketed {
+        format!("\x1b[200~{text}\x1b[201~")
+    } else {
+        text
+    }
 }
 
 /// Ends the shell when the terminal goes away. The output thread holds duplicates of the pty's
@@ -420,10 +525,23 @@ struct Session {
 }
 
 /// Start `cmd` on a new pty of `size`, pumping its output into `screen` and waking `wake`.
-fn start_session(size: (u16, u16), cmd: CommandBuilder, screen: Screen, wake: async_channel::Sender<()>) -> anyhow::Result<Session> {
-    let pty = native_pty_system().openpty(PtySize { rows: size.0, cols: size.1, pixel_width: 0, pixel_height: 0 })?;
+fn start_session(
+    size: (u16, u16),
+    cmd: CommandBuilder,
+    screen: Screen,
+    wake: async_channel::Sender<()>,
+) -> anyhow::Result<Session> {
+    let pty = native_pty_system().openpty(PtySize {
+        rows: size.0,
+        cols: size.1,
+        pixel_width: 0,
+        pixel_height: 0,
+    })?;
     let mut child = pty.slave.spawn_command(cmd)?;
-    let hangup = Hangup { killer: child.clone_killer(), reaped: Arc::new(AtomicBool::new(false)) };
+    let hangup = Hangup {
+        killer: child.clone_killer(),
+        reaped: Arc::new(AtomicBool::new(false)),
+    };
     let reader = pty.master.try_clone_reader()?;
     let writer = Arc::new(Mutex::new(pty.master.take_writer()?));
     let answering = writer.clone();
@@ -438,7 +556,12 @@ fn start_session(size: (u16, u16), cmd: CommandBuilder, screen: Screen, wake: as
         let _ = child.wait();
         reaped.store(true, Ordering::SeqCst);
     });
-    Ok(Session { writer, master: pty.master, hangup, thread })
+    Ok(Session {
+        writer,
+        master: pty.master,
+        hangup,
+        thread,
+    })
 }
 
 /// A place in the output: a line counted from the top of the live screen (negative back in the
@@ -461,7 +584,11 @@ struct Selection {
 impl Selection {
     /// Its start and end, the start first.
     fn ordered(&self) -> (Pos, Pos) {
-        if self.anchor <= self.head { (self.anchor, self.head) } else { (self.head, self.anchor) }
+        if self.anchor <= self.head {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
     }
 }
 
@@ -487,10 +614,16 @@ fn selected_text(parser: &mut Parser, start: Pos, end: Pos) -> String {
         }
         let row = row as u16;
         let from = if line == start.line { start.col } else { 0 };
-        let to = if line == end.line { end.col.min(cols) } else { cols };
+        let to = if line == end.line {
+            end.col.min(cols)
+        } else {
+            cols
+        };
         let mut text = String::new();
         for c in from..to {
-            let Some(cell) = screen.cell(row, c) else { continue };
+            let Some(cell) = screen.cell(row, c) else {
+                continue;
+            };
             if cell.is_wide_continuation() {
                 continue;
             }
@@ -512,7 +645,9 @@ fn selected_text(parser: &mut Parser, start: Pos, end: Pos) -> String {
 fn row_text(screen: &vt100::Screen, row: u16) -> (String, Vec<u16>) {
     let (mut text, mut at) = (String::new(), Vec::new());
     for c in 0..screen.size().1 {
-        let Some(cell) = screen.cell(row, c) else { continue };
+        let Some(cell) = screen.cell(row, c) else {
+            continue;
+        };
         if cell.is_wide_continuation() {
             continue;
         }
@@ -537,7 +672,11 @@ fn row_links(screen: &vt100::Screen, row: u16) -> Vec<Link> {
     let (text, at) = row_text(screen, row);
     crate::panels::terminal_links::find_links(&text)
         .into_iter()
-        .map(|f| Link { row, cols: at[f.range.start]..at[f.range.end - 1] + 1, url: f.url })
+        .map(|f| Link {
+            row,
+            cols: at[f.range.start]..at[f.range.end - 1] + 1,
+            url: f.url,
+        })
         .collect()
 }
 
@@ -548,7 +687,23 @@ fn word_bounds(screen: &vt100::Screen, row: u16, col: u16) -> (u16, u16) {
     let in_word = |c: u16| {
         screen.cell(row, c).is_some_and(|cell| {
             let s = cell.contents();
-            cell.is_wide_continuation() || (!s.trim().is_empty() && !matches!(s, "\"" | "'" | "`" | "(" | ")" | "[" | "]" | "{" | "}" | "<" | ">" | "|" | "│"))
+            cell.is_wide_continuation()
+                || (!s.trim().is_empty()
+                    && !matches!(
+                        s,
+                        "\"" | "'"
+                            | "`"
+                            | "("
+                            | ")"
+                            | "["
+                            | "]"
+                            | "{"
+                            | "}"
+                            | "<"
+                            | ">"
+                            | "|"
+                            | "│"
+                    ))
         })
     };
     if !in_word(col) {
@@ -610,8 +765,8 @@ impl EventEmitter<TitleChanged> for TerminalPanel {}
 
 fn ansi(idx: u8) -> Hsla {
     const BASE: [u32; 16] = [
-        0x1A1A1D, 0xFF5A5F, 0x3FCF8E, 0xFFB020, 0x5AA9FF, 0xB48CFF, 0x4FD1D9, 0xD7DAE0, 0x5C6370, 0xFF7B80, 0x6BE3A8, 0xFFC857, 0x7FBDFF, 0xC9A8FF,
-        0x7FE0E6, 0xFFFFFF,
+        0x1A1A1D, 0xFF5A5F, 0x3FCF8E, 0xFFB020, 0x5AA9FF, 0xB48CFF, 0x4FD1D9, 0xD7DAE0, 0x5C6370,
+        0xFF7B80, 0x6BE3A8, 0xFFC857, 0x7FBDFF, 0xC9A8FF, 0x7FE0E6, 0xFFFFFF,
     ];
     let v = match idx {
         0..=15 => BASE[idx as usize],
@@ -632,23 +787,42 @@ fn color(c: vt100::Color) -> Option<Hsla> {
     match c {
         vt100::Color::Default => None,
         vt100::Color::Idx(i) => Some(ansi(i)),
-        vt100::Color::Rgb(r, g, b) => Some(rgb(((r as u32) << 16) | ((g as u32) << 8) | b as u32).into()),
+        vt100::Color::Rgb(r, g, b) => {
+            Some(rgb(((r as u32) << 16) | ((g as u32) << 8) | b as u32).into())
+        }
     }
 }
 
 impl TerminalPanel {
     /// A terminal in `cwd`, for `workspace`. `shell` is `[terminal] shell` as the workspace holds it now.
-    pub fn new(workspace: WeakEntity<Workspace>, cwd: Option<PathBuf>, shell: String, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: WeakEntity<Workspace>,
+        cwd: Option<PathBuf>,
+        shell: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self::with_job(workspace, cwd, None, shell, cx)
     }
 
     /// A terminal that runs one command in a login shell (agent install / sign-in, a project
     /// action), shows its output and stays open after it exits.
-    pub fn with_command(workspace: WeakEntity<Workspace>, cwd: Option<PathBuf>, job: Job, shell: String, cx: &mut Context<Self>) -> Self {
+    pub fn with_command(
+        workspace: WeakEntity<Workspace>,
+        cwd: Option<PathBuf>,
+        job: Job,
+        shell: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self::with_job(workspace, cwd, Some(job), shell, cx)
     }
 
-    fn with_job(workspace: WeakEntity<Workspace>, cwd: Option<PathBuf>, job: Option<Job>, shell: String, cx: &mut Context<Self>) -> Self {
+    fn with_job(
+        workspace: WeakEntity<Workspace>,
+        cwd: Option<PathBuf>,
+        job: Option<Job>,
+        shell: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let size = (30u16, 90u16);
         let mut this = Self {
             workspace,
@@ -676,11 +850,18 @@ impl TerminalPanel {
         // An isolated (test) process starts no shell: one would run the user's login profile,
         // and the command (a project's tests, an agent's sign-in) for real.
         if trek_core::paths::isolated() {
-            this.screen().process(format!("$ {}\r\n(no shell in tests)\r\n", job.as_ref().map_or("", Job::command)).as_bytes());
+            this.screen().process(
+                format!(
+                    "$ {}\r\n(no shell in tests)\r\n",
+                    job.as_ref().map_or("", Job::command)
+                )
+                .as_bytes(),
+            );
             return this;
         }
         if let Err(e) = this.spawn(cwd, job, &shell, cx) {
-            this.screen().process(format!("Couldn't start a shell: {e}\r\n").as_bytes());
+            this.screen()
+                .process(format!("Couldn't start a shell: {e}\r\n").as_bytes());
         }
         this
     }
@@ -689,11 +870,22 @@ impl TerminalPanel {
         self.parser.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn spawn(&mut self, cwd: Option<PathBuf>, job: Option<Job>, shell: &str, cx: &mut Context<Self>) -> anyhow::Result<()> {
+    fn spawn(
+        &mut self,
+        cwd: Option<PathBuf>,
+        job: Option<Job>,
+        shell: &str,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
         let cmd = shell_command(shell, cwd, job.as_ref());
         let (tx, rx) = async_channel::bounded::<()>(1);
         let session = start_session(self.size, cmd, self.parser.clone(), tx)?;
-        let Session { writer, master, hangup, thread } = session;
+        let Session {
+            writer,
+            master,
+            hangup,
+            thread,
+        } = session;
         drop(thread); // detached: it ends by itself once the shell has
         self.writer = Some(writer);
         self.master = Some(master);
@@ -734,7 +926,11 @@ impl TerminalPanel {
             let mut parser = self.screen();
             let scrollback = parser.screen().scrollback();
             let events = parser.callbacks_mut();
-            (std::mem::take(&mut events.bell), events.title.take(), scrollback)
+            (
+                std::mem::take(&mut events.bell),
+                events.title.take(),
+                scrollback,
+            )
         };
         if let Some(title) = title.filter(|t| Some(t) != self.title.as_ref()) {
             self.title = Some(title);
@@ -751,7 +947,11 @@ impl TerminalPanel {
             sel.anchor.line -= grew;
             sel.head.line -= grew;
             let (start, end) = sel.ordered();
-            let now = selected_text(&mut self.parser.lock().unwrap_or_else(|e| e.into_inner()), start, end);
+            let now = selected_text(
+                &mut self.parser.lock().unwrap_or_else(|e| e.into_inner()),
+                start,
+                end,
+            );
             if now != sel.text {
                 self.selection = None;
                 self.press = None;
@@ -809,7 +1009,12 @@ impl TerminalPanel {
         self.press = None;
         self.hovered = None;
         if let Some(m) = &self.master {
-            let _ = m.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+            let _ = m.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
         }
     }
 
@@ -822,7 +1027,9 @@ impl TerminalPanel {
 
     /// Copy the selection to the clipboard; false when nothing is selected.
     fn copy(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(sel) = &self.selection else { return false };
+        let Some(sel) = &self.selection else {
+            return false;
+        };
         cx.write_to_clipboard(ClipboardItem::new_string(sel.text.clone()));
         true
     }
@@ -853,9 +1060,17 @@ impl TerminalPanel {
         {
             return (family.clone(), *width);
         }
-        let family = self.font.as_ref().map(|f| f.0.clone()).unwrap_or_else(|| terminal_font(window, fallback.clone()));
+        let family = self
+            .font
+            .as_ref()
+            .map(|f| f.0.clone())
+            .unwrap_or_else(|| terminal_font(window, fallback.clone()));
         let id = window.text_system().resolve_font(&font(family.clone()));
-        let width = window.text_system().em_advance(id, px(self.font_size)).map(|w| w.as_f32()).unwrap_or(self.font_size * 0.6);
+        let width = window
+            .text_system()
+            .em_advance(id, px(self.font_size))
+            .map(|w| w.as_f32())
+            .unwrap_or(self.font_size * 0.6);
         self.font = Some((family.clone(), self.font_size, width));
         (family, width)
     }
@@ -864,11 +1079,17 @@ impl TerminalPanel {
     fn cell_at(&self, position: Point<Pixels>) -> Option<(u16, u16)> {
         let grid = self.grid.get();
         let (rows, cols) = self.screen().screen().size();
-        let (x, y) = ((position.x - grid.origin.x).as_f32(), (position.y - grid.origin.y).as_f32());
+        let (x, y) = (
+            (position.x - grid.origin.x).as_f32(),
+            (position.y - grid.origin.y).as_f32(),
+        );
         if x < 0. || y < 0. {
             return None;
         }
-        let (row, col) = ((y / self.line_height()) as u16, (x / self.cell_width()) as u16);
+        let (row, col) = (
+            (y / self.line_height()) as u16,
+            (x / self.cell_width()) as u16,
+        );
         (row < rows && col < cols).then_some((row, col))
     }
 
@@ -880,22 +1101,39 @@ impl TerminalPanel {
         let (rows, cols) = screen.screen().size();
         let back = screen.screen().scrollback() as isize;
         drop(screen);
-        let (x, y) = ((position.x - grid.origin.x).as_f32(), (position.y - grid.origin.y).as_f32());
+        let (x, y) = (
+            (position.x - grid.origin.x).as_f32(),
+            (position.y - grid.origin.y).as_f32(),
+        );
         let (row, col) = if y < 0. {
             (0, 0)
         } else if y >= rows as f32 * self.line_height() {
             (rows.saturating_sub(1), cols)
         } else {
-            ((y / self.line_height()) as u16, (x / self.cell_width()).round().clamp(0., cols as f32) as u16)
+            (
+                (y / self.line_height()) as u16,
+                (x / self.cell_width()).round().clamp(0., cols as f32) as u16,
+            )
         };
-        Pos { line: row as isize - back, col }
+        Pos {
+            line: row as isize - back,
+            col,
+        }
     }
 
     /// Select from `anchor` to `head`; nothing when they're the same place.
     fn select(&mut self, anchor: Pos, head: Pos) {
         self.selection = (anchor != head).then(|| {
-            let (start, end) = if anchor <= head { (anchor, head) } else { (head, anchor) };
-            Selection { anchor, head, text: selected_text(&mut self.screen(), start, end) }
+            let (start, end) = if anchor <= head {
+                (anchor, head)
+            } else {
+                (head, anchor)
+            };
+            Selection {
+                anchor,
+                head,
+                text: selected_text(&mut self.screen(), start, end),
+            }
         });
     }
 
@@ -919,11 +1157,17 @@ impl TerminalPanel {
                 }
             }
             clicks => {
-                let Some((row, col)) = self.cell_at(e.position) else { return };
+                let Some((row, col)) = self.cell_at(e.position) else {
+                    return;
+                };
                 let (line, (a, b)) = {
                     let parser = self.screen();
                     let screen = parser.screen();
-                    let span = if clicks == 2 { word_bounds(screen, row, col) } else { (0, screen.size().1) };
+                    let span = if clicks == 2 {
+                        word_bounds(screen, row, col)
+                    } else {
+                        (0, screen.size().1)
+                    };
                     (row as isize - screen.scrollback() as isize, span)
                 };
                 self.select(Pos { line, col: a }, Pos { line, col: b });
@@ -947,7 +1191,9 @@ impl TerminalPanel {
     /// The link under `position`, if there's one.
     fn link_at(&self, position: Point<Pixels>) -> Option<Link> {
         let (row, col) = self.cell_at(position)?;
-        row_links(self.screen().screen(), row).into_iter().find(|l| l.cols.contains(&col))
+        row_links(self.screen().screen(), row)
+            .into_iter()
+            .find(|l| l.cols.contains(&col))
     }
 
     /// The pointer is at `position` with ⌘ held or not: the link under it, while held, is
@@ -972,7 +1218,12 @@ impl TerminalPanel {
         let k = &event.keystroke;
         let m = &k.modifiers;
         // Shift+PageUp / PageDown page through the scrollback, as in Terminal.
-        if m.shift && !m.control && !m.alt && !m.platform && matches!(k.key.as_str(), "pageup" | "pagedown") {
+        if m.shift
+            && !m.control
+            && !m.alt
+            && !m.platform
+            && matches!(k.key.as_str(), "pageup" | "pagedown")
+        {
             let page = self.size.0.saturating_sub(1).max(1) as isize;
             self.scroll_by(if k.key == "pageup" { page } else { -page }, cx);
             cx.stop_propagation();
@@ -980,7 +1231,10 @@ impl TerminalPanel {
         }
         let (app, alternate) = {
             let parser = self.screen();
-            (parser.screen().application_cursor(), parser.screen().alternate_screen())
+            (
+                parser.screen().application_cursor(),
+                parser.screen().alternate_screen(),
+            )
         };
         if let Some(shortcut) = shortcut(&k.key, m, cfg!(windows)) {
             match shortcut {
@@ -993,8 +1247,16 @@ impl TerminalPanel {
                 Shortcut::Clear => self.write(b"\x0c"),
                 // A full-screen program (an editor, less) reads Home and End; a shell's line
                 // editor knows Ctrl+A, Ctrl+E and Ctrl+U.
-                Shortcut::LineStart => self.write(if alternate { home_end(false, app) } else { b"\x01" }),
-                Shortcut::LineEnd => self.write(if alternate { home_end(true, app) } else { b"\x05" }),
+                Shortcut::LineStart => self.write(if alternate {
+                    home_end(false, app)
+                } else {
+                    b"\x01"
+                }),
+                Shortcut::LineEnd => self.write(if alternate {
+                    home_end(true, app)
+                } else {
+                    b"\x05"
+                }),
                 Shortcut::DeleteLine => self.write(b"\x15"),
                 Shortcut::Bigger => self.set_font_size(self.font_size + 1., cx),
                 Shortcut::Smaller => self.set_font_size(self.font_size - 1., cx),
@@ -1007,14 +1269,38 @@ impl TerminalPanel {
         let seq: Option<Vec<u8>> = match k.key.as_str() {
             // Shift+Enter (and Alt+Enter) is Meta+Return: a new line in the prompt without running
             // it, in zsh and in agents' CLIs (Claude Code, Codex).
-            "enter" => Some(if m.shift || m.alt { b"\x1b\r".to_vec() } else { b"\r".to_vec() }),
-            "backspace" => Some(if m.alt { b"\x1b\x7f".to_vec() } else { b"\x7f".to_vec() }),
-            "tab" => Some(if m.shift { b"\x1b[Z".to_vec() } else { b"\t".to_vec() }),
+            "enter" => Some(if m.shift || m.alt {
+                b"\x1b\r".to_vec()
+            } else {
+                b"\r".to_vec()
+            }),
+            "backspace" => Some(if m.alt {
+                b"\x1b\x7f".to_vec()
+            } else {
+                b"\x7f".to_vec()
+            }),
+            "tab" => Some(if m.shift {
+                b"\x1b[Z".to_vec()
+            } else {
+                b"\t".to_vec()
+            }),
             "escape" => Some(b"\x1b".to_vec()),
             "up" => Some(if app { b"\x1bOA" } else { b"\x1b[A" }.to_vec()),
             "down" => Some(if app { b"\x1bOB" } else { b"\x1b[B" }.to_vec()),
-            "right" => Some(if m.alt { b"\x1bf".to_vec() } else if app { b"\x1bOC".to_vec() } else { b"\x1b[C".to_vec() }),
-            "left" => Some(if m.alt { b"\x1bb".to_vec() } else if app { b"\x1bOD".to_vec() } else { b"\x1b[D".to_vec() }),
+            "right" => Some(if m.alt {
+                b"\x1bf".to_vec()
+            } else if app {
+                b"\x1bOC".to_vec()
+            } else {
+                b"\x1b[C".to_vec()
+            }),
+            "left" => Some(if m.alt {
+                b"\x1bb".to_vec()
+            } else if app {
+                b"\x1bOD".to_vec()
+            } else {
+                b"\x1b[D".to_vec()
+            }),
             "home" => Some(home_end(false, app).to_vec()),
             "end" => Some(home_end(true, app).to_vec()),
             "delete" => Some(b"\x1b[3~".to_vec()),
@@ -1071,7 +1357,12 @@ impl TerminalPanel {
         let (mode, encoding, alternate, app) = {
             let parser = self.screen();
             let s = parser.screen();
-            (s.mouse_protocol_mode(), s.mouse_protocol_encoding(), s.alternate_screen(), s.application_cursor())
+            (
+                s.mouse_protocol_mode(),
+                s.mouse_protocol_encoding(),
+                s.alternate_screen(),
+                s.application_cursor(),
+            )
         };
         let up = lines > 0.;
         let count = lines.abs() as usize;
@@ -1116,12 +1407,19 @@ impl TerminalPanel {
     pub fn links(&self) -> Vec<Link> {
         let parser = self.screen();
         let screen = parser.screen();
-        (0..screen.size().0).flat_map(|row| row_links(screen, row)).collect()
+        (0..screen.size().0)
+            .flat_map(|row| row_links(screen, row))
+            .collect()
     }
 
     /// Open the `n`th link on screen (from 1), as ⌘-clicking it does.
     #[cfg(any(test, feature = "shots"))]
-    pub fn open_nth_link(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) -> anyhow::Result<String> {
+    pub fn open_nth_link(
+        &mut self,
+        n: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<String> {
         let links = self.links();
         let Some(link) = n.checked_sub(1).and_then(|i| links.get(i)).cloned() else {
             anyhow::bail!("no link {n}: {} on screen", links.len());
@@ -1154,14 +1452,20 @@ impl TerminalPanel {
     #[cfg(test)]
     pub fn cell_start(&self, row: u16, col: u16) -> Point<Pixels> {
         let grid = self.grid.get();
-        point(grid.origin.x + px(col as f32 * self.cell_width() + 1.), grid.origin.y + px((row as f32 + 0.5) * self.line_height()))
+        point(
+            grid.origin.x + px(col as f32 * self.cell_width() + 1.),
+            grid.origin.y + px((row as f32 + 0.5) * self.line_height()),
+        )
     }
 
     /// The middle of the cell at `(row, col)`, in the window, as last drawn.
     #[cfg(test)]
     pub fn cell_center(&self, row: u16, col: u16) -> Point<Pixels> {
         let grid = self.grid.get();
-        point(grid.origin.x + px((col as f32 + 0.5) * self.cell_width()), grid.origin.y + px((row as f32 + 0.5) * self.line_height()))
+        point(
+            grid.origin.x + px((col as f32 + 0.5) * self.cell_width()),
+            grid.origin.y + px((row as f32 + 0.5) * self.line_height()),
+        )
     }
 
     /// The text under the selection now, if there's one (what ⌘C copies is what it held when
@@ -1198,8 +1502,16 @@ impl TerminalPanel {
     pub fn recent_output(&self, n: usize) -> String {
         let text = self.screen().screen().contents();
         let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
-        let end = lines.iter().rposition(|l| !l.is_empty()).map_or(0, |i| i + 1);
-        lines[..end].iter().skip(end.saturating_sub(n)).copied().collect::<Vec<_>>().join("\n")
+        let end = lines
+            .iter()
+            .rposition(|l| !l.is_empty())
+            .map_or(0, |i| i + 1);
+        lines[..end]
+            .iter()
+            .skip(end.saturating_sub(n))
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -1221,11 +1533,17 @@ impl Render for TerminalPanel {
         let mut lines = Vec::with_capacity(rows as usize);
         for r in 0..rows {
             let line = r as isize - scrollback as isize;
-            let link = self.hovered.as_ref().filter(|l| l.row == r).map(|l| l.cols.clone());
+            let link = self
+                .hovered
+                .as_ref()
+                .filter(|l| l.row == r)
+                .map(|l| l.cols.clone());
             let mut text = String::new();
             let mut highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = Vec::new();
             for c in 0..cols {
-                let Some(cell) = screen.cell(r, c) else { continue };
+                let Some(cell) = screen.cell(r, c) else {
+                    continue;
+                };
                 if cell.is_wide_continuation() {
                     continue;
                 }
@@ -1254,16 +1572,27 @@ impl Render for TerminalPanel {
                             color: fg,
                             background_color: bg,
                             font_weight: cell.bold().then_some(FontWeight::BOLD),
-                            underline: underline.then(|| UnderlineStyle { thickness: px(1.), ..Default::default() }),
+                            underline: underline.then(|| UnderlineStyle {
+                                thickness: px(1.),
+                                ..Default::default()
+                            }),
                             ..Default::default()
                         },
                     ));
                 }
             }
-            let trimmed = text.trim_end().len().max(highlights.last().map(|h| h.0.end).unwrap_or(0));
+            let trimmed = text
+                .trim_end()
+                .len()
+                .max(highlights.last().map(|h| h.0.end).unwrap_or(0));
             text.truncate(trimmed);
             highlights.retain(|h| h.0.end <= text.len());
-            lines.push(div().h(px(line_height)).whitespace_nowrap().child(StyledText::new(text).with_highlights(highlights)));
+            lines.push(
+                div()
+                    .h(px(line_height))
+                    .whitespace_nowrap()
+                    .child(StyledText::new(text).with_highlights(highlights)),
+            );
         }
         drop(parser);
         let entity = cx.entity().downgrade();
@@ -1299,8 +1628,11 @@ impl Render for TerminalPanel {
                         move |_, _, window, _| {
                             let moved = entity.clone();
                             window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
-                                if phase == DispatchPhase::Bubble && e.pressed_button == Some(MouseButton::Left) {
-                                    let _ = moved.update(cx, |this, cx| this.drag_to(e.position, cx));
+                                if phase == DispatchPhase::Bubble
+                                    && e.pressed_button == Some(MouseButton::Left)
+                                {
+                                    let _ =
+                                        moved.update(cx, |this, cx| this.drag_to(e.position, cx));
                                 }
                             });
                             let released = entity.clone();
@@ -1364,10 +1696,18 @@ impl Render for TerminalPanel {
             .line_height(px(line_height))
             .text_color(theme.foreground)
             .overflow_hidden()
-            .cursor(if self.hovered.is_some() { CursorStyle::PointingHand } else { CursorStyle::IBeam })
+            .cursor(if self.hovered.is_some() {
+                CursorStyle::PointingHand
+            } else {
+                CursorStyle::IBeam
+            })
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
-            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.hover(e.position, e.modifiers.secondary(), cx)))
-            .on_modifiers_changed(cx.listener(|this, e: &ModifiersChangedEvent, window, cx| this.hover(window.mouse_position(), e.modifiers.secondary(), cx)))
+            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
+                this.hover(e.position, e.modifiers.secondary(), cx)
+            }))
+            .on_modifiers_changed(cx.listener(|this, e: &ModifiersChangedEvent, window, cx| {
+                this.hover(window.mouse_position(), e.modifiers.secondary(), cx)
+            }))
             .on_hover(cx.listener(|this, over: &bool, _, cx| {
                 if !*over {
                     this.pointer = None;
@@ -1380,14 +1720,25 @@ impl Render for TerminalPanel {
             .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.wheel(e, cx)))
             .child(rows_view)
             .children(to_bottom)
-            .when(self.bell_at.is_some(), |el| el.child(div().id("terminal-bell").test_support().absolute().inset_0().bg(theme.foreground.opacity(0.06))))
+            .when(self.bell_at.is_some(), |el| {
+                el.child(
+                    div()
+                        .id("terminal-bell")
+                        .test_support()
+                        .absolute()
+                        .inset_0()
+                        .bg(theme.foreground.opacity(0.06)),
+                )
+            })
             .context_menu(move |menu, _, cx| {
                 let selected = me.upgrade().is_some_and(|t| t.read(cx).selection.is_some());
                 let (copy, paste) = (me.clone(), me.clone());
                 menu.min_w(px(160.))
-                    .item(PopupMenuItem::new("Copy").disabled(!selected).on_click(move |_, _, cx| {
-                        let _ = copy.update(cx, |t, cx| t.copy(cx));
-                    }))
+                    .item(PopupMenuItem::new("Copy").disabled(!selected).on_click(
+                        move |_, _, cx| {
+                            let _ = copy.update(cx, |t, cx| t.copy(cx));
+                        },
+                    ))
                     .item(PopupMenuItem::new("Paste").on_click(move |_, _, cx| {
                         let _ = paste.update(cx, |t, cx| t.paste(cx));
                     }))
@@ -1397,40 +1748,85 @@ impl Render for TerminalPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{Flavor, Job, Screen, Shortcut, choose_shell, home_end, new_screen, wheel_report, cursor_queries, cursor_report, flavor, paste_bytes, plain_path, powershell_quote, pump, shell_args, shell_cwd, shell_for, shortcut};
+    use super::{
+        Flavor, Job, Screen, Shortcut, choose_shell, cursor_queries, cursor_report, flavor,
+        home_end, new_screen, paste_bytes, plain_path, powershell_quote, pump, shell_args,
+        shell_cwd, shell_for, shortcut, wheel_report,
+    };
     use gpui_kit::Modifiers;
     use std::path::{Path, PathBuf};
 
     fn found(names: &'static [&'static str]) -> impl Fn(&str) -> Option<PathBuf> {
-        move |n| names.contains(&n).then(|| PathBuf::from(format!(r"C:\bin\{n}.exe")))
+        move |n| {
+            names
+                .contains(&n)
+                .then(|| PathBuf::from(format!(r"C:\bin\{n}.exe")))
+        }
     }
 
     #[test]
     fn windows_picks_pwsh_then_windows_powershell_then_comspec() {
         let pick = |names, comspec| choose_shell("", None, true, found(names), comspec);
-        assert_eq!(pick(&["pwsh", "powershell"], Some(r"C:\Windows\System32\cmd.exe")), r"C:\bin\pwsh.exe");
-        assert_eq!(pick(&["powershell"], Some(r"C:\Windows\System32\cmd.exe")), r"C:\bin\powershell.exe");
-        assert_eq!(pick(&[], Some(r"C:\Windows\System32\cmd.exe")), r"C:\Windows\System32\cmd.exe");
-        assert_eq!(pick(&[], Some("")), "cmd.exe", "an empty COMSPEC is no COMSPEC");
+        assert_eq!(
+            pick(
+                &["pwsh", "powershell"],
+                Some(r"C:\Windows\System32\cmd.exe")
+            ),
+            r"C:\bin\pwsh.exe"
+        );
+        assert_eq!(
+            pick(&["powershell"], Some(r"C:\Windows\System32\cmd.exe")),
+            r"C:\bin\powershell.exe"
+        );
+        assert_eq!(
+            pick(&[], Some(r"C:\Windows\System32\cmd.exe")),
+            r"C:\Windows\System32\cmd.exe"
+        );
+        assert_eq!(
+            pick(&[], Some("")),
+            "cmd.exe",
+            "an empty COMSPEC is no COMSPEC"
+        );
         assert_eq!(pick(&[], None), "cmd.exe");
     }
 
     #[test]
     fn a_mac_keeps_its_login_shell_and_the_setting_overrides_either() {
-        assert_eq!(choose_shell("", Some("/opt/homebrew/bin/fish"), false, found(&["pwsh"]), None), "/opt/homebrew/bin/fish");
+        assert_eq!(
+            choose_shell(
+                "",
+                Some("/opt/homebrew/bin/fish"),
+                false,
+                found(&["pwsh"]),
+                None
+            ),
+            "/opt/homebrew/bin/fish"
+        );
         assert_eq!(choose_shell("", None, false, found(&[]), None), "/bin/zsh");
         // A name is looked up; a path, quoted or not, is taken as it is; a name nothing has stays a name.
-        assert_eq!(choose_shell("pwsh", Some("/bin/zsh"), false, found(&["pwsh"]), None), r"C:\bin\pwsh.exe");
-        assert_eq!(choose_shell(r#" "D:\tools\nu.exe" "#, None, true, found(&["pwsh"]), None), r"D:\tools\nu.exe");
+        assert_eq!(
+            choose_shell("pwsh", Some("/bin/zsh"), false, found(&["pwsh"]), None),
+            r"C:\bin\pwsh.exe"
+        );
+        assert_eq!(
+            choose_shell(r#" "D:\tools\nu.exe" "#, None, true, found(&["pwsh"]), None),
+            r"D:\tools\nu.exe"
+        );
         assert_eq!(choose_shell("nu", None, true, found(&[]), None), "nu");
     }
 
     #[test]
     fn the_shell_kind_comes_from_its_name_on_windows_only() {
-        assert_eq!(flavor(r"C:\Program Files\PowerShell\7\pwsh.exe", true), Flavor::PowerShell);
+        assert_eq!(
+            flavor(r"C:\Program Files\PowerShell\7\pwsh.exe", true),
+            Flavor::PowerShell
+        );
         assert_eq!(flavor("PowerShell.EXE", true), Flavor::PowerShell);
         assert_eq!(flavor(r"C:\Windows\System32\cmd.exe", true), Flavor::Cmd);
-        assert_eq!(flavor(r"C:\Program Files\Git\bin\bash.exe", true), Flavor::Posix);
+        assert_eq!(
+            flavor(r"C:\Program Files\Git\bin\bash.exe", true),
+            Flavor::Posix
+        );
         assert_eq!(flavor("/usr/local/bin/pwsh", false), Flavor::Posix);
     }
 
@@ -1450,10 +1846,25 @@ mod tests {
         assert_eq!(shell_args(Flavor::PowerShell, None), ["-NoLogo"]);
         let ps = shell_args(Flavor::PowerShell, Some("winget install it's"));
         assert_eq!((ps[0].as_str(), ps[1].as_str()), ("-NoLogo", "-Command"));
-        assert!(ps[2].starts_with("Write-Host '$ winget install it''s'; "), "{}", ps[2]);
-        assert!(ps[2].contains("; winget install it's; $ok = $?;"), "{}", ps[2]);
+        assert!(
+            ps[2].starts_with("Write-Host '$ winget install it''s'; "),
+            "{}",
+            ps[2]
+        );
+        assert!(
+            ps[2].contains("; winget install it's; $ok = $?;"),
+            "{}",
+            ps[2]
+        );
         assert!(shell_args(Flavor::Cmd, None).is_empty());
-        assert_eq!(shell_args(Flavor::Cmd, Some("dir")), ["/c", "dir & echo. & call echo [finished with exit code %^errorlevel%]"], "one `call`: an earlier one resets the exit code");
+        assert_eq!(
+            shell_args(Flavor::Cmd, Some("dir")),
+            [
+                "/c",
+                "dir & echo. & call echo [finished with exit code %^errorlevel%]"
+            ],
+            "one `call`: an earlier one resets the exit code"
+        );
     }
 
     #[cfg(unix)]
@@ -1466,53 +1877,142 @@ mod tests {
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.args(["-c", "exec sleep 600"]);
         let session = start_session((30, 100), cmd, screen, tx).unwrap();
-        let Session { writer, master, hangup, thread } = session;
+        let Session {
+            writer,
+            master,
+            hangup,
+            thread,
+        } = session;
         // What the panel keeps and what it hands the thread; dropping them is closing the tab.
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = done_tx.send(thread.join().is_ok());
         });
-        assert!(done_rx.recv_timeout(Duration::from_millis(500)).is_err(), "the thread ended with the shell still running");
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            "the thread ended with the shell still running"
+        );
         drop((writer, master, hangup));
-        assert_eq!(done_rx.recv_timeout(Duration::from_secs(10)), Ok(true), "the shell and the thread outlived the terminal");
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(10)),
+            Ok(true),
+            "the shell and the thread outlived the terminal"
+        );
     }
 
     #[test]
     fn powershell_quoting_doubles_every_kind_of_single_quote() {
         assert_eq!(powershell_quote("plain"), "'plain'");
         assert_eq!(powershell_quote("it's"), "'it''s'");
-        assert_eq!(powershell_quote("a $b `c \"d\""), "'a $b `c \"d\"'", "nothing else is special in single quotes");
-        assert_eq!(powershell_quote("\u{2018}x\u{2019}"), "'\u{2018}\u{2018}x\u{2019}\u{2019}'");
+        assert_eq!(
+            powershell_quote("a $b `c \"d\""),
+            "'a $b `c \"d\"'",
+            "nothing else is special in single quotes"
+        );
+        assert_eq!(
+            powershell_quote("\u{2018}x\u{2019}"),
+            "'\u{2018}\u{2018}x\u{2019}\u{2019}'"
+        );
     }
 
     #[test]
     fn the_shell_starts_in_a_plain_folder() {
         let home = PathBuf::from(r"C:\Users\me");
-        assert_eq!(plain_path(PathBuf::from(r"\\?\C:\code\app")), PathBuf::from(r"C:\code\app"));
-        assert_eq!(plain_path(PathBuf::from(r"\\?\UNC\nas\share\app")), PathBuf::from(r"\\nas\share\app"));
-        assert_eq!(plain_path(PathBuf::from(r"\\?\Volume{1234}\x")), PathBuf::from(r"\\?\Volume{1234}\x"), "only a drive or share path has a plain form");
-        assert_eq!(plain_path(PathBuf::from(r"C:\code")), PathBuf::from(r"C:\code"));
+        assert_eq!(
+            plain_path(PathBuf::from(r"\\?\C:\code\app")),
+            PathBuf::from(r"C:\code\app")
+        );
+        assert_eq!(
+            plain_path(PathBuf::from(r"\\?\UNC\nas\share\app")),
+            PathBuf::from(r"\\nas\share\app")
+        );
+        assert_eq!(
+            plain_path(PathBuf::from(r"\\?\Volume{1234}\x")),
+            PathBuf::from(r"\\?\Volume{1234}\x"),
+            "only a drive or share path has a plain form"
+        );
+        assert_eq!(
+            plain_path(PathBuf::from(r"C:\code")),
+            PathBuf::from(r"C:\code")
+        );
         let all = |_: &Path| true;
         let verbatim = Some(PathBuf::from(r"\\?\C:\code\app"));
-        assert_eq!(shell_cwd(verbatim.clone(), Flavor::PowerShell, true, home.clone(), all), Some(PathBuf::from(r"C:\code\app")));
-        assert_eq!(shell_cwd(None, Flavor::Cmd, true, home.clone(), all), Some(home.clone()));
+        assert_eq!(
+            shell_cwd(
+                verbatim.clone(),
+                Flavor::PowerShell,
+                true,
+                home.clone(),
+                all
+            ),
+            Some(PathBuf::from(r"C:\code\app"))
+        );
+        assert_eq!(
+            shell_cwd(None, Flavor::Cmd, true, home.clone(), all),
+            Some(home.clone())
+        );
         // A network folder is fine for PowerShell, and not for cmd.exe.
         let unc = Some(PathBuf::from(r"\\nas\share\app"));
-        assert_eq!(shell_cwd(unc.clone(), Flavor::PowerShell, true, home.clone(), all), Some(PathBuf::from(r"\\nas\share\app")));
-        assert_eq!(shell_cwd(Some(PathBuf::from(r"\\?\UNC\nas\share\app")), Flavor::Cmd, true, home.clone(), all), Some(home.clone()));
+        assert_eq!(
+            shell_cwd(unc.clone(), Flavor::PowerShell, true, home.clone(), all),
+            Some(PathBuf::from(r"\\nas\share\app"))
+        );
+        assert_eq!(
+            shell_cwd(
+                Some(PathBuf::from(r"\\?\UNC\nas\share\app")),
+                Flavor::Cmd,
+                true,
+                home.clone(),
+                all
+            ),
+            Some(home.clone())
+        );
         // Off Windows nothing is rewritten.
-        assert_eq!(shell_cwd(verbatim.clone(), Flavor::Posix, false, home.clone(), all), verbatim);
+        assert_eq!(
+            shell_cwd(verbatim.clone(), Flavor::Posix, false, home.clone(), all),
+            verbatim
+        );
     }
 
     #[test]
     fn a_folder_that_is_gone_starts_the_shell_in_home_and_without_home_where_trek_is() {
         let home = PathBuf::from(r"C:\Users\me");
         let only_home = |p: &Path| p == Path::new(r"C:\Users\me");
-        assert_eq!(shell_cwd(Some(PathBuf::from(r"C:\gone")), Flavor::PowerShell, true, home.clone(), only_home), Some(home.clone()));
+        assert_eq!(
+            shell_cwd(
+                Some(PathBuf::from(r"C:\gone")),
+                Flavor::PowerShell,
+                true,
+                home.clone(),
+                only_home
+            ),
+            Some(home.clone())
+        );
         // cmd.exe and a network folder: home too, and if that is gone, nothing (no panic, no error).
-        assert_eq!(shell_cwd(Some(PathBuf::from(r"\\nas\share")), Flavor::Cmd, true, home.clone(), only_home), Some(home.clone()));
-        assert_eq!(shell_cwd(Some(PathBuf::from(r"C:\gone")), Flavor::Cmd, true, home.clone(), |_: &Path| false), None);
-        assert_eq!(shell_cwd(None, Flavor::Posix, false, home, |_: &Path| false), None);
+        assert_eq!(
+            shell_cwd(
+                Some(PathBuf::from(r"\\nas\share")),
+                Flavor::Cmd,
+                true,
+                home.clone(),
+                only_home
+            ),
+            Some(home.clone())
+        );
+        assert_eq!(
+            shell_cwd(
+                Some(PathBuf::from(r"C:\gone")),
+                Flavor::Cmd,
+                true,
+                home.clone(),
+                |_: &Path| false
+            ),
+            None
+        );
+        assert_eq!(
+            shell_cwd(None, Flavor::Posix, false, home, |_: &Path| false),
+            None
+        );
     }
 
     #[test]
@@ -1527,49 +2027,127 @@ mod tests {
         assert_eq!(pick("bash", Some(&action)), r"C:\bin\bash.exe");
         // Install / Sign in are PowerShell one-liners on Windows: Git Bash, nu or cmd would choke on them.
         assert_eq!(pick("bash", Some(&setup)), r"C:\bin\pwsh.exe");
-        assert_eq!(pick(r"C:\Windows\System32\cmd.exe", Some(&setup)), r"C:\bin\pwsh.exe");
-        assert_eq!(shell_for("nu", Some(&setup), None, true, found(&["powershell"]), comspec), r"C:\bin\powershell.exe");
+        assert_eq!(
+            pick(r"C:\Windows\System32\cmd.exe", Some(&setup)),
+            r"C:\bin\pwsh.exe"
+        );
+        assert_eq!(
+            shell_for(
+                "nu",
+                Some(&setup),
+                None,
+                true,
+                found(&["powershell"]),
+                comspec
+            ),
+            r"C:\bin\powershell.exe"
+        );
         // A Mac has one kind of shell: its own command runs in the one it chose, else `$SHELL`.
-        assert_eq!(shell_for("", Some(&setup), Some("/bin/zsh"), false, found(&[]), None), "/bin/zsh");
-        assert_eq!(shell_for("fish", Some(&action), Some("/bin/zsh"), false, found(&[]), None), "fish");
+        assert_eq!(
+            shell_for("", Some(&setup), Some("/bin/zsh"), false, found(&[]), None),
+            "/bin/zsh"
+        );
+        assert_eq!(
+            shell_for(
+                "fish",
+                Some(&action),
+                Some("/bin/zsh"),
+                false,
+                found(&[]),
+                None
+            ),
+            "fish"
+        );
     }
 
     #[test]
     fn paste_keys_leave_ctrl_v_to_the_shell() {
-        let keys = |control, shift, platform| Modifiers { control, shift, platform, ..Default::default() };
+        let keys = |control, shift, platform| Modifiers {
+            control,
+            shift,
+            platform,
+            ..Default::default()
+        };
         // Windows: Ctrl+Shift+V and Shift+Insert paste; Ctrl+V is the shell's, and so are Ctrl+C and the Win key's.
-        assert_eq!(shortcut("v", &keys(true, true, false), true), Some(Shortcut::Paste));
-        assert_eq!(shortcut("insert", &keys(false, true, false), true), Some(Shortcut::Paste));
+        assert_eq!(
+            shortcut("v", &keys(true, true, false), true),
+            Some(Shortcut::Paste)
+        );
+        assert_eq!(
+            shortcut("insert", &keys(false, true, false), true),
+            Some(Shortcut::Paste)
+        );
         assert_eq!(shortcut("v", &keys(true, false, false), true), None);
-        assert_eq!(shortcut("c", &keys(true, false, false), true), None, "Ctrl+C interrupts");
-        assert_eq!(shortcut("c", &keys(true, true, false), true), Some(Shortcut::Copy), "the selection, and never an interrupt");
-        assert_eq!(shortcut("v", &keys(false, false, true), true), Some(Shortcut::PassThrough));
+        assert_eq!(
+            shortcut("c", &keys(true, false, false), true),
+            None,
+            "Ctrl+C interrupts"
+        );
+        assert_eq!(
+            shortcut("c", &keys(true, true, false), true),
+            Some(Shortcut::Copy),
+            "the selection, and never an interrupt"
+        );
+        assert_eq!(
+            shortcut("v", &keys(false, false, true), true),
+            Some(Shortcut::PassThrough)
+        );
         assert_eq!(shortcut("a", &keys(false, false, false), true), None);
         // macOS: Cmd+V pastes, Cmd+K clears, the rest of Cmd is the app's, Ctrl is the shell's.
-        assert_eq!(shortcut("v", &keys(false, false, true), false), Some(Shortcut::Paste));
-        assert_eq!(shortcut("k", &keys(false, false, true), false), Some(Shortcut::Clear));
-        assert_eq!(shortcut("t", &keys(false, false, true), false), Some(Shortcut::PassThrough));
+        assert_eq!(
+            shortcut("v", &keys(false, false, true), false),
+            Some(Shortcut::Paste)
+        );
+        assert_eq!(
+            shortcut("k", &keys(false, false, true), false),
+            Some(Shortcut::Clear)
+        );
+        assert_eq!(
+            shortcut("t", &keys(false, false, true), false),
+            Some(Shortcut::PassThrough)
+        );
         assert_eq!(shortcut("v", &keys(true, false, false), false), None);
     }
 
     #[test]
     fn a_macs_command_keys_copy_move_along_the_line_and_size_the_text() {
-        let cmd = Modifiers { platform: true, ..Default::default() };
-        let cmd_shift = Modifiers { platform: true, shift: true, ..Default::default() };
+        let cmd = Modifiers {
+            platform: true,
+            ..Default::default()
+        };
+        let cmd_shift = Modifiers {
+            platform: true,
+            shift: true,
+            ..Default::default()
+        };
         assert_eq!(shortcut("c", &cmd, false), Some(Shortcut::Copy));
         assert_eq!(shortcut("left", &cmd, false), Some(Shortcut::LineStart));
         assert_eq!(shortcut("right", &cmd, false), Some(Shortcut::LineEnd));
-        assert_eq!(shortcut("backspace", &cmd, false), Some(Shortcut::DeleteLine));
-        assert_eq!(shortcut("left", &cmd_shift, false), Some(Shortcut::PassThrough), "⌘⇧← isn't the line's start");
+        assert_eq!(
+            shortcut("backspace", &cmd, false),
+            Some(Shortcut::DeleteLine)
+        );
+        assert_eq!(
+            shortcut("left", &cmd_shift, false),
+            Some(Shortcut::PassThrough),
+            "⌘⇧← isn't the line's start"
+        );
         assert_eq!(shortcut("=", &cmd, false), Some(Shortcut::Bigger));
         assert_eq!(shortcut("+", &cmd_shift, false), Some(Shortcut::Bigger));
         assert_eq!(shortcut("-", &cmd, false), Some(Shortcut::Smaller));
         assert_eq!(shortcut("0", &cmd, false), Some(Shortcut::ActualSize));
         // Windows: Ctrl+= / - / 0, as Windows Terminal has them; ⌥ keys stay the shell's.
-        let ctrl = Modifiers { control: true, ..Default::default() };
+        let ctrl = Modifiers {
+            control: true,
+            ..Default::default()
+        };
         assert_eq!(shortcut("=", &ctrl, true), Some(Shortcut::Bigger));
         assert_eq!(shortcut("0", &ctrl, true), Some(Shortcut::ActualSize));
-        assert_eq!(shortcut("left", &ctrl, true), None, "the shell's word movement");
+        assert_eq!(
+            shortcut("left", &ctrl, true),
+            None,
+            "the shell's word movement"
+        );
         assert_eq!(home_end(false, false), b"\x1b[H");
         assert_eq!(home_end(true, true), b"\x1bOF");
     }
@@ -1579,10 +2157,22 @@ mod tests {
         use vt100::MouseProtocolEncoding::{Default, Sgr, Utf8};
         assert_eq!(wheel_report(true, (4, 9), Sgr), b"\x1b[<64;10;5M");
         assert_eq!(wheel_report(false, (0, 0), Sgr), b"\x1b[<65;1;1M");
-        assert_eq!(wheel_report(true, (4, 9), Default), [0x1b, b'[', b'M', 96, 42, 37]);
+        assert_eq!(
+            wheel_report(true, (4, 9), Default),
+            [0x1b, b'[', b'M', 96, 42, 37]
+        );
         // Far out, X10 stops at 255; UTF-8 goes on.
         assert_eq!(wheel_report(false, (0, 300), Default)[4], 255);
-        assert_eq!(wheel_report(false, (0, 300), Utf8), [b"\x1b[M".as_slice(), "a".as_bytes(), "\u{14d}".as_bytes(), "!".as_bytes()].concat());
+        assert_eq!(
+            wheel_report(false, (0, 300), Utf8),
+            [
+                b"\x1b[M".as_slice(),
+                "a".as_bytes(),
+                "\u{14d}".as_bytes(),
+                "!".as_bytes()
+            ]
+            .concat()
+        );
     }
 
     fn parser(rows: u16, cols: u16, text: &str) -> super::Parser {
@@ -1597,17 +2187,26 @@ mod tests {
         let at = |line, col| Pos { line, col };
         let mut p = parser(5, 20, "first line\r\nsecond   \r\nthird one\r\n");
         // From the middle of one row to the middle of another: the rows between whole, blanks at a row's end dropped.
-        assert_eq!(selected_text(&mut p, at(0, 6), at(2, 5)), "line\nsecond\nthird");
+        assert_eq!(
+            selected_text(&mut p, at(0, 6), at(2, 5)),
+            "line\nsecond\nthird"
+        );
         // Within a row.
         assert_eq!(selected_text(&mut p, at(1, 0), at(1, 3)), "sec");
         // A long line that ran on to the next row reads as one line.
         let mut p = parser(5, 10, "0123456789abcdef\r\nnext\r\n");
-        assert_eq!(selected_text(&mut p, at(0, 0), at(2, 4)), "0123456789abcdef\nnext");
+        assert_eq!(
+            selected_text(&mut p, at(0, 0), at(2, 4)),
+            "0123456789abcdef\nnext"
+        );
         // Lines scrolled off the screen are still there, before the screen's: negative lines.
         let lines: String = (1..=8).map(|i| format!("line {i}\r\n")).collect();
         let mut p = parser(4, 20, &lines);
         assert_eq!(p.screen().contents().lines().next(), Some("line 6"));
-        assert_eq!(selected_text(&mut p, at(-2, 0), at(1, 6)), "line 4\nline 5\nline 6\nline 7");
+        assert_eq!(
+            selected_text(&mut p, at(-2, 0), at(1, 6)),
+            "line 4\nline 5\nline 6\nline 7"
+        );
         assert_eq!(p.screen().scrollback(), 0, "the view is left where it was");
     }
 
@@ -1618,16 +2217,27 @@ mod tests {
         let p = parser(3, 60, "界 Local: http://localhost:5173/ (ready)\r\n");
         let links = row_links(p.screen(), 0);
         assert_eq!(links.len(), 1);
-        assert_eq!((links[0].cols.clone(), links[0].url.as_str()), (10..32, "http://localhost:5173/"));
+        assert_eq!(
+            (links[0].cols.clone(), links[0].url.as_str()),
+            (10..32, "http://localhost:5173/")
+        );
         // A double-click's word: the address whole, not the bracket after it.
         assert_eq!(word_bounds(p.screen(), 0, 15), (10, 32));
         assert_eq!(word_bounds(p.screen(), 0, 34), (34, 39));
-        assert_eq!(word_bounds(p.screen(), 0, 9), (9, 10), "a blank is a word of its own");
+        assert_eq!(
+            word_bounds(p.screen(), 0, 9),
+            (9, 10),
+            "a blank is a word of its own"
+        );
     }
 
     #[test]
     fn pasted_text_is_bracketed_when_asked_and_enters_as_cr_on_windows() {
-        assert_eq!(paste_bytes("a\nb", false, false), "a\nb", "a Mac is untouched");
+        assert_eq!(
+            paste_bytes("a\nb", false, false),
+            "a\nb",
+            "a Mac is untouched"
+        );
         assert_eq!(paste_bytes("a\r\nb\nc", false, true), "a\rb\rc");
         assert_eq!(paste_bytes("ls", true, true), "\x1b[200~ls\x1b[201~");
     }
@@ -1639,7 +2249,12 @@ mod tests {
         let flood = "y\r\n".repeat(2 << 20) + "done\r\n";
         let screen: Screen = new_screen(24, 80, 2000);
         let (tx, rx) = async_channel::bounded::<()>(1);
-        pump(std::io::Cursor::new(flood.into_bytes()), &screen, &tx, |_| panic!("nothing asked for a reply"));
+        pump(
+            std::io::Cursor::new(flood.into_bytes()),
+            &screen,
+            &tx,
+            |_| panic!("nothing asked for a reply"),
+        );
         assert_eq!(rx.len(), 1, "one wake-up stands for every read");
         let text = screen.lock().unwrap().screen().contents();
         assert!(text.trim_end().ends_with("done"), "{text}");
@@ -1655,7 +2270,9 @@ mod tests {
         let (tx, rx) = async_channel::bounded::<()>(1);
         drop(rx);
         // An endless stream: `pump` returns because nothing listens any more.
-        pump(std::io::repeat(b'y'), &screen, &tx, |_| panic!("nothing asked for a reply"));
+        pump(std::io::repeat(b'y'), &screen, &tx, |_| {
+            panic!("nothing asked for a reply")
+        });
     }
 
     #[test]
@@ -1665,14 +2282,20 @@ mod tests {
         assert_eq!(cursor_queries(b"", b"\x1b[6n"), 1);
         assert_eq!(cursor_queries(b"", b"hello\x1b[6nworld\x1b[6n"), 2);
         assert_eq!(cursor_queries(b"", b"\x1b[6"), 0);
-        assert_eq!(cursor_queries(b"\x1b[6", b"n"), 1, "a query split across two reads");
+        assert_eq!(
+            cursor_queries(b"\x1b[6", b"n"),
+            1,
+            "a query split across two reads"
+        );
         assert_eq!(cursor_queries(b"\x1b[6", b"ok"), 0);
         // ConPTY's first output is the query alone; the prompt follows only once it is answered.
         let screen: Screen = new_screen(24, 80, 0);
         let (tx, _rx) = async_channel::bounded::<()>(1);
         let said = std::cell::RefCell::new(Vec::<u8>::new());
         let stream = std::io::Cursor::new(b"ab\r\n\x1b[6n".to_vec());
-        pump(stream, &screen, &tx, |bytes| said.borrow_mut().extend_from_slice(bytes));
+        pump(stream, &screen, &tx, |bytes| {
+            said.borrow_mut().extend_from_slice(bytes)
+        });
         assert_eq!(said.into_inner(), b"\x1b[2;1R");
         // One byte per read, which is what a slow pipe can do: the query is still seen once.
         struct ByteAtATime(std::io::Cursor<Vec<u8>>);
@@ -1684,7 +2307,12 @@ mod tests {
         }
         let screen: Screen = new_screen(24, 80, 0);
         let said = std::cell::RefCell::new(Vec::<u8>::new());
-        pump(ByteAtATime(std::io::Cursor::new(b"\x1b[6n".to_vec())), &screen, &tx, |bytes| said.borrow_mut().extend_from_slice(bytes));
+        pump(
+            ByteAtATime(std::io::Cursor::new(b"\x1b[6n".to_vec())),
+            &screen,
+            &tx,
+            |bytes| said.borrow_mut().extend_from_slice(bytes),
+        );
         assert_eq!(said.into_inner(), b"\x1b[1;1R");
     }
 
@@ -1705,15 +2333,34 @@ mod tests {
         /// (if any), and returns the screen once `done` likes it, or after `LIMIT`. The shell is
         /// killed afterwards. One shell at a time: six PowerShells starting at once, each running
         /// the user's profile, took longer than `LIMIT` on a loaded machine.
-        fn run(setting: &str, job: Option<Job>, input: Option<&str>, done: impl Fn(&str) -> bool) -> String {
+        fn run(
+            setting: &str,
+            job: Option<Job>,
+            input: Option<&str>,
+            done: impl Fn(&str) -> bool,
+        ) -> String {
             static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
             let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
             // A folder of its own, as each test removes its folder.
             static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let dir = std::env::temp_dir().join(format!("trek-terminal-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            let dir = std::env::temp_dir().join(format!(
+                "trek-terminal-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
             std::fs::create_dir_all(&dir).unwrap();
-            let pty = native_pty_system().openpty(PtySize { rows: 30, cols: 100, pixel_width: 0, pixel_height: 0 }).unwrap();
-            let mut child = pty.slave.spawn_command(shell_command(setting, Some(dir.clone()), job.as_ref())).unwrap();
+            let pty = native_pty_system()
+                .openpty(PtySize {
+                    rows: 30,
+                    cols: 100,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .unwrap();
+            let mut child = pty
+                .slave
+                .spawn_command(shell_command(setting, Some(dir.clone()), job.as_ref()))
+                .unwrap();
             let reader = pty.master.try_clone_reader().unwrap();
             // As the panel runs it: the output thread answers ConPTY's cursor query on the same writer.
             let writer = Arc::new(Mutex::new(pty.master.take_writer().unwrap()));
@@ -1721,7 +2368,9 @@ mod tests {
             let (tx, _rx) = async_channel::bounded::<()>(1);
             let pumped = screen.clone();
             let answering = writer.clone();
-            std::thread::spawn(move || pump(reader, &pumped, &tx, |bytes| write_to(&answering, bytes)));
+            std::thread::spawn(move || {
+                pump(reader, &pumped, &tx, |bytes| write_to(&answering, bytes))
+            });
             if let Some(input) = input {
                 // The shell reads keys once it has started (a profile can take seconds to run, and
                 // five shells start at once here): wait for output, then for it to settle at its prompt.
@@ -1731,7 +2380,9 @@ mod tests {
                     let now = screen.lock().unwrap().screen().contents();
                     if now != last {
                         (last, changed) = (now, Instant::now());
-                    } else if !last.trim().is_empty() && changed.elapsed() > Duration::from_millis(2000) {
+                    } else if !last.trim().is_empty()
+                        && changed.elapsed() > Duration::from_millis(2000)
+                    {
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(100));
@@ -1762,13 +2413,19 @@ mod tests {
         fn the_chosen_shell_runs_what_is_typed_into_it() {
             // The typed line is on the screen too ("PS C:\> echo trek-ok"): the output is a line of its own.
             let text = run("", None, Some("echo trek-ok\r"), |t| has_line(t, "trek-ok"));
-            assert!(has_line(&text, "trek-ok"), "no output from the shell:\n{text}");
+            assert!(
+                has_line(&text, "trek-ok"),
+                "no output from the shell:\n{text}"
+            );
         }
 
         #[test]
         fn the_shell_starts_in_the_folder_it_was_given() {
             let text = run("", None, Some("echo trek-ok\r"), |t| has_line(t, "trek-ok"));
-            assert!(text.contains("trek-terminal-test-"), "no prompt in the folder:\n{text}");
+            assert!(
+                text.contains("trek-terminal-test-"),
+                "no prompt in the folder:\n{text}"
+            );
         }
 
         #[test]
@@ -1782,9 +2439,17 @@ mod tests {
                     eprintln!("{name} isn't installed here; skipped");
                     continue;
                 }
-                let text = run(name, Some(Job::Action(command.into())), None, |t| t.contains("[finished with exit code"));
-                assert!(has_line(&text, shows), "{name}: the command's output is missing:\n{text}");
-                assert!(text.contains("[finished with exit code 0]"), "{name}: no exit code:\n{text}");
+                let text = run(name, Some(Job::Action(command.into())), None, |t| {
+                    t.contains("[finished with exit code")
+                });
+                assert!(
+                    has_line(&text, shows),
+                    "{name}: the command's output is missing:\n{text}"
+                );
+                assert!(
+                    text.contains("[finished with exit code 0]"),
+                    "{name}: no exit code:\n{text}"
+                );
             }
         }
 
@@ -1795,8 +2460,13 @@ mod tests {
                     eprintln!("{name} isn't installed here; skipped");
                     continue;
                 }
-                let text = run(name, Some(Job::Action("cmd /c exit 3".into())), None, |t| t.contains("[finished with exit code"));
-                assert!(text.contains("[finished with exit code 3]"), "{name}:\n{text}");
+                let text = run(name, Some(Job::Action("cmd /c exit 3".into())), None, |t| {
+                    t.contains("[finished with exit code")
+                });
+                assert!(
+                    text.contains("[finished with exit code 3]"),
+                    "{name}:\n{text}"
+                );
             }
         }
 
@@ -1808,24 +2478,53 @@ mod tests {
                     eprintln!("{name} isn't installed here; skipped");
                     continue;
                 }
-                let fails = run(name, Some(Job::Action("Get-Item .\\no-such-file".into())), None, |t| t.contains("[finished with exit code"));
-                assert!(fails.contains("[finished with exit code 1]"), "{name}:\n{fails}");
+                let fails = run(
+                    name,
+                    Some(Job::Action("Get-Item .\\no-such-file".into())),
+                    None,
+                    |t| t.contains("[finished with exit code"),
+                );
+                assert!(
+                    fails.contains("[finished with exit code 1]"),
+                    "{name}:\n{fails}"
+                );
             }
         }
 
         #[test]
         fn treks_own_command_runs_in_powershell_when_the_chosen_shell_is_git_bash() {
             let bash = r"C:\Program Files\Git\bin\bash.exe";
-            if !std::path::Path::new(bash).exists() || trek_core::detect::which("pwsh").or_else(|| trek_core::detect::which("powershell")).is_none() {
+            if !std::path::Path::new(bash).exists()
+                || trek_core::detect::which("pwsh")
+                    .or_else(|| trek_core::detect::which("powershell"))
+                    .is_none()
+            {
                 eprintln!("Git Bash or PowerShell isn't installed here; skipped");
                 return;
             }
             // `Write-Output` is a cmdlet: bash would say "command not found".
-            let text = run(bash, Some(Job::Setup("Write-Output 'ran in powershell'".into())), None, |t| t.contains("[finished with exit code"));
-            assert!(has_line(&text, "ran in powershell") && text.contains("[finished with exit code 0]"), "{text}");
+            let text = run(
+                bash,
+                Some(Job::Setup("Write-Output 'ran in powershell'".into())),
+                None,
+                |t| t.contains("[finished with exit code"),
+            );
+            assert!(
+                has_line(&text, "ran in powershell")
+                    && text.contains("[finished with exit code 0]"),
+                "{text}"
+            );
             // The user's own command goes to the shell they chose.
-            let text = run(bash, Some(Job::Action("echo ran in bash".into())), None, |t| t.contains("[finished with exit code"));
-            assert!(has_line(&text, "ran in bash") && text.contains("[finished with exit code 0]"), "{text}");
+            let text = run(
+                bash,
+                Some(Job::Action("echo ran in bash".into())),
+                None,
+                |t| t.contains("[finished with exit code"),
+            );
+            assert!(
+                has_line(&text, "ran in bash") && text.contains("[finished with exit code 0]"),
+                "{text}"
+            );
         }
     }
 }

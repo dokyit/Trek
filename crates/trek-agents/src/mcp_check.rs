@@ -18,7 +18,9 @@ const MAX_PAGES: usize = 20;
 /// The names of the tools `server` offers, or why it couldn't be asked, in words for Settings.
 pub async fn list_tools(server: &McpServer) -> Result<Vec<String>, String> {
     match &server.transport {
-        McpTransport::Stdio { command, args, env } => stdio(command, args, env, STDIO_TIMEOUT).await,
+        McpTransport::Stdio { command, args, env } => {
+            stdio(command, args, env, STDIO_TIMEOUT).await
+        }
         McpTransport::Http { url, headers } => http(url, headers).await,
     }
 }
@@ -35,11 +37,29 @@ fn said(error: &Value) -> String {
 
 /// Tool names out of one `tools/list` result, and the cursor of the next page.
 fn page(result: &Value) -> (Vec<String>, Option<String>) {
-    let names = result["tools"].as_array().map(|t| t.iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect()).unwrap_or_default();
-    (names, result["nextCursor"].as_str().filter(|c| !c.is_empty()).map(str::to_string))
+    let names = result["tools"]
+        .as_array()
+        .map(|t| {
+            t.iter()
+                .filter_map(|t| t["name"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    (
+        names,
+        result["nextCursor"]
+            .as_str()
+            .filter(|c| !c.is_empty())
+            .map(str::to_string),
+    )
 }
 
-async fn stdio(command: &str, args: &[String], env: &[(String, String)], limit: Duration) -> Result<Vec<String>, String> {
+async fn stdio(
+    command: &str,
+    args: &[String],
+    env: &[(String, String)],
+    limit: Duration,
+) -> Result<Vec<String>, String> {
     use std::process::Stdio;
     // A name is looked up the way the PATH the server gets would (on Windows `npx` is `npx.cmd`),
     // a path used as written. A `.cmd` can't be given every argument, which they hear.
@@ -49,15 +69,26 @@ async fn stdio(command: &str, args: &[String], env: &[(String, String)], limit: 
     }
     let mut cmd = trek_core::procs::async_command(&program);
     // The login shell's PATH (where npx and uvx are), unless the server sets its own.
-    cmd.args(args).env("PATH", trek_core::detect::login_path()).envs(env.iter().map(|(k, v)| (k, v)));
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.args(args)
+        .env("PATH", trek_core::detect::login_path())
+        .envs(env.iter().map(|(k, v)| (k, v)));
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = crate::spawn_group(&mut cmd).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => format!("{command} isn't installed, or isn't on your PATH."),
-        std::io::ErrorKind::PermissionDenied => format!("{command} can't be run (permission denied)."),
+        std::io::ErrorKind::NotFound => {
+            format!("{command} isn't installed, or isn't on your PATH.")
+        }
+        std::io::ErrorKind::PermissionDenied => {
+            format!("{command} can't be run (permission denied).")
+        }
         _ => format!("{command} couldn't start: {e}"),
     })?;
     let tail = StderrTail::capture(child.stderr.take().expect("piped"), "mcp-check");
-    let (stdin, stdout) = (child.stdin.take().expect("piped"), child.stdout.take().expect("piped"));
+    let (stdin, stdout) = (
+        child.stdin.take().expect("piped"),
+        child.stdout.take().expect("piped"),
+    );
     let talk = tokio::time::timeout(limit, stdio_talk(stdin, stdout)).await;
     // Whatever the outcome, the server and anything it started are ended.
     let exit = child.try_wait().ok().flatten();
@@ -74,7 +105,10 @@ async fn stdio(command: &str, args: &[String], env: &[(String, String)], limit: 
             (None, None) => "It stopped before answering.".into(),
         }),
         Err(_) => Err(match hint {
-            Some(line) => format!("No answer within {} seconds. Last it said: {line}", limit.as_secs()),
+            Some(line) => format!(
+                "No answer within {} seconds. Last it said: {line}",
+                limit.as_secs()
+            ),
             None => format!("No answer within {} seconds.", limit.as_secs()),
         }),
     }
@@ -85,8 +119,14 @@ async fn stdio(command: &str, args: &[String], env: &[(String, String)], limit: 
 /// with the usual "isn't installed"; a path is used as written.
 fn program_for(command: &str, env: &[(String, String)]) -> std::path::PathBuf {
     if trek_core::detect::is_bare_name(command) {
-        let own = env.iter().find(|(k, _)| k == "PATH" || (cfg!(windows) && k.eq_ignore_ascii_case("PATH"))).map(|(_, v)| v.as_str());
-        if let Some(found) = trek_core::detect::which_in(own.unwrap_or_else(|| trek_core::detect::login_path()), command) {
+        let own = env
+            .iter()
+            .find(|(k, _)| k == "PATH" || (cfg!(windows) && k.eq_ignore_ascii_case("PATH")))
+            .map(|(_, v)| v.as_str());
+        if let Some(found) = trek_core::detect::which_in(
+            own.unwrap_or_else(|| trek_core::detect::login_path()),
+            command,
+        ) {
             return found;
         }
     }
@@ -100,22 +140,38 @@ enum Talk {
     Said(String),
 }
 
-async fn stdio_talk(mut stdin: tokio::process::ChildStdin, stdout: tokio::process::ChildStdout) -> Result<Vec<String>, Talk> {
+async fn stdio_talk(
+    mut stdin: tokio::process::ChildStdin,
+    stdout: tokio::process::ChildStdout,
+) -> Result<Vec<String>, Talk> {
     use tokio::io::AsyncWriteExt as _;
     let mut lines = ProtocolLines::new(tokio::io::BufReader::new(stdout));
     let send = async |stdin: &mut tokio::process::ChildStdin, msg: Value| {
         let mut line = msg.to_string();
         line.push('\n');
-        stdin.write_all(line.as_bytes()).await.map_err(|_| Talk::Ended)?;
+        stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|_| Talk::Ended)?;
         stdin.flush().await.map_err(|_| Talk::Ended)
     };
     // The reply to request `id`. What else it says on the way is passed over (logs, progress),
     // and a request of its own is answered so it doesn't wait on Trek.
-    async fn reply(lines: &mut ProtocolLines<tokio::io::BufReader<tokio::process::ChildStdout>>, stdin: &mut tokio::process::ChildStdin, id: u64) -> Result<Value, Talk> {
+    async fn reply(
+        lines: &mut ProtocolLines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+        stdin: &mut tokio::process::ChildStdin,
+        id: u64,
+    ) -> Result<Value, Talk> {
         use tokio::io::AsyncWriteExt as _;
         loop {
-            let line = lines.next_line().await.map_err(|_| Talk::Ended)?.ok_or(Talk::Ended)?;
-            let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
+            let line = lines
+                .next_line()
+                .await
+                .map_err(|_| Talk::Ended)?
+                .ok_or(Talk::Ended)?;
+            let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
             if msg["id"] == json!(id) && msg.get("method").is_none() {
                 if let Some(error) = msg.get("error") {
                     return Err(Talk::Said(said(error)));
@@ -125,16 +181,28 @@ async fn stdio_talk(mut stdin: tokio::process::ChildStdin, stdout: tokio::proces
             if let (Some(method), Some(their)) = (msg["method"].as_str(), msg.get("id")) {
                 let answer = match method {
                     "ping" => json!({ "jsonrpc": "2.0", "id": their, "result": {} }),
-                    "roots/list" => json!({ "jsonrpc": "2.0", "id": their, "result": { "roots": [] } }),
-                    _ => json!({ "jsonrpc": "2.0", "id": their, "error": { "code": -32601, "message": "Not supported while checking" } }),
+                    "roots/list" => {
+                        json!({ "jsonrpc": "2.0", "id": their, "result": { "roots": [] } })
+                    }
+                    _ => {
+                        json!({ "jsonrpc": "2.0", "id": their, "error": { "code": -32601, "message": "Not supported while checking" } })
+                    }
                 };
                 let _ = stdin.write_all(format!("{answer}\n").as_bytes()).await;
             }
         }
     }
-    send(&mut stdin, json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": initialize() })).await?;
+    send(
+        &mut stdin,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": initialize() }),
+    )
+    .await?;
     reply(&mut lines, &mut stdin, 1).await?;
-    send(&mut stdin, json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).await?;
+    send(
+        &mut stdin,
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+    )
+    .await?;
     let mut tools = vec![];
     let mut cursor: Option<String> = None;
     for id in 2..2 + MAX_PAGES as u64 {
@@ -142,7 +210,11 @@ async fn stdio_talk(mut stdin: tokio::process::ChildStdin, stdout: tokio::proces
             Some(c) => json!({ "cursor": c }),
             None => json!({}),
         };
-        send(&mut stdin, json!({ "jsonrpc": "2.0", "id": id, "method": "tools/list", "params": params })).await?;
+        send(
+            &mut stdin,
+            json!({ "jsonrpc": "2.0", "id": id, "method": "tools/list", "params": params }),
+        )
+        .await?;
         let (names, next) = page(&reply(&mut lines, &mut stdin, id).await?);
         tools.extend(names);
         cursor = next;
@@ -156,22 +228,64 @@ async fn stdio_talk(mut stdin: tokio::process::ChildStdin, stdout: tokio::proces
 /// The stderr line that best says what went wrong: one that says "error", or else one that
 /// reads like a problem, or else the last thing it said. npm's chatter is passed over.
 fn useful_line(lines: &[String]) -> Option<String> {
-    let lines: Vec<&str> = lines.iter().map(|l| l.trim()).filter(|l| !l.is_empty() && !l.starts_with("npm warn") && !l.starts_with("npm notice")).collect();
+    let lines: Vec<&str> = lines
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with("npm warn") && !l.starts_with("npm notice"))
+        .collect();
     let has = |l: &str, words: &[&str]| words.iter().any(|w| l.to_ascii_lowercase().contains(w));
     let line = lines
         .iter()
         .find(|l| has(l, &["error"]))
-        .or_else(|| lines.iter().find(|l| has(l, &["not found", "required", "missing", "invalid", "denied", "cannot", "can't", "unable", "failed", "enoent", "e404"])))
+        .or_else(|| {
+            lines.iter().find(|l| {
+                has(
+                    l,
+                    &[
+                        "not found",
+                        "required",
+                        "missing",
+                        "invalid",
+                        "denied",
+                        "cannot",
+                        "can't",
+                        "unable",
+                        "failed",
+                        "enoent",
+                        "e404",
+                    ],
+                )
+            })
+        })
         .or(lines.last())?;
     Some(crate::clip(line, 200))
 }
 
 async fn http(url: &str, headers: &[(String, String)]) -> Result<Vec<String>, String> {
-    let client = reqwest::Client::builder().timeout(HTTP_TIMEOUT).build().map_err(|e| e.to_string())?;
+    let client = reqwest::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .build()
+        .map_err(|e| e.to_string())?;
     let talk = async {
-        let (init, session) = post(&client, url, headers, None, false, json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": initialize() })).await?;
+        let (init, session) = post(
+            &client,
+            url,
+            headers,
+            None,
+            false,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": initialize() }),
+        )
+        .await?;
         init.ok_or("It didn't answer initialize.")?;
-        post(&client, url, headers, session.as_deref(), true, json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).await?;
+        post(
+            &client,
+            url,
+            headers,
+            session.as_deref(),
+            true,
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        )
+        .await?;
         let mut tools = vec![];
         let mut cursor: Option<String> = None;
         for id in 2..2 + MAX_PAGES as u64 {
@@ -179,7 +293,15 @@ async fn http(url: &str, headers: &[(String, String)]) -> Result<Vec<String>, St
                 Some(c) => json!({ "cursor": c }),
                 None => json!({}),
             };
-            let (result, _) = post(&client, url, headers, session.as_deref(), true, json!({ "jsonrpc": "2.0", "id": id, "method": "tools/list", "params": params })).await?;
+            let (result, _) = post(
+                &client,
+                url,
+                headers,
+                session.as_deref(),
+                true,
+                json!({ "jsonrpc": "2.0", "id": id, "method": "tools/list", "params": params }),
+            )
+            .await?;
             let (names, next) = page(&result.ok_or("It didn't answer tools/list.")?);
             tools.extend(names);
             cursor = next;
@@ -197,13 +319,30 @@ async fn http(url: &str, headers: &[(String, String)]) -> Result<Vec<String>, St
         }
         Ok::<_, String>(tools)
     };
-    tokio::time::timeout(HTTP_TIMEOUT, talk).await.unwrap_or_else(|_| Err(format!("No answer within {} seconds.", HTTP_TIMEOUT.as_secs())))
+    tokio::time::timeout(HTTP_TIMEOUT, talk)
+        .await
+        .unwrap_or_else(|_| {
+            Err(format!(
+                "No answer within {} seconds.",
+                HTTP_TIMEOUT.as_secs()
+            ))
+        })
 }
 
 /// POST one JSON-RPC message; its reply (`None` for a notification) and the session id the
 /// server gave. The reply comes as JSON or as an event stream with it in a `data:` line.
-async fn post(client: &reqwest::Client, url: &str, headers: &[(String, String)], session: Option<&str>, initialized: bool, msg: Value) -> Result<(Option<Value>, Option<String>), String> {
-    let mut req = client.post(url).header("Accept", "application/json, text/event-stream").header("Content-Type", "application/json");
+async fn post(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &[(String, String)],
+    session: Option<&str>,
+    initialized: bool,
+    msg: Value,
+) -> Result<(Option<Value>, Option<String>), String> {
+    let mut req = client
+        .post(url)
+        .header("Accept", "application/json, text/event-stream")
+        .header("Content-Type", "application/json");
     if initialized {
         req = req.header("MCP-Protocol-Version", PROTOCOL_VERSION);
     }
@@ -229,12 +368,26 @@ async fn post(client: &reqwest::Client, url: &str, headers: &[(String, String)],
             403 => "Turned away (403). Check its token.".to_string(),
             404 => "Nothing at that address (404).".to_string(),
             405 => "That address doesn't take MCP requests (405).".to_string(),
-            code => format!("The server answered {code} {}.", status.canonical_reason().unwrap_or_default()).replace(" .", "."),
+            code => format!(
+                "The server answered {code} {}.",
+                status.canonical_reason().unwrap_or_default()
+            )
+            .replace(" .", "."),
         });
     }
-    let sid = resp.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()).map(str::to_string);
-    let Some(id) = msg.get("id").cloned() else { return Ok((None, sid)) };
-    let sse = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|t| t.starts_with("text/event-stream"));
+    let sid = resp
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let Some(id) = msg.get("id").cloned() else {
+        return Ok((None, sid));
+    };
+    let sse = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|t| t.starts_with("text/event-stream"));
     let answer = |v: Value| -> Option<Result<Value, String>> {
         (v["id"] == id && v.get("method").is_none()).then(|| match v.get("error") {
             Some(e) => Err(said(e)),
@@ -242,15 +395,25 @@ async fn post(client: &reqwest::Client, url: &str, headers: &[(String, String)],
         })
     };
     if !sse {
-        let body = resp.bytes().await.map_err(|e| format!("Its answer was cut off: {e}"))?;
-        let v: Value = serde_json::from_slice(&body).map_err(|_| "Its answer isn't MCP (not JSON).".to_string())?;
-        return answer(v).unwrap_or(Err("It answered something else.".into())).map(|r| (Some(r), sid));
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("Its answer was cut off: {e}"))?;
+        let v: Value = serde_json::from_slice(&body)
+            .map_err(|_| "Its answer isn't MCP (not JSON).".to_string())?;
+        return answer(v)
+            .unwrap_or(Err("It answered something else.".into()))
+            .map(|r| (Some(r), sid));
     }
     // An event stream: read it until our reply's event comes, then stop (it may stay open).
     let mut buf = String::new();
     let mut data = String::new();
     loop {
-        let Some(chunk) = resp.chunk().await.map_err(|e| format!("Its answer was cut off: {e}"))? else {
+        let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| format!("Its answer was cut off: {e}"))?
+        else {
             return Err("It closed the stream without answering.".into());
         };
         buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -261,7 +424,9 @@ async fn post(client: &reqwest::Client, url: &str, headers: &[(String, String)],
                 data.push_str(d.strip_prefix(' ').unwrap_or(d));
             } else if line.is_empty()
                 && !data.is_empty()
-                && let Some(found) = serde_json::from_str::<Value>(&std::mem::take(&mut data)).ok().and_then(answer)
+                && let Some(found) = serde_json::from_str::<Value>(&std::mem::take(&mut data))
+                    .ok()
+                    .and_then(answer)
             {
                 return found.map(|r| (Some(r), sid));
             }
@@ -275,25 +440,51 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     fn fake(mode: &str, env: Vec<(String, String)>) -> McpServer {
-        McpServer::stdio("fake", trek_test_fixtures::bin("fake-mcp").display().to_string(), vec![mode.into()], env)
+        McpServer::stdio(
+            "fake",
+            trek_test_fixtures::bin("fake-mcp").display().to_string(),
+            vec![mode.into()],
+            env,
+        )
     }
 
     #[tokio::test]
     async fn a_stdio_server_lists_its_tools_with_its_environment() {
         // Past a log line on stdout, a ping of its own and a notification, over two pages.
-        let tools = list_tools(&fake("ok", vec![("FAKE_TOKEN".into(), "abc".into())])).await.unwrap();
+        let tools = list_tools(&fake("ok", vec![("FAKE_TOKEN".into(), "abc".into())]))
+            .await
+            .unwrap();
         assert_eq!(tools, ["echo", "add", "get_time", "env_ok"]);
         let tools = list_tools(&fake("ok", vec![])).await.unwrap();
-        assert!(!tools.contains(&"env_ok".to_string()), "the tool needs the env var");
+        assert!(
+            !tools.contains(&"env_ok".to_string()),
+            "the tool needs the env var"
+        );
     }
 
     #[tokio::test]
     async fn a_stdio_server_that_fails_says_why() {
         let err = list_tools(&fake("crash", vec![])).await.unwrap_err();
-        assert_eq!(err, "It stopped: Error: GITHUB_PERSONAL_ACCESS_TOKEN environment variable is required");
-        assert_eq!(list_tools(&fake("refuse", vec![])).await.unwrap_err(), "It said: Unsupported protocol version");
-        let err = list_tools(&McpServer::stdio("x", "trek-no-such-mcp-server", vec![], vec![])).await.unwrap_err();
-        assert_eq!(err, "trek-no-such-mcp-server isn't installed, or isn't on your PATH.");
+        assert_eq!(
+            err,
+            "It stopped: Error: GITHUB_PERSONAL_ACCESS_TOKEN environment variable is required"
+        );
+        assert_eq!(
+            list_tools(&fake("refuse", vec![])).await.unwrap_err(),
+            "It said: Unsupported protocol version"
+        );
+        let err = list_tools(&McpServer::stdio(
+            "x",
+            "trek-no-such-mcp-server",
+            vec![],
+            vec![],
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "trek-no-such-mcp-server isn't installed, or isn't on your PATH."
+        );
     }
 
     /// A name is looked up on the `PATH` the server gets, as a shell script there (on Windows this
@@ -306,51 +497,112 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("tool-launcher");
-        std::fs::write(&file, format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", trek_test_fixtures::bin("fake-mcp").display())).unwrap();
+        std::fs::write(
+            &file,
+            format!(
+                "#!/bin/sh\nexec \"{}\" \"$@\"\n",
+                trek_test_fixtures::bin("fake-mcp").display()
+            ),
+        )
+        .unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = dir.display().to_string();
-        let server = McpServer::stdio("x", "tool-launcher", vec!["ok".into()], vec![("PATH".into(), path)]);
-        assert_eq!(list_tools(&server).await.unwrap(), ["echo", "add", "get_time"]);
+        let server = McpServer::stdio(
+            "x",
+            "tool-launcher",
+            vec!["ok".into()],
+            vec![("PATH".into(), path)],
+        );
+        assert_eq!(
+            list_tools(&server).await.unwrap(),
+            ["echo", "add", "get_time"]
+        );
         // Written as a path, it's used as written.
         let server = McpServer::stdio("x", file.display().to_string(), vec!["ok".into()], vec![]);
-        assert_eq!(list_tools(&server).await.unwrap(), ["echo", "add", "get_time"]);
+        assert_eq!(
+            list_tools(&server).await.unwrap(),
+            ["echo", "add", "get_time"]
+        );
         // A name that isn't there still says what was written.
-        let server = McpServer::stdio("x", "tool-launcher", vec![], vec![("PATH".into(), String::new())]);
-        assert_eq!(list_tools(&server).await.unwrap_err(), "tool-launcher isn't installed, or isn't on your PATH.");
+        let server = McpServer::stdio(
+            "x",
+            "tool-launcher",
+            vec![],
+            vec![("PATH".into(), String::new())],
+        );
+        assert_eq!(
+            list_tools(&server).await.unwrap_err(),
+            "tool-launcher isn't installed, or isn't on your PATH."
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn a_silent_server_is_given_up_on_and_ended() {
-        let McpTransport::Stdio { command, args, env } = fake("silent", vec![]).transport else { unreachable!() };
+        let McpTransport::Stdio { command, args, env } = fake("silent", vec![]).transport else {
+            unreachable!()
+        };
         let started = std::time::Instant::now();
-        let err = stdio(&command, &args, &env, Duration::from_secs(1)).await.unwrap_err();
+        let err = stdio(&command, &args, &env, Duration::from_secs(1))
+            .await
+            .unwrap_err();
         assert_eq!(err, "No answer within 1 seconds.");
-        assert!(started.elapsed() < Duration::from_secs(5), "and it's ended without waiting on it");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "and it's ended without waiting on it"
+        );
     }
 
     /// A real server from npm, fetched by npx: `cargo test -p trek-agents real_server -- --ignored`.
     #[tokio::test]
     #[ignore = "needs npx and the network"]
     async fn a_real_server_from_npm_lists_its_tools() {
-        let tools = list_tools(&McpServer::stdio("everything", "npx", vec!["-y".into(), "@modelcontextprotocol/server-everything".into()], vec![])).await.unwrap();
+        let tools = list_tools(&McpServer::stdio(
+            "everything",
+            "npx",
+            vec![
+                "-y".into(),
+                "@modelcontextprotocol/server-everything".into(),
+            ],
+            vec![],
+        ))
+        .await
+        .unwrap();
         println!("{} tools: {}", tools.len(), tools.join(", "));
         assert!(tools.iter().any(|t| t == "echo"), "{tools:?}");
         // And remote ones: an open one, and one that wants a sign-in.
-        let tools = list_tools(&McpServer::http("deepwiki", "https://mcp.deepwiki.com/mcp", vec![])).await.unwrap();
+        let tools = list_tools(&McpServer::http(
+            "deepwiki",
+            "https://mcp.deepwiki.com/mcp",
+            vec![],
+        ))
+        .await
+        .unwrap();
         println!("deepwiki: {} tools: {}", tools.len(), tools.join(", "));
         assert!(!tools.is_empty());
-        println!("notion: {:?}", list_tools(&McpServer::http("notion", "https://mcp.notion.com/mcp", vec![])).await);
+        println!(
+            "notion: {:?}",
+            list_tools(&McpServer::http(
+                "notion",
+                "https://mcp.notion.com/mcp",
+                vec![]
+            ))
+            .await
+        );
     }
 
     /// A one-request-per-connection HTTP server: `answer` gets the request's head and body and
     /// gives back the whole response.
-    async fn serve(answer: impl Fn(&str, &Value) -> String + Send + Sync + 'static) -> (String, tokio::task::JoinHandle<()>) {
+    async fn serve(
+        answer: impl Fn(&str, &Value) -> String + Send + Sync + 'static,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             loop {
-                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
                 let mut raw = vec![];
                 let mut buf = [0u8; 4096];
                 let (head, body) = loop {
@@ -362,9 +614,20 @@ mod tests {
                     let text = String::from_utf8_lossy(&raw).to_string();
                     if let Some(split) = text.find("\r\n\r\n") {
                         let head = text[..split].to_string();
-                        let len = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0))).unwrap_or(0);
+                        let len = head
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
                         if raw.len() >= split + 4 + len {
-                            break (head, serde_json::from_slice(&raw[split + 4..split + 4 + len]).unwrap_or(Value::Null));
+                            break (
+                                head,
+                                serde_json::from_slice(&raw[split + 4..split + 4 + len])
+                                    .unwrap_or(Value::Null),
+                            );
                         }
                     }
                 };
@@ -376,7 +639,10 @@ mod tests {
     }
 
     fn response(status: &str, headers: &str, body: &str) -> String {
-        format!("HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+        format!(
+            "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
     }
 
     #[tokio::test]
@@ -403,17 +669,35 @@ mod tests {
             }
         })
         .await;
-        let tools = list_tools(&McpServer::http("r", url, vec![("Authorization".into(), "Bearer t".into())])).await.unwrap();
+        let tools = list_tools(&McpServer::http(
+            "r",
+            url,
+            vec![("Authorization".into(), "Bearer t".into())],
+        ))
+        .await
+        .unwrap();
         assert_eq!(tools, ["search", "fetch"]);
     }
 
     #[tokio::test]
     async fn a_remote_server_that_turns_trek_away_says_why() {
-        let (url, _server) = serve(|_, _| response("401 Unauthorized", "WWW-Authenticate: Bearer\r\n", "")).await;
-        assert_eq!(list_tools(&McpServer::http("r", url, vec![])).await.unwrap_err(), "Needs sign-in or a token (401).");
+        let (url, _server) =
+            serve(|_, _| response("401 Unauthorized", "WWW-Authenticate: Bearer\r\n", "")).await;
+        assert_eq!(
+            list_tools(&McpServer::http("r", url, vec![]))
+                .await
+                .unwrap_err(),
+            "Needs sign-in or a token (401)."
+        );
         // Nothing listening there.
-        let free = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
-        let err = list_tools(&McpServer::http("r", format!("http://{free}/mcp"), vec![])).await.unwrap_err();
+        let free = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let err = list_tools(&McpServer::http("r", format!("http://{free}/mcp"), vec![]))
+            .await
+            .unwrap_err();
         assert!(err.starts_with("Couldn't reach it"), "{err}");
     }
 }

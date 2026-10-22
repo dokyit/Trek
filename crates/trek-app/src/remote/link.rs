@@ -64,7 +64,11 @@ pub fn via(peer: IpAddr, local: IpAddr, tailscale: Option<Ipv4Addr>) -> Via {
             IpAddr::V4(v4) => shared_v4(v4),
             IpAddr::V6(v6) => tailnet_v6(v6),
         };
-        return if peer_tailnet { Via::Tailnet } else { Via::Elsewhere };
+        return if peer_tailnet {
+            Via::Tailnet
+        } else {
+            Via::Elsewhere
+        };
     }
     let local_network = match (peer, local) {
         (IpAddr::V4(p), _) => p.is_private() || p.is_link_local(),
@@ -80,7 +84,11 @@ pub fn via(peer: IpAddr, local: IpAddr, tailscale: Option<Ipv4Addr>) -> Via {
             seg[0] & 0xffc0 == 0xfe80 || (seg[0] & 0xfe00 == 0xfc00 && !tailnet_v6(p))
         }
     };
-    if local_network { Via::Wifi } else { Via::Elsewhere }
+    if local_network {
+        Via::Wifi
+    } else {
+        Via::Elsewhere
+    }
 }
 
 /// 100.64.0.0/10: Tailscale's addresses, and carrier-grade NAT's.

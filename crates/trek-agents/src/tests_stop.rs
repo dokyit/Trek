@@ -29,7 +29,10 @@ async fn reader() -> (GroupChild, tokio::process::ChildStdin) {
     let stdin = child.stdin.take().unwrap();
     let mut line = String::new();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    tokio::time::timeout(Duration::from_secs(30), stdout.read_line(&mut line)).await.expect("the stand-in started").unwrap();
+    tokio::time::timeout(Duration::from_secs(30), stdout.read_line(&mut line))
+        .await
+        .expect("the stand-in started")
+        .unwrap();
     assert_eq!(line.trim(), "ready");
     (child, stdin)
 }
@@ -43,7 +46,10 @@ async fn with_stdin_closed_first_an_agent_stops_at_once() {
     child.terminate().await;
     let took = started.elapsed();
     eprintln!("terminate with stdin closed first: {took:?}");
-    assert!(took < Duration::from_secs(1), "the end of stdin stopped it, not the grace's kill: {took:?}");
+    assert!(
+        took < Duration::from_secs(1),
+        "the end of stdin stopped it, not the grace's kill: {took:?}"
+    );
     assert!(!trek_core::procs::live().contains(&group));
 }
 
@@ -55,7 +61,10 @@ async fn with_stdin_held_an_agent_is_waited_out_then_killed() {
     child.terminate().await;
     let took = started.elapsed();
     eprintln!("terminate with stdin held: {took:?}");
-    assert!(took >= Duration::from_millis(1900), "nothing but the grace's kill could stop it: {took:?}");
+    assert!(
+        took >= Duration::from_millis(1900),
+        "nothing but the grace's kill could stop it: {took:?}"
+    );
     assert!(took < Duration::from_secs(10), "{took:?}");
     assert!(!trek_core::procs::live().contains(&group));
     drop(stdin);

@@ -35,8 +35,23 @@ pub fn parse_versions(output: &str) -> Option<Latest> {
     let output = output.replace("\r\n", "\n").replace('\r', "\n");
     let mut rows = output.lines().map(str::trim);
     rows.find(|row| row.len() >= 3 && row.bytes().all(|b| b == b'-'))?;
-    let versions: Vec<String> = rows.take_while(|row| !row.is_empty()).filter_map(version_row).collect();
-    versions.into_iter().reduce(|a, b| if crate::agent_update::is_newer(&b, &a) { b } else { a }).map(|version| Latest { version, auto_updates: false })
+    let versions: Vec<String> = rows
+        .take_while(|row| !row.is_empty())
+        .filter_map(version_row)
+        .collect();
+    versions
+        .into_iter()
+        .reduce(|a, b| {
+            if crate::agent_update::is_newer(&b, &a) {
+                b
+            } else {
+                a
+            }
+        })
+        .map(|version| Latest {
+            version,
+            auto_updates: false,
+        })
 }
 
 /// What `program` (`winget`) says is `id`'s newest version, `None` when it can't say: not
@@ -44,7 +59,17 @@ pub fn parse_versions(output: &str) -> Option<Latest> {
 pub async fn latest(program: &str, id: &str) -> Option<Latest> {
     let _one = ONE_AT_A_TIME.lock().await;
     let run = crate::procs::async_command(program)
-        .args(["show", "--exact", "--id", id, "--versions", "--source", "winget", "--disable-interactivity", "--accept-source-agreements"])
+        .args([
+            "show",
+            "--exact",
+            "--id",
+            id,
+            "--versions",
+            "--source",
+            "winget",
+            "--disable-interactivity",
+            "--accept-source-agreements",
+        ])
         .env("PATH", crate::detect::login_path())
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
@@ -77,28 +102,59 @@ mod tests {
     #[test]
     fn the_newest_version_is_read_from_winget_shows_table() {
         assert_eq!(version(CLAUDE).as_deref(), Some("2.1.292"));
-        assert_eq!(version(COPILOT).as_deref(), Some("1.0.95"), "a `v` is not part of the version");
+        assert_eq!(
+            version(COPILOT).as_deref(),
+            Some("1.0.95"),
+            "a `v` is not part of the version"
+        );
         assert_eq!(version(NONE), None);
         assert_eq!(version(""), None);
         // Newest by version, not by position: a list in any order, a pre-release among them.
-        assert_eq!(version("Found X [A.B]\nVersion\n-------\n1.9.0\n1.10.0\n1.2.0\n").as_deref(), Some("1.10.0"));
-        assert_eq!(version("Found X [A.B]\nVersion\n-------\n2.0.0-beta.1\n1.9.0\n").as_deref(), Some("2.0.0-beta.1"));
-        assert_eq!(version("Found X [A.B]\nVersion\n-------\n2.0.0-beta.1\n2.0.0\n").as_deref(), Some("2.0.0"), "a release after its pre-release");
+        assert_eq!(
+            version("Found X [A.B]\nVersion\n-------\n1.9.0\n1.10.0\n1.2.0\n").as_deref(),
+            Some("1.10.0")
+        );
+        assert_eq!(
+            version("Found X [A.B]\nVersion\n-------\n2.0.0-beta.1\n1.9.0\n").as_deref(),
+            Some("2.0.0-beta.1")
+        );
+        assert_eq!(
+            version("Found X [A.B]\nVersion\n-------\n2.0.0-beta.1\n2.0.0\n").as_deref(),
+            Some("2.0.0"),
+            "a release after its pre-release"
+        );
         // Unix line ends, and a header in another language, change nothing.
         assert_eq!(version("Encontrado Claude Code [Anthropic.ClaudeCode]\nVersión\n-------\n2.1.292\n2.1.291\n").as_deref(), Some("2.1.292"));
-        assert_eq!(version("Gefunden X [A.B]\nVersion\n----------\n3.0.1\n").as_deref(), Some("3.0.1"));
+        assert_eq!(
+            version("Gefunden X [A.B]\nVersion\n----------\n3.0.1\n").as_deref(),
+            Some("3.0.1")
+        );
     }
 
     #[test]
     fn only_the_table_under_the_dashes_is_read() {
         // A version-like word above the table (a package's name, a notice) isn't a version.
-        assert_eq!(version("Found Tool 9.9.9 [A.B]\nVersion\n-------\n1.2.3\n").as_deref(), Some("1.2.3"));
+        assert_eq!(
+            version("Found Tool 9.9.9 [A.B]\nVersion\n-------\n1.2.3\n").as_deref(),
+            Some("1.2.3")
+        );
         assert_eq!(version("Notice 9.9.9\n-------\n"), None);
         // Nothing after the table is: a blank line ends it.
-        assert_eq!(version("Found X [A.B]\nVersion\n-------\n1.2.3\n\nSee 9.9.9\n").as_deref(), Some("1.2.3"));
+        assert_eq!(
+            version("Found X [A.B]\nVersion\n-------\n1.2.3\n\nSee 9.9.9\n").as_deref(),
+            Some("1.2.3")
+        );
         // Rows that aren't a version's name are left out (a build, a note, a spinner's frame).
-        assert_eq!(version("Found X [A.B]\nVersion\n-------\n  \\  \n1.0.0 beta\nlatest\n1.2.3\n").as_deref(), Some("1.2.3"));
-        assert_eq!(version("Found X [A.B]\r\nVersion\r\n-------\r\n   -   \r   \\   \r\n1.2.3\r\n").as_deref(), Some("1.2.3"));
+        assert_eq!(
+            version("Found X [A.B]\nVersion\n-------\n  \\  \n1.0.0 beta\nlatest\n1.2.3\n")
+                .as_deref(),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            version("Found X [A.B]\r\nVersion\r\n-------\r\n   -   \r   \\   \r\n1.2.3\r\n")
+                .as_deref(),
+            Some("1.2.3")
+        );
         // No dashes, no table; a table with no versions is none.
         assert_eq!(version("Found X [A.B]\nVersion\n1.2.3\n"), None);
         assert_eq!(version("Found X [A.B]\nVersion\n-------\n"), None);
@@ -112,7 +168,11 @@ mod tests {
         for id in ["Anthropic.ClaudeCode", "GitHub.Copilot", "Nope.Nothing"] {
             let started = std::time::Instant::now();
             let said = crate::runtime().block_on(latest("winget", id));
-            println!("{id}: {:?} in {:?}", said.map(|l| l.version), started.elapsed());
+            println!(
+                "{id}: {:?} in {:?}",
+                said.map(|l| l.version),
+                started.elapsed()
+            );
         }
     }
 }

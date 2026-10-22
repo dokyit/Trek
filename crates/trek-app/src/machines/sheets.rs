@@ -10,7 +10,10 @@ use crate::workspace::{Route, SettingsPage, Workspace};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _,
+    WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::PathBuf;
@@ -18,16 +21,30 @@ use std::path::PathBuf;
 const PAD: f32 = 20.;
 
 /// A field as the verify driver reaches it: a wrapper with an id, the input inside.
-fn field(id: &'static str, label: impl Into<SharedString>, input: &Entity<InputState>, cx: &App) -> AnyElement {
+fn field(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    input: &Entity<InputState>,
+    cx: &App,
+) -> AnyElement {
     v_flex()
         .gap(px(4.))
-        .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground).child(label.into()))
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(cx.theme().muted_foreground)
+                .child(label.into()),
+        )
         .child(div().id(id).test_support().child(Input::new(input)))
         .into_any_element()
 }
 
 fn note(text: impl Into<SharedString>, cx: &App) -> Div {
-    div().text_size(px(12.5)).line_height(relative(1.5)).text_color(cx.theme().muted_foreground).child(text.into())
+    div()
+        .text_size(px(12.5))
+        .line_height(relative(1.5))
+        .text_color(cx.theme().muted_foreground)
+        .child(text.into())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -44,8 +61,12 @@ pub fn open_pair(workspace: Entity<Workspace>, window: &mut Window, cx: &mut App
     });
     let sheet = cx.new(|cx| PairSheet::new(workspace, window, cx));
     let focus = sheet.clone();
-    window.defer(cx, move |window, cx| focus.update(cx, |s, cx| s.link.update(cx, |i, cx| i.focus(window, cx))));
-    window.open_dialog(cx, move |dialog, _, _| dialog.w(px(560.)).p(px(0.)).child(sheet.clone()));
+    window.defer(cx, move |window, cx| {
+        focus.update(cx, |s, cx| s.link.update(cx, |i, cx| i.focus(window, cx)))
+    });
+    window.open_dialog(cx, move |dialog, _, _| {
+        dialog.w(px(560.)).p(px(0.)).child(sheet.clone())
+    });
 }
 
 pub struct PairSheet {
@@ -64,28 +85,51 @@ pub struct PairSheet {
 
 impl PairSheet {
     fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let link = cx.new(|cx| InputState::new(window, cx).placeholder("trek://pair?host=…&code=…&fp=…"));
-        let host = cx.new(|cx| InputState::new(window, cx).placeholder("192.168.1.20 or studio.local"));
+        let link =
+            cx.new(|cx| InputState::new(window, cx).placeholder("trek://pair?host=…&code=…&fp=…"));
+        let host =
+            cx.new(|cx| InputState::new(window, cx).placeholder("192.168.1.20 or studio.local"));
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("ABCD-1234"));
         let fingerprint = cx.new(|cx| InputState::new(window, cx).placeholder("64 hex characters"));
-        let subs = vec![cx.observe_in(&workspace, window, |this: &mut Self, ws, window, cx| {
-            if this.asked && matches!(ws.read(cx).machines.pairing, Some(Pairing::Done(_))) {
-                this.asked = false;
-                window.close_dialog(cx);
-            }
-            cx.notify();
-        })];
-        Self { workspace, typed: false, link, host, code, fingerprint, error: None, asked: false, _subscriptions: subs }
+        let subs = vec![
+            cx.observe_in(&workspace, window, |this: &mut Self, ws, window, cx| {
+                if this.asked && matches!(ws.read(cx).machines.pairing, Some(Pairing::Done(_))) {
+                    this.asked = false;
+                    window.close_dialog(cx);
+                }
+                cx.notify();
+            }),
+        ];
+        Self {
+            workspace,
+            typed: false,
+            link,
+            host,
+            code,
+            fingerprint,
+            error: None,
+            asked: false,
+            _subscriptions: subs,
+        }
     }
 
     fn pair(&mut self, cx: &mut Context<Self>) {
         let read = |i: &Entity<InputState>, cx: &App| i.read(cx).value().to_string();
-        let link = if self.typed { PairLink::typed(&read(&self.host, cx), &read(&self.code, cx), &read(&self.fingerprint, cx)) } else { PairLink::parse(&read(&self.link, cx)) };
+        let link = if self.typed {
+            PairLink::typed(
+                &read(&self.host, cx),
+                &read(&self.code, cx),
+                &read(&self.fingerprint, cx),
+            )
+        } else {
+            PairLink::parse(&read(&self.link, cx))
+        };
         match link {
             Ok(link) => {
                 self.error = None;
                 self.asked = true;
-                self.workspace.update(cx, |ws, cx| ws.pair_machine(link, cx));
+                self.workspace
+                    .update(cx, |ws, cx| ws.pair_machine(link, cx));
             }
             Err(why) => self.error = Some(why),
         }
@@ -108,7 +152,11 @@ impl Render for PairSheet {
             view.update(cx, |this, cx| {
                 this.typed = typed;
                 this.error = None;
-                let first = if typed { this.host.clone() } else { this.link.clone() };
+                let first = if typed {
+                    this.host.clone()
+                } else {
+                    this.link.clone()
+                };
                 first.update(cx, |i, cx| i.focus(window, cx));
                 cx.notify();
             })
@@ -118,9 +166,16 @@ impl Render for PairSheet {
                 .gap(px(10.))
                 .child(field("pair-host-input", "Address", &self.host, cx))
                 .child(field("pair-code-input", "Code", &self.code, cx))
-                .child(field("pair-fp-input", "Fingerprint (the whole one, as the link carries it)", &self.fingerprint, cx))
+                .child(field(
+                    "pair-fp-input",
+                    "Fingerprint (the whole one, as the link carries it)",
+                    &self.fingerprint,
+                    cx,
+                ))
         } else {
-            v_flex().gap(px(10.)).child(field("pair-link-input", "Pairing link", &self.link, cx))
+            v_flex()
+                .gap(px(10.))
+                .child(field("pair-link-input", "Pairing link", &self.link, cx))
         };
         v_flex()
             .id("pair-sheet")
@@ -159,16 +214,28 @@ impl Render for PairSheet {
 // ---------------------------------------------------------------------------------------------
 
 /// Open "Add to another machine…" for this Mac's project at `project`.
-pub fn open_clone(workspace: Entity<Workspace>, project: PathBuf, window: &mut Window, cx: &mut App) {
+pub fn open_clone(
+    workspace: Entity<Workspace>,
+    project: PathBuf,
+    window: &mut Window,
+    cx: &mut App,
+) {
     workspace.update(cx, |ws, cx| {
         // A finished or failed run from before isn't this one's.
-        if ws.machines.clone.as_ref().is_some_and(|r| !matches!(r.stage, CloneStage::Cloning | CloneStage::Copying { .. })) {
+        if ws
+            .machines
+            .clone
+            .as_ref()
+            .is_some_and(|r| !matches!(r.stage, CloneStage::Cloning | CloneStage::Copying { .. }))
+        {
             ws.machines.clone = None;
             cx.notify();
         }
     });
     let sheet = cx.new(|cx| CloneSheet::new(workspace, project, window, cx));
-    window.open_dialog(cx, move |dialog, _, _| dialog.w(px(620.)).p(px(0.)).child(sheet.clone()));
+    window.open_dialog(cx, move |dialog, _, _| {
+        dialog.w(px(620.)).p(px(0.)).child(sheet.clone())
+    });
 }
 
 pub struct CloneSheet {
@@ -191,21 +258,50 @@ pub struct CloneSheet {
 }
 
 impl CloneSheet {
-    fn new(workspace: Entity<Workspace>, project: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        workspace: Entity<Workspace>,
+        project: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let folder = cx.new(|cx| InputState::new(window, cx).placeholder("~/repo"));
         let ws = workspace.read(cx);
-        let target = ws.draft_machine(&project).or_else(|| ws.machines.list.iter().find(|m| m.reachable()).or(ws.machines.list.first()).map(|m| m.id().to_string()));
-        let subs = vec![cx.observe_in(&workspace, window, |this: &mut Self, ws, window, cx| {
-            this.sync_folder(window, cx);
-            if this.started && ws.read(cx).machines.clone.as_ref().is_some_and(|r| matches!(r.stage, CloneStage::Done { .. })) {
-                this.started = false;
-                window.close_dialog(cx);
-            }
-            cx.notify();
-        })];
+        let target = ws.draft_machine(&project).or_else(|| {
+            ws.machines
+                .list
+                .iter()
+                .find(|m| m.reachable())
+                .or(ws.machines.list.first())
+                .map(|m| m.id().to_string())
+        });
+        let subs = vec![
+            cx.observe_in(&workspace, window, |this: &mut Self, ws, window, cx| {
+                this.sync_folder(window, cx);
+                if this.started
+                    && ws
+                        .read(cx)
+                        .machines
+                        .clone
+                        .as_ref()
+                        .is_some_and(|r| matches!(r.stage, CloneStage::Done { .. }))
+                {
+                    this.started = false;
+                    window.close_dialog(cx);
+                }
+                cx.notify();
+            }),
+        ];
         let root = project.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let (origin, files) = cx.background_executor().spawn(async move { (clone::origin_url(&root), clone::ignored_files(&root).map_err(|e| e.to_string())) }).await;
+            let (origin, files) = cx
+                .background_executor()
+                .spawn(async move {
+                    (
+                        clone::origin_url(&root),
+                        clone::ignored_files(&root).map_err(|e| e.to_string()),
+                    )
+                })
+                .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 if let Some(url) = &origin {
                     this.scheme = clone::scheme_of(url);
@@ -237,7 +333,16 @@ impl CloneSheet {
 
     /// The repository's name, for the default folder.
     fn repo(&self) -> String {
-        self.origin.clone().flatten().and_then(|u| clone::repo_name(&u)).or_else(|| self.project.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| "repo".into())
+        self.origin
+            .clone()
+            .flatten()
+            .and_then(|u| clone::repo_name(&u))
+            .or_else(|| {
+                self.project
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+            })
+            .unwrap_or_else(|| "repo".into())
     }
 
     /// `~/<repo>`, or `<home>/<repo>` once the target said where its home is; filled in unless the
@@ -246,7 +351,12 @@ impl CloneSheet {
         let repo = self.repo();
         let ws = self.workspace.read(cx);
         let home = self.target.as_deref().and_then(|t| ws.machine_home(t));
-        let windows = self.target.as_deref().and_then(|t| ws.machines.get(t)).and_then(|m| m.info.as_ref()).is_some_and(|i| i.platform == "windows");
+        let windows = self
+            .target
+            .as_deref()
+            .and_then(|t| ws.machines.get(t))
+            .and_then(|m| m.info.as_ref())
+            .is_some_and(|i| i.platform == "windows");
         let default = match home {
             Some(home) if windows => format!("{}\\{repo}", home.trim_end_matches('\\')),
             Some(home) => format!("{}/{repo}", home.trim_end_matches('/')),
@@ -254,41 +364,74 @@ impl CloneSheet {
         };
         let now = self.folder.read(cx).value().to_string();
         if default != self.folder_default && (now.is_empty() || now == self.folder_default) {
-            self.folder.update(cx, |i, cx| i.set_value(default.clone(), window, cx));
+            self.folder
+                .update(cx, |i, cx| i.set_value(default.clone(), window, cx));
         }
         self.folder_default = default;
     }
 
     fn url(&self) -> Option<String> {
-        self.origin.clone().flatten().map(|u| clone::rewrite_url(&u, self.scheme))
+        self.origin
+            .clone()
+            .flatten()
+            .map(|u| clone::rewrite_url(&u, self.scheme))
     }
 
     fn submit(&mut self, cx: &mut Context<Self>) {
-        let (Some(target), Some(url)) = (self.target.clone(), self.url()) else { return };
+        let (Some(target), Some(url)) = (self.target.clone(), self.url()) else {
+            return;
+        };
         let folder = self.folder.read(cx).value().trim().to_string();
-        let name = self.project.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        if let Err(why) = (trek_remote::CloneProjectRequest { url: url.clone(), folder: folder.clone(), name }).check() {
+        let name = self
+            .project
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if let Err(why) = (trek_remote::CloneProjectRequest {
+            url: url.clone(),
+            folder: folder.clone(),
+            name,
+        })
+        .check()
+        {
             self.error = Some(why);
             cx.notify();
             return;
         }
         let files: Vec<String> = match &self.files {
-            Some(Ok(files)) => files.iter().filter(|f| f.ticked).map(|f| f.path.clone()).collect(),
+            Some(Ok(files)) => files
+                .iter()
+                .filter(|f| f.ticked)
+                .map(|f| f.path.clone())
+                .collect(),
             _ => vec![],
         };
         self.error = None;
         self.started = true;
         let project = self.project.clone();
-        self.workspace.update(cx, |ws, cx| ws.clone_to_machine(&target, project, url, folder, files, cx));
+        self.workspace.update(cx, |ws, cx| {
+            ws.clone_to_machine(&target, project, url, folder, files, cx)
+        });
         cx.notify();
     }
 
     fn files_list(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let files = match &self.files {
-            None => return h_flex().gap(px(8.)).child(Spinner::new().xsmall()).child(note("Looking for ignored files…", cx)).into_any_element(),
-            Some(Err(why)) => return note(format!("Couldn't list the ignored files: {why}"), cx).into_any_element(),
-            Some(Ok(files)) if files.is_empty() => return note("Nothing git ignores needs copying.", cx).into_any_element(),
+            None => {
+                return h_flex()
+                    .gap(px(8.))
+                    .child(Spinner::new().xsmall())
+                    .child(note("Looking for ignored files…", cx))
+                    .into_any_element();
+            }
+            Some(Err(why)) => {
+                return note(format!("Couldn't list the ignored files: {why}"), cx)
+                    .into_any_element();
+            }
+            Some(Ok(files)) if files.is_empty() => {
+                return note("Nothing git ignores needs copying.", cx).into_any_element();
+            }
             Some(Ok(files)) => files,
         };
         let ticked: Vec<&IgnoredFile> = files.iter().filter(|f| f.ticked).collect();
@@ -349,12 +492,38 @@ impl Render for CloneSheet {
         let theme = cx.theme().clone();
         let words = crate::words::words();
         let ws = self.workspace.read(cx);
-        let machines: Vec<(String, String, bool)> = ws.machines.list.iter().map(|m| (m.id().to_string(), m.entry.name.clone(), m.reachable())).collect();
-        let run = ws.machines.clone.clone().filter(|r| Some(&r.host) == self.target.as_ref());
-        let running = run.as_ref().is_some_and(|r| matches!(r.stage, CloneStage::Cloning | CloneStage::Copying { .. }));
-        let target_name = self.target.as_ref().and_then(|t| machines.iter().find(|(id, ..)| id == t)).map(|(_, n, _)| n.clone());
-        let source = format!("{} · {}", capitalized(words.this_computer), trek_core::paths::tildify(&self.project));
-        let label = |text: &str| div().w(px(130.)).flex_none().text_size(px(12.5)).text_color(theme.muted_foreground).child(text.to_string());
+        let machines: Vec<(String, String, bool)> = ws
+            .machines
+            .list
+            .iter()
+            .map(|m| (m.id().to_string(), m.entry.name.clone(), m.reachable()))
+            .collect();
+        let run = ws
+            .machines
+            .clone
+            .clone()
+            .filter(|r| Some(&r.host) == self.target.as_ref());
+        let running = run
+            .as_ref()
+            .is_some_and(|r| matches!(r.stage, CloneStage::Cloning | CloneStage::Copying { .. }));
+        let target_name = self
+            .target
+            .as_ref()
+            .and_then(|t| machines.iter().find(|(id, ..)| id == t))
+            .map(|(_, n, _)| n.clone());
+        let source = format!(
+            "{} · {}",
+            capitalized(words.this_computer),
+            trek_core::paths::tildify(&self.project)
+        );
+        let label = |text: &str| {
+            div()
+                .w(px(130.))
+                .flex_none()
+                .text_size(px(12.5))
+                .text_color(theme.muted_foreground)
+                .child(text.to_string())
+        };
 
         if machines.is_empty() {
             let ws = self.workspace.clone();
@@ -375,7 +544,11 @@ impl Render for CloneSheet {
 
         let view = cx.entity();
         let ids: Vec<String> = machines.iter().map(|(id, ..)| id.clone()).collect();
-        let current = self.target.as_ref().and_then(|t| ids.iter().position(|id| id == t)).unwrap_or(usize::MAX);
+        let current = self
+            .target
+            .as_ref()
+            .and_then(|t| ids.iter().position(|id| id == t))
+            .unwrap_or(usize::MAX);
         let pick_target = {
             let view = view.clone();
             move |ix: usize, window: &mut Window, cx: &mut App| {
@@ -410,7 +583,10 @@ impl Render for CloneSheet {
         let progress = run.as_ref().map(|r| {
             let stage = match &r.stage {
                 CloneStage::Cloning => "Cloning…".to_string(),
-                CloneStage::Copying { files } => format!("Copying {files} ignored file{}…", if *files == 1 { "" } else { "s" }),
+                CloneStage::Copying { files } => format!(
+                    "Copying {files} ignored file{}…",
+                    if *files == 1 { "" } else { "s" }
+                ),
                 CloneStage::Done { .. } => "Done".to_string(),
                 CloneStage::Failed(_) => "Didn't clone".to_string(),
             };
@@ -418,7 +594,12 @@ impl Render for CloneSheet {
                 .id("clone-progress")
                 .test_support()
                 .gap(px(4.))
-                .child(h_flex().gap(px(8.)).when(running, |el| el.child(Spinner::new().xsmall())).child(div().text_size(px(12.5)).child(stage)))
+                .child(
+                    h_flex()
+                        .gap(px(8.))
+                        .when(running, |el| el.child(Spinner::new().xsmall()))
+                        .child(div().text_size(px(12.5)).child(stage)),
+                )
                 .when(!r.lines.is_empty(), |el| {
                     el.child(
                         v_flex()
@@ -428,7 +609,14 @@ impl Render for CloneSheet {
                             .font_family(theme.mono_font_family.clone())
                             .text_size(px(11.5))
                             .text_color(theme.muted_foreground)
-                            .children(r.lines.iter().rev().take(6).rev().map(|l| div().truncate().child(l.clone()))),
+                            .children(
+                                r.lines
+                                    .iter()
+                                    .rev()
+                                    .take(6)
+                                    .rev()
+                                    .map(|l| div().truncate().child(l.clone())),
+                            ),
                     )
                 })
         });
@@ -436,7 +624,13 @@ impl Render for CloneSheet {
             Some(CloneStage::Failed(why)) => Some(why.clone()),
             _ => self.error.clone(),
         };
-        let row = |name: &str, el: AnyElement| h_flex().gap(px(10.)).items_center().child(label(name)).child(div().flex_1().min_w_0().child(el));
+        let row = |name: &str, el: AnyElement| {
+            h_flex()
+                .gap(px(10.))
+                .items_center()
+                .child(label(name))
+                .child(div().flex_1().min_w_0().child(el))
+        };
         v_flex()
             .id("clone-sheet")
             .test_support()

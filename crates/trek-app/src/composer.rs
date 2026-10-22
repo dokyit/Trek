@@ -2,21 +2,27 @@
 //! model (Fast · Effort › · Model ›) and access level, plus attach and send.
 //! On a new thread it floats over the background hero with Capy-style context chips above it.
 
+use crate::TogglePlan;
 use crate::attachments::{self, Attaching, Outbox};
 use crate::dictate;
+use crate::mentions::{self, PickKind};
 use crate::palette;
+use crate::screenclip;
 use crate::ui::{self, Pill};
 use crate::workspace::{Route, Scope, Workspace, WorkspaceEvent};
-use crate::TogglePlan;
-use gpui_kit::component::input::{Enter, Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState};
+use gpui_kit::component::button::ButtonVariants as _;
+use gpui_kit::component::input::{
+    Enter, Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea,
+    TextareaState,
+};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::button::ButtonVariants as _;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
+    WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use crate::mentions::{self, PickKind};
-use crate::screenclip;
 use std::path::PathBuf;
 use trek_core::catalog::ModelInfo;
 use trek_core::orchestrate::{Consult, Consultant, Style};
@@ -131,18 +137,28 @@ pub fn same_model(id: &str, candidate: &str) -> bool {
 
 /// Display name for a model id.
 pub(crate) fn model_name(models: &[ModelInfo], id: &str) -> String {
-    models.iter().find(|i| same_model(id, &i.id)).map(|i| i.name.clone()).unwrap_or_else(|| id.to_string())
+    models
+        .iter()
+        .find(|i| same_model(id, &i.id))
+        .map(|i| i.name.clone())
+        .unwrap_or_else(|| id.to_string())
 }
 
 /// The agent's default when the thread hasn't picked one: Opus 5.5 for Claude, the first live model otherwise.
 pub(crate) fn default_model(models: &[ModelInfo]) -> Option<&ModelInfo> {
-    models.iter().find(|m| m.id == "claude-opus-5-5").or_else(|| models.first())
+    models
+        .iter()
+        .find(|m| m.id == "claude-opus-5-5")
+        .or_else(|| models.first())
 }
 
 /// `/consult`'s models and message, split at the first colon followed by a space (or ending
 /// it): model ids may have colons of their own (`qwen2.5-coder:7b`).
 pub(crate) fn consult_split(rest: &str) -> Option<(&str, &str)> {
-    let at = rest.char_indices().find(|&(i, c)| c == ':' && rest[i + 1..].chars().next().is_none_or(char::is_whitespace))?.0;
+    let at = rest
+        .char_indices()
+        .find(|&(i, c)| c == ':' && rest[i + 1..].chars().next().is_none_or(char::is_whitespace))?
+        .0;
     Some((&rest[..at], &rest[at + 1..]))
 }
 
@@ -161,25 +177,50 @@ pub(crate) fn restate_command(text: &str) -> Option<Option<String>> {
 /// A consultant on `model` of `agent`, at `effort` (High, unless asked) within what the model takes.
 pub(crate) fn consultant(agent: AgentId, model: &ModelInfo, effort: Option<Effort>) -> Consultant {
     let effort = effort.unwrap_or(Effort::High);
-    let effort = if model.efforts.is_empty() { effort } else { effort.clamp_to(&model.efforts) };
-    Consultant { agent, model: model.id.clone(), effort }
+    let effort = if model.efforts.is_empty() {
+        effort
+    } else {
+        effort.clamp_to(&model.efforts)
+    };
+    Consultant {
+        agent,
+        model: model.id.clone(),
+        effort,
+    }
 }
 
 /// The model `query` names among the agents the user can pick: by id or name, whole or in part
 /// ("sol", "opus 5.5", "gpt-5.6-luna"), optionally after its agent ("codex sol").
-pub(crate) fn find_model(ws: &crate::workspace::Workspace, query: &str) -> Option<(AgentId, ModelInfo)> {
+pub(crate) fn find_model(
+    ws: &crate::workspace::Workspace,
+    query: &str,
+) -> Option<(AgentId, ModelInfo)> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
         return None;
     }
-    let all: Vec<(AgentId, ModelInfo)> = ws.ready_agents().into_iter().flat_map(|a| ws.models_for(&a).into_iter().map(move |m| (a.clone(), m))).collect();
+    let all: Vec<(AgentId, ModelInfo)> = ws
+        .ready_agents()
+        .into_iter()
+        .flat_map(|a| ws.models_for(&a).into_iter().map(move |m| (a.clone(), m)))
+        .collect();
     let named = |(a, m): &&(AgentId, ModelInfo)| {
         let agent = a.display_name().to_lowercase();
-        [m.id.to_lowercase(), m.name.to_lowercase(), format!("{agent} {}", m.name.to_lowercase()), format!("{} {}", a.key(), m.id.to_lowercase())].contains(&q)
+        [
+            m.id.to_lowercase(),
+            m.name.to_lowercase(),
+            format!("{agent} {}", m.name.to_lowercase()),
+            format!("{} {}", a.key(), m.id.to_lowercase()),
+        ]
+        .contains(&q)
     };
     all.iter()
         .find(named)
-        .or_else(|| all.iter().find(|(_, m)| m.name.to_lowercase().contains(&q) || m.id.to_lowercase().contains(&q)))
+        .or_else(|| {
+            all.iter().find(|(_, m)| {
+                m.name.to_lowercase().contains(&q) || m.id.to_lowercase().contains(&q)
+            })
+        })
         .cloned()
 }
 
@@ -213,43 +254,64 @@ pub(crate) fn hand_icon(level: HandHolding) -> Icon {
 }
 
 impl Composer {
-    pub fn new(workspace: Entity<Workspace>, scope: Scope, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: Entity<Workspace>,
+        scope: Scope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let cmd_enter = workspace.read(cx).settings.general.send_with_cmd_enter;
         let input = cx.new(|cx| {
-            TextareaState::new(window, cx).auto_grow(2, 12).submit_on_enter(!cmd_enter).placeholder(placeholder(None).to_string())
+            TextareaState::new(window, cx)
+                .auto_grow(2, 12)
+                .submit_on_enter(!cmd_enter)
+                .placeholder(placeholder(None).to_string())
         });
         let pickers = Pickers::new(window, cx);
         let clone_input = cx.new(|cx| InputState::new(window, cx).placeholder("owner/repo or URL"));
         let subscriptions = vec![
-            cx.subscribe_in(&input, window, |this, state, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { shift, secondary } = event {
-                    let send = if this.cmd_enter { *secondary } else { !*shift };
-                    let swallowed = this.pickers.swallowed();
-                    if send && this.pickers.trigger.is_none() && !swallowed {
-                        this.submit(state.clone(), window, cx);
+            cx.subscribe_in(
+                &input,
+                window,
+                |this, state, event: &InputEvent, window, cx| {
+                    if let InputEvent::PressEnter { shift, secondary } = event {
+                        let send = if this.cmd_enter { *secondary } else { !*shift };
+                        let swallowed = this.pickers.swallowed();
+                        if send && this.pickers.trigger.is_none() && !swallowed {
+                            this.submit(state.clone(), window, cx);
+                        }
+                    } else if matches!(event, InputEvent::Change) {
+                        pickers::update_trigger(this, cx);
+                        // The user has started typing: get the agent process up before they hit Return.
+                        // Not while editing: sending that starts a session of its own, after the rewind.
+                        let typing = {
+                            let v = state.read(cx).value();
+                            v.trim().len() >= 2 && !v.starts_with('/')
+                        } && this.editing.is_none();
+                        if typing {
+                            let scope = this.scope.clone();
+                            this.workspace
+                                .update(cx, |ws, cx| ws.warm_up_in(&scope, cx));
+                        }
+                        cx.notify();
                     }
-                } else if matches!(event, InputEvent::Change) {
-                    pickers::update_trigger(this, cx);
-                    // The user has started typing: get the agent process up before they hit Return.
-                    // Not while editing: sending that starts a session of its own, after the rewind.
-                    let typing = { let v = state.read(cx).value(); v.trim().len() >= 2 && !v.starts_with('/') } && this.editing.is_none();
-                    if typing {
-                        let scope = this.scope.clone();
-                        this.workspace.update(cx, |ws, cx| ws.warm_up_in(&scope, cx));
-                    }
-                    cx.notify();
-                }
-            }),
+                },
+            ),
             cx.observe_in(&workspace, window, |this, ws, window, cx| {
                 let cmd_enter = ws.read(cx).settings.general.send_with_cmd_enter;
                 if cmd_enter != this.cmd_enter {
                     this.cmd_enter = cmd_enter;
-                    this.input.update(cx, |s, cx| s.set_submit_on_enter(!cmd_enter, cx));
+                    this.input
+                        .update(cx, |s, cx| s.set_submit_on_enter(!cmd_enter, cx));
                 }
                 // The message being edited is gone from view (another thread, or a rewind took it).
                 let stale = this.editing.as_ref().is_some_and(|e| {
                     let ws = ws.read(cx);
-                    ws.thread_id_in(&this.scope) != Some(e.thread.as_str()) || ws.live.get(&e.thread).is_none_or(|l| l.items.position(&e.item).is_none())
+                    ws.thread_id_in(&this.scope) != Some(e.thread.as_str())
+                        || ws
+                            .live
+                            .get(&e.thread)
+                            .is_none_or(|l| l.items.position(&e.item).is_none())
                 });
                 if stale {
                     this.cancel_edit(window, cx);
@@ -259,15 +321,24 @@ impl Composer {
                 // Mid-turn the prompt says where a message goes.
                 let placeholder = {
                     let ws = ws.read(cx);
-                    let running = ws.thread_id_in(&this.scope).is_some_and(|id| ws.turn_running(id));
+                    let running = ws
+                        .thread_id_in(&this.scope)
+                        .is_some_and(|id| ws.turn_running(id));
                     placeholder(running.then_some(ws.settings.general.follow_up))
                 };
                 if this.placeholder != placeholder {
-                    this.input.update(cx, |s, cx| s.set_placeholder(placeholder.to_string(), window, cx));
+                    this.input.update(cx, |s, cx| {
+                        s.set_placeholder(placeholder.to_string(), window, cx)
+                    });
                     this.placeholder = placeholder;
                 }
                 // An open @ picker follows the folder on screen.
-                if this.pickers.trigger.as_ref().is_some_and(|t| t.kind == PickKind::Mention) {
+                if this
+                    .pickers
+                    .trigger
+                    .as_ref()
+                    .is_some_and(|t| t.kind == PickKind::Mention)
+                {
                     pickers::ensure_file_index(this, cx);
                 }
                 cx.notify()
@@ -297,7 +368,10 @@ impl Composer {
             height: std::rc::Rc::new(std::cell::Cell::new(px(0.))),
             editing: None,
             limit_tick: None,
-            consult: Consult { implement: true, ..Default::default() },
+            consult: Consult {
+                implement: true,
+                ..Default::default()
+            },
             consult_pinned: false,
             consult_open: false,
             consult_rail: None,
@@ -321,7 +395,9 @@ impl Composer {
             // Once the agents on this Mac have been found, so every family can take part.
             Ok("arena") if this.scope == Scope::Main => cx
                 .spawn(async move |this, cx| {
-                    cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(3))
+                        .await;
                     let _ = this.update(cx, |this, cx| {
                         this.consult.style = Style::Arena;
                         this.consult.consultants = this.arena_defaults(cx);
@@ -335,13 +411,24 @@ impl Composer {
         this
     }
 
-    fn submit(&mut self, state: Entity<TextareaState>, window: &mut Window, cx: &mut Context<Self>) {
+    fn submit(
+        &mut self,
+        state: Entity<TextareaState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.submit_as(state, None, window, cx);
     }
 
     /// Send what's typed. `follow`: how it goes if a turn is running (`None`: as Settings ›
     /// General has it; ⌥↩ sends it the other way).
-    fn submit_as(&mut self, state: Entity<TextareaState>, follow: Option<FollowUp>, window: &mut Window, cx: &mut Context<Self>) {
+    fn submit_as(
+        &mut self,
+        state: Entity<TextareaState>,
+        follow: Option<FollowUp>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let target = self.target(cx);
         if self.outbox.hold_send(target) {
             cx.notify();
@@ -363,7 +450,12 @@ impl Composer {
                 return;
             }
             Some(Err(why)) => {
-                self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message: why, undo: None }));
+                self.workspace.update(cx, |_, cx| {
+                    cx.emit(WorkspaceEvent::Toast {
+                        message: why,
+                        undo: None,
+                    })
+                });
                 return;
             }
             None => text,
@@ -371,7 +463,8 @@ impl Composer {
         // `/restate <message>` sends it asking for a restatement first. `/restate` alone, in a
         // thread under way, asks the agent to restate the thread so far; in a new thread it turns
         // that on (or off) for the first message.
-        let under_way = self.editing.is_none() && self.workspace.read(cx).thread_in(&self.scope).is_some();
+        let under_way =
+            self.editing.is_none() && self.workspace.read(cx).thread_in(&self.scope).is_some();
         let text = match restate_command(&text) {
             Some(None) if under_way => {
                 self.restate = true;
@@ -394,23 +487,40 @@ impl Composer {
         // With consultants picked, the agent is told to ask them first. Picks clear once it's
         // sent (unless pinned); a message that isn't sent keeps them, and comes back as written.
         let plain = text.clone();
-        let restating = self.restate && !text.trim().is_empty() && !text.trim_start().starts_with('/');
-        let consulting = !(self.consult.consultants.is_empty() || text.trim().is_empty() || text.trim_start().starts_with('/'));
+        let restating =
+            self.restate && !text.trim().is_empty() && !text.trim_start().starts_with('/');
+        let consulting = !(self.consult.consultants.is_empty()
+            || text.trim().is_empty()
+            || text.trim_start().starts_with('/'));
         if consulting {
             let agent = self.workspace.read(cx).prefs_in(&self.scope).agent;
             if let Some(why) = self.workspace.read(cx).consult_unavailable(&agent) {
-                self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message: format!("Can't consult: {why}."), undo: None }));
+                self.workspace.update(cx, |_, cx| {
+                    cx.emit(WorkspaceEvent::Toast {
+                        message: format!("Can't consult: {why}."),
+                        undo: None,
+                    })
+                });
                 return;
             }
         }
-        let text = if restating { trek_core::restate::with_restate(&text) } else { text };
+        let text = if restating {
+            trek_core::restate::with_restate(&text)
+        } else {
+            text
+        };
         // An arena names its judge: the one picked, else Trek's pick.
         let mut consult = self.consult.clone();
         if consulting && consult.style == Style::Arena && consult.judge.is_none() {
             consult.judge = self.arena_judge(cx);
         }
         if let Some(why) = trek_core::orchestrate::arena_problem(&consult).filter(|_| consulting) {
-            self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message: format!("{why}."), undo: None }));
+            self.workspace.update(cx, |_, cx| {
+                cx.emit(WorkspaceEvent::Toast {
+                    message: format!("{why}."),
+                    undo: None,
+                })
+            });
             return;
         }
         let text = if consulting {
@@ -429,7 +539,12 @@ impl Composer {
                 None
             };
             if let Some(message) = why {
-                self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message: message.into(), undo: None }));
+                self.workspace.update(cx, |_, cx| {
+                    cx.emit(WorkspaceEvent::Toast {
+                        message: message.into(),
+                        undo: None,
+                    })
+                });
                 return;
             }
         }
@@ -442,9 +557,16 @@ impl Composer {
             // Sent in place of the message: the conversation goes back to just before it. What
             // the composer held before the edit comes back.
             Some(e) => {
-                let restore = e.restore == Some(true) && !matches!(&e.files, EditFiles::Changes(c) if c.is_empty());
-                let sent = self.workspace.update(cx, |ws, cx| ws.edit_and_resend(&e.thread, &e.item, text, images.clone(), restore, cx));
-                let (text, images) = if sent { e.draft.clone() } else { (plain, images) };
+                let restore = e.restore == Some(true)
+                    && !matches!(&e.files, EditFiles::Changes(c) if c.is_empty());
+                let sent = self.workspace.update(cx, |ws, cx| {
+                    ws.edit_and_resend(&e.thread, &e.item, text, images.clone(), restore, cx)
+                });
+                let (text, images) = if sent {
+                    e.draft.clone()
+                } else {
+                    (plain, images)
+                };
                 self.outbox.paths = images;
                 state.update(cx, |s, cx| s.set_value(text, window, cx));
                 if !sent {
@@ -454,7 +576,10 @@ impl Composer {
             }
             None => {
                 self.workspace.update(cx, |ws, cx| {
-                    let running = ws.thread_id_in(&scope).map(str::to_string).filter(|id| ws.turn_running(id));
+                    let running = ws
+                        .thread_id_in(&scope)
+                        .map(str::to_string)
+                        .filter(|id| ws.turn_running(id));
                     match (follow, running) {
                         (Some(follow), Some(id)) => ws.send_as(&id, text, images, Some(follow), cx),
                         _ => ws.send_in(&scope, text, images, cx),
@@ -482,7 +607,15 @@ impl Composer {
 
     /// A message comes back into the composer: put back by a rewind, or (`edit`: its item id) to
     /// edit and send again in its place.
-    pub fn compose(&mut self, thread: &str, text: &str, images: &[PathBuf], edit: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn compose(
+        &mut self,
+        thread: &str,
+        text: &str,
+        images: &[PathBuf],
+        edit: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.follow_route(window, cx);
         // A message sent with consultants comes back as it was written, its consultants picked
         // (and asking for a restatement again, if it did).
@@ -498,16 +631,25 @@ impl Composer {
         };
         let draft = match self.editing.take() {
             Some(e) => e.draft,
-            None => (self.input.read(cx).value().to_string(), std::mem::take(&mut self.outbox.paths)),
+            None => (
+                self.input.read(cx).value().to_string(),
+                std::mem::take(&mut self.outbox.paths),
+            ),
         };
         let ws = self.workspace.read(cx);
         let checkpoint = ws.rewind_files(thread, &item);
-        let why_not = ws.no_checkpoint(thread, &item).unwrap_or(crate::workspace::NoCheckpoint::Missing).explain();
+        let why_not = ws
+            .no_checkpoint(thread, &item)
+            .unwrap_or(crate::workspace::NoCheckpoint::Missing)
+            .explain();
         // Which files sending it would put back (those its turns changed), found off the main thread.
         let check = checkpoint.as_ref().map(|_| {
             let files = ws.rewind_files(thread, &item);
             cx.spawn(async move |this, cx| {
-                let result = cx.background_executor().spawn(async move { files.map_or(Ok(vec![]), |f| f.changes()) }).await;
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { files.map_or(Ok(vec![]), |f| f.changes()) })
+                    .await;
                 let _ = this.update(cx, |this, cx| {
                     if let Some(e) = this.editing.as_mut() {
                         e.files = match result {
@@ -551,7 +693,11 @@ impl Composer {
     /// typed for `key`'s (nothing, if nothing was).
     fn switch_draft(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
         // A message being edited belongs to its thread: leaving it puts the draft it replaced back first.
-        if self.editing.as_ref().is_some_and(|e| format!("thread:{}", e.thread) != key) {
+        if self
+            .editing
+            .as_ref()
+            .is_some_and(|e| format!("thread:{}", e.thread) != key)
+        {
             self.cancel_edit(window, cx);
         }
         // A take in progress ends unconfirmed: its words don't follow into a draft put away.
@@ -564,11 +710,24 @@ impl Composer {
         let restate = std::mem::take(&mut self.restate);
         let old = std::mem::replace(&mut self.draft_key, key.clone());
         if !text.is_empty() || !images.is_empty() || restate {
-            self.drafts.insert(old, Draft { text, cursor, images, restate });
+            self.drafts.insert(
+                old,
+                Draft {
+                    text,
+                    cursor,
+                    images,
+                    restate,
+                },
+            );
         } else {
             self.drafts.remove(&old);
         }
-        let next = self.drafts.remove(&key).unwrap_or(Draft { text: String::new(), cursor: 0, images: Vec::new(), restate: false });
+        let next = self.drafts.remove(&key).unwrap_or(Draft {
+            text: String::new(),
+            cursor: 0,
+            images: Vec::new(),
+            restate: false,
+        });
         self.outbox.paths = next.images;
         self.restate = next.restate;
         self.pickers.trigger = None;
@@ -593,20 +752,44 @@ impl Composer {
     fn edit_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let e = self.editing.as_ref()?;
         let theme = cx.theme().clone();
-        let tooltip = |text: String| move |window: &mut Window, cx: &mut App| gpui_kit::component::tooltip::Tooltip::new(text.clone()).build(window, cx);
+        let tooltip = |text: String| {
+            move |window: &mut Window, cx: &mut App| {
+                gpui_kit::component::tooltip::Tooltip::new(text.clone()).build(window, cx)
+            }
+        };
         let restore = match (e.restore, &e.files) {
             (Some(_), EditFiles::Changes(changes)) if changes.is_empty() => {
-                ui::check_row("edit-restore", "Restore files", false, true, cx).tooltip(tooltip("The files are as they were when this message was first sent.".into()))
+                ui::check_row("edit-restore", "Restore files", false, true, cx).tooltip(tooltip(
+                    "The files are as they were when this message was first sent.".into(),
+                ))
             }
             (Some(on), files) => {
                 // What sending it puts back, before it's sent: restoring reverts edits made since
                 // (yours too) and removes files created since.
                 let (label, tip) = match files {
-                    EditFiles::Checking => ("Restore files".to_string(), "Checking which files changed…".to_string()),
-                    EditFiles::Failed(why) => ("Restore files".to_string(), format!("Couldn't check the files: {why}")),
+                    EditFiles::Checking => (
+                        "Restore files".to_string(),
+                        "Checking which files changed…".to_string(),
+                    ),
+                    EditFiles::Failed(why) => (
+                        "Restore files".to_string(),
+                        format!("Couldn't check the files: {why}"),
+                    ),
                     EditFiles::Changes(changes) => {
-                        let mut tip = String::from("Put the files back as they were when this message was first sent:");
-                        for f in changes.iter().filter(|f| !matches!(f.change, trek_core::checkpoint::Change::Nested | trek_core::checkpoint::Change::Kept)).take(FILES_LISTED) {
+                        let mut tip = String::from(
+                            "Put the files back as they were when this message was first sent:",
+                        );
+                        for f in changes
+                            .iter()
+                            .filter(|f| {
+                                !matches!(
+                                    f.change,
+                                    trek_core::checkpoint::Change::Nested
+                                        | trek_core::checkpoint::Change::Kept
+                                )
+                            })
+                            .take(FILES_LISTED)
+                        {
                             let what = match f.change {
                                 trek_core::checkpoint::Change::Added => "delete",
                                 trek_core::checkpoint::Change::Deleted => "bring back",
@@ -614,21 +797,36 @@ impl Composer {
                             };
                             tip.push_str(&format!("\n{what} {}", f.path));
                         }
-                        let n = changes.iter().filter(|f| !matches!(f.change, trek_core::checkpoint::Change::Nested | trek_core::checkpoint::Change::Kept)).count();
+                        let n = changes
+                            .iter()
+                            .filter(|f| {
+                                !matches!(
+                                    f.change,
+                                    trek_core::checkpoint::Change::Nested
+                                        | trek_core::checkpoint::Change::Kept
+                                )
+                            })
+                            .count();
                         if n > FILES_LISTED {
                             tip.push_str(&format!("\nand {} more", n - FILES_LISTED));
                         }
-                        (format!("Restore {n} file{}", if n == 1 { "" } else { "s" }), tip)
+                        (
+                            format!("Restore {n} file{}", if n == 1 { "" } else { "s" }),
+                            tip,
+                        )
                     }
                 };
-                ui::check_row("edit-restore", label, on, false, cx).tooltip(tooltip(tip)).on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(e) = this.editing.as_mut() {
-                        e.restore = e.restore.map(|on| !on);
-                    }
-                    cx.notify();
-                }))
+                ui::check_row("edit-restore", label, on, false, cx)
+                    .tooltip(tooltip(tip))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(e) = this.editing.as_mut() {
+                            e.restore = e.restore.map(|on| !on);
+                        }
+                        cx.notify();
+                    }))
             }
-            (None, _) => ui::check_row("edit-restore", "Restore files", false, true, cx).tooltip(tooltip(e.why_not.clone())),
+            (None, _) => ui::check_row("edit-restore", "Restore files", false, true, cx)
+                .tooltip(tooltip(e.why_not.clone())),
         };
         Some(
             h_flex()
@@ -640,7 +838,13 @@ impl Composer {
                 .text_size(px(12.5))
                 .text_color(theme.muted_foreground)
                 .child(Icon::new(crate::assets::Lucide::Pencil).xsmall())
-                .child(div().flex_1().min_w_0().truncate().child("Editing message · Esc to cancel"))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child("Editing message · Esc to cancel"),
+                )
                 .child(restore)
                 .child(
                     gpui_kit::component::button::Button::new("edit-cancel")
@@ -664,23 +868,32 @@ impl Composer {
             return None;
         }
         let now = ws.now();
-        let snoozed = ws.thread(id).and_then(|t| t.snoozed_until).is_some_and(|u| u > now);
+        let snoozed = ws
+            .thread(id)
+            .and_then(|t| t.snoozed_until)
+            .is_some_and(|u| u > now);
         // The countdown moves on its own: redraw this view (not the window) twice a minute.
         if self.limit_tick.is_none() {
-            self.limit_tick = Some(cx.spawn(async move |this, cx| loop {
-                cx.background_executor().timer(std::time::Duration::from_secs(30)).await;
-                let paused = this.update(cx, |this, cx| {
-                    let ws = this.workspace.read(cx);
-                    let paused = ws.thread_id_in(&this.scope).is_some_and(|id| ws.pause(id).is_some());
-                    if paused {
-                        cx.notify();
-                    } else {
-                        this.limit_tick = None;
+            self.limit_tick = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(30))
+                        .await;
+                    let paused = this.update(cx, |this, cx| {
+                        let ws = this.workspace.read(cx);
+                        let paused = ws
+                            .thread_id_in(&this.scope)
+                            .is_some_and(|id| ws.pause(id).is_some());
+                        if paused {
+                            cx.notify();
+                        } else {
+                            this.limit_tick = None;
+                        }
+                        paused
+                    });
+                    if !paused.unwrap_or(false) {
+                        break;
                     }
-                    paused
-                });
-                if !paused.unwrap_or(false) {
-                    break;
                 }
             }));
         }
@@ -688,12 +901,24 @@ impl Composer {
         let amber = palette::amber(cx);
         let when = |at: i64| {
             let clock = crate::time::reset_clock(at, now);
-            if compact { clock } else { format!("{clock} (in {})", crate::time::countdown(at, now)) }
+            if compact {
+                clock
+            } else {
+                format!("{clock} (in {})", crate::time::countdown(at, now))
+            }
         };
         // Stopped ahead of the limit, as Trek asked, rather than by it.
-        let title = if pause.wrapped { "Wrapped up before the limit" } else { "Usage limit reached" }.to_string();
+        let title = if pause.wrapped {
+            "Wrapped up before the limit"
+        } else {
+            "Usage limit reached"
+        }
+        .to_string();
         let detail = match (pause.resets_at, pause.resume) {
-            (Some(at), true) => format!("Resumes at {}", when(at + trek_core::limit::RESUME_GRACE_MS)),
+            (Some(at), true) => format!(
+                "Resumes at {}",
+                when(at + trek_core::limit::RESUME_GRACE_MS)
+            ),
             (Some(at), false) => format!("Resets {}", when(at)),
             (None, _) => "Reset time unknown".to_string(),
         };
@@ -708,39 +933,88 @@ impl Composer {
                 .items_center()
                 .rounded(px(6.))
                 .cursor_pointer()
-                .text_color(if strong { theme.foreground } else { theme.muted_foreground })
+                .text_color(if strong {
+                    theme.foreground
+                } else {
+                    theme.muted_foreground
+                })
                 .when(strong, |el| el.font_medium())
-                .hover(|s| s.bg(theme.foreground.opacity(0.06)).text_color(theme.foreground))
+                .hover(|s| {
+                    s.bg(theme.foreground.opacity(0.06))
+                        .text_color(theme.foreground)
+                })
                 .child(label)
         };
         let ws = self.workspace.clone();
         let on = |f: fn(&mut Workspace, &str, &mut Context<Workspace>)| {
             let (ws, id) = (ws.clone(), id.to_string());
-            move |_: &ClickEvent, _: &mut Window, cx: &mut App| ws.update(cx, |ws, cx| f(ws, &id, cx))
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                ws.update(cx, |ws, cx| f(ws, &id, cx))
+            }
         };
         let mut actions: Vec<AnyElement> = vec![];
         match (pause.resets_at.is_some(), pause.resume) {
-            (true, false) => actions.push(action("limit-resume", "Resume at reset", true).on_click(on(|ws, id, cx| ws.resume_at_reset(id, cx))).into_any_element()),
-            (true, true) => actions.push(action("limit-cancel", "Cancel", false).on_click(on(|ws, id, cx| ws.cancel_resume(id, cx))).into_any_element()),
-            (false, _) => actions.push(action("limit-retry", "Try again", true).on_click(on(|ws, id, cx| ws.end_pause(id, true, cx))).into_any_element()),
+            (true, false) => actions.push(
+                action("limit-resume", "Resume at reset", true)
+                    .on_click(on(|ws, id, cx| ws.resume_at_reset(id, cx)))
+                    .into_any_element(),
+            ),
+            (true, true) => actions.push(
+                action("limit-cancel", "Cancel", false)
+                    .on_click(on(|ws, id, cx| ws.cancel_resume(id, cx)))
+                    .into_any_element(),
+            ),
+            (false, _) => actions.push(
+                action("limit-retry", "Try again", true)
+                    .on_click(on(|ws, id, cx| ws.end_pause(id, true, cx)))
+                    .into_any_element(),
+            ),
         }
         if pause.resets_at.is_some() && !snoozed {
-            let label = if compact { "Snooze" } else { "Snooze until reset" };
-            actions.push(action("limit-snooze", label, false).on_click(on(|ws, id, cx| ws.snooze_until_reset(id, cx))).into_any_element());
+            let label = if compact {
+                "Snooze"
+            } else {
+                "Snooze until reset"
+            };
+            actions.push(
+                action("limit-snooze", label, false)
+                    .on_click(on(|ws, id, cx| ws.snooze_until_reset(id, cx)))
+                    .into_any_element(),
+            );
         }
         actions.push(
-            action("limit-switch", if compact { "Switch…" } else { "Switch agent…" }, false)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    pickers::open_model_menu(this, cx);
-                }))
-                .into_any_element(),
+            action(
+                "limit-switch",
+                if compact {
+                    "Switch…"
+                } else {
+                    "Switch agent…"
+                },
+                false,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                pickers::open_model_menu(this, cx);
+            }))
+            .into_any_element(),
         );
         // Without a reset time, nothing sends them on its own: "Try again" (or the next message) does.
-        let waits_for = if pause.resets_at.is_some() { "Sends when your limit resets" } else { "Sends when you try again" };
+        let waits_for = if pause.resets_at.is_some() {
+            "Sends when your limit resets"
+        } else {
+            "Sends when you try again"
+        };
         let queued = pause.queued.iter().enumerate().map(|(ix, q)| {
             let ws = self.workspace.clone();
             let id = id.to_string();
-            let text = if q.text.trim().is_empty() { format!("{} image{}", q.images.len(), if q.images.len() == 1 { "" } else { "s" }) } else { q.text.lines().next().unwrap_or_default().to_string() };
+            let text = if q.text.trim().is_empty() {
+                format!(
+                    "{} image{}",
+                    q.images.len(),
+                    if q.images.len() == 1 { "" } else { "s" }
+                )
+            } else {
+                q.text.lines().next().unwrap_or_default().to_string()
+            };
             h_flex()
                 .id(("limit-queued", ix))
                 .test_support()
@@ -749,16 +1023,36 @@ impl Composer {
                 .gap(px(8.))
                 .border_t_1()
                 .border_color(theme.foreground.opacity(0.07))
-                .child(Icon::new(crate::assets::Lucide::Clock).xsmall().text_color(theme.muted_foreground))
-                .child(div().flex_1().min_w_0().truncate().text_color(theme.foreground.opacity(0.85)).child(text))
-                .when(!compact, |el| el.child(div().flex_none().text_color(theme.muted_foreground).child(waits_for)))
+                .child(
+                    Icon::new(crate::assets::Lucide::Clock)
+                        .xsmall()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.foreground.opacity(0.85))
+                        .child(text),
+                )
+                .when(!compact, |el| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .text_color(theme.muted_foreground)
+                            .child(waits_for),
+                    )
+                })
                 .child(
                     gpui_kit::component::button::Button::new(("limit-unqueue", ix))
                         .ghost()
                         .xsmall()
                         .icon(Icon::new(IconName::Close).text_color(theme.muted_foreground))
                         .tooltip("Don't send this at the reset")
-                        .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.unqueue_for_reset(&id, ix, cx))),
+                        .on_click(move |_, _, cx| {
+                            ws.update(cx, |ws, cx| ws.unqueue_for_reset(&id, ix, cx))
+                        }),
                 )
                 .into_any_element()
         });
@@ -779,9 +1073,26 @@ impl Composer {
                         .pl(px(12.))
                         .pr(px(6.))
                         .gap(px(8.))
-                        .child(Icon::new(crate::assets::Lucide::Gauge).small().text_color(amber))
-                        .child(div().flex_none().font_medium().text_color(theme.foreground).child(title))
-                        .child(div().flex_1().min_w_0().truncate().text_color(theme.muted_foreground).child(detail))
+                        .child(
+                            Icon::new(crate::assets::Lucide::Gauge)
+                                .small()
+                                .text_color(amber),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_medium()
+                                .text_color(theme.foreground)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.muted_foreground)
+                                .child(detail),
+                        )
                         .children(actions),
                 )
                 .children(queued)
@@ -812,7 +1123,10 @@ impl Composer {
     /// The open picker's rows, by label.
     #[cfg(test)]
     pub(crate) fn picks(&self, cx: &App) -> Vec<String> {
-        pickers::picker_items(self, cx).into_iter().map(|i| i.label).collect()
+        pickers::picker_items(self, cx)
+            .into_iter()
+            .map(|i| i.label)
+            .collect()
     }
 
     #[cfg(test)]
@@ -824,7 +1138,14 @@ impl Composer {
     /// The consultants picked for the next message (`agent/model/effort`), and whether they stay.
     #[cfg(test)]
     pub(crate) fn consultants(&self) -> (Vec<String>, bool) {
-        (self.consult.consultants.iter().map(Consultant::key).collect(), self.consult_pinned)
+        (
+            self.consult
+                .consultants
+                .iter()
+                .map(Consultant::key)
+                .collect(),
+            self.consult_pinned,
+        )
     }
 
     /// Whether the next message asks for a restatement first.
@@ -869,7 +1190,10 @@ impl Composer {
         if std::mem::take(changed) || height <= px(0.) {
             return composer.clone().into_any_element();
         }
-        composer.clone().cached(StyleRefinement::default().w_full().flex_none().h(height)).into_any_element()
+        composer
+            .clone()
+            .cached(StyleRefinement::default().w_full().flex_none().h(height))
+            .into_any_element()
     }
 
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -884,7 +1208,11 @@ impl Composer {
             let value = s.value().to_string();
             let cursor = s.cursor().min(value.len());
             let needs_break = cursor > 0 && !value[..cursor].ends_with('\n');
-            let text = if needs_break { format!("\n{text}") } else { text.to_string() };
+            let text = if needs_break {
+                format!("\n{text}")
+            } else {
+                text.to_string()
+            };
             s.insert(text, window, cx);
         });
         self.focus(window, cx);
@@ -897,7 +1225,12 @@ impl Composer {
     }
 
     /// Move voice mode on (`voice::Voice::step`) and do what that calls for.
-    pub(crate) fn voice_step(&mut self, event: voice::Event, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn voice_step(
+        &mut self,
+        event: voice::Event,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let effect = self.voice.step(event);
         if effect.ask {
             self.ask_to_dictate(window, cx);
@@ -909,10 +1242,13 @@ impl Composer {
             // A live take has its words on screen already: if the recognizer is slow to settle
             // them, they go in as shown.
             if self.voice.live {
-                self.voice_tasks.push(cx.spawn_in(window, async move |this, cx| {
-                    cx.background_executor().timer(voice::GRACE).await;
-                    let _ = this.update_in(cx, |c, window, cx| c.voice_step(voice::Event::GraceOver, window, cx));
-                }));
+                self.voice_tasks
+                    .push(cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(voice::GRACE).await;
+                        let _ = this.update_in(cx, |c, window, cx| {
+                            c.voice_step(voice::Event::GraceOver, window, cx)
+                        });
+                    }));
             }
         }
         if effect.end {
@@ -939,7 +1275,10 @@ impl Composer {
         let (tx, rx) = async_channel::bounded(1);
         dictate::ensure_permission(tx);
         cx.spawn_in(window, async move |this, cx| {
-            let allowed = rx.recv().await.unwrap_or_else(|_| Err("Dictation ended.".into()));
+            let allowed = rx
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err("Dictation ended.".into()));
             let _ = this.update_in(cx, |c, window, cx| {
                 if c.voice.take != take || c.voice.phase != voice::Phase::Asking {
                     return;
@@ -960,37 +1299,57 @@ impl Composer {
 
     /// The take is open: the waveform row replaces the toolbar, results feed the preview, and
     /// the levels tick at 20 fps.
-    pub(crate) fn begin_voice(&mut self, live: bool, results: async_channel::Receiver<dictate::Heard>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn begin_voice(
+        &mut self,
+        live: bool,
+        results: async_channel::Receiver<dictate::Heard>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (value, cursor) = {
             let s = self.input.read(cx);
             (s.value().to_string(), s.cursor())
         };
-        self.voice_step(voice::Event::Started { live, value, cursor }, window, cx);
-        self.voice_tasks.push(cx.spawn_in(window, async move |this, cx| {
-            while let Ok(heard) = results.recv().await {
-                let event = match heard {
-                    dictate::Heard::Partial(t) => voice::Event::Partial(t),
-                    dictate::Heard::Final(t) => voice::Event::Final(t),
-                    dictate::Heard::Failed(e) => voice::Event::Failed(e),
-                };
-                if this.update_in(cx, |c, window, cx| c.voice_step(event, window, cx)).is_err() {
+        self.voice_step(
+            voice::Event::Started {
+                live,
+                value,
+                cursor,
+            },
+            window,
+            cx,
+        );
+        self.voice_tasks
+            .push(cx.spawn_in(window, async move |this, cx| {
+                while let Ok(heard) = results.recv().await {
+                    let event = match heard {
+                        dictate::Heard::Partial(t) => voice::Event::Partial(t),
+                        dictate::Heard::Final(t) => voice::Event::Final(t),
+                        dictate::Heard::Failed(e) => voice::Event::Failed(e),
+                    };
+                    if this
+                        .update_in(cx, |c, window, cx| c.voice_step(event, window, cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        self.voice_tasks.push(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(voice::TICK).await;
+                let going = this.update(cx, |c, cx| {
+                    if !c.voice.active() {
+                        return false;
+                    }
+                    let level = c.dictation.as_ref().map_or(0., |d| d.level());
+                    c.voice.levels.push(level);
+                    cx.notify();
+                    true
+                });
+                if !going.unwrap_or(false) {
                     break;
                 }
-            }
-        }));
-        self.voice_tasks.push(cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(voice::TICK).await;
-            let going = this.update(cx, |c, cx| {
-                if !c.voice.active() {
-                    return false;
-                }
-                let level = c.dictation.as_ref().map_or(0., |d| d.level());
-                c.voice.levels.push(level);
-                cx.notify();
-                true
-            });
-            if !going.unwrap_or(false) {
-                break;
             }
         }));
         self.voice_focus.focus(window, cx);
@@ -1000,7 +1359,12 @@ impl Composer {
     /// `dictate-file` verb, exercising Speech and the insert path without the mic: voice mode
     /// opens already settling (✓ spinning) and the text goes in when Speech is done.
     #[cfg(feature = "shots")]
-    pub(crate) fn dictate_file(&mut self, file: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn dictate_file(
+        &mut self,
+        file: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (heard, results) = async_channel::unbounded();
         match dictate::transcribe_file(file, heard) {
             Ok(d) => {
@@ -1018,11 +1382,20 @@ impl Composer {
         let theme = cx.theme();
         let (text, interim) = self.voice.preview();
         let body = if text.trim().is_empty() {
-            div().text_color(theme.muted_foreground).child("Listening…").into_any_element()
+            div()
+                .text_color(theme.muted_foreground)
+                .child("Listening…")
+                .into_any_element()
         } else {
-            let style = HighlightStyle { font_style: Some(FontStyle::Italic), color: Some(theme.muted_foreground), ..Default::default() };
+            let style = HighlightStyle {
+                font_style: Some(FontStyle::Italic),
+                color: Some(theme.muted_foreground),
+                ..Default::default()
+            };
             let ranges = (!interim.is_empty()).then_some((interim, style));
-            StyledText::new(text).with_highlights(ranges).into_any_element()
+            StyledText::new(text)
+                .with_highlights(ranges)
+                .into_any_element()
         };
         div()
             .id("voice-preview")
@@ -1049,7 +1422,12 @@ impl Composer {
 
     /// A note for the user (dictation problems, mostly) up as a workspace toast.
     fn toast(&self, message: String, cx: &mut Context<Self>) {
-        self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message, undo: None }));
+        self.workspace.update(cx, |_, cx| {
+            cx.emit(WorkspaceEvent::Toast {
+                message,
+                undo: None,
+            })
+        });
     }
 
     /// What the mic heard, at the cursor — space-separated from the text it lands in.
@@ -1069,7 +1447,13 @@ impl Composer {
     }
 
     /// Put follow-ups that never went out back into the composer.
-    pub fn restore(&mut self, text: &str, images: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+    pub fn restore(
+        &mut self,
+        text: &str,
+        images: &[PathBuf],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.follow_route(window, cx);
         let (text, consult) = trek_core::orchestrate::split_consult(text);
         if let Some(c) = consult {
@@ -1085,25 +1469,38 @@ impl Composer {
         }
     }
 
-
     /// Attach files by inserting @-references into the prompt.
     fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: true, multiple: true, prompt: Some("Attach".into()) });
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: true,
+            multiple: true,
+            prompt: Some("Attach".into()),
+        });
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
                 let (images, files) = attachments::split_files(paths);
-                let _ = this.update_in(cx, |this, window, cx| attachments::attach_files(this, images, window, cx));
+                let _ = this.update_in(cx, |this, window, cx| {
+                    attachments::attach_files(this, images, window, cx)
+                });
                 if files.is_empty() {
                     return;
                 }
-                let _ = this.update_in(cx, |this, window, cx| this.append_file_refs(&files, window, cx));
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.append_file_refs(&files, window, cx)
+                });
             }
         })
         .detach();
     }
 
     /// `@path` references after what's typed, the caret behind them.
-    pub(crate) fn append_file_refs(&mut self, files: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn append_file_refs(
+        &mut self,
+        files: &[PathBuf],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let refs: Vec<String> = files.iter().map(|p| format!("@{}", p.display())).collect();
         self.input.update(cx, |s, cx| {
             let mut v = s.value().to_string();
@@ -1150,7 +1547,9 @@ impl Composer {
         cx.spawn(async move |this, cx| {
             if prefs.hide_trek {
                 // Let the window finish hiding before the picker appears.
-                cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(250))
+                    .await;
             }
             let ok = cx
                 .background_executor()
@@ -1168,7 +1567,10 @@ impl Composer {
                         cmd.arg("-x");
                     }
                     cmd.args(["-t", if jpg { "jpg" } else { "png" }]);
-                    cmd.arg(&out).status().map(|s| s.success()).unwrap_or(false) && std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false)
+                    cmd.arg(&out).status().map(|s| s.success()).unwrap_or(false)
+                        && std::fs::metadata(&out)
+                            .map(|m| m.len() > 0)
+                            .unwrap_or(false)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -1265,7 +1667,8 @@ impl Composer {
         attachments::attach_files(self, images, window, cx);
         if !files.is_empty() {
             let refs: Vec<String> = files.iter().map(|p| format!("@{} ", p.display())).collect();
-            self.input.update(cx, |s, cx| s.insert(refs.concat(), window, cx));
+            self.input
+                .update(cx, |s, cx| s.insert(refs.concat(), window, cx));
         }
         cx.notify();
     }
@@ -1297,8 +1700,6 @@ impl Composer {
         }
     }
 
-
-
     fn attachment_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.outbox.paths.is_empty() && !self.snapshotting && self.outbox.saving == 0 {
             return None;
@@ -1323,7 +1724,13 @@ impl Composer {
             div()
                 .px(px(14.))
                 .pt(px(12.))
-                .child(attachments::thumbnails(&self.outbox.paths, px(56.), self.snapshotting || self.outbox.saving > 0, remove, cx))
+                .child(attachments::thumbnails(
+                    &self.outbox.paths,
+                    px(56.),
+                    self.snapshotting || self.outbox.saving > 0,
+                    remove,
+                    cx,
+                ))
                 .children(waiting)
                 .into_any_element(),
         )
@@ -1341,32 +1748,90 @@ impl Composer {
             .bg(theme.foreground.opacity(0.065))
             .icon(Icon::new(IconName::Plus).text_color(theme.muted_foreground))
             .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                let (a, b, c, d, e, f, g, h) = (me.clone(), me.clone(), me.clone(), me.clone(), me.clone(), me.clone(), me.clone(), me.clone());
+                let (a, b, c, d, e, f, g, h) = (
+                    me.clone(),
+                    me.clone(),
+                    me.clone(),
+                    me.clone(),
+                    me.clone(),
+                    me.clone(),
+                    me.clone(),
+                    me.clone(),
+                );
                 let menu = menu
                     .min_w(px(230.))
                     .check_side(gpui_kit::component::Side::Right)
-                    .item(PopupMenuItem::new("Add photos & files").icon(crate::assets::Lucide::Image).on_click(move |_, window, cx| a.update(cx, |c, cx| c.attach(window, cx))))
+                    .item(
+                        PopupMenuItem::new("Add photos & files")
+                            .icon(crate::assets::Lucide::Image)
+                            .on_click(move |_, window, cx| {
+                                a.update(cx, |c, cx| c.attach(window, cx))
+                            }),
+                    )
                     .separator();
                 // Snipping Tool has the window, area and screen choice in its own toolbar.
                 let menu = if cfg!(windows) {
-                    menu.item(PopupMenuItem::new("Take a snapshot").icon(crate::assets::Lucide::Camera).on_click(move |_, _, cx| b.update(cx, |c, cx| c.snapshot("area", cx))))
+                    menu.item(
+                        PopupMenuItem::new("Take a snapshot")
+                            .icon(crate::assets::Lucide::Camera)
+                            .on_click(move |_, _, cx| b.update(cx, |c, cx| c.snapshot("area", cx))),
+                    )
                 } else {
-                    menu.item(PopupMenuItem::new("Snapshot a window").icon(crate::assets::Lucide::Camera).on_click(move |_, _, cx| b.update(cx, |c, cx| c.snapshot("window", cx))))
-                        .item(PopupMenuItem::new("Snapshot an area").icon(crate::assets::Lucide::Crosshair).on_click(move |_, _, cx| c.update(cx, |c, cx| c.snapshot("area", cx))))
-                        .item(PopupMenuItem::new("Snapshot the screen").icon(crate::assets::Lucide::Monitor).on_click(move |_, _, cx| d.update(cx, |c, cx| c.snapshot("screen", cx))))
+                    menu.item(
+                        PopupMenuItem::new("Snapshot a window")
+                            .icon(crate::assets::Lucide::Camera)
+                            .on_click(move |_, _, cx| {
+                                b.update(cx, |c, cx| c.snapshot("window", cx))
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Snapshot an area")
+                            .icon(crate::assets::Lucide::Crosshair)
+                            .on_click(move |_, _, cx| c.update(cx, |c, cx| c.snapshot("area", cx))),
+                    )
+                    .item(
+                        PopupMenuItem::new("Snapshot the screen")
+                            .icon(crate::assets::Lucide::Monitor)
+                            .on_click(move |_, _, cx| {
+                                d.update(cx, |c, cx| c.snapshot("screen", cx))
+                            }),
+                    )
                 };
                 menu.separator()
-                    .item(PopupMenuItem::new("Mention a file  @").icon(IconName::File).on_click(move |_, window, cx| e.update(cx, |c, cx| c.insert_trigger("@", window, cx))))
-                    .item(PopupMenuItem::new("Use a skill  $").icon(crate::assets::Lucide::Sparkle).on_click(move |_, window, cx| f.update(cx, |c, cx| c.insert_trigger("$", window, cx))))
-                    .item(PopupMenuItem::new("Run a command  /").icon(IconName::SquareTerminal).on_click(move |_, window, cx| g.update(cx, |c, cx| c.insert_trigger("/", window, cx))))
+                    .item(
+                        PopupMenuItem::new("Mention a file  @")
+                            .icon(IconName::File)
+                            .on_click(move |_, window, cx| {
+                                e.update(cx, |c, cx| c.insert_trigger("@", window, cx))
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Use a skill  $")
+                            .icon(crate::assets::Lucide::Sparkle)
+                            .on_click(move |_, window, cx| {
+                                f.update(cx, |c, cx| c.insert_trigger("$", window, cx))
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Run a command  /")
+                            .icon(IconName::SquareTerminal)
+                            .on_click(move |_, window, cx| {
+                                g.update(cx, |c, cx| c.insert_trigger("/", window, cx))
+                            }),
+                    )
                     .separator()
-                    .item(PopupMenuItem::new("Restate first").icon(crate::assets::Lucide::MessageSquareQuote).checked(restate).on_click(move |_, window, cx| {
-                        h.update(cx, |c, cx| {
-                            c.restate = !c.restate;
-                            c.focus(window, cx);
-                            cx.notify();
-                        })
-                    }))
+                    .item(
+                        PopupMenuItem::new("Restate first")
+                            .icon(crate::assets::Lucide::MessageSquareQuote)
+                            .checked(restate)
+                            .on_click(move |_, window, cx| {
+                                h.update(cx, |c, cx| {
+                                    c.restate = !c.restate;
+                                    c.focus(window, cx);
+                                    cx.notify();
+                                })
+                            }),
+                    )
             })
     }
 
@@ -1375,9 +1840,18 @@ impl Composer {
     /// "Sol · High": a consultant as the menu and the agent's instructions name it.
     fn consultant_names(&self, cx: &App) -> Box<dyn Fn(&Consultant) -> String> {
         let ws = self.workspace.read(cx);
-        let models: Vec<(AgentId, Vec<ModelInfo>)> = self.consult.consultants.iter().map(|c| (c.agent.clone(), ws.models_for(&c.agent))).collect();
+        let models: Vec<(AgentId, Vec<ModelInfo>)> = self
+            .consult
+            .consultants
+            .iter()
+            .map(|c| (c.agent.clone(), ws.models_for(&c.agent)))
+            .collect();
         Box::new(move |c: &Consultant| {
-            let name = models.iter().find(|(a, _)| *a == c.agent).map(|(_, m)| model_name(m, &c.model)).unwrap_or_else(|| c.model.clone());
+            let name = models
+                .iter()
+                .find(|(a, _)| *a == c.agent)
+                .map(|(_, m)| model_name(m, &c.model))
+                .unwrap_or_else(|| c.model.clone());
             format!("{name} · {}", c.effort.label())
         })
     }
@@ -1385,7 +1859,11 @@ impl Composer {
     /// `/consult sol high, opus max: <message>` (also `discuss`, `report`): the consultants it
     /// names are picked; returns the message to send, `None` when there's none (the menu opens).
     /// `None` overall when `text` isn't the command.
-    fn consult_command(&mut self, text: &str, cx: &mut Context<Self>) -> Option<Result<Option<String>, String>> {
+    fn consult_command(
+        &mut self,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<Result<Option<String>, String>> {
         let rest = text.trim_start().strip_prefix("/consult")?;
         if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
             return None;
@@ -1428,18 +1906,27 @@ impl Composer {
             if words.is_empty() {
                 continue;
             }
-            let effort = words.last().and_then(|w| Effort::parse(w)).filter(|_| words.len() > 1);
+            let effort = words
+                .last()
+                .and_then(|w| Effort::parse(w))
+                .filter(|_| words.len() > 1);
             if effort.is_some() {
                 words.pop();
             }
             let query = words.join(" ");
-            let Some((agent, model)) = find_model(ws, &query) else { return Some(Err(format!("There's no model called “{query}” to consult."))) };
+            let Some((agent, model)) = find_model(ws, &query) else {
+                return Some(Err(format!(
+                    "There's no model called “{query}” to consult."
+                )));
+            };
             picked.push(consultant(agent, &model, effort));
         }
         // An arena's designs all run at once, so there are no more than can.
         let most = trek_core::orchestrate::MAX_RUNNING;
         if self.consult.style == Style::Arena && picked.len() > most {
-            return Some(Err(format!("An arena drafts {most} designs at most, all at once: name up to {most} models.")));
+            return Some(Err(format!(
+                "An arena drafts {most} designs at most, all at once: name up to {most} models."
+            )));
         }
         if !picked.is_empty() {
             self.consult.consultants = picked;
@@ -1454,7 +1941,9 @@ impl Composer {
             self.consult.consultants = self.arena_defaults(cx);
         }
         match message {
-            Some(_) if self.consult.consultants.is_empty() => Some(Err("Name a model to consult: /consult sol high: your question".into())),
+            Some(_) if self.consult.consultants.is_empty() => Some(Err(
+                "Name a model to consult: /consult sol high: your question".into(),
+            )),
             message => Some(Ok(message)),
         }
     }
@@ -1468,9 +1957,17 @@ impl Composer {
         let ws = self.workspace.read(cx);
         let prefs = ws.prefs_in(&self.scope);
         let models = ws.models_for(&prefs.agent);
-        let model = prefs.model.clone().or_else(|| default_model(&models).map(|m| m.id.clone())).unwrap_or_default();
+        let model = prefs
+            .model
+            .clone()
+            .or_else(|| default_model(&models).map(|m| m.id.clone()))
+            .unwrap_or_default();
         // As the model list names it, so it's told apart from the others there.
-        let model = models.iter().find(|m| same_model(&model, &m.id)).map(|m| m.id.clone()).unwrap_or(model);
+        let model = models
+            .iter()
+            .find(|m| same_model(&model, &m.id))
+            .map(|m| m.id.clone())
+            .unwrap_or(model);
         (prefs.agent, model)
     }
 
@@ -1482,7 +1979,13 @@ impl Composer {
     /// Who judges the arena: the one picked, else a model of another family than the thread's.
     fn arena_judge(&self, cx: &App) -> Option<Consultant> {
         let (agent, model) = self.main_model(cx);
-        self.consult.judge.clone().or_else(|| trek_core::orchestrate::pick_judge((&agent, &model), &self.consult.consultants, &self.arena_options(cx)))
+        self.consult.judge.clone().or_else(|| {
+            trek_core::orchestrate::pick_judge(
+                (&agent, &model),
+                &self.consult.consultants,
+                &self.arena_options(cx),
+            )
+        })
     }
 
     /// The consult menu: who's consulted, at what effort, how, and then what.
@@ -1491,9 +1994,19 @@ impl Composer {
         let prefs = ws.prefs_in(&self.scope);
         let agents = ws.ready_agents();
         // Another agent than the thread's own comes first: a second opinion from elsewhere.
-        let rail = self.consult_rail.clone().filter(|a| agents.contains(a)).or_else(|| agents.iter().find(|a| **a != prefs.agent).cloned()).or_else(|| agents.first().cloned());
+        let rail = self
+            .consult_rail
+            .clone()
+            .filter(|a| agents.contains(a))
+            .or_else(|| agents.iter().find(|a| **a != prefs.agent).cloned())
+            .or_else(|| agents.first().cloned());
         let models = rail.as_ref().map(|a| ws.models_for(a)).unwrap_or_default();
-        let picked_models: Vec<Vec<ModelInfo>> = self.consult.consultants.iter().map(|c| ws.models_for(&c.agent)).collect();
+        let picked_models: Vec<Vec<ModelInfo>> = self
+            .consult
+            .consultants
+            .iter()
+            .map(|c| ws.models_for(&c.agent))
+            .collect();
         let main_agent = prefs.agent.display_name();
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
@@ -1506,7 +2019,13 @@ impl Composer {
             .pt(px(6.))
             .pb(px(2.))
             .gap(px(6.))
-            .child(div().flex_1().text_size(px(13.5)).font_medium().child("Consult other models"))
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(13.5))
+                    .font_medium()
+                    .child("Consult other models"),
+            )
             .when(!empty, |el| {
                 el.child(
                     div()
@@ -1531,8 +2050,23 @@ impl Composer {
                     .ghost()
                     .xsmall()
                     .selected(self.consult_pinned)
-                    .icon(Icon::new(if self.consult_pinned { crate::assets::Lucide::Pin } else { crate::assets::Lucide::PinOff }).text_color(if self.consult_pinned { theme.foreground } else { muted }))
-                    .tooltip(if self.consult_pinned { "Kept for every message: click to clear after sending" } else { "Keep for the next messages too" })
+                    .icon(
+                        Icon::new(if self.consult_pinned {
+                            crate::assets::Lucide::Pin
+                        } else {
+                            crate::assets::Lucide::PinOff
+                        })
+                        .text_color(if self.consult_pinned {
+                            theme.foreground
+                        } else {
+                            muted
+                        }),
+                    )
+                    .tooltip(if self.consult_pinned {
+                        "Kept for every message: click to clear after sending"
+                    } else {
+                        "Keep for the next messages too"
+                    })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.consult_pinned = !this.consult_pinned;
                         cx.notify();
@@ -1540,74 +2074,111 @@ impl Composer {
             );
         let note = match self.consult.style {
             Style::Advise => format!("They review and suggest; {main_agent} decides."),
-            Style::Discuss => format!("{main_agent} and they go back and forth until they agree ({} rounds at most).", trek_core::orchestrate::DISCUSS_ROUNDS),
+            Style::Discuss => format!(
+                "{main_agent} and they go back and forth until they agree ({} rounds at most).",
+                trek_core::orchestrate::DISCUSS_ROUNDS
+            ),
             Style::Arena => {
                 let (agent, model) = self.main_model(cx);
                 let own = trek_core::orchestrate::family(&agent, &model);
                 let judge = match self.arena_judge(cx) {
-                    Some(j) if trek_core::orchestrate::family(&j.agent, &j.model) == own => "another model",
+                    Some(j) if trek_core::orchestrate::family(&j.agent, &j.model) == own => {
+                        "another model"
+                    }
                     _ => "a model of another family",
                 };
-                format!("{main_agent} grounds the problem; each drafts a design on its own; {judge} judges them blind; {main_agent} synthesises the best.")
+                format!(
+                    "{main_agent} grounds the problem; each drafts a design on its own; {judge} judges them blind; {main_agent} synthesises the best."
+                )
             }
         };
         // An arena's designs all run at once: no more than can.
         let most = trek_core::orchestrate::MAX_RUNNING;
         let full = self.consult.style == Style::Arena && self.consult.consultants.len() >= most;
-        let note = if full { format!("{note} {most} designs at most.") } else { note };
-        let picked = v_flex().px(px(5.)).children(self.consult.consultants.iter().enumerate().map(|(i, c)| {
-            let name = picked_models.get(i).map(|m| model_name(m, &c.model)).unwrap_or_else(|| c.model.clone());
-            let choosing = self.consult_effort == Some(i);
-            ui::menu_row(("consultant", i), choosing, cx)
-                .test_support()
-                .min_h(px(32.))
-                .child(ui::agent_glyph(&c.agent, cx))
-                .child(div().flex_1().min_w_0().truncate().child(name))
-                .child(
-                    h_flex()
-                        .id(("consultant-effort", i))
-                        .test_support()
-                        .gap(px(2.))
-                        .text_color(muted)
-                        .hover(|s| s.text_color(theme.foreground))
-                        .child(c.effort.label())
-                        .child(Icon::new(IconName::ChevronRight).xsmall())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.consult_effort = if this.consult_effort == Some(i) { None } else { Some(i) };
-                            this.consult_judge = false;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    div()
-                        .id(("consultant-remove", i))
-                        .test_support()
-                        .child(Icon::new(IconName::Close).xsmall().text_color(muted))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            if i < this.consult.consultants.len() {
-                                this.consult.consultants.remove(i);
-                            }
-                            this.consult_effort = None;
-                            cx.notify();
-                        })),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.consult_effort = if this.consult_effort == Some(i) { None } else { Some(i) };
-                    this.consult_judge = false;
-                    cx.notify();
-                }))
-        }));
+        let note = if full {
+            format!("{note} {most} designs at most.")
+        } else {
+            note
+        };
+        let picked = v_flex()
+            .px(px(5.))
+            .children(self.consult.consultants.iter().enumerate().map(|(i, c)| {
+                let name = picked_models
+                    .get(i)
+                    .map(|m| model_name(m, &c.model))
+                    .unwrap_or_else(|| c.model.clone());
+                let choosing = self.consult_effort == Some(i);
+                ui::menu_row(("consultant", i), choosing, cx)
+                    .test_support()
+                    .min_h(px(32.))
+                    .child(ui::agent_glyph(&c.agent, cx))
+                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .child(
+                        h_flex()
+                            .id(("consultant-effort", i))
+                            .test_support()
+                            .gap(px(2.))
+                            .text_color(muted)
+                            .hover(|s| s.text_color(theme.foreground))
+                            .child(c.effort.label())
+                            .child(Icon::new(IconName::ChevronRight).xsmall())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.consult_effort = if this.consult_effort == Some(i) {
+                                    None
+                                } else {
+                                    Some(i)
+                                };
+                                this.consult_judge = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id(("consultant-remove", i))
+                            .test_support()
+                            .child(Icon::new(IconName::Close).xsmall().text_color(muted))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                if i < this.consult.consultants.len() {
+                                    this.consult.consultants.remove(i);
+                                }
+                                this.consult_effort = None;
+                                cx.notify();
+                            })),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.consult_effort = if this.consult_effort == Some(i) {
+                            None
+                        } else {
+                            Some(i)
+                        };
+                        this.consult_judge = false;
+                        cx.notify();
+                    }))
+            }));
         // An arena's judge, with a side panel to pick another.
         let judge = (self.consult.style == Style::Arena).then(|| {
             let j = self.arena_judge(cx);
-            let name = j.as_ref().map(|j| format!("{} · {}", model_name(&ws.models_for(&j.agent), &j.model), j.effort.label())).unwrap_or_else(|| "No other model on offer".into());
+            let name = j
+                .as_ref()
+                .map(|j| {
+                    format!(
+                        "{} · {}",
+                        model_name(&ws.models_for(&j.agent), &j.model),
+                        j.effort.label()
+                    )
+                })
+                .unwrap_or_else(|| "No other model on offer".into());
             v_flex().px(px(5.)).pt(px(2.)).child(
                 ui::menu_row("consult-judge", self.consult_judge, cx)
                     .test_support()
                     .min_h(px(32.))
-                    .child(Icon::new(crate::assets::Lucide::Scale).small().text_color(muted))
+                    .child(
+                        Icon::new(crate::assets::Lucide::Scale)
+                            .small()
+                            .text_color(muted),
+                    )
                     .child(div().flex_none().text_color(muted).child("Judged by"))
                     .children(j.as_ref().map(|j| ui::agent_glyph(&j.agent, cx)))
                     .child(div().flex_1().min_w_0().truncate().child(name))
@@ -1620,50 +2191,82 @@ impl Composer {
             )
         });
         // Which agent's models to list: a row of tabs, so no logo sits beside a model it isn't.
-        let rail_row = h_flex().flex_wrap().gap(px(2.)).px(px(6.)).pt(px(6.)).children(agents.iter().map(|a| {
-            let active = rail.as_ref() == Some(a);
-            let (target, tip) = (a.clone(), SharedString::from(a.display_name()));
-            div()
-                .id(SharedString::from(format!("consult-rail-{}", a.key())))
-                .test_support()
-                .size(px(28.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(7.))
-                .cursor_pointer()
-                .when(active, |el| el.bg(theme.list_active))
-                .hover(|s| s.bg(theme.list_active))
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
-                .child(ui::agent_glyph(a, cx))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.consult_rail = Some(target.clone());
-                    cx.notify();
-                }))
-        }));
-        let list = v_flex().id("consult-models").min_w_0().px(px(5.)).pt(px(4.)).max_h(px(220.)).overflow_y_scroll().children(rail.iter().flat_map(|agent| {
-            models.iter().map(|m| {
-                let on = self.consult.consultants.iter().any(|c| c.agent == *agent && same_model(&c.model, &m.id));
-                let (agent, model) = (agent.clone(), m.clone());
-                ui::menu_row(SharedString::from(format!("consult-add-{}-{}", agent.key(), m.id)), false, cx)
+        let rail_row = h_flex()
+            .flex_wrap()
+            .gap(px(2.))
+            .px(px(6.))
+            .pt(px(6.))
+            .children(agents.iter().map(|a| {
+                let active = rail.as_ref() == Some(a);
+                let (target, tip) = (a.clone(), SharedString::from(a.display_name()));
+                div()
+                    .id(SharedString::from(format!("consult-rail-{}", a.key())))
+                    .test_support()
+                    .size(px(28.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(7.))
+                    .cursor_pointer()
+                    .when(active, |el| el.bg(theme.list_active))
+                    .hover(|s| s.bg(theme.list_active))
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                    })
+                    .child(ui::agent_glyph(a, cx))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.consult_rail = Some(target.clone());
+                        cx.notify();
+                    }))
+            }));
+        let list = v_flex()
+            .id("consult-models")
+            .min_w_0()
+            .px(px(5.))
+            .pt(px(4.))
+            .max_h(px(220.))
+            .overflow_y_scroll()
+            .children(rail.iter().flat_map(|agent| {
+                models.iter().map(|m| {
+                    let on = self
+                        .consult
+                        .consultants
+                        .iter()
+                        .any(|c| c.agent == *agent && same_model(&c.model, &m.id));
+                    let (agent, model) = (agent.clone(), m.clone());
+                    ui::menu_row(
+                        SharedString::from(format!("consult-add-{}-{}", agent.key(), m.id)),
+                        false,
+                        cx,
+                    )
                     .test_support()
                     .min_h(px(30.))
                     .when(full && !on, |el| el.opacity(0.45).cursor_default())
                     .child(div().flex_1().min_w_0().truncate().child(m.name.clone()))
                     .when(on, |el| el.child(Icon::new(IconName::Check).small()))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        let at = this.consult.consultants.iter().position(|c| c.agent == agent && same_model(&c.model, &model.id));
-                        let full = this.consult.style == Style::Arena && this.consult.consultants.len() >= trek_core::orchestrate::MAX_RUNNING;
+                        let at = this
+                            .consult
+                            .consultants
+                            .iter()
+                            .position(|c| c.agent == agent && same_model(&c.model, &model.id));
+                        let full = this.consult.style == Style::Arena
+                            && this.consult.consultants.len()
+                                >= trek_core::orchestrate::MAX_RUNNING;
                         match at {
                             Some(i) => _ = this.consult.consultants.remove(i),
                             None if full => return,
-                            None => this.consult.consultants.push(consultant(agent.clone(), &model, None)),
+                            None => this.consult.consultants.push(consultant(
+                                agent.clone(),
+                                &model,
+                                None,
+                            )),
                         }
                         this.consult_effort = None;
                         cx.notify();
                     }))
-            })
-        }));
+                })
+            }));
         let (m1, m2) = (me.clone(), me.clone());
         let main = ui::menu_surface(cx)
             .id("consult-menu-body")
@@ -1672,10 +2275,25 @@ impl Composer {
             .p_0()
             .pb(px(8.))
             .child(header)
-            .child(div().px(px(10.)).pb(px(6.)).text_size(px(12.5)).line_height(relative(1.4)).text_color(muted).child(note))
+            .child(
+                div()
+                    .px(px(10.))
+                    .pb(px(6.))
+                    .text_size(px(12.5))
+                    .line_height(relative(1.4))
+                    .text_color(muted)
+                    .child(note),
+            )
             .when(!empty, |el| el.child(picked))
             .children(judge)
-            .child(v_flex().mt(px(6.)).border_t_1().border_color(hairline).child(rail_row).child(list))
+            .child(
+                v_flex()
+                    .mt(px(6.))
+                    .border_t_1()
+                    .border_color(hairline)
+                    .child(rail_row)
+                    .child(list),
+            )
             .child(
                 v_flex()
                     // The switches hug their options: stretched, they'd trail an empty track.
@@ -1687,7 +2305,11 @@ impl Composer {
                     .border_color(hairline)
                     .child(ui::segmented(
                         "consult-style",
-                        vec![(Style::Advise, "Advise"), (Style::Discuss, "Discuss"), (Style::Arena, "Arena")],
+                        vec![
+                            (Style::Advise, "Advise"),
+                            (Style::Discuss, "Discuss"),
+                            (Style::Arena, "Arena"),
+                        ],
                         self.consult.style,
                         move |v, _, cx| {
                             m1.update(cx, |c, cx| {
@@ -1697,7 +2319,9 @@ impl Composer {
                                     c.consult.consultants = c.arena_defaults(cx);
                                 }
                                 if v == Style::Arena {
-                                    c.consult.consultants.truncate(trek_core::orchestrate::MAX_RUNNING);
+                                    c.consult
+                                        .consultants
+                                        .truncate(trek_core::orchestrate::MAX_RUNNING);
                                 }
                                 if v != Style::Arena {
                                     c.consult_judge = false;
@@ -1730,47 +2354,84 @@ impl Composer {
                 .w(px(230.))
                 .max_h(px(300.))
                 .overflow_y_scroll()
-                .when(options.is_empty(), |el| el.child(div().p(px(8.)).text_size(px(12.5)).text_color(muted).child("There's no other model on offer to judge.")))
+                .when(options.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .p(px(8.))
+                            .text_size(px(12.5))
+                            .text_color(muted)
+                            .child("There's no other model on offer to judge."),
+                    )
+                })
                 .children(options.into_iter().map(|(agent, m)| {
-                    let on = current.as_ref().is_some_and(|j| j.agent == agent && same_model(&j.model, &m.id));
-                    ui::menu_row(SharedString::from(format!("consult-judge-{}-{}", agent.key(), m.id)), on, cx)
-                        .test_support()
-                        .child(ui::agent_glyph(&agent, cx))
-                        .child(div().flex_1().min_w_0().truncate().child(m.name.clone()))
-                        .when(on, |el| el.child(Icon::new(IconName::Check).small()))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.consult.judge = Some(consultant(agent.clone(), &m, None));
-                            this.consult_judge = false;
-                            cx.notify();
-                        }))
+                    let on = current
+                        .as_ref()
+                        .is_some_and(|j| j.agent == agent && same_model(&j.model, &m.id));
+                    ui::menu_row(
+                        SharedString::from(format!("consult-judge-{}-{}", agent.key(), m.id)),
+                        on,
+                        cx,
+                    )
+                    .test_support()
+                    .child(ui::agent_glyph(&agent, cx))
+                    .child(div().flex_1().min_w_0().truncate().child(m.name.clone()))
+                    .when(on, |el| el.child(Icon::new(IconName::Check).small()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.consult.judge = Some(consultant(agent.clone(), &m, None));
+                        this.consult_judge = false;
+                        cx.notify();
+                    }))
                 }))
                 .into_any_element()
         });
         let side = self.consult_effort.and_then(|i| {
             let c = self.consult.consultants.get(i)?;
-            let efforts = picked_models.get(i).and_then(|ms| ms.iter().find(|m| same_model(&c.model, &m.id))).map(|m| m.efforts.clone()).filter(|e| !e.is_empty());
-            let efforts = efforts.unwrap_or_else(|| vec![Effort::Low, Effort::Medium, Effort::High, Effort::XHigh, Effort::Max]);
+            let efforts = picked_models
+                .get(i)
+                .and_then(|ms| ms.iter().find(|m| same_model(&c.model, &m.id)))
+                .map(|m| m.efforts.clone())
+                .filter(|e| !e.is_empty());
+            let efforts = efforts.unwrap_or_else(|| {
+                vec![
+                    Effort::Low,
+                    Effort::Medium,
+                    Effort::High,
+                    Effort::XHigh,
+                    Effort::Max,
+                ]
+            });
             let current = c.effort;
             Some(
                 ui::menu_surface(cx)
                     .w(px(170.))
                     .children(efforts.into_iter().map(|e| {
-                        ui::menu_row(SharedString::from(format!("consult-eff-{}", e.as_str())), e == current, cx)
-                            .test_support()
-                            .child(div().flex_1().child(e.label()))
-                            .when(e == current, |el| el.child(Icon::new(IconName::Check).small()))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(c) = this.consult.consultants.get_mut(i) {
-                                    c.effort = e;
-                                }
-                                this.consult_effort = None;
-                                cx.notify();
-                            }))
+                        ui::menu_row(
+                            SharedString::from(format!("consult-eff-{}", e.as_str())),
+                            e == current,
+                            cx,
+                        )
+                        .test_support()
+                        .child(div().flex_1().child(e.label()))
+                        .when(e == current, |el| {
+                            el.child(Icon::new(IconName::Check).small())
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(c) = this.consult.consultants.get_mut(i) {
+                                c.effort = e;
+                            }
+                            this.consult_effort = None;
+                            cx.notify();
+                        }))
                     }))
                     .into_any_element(),
             )
         });
-        h_flex().items_end().gap(px(6.)).child(main).children(side.or(judges)).into_any_element()
+        h_flex()
+            .items_end()
+            .gap(px(6.))
+            .child(main)
+            .children(side.or(judges))
+            .into_any_element()
     }
 
     /// The Consult pill: quiet until models are picked, then their logos and how they'll be asked.
@@ -1784,16 +2445,32 @@ impl Composer {
             "Consult other models before answering".into()
         } else {
             let who: Vec<String> = self.consult.consultants.iter().map(|c| names(c)).collect();
-            format!("Consulting {}{}", who.join(", "), if self.consult_pinned { " · kept for every message" } else { "" }).into()
+            format!(
+                "Consulting {}{}",
+                who.join(", "),
+                if self.consult_pinned {
+                    " · kept for every message"
+                } else {
+                    ""
+                }
+            )
+            .into()
         };
         let style = match self.consult.style {
             Style::Advise => "Advise",
             Style::Discuss => "Discuss",
             Style::Arena => "Arena",
         };
-        let logos = h_flex().children(self.consult.consultants.iter().take(4).enumerate().map(|(i, c)| {
-            div().when(i > 0, |el| el.ml(px(-5.))).p(px(1.)).rounded(px(5.)).bg(theme.secondary).child(ui::agent_logo(&c.agent, px(14.), cx))
-        }));
+        let logos = h_flex().children(self.consult.consultants.iter().take(4).enumerate().map(
+            |(i, c)| {
+                div()
+                    .when(i > 0, |el| el.ml(px(-5.)))
+                    .p(px(1.))
+                    .rounded(px(5.))
+                    .bg(theme.secondary)
+                    .child(ui::agent_logo(&c.agent, px(14.), cx))
+            },
+        ));
         // An agent that wouldn't get `delegate_task` can't consult: the pill says why, and opens
         // only to let go of consultants already picked.
         let agent = self.workspace.read(cx).prefs_in(&self.scope).agent;
@@ -1801,8 +2478,14 @@ impl Composer {
             return Pill::new("consult-pill")
                 .ghost(true)
                 .tooltip(format!("Can't consult: {why}"))
-                .child(Icon::new(crate::assets::Lucide::MessagesSquare).small().text_color(muted.opacity(0.5)))
-                .when(!compact, |p| p.child(div().text_color(muted.opacity(0.5)).child("Consult")))
+                .child(
+                    Icon::new(crate::assets::Lucide::MessagesSquare)
+                        .small()
+                        .text_color(muted.opacity(0.5)),
+                )
+                .when(!compact, |p| {
+                    p.child(div().text_color(muted.opacity(0.5)).child("Consult"))
+                })
                 .into_any_element();
         }
         let entity = cx.entity();
@@ -1823,11 +2506,26 @@ impl Composer {
                 Pill::new("consult-pill")
                     .ghost(empty)
                     .tooltip(tip)
-                    .when(empty, |p| p.child(Icon::new(crate::assets::Lucide::MessagesSquare).small().text_color(muted)).when(!compact, |p| p.child(div().text_color(muted).child("Consult"))))
+                    .when(empty, |p| {
+                        p.child(
+                            Icon::new(crate::assets::Lucide::MessagesSquare)
+                                .small()
+                                .text_color(muted),
+                        )
+                        .when(!compact, |p| {
+                            p.child(div().text_color(muted).child("Consult"))
+                        })
+                    })
                     .when(!empty, |p| {
                         p.child(logos)
                             .when(!compact, |p| p.child(div().text_color(muted).child(style)))
-                            .when(self.consult_pinned, |p| p.child(Icon::new(crate::assets::Lucide::Pin).xsmall().text_color(muted)))
+                            .when(self.consult_pinned, |p| {
+                                p.child(
+                                    Icon::new(crate::assets::Lucide::Pin)
+                                        .xsmall()
+                                        .text_color(muted),
+                                )
+                            })
                     }),
             )
             .content(move |_, _, cx| entity.update(cx, |c, cx| c.consult_menu(cx)))
@@ -1839,13 +2537,25 @@ impl Composer {
     fn project_chip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let ws = self.workspace.read(cx);
         let project = ws.draft_project_in(&self.scope);
-        let label = project.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "No project".into());
+        let label = project
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "No project".into());
         // The project's colour on its folder, as on its badge in the sidebar.
         let tint = project.as_ref().and_then(|p| ws.project_tint_at(p, cx));
         let projects: Vec<(String, std::path::PathBuf)> = ws
             .workspace_projects()
             .into_iter()
-            .map(|p| (p.remote.clone().map(|r| format!("{}  ·  {r}", p.name)).unwrap_or_else(|| p.name.clone()), p.path.clone()))
+            .map(|p| {
+                (
+                    p.remote
+                        .clone()
+                        .map(|r| format!("{}  ·  {r}", p.name))
+                        .unwrap_or_else(|| p.name.clone()),
+                    p.path.clone(),
+                )
+            })
             .collect();
         let ws_entity = self.workspace.clone();
         let composer = cx.entity();
@@ -1857,9 +2567,17 @@ impl Composer {
                 h_flex()
                     .gap(px(6.))
                     .text_color(theme.foreground.opacity(0.9))
-                    .child(Icon::new(IconName::Folder).small().when_some(tint, |i, c| i.text_color(c)))
+                    .child(
+                        Icon::new(IconName::Folder)
+                            .small()
+                            .when_some(tint, |i, c| i.text_color(c)),
+                    )
                     .child(label)
-                    .child(Icon::new(IconName::ChevronDown).xsmall().text_color(theme.muted_foreground)),
+                    .child(
+                        Icon::new(IconName::ChevronDown)
+                            .xsmall()
+                            .text_color(theme.muted_foreground),
+                    ),
             )
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
                 let ws = ws_entity.clone();
@@ -1868,35 +2586,69 @@ impl Composer {
                     .min_w(px(280.))
                     .max_h(px(360.))
                     .scrollable(true)
-                    .item(PopupMenuItem::new("No project").checked(project.is_none()).on_click(move |_, _, cx| {
-                        ws.update(cx, |ws, cx| ws.navigate(Route::Draft { project: None }, cx))
-                    }))
+                    .item(
+                        PopupMenuItem::new("No project")
+                            .checked(project.is_none())
+                            .on_click(move |_, _, cx| {
+                                ws.update(cx, |ws, cx| {
+                                    ws.navigate(Route::Draft { project: None }, cx)
+                                })
+                            }),
+                    )
                     .separator()
                     .label("Projects");
                 for (name, path) in projects.clone() {
                     let ws = ws_entity.clone();
                     let checked = project.as_ref() == Some(&path);
-                    menu = menu.item(PopupMenuItem::new(name).checked(checked).on_click(move |_, _, cx| {
-                        let path = path.clone();
-                        ws.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(path) }, cx))
-                    }));
+                    menu = menu.item(PopupMenuItem::new(name).checked(checked).on_click(
+                        move |_, _, cx| {
+                            let path = path.clone();
+                            ws.update(cx, |ws, cx| {
+                                ws.navigate(
+                                    Route::Draft {
+                                        project: Some(path),
+                                    },
+                                    cx,
+                                )
+                            })
+                        },
+                    ));
                 }
                 let ws = ws_entity.clone();
                 let c = composer.clone();
                 menu.separator()
-                    .item(PopupMenuItem::new("Open folder…").icon(IconName::FolderOpen).on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.open_folder(cx))))
-                    .item(PopupMenuItem::new("Clone from GitHub…").icon(IconName::Github).on_click(move |_, window, cx| c.update(cx, |c, cx| c.open_clone_dialog(window, cx))))
+                    .item(
+                        PopupMenuItem::new("Open folder…")
+                            .icon(IconName::FolderOpen)
+                            .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.open_folder(cx))),
+                    )
+                    .item(
+                        PopupMenuItem::new("Clone from GitHub…")
+                            .icon(IconName::Github)
+                            .on_click(move |_, window, cx| {
+                                c.update(cx, |c, cx| c.open_clone_dialog(window, cx))
+                            }),
+                    )
             })
     }
 
     /// Where a draft runs: the project folder, or a worktree of its own (git projects). A quiet
     /// menu; the choice is fixed once the thread starts. `blocked`: why a worktree can't start
     /// from the project folder right now (no branch, or no commit, to start from).
-    fn place_chip(&self, worktree: bool, blocked: Option<&'static str>, cx: &mut Context<Self>) -> AnyElement {
+    fn place_chip(
+        &self,
+        worktree: bool,
+        blocked: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let ws = self.workspace.clone();
         let scope = self.scope.clone();
-        let (icon, label) = if worktree { (crate::assets::Lucide::GitBranchPlus, "New worktree") } else { (crate::assets::Lucide::Laptop, "Local") };
+        let (icon, label) = if worktree {
+            (crate::assets::Lucide::GitBranchPlus, "New worktree")
+        } else {
+            (crate::assets::Lucide::Laptop, "Local")
+        };
         gpui_kit::component::button::Button::new("env-place")
             .ghost()
             .small()
@@ -1904,28 +2656,49 @@ impl Composer {
                 h_flex()
                     .gap(px(6.))
                     .text_color(theme.foreground.opacity(0.82))
-                    .child(Icon::new(icon).small().text_color(if worktree && blocked.is_some() { palette::amber(cx) } else { theme.muted_foreground }))
+                    .child(
+                        Icon::new(icon)
+                            .small()
+                            .text_color(if worktree && blocked.is_some() {
+                                palette::amber(cx)
+                            } else {
+                                theme.muted_foreground
+                            }),
+                    )
                     .child(label)
-                    .child(Icon::new(IconName::ChevronDown).xsmall().text_color(theme.muted_foreground)),
+                    .child(
+                        Icon::new(IconName::ChevronDown)
+                            .xsmall()
+                            .text_color(theme.muted_foreground),
+                    ),
             )
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
                 let pick = |label: &'static str, on: bool| {
                     let (ws, scope) = (ws.clone(), scope.clone());
-                    PopupMenuItem::new(label).checked(worktree == on).on_click(move |_, _, cx| {
-                        ws.update(cx, |ws, cx| {
-                            let mut p = ws.prefs_in(&scope);
-                            p.worktree = on;
-                            ws.set_prefs_in(&scope, p, cx);
+                    PopupMenuItem::new(label)
+                        .checked(worktree == on)
+                        .on_click(move |_, _, cx| {
+                            ws.update(cx, |ws, cx| {
+                                let mut p = ws.prefs_in(&scope);
+                                p.worktree = on;
+                                ws.set_prefs_in(&scope, p, cx);
+                            })
                         })
-                    })
                 };
                 // The items have icons, which would take the check's place on the left.
                 let menu = menu
                     .min_w(px(240.))
                     .check_side(gpui_kit::component::Side::Right)
                     .label("New thread runs in")
-                    .item(pick("Local: the project folder", false).icon(crate::assets::Lucide::Laptop))
-                    .item(pick("New worktree: a branch of its own", true).icon(crate::assets::Lucide::GitBranchPlus).disabled(blocked.is_some() && !worktree));
+                    .item(
+                        pick("Local: the project folder", false)
+                            .icon(crate::assets::Lucide::Laptop),
+                    )
+                    .item(
+                        pick("New worktree: a branch of its own", true)
+                            .icon(crate::assets::Lucide::GitBranchPlus)
+                            .disabled(blocked.is_some() && !worktree),
+                    );
                 match blocked {
                     Some(why) => menu.separator().label(why),
                     None => menu,
@@ -1946,36 +2719,70 @@ impl Composer {
         let worktree = ws.thread_in(&self.scope).and_then(|t| t.worktree.clone());
         // The main window's draft in a project picks the machine its thread starts on; a thread
         // on another machine names it. On another machine, this Mac's branch is beside the point.
-        let draft_project = ws.draft_project_in(&self.scope).filter(|_| is_draft && with_project && self.scope == Scope::Main);
-        let elsewhere = draft_project.as_ref().is_some_and(|p| ws.draft_machine(p).is_some());
+        let draft_project = ws
+            .draft_project_in(&self.scope)
+            .filter(|_| is_draft && with_project && self.scope == Scope::Main);
+        let elsewhere = draft_project
+            .as_ref()
+            .is_some_and(|p| ws.draft_machine(p).is_some());
         let theme = cx.theme().clone();
         let chip = |id: &'static str| {
-            h_flex().id(id).h(px(26.)).px(px(8.)).gap(px(6.)).rounded(px(7.)).text_sm().text_color(theme.foreground.opacity(0.82))
+            h_flex()
+                .id(id)
+                .h(px(26.))
+                .px(px(8.))
+                .gap(px(6.))
+                .rounded(px(7.))
+                .text_sm()
+                .text_color(theme.foreground.opacity(0.82))
         };
         // A worktree needs a branch to start from (and a commit on it). The menu shows for any git
         // project, and whenever the draft is set to a worktree (its git state may not be in yet):
         // what it says is what sending does, and it can always go back to Local.
         let is_repo = git.as_ref().is_some_and(|g| g.is_repo);
         let blocked = match &git {
-            Some(g) if g.is_repo && g.branch.is_none() => Some("The project folder isn't on a branch to start from."),
-            Some(g) if g.is_repo && g.branches.is_empty() => Some("The repository has no commits to start from."),
+            Some(g) if g.is_repo && g.branch.is_none() => {
+                Some("The project folder isn't on a branch to start from.")
+            }
+            Some(g) if g.is_repo && g.branches.is_empty() => {
+                Some("The repository has no commits to start from.")
+            }
             _ => None,
         };
         let place = if is_draft && (is_repo || draft_worktree) {
             self.place_chip(draft_worktree, blocked, cx)
         } else if let Some(wt) = worktree.clone() {
-            let tip = format!("Runs in a worktree of its own: {}", trek_core::paths::tildify(&wt.path));
+            let tip = format!(
+                "Runs in a worktree of its own: {}",
+                trek_core::paths::tildify(&wt.path)
+            );
             chip("env-worktree")
                 .test_support()
-                .child(Icon::new(crate::assets::Lucide::GitBranchPlus).small().text_color(theme.muted_foreground))
+                .child(
+                    Icon::new(crate::assets::Lucide::GitBranchPlus)
+                        .small()
+                        .text_color(theme.muted_foreground),
+                )
                 .child("Worktree")
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                })
                 .into_any_element()
         } else if is_draft {
             chip("env-local")
-                .child(Icon::new(crate::assets::Lucide::Laptop).small().text_color(theme.muted_foreground))
+                .child(
+                    Icon::new(crate::assets::Lucide::Laptop)
+                        .small()
+                        .text_color(theme.muted_foreground),
+                )
                 .child("Local")
-                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(format!("Runs on {}, in the project folder", crate::words::words().this_computer)).build(window, cx))
+                .tooltip(|window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(format!(
+                        "Runs on {}, in the project folder",
+                        crate::words::words().this_computer
+                    ))
+                    .build(window, cx)
+                })
                 .into_any_element()
         } else {
             // A thread in the project folder is the usual case: only a worktree is worth a chip.
@@ -1985,9 +2792,22 @@ impl Composer {
             // The thread's own branch, off its base.
             _ if worktree.is_some() => worktree.map(|wt| {
                 chip("env-branch")
-                    .child(Icon::new(crate::assets::Lucide::GitBranch).small().text_color(palette::indigo(cx)))
-                    .child(div().text_color(theme.foreground.opacity(0.9)).child(wt.branch.clone()))
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(format!("off {}", wt.base)))
+                    .child(
+                        Icon::new(crate::assets::Lucide::GitBranch)
+                            .small()
+                            .text_color(palette::indigo(cx)),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme.foreground.opacity(0.9))
+                            .child(wt.branch.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("off {}", wt.base)),
+                    )
                     .into_any_element()
             }),
             // A draft headed for a worktree: the branch it starts from, with no switcher (switching
@@ -1995,10 +2815,29 @@ impl Composer {
             Some(g) if is_draft && draft_worktree && g.is_repo => Some(
                 chip("env-base")
                     .test_support()
-                    .child(Icon::new(crate::assets::Lucide::GitBranch).small().text_color(theme.muted_foreground))
-                    .when_some(g.branch.clone(), |el, b| el.child(div().text_xs().text_color(theme.muted_foreground).child("off")).child(div().text_color(theme.foreground.opacity(0.9)).child(b)))
-                    .when(g.branch.is_none(), |el| el.text_color(palette::amber(cx)).child("detached HEAD"))
-                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("The worktree's branch starts from the branch the project folder is on").build(window, cx))
+                    .child(
+                        Icon::new(crate::assets::Lucide::GitBranch)
+                            .small()
+                            .text_color(theme.muted_foreground),
+                    )
+                    .when_some(g.branch.clone(), |el, b| {
+                        el.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child("off"),
+                        )
+                        .child(div().text_color(theme.foreground.opacity(0.9)).child(b))
+                    })
+                    .when(g.branch.is_none(), |el| {
+                        el.text_color(palette::amber(cx)).child("detached HEAD")
+                    })
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(
+                            "The worktree's branch starts from the branch the project folder is on",
+                        )
+                        .build(window, cx)
+                    })
                     .into_any_element(),
             ),
             Some(g) if g.is_repo => {
@@ -2022,16 +2861,37 @@ impl Composer {
                         .child(
                             h_flex()
                                 .gap(px(6.))
-                                .child(Icon::new(crate::assets::Lucide::GitBranch).small().text_color(if on_default { theme.muted_foreground } else { palette::indigo(cx) }))
+                                .child(
+                                    Icon::new(crate::assets::Lucide::GitBranch)
+                                        .small()
+                                        .text_color(if on_default {
+                                            theme.muted_foreground
+                                        } else {
+                                            palette::indigo(cx)
+                                        }),
+                                )
                                 .child(div().text_color(theme.foreground.opacity(0.9)).child(name))
                                 // Uncommitted work is normal, not a warning: quiet, like the branch's other details.
-                                .when_some(status, |el, s| el.child(div().text_xs().text_color(theme.muted_foreground).child(s)))
-                                .child(Icon::new(IconName::ChevronDown).xsmall().text_color(theme.muted_foreground)),
+                                .when_some(status, |el, s| {
+                                    el.child(
+                                        div().text_xs().text_color(theme.muted_foreground).child(s),
+                                    )
+                                })
+                                .child(
+                                    Icon::new(IconName::ChevronDown)
+                                        .xsmall()
+                                        .text_color(theme.muted_foreground),
+                                ),
                         )
                         .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, cx| {
                             // Read as the menu opens: an agent may have started since the chip drew.
-                            let blocked = cwd.as_deref().and_then(|c| ws_entity.read(cx).switch_blocked(c));
-                            menu = menu.min_w(px(220.)).max_h(px(320.)).scrollable(true).label(blocked.clone().unwrap_or_else(|| "Switch branch".into()));
+                            let blocked = cwd
+                                .as_deref()
+                                .and_then(|c| ws_entity.read(cx).switch_blocked(c));
+                            menu =
+                                menu.min_w(px(220.)).max_h(px(320.)).scrollable(true).label(
+                                    blocked.clone().unwrap_or_else(|| "Switch branch".into()),
+                                );
                             for b in branches.clone() {
                                 let (ws, cwd) = (ws_entity.clone(), cwd.clone());
                                 let is_current = Some(&b) == current.as_ref();
@@ -2042,12 +2902,17 @@ impl Composer {
                                     (true, false) => format!("{b}  (default)"),
                                     (false, false) => b.clone(),
                                 };
-                                menu = menu.item(PopupMenuItem::new(label).checked(is_current).disabled(!is_current && (taken || blocked.is_some())).on_click(move |_, _, cx| {
-                                    let b = b.clone();
-                                    if let Some(cwd) = cwd.clone() {
-                                        ws.update(cx, |ws, cx| ws.switch_branch(cwd, b, cx))
-                                    }
-                                }));
+                                menu = menu.item(
+                                    PopupMenuItem::new(label)
+                                        .checked(is_current)
+                                        .disabled(!is_current && (taken || blocked.is_some()))
+                                        .on_click(move |_, _, cx| {
+                                            let b = b.clone();
+                                            if let Some(cwd) = cwd.clone() {
+                                                ws.update(cx, |ws, cx| ws.switch_branch(cwd, b, cx))
+                                            }
+                                        }),
+                                );
                             }
                             menu
                         })
@@ -2076,7 +2941,12 @@ impl Composer {
     }
 
     /// The thread's worktree folder is gone: say so, and offer the ways on. Messages wait.
-    fn missing_worktree(&self, wt: &trek_core::worktree::Worktree, id: String, cx: &mut Context<Self>) -> AnyElement {
+    fn missing_worktree(
+        &self,
+        wt: &trek_core::worktree::Worktree,
+        id: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let (ws1, ws2, id2) = (self.workspace.clone(), self.workspace.clone(), id.clone());
         h_flex()
@@ -2114,17 +2984,33 @@ impl Composer {
             let ws = ws.clone();
             dialog
                 .title("Clone from GitHub")
-                .child(v_flex().gap_2().child("Uses your GitHub CLI login. Clones into ~/Developer.").child(Input::new(&input)))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child("Uses your GitHub CLI login. Clones into ~/Developer.")
+                        .child(Input::new(&input)),
+                )
                 .footer(
                     gpui_kit::component::dialog::DialogFooter::new()
                         .gap_2()
-                        .child(gpui_kit::component::dialog::DialogClose::new().child(gpui_kit::component::button::Button::new("cancel-clone").outline().label("Cancel")))
-                        .child(gpui_kit::component::dialog::DialogAction::new().child(
-                            gpui_kit::component::button::Button::new("do-clone").primary().label("Clone").on_click(move |_, _, cx| {
-                                let spec = input2.read(cx).value().to_string();
-                                ws.update(cx, |ws, cx| ws.clone_repo(spec, cx));
-                            }),
-                        )),
+                        .child(
+                            gpui_kit::component::dialog::DialogClose::new().child(
+                                gpui_kit::component::button::Button::new("cancel-clone")
+                                    .outline()
+                                    .label("Cancel"),
+                            ),
+                        )
+                        .child(
+                            gpui_kit::component::dialog::DialogAction::new().child(
+                                gpui_kit::component::button::Button::new("do-clone")
+                                    .primary()
+                                    .label("Clone")
+                                    .on_click(move |_, _, cx| {
+                                        let spec = input2.read(cx).value().to_string();
+                                        ws.update(cx, |ws, cx| ws.clone_repo(spec, cx));
+                                    }),
+                            ),
+                        ),
                 )
         });
     }
@@ -2165,7 +3051,12 @@ impl Attaching for Composer {
         let ws = self.workspace.read(cx);
         match ws.thread_id_in(&self.scope) {
             Some(id) => format!("thread:{id}"),
-            None if ws.is_draft_in(&self.scope) => format!("draft:{}", ws.draft_project_in(&self.scope).map(|p| p.display().to_string()).unwrap_or_default()),
+            None if ws.is_draft_in(&self.scope) => format!(
+                "draft:{}",
+                ws.draft_project_in(&self.scope)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
+            ),
             None => String::new(),
         }
     }
@@ -2189,9 +3080,13 @@ impl Render for Composer {
         let is_draft = ws.is_draft_in(&self.scope);
         let main = self.scope == Scope::Main;
         let follow_up = ws.settings.general.follow_up;
-        let own_turn = thread.as_ref().is_some_and(|t| matches!(t.run_state, RunState::Working | RunState::NeedsYou));
+        let own_turn = thread
+            .as_ref()
+            .is_some_and(|t| matches!(t.run_state, RunState::Working | RunState::NeedsYou));
         // Its turn is over but it waits on sub-agents (Trek's, or its agent's own in the background).
-        let children_working = thread.as_ref().is_some_and(|t| !ws.running_children(&t.id).is_empty() || ws.waiting(&t.id));
+        let children_working = thread
+            .as_ref()
+            .is_some_and(|t| !ws.running_children(&t.id).is_empty() || ws.waiting(&t.id));
         let live = thread.as_ref().and_then(|t| ws.live.get(&t.id));
         // The API cost estimate: changes as usage is reported, not per token.
         let billing = thread.as_ref().and_then(|t| ws.billing_of(t));
@@ -2199,16 +3094,23 @@ impl Render for Composer {
         let cost_label = crate::cost::label(billing.as_ref(), &spend);
         // Beside the estimate: how much of the prompts the cache served (a model on this Mac
         // has no estimate and no cache to speak of).
-        let cache_hits = cost_label.as_ref().and_then(|_| crate::cost::CacheHits::of(&spend));
+        let cache_hits = cost_label
+            .as_ref()
+            .and_then(|_| crate::cost::CacheHits::of(&spend));
         let billing_tip = crate::cost::billing_note(billing.as_ref());
         let queued = thread.as_ref().map_or(0, |t| ws.queued(&t.id));
         let theme = cx.theme().clone();
-        let empty = self.input.read(cx).value().trim().is_empty() && self.outbox.paths.is_empty() && self.outbox.saving == 0;
+        let empty = self.input.read(cx).value().trim().is_empty()
+            && self.outbox.paths.is_empty()
+            && self.outbox.saving == 0;
         // Stop also ends sub-agents still at work after their parent's turn, unless there's a
         // message to send: the parent is free to take it.
         let running = own_turn || (children_working && empty);
         let thread_id = thread.as_ref().map(|t| t.id.clone());
-        let context = thread.as_ref().and_then(|t| ws.live.get(&t.id)).and_then(|l| l.context);
+        let context = thread
+            .as_ref()
+            .and_then(|t| ws.live.get(&t.id))
+            .and_then(|l| l.context);
         let compact = self.width.get() < px(600.);
         // A side bar's width (the editor's AI side bar): the model pill drops its effort and
         // cuts its name shorter, so the send button stays in view.
@@ -2216,12 +3118,28 @@ impl Render for Composer {
         let plan = prefs.plan;
         let preparing = live.is_some_and(|l| l.preparing);
         // Its agent's CLI is being updated: messages wait for the new version.
-        let updating = thread.as_ref().filter(|t| ws.agent_updating(&t.agent.key())).map(|t| t.agent.display_name());
-        let missing = thread.as_ref().and_then(|t| Some((t.worktree.clone().filter(|w| !preparing && crate::system::lately::worktree_missing(w))?, t.id.clone())));
+        let updating = thread
+            .as_ref()
+            .filter(|t| ws.agent_updating(&t.agent.key()))
+            .map(|t| t.agent.display_name());
+        let missing = thread.as_ref().and_then(|t| {
+            Some((
+                t.worktree
+                    .clone()
+                    .filter(|w| !preparing && crate::system::lately::worktree_missing(w))?,
+                t.id.clone(),
+            ))
+        });
         // Another thread edits the same folder right now: offer a worktree for the next one.
-        let crowded = thread.as_ref().filter(|t| ws.sharing_folder(&t.id)).map(|t| ws.project_dir(t));
+        let crowded = thread
+            .as_ref()
+            .filter(|t| ws.sharing_folder(&t.id))
+            .map(|t| ws.project_dir(t));
         // The way out is a worktree, for git projects.
-        let crowded_repo = crowded.clone().flatten().filter(|p| crate::system::lately::exists(&p.join(".git")));
+        let crowded_repo = crowded
+            .clone()
+            .flatten()
+            .filter(|p| crate::system::lately::exists(&p.join(".git")));
 
         // Model pill + menu, access pill + menu (`pickers`). Short labels (Consult, Plan) stay
         // until the card is side-bar narrow; the access level's long one goes first.
@@ -2230,7 +3148,14 @@ impl Render for Composer {
         let hh = prefs.hand_holding;
 
         let square = |id: &'static str| {
-            div().id(id).size(px(30.)).flex_none().rounded(px(8.)).flex().items_center().justify_center()
+            div()
+                .id(id)
+                .size(px(30.))
+                .flex_none()
+                .rounded(px(8.))
+                .flex()
+                .items_center()
+                .justify_center()
         };
         // What the keys do, on the button: sending, a new line, and steer or queue mid-turn.
         let hint = delivery_hint(self.cmd_enter, follow_up, own_turn);
@@ -2238,7 +3163,12 @@ impl Render for Composer {
             square("stop")
                 .test_support()
                 .cursor_pointer()
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(crate::keys::localize(&format!("Stop ⌘. · {hint}")).into_owned()).build(window, cx))
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(
+                        crate::keys::localize(&format!("Stop ⌘. · {hint}")).into_owned(),
+                    )
+                    .build(window, cx)
+                })
                 .bg(palette::red(cx))
                 .child(div().size(px(10.)).rounded(px(2.)).bg(rgb(0xFFFFFF)))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -2250,10 +3180,20 @@ impl Render for Composer {
         } else {
             square("send")
                 .test_support()
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(hint.clone()).build(window, cx))
-                .bg(if empty { theme.foreground.opacity(0.08) } else { theme.foreground })
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(hint.clone()).build(window, cx)
+                })
+                .bg(if empty {
+                    theme.foreground.opacity(0.08)
+                } else {
+                    theme.foreground
+                })
                 .when(!empty, |el| el.cursor_pointer().hover(|s| s.opacity(0.85)))
-                .child(Icon::new(IconName::ArrowUp).small().text_color(if empty { theme.muted_foreground } else { theme.background }))
+                .child(Icon::new(IconName::ArrowUp).small().text_color(if empty {
+                    theme.muted_foreground
+                } else {
+                    theme.background
+                }))
                 .on_click(cx.listener(|this, _, window, cx| {
                     let input = this.input.clone();
                     this.submit(input, window, cx);
@@ -2268,13 +3208,28 @@ impl Render for Composer {
             square("dictate")
                 .test_support()
                 .cursor_pointer()
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(if asking { "Starting dictation…" } else { crate::words::words().dictate_tip }).build(window, cx))
-                .child(if asking {
-                    gpui_kit::component::spinner::Spinner::new().xsmall().color(theme.muted_foreground).into_any_element()
-                } else {
-                    Icon::new(crate::assets::Lucide::Mic).small().text_color(theme.muted_foreground).into_any_element()
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(if asking {
+                        "Starting dictation…"
+                    } else {
+                        crate::words::words().dictate_tip
+                    })
+                    .build(window, cx)
                 })
-                .when(!asking, |el| el.on_click(cx.listener(|this, _, window, cx| this.dictate(window, cx))))
+                .child(if asking {
+                    gpui_kit::component::spinner::Spinner::new()
+                        .xsmall()
+                        .color(theme.muted_foreground)
+                        .into_any_element()
+                } else {
+                    Icon::new(crate::assets::Lucide::Mic)
+                        .small()
+                        .text_color(theme.muted_foreground)
+                        .into_any_element()
+                })
+                .when(!asking, |el| {
+                    el.on_click(cx.listener(|this, _, window, cx| this.dictate(window, cx)))
+                })
                 .into_any_element()
         });
         // Voice mode: the waveform, ✕ and ✓ in place of the toolbar.
@@ -2286,26 +3241,54 @@ impl Render for Composer {
                 .cursor_pointer()
                 .bg(theme.foreground.opacity(0.08))
                 .hover(|s| s.bg(theme.foreground.opacity(0.14)))
-                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared("Discard (esc)")).build(window, cx))
-                .child(Icon::new(IconName::Close).small().text_color(theme.muted_foreground))
-                .on_click(cx.listener(|this, _, window, cx| this.voice_step(voice::Event::Cancel, window, cx)));
+                .tooltip(|window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared("Discard (esc)"))
+                        .build(window, cx)
+                })
+                .child(
+                    Icon::new(IconName::Close)
+                        .small()
+                        .text_color(theme.muted_foreground),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.voice_step(voice::Event::Cancel, window, cx)
+                }));
             let confirm = square("voice-confirm")
                 .test_support()
                 .rounded_full()
                 .bg(theme.foreground)
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared(if finishing { "Finishing…" } else { "Insert the text (↩)" })).build(window, cx))
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared(if finishing {
+                        "Finishing…"
+                    } else {
+                        "Insert the text (↩)"
+                    }))
+                    .build(window, cx)
+                })
                 .child(if finishing {
-                    gpui_kit::component::spinner::Spinner::new().xsmall().color(theme.background).into_any_element()
+                    gpui_kit::component::spinner::Spinner::new()
+                        .xsmall()
+                        .color(theme.background)
+                        .into_any_element()
                 } else {
-                    Icon::new(IconName::Check).small().text_color(theme.background).into_any_element()
+                    Icon::new(IconName::Check)
+                        .small()
+                        .text_color(theme.background)
+                        .into_any_element()
                 })
                 .when(!finishing, |el| {
                     el.cursor_pointer()
                         .hover(|s| s.opacity(0.85))
-                        .on_click(cx.listener(|this, _, window, cx| this.voice_step(voice::Event::Confirm, window, cx)))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.voice_step(voice::Event::Confirm, window, cx)
+                        }))
                 })
                 // Fades in as the take opens.
-                .with_animation(("voice-confirm-in", self.voice.take), Animation::new(std::time::Duration::from_millis(800)), |el, t| el.opacity(0.6 + 0.4 * t));
+                .with_animation(
+                    ("voice-confirm-in", self.voice.take),
+                    Animation::new(std::time::Duration::from_millis(800)),
+                    |el, t| el.opacity(0.6 + 0.4 * t),
+                );
             h_flex()
                 .id("voice-row")
                 .test_support()
@@ -2313,7 +3296,10 @@ impl Render for Composer {
                 .pl(px(14.))
                 .gap(px(8.))
                 .min_w_0()
-                .child(voice::waveform(self.voice.levels.bars().collect(), theme.muted_foreground))
+                .child(voice::waveform(
+                    self.voice.levels.bars().collect(),
+                    theme.muted_foreground,
+                ))
                 .child(cancel)
                 .child(confirm)
         });
@@ -2434,19 +3420,37 @@ impl Render for Composer {
                     .child(send),
             ));
 
-        let limit_bar = thread.as_ref().and_then(|t| self.limit_bar(&t.id, compact, cx));
+        let limit_bar = thread
+            .as_ref()
+            .and_then(|t| self.limit_bar(&t.id, compact, cx));
         // Capy-style context chips above the card on a new thread.
         // The AI side bar's new chat works in the IDE folder: it has no project to pick.
-        let chips = is_draft.then(|| div().pb(px(8.)).child(self.env_chips(self.scope != Scope::Ide, cx)));
+        let chips = is_draft.then(|| {
+            div()
+                .pb(px(8.))
+                .child(self.env_chips(self.scope != Scope::Ide, cx))
+        });
         let picker = pickers::picker(self, cx);
         let drop_tint = palette::ember(cx);
         let card = div()
             .relative()
             .w_full()
             .child(card)
-            .when_some(picker, |el, p| el.child(div().absolute().bottom_full().left_0().w_full().pb(px(6.)).child(p)))
+            .when_some(picker, |el, p| {
+                el.child(
+                    div()
+                        .absolute()
+                        .bottom_full()
+                        .left_0()
+                        .w_full()
+                        .pb(px(6.))
+                        .child(p),
+                )
+            })
             .drag_over::<ExternalPaths>(move |s, _, _, _| s.opacity(0.85).border_color(drop_tint))
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| this.add_paths(paths.paths(), window, cx)));
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.add_paths(paths.paths(), window, cx)
+            }));
 
         // Status strip under the card (threads and drafts).
         let status = Some({
@@ -2463,9 +3467,16 @@ impl Render for Composer {
                         .child(ui::agent_glyph(&prefs.agent, cx))
                         .child(prefs.agent.display_name())
                         // How the session is billed (what it would cost is the estimate beside it).
-                        .when_some(billing_tip, |el, tip| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))),
+                        .when_some(billing_tip, |el, tip| {
+                            el.tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                                    .build(window, cx)
+                            })
+                        }),
                 )
-                .when_some(cost_label, |el, label| el.child(cost_chip(label, billing.clone(), spend, cx)))
+                .when_some(cost_label, |el, label| {
+                    el.child(cost_chip(label, billing.clone(), spend, cx))
+                })
                 .when_some(cache_hits, |el, c| {
                     let tip = c.detail();
                     el.child(
@@ -2474,7 +3485,10 @@ impl Render for Composer {
                             .test_support()
                             .flex_none()
                             .child(c.label())
-                            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)),
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                                    .build(window, cx)
+                            }),
                     )
                 })
                 .when(queued > 0, |el| el.child(format!("{queued} queued")))
@@ -2484,29 +3498,46 @@ impl Render for Composer {
                         h_flex()
                             .min_w_0()
                             .gap(px(6.))
-                            .child(Icon::new(IconName::TriangleAlert).xsmall().text_color(palette::amber(cx)))
-                            .child(div().min_w_0().truncate().child("Another thread is also editing this folder"))
-                            .when_some(crowded_repo, |el, project| el.child(
+                            .child(
+                                Icon::new(IconName::TriangleAlert)
+                                    .xsmall()
+                                    .text_color(palette::amber(cx)),
+                            )
+                            .child(
                                 div()
-                                    .id("next-in-worktree")
-                                    .test_support()
-                                    .flex_none()
-                                    .cursor_pointer()
-                                    .text_color(theme.foreground.opacity(0.85))
-                                    .hover(|s| s.text_color(theme.foreground).underline())
-                                    .child("Use a worktree next time")
-                                    .on_click(move |_, _, cx| {
-                                        let project = project.clone();
-                                        ws.update(cx, |ws, cx| ws.new_thread_in_worktree(project, cx))
-                                    }),
-                            )),
+                                    .min_w_0()
+                                    .truncate()
+                                    .child("Another thread is also editing this folder"),
+                            )
+                            .when_some(crowded_repo, |el, project| {
+                                el.child(
+                                    div()
+                                        .id("next-in-worktree")
+                                        .test_support()
+                                        .flex_none()
+                                        .cursor_pointer()
+                                        .text_color(theme.foreground.opacity(0.85))
+                                        .hover(|s| s.text_color(theme.foreground).underline())
+                                        .child("Use a worktree next time")
+                                        .on_click(move |_, _, cx| {
+                                            let project = project.clone();
+                                            ws.update(cx, |ws, cx| {
+                                                ws.new_thread_in_worktree(project, cx)
+                                            })
+                                        }),
+                                )
+                            }),
                     )
                 })
                 .child(div().flex_1())
                 // The terminal docks under the chat in the main window (⌃` too); lit while it's out.
                 .when(main, |el| {
                     let open = self.workspace.read(cx).settings.layout.terminal_open;
-                    let tip = crate::keys::shared(if open { "Hide the terminal (⌃`)" } else { "A terminal under the chat (⌃`)" });
+                    let tip = crate::keys::shared(if open {
+                        "Hide the terminal (⌃`)"
+                    } else {
+                        "A terminal under the chat (⌃`)"
+                    });
                     el.child(
                         h_flex()
                             .id("open-terminal")
@@ -2517,8 +3548,13 @@ impl Render for Composer {
                             .hover(|s| s.text_color(theme.foreground))
                             .child(Icon::new(IconName::SquareTerminal).xsmall())
                             .child("Terminal")
-                            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
-                            .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::ToggleTerminal), cx)),
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                                    .build(window, cx)
+                            })
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(crate::ToggleTerminal), cx)
+                            }),
                     )
                 })
         });
@@ -2556,13 +3592,25 @@ impl Render for Composer {
                 // ⌥↩ sends the other way from the default while a turn runs (steer ⇄ queue).
                 let k = &ev.keystroke;
                 // Voice mode: esc is ✕ and ↩ is ✓.
-                if this.voice.active() && !k.modifiers.modified() && matches!(k.key.as_str(), "escape" | "enter") {
+                if this.voice.active()
+                    && !k.modifiers.modified()
+                    && matches!(k.key.as_str(), "escape" | "enter")
+                {
                     cx.stop_propagation();
-                    let event = if k.key == "escape" { voice::Event::Cancel } else { voice::Event::Confirm };
+                    let event = if k.key == "escape" {
+                        voice::Event::Cancel
+                    } else {
+                        voice::Event::Confirm
+                    };
                     this.voice_step(event, window, cx);
                     return;
                 }
-                if k.key == "enter" && k.modifiers.alt && !k.modifiers.secondary() && !k.modifiers.shift && this.pickers.trigger.is_none() {
+                if k.key == "enter"
+                    && k.modifiers.alt
+                    && !k.modifiers.secondary()
+                    && !k.modifiers.shift
+                    && this.pickers.trigger.is_none()
+                {
                     cx.stop_propagation();
                     let other = match this.workspace.read(cx).settings.general.follow_up {
                         FollowUp::Steer => FollowUp::Queue,
@@ -2575,13 +3623,37 @@ impl Render for Composer {
                 pickers::picker_key(this, ev, window, cx)
             }))
             // The textarea binds these keys to actions, which never reach key listeners.
-            .capture_action(cx.listener(|this, _: &MoveUp, window, cx| this.picker_action("up", window, cx)))
-            .capture_action(cx.listener(|this, _: &MoveDown, window, cx| this.picker_action("down", window, cx)))
-            .capture_action(cx.listener(|this, _: &Escape, window, cx| this.picker_action("escape", window, cx)))
-            .capture_action(cx.listener(|this, _: &IndentInline, window, cx| this.picker_action("tab", window, cx)))
-            .capture_action(cx.listener(|this, action: &Enter, window, cx| this.on_enter(action, window, cx)))
-            .on_action(cx.listener(|this, _: &TogglePlan, _, cx| pickers::update_prefs(this, cx, |p| p.plan = !p.plan)))
-            .child(v_flex().w_full().max_w(self.workspace.read(cx).column()).children(chips).children(limit_bar).child(card).children(status))
+            .capture_action(
+                cx.listener(|this, _: &MoveUp, window, cx| this.picker_action("up", window, cx)),
+            )
+            .capture_action(
+                cx.listener(|this, _: &MoveDown, window, cx| {
+                    this.picker_action("down", window, cx)
+                }),
+            )
+            .capture_action(
+                cx.listener(|this, _: &Escape, window, cx| {
+                    this.picker_action("escape", window, cx)
+                }),
+            )
+            .capture_action(cx.listener(|this, _: &IndentInline, window, cx| {
+                this.picker_action("tab", window, cx)
+            }))
+            .capture_action(
+                cx.listener(|this, action: &Enter, window, cx| this.on_enter(action, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &TogglePlan, _, cx| {
+                pickers::update_prefs(this, cx, |p| p.plan = !p.plan)
+            }))
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(self.workspace.read(cx).column())
+                    .children(chips)
+                    .children(limit_bar)
+                    .child(card)
+                    .children(status),
+            )
     }
 }
 
@@ -2590,15 +3662,23 @@ impl Render for Composer {
 fn placeholder(running: Option<FollowUp>) -> std::borrow::Cow<'static, str> {
     match running {
         None => "Ask or build · / commands · @ files".into(),
-        Some(FollowUp::Steer) => crate::keys::localize("Steer the running turn · ⌥↩ queues for after it"),
-        Some(FollowUp::Queue) => crate::keys::localize("Queue a follow-up · ⌥↩ steers the running turn"),
+        Some(FollowUp::Steer) => {
+            crate::keys::localize("Steer the running turn · ⌥↩ queues for after it")
+        }
+        Some(FollowUp::Queue) => {
+            crate::keys::localize("Queue a follow-up · ⌥↩ steers the running turn")
+        }
     }
 }
 
 /// The send button's tooltip: which keys send and add a line, and while a turn runs (`running`),
 /// which key steers it and which queues for after it.
 pub(crate) fn delivery_hint(cmd_enter: bool, follow: FollowUp, running: bool) -> String {
-    let (send, line) = if cmd_enter { ("⌘↩", "↩") } else { ("↩", "⇧↩") }; // keys::localize below
+    let (send, line) = if cmd_enter {
+        ("⌘↩", "↩")
+    } else {
+        ("↩", "⇧↩")
+    }; // keys::localize below
     let text = if !running {
         format!("Send {send} · New line {line}")
     } else {
@@ -2611,14 +3691,23 @@ pub(crate) fn delivery_hint(cmd_enter: bool, follow: FollowUp, running: bool) ->
 }
 
 /// The API cost estimate in the status strip, with its breakdown on hover (worked out only then).
-fn cost_chip(label: String, billing: Option<trek_agents::Billing>, spend: crate::cost::ThreadSpend, cx: &App) -> AnyElement {
+fn cost_chip(
+    label: String,
+    billing: Option<trek_agents::Billing>,
+    spend: crate::cost::ThreadSpend,
+    cx: &App,
+) -> AnyElement {
     let hover = cx.theme().foreground;
     // TREK_HOVER_COST=<seconds> hovers the first estimate drawn, once, that long after it's
     // drawn (once the agents have said how they're billed), so its breakdown can be reviewed in
     // a window that isn't in front, without moving the real pointer.
     static HOVERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     static DELAY: std::sync::LazyLock<Option<std::time::Duration>> =
-        std::sync::LazyLock::new(|| std::env::var("TREK_HOVER_COST").ok().map(|s| std::time::Duration::from_secs(s.trim().parse().unwrap_or(0))));
+        std::sync::LazyLock::new(|| {
+            std::env::var("TREK_HOVER_COST")
+                .ok()
+                .map(|s| std::time::Duration::from_secs(s.trim().parse().unwrap_or(0)))
+        });
     let delay = *DELAY;
     let review = delay.is_some() && !HOVERED.load(std::sync::atomic::Ordering::Relaxed);
     div()
@@ -2639,7 +3728,14 @@ fn cost_chip(label: String, billing: Option<trek_agents::Billing>, spend: crate:
                                 .spawn(cx, async move |cx| {
                                     cx.background_executor().timer(after).await;
                                     let _ = cx.update(|window, cx| {
-                                        window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: None, modifiers: Default::default() }), cx);
+                                        window.dispatch_event(
+                                            PlatformInput::MouseMove(MouseMoveEvent {
+                                                position,
+                                                pressed_button: None,
+                                                modifiers: Default::default(),
+                                            }),
+                                            cx,
+                                        );
                                     });
                                 })
                                 .detach();
@@ -2655,7 +3751,11 @@ fn cost_chip(label: String, billing: Option<trek_agents::Billing>, spend: crate:
         })
         .tooltip(move |window, cx| {
             let tip = crate::cost::breakdown(billing.as_ref(), &spend);
-            gpui_kit::component::tooltip::Tooltip::element(move |_, cx| tip.as_ref().map_or_else(|| div().into_any_element(), |b| cost_breakdown(b, cx))).build(window, cx)
+            gpui_kit::component::tooltip::Tooltip::element(move |_, cx| {
+                tip.as_ref()
+                    .map_or_else(|| div().into_any_element(), |b| cost_breakdown(b, cx))
+            })
+            .build(window, cx)
         })
         .into_any_element()
 }
@@ -2669,15 +3769,35 @@ fn cost_breakdown(b: &crate::cost::Breakdown, cx: &App) -> AnyElement {
     let models = b.models.iter().map(|m| {
         v_flex()
             .gap(px(2.))
-            .child(h_flex().gap(px(12.)).text_xs().font_medium().child(div().flex_1().child(m.name.clone())).child(m.amount.clone()))
+            .child(
+                h_flex()
+                    .gap(px(12.))
+                    .text_xs()
+                    .font_medium()
+                    .child(div().flex_1().child(m.name.clone()))
+                    .child(m.amount.clone()),
+            )
             .children(m.rows.iter().map(|r| {
                 h_flex()
                     .gap(px(8.))
                     .text_xs()
                     .text_color(muted)
                     .child(div().w(px(76.)).child(r.kind))
-                    .child(div().w(px(44.)).flex().justify_end().child(r.tokens.clone()))
-                    .child(div().pl(px(4.)).child(r.rate.clone().map(|r| format!("× {r}")).unwrap_or_else(|| "—".into())))
+                    .child(
+                        div()
+                            .w(px(44.))
+                            .flex()
+                            .justify_end()
+                            .child(r.tokens.clone()),
+                    )
+                    .child(
+                        div().pl(px(4.)).child(
+                            r.rate
+                                .clone()
+                                .map(|r| format!("× {r}"))
+                                .unwrap_or_else(|| "—".into()),
+                        ),
+                    )
             }))
     });
     v_flex()
@@ -2689,20 +3809,42 @@ fn cost_breakdown(b: &crate::cost::Breakdown, cx: &App) -> AnyElement {
             v_flex()
                 .gap(px(2.))
                 .child(div().text_sm().font_medium().child(b.headline.clone()))
-                .when_some(b.billing.clone(), |el, l| el.child(div().text_xs().text_color(muted).child(l))),
+                .when_some(b.billing.clone(), |el, l| {
+                    el.child(div().text_xs().text_color(muted).child(l))
+                }),
         )
-        .when(!b.models.is_empty(), |el| el.child(v_flex().gap(px(8.)).pt(px(8.)).border_t_1().border_color(rule).children(models)))
+        .when(!b.models.is_empty(), |el| {
+            el.child(
+                v_flex()
+                    .gap(px(8.))
+                    .pt(px(8.))
+                    .border_t_1()
+                    .border_color(rule)
+                    .children(models),
+            )
+        })
         .when(b.subs.is_some() || b.unpriced.is_some(), |el| {
             el.child(
                 v_flex()
                     .gap(px(2.))
                     .text_xs()
                     .when_some(b.subs.clone(), |el, s| el.child(s))
-                    .when_some(b.unpriced.clone(), |el, u| el.child(div().text_color(muted).child(u))),
+                    .when_some(b.unpriced.clone(), |el, u| {
+                        el.child(div().text_color(muted).child(u))
+                    }),
             )
         })
         .when(!b.sources.is_empty(), |el| {
-            el.child(v_flex().gap(px(2.)).pt(px(8.)).border_t_1().border_color(rule).text_xs().text_color(muted).children(b.sources.iter().cloned()))
+            el.child(
+                v_flex()
+                    .gap(px(2.))
+                    .pt(px(8.))
+                    .border_t_1()
+                    .border_color(rule)
+                    .text_xs()
+                    .text_color(muted)
+                    .children(b.sources.iter().cloned()),
+            )
         })
         .into_any_element()
 }
@@ -2715,7 +3857,10 @@ mod tests {
     fn restate_takes_a_message_or_none() {
         assert_eq!(restate_command("/restate"), Some(None));
         assert_eq!(restate_command("  /restate  "), Some(None));
-        assert_eq!(restate_command("/restate why does it flicker?"), Some(Some("why does it flicker?".into())));
+        assert_eq!(
+            restate_command("/restate why does it flicker?"),
+            Some(Some("why does it flicker?".into()))
+        );
         assert_eq!(restate_command("/restate: why?"), Some(Some("why?".into())));
         assert_eq!(restate_command("/restated"), None);
         assert_eq!(restate_command("please /restate"), None);
@@ -2723,8 +3868,15 @@ mod tests {
 
     #[test]
     fn consult_splits_at_a_colon_and_space() {
-        assert_eq!(consult_split(" sol high: why?"), Some((" sol high", " why?")));
-        assert_eq!(consult_split(" qwen2.5-coder:7b high: why?"), Some((" qwen2.5-coder:7b high", " why?")), "a model id's colon stays");
+        assert_eq!(
+            consult_split(" sol high: why?"),
+            Some((" sol high", " why?"))
+        );
+        assert_eq!(
+            consult_split(" qwen2.5-coder:7b high: why?"),
+            Some((" qwen2.5-coder:7b high", " why?")),
+            "a model id's colon stays"
+        );
         assert_eq!(consult_split(" sol:"), Some((" sol", "")));
         assert_eq!(consult_split(" qwen2.5-coder:7b"), None);
         assert_eq!(consult_split(" sol"), None);

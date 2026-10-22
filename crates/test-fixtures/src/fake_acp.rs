@@ -31,19 +31,28 @@ pub fn run() {
 
     let mut lines = stdin.lock().split(b'\n');
     while let Some(Ok(line)) = lines.next() {
-        let Ok(m) = serde_json::from_slice::<Value>(&line) else { continue };
-        let Some(method) = m.get("method").filter(|m| !m.is_null()) else { continue };
+        let Ok(m) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
+        let Some(method) = m.get("method").filter(|m| !m.is_null()) else {
+            continue;
+        };
         let entry = json!({ "method": method, "params": m["params"] });
         writeln!(log, "{entry}").unwrap();
         log.flush().unwrap();
-        let Some(id) = m.get("id").filter(|i| !i.is_null()).cloned() else { continue };
+        let Some(id) = m.get("id").filter(|i| !i.is_null()).cloned() else {
+            continue;
+        };
         let method = method.as_str().unwrap_or_default();
         let mut result = json!({});
         if method == "initialize" {
             result = json!({ "protocolVersion": 1, "agentCapabilities": { "loadSession": true, "mcpCapabilities": caps.clone() } });
         } else if matches!(method, "session/new" | "session/load") {
             if let Some(why) = bad_mcp(&m["params"]["mcpServers"], &caps) {
-                say(&mut out, json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32602, "message": format!("Invalid params: {why}") } }));
+                say(
+                    &mut out,
+                    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32602, "message": format!("Invalid params: {why}") } }),
+                );
                 continue;
             }
             if method == "session/new" {
@@ -57,39 +66,72 @@ pub fn run() {
             let c = config.as_mut().unwrap();
             let config_id = m["params"]["configId"].as_str().unwrap_or_default();
             let value = m["params"]["value"].as_str().unwrap_or_default();
-            if config_id == "model" && c["models"].as_object().is_some_and(|m| m.contains_key(value)) {
+            if config_id == "model"
+                && c["models"]
+                    .as_object()
+                    .is_some_and(|m| m.contains_key(value))
+            {
                 c["current"] = json!(value);
                 effort = default_effort(c);
-            } else if config_id == "effort" && levels_of(c).iter().any(|l| l.as_str() == Some(value)) {
+            } else if config_id == "effort"
+                && levels_of(c).iter().any(|l| l.as_str() == Some(value))
+            {
                 effort = Some(json!(value));
             } else {
-                say(&mut out, json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32602, "message": format!("Invalid params: no {config_id} {value}") } }));
+                say(
+                    &mut out,
+                    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32602, "message": format!("Invalid params: no {config_id} {value}") } }),
+                );
                 continue;
             }
             result = json!({ "configOptions": config_options(c, effort.as_ref()) });
         } else if method == "session/prompt" {
             let texts: Vec<&Value> = m["params"]["prompt"]
                 .as_array()
-                .map(|p| p.iter().filter(|b| b["type"].as_str() == Some("text")).collect())
+                .map(|p| {
+                    p.iter()
+                        .filter(|b| b["type"].as_str() == Some("text"))
+                        .collect()
+                })
                 .unwrap_or_default();
-            let text = texts.first().and_then(|t| t["text"].as_str()).unwrap_or_default();
+            let text = texts
+                .first()
+                .and_then(|t| t["text"].as_str())
+                .unwrap_or_default();
             if text == "hold" {
                 held = Some(id);
                 continue;
             }
             if text == "refuse" && held.is_some() {
-                say(&mut out, json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32602, "message": "a prompt is already running" } }));
-                say(&mut out, json!({ "jsonrpc": "2.0", "id": held.take().unwrap(), "result": { "stopReason": "end_turn" } }));
+                say(
+                    &mut out,
+                    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32602, "message": "a prompt is already running" } }),
+                );
+                say(
+                    &mut out,
+                    json!({ "jsonrpc": "2.0", "id": held.take().unwrap(), "result": { "stopReason": "end_turn" } }),
+                );
                 continue;
             }
             let update = json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": format!("heard {}", texts.len()) } });
-            say(&mut out, json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": m["params"]["sessionId"], "update": update } }));
+            say(
+                &mut out,
+                json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": m["params"]["sessionId"], "update": update } }),
+            );
             result = json!({ "stopReason": "end_turn" });
         }
-        say(&mut out, json!({ "jsonrpc": "2.0", "id": id, "result": result }));
-        if method == "session/new" && let Some(c) = &config {
+        say(
+            &mut out,
+            json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        );
+        if method == "session/new"
+            && let Some(c) = &config
+        {
             let update = json!({ "sessionUpdate": "config_option_update", "configOptions": config_options(c, effort.as_ref()) });
-            say(&mut out, json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": result["sessionId"].clone(), "update": update } }));
+            say(
+                &mut out,
+                json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": result["sessionId"].clone(), "update": update } }),
+            );
         }
     }
 }
@@ -105,14 +147,23 @@ fn read_json(file: &str) -> Option<Value> {
 
 /// The current model's effort levels.
 fn levels_of(config: &Value) -> Vec<Value> {
-    let Some(current) = config["current"].as_str() else { return vec![] };
-    config["models"][current].as_array().cloned().unwrap_or_default()
+    let Some(current) = config["current"].as_str() else {
+        return vec![];
+    };
+    config["models"][current]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// The model's levels, on "default" if it has one, else its first.
 fn default_effort(config: &Value) -> Option<Value> {
     let levels = levels_of(config);
-    levels.iter().find(|l| *l == "default").or_else(|| levels.first()).cloned()
+    levels
+        .iter()
+        .find(|l| *l == "default")
+        .or_else(|| levels.first())
+        .cloned()
 }
 
 fn ucfirst(s: &str) -> String {
@@ -124,7 +175,10 @@ fn ucfirst(s: &str) -> String {
 }
 
 fn config_options(config: &Value, effort: Option<&Value>) -> Value {
-    let mut models: Vec<&String> = config["models"].as_object().map(|m| m.keys().collect()).unwrap_or_default();
+    let mut models: Vec<&String> = config["models"]
+        .as_object()
+        .map(|m| m.keys().collect())
+        .unwrap_or_default();
     models.sort();
     let mut options = vec![json!({
         "id": "model", "category": "model", "type": "select", "currentValue": config["current"],
@@ -167,8 +221,15 @@ fn shown(v: &Value) -> String {
 
 /// Why `servers` isn't a valid `mcpServers`, or None.
 fn bad_mcp(servers: &Value, caps: &Value) -> Option<String> {
-    let Some(list) = servers.as_array() else { return Some("mcpServers must be an array".into()) };
-    let pairs = |v: &Value| v.as_array().is_some_and(|l| l.iter().all(|p| p.is_object() && scalar(&p["name"]) && scalar(&p["value"])));
+    let Some(list) = servers.as_array() else {
+        return Some("mcpServers must be an array".into());
+    };
+    let pairs = |v: &Value| {
+        v.as_array().is_some_and(|l| {
+            l.iter()
+                .all(|p| p.is_object() && scalar(&p["name"]) && scalar(&p["value"]))
+        })
+    };
     for s in list {
         if !s.is_object() {
             return Some("a server must be an object".into());

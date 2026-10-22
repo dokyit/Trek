@@ -25,7 +25,10 @@ const STONES: [(f32, f32, f32, f32, u32, u32); 4] = [
 fn paint_cairn(bounds: Bounds<Pixels>, drops: [f32; 4], window: &mut Window) {
     let w = bounds.size.width.min(bounds.size.height * ASPECT);
     let h = w / ASPECT;
-    let origin = point(bounds.origin.x + (bounds.size.width - w) / 2., bounds.origin.y + (bounds.size.height - h) / 2.);
+    let origin = point(
+        bounds.origin.x + (bounds.size.width - w) / 2.,
+        bounds.origin.y + (bounds.size.height - h) / 2.,
+    );
     for ((cx, cy, sw, sh, top, side), k) in STONES.into_iter().zip(drops) {
         if k <= 0.0 {
             continue;
@@ -37,26 +40,48 @@ fn paint_cairn(bounds: Bounds<Pixels>, drops: [f32; 4], window: &mut Window) {
         let lift = h * 0.25 * (1.0 - k);
         let centre = point(origin.x + w * cx, origin.y + h * cy - lift);
         let alpha = k.clamp(0.0, 1.0);
-        let stone = |dy: Pixels| Bounds::new(point(centre.x - sw / 2., centre.y - face / 2. + dy), size(sw, face));
-        window.paint_quad(fill(stone(thick / 2.), Hsla::from(rgb(side)).opacity(alpha)).corner_radii(face / 2.));
-        window.paint_quad(fill(stone(-thick / 2.), Hsla::from(rgb(top)).opacity(alpha)).corner_radii(face / 2.));
+        let stone = |dy: Pixels| {
+            Bounds::new(
+                point(centre.x - sw / 2., centre.y - face / 2. + dy),
+                size(sw, face),
+            )
+        };
+        window.paint_quad(
+            fill(stone(thick / 2.), Hsla::from(rgb(side)).opacity(alpha)).corner_radii(face / 2.),
+        );
+        window.paint_quad(
+            fill(stone(-thick / 2.), Hsla::from(rgb(top)).opacity(alpha)).corner_radii(face / 2.),
+        );
     }
 }
 
 /// The welcome screens' signature: the cairn stacks itself, bottom stone first.
-pub fn cairn_draw(id: impl Into<ElementId>, size_px: Pixels, reduce_motion: bool) -> impl IntoElement {
+pub fn cairn_draw(
+    id: impl Into<ElementId>,
+    size_px: Pixels,
+    reduce_motion: bool,
+) -> impl IntoElement {
     let total = Duration::from_millis(1100);
-    div().w(size_px).h(size_px / ASPECT).with_animation(id, Animation::new(total), move |el, t| {
-        let drops: [f32; 4] = std::array::from_fn(|i| {
-            if reduce_motion {
-                return 1.0;
-            }
-            // Each stone takes 40% of the run, starting 20% after the one below.
-            let local = ((t - i as f32 * 0.2) / 0.4).clamp(0.0, 1.0);
-            if local == 0.0 { 0.0 } else { back_out(local) }
-        });
-        el.child(canvas(|_, _, _| {}, move |bounds, _, window, _| paint_cairn(bounds, drops, window)).size_full())
-    })
+    div()
+        .w(size_px)
+        .h(size_px / ASPECT)
+        .with_animation(id, Animation::new(total), move |el, t| {
+            let drops: [f32; 4] = std::array::from_fn(|i| {
+                if reduce_motion {
+                    return 1.0;
+                }
+                // Each stone takes 40% of the run, starting 20% after the one below.
+                let local = ((t - i as f32 * 0.2) / 0.4).clamp(0.0, 1.0);
+                if local == 0.0 { 0.0 } else { back_out(local) }
+            });
+            el.child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _| paint_cairn(bounds, drops, window),
+                )
+                .size_full(),
+            )
+        })
 }
 
 /// Ease-out with a small overshoot, for the beacon "ignite".

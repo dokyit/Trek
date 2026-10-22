@@ -22,7 +22,11 @@ pub const LEFT_INSET: f32 = if cfg!(target_os = "macos") { 80. } else { 12. };
 /// the bar (34 px, 102 in all; Windows 11's own are 46 wide): 0 on macOS, where the traffic lights
 /// are on the left. `TitleBar` puts its content left of them by itself; this is for what Trek
 /// draws outside a `TitleBar` (Quick Look's header).
-pub const RIGHT_RESERVE: f32 = if cfg!(target_os = "macos") { 0. } else { 3. * TITLE_BAR_HEIGHT_PX };
+pub const RIGHT_RESERVE: f32 = if cfg!(target_os = "macos") {
+    0.
+} else {
+    3. * TITLE_BAR_HEIGHT_PX
+};
 
 /// `TitleBar`'s height, as a plain number.
 pub const TITLE_BAR_HEIGHT_PX: f32 = 34.;
@@ -32,7 +36,8 @@ pub const TITLE_BAR_HEIGHT_PX: f32 = 34.;
 /// kept the sidebar's rows held. Only a capture build can turn it on (`shots`' `legacy-pointer`),
 /// so the beta's failures can be shown beside the fixes.
 #[cfg(feature = "shots")]
-pub static LEGACY_POINTER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static LEGACY_POINTER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Whether the pointer is handled as the beta did (`LEGACY_POINTER`); never in a release build.
 pub fn legacy_pointer() -> bool {
@@ -49,7 +54,8 @@ pub fn legacy_pointer() -> bool {
 /// A capture build's cursor: the machine's isn't where a script can put it (a shots window is
 /// driven by events), so `realmove` and `realleave` say where it is. `true` is off the window.
 #[cfg(all(windows, feature = "shots"))]
-pub static SCRIPTED_CURSOR_AWAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static SCRIPTED_CURSOR_AWAY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Whether the cursor is over the window with handle `hwnd`, as the system has it (`None` where
 /// it can't say: a window with no handle). Never from inside an update: asking
@@ -118,7 +124,14 @@ fn ask_after_draw(window: &mut Window, cx: &mut App) {
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 pub fn pointer_off_window(window: &mut Window, cx: &mut App) {
     let modifiers = window.modifiers();
-    window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position: point(px(-1.), px(-1.)), pressed_button: None, modifiers }), cx);
+    window.dispatch_event(
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: point(px(-1.), px(-1.)),
+            pressed_button: None,
+            modifiers,
+        }),
+        cx,
+    );
 }
 
 /// A pointer that goes off a window's edge leaves what it was over still hovered: Windows says so
@@ -134,7 +147,11 @@ pub fn let_go_of_hover(window: &mut Window, cx: &mut App) {
     #[cfg(any(windows, test))]
     {
         // Only when GPUI has been told the pointer left: most frames cost a comparison.
-        if legacy_pointer() || !should_let_go(pointer_inside(window), window.is_window_hovered(), || Some(false)) {
+        if legacy_pointer()
+            || !should_let_go(pointer_inside(window), window.is_window_hovered(), || {
+                Some(false)
+            })
+        {
             return;
         }
         ask_after_draw(window, cx);
@@ -154,7 +171,11 @@ pub fn pointer_inside(window: &Window) -> bool {
 /// (`cursor_over() == Some(false)`; `Some(true)` is this window's own frame or a web view in it).
 /// Once the pointer is moved off, it isn't inside, so the move is made once.
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
-pub fn should_let_go(inside: bool, window_hovered: bool, cursor_over: impl FnOnce() -> Option<bool>) -> bool {
+pub fn should_let_go(
+    inside: bool,
+    window_hovered: bool,
+    cursor_over: impl FnOnce() -> Option<bool>,
+) -> bool {
     inside && !window_hovered && cursor_over() == Some(false)
 }
 
@@ -172,7 +193,12 @@ fn takes_pointer() -> bool {
 /// what it does (its title bar's own press-and-move).
 pub fn no_drag(id: &'static str, control: impl IntoElement) -> impl IntoElement + Styled {
     use gpui_kit::prelude::FluentBuilder as _;
-    div().id(SharedString::from(format!("no-drag-{id}"))).test_support().flex_none().when(takes_pointer(), |el| el.occlude()).child(control)
+    div()
+        .id(SharedString::from(format!("no-drag-{id}")))
+        .test_support()
+        .flex_none()
+        .when(takes_pointer(), |el| el.occlude())
+        .child(control)
 }
 
 /// Width of the title bar's left cluster (the sidebar toggle and Trek's mark) so that what follows
@@ -194,7 +220,15 @@ pub fn caption_over_overlays(window: &Window, cx: &App) -> Option<AnyElement> {
     let theme = cx.theme().clone();
     let button = |id: &'static str, icon: IconName, area: WindowControlArea| {
         let close = area == WindowControlArea::Close;
-        let (hover, active, fg) = if close { (theme.danger, theme.danger_active, theme.danger_foreground) } else { (theme.secondary_hover, theme.secondary_active, theme.secondary_foreground) };
+        let (hover, active, fg) = if close {
+            (theme.danger, theme.danger_active, theme.danger_foreground)
+        } else {
+            (
+                theme.secondary_hover,
+                theme.secondary_active,
+                theme.secondary_foreground,
+            )
+        };
         div()
             .id(id)
             .test_support()
@@ -218,11 +252,29 @@ pub fn caption_over_overlays(window: &Window, cx: &App) -> Option<AnyElement> {
             .top_0()
             .right_0()
             .h(px(TITLE_BAR_HEIGHT_PX))
-            .when(supported.minimize, |el| el.child(button("caption-minimize", IconName::WindowMinimize, WindowControlArea::Min)))
-            .when(supported.maximize, |el| {
-                el.child(button("caption-maximize", if window.is_maximized() { IconName::WindowRestore } else { IconName::WindowMaximize }, WindowControlArea::Max))
+            .when(supported.minimize, |el| {
+                el.child(button(
+                    "caption-minimize",
+                    IconName::WindowMinimize,
+                    WindowControlArea::Min,
+                ))
             })
-            .child(button("caption-close", IconName::WindowClose, WindowControlArea::Close))
+            .when(supported.maximize, |el| {
+                el.child(button(
+                    "caption-maximize",
+                    if window.is_maximized() {
+                        IconName::WindowRestore
+                    } else {
+                        IconName::WindowMaximize
+                    },
+                    WindowControlArea::Max,
+                ))
+            })
+            .child(button(
+                "caption-close",
+                IconName::WindowClose,
+                WindowControlArea::Close,
+            ))
             .into_any_element(),
     )
 }
@@ -234,7 +286,10 @@ mod tests {
 
     #[test]
     fn the_title_bar_height_is_the_one_the_title_bar_draws() {
-        assert_eq!(gpui_kit::px(TITLE_BAR_HEIGHT_PX), gpui_kit::component::TITLE_BAR_HEIGHT);
+        assert_eq!(
+            gpui_kit::px(TITLE_BAR_HEIGHT_PX),
+            gpui_kit::component::TITLE_BAR_HEIGHT
+        );
     }
 
     #[test]
@@ -250,7 +305,11 @@ mod tests {
         // A window with no handle can't say: nothing moves.
         assert!(!should_let_go(true, false, || None));
         // The system is only asked when GPUI has been told the pointer left.
-        assert!(!should_let_go(true, true, || panic!("asked the system on a hovered window")));
-        assert!(!should_let_go(false, false, || panic!("asked the system with the pointer outside")));
+        assert!(!should_let_go(true, true, || panic!(
+            "asked the system on a hovered window"
+        )));
+        assert!(!should_let_go(false, false, || panic!(
+            "asked the system with the pointer outside"
+        )));
     }
 }

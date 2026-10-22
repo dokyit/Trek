@@ -13,17 +13,34 @@
 
 use crate::workspace::Workspace;
 use gpui_kit::component::input::{InputEvent, Redo, Textarea, TextareaState, Undo};
-use std::path::PathBuf;
-use gpui_kit::component::popover::Popover;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::popover::Popover;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::ops::Range;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use trek_core::notes::{self, Block, Edit, Note};
 
-actions!(notes, [Bold, Italic, Underline, Strike, Bullets, Numbers, Checklist, Heading1, Heading2, Quote, Code, ToggleCheck, NewNote]);
+actions!(
+    notes,
+    [
+        Bold,
+        Italic,
+        Underline,
+        Strike,
+        Bullets,
+        Numbers,
+        Checklist,
+        Heading1,
+        Heading2,
+        Quote,
+        Code,
+        ToggleCheck,
+        NewNote
+    ]
+);
 
 pub(crate) const CONTEXT: &str = "NoteEditor";
 
@@ -74,7 +91,10 @@ struct History {
 
 impl History {
     fn starting_at(now: Snapshot) -> Self {
-        History { now, ..Default::default() }
+        History {
+            now,
+            ..Default::default()
+        }
     }
 
     /// The note changed to `now`: by `typing` (joined to the burst under way), or in one go.
@@ -99,7 +119,8 @@ impl History {
     /// Step back: what the note goes back to.
     fn undo(&mut self) -> Option<Snapshot> {
         let back = self.past.pop()?;
-        self.future.push(std::mem::replace(&mut self.now, back.clone()));
+        self.future
+            .push(std::mem::replace(&mut self.now, back.clone()));
         self.typed = None;
         Some(back)
     }
@@ -140,17 +161,94 @@ struct Format {
 // The tips are written for a Mac; `tool` and the "More formatting" menu localize them.
 // keys: localized where used
 const FORMATS: [Format; 11] = [
-    Format { id: "note-bold", icon: crate::assets::Lucide::Bold, tip: "Bold (⌘B)", act: |t, w, cx| t.wrap("**", "**", w, cx), tier: 0, group: 0 },
-    Format { id: "note-italic", icon: crate::assets::Lucide::Italic, tip: "Italic (⌘I)", act: |t, w, cx| t.wrap("*", "*", w, cx), tier: 0, group: 0 },
-    Format { id: "note-underline", icon: crate::assets::Lucide::Underline, tip: "Underline (⌘U)", act: |t, w, cx| t.wrap("<u>", "</u>", w, cx), tier: 2, group: 0 },
-    Format { id: "note-strike", icon: crate::assets::Lucide::Strikethrough, tip: "Strikethrough (⌘⇧X)", act: |t, w, cx| t.wrap("~~", "~~", w, cx), tier: 2, group: 0 },
-    Format { id: "note-h1", icon: crate::assets::Lucide::Heading1, tip: "Heading (⌘⌥1)", act: |t, w, cx| t.block(Block::Heading(1), w, cx), tier: 1, group: 1 },
-    Format { id: "note-h2", icon: crate::assets::Lucide::Heading2, tip: "Subheading (⌘⌥2)", act: |t, w, cx| t.block(Block::Heading(2), w, cx), tier: 2, group: 1 },
-    Format { id: "note-bullets", icon: crate::assets::Lucide::List, tip: "Bullet list (⌘⇧8)", act: |t, w, cx| t.block(Block::Bullets, w, cx), tier: 1, group: 2 },
-    Format { id: "note-numbers", icon: crate::assets::Lucide::ListOrdered, tip: "Numbered list (⌘⇧7)", act: |t, w, cx| t.block(Block::Numbers, w, cx), tier: 2, group: 2 },
-    Format { id: "note-checks", icon: crate::assets::Lucide::ListTodo, tip: "Checklist (⌘⇧9) · tick with ⌘↩", act: |t, w, cx| t.block(Block::Checklist, w, cx), tier: 1, group: 2 },
-    Format { id: "note-quote", icon: crate::assets::Lucide::Quote, tip: "Quote (⌘⇧.)", act: |t, w, cx| t.block(Block::Quote, w, cx), tier: 2, group: 2 },
-    Format { id: "note-code", icon: crate::assets::Lucide::Code, tip: "Code (⌘E)", act: |t, w, cx| t.wrap("`", "`", w, cx), tier: 2, group: 2 },
+    Format {
+        id: "note-bold",
+        icon: crate::assets::Lucide::Bold,
+        tip: "Bold (⌘B)",
+        act: |t, w, cx| t.wrap("**", "**", w, cx),
+        tier: 0,
+        group: 0,
+    },
+    Format {
+        id: "note-italic",
+        icon: crate::assets::Lucide::Italic,
+        tip: "Italic (⌘I)",
+        act: |t, w, cx| t.wrap("*", "*", w, cx),
+        tier: 0,
+        group: 0,
+    },
+    Format {
+        id: "note-underline",
+        icon: crate::assets::Lucide::Underline,
+        tip: "Underline (⌘U)",
+        act: |t, w, cx| t.wrap("<u>", "</u>", w, cx),
+        tier: 2,
+        group: 0,
+    },
+    Format {
+        id: "note-strike",
+        icon: crate::assets::Lucide::Strikethrough,
+        tip: "Strikethrough (⌘⇧X)",
+        act: |t, w, cx| t.wrap("~~", "~~", w, cx),
+        tier: 2,
+        group: 0,
+    },
+    Format {
+        id: "note-h1",
+        icon: crate::assets::Lucide::Heading1,
+        tip: "Heading (⌘⌥1)",
+        act: |t, w, cx| t.block(Block::Heading(1), w, cx),
+        tier: 1,
+        group: 1,
+    },
+    Format {
+        id: "note-h2",
+        icon: crate::assets::Lucide::Heading2,
+        tip: "Subheading (⌘⌥2)",
+        act: |t, w, cx| t.block(Block::Heading(2), w, cx),
+        tier: 2,
+        group: 1,
+    },
+    Format {
+        id: "note-bullets",
+        icon: crate::assets::Lucide::List,
+        tip: "Bullet list (⌘⇧8)",
+        act: |t, w, cx| t.block(Block::Bullets, w, cx),
+        tier: 1,
+        group: 2,
+    },
+    Format {
+        id: "note-numbers",
+        icon: crate::assets::Lucide::ListOrdered,
+        tip: "Numbered list (⌘⇧7)",
+        act: |t, w, cx| t.block(Block::Numbers, w, cx),
+        tier: 2,
+        group: 2,
+    },
+    Format {
+        id: "note-checks",
+        icon: crate::assets::Lucide::ListTodo,
+        tip: "Checklist (⌘⇧9) · tick with ⌘↩",
+        act: |t, w, cx| t.block(Block::Checklist, w, cx),
+        tier: 1,
+        group: 2,
+    },
+    Format {
+        id: "note-quote",
+        icon: crate::assets::Lucide::Quote,
+        tip: "Quote (⌘⇧.)",
+        act: |t, w, cx| t.block(Block::Quote, w, cx),
+        tier: 2,
+        group: 2,
+    },
+    Format {
+        id: "note-code",
+        icon: crate::assets::Lucide::Code,
+        tip: "Code (⌘E)",
+        act: |t, w, cx| t.wrap("`", "`", w, cx),
+        tier: 2,
+        group: 2,
+    },
 ];
 // keys: end
 
@@ -194,26 +292,38 @@ impl NotesView {
         // And when the main window goes, which takes this view and its pending save with it: a
         // closed main window on macOS, or any quit on Windows, which closes the windows first.
         cx.on_release(|this: &mut Self, _| this.flush()).detach();
-        let mut subscriptions = vec![cx.subscribe_in(&editor, window, |this, state, event: &InputEvent, window, cx| match event {
-            InputEvent::Change => {
-                let (body, selection) = Self::read(state, cx);
-                this.history.record(Snapshot { text: body.clone(), selection }, true);
-                this.changed(body, cx);
-            }
-            InputEvent::PressEnter { shift: false, .. } => {
-                let (text, sel) = Self::read(state, cx);
-                this.apply(notes::newline(&text, sel), window, cx);
-            }
-            _ => {}
-        })];
+        let mut subscriptions = vec![cx.subscribe_in(
+            &editor,
+            window,
+            |this, state, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    let (body, selection) = Self::read(state, cx);
+                    this.history.record(
+                        Snapshot {
+                            text: body.clone(),
+                            selection,
+                        },
+                        true,
+                    );
+                    this.changed(body, cx);
+                }
+                InputEvent::PressEnter { shift: false, .. } => {
+                    let (text, sel) = Self::read(state, cx);
+                    this.apply(notes::newline(&text, sel), window, cx);
+                }
+                _ => {}
+            },
+        )];
         // A phone changed the notes: read them again.
-        subscriptions.push(cx.observe_in(&workspace, window, |this: &mut Self, ws, window, cx| {
-            let epoch = ws.read(cx).notes_epoch;
-            if epoch != this.epoch {
-                this.epoch = epoch;
-                this.reload(window, cx);
-            }
-        }));
+        subscriptions.push(
+            cx.observe_in(&workspace, window, |this: &mut Self, ws, window, cx| {
+                let epoch = ws.read(cx).notes_epoch;
+                if epoch != this.epoch {
+                    this.epoch = epoch;
+                    this.reload(window, cx);
+                }
+            }),
+        );
         let epoch = workspace.read(cx).notes_epoch;
         let mut this = Self {
             workspace,
@@ -250,11 +360,16 @@ impl NotesView {
     /// The notes as listed, newest first, and whether the one on screen is unsaved.
     #[cfg(test)]
     pub(crate) fn listed(&self) -> (Vec<String>, bool) {
-        (self.notes.iter().map(|n| n.body.clone()).collect(), self.dirty)
+        (
+            self.notes.iter().map(|n| n.body.clone()).collect(),
+            self.dirty,
+        )
     }
 
     fn note(&self) -> Option<&Note> {
-        self.notes.iter().find(|n| Some(&n.id) == self.current.as_ref())
+        self.notes
+            .iter()
+            .find(|n| Some(&n.id) == self.current.as_ref())
     }
 
     fn open(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -266,7 +381,10 @@ impl NotesView {
             s.set_selected_range(body.len()..body.len(), cx);
         });
         // Another note (or this one as the phone left it): nothing of the last is undone into it.
-        self.history = History::starting_at(Snapshot { selection: body.len()..body.len(), text: body });
+        self.history = History::starting_at(Snapshot {
+            selection: body.len()..body.len(),
+            text: body,
+        });
         self.dirty = false;
         cx.notify();
     }
@@ -285,10 +403,22 @@ impl NotesView {
             return;
         }
         self.notes = notes::list_in(&notes::notes_dir());
-        match self.current.clone().filter(|id| self.notes.iter().any(|n| &n.id == id)).or_else(|| self.notes.first().map(|n| n.id.clone())) {
+        match self
+            .current
+            .clone()
+            .filter(|id| self.notes.iter().any(|n| &n.id == id))
+            .or_else(|| self.notes.first().map(|n| n.id.clone()))
+        {
             Some(id) => {
-                let body = self.notes.iter().find(|n| n.id == id).map(|n| n.body.clone()).unwrap_or_default();
-                if self.current.as_deref() != Some(id.as_str()) || self.editor.read(cx).value() != body.as_str() {
+                let body = self
+                    .notes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .map(|n| n.body.clone())
+                    .unwrap_or_default();
+                if self.current.as_deref() != Some(id.as_str())
+                    || self.editor.read(cx).value() != body.as_str()
+                {
                     self.open(&id, window, cx);
                 }
             }
@@ -302,7 +432,12 @@ impl NotesView {
 
     fn new_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // An empty note on top is reused rather than stacked.
-        if let Some(empty) = self.notes.iter().find(|n| n.body.trim().is_empty()).map(|n| n.id.clone()) {
+        if let Some(empty) = self
+            .notes
+            .iter()
+            .find(|n| n.body.trim().is_empty())
+            .map(|n| n.id.clone())
+        {
             self.open(&empty, window, cx);
         } else {
             match notes::create_in(&notes::notes_dir()) {
@@ -312,7 +447,10 @@ impl NotesView {
                     self.open(&id, window, cx);
                 }
                 Err(e) => self.workspace.update(cx, |_, cx| {
-                    cx.emit(crate::workspace::WorkspaceEvent::Toast { message: format!("Couldn't make a note: {e}"), undo: None })
+                    cx.emit(crate::workspace::WorkspaceEvent::Toast {
+                        message: format!("Couldn't make a note: {e}"),
+                        undo: None,
+                    })
                 }),
             }
         }
@@ -323,16 +461,31 @@ impl NotesView {
     }
 
     fn delete_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(at) = self.notes.iter().position(|n| Some(&n.id) == self.current.as_ref()) else { return };
+        let Some(at) = self
+            .notes
+            .iter()
+            .position(|n| Some(&n.id) == self.current.as_ref())
+        else {
+            return;
+        };
         let note = self.notes.remove(at);
         if let Err(e) = notes::delete(&note) {
             self.notes.insert(at, note);
-            self.workspace.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::Toast { message: format!("Couldn't delete the note: {e}"), undo: None }));
+            self.workspace.update(cx, |_, cx| {
+                cx.emit(crate::workspace::WorkspaceEvent::Toast {
+                    message: format!("Couldn't delete the note: {e}"),
+                    undo: None,
+                })
+            });
             return;
         }
         self.dirty = false;
         self.current = None;
-        match self.notes.get(at.min(self.notes.len().saturating_sub(1))).map(|n| n.id.clone()) {
+        match self
+            .notes
+            .get(at.min(self.notes.len().saturating_sub(1)))
+            .map(|n| n.id.clone())
+        {
             Some(next) => self.open(&next, window, cx),
             None => {
                 self.editor.update(cx, |s, cx| s.set_value("", window, cx));
@@ -340,7 +493,12 @@ impl NotesView {
             }
         }
         let title = note.title();
-        self.workspace.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::Toast { message: format!("Deleted “{title}” (kept in the notes folder's Deleted)"), undo: None }));
+        self.workspace.update(cx, |_, cx| {
+            cx.emit(crate::workspace::WorkspaceEvent::Toast {
+                message: format!("Deleted “{title}” (kept in the notes folder's Deleted)"),
+                undo: None,
+            })
+        });
     }
 
     /// The note's text changed: keep it, and save it a moment after typing stops. Typing into
@@ -358,7 +516,13 @@ impl NotesView {
                 Err(_) => return,
             }
         }
-        let Some(note) = self.notes.iter_mut().find(|n| Some(&n.id) == self.current.as_ref()) else { return };
+        let Some(note) = self
+            .notes
+            .iter_mut()
+            .find(|n| Some(&n.id) == self.current.as_ref())
+        else {
+            return;
+        };
         if note.body == body {
             return;
         }
@@ -366,7 +530,12 @@ impl NotesView {
         note.modified = trek_core::store::now_ms();
         self.dirty = true;
         // The note just written in goes to the top.
-        if let Some(at) = self.notes.iter().position(|n| Some(&n.id) == self.current.as_ref()).filter(|i| *i > 0) {
+        if let Some(at) = self
+            .notes
+            .iter()
+            .position(|n| Some(&n.id) == self.current.as_ref())
+            .filter(|i| *i > 0)
+        {
             let n = self.notes.remove(at);
             self.notes.insert(0, n);
         }
@@ -382,7 +551,10 @@ impl NotesView {
                     Err(e) => {
                         if !std::mem::replace(&mut told, true) {
                             this.workspace.update(cx, |_, cx| {
-                                cx.emit(crate::workspace::WorkspaceEvent::Toast { message: format!("Couldn't save the note: {e}. Trying again."), undo: None })
+                                cx.emit(crate::workspace::WorkspaceEvent::Toast {
+                                    message: format!("Couldn't save the note: {e}. Trying again."),
+                                    undo: None,
+                                })
                             });
                         }
                         true
@@ -427,15 +599,31 @@ impl NotesView {
 
     /// Put an edit's text in the editor and select what it says. One step to undo.
     fn apply(&mut self, edit: Edit, window: &mut Window, cx: &mut Context<Self>) {
-        self.history.record(Snapshot { text: edit.text.clone(), selection: edit.selection.clone() }, false);
-        self.show(Snapshot { text: edit.text, selection: edit.selection }, window, cx);
+        self.history.record(
+            Snapshot {
+                text: edit.text.clone(),
+                selection: edit.selection.clone(),
+            },
+            false,
+        );
+        self.show(
+            Snapshot {
+                text: edit.text,
+                selection: edit.selection,
+            },
+            window,
+            cx,
+        );
     }
 
     /// Put `to` in the editor (its text, and what was selected), and keep it as the note's.
     fn show(&mut self, to: Snapshot, window: &mut Window, cx: &mut Context<Self>) {
         self.editor.update(cx, |s, cx| {
             s.set_value(to.text.clone(), window, cx);
-            s.set_selected_range(to.selection.start.min(to.text.len())..to.selection.end.min(to.text.len()), cx);
+            s.set_selected_range(
+                to.selection.start.min(to.text.len())..to.selection.end.min(to.text.len()),
+                cx,
+            );
         });
         self.changed(to.text, cx);
         self.focus(window, cx);
@@ -455,12 +643,23 @@ impl NotesView {
         }
     }
 
-    fn format(&mut self, f: impl FnOnce(&str, Range<usize>) -> Edit, window: &mut Window, cx: &mut Context<Self>) {
+    fn format(
+        &mut self,
+        f: impl FnOnce(&str, Range<usize>) -> Edit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (text, sel) = Self::read(&self.editor, cx);
         self.apply(f(&text, sel), window, cx);
     }
 
-    fn wrap(&mut self, open: &'static str, close: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+    fn wrap(
+        &mut self,
+        open: &'static str,
+        close: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.format(|t, s| notes::wrap(t, s, open, close), window, cx);
     }
 
@@ -472,7 +671,14 @@ impl NotesView {
         let (text, sel) = Self::read(&self.editor, cx);
         let line = text[..sel.start.min(text.len())].matches('\n').count();
         if let Some(new) = notes::toggle_check(&text, line) {
-            self.apply(Edit { selection: sel.clone(), text: new }, window, cx);
+            self.apply(
+                Edit {
+                    selection: sel.clone(),
+                    text: new,
+                },
+                window,
+                cx,
+            );
         }
     }
 
@@ -487,7 +693,15 @@ impl NotesView {
         // Read here: the folder is this thread's (tests isolate it per thread).
         let dir = notes::notes_dir();
         cx.spawn_in(window, async move |this, cx| {
-            let added = cx.background_executor().spawn(async move { pictures.into_iter().map(|p| (p.label(), p.keep(&dir))).collect::<Vec<_>>() }).await;
+            let added = cx
+                .background_executor()
+                .spawn(async move {
+                    pictures
+                        .into_iter()
+                        .map(|p| (p.label(), p.keep(&dir)))
+                        .collect::<Vec<_>>()
+                })
+                .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.adding = this.adding.saturating_sub(1);
                 let mut lines = Vec::new();
@@ -500,10 +714,19 @@ impl NotesView {
                 }
                 if !lines.is_empty() {
                     let (text, sel) = Self::read(&this.editor, cx);
-                    this.apply(notes::insert_lines(&text, sel, &lines.join("\n")), window, cx);
+                    this.apply(
+                        notes::insert_lines(&text, sel, &lines.join("\n")),
+                        window,
+                        cx,
+                    );
                 }
                 if let Some(message) = failed {
-                    this.workspace.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::Toast { message, undo: None }));
+                    this.workspace.update(cx, |_, cx| {
+                        cx.emit(crate::workspace::WorkspaceEvent::Toast {
+                            message,
+                            undo: None,
+                        })
+                    });
                 }
                 cx.notify();
             });
@@ -513,15 +736,40 @@ impl NotesView {
 
     /// Attach these files to the note: pictures show in it, anything else (a video, a PDF) is a
     /// link to its copy.
-    pub(crate) fn add_files(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_images(paths.into_iter().map(|p| if is_picture(&p) { Picture::File(p) } else { Picture::Attached(p) }).collect(), window, cx);
+    pub(crate) fn add_files(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_images(
+            paths
+                .into_iter()
+                .map(|p| {
+                    if is_picture(&p) {
+                        Picture::File(p)
+                    } else {
+                        Picture::Attached(p)
+                    }
+                })
+                .collect(),
+            window,
+            cx,
+        );
     }
 
     /// Attach: pick photos, videos or files to put in the note.
     fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Add".into()) });
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Add".into()),
+        });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
             let _ = this.update_in(cx, |this, window, cx| this.add_files(paths, window, cx));
         })
         .detach();
@@ -530,15 +778,33 @@ impl NotesView {
     /// A paste the text box hands over: image data, or files copied in Finder, are attached
     /// (pictures show, other files are linked). Returns whether it was taken; anything else
     /// pastes as text.
-    pub(crate) fn paste(&mut self, item: &ClipboardItem, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn paste(
+        &mut self,
+        item: &ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         // A note takes SVGs too, which the composer's paste doesn't.
-        let files: Vec<PathBuf> = item.entries().iter().filter_map(|e| if let ClipboardEntry::ExternalPaths(p) = e { Some(p.paths().to_vec()) } else { None }).flatten().collect();
+        let files: Vec<PathBuf> = item
+            .entries()
+            .iter()
+            .filter_map(|e| {
+                if let ClipboardEntry::ExternalPaths(p) = e {
+                    Some(p.paths().to_vec())
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect();
         if !files.is_empty() {
             self.add_files(files, window, cx);
             return true;
         }
         match crate::attachments::pasted(item) {
-            Some(crate::attachments::Pasted::Images(images)) => self.add_images(images.into_iter().map(Picture::Data).collect(), window, cx),
+            Some(crate::attachments::Pasted::Images(images)) => {
+                self.add_images(images.into_iter().map(Picture::Data).collect(), window, cx)
+            }
             _ => return false,
         }
         true
@@ -555,23 +821,50 @@ impl NotesView {
     #[cfg_attr(not(any(test, feature = "shots")), allow(dead_code))]
     pub(crate) fn set_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
         let len = text.len();
-        self.apply(Edit { text, selection: len..len }, window, cx);
+        self.apply(
+            Edit {
+                text,
+                selection: len..len,
+            },
+            window,
+            cx,
+        );
     }
 
-    fn tool(&self, id: &'static str, icon: impl Into<Icon>, tip: &'static str, cx: &mut Context<Self>, f: fn(&mut Self, &mut Window, &mut Context<Self>)) -> AnyElement {
-        crate::ui::icon_button(id, icon, crate::keys::shared(tip)).on_click(cx.listener(move |this, _, window, cx| f(this, window, cx))).into_any_element()
+    fn tool(
+        &self,
+        id: &'static str,
+        icon: impl Into<Icon>,
+        tip: &'static str,
+        cx: &mut Context<Self>,
+        f: fn(&mut Self, &mut Window, &mut Context<Self>),
+    ) -> AnyElement {
+        crate::ui::icon_button(id, icon, crate::keys::shared(tip))
+            .on_click(cx.listener(move |this, _, window, cx| f(this, window, cx)))
+            .into_any_element()
     }
 
     fn divider(cx: &App) -> AnyElement {
-        div().w(px(1.)).h(px(16.)).mx(px(4.)).bg(cx.theme().foreground.opacity(0.1)).into_any_element()
+        div()
+            .w(px(1.))
+            .h(px(16.))
+            .mx(px(4.))
+            .bg(cx.theme().foreground.opacity(0.1))
+            .into_any_element()
     }
 
     fn colors(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let me = cx.entity();
-        let swatch = |row: &'static str, i: usize, name: &'static str, css: &'static str, background: bool| {
+        let swatch = |row: &'static str,
+                      i: usize,
+                      name: &'static str,
+                      css: &'static str,
+                      background: bool| {
             let me = me.clone();
-            let color: Hsla = Rgba::try_from(css).map(Into::into).unwrap_or(theme.foreground);
+            let color: Hsla = Rgba::try_from(css)
+                .map(Into::into)
+                .unwrap_or(theme.foreground);
             div()
                 .id(SharedString::from(format!("swatch-{row}-{i}")))
                 .size(px(22.))
@@ -580,9 +873,23 @@ impl NotesView {
                 .border_1()
                 .border_color(theme.foreground.opacity(0.15))
                 .bg(if background { color } else { color.opacity(1.) })
-                .when(!background, |el| el.flex().items_center().justify_center().bg(gpui_kit::transparent_black()).child(div().text_size(px(13.)).font_weight(FontWeight::BOLD).text_color(color).child("A")))
+                .when(!background, |el| {
+                    el.flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(gpui_kit::transparent_black())
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(color)
+                                .child("A"),
+                        )
+                })
                 .hover(|s| s.border_color(theme.foreground.opacity(0.5)))
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(name).build(window, cx))
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(name).build(window, cx)
+                })
                 .on_click(move |_, window, cx| {
                     me.update(cx, |this, cx| {
                         this.colors_open = false;
@@ -594,10 +901,34 @@ impl NotesView {
             .w(px(250.))
             .p(px(10.))
             .gap(px(8.))
-            .child(div().text_xs().text_color(theme.muted_foreground).child("Text colour"))
-            .child(h_flex().gap(px(6.)).children(COLORS.iter().enumerate().map(|(i, (n, c, _))| swatch("text", i, n, c, false))))
-            .child(div().text_xs().text_color(theme.muted_foreground).child("Highlight"))
-            .child(h_flex().gap(px(6.)).children(COLORS.iter().enumerate().map(|(i, (n, _, h))| swatch("mark", i, n, h, true))))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Text colour"),
+            )
+            .child(
+                h_flex().gap(px(6.)).children(
+                    COLORS
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (n, c, _))| swatch("text", i, n, c, false)),
+                ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Highlight"),
+            )
+            .child(
+                h_flex().gap(px(6.)).children(
+                    COLORS
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (n, _, h))| swatch("mark", i, n, h, true)),
+                ),
+            )
             .into_any_element()
     }
 
@@ -609,7 +940,13 @@ impl NotesView {
         // then the less-used formats, then the rest, into a "More" menu.
         let width = self.toolbar_width.get();
         let narrow = |below: f32| width > 0. && width < below;
-        let tier = if narrow(TOOLBAR_FEW) { 0 } else if narrow(TOOLBAR_SOME) { 1 } else { 2 };
+        let tier = if narrow(TOOLBAR_FEW) {
+            0
+        } else if narrow(TOOLBAR_SOME) {
+            1
+        } else {
+            2
+        };
         let shown = |t: u8| t <= tier;
         let colors = Popover::new("note-colors")
             .anchor(Anchor::TopLeft)
@@ -619,7 +956,11 @@ impl NotesView {
                 this.colors_open = *open;
                 cx.notify();
             }))
-            .trigger(crate::ui::icon_button("note-color", crate::assets::Lucide::Palette, "Colour and highlight"))
+            .trigger(crate::ui::icon_button(
+                "note-color",
+                crate::assets::Lucide::Palette,
+                "Colour and highlight",
+            ))
             .content(move |_, _, cx| this.update(cx, |this, cx| this.colors(cx)));
         let mode = self.mode;
         h_flex()
@@ -633,8 +974,24 @@ impl NotesView {
             .gap(px(1.))
             .border_b_1()
             .border_color(theme.foreground.opacity(0.06))
-            .child(crate::ui::icon_button("note-undo", crate::assets::Lucide::Undo2, crate::keys::shared("Undo (⌘Z)")).disabled(self.history.past.is_empty()).on_click(cx.listener(|this, _, window, cx| this.undo(window, cx))))
-            .child(crate::ui::icon_button("note-redo", crate::assets::Lucide::Redo2, crate::keys::shared("Redo (⇧⌘Z)")).disabled(self.history.future.is_empty()).on_click(cx.listener(|this, _, window, cx| this.redo(window, cx))))
+            .child(
+                crate::ui::icon_button(
+                    "note-undo",
+                    crate::assets::Lucide::Undo2,
+                    crate::keys::shared("Undo (⌘Z)"),
+                )
+                .disabled(self.history.past.is_empty())
+                .on_click(cx.listener(|this, _, window, cx| this.undo(window, cx))),
+            )
+            .child(
+                crate::ui::icon_button(
+                    "note-redo",
+                    crate::assets::Lucide::Redo2,
+                    crate::keys::shared("Redo (⇧⌘Z)"),
+                )
+                .disabled(self.history.future.is_empty())
+                .on_click(cx.listener(|this, _, window, cx| this.redo(window, cx))),
+            )
             .children(FORMATS.iter().enumerate().flat_map(|(i, f)| {
                 // A divider before each group that has a tool showing.
                 let starts_group = i == 0 || FORMATS[i - 1].group != f.group;
@@ -645,28 +1002,62 @@ impl NotesView {
             }))
             .when(tier < 2, |el| {
                 let me = cx.entity().downgrade();
-                let hidden: Vec<&'static Format> = FORMATS.iter().filter(|f| !shown(f.tier)).collect();
-                el.child(crate::ui::icon_button("note-more", gpui_kit::component::IconName::Ellipsis, "More formatting").dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, _| {
-                    menu = menu.min_w(px(200.));
-                    for f in &hidden {
-                        let (me, act) = (me.clone(), f.act);
-                        menu = menu.item(PopupMenuItem::new(crate::keys::shared(f.tip)).icon(Icon::new(f.icon)).on_click(move |_, window, cx| {
-                            let _ = me.update(cx, |this, cx| act(this, window, cx));
-                        }));
-                    }
-                    menu
-                }))
+                let hidden: Vec<&'static Format> =
+                    FORMATS.iter().filter(|f| !shown(f.tier)).collect();
+                el.child(
+                    crate::ui::icon_button(
+                        "note-more",
+                        gpui_kit::component::IconName::Ellipsis,
+                        "More formatting",
+                    )
+                    .dropdown_menu_with_anchor(
+                        Anchor::TopLeft,
+                        move |mut menu, _, _| {
+                            menu = menu.min_w(px(200.));
+                            for f in &hidden {
+                                let (me, act) = (me.clone(), f.act);
+                                menu = menu.item(
+                                    PopupMenuItem::new(crate::keys::shared(f.tip))
+                                        .icon(Icon::new(f.icon))
+                                        .on_click(move |_, window, cx| {
+                                            let _ = me.update(cx, |this, cx| act(this, window, cx));
+                                        }),
+                                );
+                            }
+                            menu
+                        },
+                    ),
+                )
             })
             .child(Self::divider(cx))
             .child(colors)
-            .child(self.tool("note-attach", crate::assets::Lucide::Paperclip, "Attach photos, videos or files… (or paste or drop them on the note)", cx, |t, w, cx| t.pick_files(w, cx)))
-            .when(self.adding > 0, |el| el.child(div().id("note-adding").test_support().px(px(4.)).child(gpui_kit::component::spinner::Spinner::new().small().color(theme.muted_foreground))))
+            .child(self.tool(
+                "note-attach",
+                crate::assets::Lucide::Paperclip,
+                "Attach photos, videos or files… (or paste or drop them on the note)",
+                cx,
+                |t, w, cx| t.pick_files(w, cx),
+            ))
+            .when(self.adding > 0, |el| {
+                el.child(
+                    div().id("note-adding").test_support().px(px(4.)).child(
+                        gpui_kit::component::spinner::Spinner::new()
+                            .small()
+                            .color(theme.muted_foreground),
+                    ),
+                )
+            })
             .child(div().flex_1().min_w(px(6.)))
             .child(self.modes(mode, width > 0. && width < TOOLBAR_FULL, cx))
             .when(self.current.is_some(), |el| {
-                el.child(div().w(px(6.))).child(
-                    div().id("note-delete-zone").test_support().child(self.tool("note-delete", crate::assets::Lucide::Trash, "Delete note", cx, |t, w, cx| t.delete_current(w, cx))),
-                )
+                el.child(div().w(px(6.)))
+                    .child(div().id("note-delete-zone").test_support().child(self.tool(
+                        "note-delete",
+                        crate::assets::Lucide::Trash,
+                        "Delete note",
+                        cx,
+                        |t, w, cx| t.delete_current(w, cx),
+                    )))
             })
             .child({
                 // Measured after layout: a width that crosses a step draws the toolbar again.
@@ -674,7 +1065,12 @@ impl NotesView {
                 canvas(
                     move |bounds, window, _| {
                         let w = f32::from(bounds.size.width);
-                        let step = |w: f32| [TOOLBAR_FULL, TOOLBAR_SOME, TOOLBAR_FEW].iter().filter(|b| w > 0. && w < **b).count();
+                        let step = |w: f32| {
+                            [TOOLBAR_FULL, TOOLBAR_SOME, TOOLBAR_FEW]
+                                .iter()
+                                .filter(|b| w > 0. && w < **b)
+                                .count()
+                        };
                         let before = cell.replace(w);
                         if step(before) != step(w) {
                             window.request_animation_frame();
@@ -703,13 +1099,35 @@ impl NotesView {
             })
         };
         if !compact {
-            return crate::ui::segmented("note-mode", vec![(Mode::Write, "Write"), (Mode::Split, "Split"), (Mode::Preview, "Preview")], mode, pick, cx);
+            return crate::ui::segmented(
+                "note-mode",
+                vec![
+                    (Mode::Write, "Write"),
+                    (Mode::Split, "Split"),
+                    (Mode::Preview, "Preview"),
+                ],
+                mode,
+                pick,
+                cx,
+            );
         }
         let theme = cx.theme().clone();
         let options: [(Mode, Icon, &'static str); 3] = [
-            (Mode::Write, Icon::new(crate::assets::Lucide::Pencil), "Write"),
-            (Mode::Split, Icon::new(gpui_kit::component::IconName::PanelRight), "Split: writing beside how it reads"),
-            (Mode::Preview, Icon::new(gpui_kit::component::IconName::Eye), "Preview"),
+            (
+                Mode::Write,
+                Icon::new(crate::assets::Lucide::Pencil),
+                "Write",
+            ),
+            (
+                Mode::Split,
+                Icon::new(gpui_kit::component::IconName::PanelRight),
+                "Split: writing beside how it reads",
+            ),
+            (
+                Mode::Preview,
+                Icon::new(gpui_kit::component::IconName::Eye),
+                "Preview",
+            ),
         ];
         h_flex()
             .flex_none()
@@ -720,24 +1138,35 @@ impl NotesView {
             .bg(theme.foreground.opacity(0.05))
             .border_1()
             .border_color(theme.foreground.opacity(0.06))
-            .children(options.into_iter().enumerate().map(|(i, (value, icon, tip))| {
-                let selected = value == mode;
-                let pick = pick.clone();
-                div()
-                    .id(("note-mode", i))
-                    .test_support()
-                    .h_full()
-                    .w(px(30.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .when(selected, |el| el.bg(theme.foreground.opacity(0.12)))
-                    .child(icon.small().text_color(if selected { theme.foreground } else { theme.muted_foreground }))
-                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
-                    .on_click(move |_, window, cx| pick(value, window, cx))
-            }))
+            .children(
+                options
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (value, icon, tip))| {
+                        let selected = value == mode;
+                        let pick = pick.clone();
+                        div()
+                            .id(("note-mode", i))
+                            .test_support()
+                            .h_full()
+                            .w(px(30.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .when(selected, |el| el.bg(theme.foreground.opacity(0.12)))
+                            .child(icon.small().text_color(if selected {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground
+                            }))
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
+                            })
+                            .on_click(move |_, window, cx| pick(value, window, cx))
+                    }),
+            )
             .into_any_element()
     }
 
@@ -757,8 +1186,21 @@ impl NotesView {
                     .pr(px(8.))
                     .border_b_1()
                     .border_color(theme.foreground.opacity(0.06))
-                    .child(div().flex_1().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).child("Notes"))
-                    .child(crate::ui::icon_button("note-new", crate::assets::Lucide::SquarePen, crate::keys::shared("New note (⌘N)")).on_click(cx.listener(|this, _, window, cx| this.new_note(window, cx)))),
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(13.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Notes"),
+                    )
+                    .child(
+                        crate::ui::icon_button(
+                            "note-new",
+                            crate::assets::Lucide::SquarePen,
+                            crate::keys::shared("New note (⌘N)"),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| this.new_note(window, cx))),
+                    ),
             )
             .child(
                 v_flex()
@@ -770,7 +1212,15 @@ impl NotesView {
                     .p(px(6.))
                     .gap(px(2.))
                     .when(self.notes.is_empty(), |el| {
-                        el.child(div().p(px(12.)).text_xs().text_color(theme.muted_foreground).child(crate::keys::shared("No notes yet. Start typing, or press ⌘N.")))
+                        el.child(
+                            div()
+                                .p(px(12.))
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(crate::keys::shared(
+                                    "No notes yet. Start typing, or press ⌘N.",
+                                )),
+                        )
                     })
                     .children(self.notes.iter().map(|n| {
                         let active = Some(&n.id) == self.current.as_ref();
@@ -785,15 +1235,41 @@ impl NotesView {
                             .rounded(px(8.))
                             .cursor_pointer()
                             .when(active, |el| el.bg(theme.foreground.opacity(0.075)))
-                            .when(!active, |el| el.hover(|s| s.bg(theme.foreground.opacity(0.04))))
+                            .when(!active, |el| {
+                                el.hover(|s| s.bg(theme.foreground.opacity(0.04)))
+                            })
                             .child(
                                 h_flex()
                                     .gap(px(8.))
-                                    .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(n.title()))
-                                    .child(div().flex_none().text_xs().text_color(theme.muted_foreground).child(crate::time::relative(n.modified))),
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(13.))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(n.title()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(crate::time::relative(n.modified)),
+                                    ),
                             )
-                            .when(!preview.is_empty(), |el| el.child(div().truncate().text_xs().text_color(theme.muted_foreground).child(preview)))
-                            .on_click(cx.listener(move |this, _, window, cx| this.open(&id, window, cx)))
+                            .when(!preview.is_empty(), |el| {
+                                el.child(
+                                    div()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(preview),
+                                )
+                            })
+                            .on_click(
+                                cx.listener(move |this, _, window, cx| this.open(&id, window, cx)),
+                            )
                     })),
             )
             .into_any_element()
@@ -803,14 +1279,29 @@ impl NotesView {
 impl Render for NotesView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let size = px(self.workspace.read(cx).settings.appearance.transcript_font_size());
+        let size = px(self
+            .workspace
+            .read(cx)
+            .settings
+            .appearance
+            .transcript_font_size());
         let body = self.note().map(|n| n.body.clone()).unwrap_or_default();
         let id = self.current.clone().unwrap_or_default();
         let dir = notes::notes_dir();
         let me = cx.entity().downgrade();
-        let textarea = Textarea::new(&self.editor).appearance(false).h_full().on_paste(move |item, window, cx| me.update(cx, |this, cx| this.paste(item, window, cx)).unwrap_or(false));
+        let textarea = Textarea::new(&self.editor)
+            .appearance(false)
+            .h_full()
+            .on_paste(move |item, window, cx| {
+                me.update(cx, |this, cx| this.paste(item, window, cx))
+                    .unwrap_or(false)
+            });
         // In Write the text shows only the pictures' links: the pictures themselves go under it.
-        let strip = if self.mode == Mode::Write { crate::note_images::strip(&body, &dir, cx) } else { None };
+        let strip = if self.mode == Mode::Write {
+            crate::note_images::strip(&body, &dir, cx)
+        } else {
+            None
+        };
         let write = v_flex()
             .id("note-write")
             .test_support()
@@ -819,7 +1310,14 @@ impl Render for NotesView {
             .h_full()
             .text_size(size)
             .line_height(relative(1.6))
-            .child(div().flex_1().min_h_0().px(px(28.)).py(px(20.)).child(textarea))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .px(px(28.))
+                    .py(px(20.))
+                    .child(textarea),
+            )
             .children(strip);
         const PAD: f32 = 32.;
         // The text's width (a hair less, so a picture's line never runs over it).
@@ -828,7 +1326,12 @@ impl Render for NotesView {
             _ => px(560.),
         };
         let widest = line.min(crate::md::column(size));
-        let pictures = crate::note_images::NoteImages { gallery: std::sync::Arc::new(crate::note_images::gallery(&body, &dir)), dir, widest, line };
+        let pictures = crate::note_images::NoteImages {
+            gallery: std::sync::Arc::new(crate::note_images::gallery(&body, &dir)),
+            dir,
+            widest,
+            line,
+        };
         let preview = div()
             .id("note-preview")
             .test_support()
@@ -840,9 +1343,20 @@ impl Render for NotesView {
             .px(px(PAD))
             .py(px(22.))
             .child(if body.trim().is_empty() {
-                div().text_color(theme.muted_foreground).text_size(size).child("Nothing to show yet.").into_any_element()
+                div()
+                    .text_color(theme.muted_foreground)
+                    .text_size(size)
+                    .child("Nothing to show yet.")
+                    .into_any_element()
             } else {
-                crate::md::note(SharedString::from(format!("note-md-{id}")), crate::note_images::for_reading(&body).into_owned(), pictures, size, cx).into_any_element()
+                crate::md::note(
+                    SharedString::from(format!("note-md-{id}")),
+                    crate::note_images::for_reading(&body).into_owned(),
+                    pictures,
+                    size,
+                    cx,
+                )
+                .into_any_element()
             })
             .child({
                 // Measured after layout: the pictures fit the width, so a new one draws them again.
@@ -903,9 +1417,15 @@ impl Render for NotesView {
                     .on_action(cx.listener(|t, _: &Code, w, cx| t.wrap("`", "`", w, cx)))
                     .on_action(cx.listener(|t, _: &Bullets, w, cx| t.block(Block::Bullets, w, cx)))
                     .on_action(cx.listener(|t, _: &Numbers, w, cx| t.block(Block::Numbers, w, cx)))
-                    .on_action(cx.listener(|t, _: &Checklist, w, cx| t.block(Block::Checklist, w, cx)))
-                    .on_action(cx.listener(|t, _: &Heading1, w, cx| t.block(Block::Heading(1), w, cx)))
-                    .on_action(cx.listener(|t, _: &Heading2, w, cx| t.block(Block::Heading(2), w, cx)))
+                    .on_action(
+                        cx.listener(|t, _: &Checklist, w, cx| t.block(Block::Checklist, w, cx)),
+                    )
+                    .on_action(
+                        cx.listener(|t, _: &Heading1, w, cx| t.block(Block::Heading(1), w, cx)),
+                    )
+                    .on_action(
+                        cx.listener(|t, _: &Heading2, w, cx| t.block(Block::Heading(2), w, cx)),
+                    )
                     .on_action(cx.listener(|t, _: &Quote, w, cx| t.block(Block::Quote, w, cx)))
                     .on_action(cx.listener(|t, _: &ToggleCheck, w, cx| t.toggle_check(w, cx)))
                     .child(self.toolbar(cx))
@@ -920,7 +1440,9 @@ impl Render for NotesView {
                                 let tint = theme.foreground.opacity(0.04);
                                 move |s, _, _, _| s.bg(tint)
                             })
-                            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| this.add_files(paths.paths().to_vec(), window, cx)))
+                            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                                this.add_files(paths.paths().to_vec(), window, cx)
+                            }))
                             .child(main),
                     ),
             )
@@ -941,7 +1463,10 @@ impl Picture {
     /// How a toast names it.
     fn label(&self) -> String {
         match self {
-            Picture::File(p) | Picture::Attached(p) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.display().to_string()),
+            Picture::File(p) | Picture::Attached(p) => p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| p.display().to_string()),
             Picture::Data(_) => "the pasted image".into(),
         }
     }
@@ -951,17 +1476,31 @@ impl Picture {
         match self {
             Picture::Data(image) => {
                 let (kind, bytes) = crate::attachments::image_bytes(&image)?;
-                Ok(notes::image_markdown("Pasted image", &notes::add_image(dir, &bytes, kind)?))
+                Ok(notes::image_markdown(
+                    "Pasted image",
+                    &notes::add_image(dir, &bytes, kind)?,
+                ))
             }
             Picture::Attached(path) => {
-                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 Ok(notes::file_markdown(&name, &notes::add_file(dir, &path)?))
             }
             Picture::File(path) => {
-                let alt = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                let alt = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 let link = if crate::attachments::needs_conversion(&path) {
-                    let tmp = std::env::temp_dir().join(format!("trek-note-image-{}-{}", std::process::id(), chrono::Local::now().format("%H%M%S%f")));
-                    let kept = crate::attachments::convert_file(&path, &tmp).and_then(|png| Ok(notes::add_image_file(dir, &png)?));
+                    let tmp = std::env::temp_dir().join(format!(
+                        "trek-note-image-{}-{}",
+                        std::process::id(),
+                        chrono::Local::now().format("%H%M%S%f")
+                    ));
+                    let kept = crate::attachments::convert_file(&path, &tmp)
+                        .and_then(|png| Ok(notes::add_image_file(dir, &png)?));
                     let _ = std::fs::remove_dir_all(&tmp);
                     kept?
                 } else {
@@ -975,7 +1514,11 @@ impl Picture {
 
 /// A file a note can show as a picture, as it is or converted.
 fn is_picture(path: &std::path::Path) -> bool {
-    let kind = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).unwrap_or_default();
+    let kind = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
     notes::IMAGE_KINDS.contains(&kind.as_str()) || crate::attachments::needs_conversion(path)
 }
 
@@ -984,7 +1527,10 @@ mod tests {
     use super::{History, Snapshot, UNDO_STEPS};
 
     fn at(text: &str) -> Snapshot {
-        Snapshot { text: text.into(), selection: text.len()..text.len() }
+        Snapshot {
+            text: text.into(),
+            selection: text.len()..text.len(),
+        }
     }
 
     #[test]
@@ -998,7 +1544,10 @@ mod tests {
         // A command (bold, a list, a colour) is a step of its own, and ends the burst.
         h.record(at("**milk**"), false);
         h.record(at("**milk** and"), true);
-        assert_eq!(h.past.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(), ["", "milk", "**milk**"]);
+        assert_eq!(
+            h.past.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
+            ["", "milk", "**milk**"]
+        );
         // Back through them, and forward again.
         assert_eq!(h.undo().map(|s| s.text).as_deref(), Some("**milk**"));
         assert_eq!(h.undo().map(|s| s.text).as_deref(), Some("milk"));
@@ -1016,10 +1565,22 @@ mod tests {
     #[test]
     fn the_caret_moving_is_no_step_but_an_undo_comes_back_to_it() {
         let mut h = History::starting_at(at("one two"));
-        h.record(Snapshot { text: "one two".into(), selection: 0..3 }, true);
+        h.record(
+            Snapshot {
+                text: "one two".into(),
+                selection: 0..3,
+            },
+            true,
+        );
         assert!(h.past.is_empty());
         h.record(at("**one** two"), false);
-        assert_eq!(h.undo(), Some(Snapshot { text: "one two".into(), selection: 0..3 }));
+        assert_eq!(
+            h.undo(),
+            Some(Snapshot {
+                text: "one two".into(),
+                selection: 0..3
+            })
+        );
     }
 
     #[test]

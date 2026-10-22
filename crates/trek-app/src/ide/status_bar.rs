@@ -30,17 +30,35 @@ pub fn language(path: &std::path::Path) -> &'static str {
 }
 
 impl IdeStatus {
-    pub fn new(workspace: Entity<Workspace>, workbench: WeakEntity<IdeWorkbench>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: Entity<Workspace>,
+        workbench: WeakEntity<IdeWorkbench>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let _subscription = cx.observe(&workspace, |_, _, cx| cx.notify());
-        Self { workspace, workbench, editor: None, _editor_watch: vec![], preview: None, _preview_watch: None, _subscription }
+        Self {
+            workspace,
+            workbench,
+            editor: None,
+            _editor_watch: vec![],
+            preview: None,
+            _preview_watch: None,
+            _subscription,
+        }
     }
 
     /// The preview in front changed (or none is).
-    pub fn set_preview(&mut self, preview: Option<Entity<super::preview::PreviewView>>, cx: &mut Context<Self>) {
+    pub fn set_preview(
+        &mut self,
+        preview: Option<Entity<super::preview::PreviewView>>,
+        cx: &mut Context<Self>,
+    ) {
         if self.preview == preview {
             return;
         }
-        self._preview_watch = preview.as_ref().map(|p| cx.observe(p, |_, _, cx| cx.notify()));
+        self._preview_watch = preview
+            .as_ref()
+            .map(|p| cx.observe(p, |_, _, cx| cx.notify()));
         self.preview = preview;
         cx.notify();
     }
@@ -54,7 +72,10 @@ impl IdeStatus {
             .as_ref()
             .map(|e| {
                 let text = e.read(cx).text_state();
-                vec![cx.observe(e, |_, _, cx| cx.notify()), cx.observe(&text, |_, _, cx| cx.notify())]
+                vec![
+                    cx.observe(e, |_, _, cx| cx.notify()),
+                    cx.observe(&text, |_, _, cx| cx.notify()),
+                ]
             })
             .unwrap_or_default();
         self.editor = editor;
@@ -63,10 +84,20 @@ impl IdeStatus {
 
     fn item(id: &'static str, cx: &App) -> Stateful<Div> {
         let theme = cx.theme();
-        h_flex().id(id).h_full().px(px(7.)).gap(px(5.)).items_center().cursor_pointer().hover(|s| s.bg(theme.foreground.opacity(0.06)))
+        h_flex()
+            .id(id)
+            .h_full()
+            .px(px(7.))
+            .gap(px(5.))
+            .items_center()
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.foreground.opacity(0.06)))
     }
 
-    fn on_workbench(&self, f: impl Fn(&mut IdeWorkbench, &mut Window, &mut Context<IdeWorkbench>) + 'static) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+    fn on_workbench(
+        &self,
+        f: impl Fn(&mut IdeWorkbench, &mut Window, &mut Context<IdeWorkbench>) + 'static,
+    ) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
         let wb = self.workbench.clone();
         move |_, window, cx| {
             let _ = wb.update(cx, |wb, cx| f(wb, window, cx));
@@ -79,21 +110,41 @@ impl Render for IdeStatus {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
         let glass = ws.glass();
-        let git = ws.ide_root.as_ref().and_then(|r| ws.git_info.get(r)).filter(|g| g.is_repo).cloned();
+        let git = ws
+            .ide_root
+            .as_ref()
+            .and_then(|r| ws.git_info.get(r))
+            .filter(|g| g.is_repo)
+            .cloned();
         let (errors, warnings) = ws.diagnostic_counts();
         let threads = ws.ide_threads();
-        let working = threads.iter().filter(|t| t.run_state == RunState::Working).count();
+        let working = threads
+            .iter()
+            .filter(|t| t.run_state == RunState::Working)
+            .count();
         let needs = threads.iter().filter(|t| t.needs_you()).count();
         let ember = crate::palette::ember(cx);
         let agents = match (working, needs) {
             (0, 0) => None,
-            (w, 0) => Some(format!("{w} agent{} working", if w == 1 { "" } else { "s" })),
+            (w, 0) => Some(format!(
+                "{w} agent{} working",
+                if w == 1 { "" } else { "s" }
+            )),
             (0, n) => Some(format!("{n} need{} you", if n == 1 { "s" } else { "" })),
-            (w, n) => Some(format!("{w} working · {n} need{} you", if n == 1 { "s" } else { "" })),
+            (w, n) => Some(format!(
+                "{w} working · {n} need{} you",
+                if n == 1 { "s" } else { "" }
+            )),
         };
         let editor = self.editor.as_ref().map(|e| {
             let e = e.read(cx);
-            (e.caret(cx), language(&e.path), e.lsp_name, e.problem().is_some(), crate::languages::of(&e.path).hard_tabs)
+            (
+                e.caret(cx),
+                language(&e.path),
+                e.lsp_name,
+                e.problem().is_some(),
+                crate::languages::of(&e.path).hard_tabs,
+            )
         });
         let preview = self.preview.as_ref().map(|p| p.read(cx).status_items());
         let muted = theme.muted_foreground;
@@ -104,7 +155,11 @@ impl Render for IdeStatus {
             .px(px(5.))
             .bg(crate::ui::chrome_bg(glass, cx))
             .border_t_1()
-            .border_color(if glass.is_some() { crate::ui::panel_border(glass, cx) } else { theme.border })
+            .border_color(if glass.is_some() {
+                crate::ui::panel_border(glass, cx)
+            } else {
+                theme.border
+            })
             .text_size(px(11.5))
             .text_color(muted)
             .when_some(git, |el, g| {
@@ -113,41 +168,82 @@ impl Render for IdeStatus {
                     Self::item("ide-status-branch", cx)
                         .child(Icon::new(crate::assets::Lucide::GitBranch).size(px(12.)))
                         .child(format!("{branch}{}", if g.changed > 0 { "*" } else { "" }))
-                        .when(g.ahead + g.behind > 0, |el| el.child(format!("↓{} ↑{}", g.behind, g.ahead)))
-                        .on_click(self.on_workbench(|wb, window, cx| wb.show_view(SideView::Scm, window, cx))),
+                        .when(g.ahead + g.behind > 0, |el| {
+                            el.child(format!("↓{} ↑{}", g.behind, g.ahead))
+                        })
+                        .on_click(self.on_workbench(|wb, window, cx| {
+                            wb.show_view(SideView::Scm, window, cx)
+                        })),
                 )
             })
             .child(
                 Self::item("ide-status-problems", cx)
-                    .child(Icon::new(IconName::CircleX).size(px(12.)).when(errors > 0, |i| i.text_color(crate::palette::red(cx))))
+                    .child(
+                        Icon::new(IconName::CircleX)
+                            .size(px(12.))
+                            .when(errors > 0, |i| i.text_color(crate::palette::red(cx))),
+                    )
                     .child(errors.to_string())
-                    .child(Icon::new(IconName::TriangleAlert).size(px(12.)).when(warnings > 0, |i| i.text_color(crate::palette::amber(cx))))
+                    .child(
+                        Icon::new(IconName::TriangleAlert)
+                            .size(px(12.))
+                            .when(warnings > 0, |i| i.text_color(crate::palette::amber(cx))),
+                    )
                     .child(warnings.to_string())
-                    .on_click(self.on_workbench(|wb, window, cx| wb.show_panel(PanelTab::Problems, window, cx))),
+                    .on_click(self.on_workbench(|wb, window, cx| {
+                        wb.show_panel(PanelTab::Problems, window, cx)
+                    })),
             )
             .when_some(agents, |el, text| {
                 el.child(
                     Self::item("ide-status-agents", cx)
-                        .text_color(if needs > 0 { crate::palette::amber(cx) } else { ember })
+                        .text_color(if needs > 0 {
+                            crate::palette::amber(cx)
+                        } else {
+                            ember
+                        })
                         .child(Icon::new(crate::assets::Lucide::Sparkles).size(px(12.)))
                         .child(text)
-                        .on_click(self.on_workbench(|wb, window, cx| wb.show_view(SideView::Agents, window, cx))),
+                        .on_click(self.on_workbench(|wb, window, cx| {
+                            wb.show_view(SideView::Agents, window, cx)
+                        })),
                 )
             })
             .child(div().flex_1())
-            .when_some(editor, |el, ((line, col), lang, lsp, read_only, hard_tabs)| {
-                el.child(Self::item("ide-status-caret", cx).child(format!("Ln {line}, Col {col}")))
-                    .when(read_only, |el| el.child(Self::item("ide-status-readonly", cx).child("Read-only")))
-                    .child(Self::item("ide-status-indent", cx).child(if hard_tabs { "Tab Size: 4" } else { "Spaces: 4" }))
+            .when_some(
+                editor,
+                |el, ((line, col), lang, lsp, read_only, hard_tabs)| {
+                    el.child(
+                        Self::item("ide-status-caret", cx).child(format!("Ln {line}, Col {col}")),
+                    )
+                    .when(read_only, |el| {
+                        el.child(Self::item("ide-status-readonly", cx).child("Read-only"))
+                    })
+                    .child(Self::item("ide-status-indent", cx).child(if hard_tabs {
+                        "Tab Size: 4"
+                    } else {
+                        "Spaces: 4"
+                    }))
                     .child(Self::item("ide-status-encoding", cx).child("UTF-8"))
                     .child(Self::item("ide-status-eol", cx).child("LF"))
                     .child(Self::item("ide-status-language", cx).child(lang))
-                    .when_some(lsp, |el, name| el.child(Self::item("ide-status-lsp", cx).child(div().text_color(crate::palette::emerald(cx)).child("●")).child(name)))
-            })
+                    .when_some(lsp, |el, name| {
+                        el.child(
+                            Self::item("ide-status-lsp", cx)
+                                .child(div().text_color(crate::palette::emerald(cx)).child("●"))
+                                .child(name),
+                        )
+                    })
+                },
+            )
             .when_some(preview, |el, (kind, pixels, size)| {
-                el.when_some(pixels, |el, p| el.child(Self::item("ide-status-pixels", cx).test_support().child(p)))
-                    .when_some(size, |el, s| el.child(Self::item("ide-status-size", cx).test_support().child(s)))
-                    .child(Self::item("ide-status-kind", cx).test_support().child(kind))
+                el.when_some(pixels, |el, p| {
+                    el.child(Self::item("ide-status-pixels", cx).test_support().child(p))
+                })
+                .when_some(size, |el, s| {
+                    el.child(Self::item("ide-status-size", cx).test_support().child(s))
+                })
+                .child(Self::item("ide-status-kind", cx).test_support().child(kind))
             })
             .child(
                 Self::item("ide-status-ai", cx)

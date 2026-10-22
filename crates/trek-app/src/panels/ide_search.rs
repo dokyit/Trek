@@ -10,8 +10,8 @@ use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_HITS: usize = 200;
 
@@ -28,10 +28,24 @@ const MAX_FILES: usize = 30_000;
 
 /// The files under `root` git doesn't ignore, relative to it (folders left out).
 pub(crate) fn list_files(root: &std::path::Path) -> Vec<String> {
-    let walk = ignore::WalkBuilder::new(root).hidden(false).parents(true).ignore(false).git_ignore(true).git_exclude(true).git_global(true).follow_links(false).filter_entry(|e| e.file_name() != ".git").build();
+    let walk = ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .parents(true)
+        .ignore(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .follow_links(false)
+        .filter_entry(|e| e.file_name() != ".git")
+        .build();
     walk.flatten()
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
-        .filter_map(|e| e.path().strip_prefix(root).ok().map(crate::mentions::rel_string))
+        .filter_map(|e| {
+            e.path()
+                .strip_prefix(root)
+                .ok()
+                .map(crate::mentions::rel_string)
+        })
         .filter(|r| !r.is_empty() && !r.ends_with(".DS_Store"))
         .take(MAX_FILES)
         .collect()
@@ -88,17 +102,30 @@ impl IdeSearch {
     /// generations drop on the floor. Nothing to do when neither the query nor the folder's
     /// files changed since the last search.
     fn search(&mut self, cx: &mut Context<Self>) {
-        let query = self.input.read(cx).value().to_string().trim().to_lowercase();
+        let query = self
+            .input
+            .read(cx)
+            .value()
+            .to_string()
+            .trim()
+            .to_lowercase();
         let (root, epoch) = {
             let ws = self.workspace.read(cx);
-            (ws.ide_root.clone(), ws.files_epoch + ws.turns_finished + ws.agent_edits)
+            (
+                ws.ide_root.clone(),
+                ws.files_epoch + ws.turns_finished + ws.agent_edits,
+            )
         };
         let key = (root.clone(), epoch, query.clone());
         if self.searched.as_ref() == Some(&key) {
             return;
         }
         // Files come and go with turns, checkouts and the folder: list them again then.
-        if self.searched.as_ref().is_none_or(|(r, e, _)| *r != root || *e != epoch) {
+        if self
+            .searched
+            .as_ref()
+            .is_none_or(|(r, e, _)| *r != root || *e != epoch)
+        {
             self.files = None;
         }
         self.searched = Some(key);
@@ -124,18 +151,29 @@ impl IdeSearch {
                     return;
                 }
                 let path = root.join(rel);
-                let Ok(meta) = std::fs::metadata(&path) else { continue };
+                let Ok(meta) = std::fs::metadata(&path) else {
+                    continue;
+                };
                 if meta.len() > 1_000_000 {
                     continue;
                 }
-                let Ok(bytes) = std::fs::read(&path) else { continue };
+                let Ok(bytes) = std::fs::read(&path) else {
+                    continue;
+                };
                 if bytes.iter().take(8192).any(|b| *b == 0) {
                     continue;
                 }
-                let Ok(text) = String::from_utf8(bytes) else { continue };
+                let Ok(text) = String::from_utf8(bytes) else {
+                    continue;
+                };
                 for (i, line) in text.lines().enumerate() {
                     if line.to_lowercase().contains(&query) {
-                        hits.push(Hit { path: path.clone(), rel: rel.clone(), line: i as u32 + 1, text: line.trim().chars().take(160).collect() });
+                        hits.push(Hit {
+                            path: path.clone(),
+                            rel: rel.clone(),
+                            line: i as u32 + 1,
+                            text: line.trim().chars().take(160).collect(),
+                        });
                         if hits.len() >= MAX_HITS {
                             break 'outer;
                         }
@@ -161,7 +199,10 @@ impl IdeSearch {
 
     #[cfg(test)]
     pub(crate) fn hits(&self) -> Vec<String> {
-        self.hits.iter().map(|h| format!("{}:{}", h.rel, h.line)).collect()
+        self.hits
+            .iter()
+            .map(|h| format!("{}:{}", h.rel, h.line))
+            .collect()
     }
 
     #[cfg(test)]
@@ -195,13 +236,19 @@ impl Render for IdeSearch {
                     .py_1()
                     .when(query.len() < 2, |el| {
                         el.child(
-                            div().p_4().text_sm().text_color(theme.muted_foreground)
+                            div()
+                                .p_4()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
                                 .child("Type to search every file in the folder."),
                         )
                     })
                     .when(!searching && query.len() >= 2 && rows.is_empty(), |el| {
                         el.child(
-                            div().p_4().text_sm().text_color(theme.muted_foreground)
+                            div()
+                                .p_4()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
                                 .child("Nothing matches."),
                         )
                     })
@@ -230,12 +277,25 @@ impl Render for IdeSearch {
                                         h_flex()
                                             .gap_1()
                                             .child(div().text_xs().truncate().child(name))
-                                            .child(div().text_xs().text_color(theme.muted_foreground).child(format!(":{line}"))),
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(format!(":{line}")),
+                                            ),
                                     )
-                                    .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(text)),
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .truncate()
+                                            .child(text),
+                                    ),
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.workspace.update(cx, |ws, cx| ws.open_editor(path.clone(), Some(line), cx));
+                                this.workspace.update(cx, |ws, cx| {
+                                    ws.open_editor(path.clone(), Some(line), cx)
+                                });
                             }))
                     })),
             )

@@ -12,7 +12,9 @@
 
 use crate::assets::Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::{Path, PathBuf};
@@ -52,7 +54,11 @@ pub fn kind_by_name(path: &Path) -> Option<Kind> {
 /// What `path` is, from its name and `first`, the first `SNIFF` bytes of it: a NUL, or bytes that
 /// can't be UTF-8, make it binary whatever it's called.
 pub fn kind(path: &Path, first: &[u8]) -> Kind {
-    kind_by_name(path).unwrap_or(if is_binary(first) { Kind::Binary } else { Kind::Text })
+    kind_by_name(path).unwrap_or(if is_binary(first) {
+        Kind::Binary
+    } else {
+        Kind::Text
+    })
 }
 
 /// `first` (a file's start) holds a NUL or isn't UTF-8. A character cut off at the end is the
@@ -66,7 +72,10 @@ fn extension(path: &Path) -> Option<String> {
 }
 
 fn is_audio(path: &Path) -> bool {
-    matches!(extension(path).as_deref(), Some("mp3" | "m4a" | "wav" | "ogg" | "flac"))
+    matches!(
+        extension(path).as_deref(),
+        Some("mp3" | "m4a" | "wav" | "ogg" | "flac")
+    )
 }
 
 /// The type the web view is told a file has.
@@ -114,13 +123,26 @@ const CLOUD_PROVIDER_TERMINATED: i32 = 404;
 /// Split on either separator: a Windows path's `\` is no separator to a Mac's `Path`, and the
 /// same words serve a path that came from a Windows machine's text.
 pub fn cloud_app(path: &Path) -> Option<&'static str> {
-    path.to_string_lossy().split(['\\', '/']).any(|s| s.len() >= 8 && s.is_char_boundary(8) && s[..8].eq_ignore_ascii_case("onedrive")).then_some("OneDrive")
+    path.to_string_lossy()
+        .split(['\\', '/'])
+        .any(|s| s.len() >= 8 && s.is_char_boundary(8) && s[..8].eq_ignore_ascii_case("onedrive"))
+        .then_some("OneDrive")
 }
 
 /// Why `name` can't be shown, in words a person can act on. `windows`: the error is a Windows
 /// one (its raw codes mean something else elsewhere).
-pub fn unreadable_words(name: &str, err: &std::io::Error, app: Option<&str>, windows: bool) -> String {
-    if windows && matches!(err.raw_os_error(), Some(CLOUD_PROVIDER_NOT_RUNNING | CLOUD_PROVIDER_TERMINATED)) {
+pub fn unreadable_words(
+    name: &str,
+    err: &std::io::Error,
+    app: Option<&str>,
+    windows: bool,
+) -> String {
+    if windows
+        && matches!(
+            err.raw_os_error(),
+            Some(CLOUD_PROVIDER_NOT_RUNNING | CLOUD_PROVIDER_TERMINATED)
+        )
+    {
         return match app {
             Some(app) => format!("This file is kept online by {app} and {app} isn't running. Start {app}, or right-click the file in Explorer and choose 'Always keep on this device'."),
             None => "This file is kept online by a cloud storage app that isn't running. Start it, or right-click the file in Explorer and choose 'Always keep on this device'.".to_string(),
@@ -135,7 +157,9 @@ pub fn online_only(path: &Path) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt as _;
-        use windows_sys::Win32::Storage::FileSystem::{GetFileAttributesW, INVALID_FILE_ATTRIBUTES};
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+        };
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
         // SAFETY: `wide` is a NUL-terminated UTF-16 path that outlives the call.
         let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
@@ -153,14 +177,26 @@ pub fn online_only(path: &Path) -> bool {
 fn default_app(path: &Path) -> Option<String> {
     #[cfg(windows)]
     {
-        use windows::Win32::UI::Shell::{ASSOCF_INIT_IGNOREUNKNOWN, ASSOCF_NOTRUNCATE, ASSOCSTR_FRIENDLYAPPNAME, AssocQueryStringW};
+        use windows::Win32::UI::Shell::{
+            ASSOCF_INIT_IGNOREUNKNOWN, ASSOCF_NOTRUNCATE, ASSOCSTR_FRIENDLYAPPNAME,
+            AssocQueryStringW,
+        };
         use windows::core::{HSTRING, PCWSTR, PWSTR};
         let ext = HSTRING::from(format!(".{}", path.extension()?.to_str()?));
         let flags = ASSOCF_INIT_IGNOREUNKNOWN | ASSOCF_NOTRUNCATE;
         let mut buf = [0u16; 260];
         let mut len = buf.len() as u32;
         // SAFETY: `buf` holds `len` UTF-16 units and outlives the call; `ext` is NUL-terminated.
-        let found = unsafe { AssocQueryStringW(flags, ASSOCSTR_FRIENDLYAPPNAME, &ext, PCWSTR::null(), Some(PWSTR(buf.as_mut_ptr())), &mut len) };
+        let found = unsafe {
+            AssocQueryStringW(
+                flags,
+                ASSOCSTR_FRIENDLYAPPNAME,
+                &ext,
+                PCWSTR::null(),
+                Some(PWSTR(buf.as_mut_ptr())),
+                &mut len,
+            )
+        };
         if found.is_err() {
             return None;
         }
@@ -189,7 +225,10 @@ fn probe(path: &Path, kind: Kind) -> std::io::Result<Probe> {
     let mut file = std::fs::File::open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a file"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a file",
+        ));
     }
     match kind {
         Kind::Text => {
@@ -201,15 +240,24 @@ fn probe(path: &Path, kind: Kind) -> std::io::Result<Probe> {
         }
     }
     // Not the remembered size: the file may have been rewritten since it was last open here.
-    let pixels = if kind == Kind::Image { crate::image_preview::pixels_now(path) } else { None };
-    Ok(Probe { bytes: meta.len(), pixels })
+    let pixels = if kind == Kind::Image {
+        crate::image_preview::pixels_now(path)
+    } else {
+        None
+    };
+    Ok(Probe {
+        bytes: meta.len(),
+        pixels,
+    })
 }
 
 enum Status {
     /// Reading the file's size (and an image's pixels), off the main thread.
     Loading,
     /// The file is kept online and being fetched; `slow` once that's taken `FETCH_LIMIT`.
-    Fetching { slow: bool },
+    Fetching {
+        slow: bool,
+    },
     Ready,
     /// Why it can't be shown.
     Unreadable(String),
@@ -281,7 +329,13 @@ impl Focusable for PreviewView {
 impl PreviewView {
     /// A preview of `path`, a `kind` the editor doesn't edit; with `error`, the file couldn't be
     /// read and the view says why.
-    pub fn new(path: PathBuf, kind: Kind, error: Option<std::io::Error>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        path: PathBuf,
+        kind: Kind,
+        error: Option<std::io::Error>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut this = Self {
             path,
             kind,
@@ -300,14 +354,24 @@ impl PreviewView {
             _tasks: vec![],
         };
         match error {
-            Some(e) => this.status = Status::Unreadable(unreadable_words(&this.name(), &e, cloud_app(&this.path), cfg!(windows))),
+            Some(e) => {
+                this.status = Status::Unreadable(unreadable_words(
+                    &this.name(),
+                    &e,
+                    cloud_app(&this.path),
+                    cfg!(windows),
+                ))
+            }
             None => this.load(window, cx),
         }
         this
     }
 
     fn name(&self) -> String {
-        self.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| self.path.display().to_string())
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| self.path.display().to_string())
     }
 
     fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -325,12 +389,20 @@ impl PreviewView {
             }));
         }
         self._tasks.push(cx.spawn_in(window, async move |this, cx| {
-            let found = cx.background_executor().spawn(async move { (probe(&path, kind), default_app(&path)) }).await;
+            let found = cx
+                .background_executor()
+                .spawn(async move { (probe(&path, kind), default_app(&path)) })
+                .await;
             let _ = this.update_in(cx, |this, window, cx| this.probed(found, window, cx));
         }));
     }
 
-    fn probed(&mut self, (probe, app): (std::io::Result<Probe>, Option<String>), window: &mut Window, cx: &mut Context<Self>) {
+    fn probed(
+        &mut self,
+        (probe, app): (std::io::Result<Probe>, Option<String>),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.app = app;
         match probe {
             Ok(p) => {
@@ -352,7 +424,14 @@ impl PreviewView {
                     Kind::Image | Kind::Binary => {}
                 }
             }
-            Err(e) => self.status = Status::Unreadable(unreadable_words(&self.name(), &e, cloud_app(&self.path), cfg!(windows))),
+            Err(e) => {
+                self.status = Status::Unreadable(unreadable_words(
+                    &self.name(),
+                    &e,
+                    cloud_app(&self.path),
+                    cfg!(windows),
+                ))
+            }
         }
         cx.notify();
     }
@@ -388,7 +467,10 @@ impl PreviewView {
     pub fn note_text(&self) -> Option<String> {
         match (&self.status, self.kind, &self.web) {
             (Status::Unreadable(why), ..) => Some(why.clone()),
-            (Status::Ready, Kind::Binary, _) | (Status::Ready, Kind::Document | Kind::Media, Web::Unavailable | Web::TooBig) => Some(self.cant_show()),
+            (Status::Ready, Kind::Binary, _)
+            | (Status::Ready, Kind::Document | Kind::Media, Web::Unavailable | Web::TooBig) => {
+                Some(self.cant_show())
+            }
             (Status::Ready, Kind::Image, _) if self.undecodable() => Some(self.cant_show()),
             _ => None,
         }
@@ -397,13 +479,19 @@ impl PreviewView {
     /// What the status bar says: the kind, the image's pixels, the file's size.
     pub fn status_items(&self) -> (String, Option<String>, Option<String>) {
         let pixels = self.pixels.map(|(w, h)| format!("{w} × {h}"));
-        (kind_label(&self.path, self.kind), pixels, self.bytes.map(crate::image_preview::file_size))
+        (
+            kind_label(&self.path, self.kind),
+            pixels,
+            self.bytes.map(crate::image_preview::file_size),
+        )
     }
 
     /// An image whose header gives no size isn't one Trek can draw (an SVG has none to give): a
     /// damaged file, or a format it doesn't decode. It's said, not left a blank tab.
     fn undecodable(&self) -> bool {
-        self.kind == Kind::Image && self.pixels.is_none() && extension(&self.path).as_deref() != Some("svg")
+        self.kind == Kind::Image
+            && self.pixels.is_none()
+            && extension(&self.path).as_deref() != Some("svg")
     }
 
     fn open_label(&self) -> String {
@@ -415,12 +503,22 @@ impl PreviewView {
 
     fn open_button(&self) -> Button {
         let path = self.path.clone();
-        Button::new("ide-preview-open").small().outline().icon(Icon::new(Lucide::SquareArrowOutUpRight)).label(self.open_label()).on_click(move |_, _, cx| cx.open_with_system(&path))
+        Button::new("ide-preview-open")
+            .small()
+            .outline()
+            .icon(Icon::new(Lucide::SquareArrowOutUpRight))
+            .label(self.open_label())
+            .on_click(move |_, _, cx| cx.open_with_system(&path))
     }
 
     fn reveal_button(&self) -> Button {
         let path = self.path.clone();
-        Button::new("ide-preview-reveal").small().ghost().icon(IconName::FolderOpen).label(crate::words::words().reveal_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&path))
+        Button::new("ide-preview-reveal")
+            .small()
+            .ghost()
+            .icon(IconName::FolderOpen)
+            .label(crate::words::words().reveal_in_file_manager)
+            .on_click(move |_, _, cx| cx.reveal_path(&path))
     }
 
     /// The line over a PDF or a video: the file's name and size, and its own app.
@@ -437,15 +535,40 @@ impl PreviewView {
             .border_b_1()
             .border_color(theme.border)
             .text_size(px(12.))
-            .child(div().id("ide-preview-name").test_support().min_w_0().truncate().font_medium().child(self.name()))
-            .when_some(self.bytes.map(crate::image_preview::file_size), |el, size| el.child(div().flex_none().text_color(theme.muted_foreground).child(size)))
+            .child(
+                div()
+                    .id("ide-preview-name")
+                    .test_support()
+                    .min_w_0()
+                    .truncate()
+                    .font_medium()
+                    .child(self.name()),
+            )
+            .when_some(
+                self.bytes.map(crate::image_preview::file_size),
+                |el, size| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .text_color(theme.muted_foreground)
+                            .child(size),
+                    )
+                },
+            )
             .child(div().flex_1())
             .child(self.open_button())
             .child(self.reveal_button())
     }
 
     /// A note in the middle of the tab, for what isn't drawn: what it is, and what can be done.
-    fn note(&self, icon: Icon, text: String, hint: Option<String>, buttons: Vec<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
+    fn note(
+        &self,
+        icon: Icon,
+        text: String,
+        hint: Option<String>,
+        buttons: Vec<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         v_flex()
             .id("ide-preview-note")
@@ -455,10 +578,36 @@ impl PreviewView {
             .justify_center()
             .gap(px(12.))
             .px(px(24.))
-            .child(icon.size(px(30.)).text_color(theme.muted_foreground.opacity(0.7)))
-            .child(div().id("ide-preview-words").test_support().max_w(px(480.)).text_center().text_size(px(13.)).child(text))
-            .when_some(hint, |el, hint| el.child(div().max_w(px(480.)).text_center().text_size(px(12.)).text_color(theme.muted_foreground).child(hint)))
-            .child(h_flex().gap(px(8.)).flex_wrap().justify_center().children(buttons))
+            .child(
+                icon.size(px(30.))
+                    .text_color(theme.muted_foreground.opacity(0.7)),
+            )
+            .child(
+                div()
+                    .id("ide-preview-words")
+                    .test_support()
+                    .max_w(px(480.))
+                    .text_center()
+                    .text_size(px(13.))
+                    .child(text),
+            )
+            .when_some(hint, |el, hint| {
+                el.child(
+                    div()
+                        .max_w(px(480.))
+                        .text_center()
+                        .text_size(px(12.))
+                        .text_color(theme.muted_foreground)
+                        .child(hint),
+                )
+            })
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .flex_wrap()
+                    .justify_center()
+                    .children(buttons),
+            )
             .into_any_element()
     }
 
@@ -487,7 +636,9 @@ impl PreviewView {
 
     /// Fit ⇄ actual pixels, keeping the spot pressed (or the middle) where it was.
     fn toggle_actual(&mut self, at: Option<Point<Pixels>>, scale: f32, cx: &mut Context<Self>) {
-        let Some(layout) = ImageLayout::of(self.pixels, self.area, scale) else { return };
+        let Some(layout) = ImageLayout::of(self.pixels, self.area, scale) else {
+            return;
+        };
         if !self.actual && !layout.zoomable() {
             return;
         }
@@ -495,10 +646,20 @@ impl PreviewView {
         if self.actual {
             let fit = layout.fit;
             let at = at.filter(|p| fit.contains(p)).unwrap_or(fit.center());
-            let (fx, fy) = ((at.x - fit.origin.x) / fit.size.width, (at.y - fit.origin.y) / fit.size.height);
+            let (fx, fy) = (
+                (at.x - fit.origin.x) / fit.size.width,
+                (at.y - fit.origin.y) / fit.size.height,
+            );
             let image = layout.actual_in_content();
-            let target = point(image.origin.x + image.size.width * fx - (at.x - self.area.origin.x), image.origin.y + image.size.height * fy - (at.y - self.area.origin.y));
-            self.scroll.set_offset(crate::image_preview::clamp_offset(point(-target.x, -target.y), layout.content(), self.area.size));
+            let target = point(
+                image.origin.x + image.size.width * fx - (at.x - self.area.origin.x),
+                image.origin.y + image.size.height * fy - (at.y - self.area.origin.y),
+            );
+            self.scroll.set_offset(crate::image_preview::clamp_offset(
+                point(-target.x, -target.y),
+                layout.content(),
+                self.area.size,
+            ));
         }
         cx.notify();
     }
@@ -512,7 +673,9 @@ impl PreviewView {
     }
 
     fn mouse_move(&mut self, e: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((from, offset, panned)) = self.drag.as_mut() else { return };
+        let Some((from, offset, panned)) = self.drag.as_mut() else {
+            return;
+        };
         if e.pressed_button != Some(MouseButton::Left) {
             self.drag = None;
             return;
@@ -524,7 +687,11 @@ impl PreviewView {
         *panned = true;
         let to = *offset + d;
         if let Some(layout) = ImageLayout::of(self.pixels, self.area, window.scale_factor()) {
-            self.scroll.set_offset(crate::image_preview::clamp_offset(to, layout.content(), self.area.size));
+            self.scroll.set_offset(crate::image_preview::clamp_offset(
+                to,
+                layout.content(),
+                self.area.size,
+            ));
         }
         cx.notify();
     }
@@ -552,14 +719,23 @@ impl PreviewView {
         .size_full();
         let layout = ImageLayout::of(self.pixels, self.area, window.scale_factor());
         let path = self.path.clone();
-        let press = cx.listener(|this, e: &MouseDownEvent, window, cx| this.mouse_down(e, window, cx));
+        let press =
+            cx.listener(|this, e: &MouseDownEvent, window, cx| this.mouse_down(e, window, cx));
         let stage = div()
             .id("ide-preview-stage")
             .relative()
             .size_full()
-            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, cx| this.mouse_move(e, window, cx)))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, window, cx| this.mouse_up(window, cx)))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, window, cx| this.mouse_up(window, cx)))
+            .on_mouse_move(
+                cx.listener(|this, e: &MouseMoveEvent, window, cx| this.mouse_move(e, window, cx)),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| this.mouse_up(window, cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| this.mouse_up(window, cx)),
+            )
             .child(measure);
         match layout {
             Some(layout) if self.actual => {
@@ -567,21 +743,33 @@ impl PreviewView {
                 let grabbing = self.drag.as_ref().is_some_and(|d| d.2);
                 stage
                     .child(
-                        div().id("ide-preview-pan").absolute().top_0().left_0().size_full().overflow_scroll().track_scroll(&self.scroll).child(
-                            div().relative().w(content.width).h(content.height).child(
-                                div()
-                                    .id("ide-preview-image")
-                                    .test_support()
-                                    .absolute()
-                                    .left(at.origin.x)
-                                    .top(at.origin.y)
-                                    .w(at.size.width)
-                                    .h(at.size.height)
-                                    .cursor(if grabbing { CursorStyle::ClosedHand } else { CursorStyle::OpenHand })
-                                    .child(img(path).image_cache(&self.images).size_full())
-                                    .on_mouse_down(MouseButton::Left, press),
+                        div()
+                            .id("ide-preview-pan")
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .overflow_scroll()
+                            .track_scroll(&self.scroll)
+                            .child(
+                                div().relative().w(content.width).h(content.height).child(
+                                    div()
+                                        .id("ide-preview-image")
+                                        .test_support()
+                                        .absolute()
+                                        .left(at.origin.x)
+                                        .top(at.origin.y)
+                                        .w(at.size.width)
+                                        .h(at.size.height)
+                                        .cursor(if grabbing {
+                                            CursorStyle::ClosedHand
+                                        } else {
+                                            CursorStyle::OpenHand
+                                        })
+                                        .child(img(path).image_cache(&self.images).size_full())
+                                        .on_mouse_down(MouseButton::Left, press),
+                                ),
                             ),
-                        ),
                     )
                     .into_any_element()
             }
@@ -589,10 +777,31 @@ impl PreviewView {
                 let zoomable = layout.as_ref().is_some_and(ImageLayout::zoomable);
                 // Before the first layout (or with no size in the file's header) the image fits
                 // itself; after it, it's placed where a click measures it to be.
-                let image = div().id("ide-preview-image").test_support().when(zoomable, |el| el.cursor(CursorStyle::PointingHand)).on_mouse_down(MouseButton::Left, press);
+                let image = div()
+                    .id("ide-preview-image")
+                    .test_support()
+                    .when(zoomable, |el| el.cursor(CursorStyle::PointingHand))
+                    .on_mouse_down(MouseButton::Left, press);
                 let image = match layout {
-                    Some(l) => image.absolute().left(l.fit.origin.x - self.area.origin.x).top(l.fit.origin.y - self.area.origin.y).w(l.fit.size.width).h(l.fit.size.height).child(img(path).image_cache(&self.images).size_full()),
-                    None => image.absolute().top(px(PAD)).left(px(PAD)).right(px(PAD)).bottom(px(PAD)).child(img(path).image_cache(&self.images).size_full().object_fit(ObjectFit::ScaleDown)),
+                    Some(l) => image
+                        .absolute()
+                        .left(l.fit.origin.x - self.area.origin.x)
+                        .top(l.fit.origin.y - self.area.origin.y)
+                        .w(l.fit.size.width)
+                        .h(l.fit.size.height)
+                        .child(img(path).image_cache(&self.images).size_full()),
+                    None => image
+                        .absolute()
+                        .top(px(PAD))
+                        .left(px(PAD))
+                        .right(px(PAD))
+                        .bottom(px(PAD))
+                        .child(
+                            img(path)
+                                .image_cache(&self.images)
+                                .size_full()
+                                .object_fit(ObjectFit::ScaleDown),
+                        ),
                 };
                 stage.child(image).into_any_element()
             }
@@ -619,10 +828,22 @@ impl ImageLayout {
             return None;
         }
         let actual = size(px(w as f32 / scale), px(h as f32 / scale));
-        let room = size(area.size.width - px(2. * PAD), area.size.height - px(2. * PAD));
-        let k = (room.width / actual.width).min(room.height / actual.height).min(1.);
+        let room = size(
+            area.size.width - px(2. * PAD),
+            area.size.height - px(2. * PAD),
+        );
+        let k = (room.width / actual.width)
+            .min(room.height / actual.height)
+            .min(1.);
         let shown = size(actual.width * k, actual.height * k);
-        let fit = Bounds::new(area.origin + point((area.size.width - shown.width) / 2., (area.size.height - shown.height) / 2.), shown);
+        let fit = Bounds::new(
+            area.origin
+                + point(
+                    (area.size.width - shown.width) / 2.,
+                    (area.size.height - shown.height) / 2.,
+                ),
+            shown,
+        );
         Some(Self { area, actual, fit })
     }
 
@@ -631,12 +852,21 @@ impl ImageLayout {
     }
 
     fn content(&self) -> Size<Pixels> {
-        size(self.actual.width.max(self.area.size.width), self.actual.height.max(self.area.size.height))
+        size(
+            self.actual.width.max(self.area.size.width),
+            self.actual.height.max(self.area.size.height),
+        )
     }
 
     fn actual_in_content(&self) -> Bounds<Pixels> {
         let c = self.content();
-        Bounds::new(point((c.width - self.actual.width) / 2., (c.height - self.actual.height) / 2.), self.actual)
+        Bounds::new(
+            point(
+                (c.width - self.actual.width) / 2.,
+                (c.height - self.actual.height) / 2.,
+            ),
+            self.actual,
+        )
     }
 }
 
@@ -647,22 +877,50 @@ impl Render for PreviewView {
             Status::Fetching { slow } => {
                 let app = cloud_app(&self.path).unwrap_or("the cloud");
                 let (text, retry) = if *slow {
-                    (format!("{app} is still fetching {}. It opens here once it's on this device.", self.name()), Some(Self::retry_button(cx)))
+                    (
+                        format!(
+                            "{app} is still fetching {}. It opens here once it's on this device.",
+                            self.name()
+                        ),
+                        Some(Self::retry_button(cx)),
+                    )
                 } else {
                     (format!("Fetching {} from {app}…", self.name()), None)
                 };
-                self.note(Icon::new(Lucide::Cloud), text, None, retry.into_iter().collect(), cx)
+                self.note(
+                    Icon::new(Lucide::Cloud),
+                    text,
+                    None,
+                    retry.into_iter().collect(),
+                    cx,
+                )
             }
             Status::Unreadable(why) => {
-                let buttons = vec![Self::retry_button(cx), self.reveal_button().into_any_element()];
-                self.note(Icon::new(IconName::TriangleAlert), why.clone(), None, buttons, cx)
+                let buttons = vec![
+                    Self::retry_button(cx),
+                    self.reveal_button().into_any_element(),
+                ];
+                self.note(
+                    Icon::new(IconName::TriangleAlert),
+                    why.clone(),
+                    None,
+                    buttons,
+                    cx,
+                )
             }
             Status::Ready => match (self.kind, &self.web) {
                 (Kind::Image, _) if !self.undecodable() => self.image(window, cx),
                 (Kind::Document | Kind::Media, Web::Made(web)) => v_flex()
                     .size_full()
                     .child(self.header(cx))
-                    .child(div().id("ide-preview-web").test_support().flex_1().min_h_0().child(web.element()))
+                    .child(
+                        div()
+                            .id("ide-preview-web")
+                            .test_support()
+                            .flex_1()
+                            .min_h_0()
+                            .child(web.element()),
+                    )
                     .into_any_element(),
                 (Kind::Document | Kind::Media, Web::Unavailable | Web::TooBig) => {
                     let too_big = matches!(self.web, Web::TooBig);
@@ -673,19 +931,51 @@ impl Render for PreviewView {
                     } else {
                         "PDFs, video and audio show in the system's web view, which isn't available."
                     };
-                    let mut buttons = vec![self.open_button().into_any_element(), self.reveal_button().into_any_element()];
+                    let mut buttons = vec![
+                        self.open_button().into_any_element(),
+                        self.reveal_button().into_any_element(),
+                    ];
                     if cfg!(windows) && !too_big {
-                        buttons.push(Button::new("ide-preview-get-webview2").small().ghost().label("Get WebView2").on_click(|_, _, cx| cx.open_url(crate::panels::browser::WEBVIEW2_DOWNLOAD)).into_any_element());
+                        buttons.push(
+                            Button::new("ide-preview-get-webview2")
+                                .small()
+                                .ghost()
+                                .label("Get WebView2")
+                                .on_click(|_, _, cx| {
+                                    cx.open_url(crate::panels::browser::WEBVIEW2_DOWNLOAD)
+                                })
+                                .into_any_element(),
+                        );
                     }
-                    self.note(Icon::new(IconName::File), self.cant_show(), Some(hint.to_string()), buttons, cx)
+                    self.note(
+                        Icon::new(IconName::File),
+                        self.cant_show(),
+                        Some(hint.to_string()),
+                        buttons,
+                        cx,
+                    )
                 }
                 _ => {
-                    let buttons = vec![self.open_button().into_any_element(), self.reveal_button().into_any_element()];
-                    self.note(Icon::new(IconName::File), self.cant_show(), None, buttons, cx)
+                    let buttons = vec![
+                        self.open_button().into_any_element(),
+                        self.reveal_button().into_any_element(),
+                    ];
+                    self.note(
+                        Icon::new(IconName::File),
+                        self.cant_show(),
+                        None,
+                        buttons,
+                        cx,
+                    )
                 }
             },
         };
-        div().id("ide-preview").test_support().track_focus(&self.focus).size_full().child(body)
+        div()
+            .id("ide-preview")
+            .test_support()
+            .track_focus(&self.focus)
+            .size_full()
+            .child(body)
     }
 }
 
@@ -694,7 +984,9 @@ fn make_web(path: &Path, window: &mut Window, cx: &mut App) -> Option<Box<dyn We
     #[cfg(test)]
     {
         let _ = (path, window, cx);
-        FAKE_WEB.with(std::cell::Cell::get).then(|| Box::new(FakeWeb) as Box<dyn WebSurface>)
+        FAKE_WEB
+            .with(std::cell::Cell::get)
+            .then(|| Box::new(FakeWeb) as Box<dyn WebSurface>)
     }
     #[cfg(not(test))]
     native_web(path, window, cx)
@@ -718,7 +1010,11 @@ struct FakeWeb;
 #[cfg(test)]
 impl WebSurface for FakeWeb {
     fn element(&self) -> AnyElement {
-        div().id("ide-preview-web-fake").test_support().size_full().into_any_element()
+        div()
+            .id("ide-preview-web-fake")
+            .test_support()
+            .size_full()
+            .into_any_element()
     }
     fn set_shown(&self, _: bool, _: &mut App) {}
 }
@@ -734,8 +1030,19 @@ fn file_url(path: &Path) -> String {
 
 /// `/<name>`, percent-encoded.
 fn file_path(path: &Path) -> String {
-    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    std::iter::once("/".to_string()).chain(name.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })).collect()
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    std::iter::once("/".to_string())
+        .chain(name.bytes().map(|b| {
+            if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        }))
+        .collect()
 }
 
 /// The page a video or a song plays in: the engine's own player, still until it's played (a
@@ -767,7 +1074,11 @@ fn answer(path: &Path, asked: &str, range: Option<&str>) -> wry::http::Response<
 }
 
 fn file_origin(windows: bool) -> String {
-    if windows { format!("http://{FILE_SCHEME}.preview") } else { format!("{FILE_SCHEME}://preview") }
+    if windows {
+        format!("http://{FILE_SCHEME}.preview")
+    } else {
+        format!("{FILE_SCHEME}://preview")
+    }
 }
 
 /// The largest piece of a file one answer carries: players ask for the rest as they need it.
@@ -781,7 +1092,9 @@ const WHOLE_LIMIT: u64 = 256 << 20;
 /// The first and last byte `range` (a `Range` header) asks for of a file `len` long: `None` for
 /// the whole file, `Err` when it asks for none of it.
 fn parse_range(range: Option<&str>, len: u64) -> Result<Option<(u64, u64)>, ()> {
-    let Some(spec) = range.and_then(|r| r.trim().strip_prefix("bytes=")) else { return Ok(None) };
+    let Some(spec) = range.and_then(|r| r.trim().strip_prefix("bytes=")) else {
+        return Ok(None);
+    };
     // Only the first of several ranges: players ask for one at a time.
     let spec = spec.split(',').next().unwrap_or_default().trim();
     let (a, b) = spec.split_once('-').ok_or(())?;
@@ -792,7 +1105,10 @@ fn parse_range(range: Option<&str>, len: u64) -> Result<Option<(u64, u64)>, ()> 
             (len.saturating_sub(n), len.saturating_sub(1))
         }
         (s, "") => (s.parse().map_err(|_| ())?, len.saturating_sub(1)),
-        (s, e) => (s.parse().map_err(|_| ())?, e.parse::<u64>().map_err(|_| ())?.min(len.saturating_sub(1))),
+        (s, e) => (
+            s.parse().map_err(|_| ())?,
+            e.parse::<u64>().map_err(|_| ())?.min(len.saturating_sub(1)),
+        ),
     };
     if len == 0 || start >= len || start > end {
         return Err(());
@@ -805,18 +1121,41 @@ fn parse_range(range: Option<&str>, len: u64) -> Result<Option<(u64, u64)>, ()> 
 pub(crate) fn serve(path: &Path, range: Option<&str>) -> wry::http::Response<Vec<u8>> {
     use std::io::{Read as _, Seek as _};
     let mime = mime(path);
-    let fail = |status: u16| wry::http::Response::builder().status(status).body(Vec::new()).unwrap_or_default();
-    let Ok(mut file) = std::fs::File::open(path) else { return fail(404) };
-    let Ok(len) = file.metadata().map(|m| m.len()) else { return fail(404) };
+    let fail = |status: u16| {
+        wry::http::Response::builder()
+            .status(status)
+            .body(Vec::new())
+            .unwrap_or_default()
+    };
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return fail(404);
+    };
+    let Ok(len) = file.metadata().map(|m| m.len()) else {
+        return fail(404);
+    };
     // `nosniff`: a file called .pdf that holds a web page is still only offered as a PDF.
-    let base = || wry::http::Response::builder().header("Content-Type", mime).header("X-Content-Type-Options", "nosniff").header("Accept-Ranges", "bytes").header("Cache-Control", "no-store");
+    let base = || {
+        wry::http::Response::builder()
+            .header("Content-Type", mime)
+            .header("X-Content-Type-Options", "nosniff")
+            .header("Accept-Ranges", "bytes")
+            .header("Cache-Control", "no-store")
+    };
     match parse_range(range, len) {
         Ok(Some((start, end))) => {
             let mut body = vec![0; (end - start + 1) as usize];
-            if file.seek(std::io::SeekFrom::Start(start)).and_then(|_| file.read_exact(&mut body)).is_err() {
+            if file
+                .seek(std::io::SeekFrom::Start(start))
+                .and_then(|_| file.read_exact(&mut body))
+                .is_err()
+            {
                 return fail(500);
             }
-            base().status(206).header("Content-Range", format!("bytes {start}-{end}/{len}")).body(body).unwrap_or_default()
+            base()
+                .status(206)
+                .header("Content-Range", format!("bytes {start}-{end}/{len}"))
+                .body(body)
+                .unwrap_or_default()
         }
         Ok(None) if len > WHOLE_LIMIT => fail(413),
         Ok(None) => {
@@ -826,7 +1165,11 @@ pub(crate) fn serve(path: &Path, range: Option<&str>) -> wry::http::Response<Vec
             }
             base().status(200).body(body).unwrap_or_default()
         }
-        Err(()) => wry::http::Response::builder().status(416).header("Content-Range", format!("bytes */{len}")).body(Vec::new()).unwrap_or_default(),
+        Err(()) => wry::http::Response::builder()
+            .status(416)
+            .header("Content-Range", format!("bytes */{len}"))
+            .body(Vec::new())
+            .unwrap_or_default(),
     }
 }
 
@@ -874,7 +1217,11 @@ fn native_web(path: &Path, window: &mut Window, cx: &mut App) -> Option<Box<dyn 
     #[cfg(not(windows))]
     let builder = wry::WebViewBuilder::new();
     // A PDF opens as itself, in the engine's viewer; a video or a song in the page that holds it.
-    let start = if kind_by_name(path) == Some(Kind::Media) { origin.clone() } else { file_url(path) };
+    let start = if kind_by_name(path) == Some(Kind::Media) {
+        origin.clone()
+    } else {
+        file_url(path)
+    };
     let built = builder
         .with_url(start)
         .with_visible(false)
@@ -885,7 +1232,11 @@ fn native_web(path: &Path, window: &mut Window, cx: &mut App) -> Option<Box<dyn 
         .with_asynchronous_custom_protocol(FILE_SCHEME.into(), move |_, request, responder| {
             let file = file.clone();
             let asked = request.uri().path().to_string();
-            let range = request.headers().get("range").and_then(|r| r.to_str().ok()).map(str::to_string);
+            let range = request
+                .headers()
+                .get("range")
+                .and_then(|r| r.to_str().ok())
+                .map(str::to_string);
             std::thread::spawn(move || responder.respond(answer(&file, &asked, range.as_deref())));
         })
         // The file's own page only: a link in a PDF goes nowhere from here.
@@ -895,13 +1246,18 @@ fn native_web(path: &Path, window: &mut Window, cx: &mut App) -> Option<Box<dyn 
         .build_as_child(&handle)
         .inspect_err(|e| tracing::warn!("preview: no web view: {e}"))
         .ok()?;
-    Some(Box::new(NativeWeb(cx.new(|cx| gpui_wry::WebView::new(built, window, cx)))))
+    Some(Box::new(NativeWeb(
+        cx.new(|cx| gpui_wry::WebView::new(built, window, cx)),
+    )))
 }
 
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's prelude has a `test` macro of its own.
-    use super::{CHUNK, Kind, MEDIA_CSP, WHOLE_LIMIT, answer, cloud_app, file_origin, file_url, kind, kind_label, parse_range, serve, unreadable_words};
+    use super::{
+        CHUNK, Kind, MEDIA_CSP, WHOLE_LIMIT, answer, cloud_app, file_origin, file_url, kind,
+        kind_label, parse_range, serve, unreadable_words,
+    };
     use std::path::Path;
 
     #[test]
@@ -919,14 +1275,37 @@ mod tests {
             assert_eq!(kind(Path::new(name), b"anything"), want, "{name}");
         }
         assert_eq!(kind(Path::new("notes.txt"), b"plain words\n"), Kind::Text);
-        assert_eq!(kind(Path::new("notes.txt"), b"plain\0words"), Kind::Binary, "a NUL makes even a .txt binary");
-        assert_eq!(kind(Path::new("data.bin"), "plain UTF-8, ünïcode\n".as_bytes()), Kind::Text, "a .bin of text is text");
-        assert_eq!(kind(Path::new("Makefile"), b""), Kind::Text, "an empty file is text");
-        assert_eq!(kind(Path::new("latin1.txt"), b"caf\xe9 au lait"), Kind::Binary, "not UTF-8");
+        assert_eq!(
+            kind(Path::new("notes.txt"), b"plain\0words"),
+            Kind::Binary,
+            "a NUL makes even a .txt binary"
+        );
+        assert_eq!(
+            kind(Path::new("data.bin"), "plain UTF-8, ünïcode\n".as_bytes()),
+            Kind::Text,
+            "a .bin of text is text"
+        );
+        assert_eq!(
+            kind(Path::new("Makefile"), b""),
+            Kind::Text,
+            "an empty file is text"
+        );
+        assert_eq!(
+            kind(Path::new("latin1.txt"), b"caf\xe9 au lait"),
+            Kind::Binary,
+            "not UTF-8"
+        );
         // A character cut off by the sample's edge is still text.
         let cut = &"é".as_bytes()[..1];
-        assert_eq!(kind(Path::new("long.txt"), &[b"x".as_slice(), cut].concat()), Kind::Text);
-        assert_eq!(kind(Path::new(r"C:\Users\me\Pictures\a.webp"), b""), Kind::Image, "a Windows path anywhere");
+        assert_eq!(
+            kind(Path::new("long.txt"), &[b"x".as_slice(), cut].concat()),
+            Kind::Text
+        );
+        assert_eq!(
+            kind(Path::new(r"C:\Users\me\Pictures\a.webp"), b""),
+            Kind::Image,
+            "a Windows path anywhere"
+        );
     }
 
     #[test]
@@ -950,22 +1329,44 @@ mod tests {
             unreadable_words("launcher_imgui.ini", &not_running, cloud_app(path), true),
             "This file is kept online by OneDrive and OneDrive isn't running. Start OneDrive, or right-click the file in Explorer and choose 'Always keep on this device'."
         );
-        assert_eq!(cloud_app(Path::new(r"C:\Users\me\OneDrive - Contoso\a.txt")), Some("OneDrive"), "a work OneDrive too");
+        assert_eq!(
+            cloud_app(Path::new(r"C:\Users\me\OneDrive - Contoso\a.txt")),
+            Some("OneDrive"),
+            "a work OneDrive too"
+        );
         let words = unreadable_words("a.txt", &std::io::Error::from_raw_os_error(404), None, true);
-        assert!(words.starts_with("This file is kept online by a cloud storage app that isn't running."), "{words}");
+        assert!(
+            words
+                .starts_with("This file is kept online by a cloud storage app that isn't running."),
+            "{words}"
+        );
         // 362 means nothing of the kind outside Windows.
-        assert!(unreadable_words("a.txt", &not_running, Some("OneDrive"), false).starts_with("Can't read a.txt: "));
+        assert!(
+            unreadable_words("a.txt", &not_running, Some("OneDrive"), false)
+                .starts_with("Can't read a.txt: ")
+        );
         assert_eq!(cloud_app(Path::new("/Users/me/Documents/a.txt")), None);
     }
 
     #[test]
     fn other_errors_name_the_file_and_say_the_error() {
         let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Access is denied.");
-        assert_eq!(unreadable_words("secret.key", &denied, None, true), "Can't read secret.key: Access is denied.");
+        assert_eq!(
+            unreadable_words("secret.key", &denied, None, true),
+            "Can't read secret.key: Access is denied."
+        );
         #[cfg(windows)]
         {
-            let words = unreadable_words("secret.key", &std::io::Error::from_raw_os_error(5), None, true);
-            assert!(words.starts_with("Can't read secret.key: ") && words.contains("os error 5"), "{words}");
+            let words = unreadable_words(
+                "secret.key",
+                &std::io::Error::from_raw_os_error(5),
+                None,
+                true,
+            );
+            assert!(
+                words.starts_with("Can't read secret.key: ") && words.contains("os error 5"),
+                "{words}"
+            );
         }
     }
 
@@ -975,12 +1376,28 @@ mod tests {
         assert_eq!(parse_range(Some("bytes=0-9"), 100), Ok(Some((0, 9))));
         assert_eq!(parse_range(Some("bytes=90-"), 100), Ok(Some((90, 99))));
         assert_eq!(parse_range(Some("bytes=-10"), 100), Ok(Some((90, 99))));
-        assert_eq!(parse_range(Some("bytes=50-500"), 100), Ok(Some((50, 99))), "clamped to the file");
-        assert_eq!(parse_range(Some("bytes=0-"), 100 << 20), Ok(Some((0, CHUNK - 1))), "an open end gets a piece");
-        assert_eq!(parse_range(Some("bytes=100-"), 100), Err(()), "past the end");
+        assert_eq!(
+            parse_range(Some("bytes=50-500"), 100),
+            Ok(Some((50, 99))),
+            "clamped to the file"
+        );
+        assert_eq!(
+            parse_range(Some("bytes=0-"), 100 << 20),
+            Ok(Some((0, CHUNK - 1))),
+            "an open end gets a piece"
+        );
+        assert_eq!(
+            parse_range(Some("bytes=100-"), 100),
+            Err(()),
+            "past the end"
+        );
         assert_eq!(parse_range(Some("bytes=9-3"), 100), Err(()));
         assert_eq!(parse_range(Some("bytes=x-1"), 100), Err(()));
-        assert_eq!(parse_range(Some("items=0-1"), 100), Ok(None), "not bytes: the whole file");
+        assert_eq!(
+            parse_range(Some("items=0-1"), 100),
+            Ok(None),
+            "not bytes: the whole file"
+        );
     }
 
     #[test]
@@ -996,8 +1413,15 @@ mod tests {
         assert_eq!(whole.headers()["x-content-type-options"], "nosniff");
         // Whole, a file is held in memory: past the limit only pieces are handed over.
         let huge = dir.join("huge.pdf");
-        std::fs::File::create(&huge).unwrap().set_len(WHOLE_LIMIT + 1).unwrap();
-        assert_eq!(serve(&huge, None).status(), 413, "no 256 MB allocation to answer a request");
+        std::fs::File::create(&huge)
+            .unwrap()
+            .set_len(WHOLE_LIMIT + 1)
+            .unwrap();
+        assert_eq!(
+            serve(&huge, None).status(),
+            413,
+            "no 256 MB allocation to answer a request"
+        );
         assert_eq!(serve(&huge, Some("bytes=0-9")).body(), &[0u8; 10]);
         let part = serve(&file, Some("bytes=2-4"));
         assert_eq!(part.status(), 206);
@@ -1007,7 +1431,10 @@ mod tests {
         assert_eq!(serve(&dir.join("gone.mp4"), None).status(), 404);
         std::fs::remove_dir_all(&dir).unwrap();
         // The address names the file, encoded, under the scheme's own origin.
-        assert_eq!(file_url(Path::new("/x/my clip#1.mp4")), format!("{}/my%20clip%231.mp4", file_origin(cfg!(windows))));
+        assert_eq!(
+            file_url(Path::new("/x/my clip#1.mp4")),
+            format!("{}/my%20clip%231.mp4", file_origin(cfg!(windows)))
+        );
         assert_eq!(file_origin(true), "http://trek-file.preview");
         assert_eq!(file_origin(false), "trek-file://preview");
     }
@@ -1016,7 +1443,11 @@ mod tests {
     fn video_and_audio_play_in_a_page_that_waits_to_be_played_and_runs_nothing() {
         let dir = std::env::temp_dir().join(format!("trek-preview-page-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let (clip, song, pdf) = (dir.join("my clip.mp4"), dir.join("song.mp3"), dir.join("paper.pdf"));
+        let (clip, song, pdf) = (
+            dir.join("my clip.mp4"),
+            dir.join("song.mp3"),
+            dir.join("paper.pdf"),
+        );
         for f in [&clip, &song, &pdf] {
             std::fs::write(f, b"bytes").unwrap();
         }
@@ -1024,14 +1455,31 @@ mod tests {
         assert_eq!(page.headers()["content-type"], "text/html; charset=utf-8");
         assert_eq!(page.headers()["content-security-policy"], MEDIA_CSP);
         let html = String::from_utf8(page.body().clone()).unwrap();
-        assert!(html.contains("<video src=\"/my%20clip.mp4\" controls controlslist=\"nodownload\""), "{html}");
+        assert!(
+            html.contains("<video src=\"/my%20clip.mp4\" controls controlslist=\"nodownload\""),
+            "{html}"
+        );
         assert_eq!(page.headers()["x-content-type-options"], "nosniff");
-        assert!(!html.contains("autoplay") && !html.contains("<script"), "{html}");
-        assert!(String::from_utf8(answer(&song, "/", None).body().clone()).unwrap().contains("<audio src=\"/song.mp3\" controls"));
+        assert!(
+            !html.contains("autoplay") && !html.contains("<script"),
+            "{html}"
+        );
+        assert!(
+            String::from_utf8(answer(&song, "/", None).body().clone())
+                .unwrap()
+                .contains("<audio src=\"/song.mp3\" controls")
+        );
         // The file itself under any other path; a PDF is the file even at `/`.
         assert_eq!(answer(&clip, "/my%20clip.mp4", None).body(), b"bytes");
-        assert_eq!(answer(&clip, "/../../etc/passwd", None).body(), b"bytes", "only ever the one file");
-        assert_eq!(answer(&pdf, "/", None).headers()["content-type"], "application/pdf");
+        assert_eq!(
+            answer(&clip, "/../../etc/passwd", None).body(),
+            b"bytes",
+            "only ever the one file"
+        );
+        assert_eq!(
+            answer(&pdf, "/", None).headers()["content-type"],
+            "application/pdf"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

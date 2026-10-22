@@ -63,7 +63,10 @@ pub struct Video {
 
 impl Default for Video {
     fn default() -> Self {
-        let scratch = std::env::var_os(ENV_VIDEO_DIR).map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| std::env::temp_dir().join("trek-videos"));
+        let scratch = std::env::var_os(ENV_VIDEO_DIR)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| std::env::temp_dir().join("trek-videos"));
         Self { scratch }
     }
 }
@@ -116,14 +119,18 @@ pub fn parse_source(raw: &str, cwd: &Path, home: Option<&Path>) -> Result<Source
         });
     }
     let path = if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
-        home.ok_or("No home folder to resolve ~ against")?.join(rest)
+        home.ok_or("No home folder to resolve ~ against")?
+            .join(rest)
     } else {
         cwd.join(raw)
     };
     match std::fs::metadata(&path) {
         Ok(m) if m.is_file() => Ok(Source::Local(path.canonicalize().unwrap_or(path))),
         Ok(_) => Err(format!("{} is a folder, not a video file", path.display())),
-        Err(_) => Err(format!("No file at {}. Pass an existing video file's path, or an https URL.", path.display())),
+        Err(_) => Err(format!(
+            "No file at {}. Pass an existing video file's path, or an https URL.",
+            path.display()
+        )),
     }
 }
 
@@ -132,7 +139,10 @@ fn scheme_of(s: &str) -> Option<&str> {
     let (scheme, _) = s.split_once(':')?;
     let mut chars = scheme.chars();
     let first = chars.next()?;
-    (scheme.len() > 1 && first.is_ascii_alphabetic() && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))).then_some(scheme)
+    (scheme.len() > 1
+        && first.is_ascii_alphabetic()
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+    .then_some(scheme)
 }
 
 fn parse_https(url: &str) -> Result<Source, String> {
@@ -147,17 +157,32 @@ fn parse_https(url: &str) -> Result<Source, String> {
     let host = if authority.starts_with('[') {
         return Err("URLs to an IP address aren't fetched: use the site's name".into());
     } else {
-        authority.rsplit_once(':').map_or(authority, |(h, _)| h).trim_end_matches('.').to_ascii_lowercase()
+        authority
+            .rsplit_once(':')
+            .map_or(authority, |(h, _)| h)
+            .trim_end_matches('.')
+            .to_ascii_lowercase()
     };
     if host.is_empty() || !host.contains('.') {
         return Err(format!("{url} has no public host name"));
     }
-    if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") || host.ends_with(".internal") || host.parse::<std::net::Ipv4Addr>().is_ok() {
+    if host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || host.parse::<std::net::Ipv4Addr>().is_ok()
+    {
         return Err("URLs on this computer or its local network aren't fetched".into());
     }
-    let bare = ["www.", "m.", "mobile.", "music."].iter().find_map(|p| host.strip_prefix(p)).unwrap_or(&host);
+    let bare = ["www.", "m.", "mobile.", "music."]
+        .iter()
+        .find_map(|p| host.strip_prefix(p))
+        .unwrap_or(&host);
     Ok(match SITES.iter().find(|(h, _)| *h == bare) {
-        Some((_, site)) => Source::Site { url: url.to_string(), site },
+        Some((_, site)) => Source::Site {
+            url: url.to_string(),
+            site,
+        },
         None => Source::Url(url.to_string()),
     })
 }
@@ -184,21 +209,47 @@ pub struct VideoStream {
 
 /// ffprobe's `-print_format json -show_format -show_streams`, read.
 pub fn parse_probe(out: &str) -> Result<Meta, String> {
-    let v: Value = serde_json::from_str(out).map_err(|e| format!("ffprobe said something unreadable: {e}"))?;
-    let num = |v: &Value| v.as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v.as_f64()).filter(|d| d.is_finite() && *d >= 0.);
+    let v: Value =
+        serde_json::from_str(out).map_err(|e| format!("ffprobe said something unreadable: {e}"))?;
+    let num = |v: &Value| {
+        v.as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .or_else(|| v.as_f64())
+            .filter(|d| d.is_finite() && *d >= 0.)
+    };
     let streams = v["streams"].as_array().cloned().unwrap_or_default();
-    let video = streams.iter().find(|s| s["codec_type"] == "video" && s["disposition"]["attached_pic"].as_i64() != Some(1)).map(|s| VideoStream {
-        codec: s["codec_name"].as_str().unwrap_or("unknown").to_string(),
-        width: s["width"].as_u64().unwrap_or(0) as u32,
-        height: s["height"].as_u64().unwrap_or(0) as u32,
-        fps: s["avg_frame_rate"].as_str().and_then(rate).or_else(|| s["r_frame_rate"].as_str().and_then(rate)),
+    let video = streams
+        .iter()
+        .find(|s| {
+            s["codec_type"] == "video" && s["disposition"]["attached_pic"].as_i64() != Some(1)
+        })
+        .map(|s| VideoStream {
+            codec: s["codec_name"].as_str().unwrap_or("unknown").to_string(),
+            width: s["width"].as_u64().unwrap_or(0) as u32,
+            height: s["height"].as_u64().unwrap_or(0) as u32,
+            fps: s["avg_frame_rate"]
+                .as_str()
+                .and_then(rate)
+                .or_else(|| s["r_frame_rate"].as_str().and_then(rate)),
+        });
+    let audio = streams
+        .iter()
+        .find(|s| s["codec_type"] == "audio")
+        .map(|s| s["codec_name"].as_str().unwrap_or("unknown").to_string());
+    let duration = num(&v["format"]["duration"]).or_else(|| {
+        streams
+            .iter()
+            .filter_map(|s| num(&s["duration"]))
+            .reduce(f64::max)
     });
-    let audio = streams.iter().find(|s| s["codec_type"] == "audio").map(|s| s["codec_name"].as_str().unwrap_or("unknown").to_string());
-    let duration = num(&v["format"]["duration"]).or_else(|| streams.iter().filter_map(|s| num(&s["duration"])).reduce(f64::max));
     Ok(Meta {
         duration,
         size: v["format"]["size"].as_str().and_then(|s| s.parse().ok()),
-        container: v["format"]["format_long_name"].as_str().or(v["format"]["format_name"].as_str()).unwrap_or_default().to_string(),
+        container: v["format"]["format_long_name"]
+            .as_str()
+            .or(v["format"]["format_name"].as_str())
+            .unwrap_or_default()
+            .to_string(),
         video,
         audio,
     })
@@ -214,7 +265,11 @@ fn rate(r: &str) -> Option<f64> {
 // ---------- which frames ----------
 
 /// The part of the video to watch: `start`/`end` as asked, kept within its `duration`.
-pub fn resolve_range(duration: Option<f64>, start: Option<f64>, end: Option<f64>) -> Result<(f64, f64), String> {
+pub fn resolve_range(
+    duration: Option<f64>,
+    start: Option<f64>,
+    end: Option<f64>,
+) -> Result<(f64, f64), String> {
     let start = start.unwrap_or(0.);
     if !start.is_finite() || start < 0. {
         return Err("`start` must be a number of seconds, 0 or more".into());
@@ -226,15 +281,25 @@ pub fn resolve_range(duration: Option<f64>, start: Option<f64>, end: Option<f64>
         (Some(e), Some(d)) => e.min(d),
         (Some(e), None) => e,
         (None, Some(d)) => d,
-        (None, None) => return Err("Couldn't read how long the video is; pass `end` in seconds".into()),
+        (None, None) => {
+            return Err("Couldn't read how long the video is; pass `end` in seconds".into());
+        }
     };
     if let Some(d) = duration
         && start >= d
     {
-        return Err(format!("`start` ({}s) is past the end: the video is {}s long", fmt_num(start), fmt_num(d)));
+        return Err(format!(
+            "`start` ({}s) is past the end: the video is {}s long",
+            fmt_num(start),
+            fmt_num(d)
+        ));
     }
     if end <= start {
-        return Err(format!("`end` ({}s) must come after `start` ({}s)", fmt_num(end), fmt_num(start)));
+        return Err(format!(
+            "`end` ({}s) must come after `start` ({}s)",
+            fmt_num(end),
+            fmt_num(start)
+        ));
     }
     Ok((start, end))
 }
@@ -260,7 +325,10 @@ pub fn plan_frames(start: f64, end: f64, fps: f64, max: usize) -> Plan {
     let wanted = (span * fps).ceil().clamp(1., 1e9) as usize;
     let n = wanted.min(max.max(1));
     let step = span / n as f64;
-    Plan { times: (0..n).map(|i| start + (i as f64 + 0.5) * step).collect(), wanted }
+    Plan {
+        times: (0..n).map(|i| start + (i as f64 + 0.5) * step).collect(),
+        wanted,
+    }
 }
 
 /// Which of frames of `sizes` bytes to keep within `budget`: all of them, or as many as fit, spread
@@ -269,7 +337,9 @@ pub fn fit_budget(sizes: &[u64], budget: u64) -> Vec<usize> {
     let n = sizes.len();
     let mut k = n;
     loop {
-        let keep: Vec<usize> = (0..k).map(|i| ((i as f64 + 0.5) * n as f64 / k as f64) as usize).collect();
+        let keep: Vec<usize> = (0..k)
+            .map(|i| ((i as f64 + 0.5) * n as f64 / k as f64) as usize)
+            .collect();
         if k <= 1 || keep.iter().map(|&i| sizes[i]).sum::<u64>() <= budget {
             return keep;
         }
@@ -300,12 +370,19 @@ pub fn chunk_plan(start: f64, end: f64, max: f64) -> Vec<(f64, f64)> {
 
 /// Transcribe each of `chunks` with `run` (which answers in seconds from the chunk's start), on
 /// the video's timeline. Chunks that fail are left out and said why; all failing is an error.
-pub fn transcribe_chunks(chunks: &[(f64, f64)], mut run: impl FnMut(f64, f64) -> Result<Vec<Segment>, String>) -> Result<(Vec<Segment>, Vec<String>), String> {
+pub fn transcribe_chunks(
+    chunks: &[(f64, f64)],
+    mut run: impl FnMut(f64, f64) -> Result<Vec<Segment>, String>,
+) -> Result<(Vec<Segment>, Vec<String>), String> {
     let mut out = Vec::new();
     let mut failed = Vec::new();
     for &(offset, len) in chunks {
         match run(offset, len) {
-            Ok(segments) => out.extend(segments.into_iter().map(|s| Segment { start: s.start + offset, end: s.end + offset, ..s })),
+            Ok(segments) => out.extend(segments.into_iter().map(|s| Segment {
+                start: s.start + offset,
+                end: s.end + offset,
+                ..s
+            })),
             Err(e) => failed.push(format!("{}–{}: {e}", clock(offset), clock(offset + len))),
         }
     }
@@ -326,7 +403,10 @@ pub fn group_words(words: &[Segment]) -> Vec<Segment> {
                 line.text.push_str(w.text.trim());
                 line.end = w.end;
             }
-            _ => lines.push(Segment { text: w.text.trim().to_string(), ..w.clone() }),
+            _ => lines.push(Segment {
+                text: w.text.trim().to_string(),
+                ..w.clone()
+            }),
         }
         open = !w.text.trim_end().ends_with(['.', '?', '!']);
     }
@@ -336,8 +416,17 @@ pub fn group_words(words: &[Segment]) -> Vec<Segment> {
 /// Seconds as `m:ss.s` (`h:mm:ss.s` from an hour).
 pub fn clock(secs: f64) -> String {
     let tenths = (secs.max(0.) * 10.).round() as u64;
-    let (h, m, s, t) = (tenths / 36000, tenths / 600 % 60, tenths / 10 % 60, tenths % 10);
-    if h > 0 { format!("{h}:{m:02}:{s:02}.{t}") } else { format!("{m}:{s:02}.{t}") }
+    let (h, m, s, t) = (
+        tenths / 36000,
+        tenths / 600 % 60,
+        tenths / 10 % 60,
+        tenths % 10,
+    );
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}.{t}")
+    } else {
+        format!("{m}:{s:02}.{t}")
+    }
 }
 
 fn size_text(bytes: u64) -> String {
@@ -357,7 +446,8 @@ fn find(name: &str) -> Option<PathBuf> {
 }
 
 fn path_str(p: &Path) -> Result<&str, String> {
-    p.to_str().ok_or_else(|| format!("{} isn't a UTF-8 path", p.display()))
+    p.to_str()
+        .ok_or_else(|| format!("{} isn't a UTF-8 path", p.display()))
 }
 
 /// How ffmpeg and ffprobe are to read `file`: as a file, whatever its name says (a file called
@@ -379,7 +469,9 @@ struct Ask {
 
 fn read_args(args: &Value) -> Result<Ask, String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from);
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
     let source = parse_source(arg_str(args, "source")?, &cwd, home.as_deref())?;
     let fps = rpc::opt_f64(args, "fps")?;
     if fps.is_some_and(|f| !f.is_finite() || f <= 0.) {
@@ -389,7 +481,13 @@ fn read_args(args: &Value) -> Result<Ask, String> {
         None | Some(Value::Null) => true,
         Some(v) => v.as_bool().ok_or("`transcript` must be true or false")?,
     };
-    Ok(Ask { source, start: rpc::opt_f64(args, "start")?, end: rpc::opt_f64(args, "end")?, fps, transcript })
+    Ok(Ask {
+        source,
+        start: rpc::opt_f64(args, "start")?,
+        end: rpc::opt_f64(args, "end")?,
+        fps,
+        transcript,
+    })
 }
 
 impl Video {
@@ -403,15 +501,28 @@ impl Video {
     fn scratch_dir(&self) -> Result<PathBuf, String> {
         if let Ok(entries) = std::fs::read_dir(&self.scratch) {
             for e in entries.flatten() {
-                let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > KEEP);
+                let old = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > KEEP);
                 if old && e.path().is_dir() {
                     let _ = std::fs::remove_dir_all(e.path());
                 }
             }
         }
-        let ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or_default();
+        let ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or_default();
         let dir = self.scratch.join(format!("{ms}-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("frames")).map_err(|e| format!("Couldn't make a scratch folder in {}: {e}", self.scratch.display()))?;
+        std::fs::create_dir_all(dir.join("frames")).map_err(|e| {
+            format!(
+                "Couldn't make a scratch folder in {}: {e}",
+                self.scratch.display()
+            )
+        })?;
         Ok(dir)
     }
 
@@ -428,8 +539,21 @@ impl Video {
         };
         let ffmpeg = path_str(&ffmpeg)?.to_string();
         let input = input_arg(&file)?;
-        let probe = util::run_ok(path_str(&ffprobe)?, &["-v", "error", "-print_format", "json", "-show_format", "-show_streams", &input], None, Duration::from_secs(60))
-            .map_err(|e| format!("ffprobe couldn't read {source_text}: {e}"))?;
+        let probe = util::run_ok(
+            path_str(&ffprobe)?,
+            &[
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_format",
+                "-show_streams",
+                &input,
+            ],
+            None,
+            Duration::from_secs(60),
+        )
+        .map_err(|e| format!("ffprobe couldn't read {source_text}: {e}"))?;
         let meta = parse_probe(&probe)?;
         if meta.video.is_none() && meta.audio.is_none() {
             return Err(format!("{source_text} has no video or audio in it"));
@@ -438,7 +562,12 @@ impl Video {
         let mut notes = Vec::new();
         let fps = ask.fps.unwrap_or(1.);
         let fps = if fps > MAX_FPS {
-            notes.push(format!("fps {} is more than the {} this takes; used {}.", fmt_num(fps), fmt_num(MAX_FPS), fmt_num(MAX_FPS)));
+            notes.push(format!(
+                "fps {} is more than the {} this takes; used {}.",
+                fmt_num(fps),
+                fmt_num(MAX_FPS),
+                fmt_num(MAX_FPS)
+            ));
             MAX_FPS
         } else {
             fps
@@ -456,12 +585,21 @@ impl Video {
                 }
             }
             if frames.is_empty() {
-                return Err(format!("ffmpeg couldn't take any frames from {source_text}"));
+                return Err(format!(
+                    "ffmpeg couldn't take any frames from {source_text}"
+                ));
             }
-            let sizes: Vec<u64> = frames.iter().map(|(_, p)| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)).collect();
+            let sizes: Vec<u64> = frames
+                .iter()
+                .map(|(_, p)| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+                .collect();
             let keep = fit_budget(&sizes, FRAME_BUDGET);
             if keep.len() < frames.len() {
-                notes.push(format!("The frames came to more than {}, so {} of them are shown, spread evenly.", size_text(FRAME_BUDGET), keep.len()));
+                notes.push(format!(
+                    "The frames came to more than {}, so {} of them are shown, spread evenly.",
+                    size_text(FRAME_BUDGET),
+                    keep.len()
+                ));
                 let dropped: Vec<usize> = (0..frames.len()).filter(|i| !keep.contains(i)).collect();
                 for &i in &dropped {
                     let _ = std::fs::remove_file(&frames[i].1);
@@ -491,7 +629,10 @@ impl Video {
             match transcribe(&ffmpeg, &input, start, end, &dir) {
                 Ok((how, segments, failed)) => {
                     if !failed.is_empty() {
-                        notes.push(format!("Parts of the audio couldn't be transcribed: {}", failed.join("; ")));
+                        notes.push(format!(
+                            "Parts of the audio couldn't be transcribed: {}",
+                            failed.join("; ")
+                        ));
                     }
                     transcript = Some((how, segments));
                 }
@@ -501,12 +642,36 @@ impl Video {
 
         // The manifest Trek reads, then the answer.
         let manifest = dir.join(MANIFEST);
-        let doc = manifest_json(&source_text, &file, &meta, (start, end), &frames, transcript.as_ref().map(|(_, s)| s.as_slice()).unwrap_or_default());
-        std::fs::write(&manifest, serde_json::to_vec_pretty(&doc).unwrap_or_default()).map_err(|e| format!("Couldn't write {}: {e}", manifest.display()))?;
-        let summary = summary_text(&source_text, &manifest, &meta, (start, end), plan.as_ref(), &frames, transcript.as_ref(), &notes);
+        let doc = manifest_json(
+            &source_text,
+            &file,
+            &meta,
+            (start, end),
+            &frames,
+            transcript
+                .as_ref()
+                .map(|(_, s)| s.as_slice())
+                .unwrap_or_default(),
+        );
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec_pretty(&doc).unwrap_or_default(),
+        )
+        .map_err(|e| format!("Couldn't write {}: {e}", manifest.display()))?;
+        let summary = summary_text(
+            &source_text,
+            &manifest,
+            &meta,
+            (start, end),
+            plan.as_ref(),
+            &frames,
+            transcript.as_ref(),
+            &notes,
+        );
         let mut out = vec![text(summary)];
         for (_, path) in &frames {
-            let bytes = std::fs::read(path).map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
+            let bytes = std::fs::read(path)
+                .map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
             out.push(json!({ "type": "image", "data": base64::engine::general_purpose::STANDARD.encode(bytes), "mimeType": "image/jpeg" }));
         }
         Ok(out)
@@ -514,7 +679,14 @@ impl Video {
 }
 
 /// The manifest: what Trek's player and frame strip are drawn from (`trek_core::media::Watch`).
-fn manifest_json(source: &str, file: &Path, meta: &Meta, (start, end): (f64, f64), frames: &[(f64, PathBuf)], transcript: &[Segment]) -> Value {
+fn manifest_json(
+    source: &str,
+    file: &Path,
+    meta: &Meta,
+    (start, end): (f64, f64),
+    frames: &[(f64, PathBuf)],
+    transcript: &[Segment],
+) -> Value {
     json!({
         "source": source,
         "video": file,
@@ -529,7 +701,16 @@ fn manifest_json(source: &str, file: &Path, meta: &Meta, (start, end): (f64, f64
 }
 
 #[allow(clippy::too_many_arguments)]
-fn summary_text(source: &str, manifest: &Path, meta: &Meta, (start, end): (f64, f64), plan: Option<&Plan>, frames: &[(f64, PathBuf)], transcript: Option<&(String, Vec<Segment>)>, notes: &[String]) -> String {
+fn summary_text(
+    source: &str,
+    manifest: &Path,
+    meta: &Meta,
+    (start, end): (f64, f64),
+    plan: Option<&Plan>,
+    frames: &[(f64, PathBuf)],
+    transcript: Option<&(String, Vec<Segment>)>,
+    notes: &[String],
+) -> String {
     let mut s = format!("Watched {source}\nManifest: {}\n", manifest.display());
     let mut what: Vec<String> = Vec::new();
     if let Some(d) = meta.duration {
@@ -552,9 +733,17 @@ fn summary_text(source: &str, manifest: &Path, meta: &Meta, (start, end): (f64, 
         what.push(meta.container.clone());
     }
     s.push_str(&format!("Video: {}\n", what.join(" · ")));
-    s.push_str(&format!("Watched from {} to {}\n", clock(start), clock(end)));
+    s.push_str(&format!(
+        "Watched from {} to {}\n",
+        clock(start),
+        clock(end)
+    ));
     if plan.is_some() {
-        s.push_str(&format!("\nFrames ({}, at most {} px on the long side; the images follow in this order):\n", frames.len(), LONG_SIDE));
+        s.push_str(&format!(
+            "\nFrames ({}, at most {} px on the long side; the images follow in this order):\n",
+            frames.len(),
+            LONG_SIDE
+        ));
         for (i, (t, _)) in frames.iter().enumerate() {
             s.push_str(&format!("  {}. {}\n", i + 1, clock(*t)));
         }
@@ -571,37 +760,114 @@ fn summary_text(source: &str, manifest: &Path, meta: &Meta, (start, end): (f64, 
             s.push_str("  (no speech heard)\n");
         }
         for seg in segments {
-            s.push_str(&format!("  [{}–{}] {}\n", clock(seg.start), clock(seg.end), seg.text.trim()));
+            s.push_str(&format!(
+                "  [{}–{}] {}\n",
+                clock(seg.start),
+                clock(seg.end),
+                seg.text.trim()
+            ));
         }
     }
     s
 }
 
 fn extract_frame(ffmpeg: &str, input: &str, t: f64, out: &Path) -> Result<(), String> {
-    let scale = format!("scale=w='min({LONG_SIDE},iw)':h='min({LONG_SIDE},ih)':force_original_aspect_ratio=decrease");
+    let scale = format!(
+        "scale=w='min({LONG_SIDE},iw)':h='min({LONG_SIDE},ih)':force_original_aspect_ratio=decrease"
+    );
     let at = format!("{t:.3}");
     let out_s = path_str(out)?;
-    util::run_ok(ffmpeg, &["-hide_banner", "-loglevel", "error", "-nostdin", "-ss", &at, "-i", input, "-frames:v", "1", "-vf", &scale, "-q:v", "5", "-y", out_s], None, Duration::from_secs(60))?;
-    if out.is_file() { Ok(()) } else { Err(format!("no frame at {at}s")) }
+    util::run_ok(
+        ffmpeg,
+        &[
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-ss",
+            &at,
+            "-i",
+            input,
+            "-frames:v",
+            "1",
+            "-vf",
+            &scale,
+            "-q:v",
+            "5",
+            "-y",
+            out_s,
+        ],
+        None,
+        Duration::from_secs(60),
+    )?;
+    if out.is_file() {
+        Ok(())
+    } else {
+        Err(format!("no frame at {at}s"))
+    }
 }
 
 /// The audio from `start` for `len` seconds, as 16 kHz mono WAV at `out`.
-fn extract_audio(ffmpeg: &str, input: &str, start: f64, len: f64, out: &Path) -> Result<(), String> {
+fn extract_audio(
+    ffmpeg: &str,
+    input: &str,
+    start: f64,
+    len: f64,
+    out: &Path,
+) -> Result<(), String> {
     let (ss, t) = (format!("{start:.3}"), format!("{len:.3}"));
-    util::run_ok(ffmpeg, &["-hide_banner", "-loglevel", "error", "-nostdin", "-ss", &ss, "-t", &t, "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-y", path_str(out)?], None, Duration::from_secs(300))
-        .map(|_| ())
-        .map_err(|e| format!("ffmpeg couldn't take the audio: {e}"))
+    util::run_ok(
+        ffmpeg,
+        &[
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-ss",
+            &ss,
+            "-t",
+            &t,
+            "-i",
+            input,
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            "-y",
+            path_str(out)?,
+        ],
+        None,
+        Duration::from_secs(300),
+    )
+    .map(|_| ())
+    .map_err(|e| format!("ffmpeg couldn't take the audio: {e}"))
 }
 
 /// The audio between `start` and `end`, transcribed: by whisper when it's installed, else by the
 /// Speech framework on a Mac. Says which, with what it heard and the parts that failed.
-fn transcribe(ffmpeg: &str, input: &str, start: f64, end: f64, dir: &Path) -> Result<(String, Vec<Segment>, Vec<String>), String> {
+fn transcribe(
+    ffmpeg: &str,
+    input: &str,
+    start: f64,
+    end: f64,
+    dir: &Path,
+) -> Result<(String, Vec<Segment>, Vec<String>), String> {
     if let Some(whisper) = find("whisper") {
         let wav = dir.join("audio.wav");
         extract_audio(ffmpeg, input, start, end - start, &wav)?;
         let segments = run_whisper(&whisper, &wav, dir)?;
         let _ = std::fs::remove_file(&wav);
-        let shifted = segments.into_iter().map(|s| Segment { start: s.start + start, end: s.end + start, ..s }).collect();
+        let shifted = segments
+            .into_iter()
+            .map(|s| Segment {
+                start: s.start + start,
+                end: s.end + start,
+                ..s
+            })
+            .collect();
         return Ok(("whisper".into(), shifted, vec![]));
     }
     #[cfg(target_os = "macos")]
@@ -625,24 +891,46 @@ fn transcribe(ffmpeg: &str, input: &str, start: f64, end: f64, dir: &Path) -> Re
 }
 
 fn run_whisper(whisper: &Path, wav: &Path, dir: &Path) -> Result<Vec<Segment>, String> {
-    let model = std::env::var("TREK_WHISPER_MODEL").ok().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| "base".into());
-    let secs = std::fs::metadata(wav).map(|m| m.len() / 32_000).unwrap_or(600);
+    let model = std::env::var("TREK_WHISPER_MODEL")
+        .ok()
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| "base".into());
+    let secs = std::fs::metadata(wav)
+        .map(|m| m.len() / 32_000)
+        .unwrap_or(600);
     util::run_ok(
         path_str(whisper)?,
-        &[path_str(wav)?, "--model", &model, "--output_format", "json", "--output_dir", path_str(dir)?, "--verbose", "False", "--fp16", "False"],
+        &[
+            path_str(wav)?,
+            "--model",
+            &model,
+            "--output_format",
+            "json",
+            "--output_dir",
+            path_str(dir)?,
+            "--verbose",
+            "False",
+            "--fp16",
+            "False",
+        ],
         None,
         Duration::from_secs((secs * 3).max(300)),
     )
     .map_err(|e| format!("whisper failed: {e}"))?;
-    let stem = wav.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    let out = std::fs::read_to_string(dir.join(format!("{stem}.json"))).map_err(|e| format!("whisper wrote no transcript: {e}"))?;
+    let stem = wav
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let out = std::fs::read_to_string(dir.join(format!("{stem}.json")))
+        .map_err(|e| format!("whisper wrote no transcript: {e}"))?;
     parse_segments(&out)
 }
 
 /// `{"segments": [{"start", "end", "text"}]}` (whisper's JSON, and `trek-mcp transcribe`'s), or
 /// `{"error": "…"}`.
 pub fn parse_segments(out: &str) -> Result<Vec<Segment>, String> {
-    let v: Value = serde_json::from_str(out.trim()).map_err(|e| format!("an unreadable transcript: {e}"))?;
+    let v: Value =
+        serde_json::from_str(out.trim()).map_err(|e| format!("an unreadable transcript: {e}"))?;
     if let Some(e) = v["error"].as_str() {
         return Err(e.to_string());
     }
@@ -650,7 +938,13 @@ pub fn parse_segments(out: &str) -> Result<Vec<Segment>, String> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|s| Some(Segment { start: s["start"].as_f64()?, end: s["end"].as_f64()?, text: s["text"].as_str()?.trim().to_string() }))
+        .filter_map(|s| {
+            Some(Segment {
+                start: s["start"].as_f64()?,
+                end: s["end"].as_f64()?,
+                text: s["text"].as_str()?.trim().to_string(),
+            })
+        })
         .filter(|s| !s.text.is_empty())
         .collect())
 }
@@ -659,9 +953,17 @@ pub fn parse_segments(out: &str) -> Result<Vec<Segment>, String> {
 /// without Trek's privacy keys), only the child goes.
 #[cfg(target_os = "macos")]
 fn speech_child(me: &Path, wav: &Path) -> Result<Vec<Segment>, String> {
-    let out = util::run(path_str(me)?, &["transcribe", path_str(wav)?], None, Duration::from_secs(300))?;
+    let out = util::run(
+        path_str(me)?,
+        &["transcribe", path_str(wav)?],
+        None,
+        Duration::from_secs(300),
+    )?;
     if !out.success() && out.stdout.trim().is_empty() {
-        return Err(format!("Speech recognition couldn't run here ({}). Install whisper for transcripts, or allow Speech Recognition for Trek in System Settings › Privacy & Security.", out.reason()));
+        return Err(format!(
+            "Speech recognition couldn't run here ({}). Install whisper for transcripts, or allow Speech Recognition for Trek in System Settings › Privacy & Security.",
+            out.reason()
+        ));
     }
     parse_segments(&out.stdout)
 }
@@ -670,12 +972,38 @@ fn speech_child(me: &Path, wav: &Path) -> Result<Vec<Segment>, String> {
 
 fn download(url: &str, dir: &Path) -> Result<PathBuf, String> {
     let curl = find("curl").ok_or("Fetching a URL needs curl, which isn't on this computer")?;
-    let name = url.split(['?', '#']).next().and_then(|u| u.rsplit('/').next()).and_then(|n| n.rsplit_once('.')).map(|(_, e)| e.to_ascii_lowercase()).filter(|e| e.len() <= 5 && e.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or_else(|| "mp4".into());
+    let name = url
+        .split(['?', '#'])
+        .next()
+        .and_then(|u| u.rsplit('/').next())
+        .and_then(|n| n.rsplit_once('.'))
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .filter(|e| e.len() <= 5 && e.chars().all(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or_else(|| "mp4".into());
     let out = dir.join(format!("download.{name}"));
     let max = MAX_DOWNLOAD.to_string();
     util::run_ok(
         path_str(&curl)?,
-        &["--fail", "--silent", "--show-error", "--location", "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "5", "--max-filesize", &max, "--max-time", "900", "--output", path_str(&out)?, "--", url],
+        &[
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--max-redirs",
+            "5",
+            "--max-filesize",
+            &max,
+            "--max-time",
+            "900",
+            "--output",
+            path_str(&out)?,
+            "--",
+            url,
+        ],
         None,
         Duration::from_secs(960),
     )
@@ -683,7 +1011,10 @@ fn download(url: &str, dir: &Path) -> Result<PathBuf, String> {
     let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
     if size > MAX_DOWNLOAD {
         let _ = std::fs::remove_file(&out);
-        return Err(format!("{url} is more than {}: too big to watch", size_text(MAX_DOWNLOAD)));
+        return Err(format!(
+            "{url} is more than {}: too big to watch",
+            size_text(MAX_DOWNLOAD)
+        ));
     }
     if size == 0 {
         return Err(format!("{url} sent nothing"));
@@ -693,22 +1024,59 @@ fn download(url: &str, dir: &Path) -> Result<PathBuf, String> {
 
 fn fetch_with_ytdlp(url: &str, site: &str, dir: &Path) -> Result<PathBuf, String> {
     let Some(ytdlp) = find("yt-dlp") else {
-        let install = if cfg!(windows) { "winget install yt-dlp" } else { "brew install yt-dlp" };
-        return Err(format!("{site} links need yt-dlp to get the video out of the page, and it isn't installed. Ask the user to install it (`{install}`), or pass a direct link to the media file."));
+        let install = if cfg!(windows) {
+            "winget install yt-dlp"
+        } else {
+            "brew install yt-dlp"
+        };
+        return Err(format!(
+            "{site} links need yt-dlp to get the video out of the page, and it isn't installed. Ask the user to install it (`{install}`), or pass a direct link to the media file."
+        ));
     };
     let template = dir.join("video.%(ext)s");
     let max = format!("{}M", MAX_DOWNLOAD / 1024 / 1024);
     let out = util::run_ok(
         path_str(&ytdlp)?,
-        &["--no-playlist", "--no-progress", "--max-filesize", &max, "-S", "res:720,ext:mp4:m4a", "--merge-output-format", "mp4", "-o", path_str(&template)?, "--print", "after_move:filepath", "--", url],
+        &[
+            "--no-playlist",
+            "--no-progress",
+            "--max-filesize",
+            &max,
+            "-S",
+            "res:720,ext:mp4:m4a",
+            "--merge-output-format",
+            "mp4",
+            "-o",
+            path_str(&template)?,
+            "--print",
+            "after_move:filepath",
+            "--",
+            url,
+        ],
         None,
         Duration::from_secs(1200),
     )
     .map_err(|e| format!("yt-dlp couldn't get the video from {url}: {e}"))?;
-    let printed = out.lines().map(str::trim).rfind(|l| !l.is_empty()).map(PathBuf::from).filter(|p| p.is_file());
+    let printed = out
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.is_file());
     printed
-        .or_else(|| std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|p| p.file_stem().is_some_and(|s| s == "video") && p.is_file()))
-        .ok_or_else(|| format!("yt-dlp got nothing from {url} (it may be over {} or need a sign-in)", size_text(MAX_DOWNLOAD)))
+        .or_else(|| {
+            std::fs::read_dir(dir)
+                .ok()?
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| p.file_stem().is_some_and(|s| s == "video") && p.is_file())
+        })
+        .ok_or_else(|| {
+            format!(
+                "yt-dlp got nothing from {url} (it may be over {} or need a sign-in)",
+                size_text(MAX_DOWNLOAD)
+            )
+        })
 }
 
 impl rpc::ToolSet for Video {
@@ -756,7 +1124,9 @@ followed by the frames as images, in time order, scaled to 1024 px on the long s
 #[cfg(target_os = "macos")]
 pub fn transcribe_cli(file: &str) {
     let out = match speech::transcribe(Path::new(file)) {
-        Ok(words) => json!({ "segments": words.iter().map(|s| json!({ "start": s.start, "end": s.end, "text": s.text })).collect::<Vec<_>>() }),
+        Ok(words) => {
+            json!({ "segments": words.iter().map(|s| json!({ "start": s.start, "end": s.end, "text": s.text })).collect::<Vec<_>>() })
+        }
         Err(e) => json!({ "error": e }),
     };
     println!("{out}");
@@ -769,7 +1139,10 @@ mod speech {
     use core_foundation::runloop::{CFRunLoop, kCFRunLoopDefaultMode};
     use objc2::AllocAnyThread as _;
     use objc2_foundation::{NSError, NSString, NSURL};
-    use objc2_speech::{SFSpeechRecognitionResult, SFSpeechRecognizer, SFSpeechRecognizerAuthorizationStatus, SFSpeechURLRecognitionRequest};
+    use objc2_speech::{
+        SFSpeechRecognitionResult, SFSpeechRecognizer, SFSpeechRecognizerAuthorizationStatus,
+        SFSpeechURLRecognitionRequest,
+    };
     use std::path::Path;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
@@ -787,7 +1160,9 @@ mod speech {
                 return None;
             }
             // SAFETY: the default mode's constant, read on the thread whose loop it runs.
-            unsafe { CFRunLoop::run_in_mode(kCFRunLoopDefaultMode, Duration::from_millis(100), true) };
+            unsafe {
+                CFRunLoop::run_in_mode(kCFRunLoopDefaultMode, Duration::from_millis(100), true)
+            };
         }
     }
 
@@ -802,37 +1177,52 @@ mod speech {
                     let _ = tx.send(s);
                 });
                 SFSpeechRecognizer::requestAuthorization(&block);
-                status = wait(&rx, Duration::from_secs(120)).ok_or("No answer to the Speech Recognition permission request")?;
+                status = wait(&rx, Duration::from_secs(120))
+                    .ok_or("No answer to the Speech Recognition permission request")?;
             }
             if status != SFSpeechRecognizerAuthorizationStatus::Authorized {
                 return Err(DENIED.into());
             }
-            let recognizer = SFSpeechRecognizer::init(SFSpeechRecognizer::alloc()).ok_or("Speech recognition doesn't support this Mac's language")?;
+            let recognizer = SFSpeechRecognizer::init(SFSpeechRecognizer::alloc())
+                .ok_or("Speech recognition doesn't support this Mac's language")?;
             if !recognizer.isAvailable() {
                 return Err("Speech recognition isn't available right now".into());
             }
             let url = NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()));
-            let request = SFSpeechURLRecognitionRequest::initWithURL(SFSpeechURLRecognitionRequest::alloc(), &url);
+            let request = SFSpeechURLRecognitionRequest::initWithURL(
+                SFSpeechURLRecognitionRequest::alloc(),
+                &url,
+            );
             request.setShouldReportPartialResults(false);
             if recognizer.supportsOnDeviceRecognition() {
                 request.setRequiresOnDeviceRecognition(true);
             }
             request.setAddsPunctuation(true);
             let (tx, rx) = mpsc::channel::<Result<Vec<Segment>, String>>();
-            let block = RcBlock::new(move |result: *mut SFSpeechRecognitionResult, error: *mut NSError| {
-                if let Some(result) = result.as_ref().filter(|r| r.isFinal()) {
-                    let segments = result.bestTranscription().segments();
-                    let words = segments
-                        .iter()
-                        .map(|s| Segment { start: s.timestamp(), end: s.timestamp() + s.duration(), text: s.substring().to_string() })
-                        .collect();
-                    let _ = tx.send(Ok(words));
-                } else if let Some(error) = error.as_ref() {
-                    let why = error.localizedDescription().to_string();
-                    // "No speech detected" is an answer: nothing was said.
-                    let _ = tx.send(if why.to_ascii_lowercase().contains("no speech") { Ok(vec![]) } else { Err(why) });
-                }
-            });
+            let block = RcBlock::new(
+                move |result: *mut SFSpeechRecognitionResult, error: *mut NSError| {
+                    if let Some(result) = result.as_ref().filter(|r| r.isFinal()) {
+                        let segments = result.bestTranscription().segments();
+                        let words = segments
+                            .iter()
+                            .map(|s| Segment {
+                                start: s.timestamp(),
+                                end: s.timestamp() + s.duration(),
+                                text: s.substring().to_string(),
+                            })
+                            .collect();
+                        let _ = tx.send(Ok(words));
+                    } else if let Some(error) = error.as_ref() {
+                        let why = error.localizedDescription().to_string();
+                        // "No speech detected" is an answer: nothing was said.
+                        let _ = tx.send(if why.to_ascii_lowercase().contains("no speech") {
+                            Ok(vec![])
+                        } else {
+                            Err(why)
+                        });
+                    }
+                },
+            );
             let task = recognizer.recognitionTaskWithRequest_resultHandler(&request, &block);
             let answer = wait(&rx, Duration::from_secs(240));
             if answer.is_none() {
@@ -856,7 +1246,14 @@ mod tests {
     fn frame_plan_follows_fps_and_caps() {
         // One a second over ten seconds: ten, each in the middle of its second.
         let p = plan_frames(0., 10., 1., MAX_FRAMES);
-        assert!(approx(&p.times, &[0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5]), "{:?}", p.times);
+        assert!(
+            approx(
+                &p.times,
+                &[0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5]
+            ),
+            "{:?}",
+            p.times
+        );
         assert!(!p.sampled());
         // Two a second over a range.
         let p = plan_frames(20., 22., 2., MAX_FRAMES);
@@ -875,11 +1272,21 @@ mod tests {
     #[test]
     fn ranges_are_kept_inside_the_video() {
         assert_eq!(resolve_range(Some(30.), None, None), Ok((0., 30.)));
-        assert_eq!(resolve_range(Some(30.), Some(10.), Some(90.)), Ok((10., 30.)), "an end past the video is its end");
-        assert!(resolve_range(Some(30.), Some(31.), None).is_err(), "a start past the end");
+        assert_eq!(
+            resolve_range(Some(30.), Some(10.), Some(90.)),
+            Ok((10., 30.)),
+            "an end past the video is its end"
+        );
+        assert!(
+            resolve_range(Some(30.), Some(31.), None).is_err(),
+            "a start past the end"
+        );
         assert!(resolve_range(Some(30.), Some(10.), Some(5.)).is_err());
         assert!(resolve_range(Some(30.), Some(-1.), None).is_err());
-        assert!(resolve_range(None, None, None).is_err(), "no duration and no end");
+        assert!(
+            resolve_range(None, None, None).is_err(),
+            "no duration and no end"
+        );
         assert_eq!(resolve_range(None, None, Some(4.)), Ok((0., 4.)));
     }
 
@@ -900,18 +1307,60 @@ mod tests {
         let clip = dir.join("clip.mp4");
         std::fs::write(&clip, b"x").unwrap();
         let canon = clip.canonicalize().unwrap();
-        assert_eq!(parse_source("clip.mp4", &dir, None), Ok(Source::Local(canon.clone())), "relative to the working folder");
-        assert_eq!(parse_source(&format!("  {}  ", clip.display()), Path::new("/"), None), Ok(Source::Local(canon.clone())));
-        assert_eq!(parse_source("~/clip.mp4", Path::new("/"), Some(&dir)), Ok(Source::Local(canon)));
-        assert!(parse_source("missing.mp4", &dir, None).unwrap_err().contains("No file"));
-        assert!(parse_source(".", &dir, None).unwrap_err().contains("folder"));
+        assert_eq!(
+            parse_source("clip.mp4", &dir, None),
+            Ok(Source::Local(canon.clone())),
+            "relative to the working folder"
+        );
+        assert_eq!(
+            parse_source(&format!("  {}  ", clip.display()), Path::new("/"), None),
+            Ok(Source::Local(canon.clone()))
+        );
+        assert_eq!(
+            parse_source("~/clip.mp4", Path::new("/"), Some(&dir)),
+            Ok(Source::Local(canon))
+        );
+        assert!(
+            parse_source("missing.mp4", &dir, None)
+                .unwrap_err()
+                .contains("No file")
+        );
+        assert!(
+            parse_source(".", &dir, None)
+                .unwrap_err()
+                .contains("folder")
+        );
 
-        assert_eq!(parse_source("https://cdn.example.com/a/b.mp4?x=1", &dir, None), Ok(Source::Url("https://cdn.example.com/a/b.mp4?x=1".into())));
-        assert_eq!(parse_source("HTTPS://www.youtube.com/watch?v=abc", &dir, None), Ok(Source::Site { url: "HTTPS://www.youtube.com/watch?v=abc".into(), site: "YouTube" }));
-        assert!(matches!(parse_source("https://youtu.be/abc", &dir, None), Ok(Source::Site { site: "YouTube", .. })));
-        assert!(matches!(parse_source("https://x.com/someone/status/1", &dir, None), Ok(Source::Site { site: "X", .. })));
-        assert!(matches!(parse_source("https://mobile.twitter.com/a/status/1", &dir, None), Ok(Source::Site { site: "X", .. })));
-        assert!(matches!(parse_source("https://notyoutube.com/v.mp4", &dir, None), Ok(Source::Url(_))));
+        assert_eq!(
+            parse_source("https://cdn.example.com/a/b.mp4?x=1", &dir, None),
+            Ok(Source::Url("https://cdn.example.com/a/b.mp4?x=1".into()))
+        );
+        assert_eq!(
+            parse_source("HTTPS://www.youtube.com/watch?v=abc", &dir, None),
+            Ok(Source::Site {
+                url: "HTTPS://www.youtube.com/watch?v=abc".into(),
+                site: "YouTube"
+            })
+        );
+        assert!(matches!(
+            parse_source("https://youtu.be/abc", &dir, None),
+            Ok(Source::Site {
+                site: "YouTube",
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_source("https://x.com/someone/status/1", &dir, None),
+            Ok(Source::Site { site: "X", .. })
+        ));
+        assert!(matches!(
+            parse_source("https://mobile.twitter.com/a/status/1", &dir, None),
+            Ok(Source::Site { site: "X", .. })
+        ));
+        assert!(matches!(
+            parse_source("https://notyoutube.com/v.mp4", &dir, None),
+            Ok(Source::Url(_))
+        ));
 
         for refused in [
             "http://example.com/a.mp4",
@@ -931,11 +1380,22 @@ mod tests {
             "https://example.com\\@evil.com/a.mp4",
             "",
         ] {
-            assert!(parse_source(refused, &dir, None).is_err(), "{refused:?} should be refused");
+            assert!(
+                parse_source(refused, &dir, None).is_err(),
+                "{refused:?} should be refused"
+            );
         }
-        assert!(parse_source("http://example.com/a.mp4", &dir, None).unwrap_err().contains("https"));
+        assert!(
+            parse_source("http://example.com/a.mp4", &dir, None)
+                .unwrap_err()
+                .contains("https")
+        );
         // A Windows drive letter isn't a scheme.
-        assert!(parse_source("C:\\videos\\missing.mp4", &dir, None).unwrap_err().contains("No file"));
+        assert!(
+            parse_source("C:\\videos\\missing.mp4", &dir, None)
+                .unwrap_err()
+                .contains("No file")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -950,7 +1410,11 @@ mod tests {
         assert_eq!(m.duration, Some(12.345));
         assert_eq!(m.size, Some(1_048_576));
         let v = m.video.unwrap();
-        assert_eq!((v.codec.as_str(), v.width, v.height), ("h264", 1920, 1080), "cover art isn't the video");
+        assert_eq!(
+            (v.codec.as_str(), v.width, v.height),
+            ("h264", 1920, 1080),
+            "cover art isn't the video"
+        );
         assert!((v.fps.unwrap() - 29.97).abs() < 0.01);
         assert_eq!(m.audio.as_deref(), Some("aac"));
         // No container duration: the longest stream's.
@@ -964,7 +1428,11 @@ mod tests {
         assert_eq!(chunk_plan(0., 30., CHUNK_SECS), vec![(0., 30.)]);
         let chunks = chunk_plan(10., 130., CHUNK_SECS);
         assert_eq!(chunks.len(), 3);
-        assert!(chunks.iter().all(|(_, len)| *len <= CHUNK_SECS && (*len - 40.).abs() < 1e-9));
+        assert!(
+            chunks
+                .iter()
+                .all(|(_, len)| *len <= CHUNK_SECS && (*len - 40.).abs() < 1e-9)
+        );
         assert_eq!(chunks[1].0, 50.);
 
         // A fake recogniser: one line a second into each chunk; the second chunk fails.
@@ -974,25 +1442,64 @@ mod tests {
             if offset == 50. {
                 return Err("busy".into());
             }
-            Ok(vec![Segment { start: 1., end: 2.5, text: format!("at {offset}") }])
+            Ok(vec![Segment {
+                start: 1.,
+                end: 2.5,
+                text: format!("at {offset}"),
+            }])
         })
         .unwrap();
         assert_eq!(asked, chunks);
-        assert_eq!(segments, vec![Segment { start: 11., end: 12.5, text: "at 10".into() }, Segment { start: 91., end: 92.5, text: "at 90".into() }]);
+        assert_eq!(
+            segments,
+            vec![
+                Segment {
+                    start: 11.,
+                    end: 12.5,
+                    text: "at 10".into()
+                },
+                Segment {
+                    start: 91.,
+                    end: 92.5,
+                    text: "at 90".into()
+                }
+            ]
+        );
         assert_eq!(failed, vec!["0:50.0–1:30.0: busy".to_string()]);
         // All of them failing is an error.
-        assert_eq!(transcribe_chunks(&chunks, |_, _| Err("no".into())).unwrap_err(), "0:10.0–0:50.0: no");
+        assert_eq!(
+            transcribe_chunks(&chunks, |_, _| Err("no".into())).unwrap_err(),
+            "0:10.0–0:50.0: no"
+        );
     }
 
     #[test]
     fn speech_words_become_lines() {
-        let w = |s: f64, t: &str| Segment { start: s, end: s + 0.4, text: t.into() };
-        let lines = group_words(&[w(0., "Hello"), w(0.5, "there."), w(1., "This"), w(1.5, "is"), w(5., "later"), w(5.5, "on")]);
+        let w = |s: f64, t: &str| Segment {
+            start: s,
+            end: s + 0.4,
+            text: t.into(),
+        };
+        let lines = group_words(&[
+            w(0., "Hello"),
+            w(0.5, "there."),
+            w(1., "This"),
+            w(1.5, "is"),
+            w(5., "later"),
+            w(5.5, "on"),
+        ]);
         let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
-        assert_eq!(texts, ["Hello there.", "This is", "later on"], "a sentence's end and a pause end a line");
+        assert_eq!(
+            texts,
+            ["Hello there.", "This is", "later on"],
+            "a sentence's end and a pause end a line"
+        );
         assert!(lines[0].start == 0. && (lines[0].end - 0.9).abs() < 1e-9);
         assert_eq!(parse_segments(r#"{"segments":[{"start":1.0,"end":2.0,"text":" hi "},{"start":3,"end":4,"text":""}]}"#).unwrap(), vec![Segment { start: 1., end: 2., text: "hi".into() }]);
-        assert_eq!(parse_segments(r#"{"error":"denied"}"#).unwrap_err(), "denied");
+        assert_eq!(
+            parse_segments(r#"{"error":"denied"}"#).unwrap_err(),
+            "denied"
+        );
         assert_eq!(clock(3725.04), "1:02:05.0");
         assert_eq!(clock(61.25), "1:01.3");
     }
@@ -1009,47 +1516,109 @@ mod tests {
         let clip = root.join("clip.mp4");
         util::run_ok(
             ffmpeg.to_str().unwrap(),
-            &["-hide_banner", "-loglevel", "error", "-nostdin", "-f", "lavfi", "-i", "testsrc=duration=3:size=1280x720:rate=10", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-shortest", "-c:v", "mpeg4", "-c:a", "aac", "-y", clip.to_str().unwrap()],
+            &[
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=3:size=1280x720:rate=10",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=3",
+                "-shortest",
+                "-c:v",
+                "mpeg4",
+                "-c:a",
+                "aac",
+                "-y",
+                clip.to_str().unwrap(),
+            ],
             None,
             Duration::from_secs(60),
         )
         .expect("ffmpeg makes a test clip");
         let mut video = Video::with_scratch(root.join("scratch"));
-        let out = video.call("watch_video", &json!({ "source": clip.to_str().unwrap(), "fps": 2, "transcript": false })).unwrap();
+        let out = video
+            .call(
+                "watch_video",
+                &json!({ "source": clip.to_str().unwrap(), "fps": 2, "transcript": false }),
+            )
+            .unwrap();
         assert_eq!(out[0]["type"], "text");
         let summary = out[0]["text"].as_str().unwrap();
-        assert!(summary.starts_with(&format!("Watched {}", clip.canonicalize().unwrap().display())), "{summary}");
-        assert!(summary.contains("1280x720 mpeg4") && summary.contains("audio aac"), "{summary}");
-        assert!(summary.contains("Frames (6,") && summary.contains("  1. 0:00.3") && summary.contains("  6. 0:02.8"), "{summary}");
+        assert!(
+            summary.starts_with(&format!(
+                "Watched {}",
+                clip.canonicalize().unwrap().display()
+            )),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("1280x720 mpeg4") && summary.contains("audio aac"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("Frames (6,")
+                && summary.contains("  1. 0:00.3")
+                && summary.contains("  6. 0:02.8"),
+            "{summary}"
+        );
         assert!(!summary.contains("Transcript"), "not asked for");
         let images = &out[1..];
         assert_eq!(images.len(), 6);
         for image in images {
             assert_eq!(image["type"], "image");
             assert_eq!(image["mimeType"], "image/jpeg");
-            let bytes = base64::engine::general_purpose::STANDARD.decode(image["data"].as_str().unwrap()).unwrap();
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(image["data"].as_str().unwrap())
+                .unwrap();
             assert_eq!(&bytes[..2], b"\xff\xd8", "a JPEG");
         }
         // The manifest Trek draws the strip from.
-        let manifest = summary.lines().find_map(|l| l.strip_prefix("Manifest: ")).map(PathBuf::from).unwrap();
+        let manifest = summary
+            .lines()
+            .find_map(|l| l.strip_prefix("Manifest: "))
+            .map(PathBuf::from)
+            .unwrap();
         let doc: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
         assert_eq!(doc["video"], clip.canonicalize().unwrap().to_str().unwrap());
         assert_eq!(doc["frames"].as_array().unwrap().len(), 6);
         assert_eq!(doc["frames"][0]["file"], "frames/frame-001.jpg");
-        assert!(manifest.parent().unwrap().join("frames/frame-006.jpg").is_file());
-        assert_eq!((doc["width"].as_u64(), doc["start"].as_f64()), (Some(1280), Some(0.)));
+        assert!(
+            manifest
+                .parent()
+                .unwrap()
+                .join("frames/frame-006.jpg")
+                .is_file()
+        );
+        assert_eq!(
+            (doc["width"].as_u64(), doc["start"].as_f64()),
+            (Some(1280), Some(0.))
+        );
 
         // A range, and a rate past the cap: forty frames, sampled, and said so.
         let out = video.call("watch_video", &json!({ "source": clip.to_str().unwrap(), "start": 1, "end": 2, "fps": 100, "transcript": false })).unwrap();
         let summary = out[0]["text"].as_str().unwrap();
-        assert!(summary.contains("Watched from 0:01.0 to 0:02.0") && summary.contains("fps 100 is more than the 10"), "{summary}");
+        assert!(
+            summary.contains("Watched from 0:01.0 to 0:02.0")
+                && summary.contains("fps 100 is more than the 10"),
+            "{summary}"
+        );
         assert_eq!(out.len(), 1 + 10);
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn missing_ffmpeg_says_how_to_install_it() {
-        let how = if cfg!(windows) { "winget install ffmpeg" } else { "brew install ffmpeg" };
+        let how = if cfg!(windows) {
+            "winget install ffmpeg"
+        } else {
+            "brew install ffmpeg"
+        };
         assert!(FFMPEG_MISSING.contains(how));
     }
 }

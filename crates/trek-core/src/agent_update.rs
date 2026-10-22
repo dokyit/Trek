@@ -65,22 +65,34 @@ pub struct Harness {
 impl Harness {
     pub fn name(&self) -> String {
         let name = AgentId::from_key(self.agent).display_name();
-        if self.adapter { format!("{name} ACP adapter") } else { name }
+        if self.adapter {
+            format!("{name} ACP adapter")
+        } else {
+            name
+        }
     }
 
     /// The binary `detect` finds the agent by: only agents Trek detects are checked, so a CLI
     /// that merely shares a name (`amp`, an editor) never is when its agent isn't installed.
     pub fn detected_by(&self) -> &'static str {
         match self.agent.strip_prefix("acp:") {
-            Some(id) => crate::catalog::ACP_AGENTS.iter().find(|a| a.id == id).map_or(self.binary, |a| a.binary),
+            Some(id) => crate::catalog::ACP_AGENTS
+                .iter()
+                .find(|a| a.id == id)
+                .map_or(self.binary, |a| a.binary),
             None => self.binary,
         }
     }
 
     /// The npm package the version `installed` is published as.
     pub fn npm_for(&self, installed: Option<&str>) -> Option<&'static str> {
-        let major = installed.and_then(numbers).and_then(|(n, _)| n.first().copied());
-        major.and_then(|m| self.majors.iter().rev().find(|(at, _)| m >= *at)).map(|(_, p)| *p).or(self.npm)
+        let major = installed
+            .and_then(numbers)
+            .and_then(|(n, _)| n.first().copied());
+        major
+            .and_then(|m| self.majors.iter().rev().find(|(at, _)| m >= *at))
+            .map(|(_, p)| *p)
+            .or(self.npm)
     }
 
     /// `package` is the one this agent's package moved from.
@@ -93,11 +105,17 @@ impl Harness {
     pub fn owns(&self, install: &Install) -> bool {
         match install {
             Install::Npm { package, .. } | Install::Bun { package } | Install::Pnpm { package } => {
-                self.npm == Some(package.as_str()) || self.moved(package) || self.majors.iter().any(|(_, p)| p == package)
+                self.npm == Some(package.as_str())
+                    || self.moved(package)
+                    || self.majors.iter().any(|(_, p)| p == package)
             }
-            Install::Brew { formula: name, .. } | Install::Cask { cask: name, .. } => self.brew.contains(&name.as_str()),
+            Install::Brew { formula: name, .. } | Install::Cask { cask: name, .. } => {
+                self.brew.contains(&name.as_str())
+            }
             Install::Winget { id } => self.winget().contains(&id.as_str()),
-            Install::Scoop { app: name } | Install::Chocolatey { package: name } => self.packages().contains(&name.as_str()),
+            Install::Scoop { app: name } | Install::Chocolatey { package: name } => {
+                self.packages().contains(&name.as_str())
+            }
             Install::Volta | Install::Native => true,
         }
     }
@@ -132,7 +150,9 @@ impl Harness {
     pub fn reading(&self, install: Install) -> Install {
         match install {
             Install::Winget { id } if !self.winget().contains(&id.as_str()) => Install::Native,
-            Install::Scoop { .. } | Install::Chocolatey { .. } if !self.owns(&install) => Install::Native,
+            Install::Scoop { .. } | Install::Chocolatey { .. } if !self.owns(&install) => {
+                Install::Native
+            }
             other => other,
         }
     }
@@ -150,7 +170,8 @@ impl Harness {
 
     /// The PowerShell line the vendor documents for installing this CLI on Windows.
     fn windows_installer(&self) -> Option<&'static str> {
-        crate::catalog::agent_setup(self.agent.strip_prefix("acp:").unwrap_or(self.agent)).map(|s| s.install)
+        crate::catalog::agent_setup(self.agent.strip_prefix("acp:").unwrap_or(self.agent))
+            .map(|s| s.install)
     }
 
     /// A Windows install of `binary` that its CLI's own `update` doesn't update, so Trek installs
@@ -165,7 +186,11 @@ impl Harness {
     fn bundle_install(&self, binary: &Path) -> bool {
         cfg!(windows)
             && self.agent == "acp:devin"
-            && binary.parent().and_then(Path::parent).and_then(|cli| std::fs::read_to_string(cli.join("distribution")).ok()).is_some_and(|m| m.trim() == "irm-iex")
+            && binary
+                .parent()
+                .and_then(Path::parent)
+                .and_then(|cli| std::fs::read_to_string(cli.join("distribution")).ok())
+                .is_some_and(|m| m.trim() == "irm-iex")
     }
 }
 
@@ -194,21 +219,186 @@ pub enum Feed {
 /// The agent CLIs Trek runs, as `detect` and `catalog` know them. Amp and Pi run through ACP
 /// adapters (separate packages): their CLIs and their adapters each have a row.
 pub const HARNESSES: &[Harness] = &[
-    Harness { agent: "claude-code", binary: "claude", npm: Some("@anthropic-ai/claude-code"), moved_from: None, majors: &[], self_update: Some(&["update"]), installer: None, feed: Feed::ClaudeReleases, brew: &["claude-code"], adapter: false },
-    Harness { agent: "codex", binary: "codex", npm: Some("@openai/codex"), moved_from: None, majors: &[], self_update: Some(&["update"]), installer: None, feed: Feed::Npm, brew: &["codex"], adapter: false },
-    Harness { agent: "opencode", binary: "opencode", npm: Some("opencode-ai"), moved_from: None, majors: &[(2, "@opencode/cli")], self_update: Some(&["upgrade"]), installer: None, feed: Feed::Npm, brew: &["opencode", "opencode-v2"], adapter: false },
-    Harness { agent: "droid", binary: "droid", npm: None, moved_from: None, majors: &[], self_update: None, installer: Some("curl -fsSL https://app.factory.ai/cli | sh"), feed: Feed::DroidInstaller, brew: &["droid"], adapter: false },
-    Harness { agent: "acp:cursor", binary: "cursor-agent", npm: None, moved_from: None, majors: &[], self_update: Some(&["update"]), installer: None, feed: Feed::CursorInstaller, brew: &["cursor-cli"], adapter: false },
-    Harness { agent: "acp:github-copilot", binary: "copilot", npm: Some("@github/copilot"), moved_from: None, majors: &[], self_update: Some(&["update"]), installer: None, feed: Feed::Npm, brew: &["copilot-cli"], adapter: false },
-    Harness { agent: "acp:kimi", binary: "kimi", npm: Some("@moonshot-ai/kimi-code"), moved_from: None, majors: &[], self_update: Some(&["upgrade"]), installer: None, feed: Feed::Npm, brew: &["kimi-cli"], adapter: false },
-    Harness { agent: "acp:qwen-code", binary: "qwen", npm: Some("@qwen-code/qwen-code"), moved_from: None, majors: &[], self_update: None, installer: None, feed: Feed::Npm, brew: &["qwen-code"], adapter: false },
-    Harness { agent: "acp:grok", binary: "grok", npm: None, moved_from: None, majors: &[], self_update: Some(&["update"]), installer: None, feed: Feed::GrokStable, brew: &[], adapter: false },
-    Harness { agent: "acp:devin", binary: "devin", npm: None, moved_from: None, majors: &[], self_update: Some(&["update"]), installer: None, feed: Feed::DevinManifest, brew: &[], adapter: false },
-    Harness { agent: "acp:goose", binary: "goose", npm: None, moved_from: None, majors: &[], self_update: Some(&["update"]), installer: None, feed: Feed::GitHub("block/goose"), brew: &["block-goose-cli"], adapter: false },
-    Harness { agent: "acp:amp", binary: "amp", npm: Some("@sourcegraph/amp"), moved_from: None, majors: &[], self_update: Some(&["update"]), installer: None, feed: Feed::Npm, brew: &[], adapter: false },
-    Harness { agent: "acp:amp", binary: "amp-acp", npm: Some("amp-acp"), moved_from: None, majors: &[], self_update: None, installer: None, feed: Feed::Npm, brew: &[], adapter: true },
-    Harness { agent: "acp:pi", binary: "pi", npm: Some("@earendil-works/pi-coding-agent"), moved_from: Some("@mariozechner/pi-coding-agent"), majors: &[], self_update: Some(&["update"]), installer: None, feed: Feed::Npm, brew: &[], adapter: false },
-    Harness { agent: "acp:pi", binary: "pi-acp", npm: Some("pi-acp"), moved_from: None, majors: &[], self_update: None, installer: None, feed: Feed::Npm, brew: &[], adapter: true },
+    Harness {
+        agent: "claude-code",
+        binary: "claude",
+        npm: Some("@anthropic-ai/claude-code"),
+        moved_from: None,
+        majors: &[],
+        self_update: Some(&["update"]),
+        installer: None,
+        feed: Feed::ClaudeReleases,
+        brew: &["claude-code"],
+        adapter: false,
+    },
+    Harness {
+        agent: "codex",
+        binary: "codex",
+        npm: Some("@openai/codex"),
+        moved_from: None,
+        majors: &[],
+        self_update: Some(&["update"]),
+        installer: None,
+        feed: Feed::Npm,
+        brew: &["codex"],
+        adapter: false,
+    },
+    Harness {
+        agent: "opencode",
+        binary: "opencode",
+        npm: Some("opencode-ai"),
+        moved_from: None,
+        majors: &[(2, "@opencode/cli")],
+        self_update: Some(&["upgrade"]),
+        installer: None,
+        feed: Feed::Npm,
+        brew: &["opencode", "opencode-v2"],
+        adapter: false,
+    },
+    Harness {
+        agent: "droid",
+        binary: "droid",
+        npm: None,
+        moved_from: None,
+        majors: &[],
+        self_update: None,
+        installer: Some("curl -fsSL https://app.factory.ai/cli | sh"),
+        feed: Feed::DroidInstaller,
+        brew: &["droid"],
+        adapter: false,
+    },
+    Harness {
+        agent: "acp:cursor",
+        binary: "cursor-agent",
+        npm: None,
+        moved_from: None,
+        majors: &[],
+        self_update: Some(&["update"]),
+        installer: None,
+        feed: Feed::CursorInstaller,
+        brew: &["cursor-cli"],
+        adapter: false,
+    },
+    Harness {
+        agent: "acp:github-copilot",
+        binary: "copilot",
+        npm: Some("@github/copilot"),
+        moved_from: None,
+        majors: &[],
+        self_update: Some(&["update"]),
+        installer: None,
+        feed: Feed::Npm,
+        brew: &["copilot-cli"],
+        adapter: false,
+    },
+    Harness {
+        agent: "acp:kimi",
+        binary: "kimi",
+        npm: Some("@moonshot-ai/kimi-code"),
+        moved_from: None,
+        majors: &[],
+        self_update: Some(&["upgrade"]),
+        installer: None,
+        feed: Feed::Npm,
+        brew: &["kimi-cli"],
+        adapter: false,
+    },
+    Harness {
+        agent: "acp:qwen-code",
+        binary: "qwen",
+        npm: Some("@qwen-code/qwen-code"),
+        moved_from: None,
+        majors: &[],
+        self_update: None,
+        installer: None,
+        feed: Feed::Npm,
+        brew: &["qwen-code"],
+        adapter: false,
+    },
+    Harness {
+        agent: "acp:grok",
+        binary: "grok",
+        npm: None,
+        moved_from: None,
+        majors: &[],
+        self_update: Some(&["update"]),
+        installer: None,
+        feed: Feed::GrokStable,
+        brew: &[],
+        adapter: false,
+    },
+    Harness {
+        agent: "acp:devin",
+        binary: "devin",
+        npm: None,
+        moved_from: None,
+        majors: &[],
+        self_update: Some(&["update"]),
+        installer: None,
+        feed: Feed::DevinManifest,
+        brew: &[],
+        adapter: false,
+    },
+    Harness {
+        agent: "acp:goose",
+        binary: "goose",
+        npm: None,
+        moved_from: None,
+        majors: &[],
+        self_update: Some(&["update"]),
+        installer: None,
+        feed: Feed::GitHub("block/goose"),
+        brew: &["block-goose-cli"],
+        adapter: false,
+    },
+    Harness {
+        agent: "acp:amp",
+        binary: "amp",
+        npm: Some("@sourcegraph/amp"),
+        moved_from: None,
+        majors: &[],
+        self_update: Some(&["update"]),
+        installer: None,
+        feed: Feed::Npm,
+        brew: &[],
+        adapter: false,
+    },
+    Harness {
+        agent: "acp:amp",
+        binary: "amp-acp",
+        npm: Some("amp-acp"),
+        moved_from: None,
+        majors: &[],
+        self_update: None,
+        installer: None,
+        feed: Feed::Npm,
+        brew: &[],
+        adapter: true,
+    },
+    Harness {
+        agent: "acp:pi",
+        binary: "pi",
+        npm: Some("@earendil-works/pi-coding-agent"),
+        moved_from: Some("@mariozechner/pi-coding-agent"),
+        majors: &[],
+        self_update: Some(&["update"]),
+        installer: None,
+        feed: Feed::Npm,
+        brew: &[],
+        adapter: false,
+    },
+    Harness {
+        agent: "acp:pi",
+        binary: "pi-acp",
+        npm: Some("pi-acp"),
+        moved_from: None,
+        majors: &[],
+        self_update: None,
+        installer: None,
+        feed: Feed::Npm,
+        brew: &[],
+        adapter: true,
+    },
 ];
 
 /// The harness a row is for, by its id (the CLI's binary name: unique, unlike agents, which
@@ -223,19 +413,39 @@ pub fn harness(id: &str) -> Option<&'static Harness> {
 pub enum Install {
     /// A global npm package, under `prefix`: `<prefix>/lib/node_modules/<package>`, or on Windows
     /// `<prefix>\node_modules\<package>` (`%APPDATA%\npm` unless the user set another).
-    Npm { package: String, prefix: PathBuf },
-    Bun { package: String },
-    Pnpm { package: String },
+    Npm {
+        package: String,
+        prefix: PathBuf,
+    },
+    Bun {
+        package: String,
+    },
+    Pnpm {
+        package: String,
+    },
     /// A Homebrew formula; `tap` is `None` for homebrew/core.
-    Brew { formula: String, prefix: PathBuf, tap: Option<String> },
-    Cask { cask: String, prefix: PathBuf },
+    Brew {
+        formula: String,
+        prefix: PathBuf,
+        tap: Option<String>,
+    },
+    Cask {
+        cask: String,
+        prefix: PathBuf,
+    },
     /// A WinGet package (`winget upgrade --id <id>`).
-    Winget { id: String },
+    Winget {
+        id: String,
+    },
     /// A Scoop app (`scoop update <app>`), found through its shim in `scoop\shims`.
-    Scoop { app: String },
+    Scoop {
+        app: String,
+    },
     /// A Chocolatey package (`choco upgrade <package> -y`), found through its shim in
     /// `chocolatey\bin`.
-    Chocolatey { package: String },
+    Chocolatey {
+        package: String,
+    },
     /// A Volta-managed package: its binary on PATH is Volta's shim.
     Volta,
     /// The vendor's own installer.
@@ -277,7 +487,11 @@ fn root_of(path: &Path) -> PathBuf {
         match c {
             Component::Prefix(p) => match p.kind() {
                 Prefix::VerbatimDisk(drive) => root.push(format!("{}:", drive as char)),
-                Prefix::VerbatimUNC(server, share) => root.push(format!(r"\\{}\{}", server.to_string_lossy(), share.to_string_lossy())),
+                Prefix::VerbatimUNC(server, share) => root.push(format!(
+                    r"\\{}\{}",
+                    server.to_string_lossy(),
+                    share.to_string_lossy()
+                )),
                 _ => root.push(c.as_os_str()),
             },
             Component::RootDir => root.push(c.as_os_str()),
@@ -298,12 +512,22 @@ fn rooted(root: &Path, parts: &[String]) -> PathBuf {
 
 /// `run` is a stretch of folders in `parts`, one after the other. Windows paths don't care about case.
 fn has_run(parts: &[String], run: &[&str]) -> bool {
-    parts.windows(run.len()).any(|w| w.iter().zip(run).all(|(a, b)| if cfg!(windows) { a.eq_ignore_ascii_case(b) } else { a == b }))
+    parts.windows(run.len()).any(|w| {
+        w.iter().zip(run).all(|(a, b)| {
+            if cfg!(windows) {
+                a.eq_ignore_ascii_case(b)
+            } else {
+                a == b
+            }
+        })
+    })
 }
 
 /// The WinGet package whose folder (`…\WinGet\Packages\<Id>_<source>`) holds the binary.
 fn winget_package(parts: &[String]) -> Option<String> {
-    let i = parts.windows(2).position(|w| w[0].eq_ignore_ascii_case("WinGet") && w[1].eq_ignore_ascii_case("Packages"))?;
+    let i = parts.windows(2).position(|w| {
+        w[0].eq_ignore_ascii_case("WinGet") && w[1].eq_ignore_ascii_case("Packages")
+    })?;
     let id = parts.get(i + 2)?.split('_').next()?;
     (!id.is_empty()).then(|| id.to_string())
 }
@@ -316,8 +540,12 @@ pub fn install_of(resolved: &Path) -> Install {
     let at = |name: &str| parts.iter().position(|p| p == name);
     // Before Cellar: Volta itself may be a formula, its shim a link into its keg. On Windows
     // Volta's home is `%LOCALAPPDATA%\Volta`, its shims `bin\<tool>.exe` copies of one program.
-    let volta_dir = has_run(&parts, &[".volta", "tools", "image", "packages"]) || (cfg!(windows) && has_run(&parts, &["Volta", "tools", "image", "packages"]));
-    let volta_shim = parts.last().is_some_and(|n| n == "volta-shim") || (cfg!(windows) && parts.len() >= 3 && has_run(&parts[parts.len() - 3..parts.len() - 1], &["Volta", "bin"]));
+    let volta_dir = has_run(&parts, &[".volta", "tools", "image", "packages"])
+        || (cfg!(windows) && has_run(&parts, &["Volta", "tools", "image", "packages"]));
+    let volta_shim = parts.last().is_some_and(|n| n == "volta-shim")
+        || (cfg!(windows)
+            && parts.len() >= 3
+            && has_run(&parts[parts.len() - 3..parts.len() - 1], &["Volta", "bin"]));
     if volta_shim || volta_dir {
         return Install::Volta;
     }
@@ -326,10 +554,17 @@ pub fn install_of(resolved: &Path) -> Install {
         // Before node_modules: a formula may be an npm package installed into its keg
         // (qwen-code), and only brew may change a keg.
         if let Some(i) = at("Cellar").filter(|i| parts.len() > i + 1) {
-            return Install::Brew { formula: parts[i + 1].clone(), prefix: rooted(&root, &parts[..i]), tap: None };
+            return Install::Brew {
+                formula: parts[i + 1].clone(),
+                prefix: rooted(&root, &parts[..i]),
+                tap: None,
+            };
         }
         if let Some(i) = at("Caskroom").filter(|i| parts.len() > i + 1) {
-            return Install::Cask { cask: parts[i + 1].clone(), prefix: rooted(&root, &parts[..i]) };
+            return Install::Cask {
+                cask: parts[i + 1].clone(),
+                prefix: rooted(&root, &parts[..i]),
+            };
         }
     }
     if cfg!(windows)
@@ -338,7 +573,9 @@ pub fn install_of(resolved: &Path) -> Install {
         return Install::Winget { id };
     }
     if let Some(i) = at("node_modules") {
-        let Some(first) = parts.get(i + 1) else { return Install::Native };
+        let Some(first) = parts.get(i + 1) else {
+            return Install::Native;
+        };
         let package = match (first.starts_with('@'), parts.get(i + 2)) {
             (true, Some(name)) => format!("{first}/{name}"),
             (true, None) => return Install::Native,
@@ -351,8 +588,15 @@ pub fn install_of(resolved: &Path) -> Install {
             return Install::Pnpm { package };
         }
         // npm's prefix holds `lib/node_modules` on Unix, and on Windows `node_modules` itself.
-        let end = if i > 0 && parts[i - 1] == "lib" { i - 1 } else { i };
-        return Install::Npm { package, prefix: rooted(&root, &parts[..end]) };
+        let end = if i > 0 && parts[i - 1] == "lib" {
+            i - 1
+        } else {
+            i
+        };
+        return Install::Npm {
+            package,
+            prefix: rooted(&root, &parts[..end]),
+        };
     }
     // After node_modules: a Node installed by Scoop or Chocolatey has npm packages of its own.
     if cfg!(windows)
@@ -366,42 +610,60 @@ pub fn install_of(resolved: &Path) -> Install {
 /// What follows `root` in `parts`, whatever case the folders are written in.
 fn tail_after<'a>(parts: &'a [String], root: &Path) -> Option<&'a [String]> {
     let root = names(root);
-    (!root.is_empty() && parts.len() >= root.len() && parts.iter().zip(&root).all(|(a, b)| a.eq_ignore_ascii_case(b))).then(|| &parts[root.len()..])
+    (!root.is_empty()
+        && parts.len() >= root.len()
+        && parts
+            .iter()
+            .zip(&root)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b)))
+    .then(|| &parts[root.len()..])
 }
 
 /// What follows a package manager's folder in `parts`: the folder called `name` (`scoop`,
 /// `chocolatey`) wherever it is, or the one the manager's environment variable (`SCOOP`,
 /// `ChocolateyInstall`) puts elsewhere.
 fn manager_tails<'a>(parts: &'a [String], name: &str, vars: &[&str]) -> Vec<&'a [String]> {
-    let named = parts.iter().position(|p| p.eq_ignore_ascii_case(name)).map(|i| &parts[i + 1..]);
-    let moved = vars.iter().filter_map(|v| std::env::var_os(v)).filter_map(|root| tail_after(parts, Path::new(&root)));
+    let named = parts
+        .iter()
+        .position(|p| p.eq_ignore_ascii_case(name))
+        .map(|i| &parts[i + 1..]);
+    let moved = vars
+        .iter()
+        .filter_map(|v| std::env::var_os(v))
+        .filter_map(|root| tail_after(parts, Path::new(&root)));
     named.into_iter().chain(moved).collect()
 }
 
 fn stem_of(file: &str) -> Option<String> {
-    Path::new(file).file_stem().map(|s| s.to_string_lossy().into_owned())
+    Path::new(file)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
 }
 
 /// A Scoop app's folder (`scoop\apps\<app>\…`) or its shim (`scoop\shims\<app>.exe`, the app
 /// taking the shim's name when its `.shim` file isn't read: see `script_of`).
 fn scoop_install(parts: &[String]) -> Option<Install> {
-    manager_tails(parts, "scoop", &["SCOOP", "SCOOP_GLOBAL"]).into_iter().find_map(|tail| match tail {
-        [kind, app, ..] if kind.eq_ignore_ascii_case("apps") => Some(app.clone()),
-        [kind, file] if kind.eq_ignore_ascii_case("shims") => stem_of(file),
-        _ => None,
-    })
-    .map(|app| Install::Scoop { app })
+    manager_tails(parts, "scoop", &["SCOOP", "SCOOP_GLOBAL"])
+        .into_iter()
+        .find_map(|tail| match tail {
+            [kind, app, ..] if kind.eq_ignore_ascii_case("apps") => Some(app.clone()),
+            [kind, file] if kind.eq_ignore_ascii_case("shims") => stem_of(file),
+            _ => None,
+        })
+        .map(|app| Install::Scoop { app })
 }
 
 /// A Chocolatey package's folder (`chocolatey\lib\<package>\…`) or its shim
 /// (`chocolatey\bin\<name>.exe`, a package's program, named as the package is for the CLIs).
 fn chocolatey_install(parts: &[String]) -> Option<Install> {
-    manager_tails(parts, "chocolatey", &["ChocolateyInstall"]).into_iter().find_map(|tail| match tail {
-        [kind, package, ..] if kind.eq_ignore_ascii_case("lib") => Some(package.clone()),
-        [kind, file] if kind.eq_ignore_ascii_case("bin") => stem_of(file),
-        _ => None,
-    })
-    .map(|package| Install::Chocolatey { package })
+    manager_tails(parts, "chocolatey", &["ChocolateyInstall"])
+        .into_iter()
+        .find_map(|tail| match tail {
+            [kind, package, ..] if kind.eq_ignore_ascii_case("lib") => Some(package.clone()),
+            [kind, file] if kind.eq_ignore_ascii_case("bin") => stem_of(file),
+            _ => None,
+        })
+        .map(|package| Install::Chocolatey { package })
 }
 
 /// The tap a formula came from, from its keg's `INSTALL_RECEIPT.json`; `None` for homebrew/core.
@@ -418,7 +680,10 @@ pub fn shim_target(shim: &Path, text: &str) -> Option<PathBuf> {
         return None;
     }
     let dir = shim.parent()?;
-    let target = text.split('"').find_map(|t| t.strip_prefix("$basedir/").filter(|t| t.contains("node_modules/")))?;
+    let target = text.split('"').find_map(|t| {
+        t.strip_prefix("$basedir/")
+            .filter(|t| t.contains("node_modules/"))
+    })?;
     Some(lexical(&dir.join(target)))
 }
 
@@ -444,7 +709,11 @@ fn lexical(path: &Path) -> PathBuf {
 /// `endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\node_modules\@openai\codex\bin\codex.js" %*`.
 pub fn cmd_shim_target(shim: &Path, text: &str) -> Option<PathBuf> {
     let dir = shim.parent()?;
-    let target = text.split('"').find_map(|t| t.strip_prefix("%dp0%").or_else(|| t.strip_prefix("%~dp0")).filter(|t| t.contains("node_modules")))?;
+    let target = text.split('"').find_map(|t| {
+        t.strip_prefix("%dp0%")
+            .or_else(|| t.strip_prefix("%~dp0"))
+            .filter(|t| t.contains("node_modules"))
+    })?;
     Some(lexical(&dir.join(target.trim_start_matches(['\\', '/']))))
 }
 
@@ -452,17 +721,31 @@ pub fn cmd_shim_target(shim: &Path, text: &str) -> Option<PathBuf> {
 /// beside `<name>.bunx`, whose UTF-16 text holds the path of the script, relative to the folder
 /// or absolute. Read for the first path in it that goes through `node_modules`.
 pub fn bunx_target(shim: &Path, bytes: &[u8]) -> Option<PathBuf> {
-    let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
     let text = String::from_utf16_lossy(&units);
-    let path = text.split(['\0', '"']).find(|t| t.contains("node_modules"))?.trim_start_matches(r"\??\");
+    let path = text
+        .split(['\0', '"'])
+        .find(|t| t.contains("node_modules"))?
+        .trim_start_matches(r"\??\");
     let path = Path::new(path);
-    Some(lexical(&if path.is_absolute() { path.to_path_buf() } else { shim.parent()?.join(path) }))
+    Some(lexical(&if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        shim.parent()?.join(path)
+    }))
 }
 
 /// What a Scoop shim runs. Scoop writes `<name>.shim` beside every `<name>.exe` in `shims`
 /// (one launcher program for all), a line of which says `path = "<app>\current\<name>.exe"`.
 pub fn scoop_shim_target(text: &str) -> Option<PathBuf> {
-    let value = text.lines().find_map(|l| l.trim().strip_prefix("path").and_then(|rest| rest.trim_start().strip_prefix('=')))?;
+    let value = text.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix("path")
+            .and_then(|rest| rest.trim_start().strip_prefix('='))
+    })?;
     let path = PathBuf::from(value.trim().trim_matches('"'));
     path.is_absolute().then_some(path)
 }
@@ -471,15 +754,28 @@ pub fn scoop_shim_target(text: &str) -> Option<PathBuf> {
 /// Windows a `.cmd`'s or Bun's), or itself.
 pub fn script_of(resolved: &Path) -> PathBuf {
     let small = std::fs::metadata(resolved).is_ok_and(|m| m.len() < 8 * 1024);
-    let extension = resolved.extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
+    let extension = resolved
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase());
     let target = match extension.as_deref() {
-        Some("cmd" | "bat") if cfg!(windows) => small.then(|| std::fs::read_to_string(resolved).ok()).flatten().and_then(|t| cmd_shim_target(resolved, &t)),
+        Some("cmd" | "bat") if cfg!(windows) => small
+            .then(|| std::fs::read_to_string(resolved).ok())
+            .flatten()
+            .and_then(|t| cmd_shim_target(resolved, &t)),
         Some("exe") if cfg!(windows) => std::fs::read_to_string(resolved.with_extension("shim"))
             .ok()
             .filter(|t| t.len() < 8 * 1024)
             .and_then(|t| scoop_shim_target(&t))
-            .or_else(|| std::fs::read(resolved.with_extension("bunx")).ok().filter(|b| b.len() < 8 * 1024).and_then(|b| bunx_target(resolved, &b))),
-        _ => small.then(|| std::fs::read_to_string(resolved).ok()).flatten().and_then(|t| shim_target(resolved, &t)),
+            .or_else(|| {
+                std::fs::read(resolved.with_extension("bunx"))
+                    .ok()
+                    .filter(|b| b.len() < 8 * 1024)
+                    .and_then(|b| bunx_target(resolved, &b))
+            }),
+        _ => small
+            .then(|| std::fs::read_to_string(resolved).ok())
+            .flatten()
+            .and_then(|t| shim_target(resolved, &t)),
     };
     target.unwrap_or_else(|| resolved.to_path_buf())
 }
@@ -492,14 +788,31 @@ const VENDOR_MARKERS: &[&str] = &["managed-install.json"];
 pub fn detect_install(resolved: &Path) -> Install {
     let script = script_of(resolved);
     let install = install_of(&script);
-    let vendors = || script.ancestors().skip(1).any(|dir| VENDOR_MARKERS.iter().any(|m| dir.join(m).is_file()));
+    let vendors = || {
+        script
+            .ancestors()
+            .skip(1)
+            .any(|dir| VENDOR_MARKERS.iter().any(|m| dir.join(m).is_file()))
+    };
     match install {
         Install::Npm { .. } if vendors() => Install::Native,
-        Install::Brew { formula, prefix, .. } => {
+        Install::Brew {
+            formula, prefix, ..
+        } => {
             let parts = names(&script);
-            let keg = parts.iter().position(|p| p == "Cellar").and_then(|i| parts.get(i + 2)).map(|v| prefix.join("Cellar").join(&formula).join(v));
-            let tap = keg.and_then(|k| std::fs::read_to_string(k.join("INSTALL_RECEIPT.json")).ok()).and_then(|j| tap_from_receipt(&j));
-            Install::Brew { formula, prefix, tap }
+            let keg = parts
+                .iter()
+                .position(|p| p == "Cellar")
+                .and_then(|i| parts.get(i + 2))
+                .map(|v| prefix.join("Cellar").join(&formula).join(v));
+            let tap = keg
+                .and_then(|k| std::fs::read_to_string(k.join("INSTALL_RECEIPT.json")).ok())
+                .and_then(|j| tap_from_receipt(&j));
+            Install::Brew {
+                formula,
+                prefix,
+                tap,
+            }
         }
         other => other,
     }
@@ -531,19 +844,29 @@ fn package_version(resolved: &Path) -> Option<String> {
 /// any pre-release or build suffix ("2026.10.01-e373342"). Only `[0-9A-Za-z.+-]`: a version
 /// goes into a shell line (`update_command`).
 pub fn parse_version(text: &str) -> Option<String> {
-    text.split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']' | ',' | ';' | '"' | '\''))
-        .map(|t| t.trim_start_matches(['v', 'V']).trim_end_matches(['.', ':']))
-        .find(|t| {
-            let core = t.split(['-', '+']).next().unwrap_or_default();
-            safe_version(t) &&
-            core.contains('.') && core.split('.').all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-        })
-        .map(String::from)
+    text.split(|c: char| {
+        c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']' | ',' | ';' | '"' | '\'')
+    })
+    .map(|t| {
+        t.trim_start_matches(['v', 'V'])
+            .trim_end_matches(['.', ':'])
+    })
+    .find(|t| {
+        let core = t.split(['-', '+']).next().unwrap_or_default();
+        safe_version(t)
+            && core.contains('.')
+            && core
+                .split('.')
+                .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
+    .map(String::from)
 }
 
 /// `v` is made of `[0-9A-Za-z.+-]` only, so it's safe in a shell line as it is.
 fn safe_version(v: &str) -> bool {
-    !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'))
+    !v.is_empty()
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'))
 }
 
 fn numbers(v: &str) -> Option<(Vec<u64>, bool)> {
@@ -551,16 +874,27 @@ fn numbers(v: &str) -> Option<(Vec<u64>, bool)> {
         Some(i) => (&v[..i], v[i..].starts_with('-')),
         None => (v, false),
     };
-    Some((core.split('.').map(|n| n.parse().ok()).collect::<Option<Vec<u64>>>()?, suffix))
+    Some((
+        core.split('.')
+            .map(|n| n.parse().ok())
+            .collect::<Option<Vec<u64>>>()?,
+        suffix,
+    ))
 }
 
 /// `latest` is a newer release than `installed`. Versions compare number by number; at equal
 /// numbers a pre-release ("1.2.0-beta.1") is older than the release. A version that isn't
 /// numbered never counts as newer: Trek offers no update it can't order.
 pub fn is_newer(latest: &str, installed: &str) -> bool {
-    let (Some((a, a_pre)), Some((b, b_pre))) = (numbers(latest), numbers(installed)) else { return false };
+    let (Some((a, a_pre)), Some((b, b_pre))) = (numbers(latest), numbers(installed)) else {
+        return false;
+    };
     let n = a.len().max(b.len());
-    let pad = |v: &[u64]| (0..n).map(|i| v.get(i).copied().unwrap_or(0)).collect::<Vec<_>>();
+    let pad = |v: &[u64]| {
+        (0..n)
+            .map(|i| v.get(i).copied().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
     match pad(&a).cmp(&pad(&b)) {
         std::cmp::Ordering::Greater => true,
         std::cmp::Ordering::Less => false,
@@ -575,7 +909,10 @@ pub fn is_newer(latest: &str, installed: &str) -> bool {
 pub enum Source {
     Npm(String),
     Formula(String),
-    TapFormula { tap: String, formula: String },
+    TapFormula {
+        tap: String,
+        formula: String,
+    },
     Cask(String),
     /// A WinGet package: the versions WinGet's community source has, as `winget` says (what
     /// `winget upgrade` installs from), or else as winget-pkgs has manifests for, which is a few
@@ -592,17 +929,34 @@ pub fn source(h: &Harness, install: &Install, installed: Option<&str>) -> Option
     match install {
         // An install of the package it moved from is compared with the new one: the old one's
         // `latest` stays where it was left.
-        Install::Npm { package, .. } | Install::Bun { package } | Install::Pnpm { package } if h.moved(package) => h.npm.map(|p| Source::Npm(p.into())),
-        Install::Npm { package, .. } | Install::Bun { package } | Install::Pnpm { package } => Some(Source::Npm(package.clone())),
-        Install::Brew { formula, tap: None, .. } => Some(Source::Formula(formula.clone())),
-        Install::Brew { formula, tap: Some(tap), .. } => Some(Source::TapFormula { tap: tap.clone(), formula: formula.clone() }),
+        Install::Npm { package, .. } | Install::Bun { package } | Install::Pnpm { package }
+            if h.moved(package) =>
+        {
+            h.npm.map(|p| Source::Npm(p.into()))
+        }
+        Install::Npm { package, .. } | Install::Bun { package } | Install::Pnpm { package } => {
+            Some(Source::Npm(package.clone()))
+        }
+        Install::Brew {
+            formula, tap: None, ..
+        } => Some(Source::Formula(formula.clone())),
+        Install::Brew {
+            formula,
+            tap: Some(tap),
+            ..
+        } => Some(Source::TapFormula {
+            tap: tap.clone(),
+            formula: formula.clone(),
+        }),
         Install::Cask { cask, .. } => Some(Source::Cask(cask.clone())),
         Install::Volta => h.npm_for(installed).map(|p| Source::Npm(p.into())),
         // What the package manager has, not what the vendor released: an update it can't install
         // yet isn't one to offer (Claude Code 2.1.296 was out while WinGet still had 2.1.292,
         // and `winget upgrade` of the install said so by failing).
         Install::Winget { id } => package_name(id).then(|| Source::Winget(id.clone())),
-        Install::Chocolatey { package } => package_name(package).then(|| Source::Chocolatey(package.clone())),
+        Install::Chocolatey { package } => {
+            package_name(package).then(|| Source::Chocolatey(package.clone()))
+        }
         // Scoop's buckets are git repositories it pulls before updating: they follow the
         // vendor's release closely.
         Install::Native | Install::Scoop { .. } => match h.feed {
@@ -621,26 +975,50 @@ pub fn urls(source: &Source) -> Vec<String> {
             // A tap "user/repo" is the GitHub repository user/homebrew-repo.
             let (user, repo) = tap.split_once('/').unwrap_or((tap, tap));
             let base = format!("https://raw.githubusercontent.com/{user}/homebrew-{repo}/HEAD");
-            vec![format!("{base}/Formula/{formula}.rb"), format!("{base}/{formula}.rb")]
+            vec![
+                format!("{base}/Formula/{formula}.rb"),
+                format!("{base}/{formula}.rb"),
+            ]
         }
         Source::Cask(c) => vec![format!("https://formulae.brew.sh/api/cask/{c}.json")],
         // `Publisher.Package` is `manifests/p/Publisher/Package`, a folder per version.
         Source::Winget(id) => {
-            let first = id.chars().next().map(|c| c.to_ascii_lowercase()).unwrap_or_default();
-            vec![format!("https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/{first}/{}", id.replace('.', "/"))]
+            let first = id
+                .chars()
+                .next()
+                .map(|c| c.to_ascii_lowercase())
+                .unwrap_or_default();
+            vec![format!(
+                "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/{first}/{}",
+                id.replace('.', "/")
+            )]
         }
-        Source::Chocolatey(p) => vec![format!("https://community.chocolatey.org/api/v2/Packages()?$filter=Id%20eq%20'{p}'%20and%20IsLatestVersion&$select=Version")],
+        Source::Chocolatey(p) => vec![format!(
+            "https://community.chocolatey.org/api/v2/Packages()?$filter=Id%20eq%20'{p}'%20and%20IsLatestVersion&$select=Version"
+        )],
         // The feeds name a version, not a download: the same on every platform. Cursor's and
         // Factory's are their install scripts, and each has a Windows one that names it too.
         Source::Feed(feed) => match feed {
             Feed::Npm => vec![],
-            Feed::ClaudeReleases => vec!["https://downloads.claude.ai/claude-code-releases/latest".into()],
-            Feed::ClaudeStable => vec!["https://downloads.claude.ai/claude-code-releases/stable".into()],
+            Feed::ClaudeReleases => {
+                vec!["https://downloads.claude.ai/claude-code-releases/latest".into()]
+            }
+            Feed::ClaudeStable => {
+                vec!["https://downloads.claude.ai/claude-code-releases/stable".into()]
+            }
             Feed::GrokStable => vec!["https://x.ai/cli/stable".into()],
             Feed::DevinManifest => vec!["https://static.devin.ai/cli/current/manifest.json".into()],
-            Feed::CursorInstaller => vec!["https://cursor.com/install".into(), "https://cursor.com/install?win32=true".into()],
-            Feed::DroidInstaller => vec!["https://app.factory.ai/cli".into(), "https://app.factory.ai/cli/windows".into()],
-            Feed::GitHub(repo) => vec![format!("https://api.github.com/repos/{repo}/releases/latest")],
+            Feed::CursorInstaller => vec![
+                "https://cursor.com/install".into(),
+                "https://cursor.com/install?win32=true".into(),
+            ],
+            Feed::DroidInstaller => vec![
+                "https://app.factory.ai/cli".into(),
+                "https://app.factory.ai/cli/windows".into(),
+            ],
+            Feed::GitHub(repo) => vec![format!(
+                "https://api.github.com/repos/{repo}/releases/latest"
+            )],
         },
     }
 }
@@ -662,18 +1040,31 @@ fn between<'a>(text: &'a str, start: &str, end: char) -> Option<&'a str> {
 
 /// The newest of `versions`, as a feed that lists several.
 fn newest(versions: impl Iterator<Item = String>) -> Option<Latest> {
-    versions.reduce(|a, b| if is_newer(&b, &a) { b } else { a }).map(|version| Latest { version, auto_updates: false })
+    versions
+        .reduce(|a, b| if is_newer(&b, &a) { b } else { a })
+        .map(|version| Latest {
+            version,
+            auto_updates: false,
+        })
 }
 
 /// `name` (a WinGet id, a Chocolatey package) goes into a URL as it is.
 fn package_name(name: &str) -> bool {
-    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
 }
 
 /// Read the newest version out of `body`, a response from one of `source`'s URLs.
 pub fn parse_latest(source: &Source, body: &str) -> Option<Latest> {
     let json = || serde_json::from_str::<serde_json::Value>(body).ok();
-    let plain = |v: Option<String>| v.and_then(|v| parse_version(&v)).map(|version| Latest { version, auto_updates: false });
+    let plain = |v: Option<String>| {
+        v.and_then(|v| parse_version(&v)).map(|version| Latest {
+            version,
+            auto_updates: false,
+        })
+    };
     match source {
         Source::Npm(_) => plain(json()?["version"].as_str().map(String::from)),
         Source::Formula(_) => plain(json()?["versions"]["stable"].as_str().map(String::from)),
@@ -681,23 +1072,47 @@ pub fn parse_latest(source: &Source, body: &str) -> Option<Latest> {
             let v = json()?;
             // Casks may append a build after a comma ("1.2.3,4567").
             let version = parse_version(v["version"].as_str()?.split(',').next()?)?;
-            Some(Latest { version, auto_updates: v["auto_updates"].as_bool().unwrap_or(false) })
+            Some(Latest {
+                version,
+                auto_updates: v["auto_updates"].as_bool().unwrap_or(false),
+            })
         }
-        Source::TapFormula { .. } => plain(body.lines().find_map(|l| l.trim().strip_prefix("version ").map(|v| v.trim().trim_matches('"').to_string()))),
+        Source::TapFormula { .. } => plain(body.lines().find_map(|l| {
+            l.trim()
+                .strip_prefix("version ")
+                .map(|v| v.trim().trim_matches('"').to_string())
+        })),
         // A version's folder is named as the version ("2.1.292", Copilot's "v1.0.95"); a folder
         // of another name is another package (`GitHub.Copilot.Prerelease`).
-        Source::Winget(_) => newest(json()?.as_array()?.iter().filter(|e| e["type"] == "dir").filter_map(|e| crate::winget::version_row(e["name"].as_str()?))),
+        Source::Winget(_) => newest(
+            json()?
+                .as_array()?
+                .iter()
+                .filter(|e| e["type"] == "dir")
+                .filter_map(|e| crate::winget::version_row(e["name"].as_str()?)),
+        ),
         // An OData feed: `<d:Version>1.19.0</d:Version>` in its one entry.
-        Source::Chocolatey(_) => newest(body.split("<d:Version>").skip(1).filter_map(|rest| parse_version(rest.split('<').next()?))),
+        Source::Chocolatey(_) => newest(
+            body.split("<d:Version>")
+                .skip(1)
+                .filter_map(|rest| parse_version(rest.split('<').next()?)),
+        ),
         Source::Feed(feed) => match feed {
             Feed::Npm => None,
-            Feed::ClaudeReleases | Feed::ClaudeStable | Feed::GrokStable => plain(body.lines().next().map(|l| l.trim().to_string())),
+            Feed::ClaudeReleases | Feed::ClaudeStable | Feed::GrokStable => {
+                plain(body.lines().next().map(|l| l.trim().to_string()))
+            }
             Feed::DevinManifest => plain(json()?["version"].as_str().map(String::from)),
-            Feed::CursorInstaller => plain(between(body, "downloads.cursor.com/lab/", '/').map(String::from)),
+            Feed::CursorInstaller => {
+                plain(between(body, "downloads.cursor.com/lab/", '/').map(String::from))
+            }
             // `VER="0.233.0"` in the shell script, `$version = '0.237.0'` in the PowerShell one.
             Feed::DroidInstaller => plain(body.lines().find_map(|l| {
                 let l = l.trim();
-                let value = l.strip_prefix("VER=").or_else(|| l.strip_prefix("$version").and_then(|v| v.trim_start().strip_prefix('=')))?;
+                let value = l.strip_prefix("VER=").or_else(|| {
+                    l.strip_prefix("$version")
+                        .and_then(|v| v.trim_start().strip_prefix('='))
+                })?;
                 Some(value.trim().trim_matches(['"', '\'']).to_string())
             })),
             Feed::GitHub(_) => plain(json()?["tag_name"].as_str().map(String::from)),
@@ -754,7 +1169,11 @@ pub enum Builtin {
 /// when it names none of them).
 fn runnable_extensions() -> Vec<String> {
     let pathext = std::env::var("PATHEXT").unwrap_or_default();
-    let mut found: Vec<String> = pathext.split(';').map(|e| e.trim().to_ascii_lowercase()).filter(|e| [".com", ".exe", ".bat", ".cmd"].contains(&e.as_str())).collect();
+    let mut found: Vec<String> = pathext
+        .split(';')
+        .map(|e| e.trim().to_ascii_lowercase())
+        .filter(|e| [".com", ".exe", ".bat", ".cmd"].contains(&e.as_str()))
+        .collect();
     if found.is_empty() {
         found = [".com", ".exe", ".bat", ".cmd"].map(String::from).to_vec();
     }
@@ -770,18 +1189,27 @@ fn resolve_program(program: &Path, search_path: &str) -> Option<PathBuf> {
     }
     let name = program.to_string_lossy();
     let extensions = runnable_extensions();
-    let names: Vec<String> = if !cfg!(windows) || extensions.iter().any(|e| name.to_ascii_lowercase().ends_with(e.as_str())) {
+    let names: Vec<String> = if !cfg!(windows)
+        || extensions
+            .iter()
+            .any(|e| name.to_ascii_lowercase().ends_with(e.as_str()))
+    {
         vec![name.to_string()]
     } else {
         extensions.iter().map(|e| format!("{name}{e}")).collect()
     };
-    std::env::split_paths(search_path).filter(|d| !d.as_os_str().is_empty()).find_map(|dir| names.iter().map(|n| dir.join(n)).find(|p| p.is_file()))
+    std::env::split_paths(search_path)
+        .filter(|d| !d.as_os_str().is_empty())
+        .find_map(|dir| names.iter().map(|n| dir.join(n)).find(|p| p.is_file()))
 }
 
 /// Windows PowerShell, the one every Windows has (PowerShell 7 isn't on all of them).
 fn powershell() -> PathBuf {
-    let system = std::env::var_os("SystemRoot").map(|root| PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"));
-    system.filter(|p| p.is_file()).unwrap_or_else(|| PathBuf::from("powershell"))
+    let system = std::env::var_os("SystemRoot")
+        .map(|root| PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"));
+    system
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from("powershell"))
 }
 
 impl UpdateCommand {
@@ -801,18 +1229,39 @@ impl UpdateCommand {
 
     /// This command, run as an administrator.
     pub fn as_admin(self) -> Self {
-        Self { elevated: true, ..self }
+        Self {
+            elevated: true,
+            ..self
+        }
     }
 
     /// `script` run by PowerShell, which is how a Windows installer line (`irm … | iex`) and the
     /// package move run where there's no `/bin/sh`. Shown as `shown`.
     pub fn powershell(script: &str, shown: &str) -> Self {
-        Self { display: Some(shown.to_string()), ..Self::new(powershell(), &["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]) }
+        Self {
+            display: Some(shown.to_string()),
+            ..Self::new(
+                powershell(),
+                &[
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    script,
+                ],
+            )
+        }
     }
 
     /// The PATH it runs with.
     pub fn search_path(&self) -> String {
-        self.path.iter().map(|p| p.display().to_string()).chain(std::iter::once(login_path().to_string())).collect::<Vec<_>>().join(&PATH_SEP.to_string())
+        self.path
+            .iter()
+            .map(|p| p.display().to_string())
+            .chain(std::iter::once(login_path().to_string()))
+            .collect::<Vec<_>>()
+            .join(&PATH_SEP.to_string())
     }
 
     /// As the user would type it: "npm install -g @openai/codex@latest", "claude update".
@@ -820,7 +1269,11 @@ impl UpdateCommand {
         if let Some(shown) = &self.display {
             return shown.clone();
         }
-        let program = self.program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.program.display().to_string());
+        let program = self
+            .program
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.program.display().to_string());
         // A script runs through `sh -c`: show the line itself, or what it's named after it (the
         // script's `$0`) when it does more than it says.
         if program == "sh" && self.args.first().is_some_and(|a| a == "-c") {
@@ -828,10 +1281,19 @@ impl UpdateCommand {
         }
         // On Windows `claude.exe` and `npm.cmd` are typed `claude` and `npm`.
         let program = match program.rsplit_once('.') {
-            Some((stem, ext)) if cfg!(windows) && [".com", ".exe", ".bat", ".cmd"].contains(&format!(".{}", ext.to_ascii_lowercase()).as_str()) => stem.to_string(),
+            Some((stem, ext))
+                if cfg!(windows)
+                    && [".com", ".exe", ".bat", ".cmd"]
+                        .contains(&format!(".{}", ext.to_ascii_lowercase()).as_str()) =>
+            {
+                stem.to_string()
+            }
             _ => program,
         };
-        std::iter::once(program).chain(self.args.iter().cloned()).collect::<Vec<_>>().join(" ")
+        std::iter::once(program)
+            .chain(self.args.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 
@@ -844,7 +1306,13 @@ pub const LOST: i32 = 76;
 /// with its binary at `binary`: the package manager that installed it, or for its own
 /// installer, the CLI's own update command (or the install script again). A self-updating cask
 /// updates itself too. `None` when there's no way Trek can run.
-pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_updates: bool, installed: Option<&str>) -> Option<UpdateCommand> {
+pub fn update_command(
+    h: &Harness,
+    install: &Install,
+    binary: &Path,
+    auto_updates: bool,
+    installed: Option<&str>,
+) -> Option<UpdateCommand> {
     let own = || h.self_update.map(|args| UpdateCommand::new(binary, args));
     // Installed as the package it moved from: that one goes first (its binary blocks the new
     // one's, and uninstalling it after a forced install takes the shared link with it), then the
@@ -853,46 +1321,87 @@ pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_update
     let moving = |remove: &str, add: &str, offline: &str, old: &str| {
         let new = h.npm?;
         // Into a shell line: only a version that can't run anything.
-        let back = installed.filter(|v| safe_version(v)).map_or_else(|| old.to_string(), |v| format!("{old}@{v}"));
+        let back = installed
+            .filter(|v| safe_version(v))
+            .map_or_else(|| old.to_string(), |v| format!("{old}@{v}"));
         let shown = format!("{remove} {old} && {add} {new}@latest");
         let name = h.name();
         let command = if cfg!(windows) {
             // The same steps in PowerShell, which reads a bare `@scope/name` as splatting: each
             // package is quoted. Stopping on an error makes a missing program exit 1, not go on.
-            let step = |line: String, test: &str, then: String| format!("{line}; if ($LASTEXITCODE -{test}) {{ {then} }}");
+            let step = |line: String, test: &str, then: String| {
+                format!("{line}; if ($LASTEXITCODE -{test}) {{ {then} }}")
+            };
             let script = [
                 "$ErrorActionPreference = 'Stop'".to_string(),
-                step(format!("{remove} '{old}'"), "ne 0", "exit $LASTEXITCODE".into()),
+                step(
+                    format!("{remove} '{old}'"),
+                    "ne 0",
+                    "exit $LASTEXITCODE".into(),
+                ),
                 step(format!("{add} '{new}@latest'"), "eq 0", "exit 0".into()),
-                step(format!("{add} {offline}'{back}'"), "eq 0", format!("exit {PUT_BACK}")),
+                step(
+                    format!("{add} {offline}'{back}'"),
+                    "eq 0",
+                    format!("exit {PUT_BACK}"),
+                ),
                 format!("exit {LOST}"),
             ]
             .join("; ");
             UpdateCommand::powershell(&script, &shown)
         } else {
             // Into a shell line: only a version that can't run anything.
-            let script = format!("{remove} {old} || exit $?; {add} {new}@latest && exit 0; {add} {offline}{back} && exit {PUT_BACK}; exit {LOST}");
+            let script = format!(
+                "{remove} {old} || exit $?; {add} {new}@latest && exit 0; {add} {offline}{back} && exit {PUT_BACK}; exit {LOST}"
+            );
             UpdateCommand::new("/bin/sh", &["-c", &script, &shown])
         };
         Some(UpdateCommand {
             on_exit: vec![
-                (PUT_BACK, format!("Couldn't install {new}, so {back} was put back.")),
-                (LOST, format!("Couldn't install {new}, nor put {back} back: {name} isn't installed now. Run {add} {new} to install it.")),
+                (
+                    PUT_BACK,
+                    format!("Couldn't install {new}, so {back} was put back."),
+                ),
+                (
+                    LOST,
+                    format!(
+                        "Couldn't install {new}, nor put {back} back: {name} isn't installed now. Run {add} {new} to install it."
+                    ),
+                ),
             ],
             ..command
         })
     };
     // Where an npm prefix keeps its programs: `<prefix>/bin`, and on Windows the prefix itself
     // (`npm.cmd`, `node.exe` and the shims of its packages, an nvm version's folder included).
-    let npm_dir = |prefix: &Path| if cfg!(windows) { prefix.to_path_buf() } else { prefix.join("bin") };
+    let npm_dir = |prefix: &Path| {
+        if cfg!(windows) {
+            prefix.to_path_buf()
+        } else {
+            prefix.join("bin")
+        }
+    };
     match install {
-        Install::Npm { package, prefix } if h.moved(package) => moving("npm uninstall -g", "npm install -g", "--prefer-offline ", package).map(|c| UpdateCommand {
+        Install::Npm { package, prefix } if h.moved(package) => moving(
+            "npm uninstall -g",
+            "npm install -g",
+            "--prefer-offline ",
+            package,
+        )
+        .map(|c| UpdateCommand {
             path: vec![npm_dir(prefix)],
             env: vec![("npm_config_prefix".into(), prefix.display().to_string())],
             ..c
         }),
-        Install::Bun { package } if h.moved(package) => moving("bun remove -g", "bun add -g", "", package),
-        Install::Pnpm { package } if h.moved(package) => moving("pnpm remove -g", "pnpm add -g", "--prefer-offline ", package),
+        Install::Bun { package } if h.moved(package) => {
+            moving("bun remove -g", "bun add -g", "", package)
+        }
+        Install::Pnpm { package } if h.moved(package) => moving(
+            "pnpm remove -g",
+            "pnpm add -g",
+            "--prefer-offline ",
+            package,
+        ),
         // The npm and node of the install's own prefix come first (an nvm version's, Homebrew's),
         // and the prefix is set outright: a prefix of the user's own (`~/.npm-global`) has
         // neither, so the npm on PATH installs there.
@@ -901,16 +1410,36 @@ pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_update
             env: vec![("npm_config_prefix".into(), prefix.display().to_string())],
             ..UpdateCommand::new("npm", &["install", "-g", &format!("{package}@latest")])
         }),
-        Install::Volta => h.npm_for(installed).map(|p| UpdateCommand::new("volta", &["install", &format!("{p}@latest")])),
-        Install::Bun { package } => Some(UpdateCommand::new("bun", &["add", "-g", &format!("{package}@latest")])),
-        Install::Pnpm { package } => Some(UpdateCommand::new("pnpm", &["add", "-g", &format!("{package}@latest")])),
-        Install::Brew { formula, prefix, tap } => {
-            let name = tap.as_ref().map_or_else(|| formula.clone(), |t| format!("{t}/{formula}"));
-            Some(UpdateCommand::new(prefix.join("bin/brew"), &["upgrade", &name]))
+        Install::Volta => h
+            .npm_for(installed)
+            .map(|p| UpdateCommand::new("volta", &["install", &format!("{p}@latest")])),
+        Install::Bun { package } => Some(UpdateCommand::new(
+            "bun",
+            &["add", "-g", &format!("{package}@latest")],
+        )),
+        Install::Pnpm { package } => Some(UpdateCommand::new(
+            "pnpm",
+            &["add", "-g", &format!("{package}@latest")],
+        )),
+        Install::Brew {
+            formula,
+            prefix,
+            tap,
+        } => {
+            let name = tap
+                .as_ref()
+                .map_or_else(|| formula.clone(), |t| format!("{t}/{formula}"));
+            Some(UpdateCommand::new(
+                prefix.join("bin/brew"),
+                &["upgrade", &name],
+            ))
         }
         Install::Cask { cask, prefix } => match own().filter(|_| auto_updates) {
             Some(cmd) => Some(cmd),
-            None => Some(UpdateCommand::new(prefix.join("bin/brew"), &["upgrade", "--cask", cask])),
+            None => Some(UpdateCommand::new(
+                prefix.join("bin/brew"),
+                &["upgrade", "--cask", cask],
+            )),
         },
         // `winget upgrade`, as Claude Code's documentation says: WinGet's installs don't update
         // themselves. One installed for every user (Program Files) upgrades as an administrator.
@@ -918,28 +1447,58 @@ pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_update
             let upgrade = UpdateCommand {
                 on_exit: winget_exits(h),
                 // Nothing to ask, or to wait for: it may run where no one can answer.
-                ..UpdateCommand::new("winget", &["upgrade", "--id", id, "--exact", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"])
+                ..UpdateCommand::new(
+                    "winget",
+                    &[
+                        "upgrade",
+                        "--id",
+                        id,
+                        "--exact",
+                        "--accept-package-agreements",
+                        "--accept-source-agreements",
+                        "--disable-interactivity",
+                    ],
+                )
             };
-            Some(if needs_admin(binary) { upgrade.as_admin() } else { upgrade })
+            Some(if needs_admin(binary) {
+                upgrade.as_admin()
+            } else {
+                upgrade
+            })
         }
         // A Scoop for every user (ProgramData) updates its apps as an administrator.
-        Install::Scoop { app } if needs_admin(binary) => Some(UpdateCommand::new("scoop", &["update", app, "-g"]).as_admin()),
+        Install::Scoop { app } if needs_admin(binary) => {
+            Some(UpdateCommand::new("scoop", &["update", app, "-g"]).as_admin())
+        }
         Install::Scoop { app } => Some(UpdateCommand::new("scoop", &["update", app])),
         // Chocolatey installs into ProgramData, and upgrades from there as an administrator.
         Install::Chocolatey { package } => {
             // No progress bars: its output is read from a file.
             let upgrade = UpdateCommand::new("choco", &["upgrade", package, "-y", "--no-progress"]);
-            Some(if needs_admin(binary) { upgrade.as_admin() } else { upgrade })
+            Some(if needs_admin(binary) {
+                upgrade.as_admin()
+            } else {
+                upgrade
+            })
         }
         // Devin's `irm … | iex` install, which Trek does itself: its release bundle, checked, put
         // where that installer puts it; no script is run, and no wizard started.
         Install::Native if h.bundle_install(binary) => Some(UpdateCommand {
             builtin: Some(Builtin::DevinBundle),
-            display: Some(format!("{}'s installer steps, without its setup wizard", h.name())),
+            display: Some(format!(
+                "{}'s installer steps, without its setup wizard",
+                h.name()
+            )),
             ..UpdateCommand::new(binary, &[])
         }),
         Install::Native => own().or_else(|| {
-            h.installer_line().map(|line| if cfg!(windows) { UpdateCommand::powershell(line, line) } else { UpdateCommand::new("/bin/sh", &["-c", line]) })
+            h.installer_line().map(|line| {
+                if cfg!(windows) {
+                    UpdateCommand::powershell(line, line)
+                } else {
+                    UpdateCommand::new("/bin/sh", &["-c", line])
+                }
+            })
         }),
     }
 }
@@ -947,7 +1506,11 @@ pub fn update_command(h: &Harness, install: &Install, binary: &Path, auto_update
 /// `path` is in a folder only an administrator can write to: Program Files, or ProgramData
 /// (where Chocolatey and a machine-wide Scoop live). Never on macOS.
 fn needs_admin(path: &Path) -> bool {
-    cfg!(windows) && names(path).iter().any(|p| ["program files", "program files (x86)", "programdata"].contains(&p.to_ascii_lowercase().as_str()))
+    cfg!(windows)
+        && names(path).iter().any(|p| {
+            ["program files", "program files (x86)", "programdata"]
+                .contains(&p.to_ascii_lowercase().as_str())
+        })
 }
 
 /// What `winget upgrade`'s exit codes (`winget`'s return-codes table) mean, said in words. None
@@ -997,7 +1560,8 @@ impl AgentVersion {
 
     /// A newer version is out, and Trek knows how to install it.
     pub fn update_available(&self) -> bool {
-        self.command.is_some() && matches!((&self.latest, &self.installed), (Some(l), Some(i)) if is_newer(l, i))
+        self.command.is_some()
+            && matches!((&self.latest, &self.installed), (Some(l), Some(i)) if is_newer(l, i))
     }
 }
 
@@ -1005,7 +1569,10 @@ impl AgentVersion {
 /// for it, as long as nothing was installed since (else it may be stale).
 pub fn carry_over(fresh: &mut [AgentVersion], before: &[AgentVersion]) {
     for v in fresh.iter_mut().filter(|v| v.latest.is_none()) {
-        if let Some(old) = before.iter().find(|o| o.id == v.id && o.installed == v.installed && o.install == v.install) {
+        if let Some(old) = before
+            .iter()
+            .find(|o| o.id == v.id && o.installed == v.installed && o.install == v.install)
+        {
             v.latest = old.latest.clone();
             // With it, the command that check worked out for it: how an install updates may
             // depend on what its feed said (a self-updating cask), unknown this time.
@@ -1030,7 +1597,10 @@ impl Snapshot {
     }
 
     pub fn load() -> Snapshot {
-        let mut snap: Snapshot = std::fs::read_to_string(Self::path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let mut snap: Snapshot = std::fs::read_to_string(Self::path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
         // Cached before rows had ids: one row per agent, its CLI's.
         for v in snap.agents.iter_mut().filter(|v| v.id.is_empty()) {
             if let Some(h) = HARNESSES.iter().find(|h| h.agent == v.agent && !h.adapter) {
@@ -1041,7 +1611,11 @@ impl Snapshot {
         // Commands an older Trek left to the user: this one runs them, as an administrator or
         // unattended, and the next check works out how. Until then there's none to run (nor to
         // carry over to a check that can't reach the feed).
-        for v in snap.agents.iter_mut().filter(|v| v.command.as_ref().is_some_and(|c| c.manual.is_some())) {
+        for v in snap
+            .agents
+            .iter_mut()
+            .filter(|v| v.command.as_ref().is_some_and(|c| c.manual.is_some()))
+        {
             v.command = None;
         }
         snap
@@ -1077,7 +1651,12 @@ async fn fetch_latest(feeds: &Feeds, source: &Source) -> Result<Latest, String> 
 /// `fetch_latest`, from `urls` (and WinGet's `winget` program): a WinGet package is asked of
 /// WinGet itself, which is what `winget upgrade` installs from, and of winget-pkgs only when it
 /// can't say; every other feed is asked through the cache (`Feeds`).
-async fn fetch_from(feeds: &Feeds, source: &Source, urls: Vec<String>, winget: &str) -> Result<Latest, String> {
+async fn fetch_from(
+    feeds: &Feeds,
+    source: &Source,
+    urls: Vec<String>,
+    winget: &str,
+) -> Result<Latest, String> {
     if let Source::Winget(id) = source
         && let Some(latest) = crate::winget::latest(winget, id).await
     {
@@ -1087,13 +1666,17 @@ async fn fetch_from(feeds: &Feeds, source: &Source, urls: Vec<String>, winget: &
     for url in urls {
         match feeds.get(&url).await {
             // A feed that's out of requests answers with what it said last, as of then.
-            Ok(Reply::Body(body) | Reply::Remembered { body, .. }) => match parse_latest(source, &body) {
-                Some(l) => return Ok(l),
-                None => last = format!("No version in {url}"),
-            },
+            Ok(Reply::Body(body) | Reply::Remembered { body, .. }) => {
+                match parse_latest(source, &body) {
+                    Some(l) => return Ok(l),
+                    None => last = format!("No version in {url}"),
+                }
+            }
             Ok(Reply::Limited { .. }) => last = LIMITED.into(),
             Ok(Reply::Refused(status)) => last = format!("{url} answered {status}"),
-            Err(e) if e.is_connect() || e.is_timeout() => last = "Offline, or the release feed didn't answer".into(),
+            Err(e) if e.is_connect() || e.is_timeout() => {
+                last = "Offline, or the release feed didn't answer".into()
+            }
             Err(e) if e.is_body() || e.is_decode() => last = format!("Couldn't read {url}: {e}"),
             Err(e) => last = format!("Couldn't reach {url}: {e}"),
         }
@@ -1106,7 +1689,9 @@ async fn fetch_from(feeds: &Feeds, source: &Source, urls: Vec<String>, winget: &
 /// `--version`, they start serving ACP.
 pub async fn installed_version(h: &Harness, binary: &Path) -> Option<String> {
     if !h.adapter
-        && let Some(v) = crate::detect::version_of(binary).await.and_then(|out| parse_version(&out))
+        && let Some(v) = crate::detect::version_of(binary)
+            .await
+            .and_then(|out| parse_version(&out))
     {
         return Some(v);
     }
@@ -1115,12 +1700,16 @@ pub async fn installed_version(h: &Harness, binary: &Path) -> Option<String> {
 
 /// Claude Code's settings put it on its stable channel (`autoUpdatesChannel`).
 pub fn claude_on_stable(settings: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(settings).ok().is_some_and(|v| v["autoUpdatesChannel"].as_str() == Some("stable"))
+    serde_json::from_str::<serde_json::Value>(settings)
+        .ok()
+        .is_some_and(|v| v["autoUpdatesChannel"].as_str() == Some("stable"))
 }
 
 /// Read-only: the channel the user picked in Claude Code's own settings.
 fn claude_channel_stable() -> bool {
-    let dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| crate::paths::home().join(".claude"));
+    let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::paths::home().join(".claude"));
     std::fs::read_to_string(dir.join("settings.json")).is_ok_and(|s| claude_on_stable(&s))
 }
 
@@ -1136,7 +1725,9 @@ pub async fn check(h: &Harness, feeds: &Feeds) -> Option<AgentVersion> {
     }
     let installed = installed_version(h, &binary).await;
     let source = source(h, &install, installed.as_deref()).map(|s| match s {
-        Source::Feed(Feed::ClaudeReleases) if claude_channel_stable() => Source::Feed(Feed::ClaudeStable),
+        Source::Feed(Feed::ClaudeReleases) if claude_channel_stable() => {
+            Source::Feed(Feed::ClaudeStable)
+        }
         s => s,
     });
     let latest = match source {
@@ -1160,7 +1751,11 @@ pub async fn check(h: &Harness, feeds: &Feeds) -> Option<AgentVersion> {
 /// Check every agent CLI on this computer, side by side. Takes a few seconds; never fails as a whole.
 pub async fn check_all() -> Vec<AgentVersion> {
     let feeds = Feeds::open(client());
-    let found = futures::future::join_all(HARNESSES.iter().map(|h| check(h, &feeds))).await.into_iter().flatten().collect();
+    let found = futures::future::join_all(HARNESSES.iter().map(|h| check(h, &feeds)))
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
     feeds.save();
     found
 }
@@ -1211,27 +1806,52 @@ const UPDATE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 pub async fn run_update(v: &AgentVersion) -> Outcome {
     // One that runs as an administrator goes through `run_elevated`, which checks it.
     if v.command.as_ref().is_some_and(|c| c.elevated) {
-        return run_elevated(std::slice::from_ref(v)).await.pop().unwrap_or_else(|| no_command(v));
+        return run_elevated(std::slice::from_ref(v))
+            .await
+            .pop()
+            .unwrap_or_else(|| no_command(v));
     }
-    run_update_settling(v, if cfg!(windows) { SETTLE } else { (0, Duration::ZERO) }).await
+    run_update_settling(
+        v,
+        if cfg!(windows) {
+            SETTLE
+        } else {
+            (0, Duration::ZERO)
+        },
+    )
+    .await
 }
 
 /// `run_update`, waiting for a version that hasn't changed yet `settle` (polls, and the time
 /// between them).
 async fn run_update_settling(v: &AgentVersion, settle: (u32, Duration)) -> Outcome {
-    let Some(cmd) = &v.command else { return no_command(v) };
+    let Some(cmd) = &v.command else {
+        return no_command(v);
+    };
     // Not here: an administrator's command is checked first (`run_update`, `run_elevated`).
     if cmd.elevated {
         return not_trek_command(v);
     }
     let ran = match cmd.builtin {
-        Some(Builtin::DevinBundle) => match tokio::time::timeout(UPDATE_TIMEOUT, install_devin_bundle(&cmd.program, &devin_manifest_url(), DEVIN_HOST)).await {
-            Ok(done) => done.map(|said| (Some(0), said)).map_err(|summary| Outcome::Failed { summary, output: String::new() }),
+        Some(Builtin::DevinBundle) => match tokio::time::timeout(
+            UPDATE_TIMEOUT,
+            install_devin_bundle(&cmd.program, &devin_manifest_url(), DEVIN_HOST),
+        )
+        .await
+        {
+            Ok(done) => done
+                .map(|said| (Some(0), said))
+                .map_err(|summary| Outcome::Failed {
+                    summary,
+                    output: String::new(),
+                }),
             Err(_) => Err(timed_out(cmd)),
         },
         None => {
             let path = cmd.search_path();
-            let Some(program) = resolve_program(&cmd.program, &path).filter(|p| p.is_file()) else { return not_installed(cmd) };
+            let Some(program) = resolve_program(&cmd.program, &path).filter(|p| p.is_file()) else {
+                return not_installed(cmd);
+            };
             run_command(cmd, &program, &path).await
         }
     };
@@ -1242,45 +1862,91 @@ async fn run_update_settling(v: &AgentVersion, settle: (u32, Duration)) -> Outco
 }
 
 fn no_command(v: &AgentVersion) -> Outcome {
-    Outcome::Failed { summary: format!("Trek doesn't know how to update {}.", v.name), output: String::new() }
+    Outcome::Failed {
+        summary: format!("Trek doesn't know how to update {}.", v.name),
+        output: String::new(),
+    }
 }
 
 fn not_installed(cmd: &UpdateCommand) -> Outcome {
-    Outcome::Failed { summary: format!("{} isn't installed.", cmd.program.display()), output: String::new() }
+    Outcome::Failed {
+        summary: format!("{} isn't installed.", cmd.program.display()),
+        output: String::new(),
+    }
 }
 
 /// `program` (`cmd`'s, found on `path`) run with `cmd`'s arguments and environment: its exit code
 /// and all it printed.
-async fn run_command(cmd: &UpdateCommand, program: &Path, path: &str) -> Result<(Option<i32>, String), Outcome> {
+async fn run_command(
+    cmd: &UpdateCommand,
+    program: &Path,
+    path: &str,
+) -> Result<(Option<i32>, String), Outcome> {
     let mut run = crate::procs::async_command(program);
-    run.args(&cmd.args).env("PATH", path).envs(cmd.env.iter().map(|(k, v)| (k, v))).env("NO_COLOR", "1").stdin(std::process::Stdio::null()).kill_on_drop(true);
+    run.args(&cmd.args)
+        .env("PATH", path)
+        .envs(cmd.env.iter().map(|(k, v)| (k, v)))
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
     match tokio::time::timeout(UPDATE_TIMEOUT, run.output()).await {
         Ok(Ok(out)) => Ok((out.status.code(), all_output(&out.stdout, &out.stderr))),
-        Ok(Err(e)) => Err(Outcome::Failed { summary: format!("Couldn't run {}: {e}", cmd.shown()), output: String::new() }),
+        Ok(Err(e)) => Err(Outcome::Failed {
+            summary: format!("Couldn't run {}: {e}", cmd.shown()),
+            output: String::new(),
+        }),
         Err(_) => Err(timed_out(cmd)),
     }
 }
 
 fn timed_out(cmd: &UpdateCommand) -> Outcome {
-    Outcome::Failed { summary: format!("{} took longer than 15 minutes, so Trek stopped it.", cmd.shown()), output: String::new() }
+    Outcome::Failed {
+        summary: format!(
+            "{} took longer than 15 minutes, so Trek stopped it.",
+            cmd.shown()
+        ),
+        output: String::new(),
+    }
 }
 
 /// What an update command that ran came to: its exit code said in words when it failed, or else
 /// the version installed now.
-async fn conclude(v: &AgentVersion, cmd: &UpdateCommand, code: Option<i32>, output: String, settle: (u32, Duration)) -> Outcome {
+async fn conclude(
+    v: &AgentVersion,
+    cmd: &UpdateCommand,
+    code: Option<i32>,
+    output: String,
+    settle: (u32, Duration),
+) -> Outcome {
     if code != Some(0) {
         if let Some((_, said)) = code.and_then(|c| cmd.on_exit.iter().find(|(e, _)| *e == c)) {
-            return Outcome::Failed { summary: said.clone(), output };
+            return Outcome::Failed {
+                summary: said.clone(),
+                output,
+            };
         }
         let code = code.map_or("a signal".to_string(), code_words);
-        return Outcome::Failed { summary: format!("{} stopped with {code}.", cmd.shown()), output };
+        return Outcome::Failed {
+            summary: format!("{} stopped with {code}.", cmd.shown()),
+            output,
+        };
     }
-    let Some(h) = harness(&v.id) else { return verify(v, None, output) };
+    let Some(h) = harness(&v.id) else {
+        return verify(v, None, output);
+    };
     // On macOS the binary on PATH may have moved (a new keg): look it up again. On Windows it is
     // the one the check found, the install this update is for: a shim is replaced in place, and
     // another install further along the PATH must not answer for it.
-    let binary = if cfg!(windows) && v.binary.is_file() { v.binary.clone() } else { which(h.binary).unwrap_or_else(|| v.binary.clone()) };
-    verify(v, settled_version(v, h, &binary, settle.0, settle.1).await, output)
+    let binary = if cfg!(windows) && v.binary.is_file() {
+        v.binary.clone()
+    } else {
+        which(h.binary).unwrap_or_else(|| v.binary.clone())
+    };
+    verify(
+        v,
+        settled_version(v, h, &binary, settle.0, settle.1).await,
+        output,
+    )
 }
 
 /// How long, on Windows, a version that hasn't changed yet is waited for: an updater may hand
@@ -1290,10 +1956,19 @@ const SETTLE: (u32, Duration) = (10, Duration::from_secs(2));
 
 /// The version installed at `binary` once the update's done: asked again, up to `polls` more times
 /// `every` apart, while it's still older than what the update was for.
-async fn settled_version(v: &AgentVersion, h: &Harness, binary: &Path, polls: u32, every: Duration) -> Option<String> {
+async fn settled_version(
+    v: &AgentVersion,
+    h: &Harness,
+    binary: &Path,
+    polls: u32,
+    every: Duration,
+) -> Option<String> {
     let mut now = installed_version(h, binary).await;
     for _ in 0..polls {
-        if now.as_ref().is_some_and(|n| v.latest.as_ref().is_none_or(|l| !is_newer(l, n))) {
+        if now
+            .as_ref()
+            .is_some_and(|n| v.latest.as_ref().is_none_or(|l| !is_newer(l, n)))
+        {
             break;
         }
         tokio::time::sleep(every).await;
@@ -1322,19 +1997,35 @@ fn devin_manifest_url() -> String {
 /// the checksum has no bundle: it isn't installed unchecked, nor by running the vendor's script.
 fn devin_bundle(manifest: &str, target: &str, host: &str) -> Option<Bundle> {
     let v: serde_json::Value = serde_json::from_str(manifest).ok()?;
-    let version = v["version"].as_str().filter(|s| parse_version(s).as_deref() == Some(*s))?;
+    let version = v["version"]
+        .as_str()
+        .filter(|s| parse_version(s).as_deref() == Some(*s))?;
     let platform = &v["platforms"][target];
-    let url = platform["url"].as_str().filter(|u| u.starts_with(host) && !u.contains(".."))?;
-    let sha256 = platform["sha256"].as_str().filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))?;
-    Some(Bundle { version: version.into(), url: url.into(), sha256: sha256.to_ascii_lowercase() })
+    let url = platform["url"]
+        .as_str()
+        .filter(|u| u.starts_with(host) && !u.contains(".."))?;
+    let sha256 = platform["sha256"]
+        .as_str()
+        .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))?;
+    Some(Bundle {
+        version: version.into(),
+        url: url.into(),
+        sha256: sha256.to_ascii_lowercase(),
+    })
 }
 
 /// The Windows platform Devin's manifest names this computer by, as its installer picks it. An
 /// x64 Trek on an Arm computer sees its own architecture in `PROCESSOR_ARCHITECTURE`, the
 /// computer's in `PROCESSOR_ARCHITEW6432`.
 fn windows_target() -> &'static str {
-    let arm = ["PROCESSOR_ARCHITEW6432", "PROCESSOR_ARCHITECTURE"].iter().any(|v| std::env::var(v).is_ok_and(|a| a.eq_ignore_ascii_case("ARM64")));
-    if arm { "aarch64-pc-windows" } else { "x86_64-pc-windows" }
+    let arm = ["PROCESSOR_ARCHITEW6432", "PROCESSOR_ARCHITECTURE"]
+        .iter()
+        .any(|v| std::env::var(v).is_ok_and(|a| a.eq_ignore_ascii_case("ARM64")));
+    if arm {
+        "aarch64-pc-windows"
+    } else {
+        "x86_64-pc-windows"
+    }
 }
 
 /// Larger than any CLI's bundle: a download past it isn't one.
@@ -1348,12 +2039,34 @@ const MAX_BUNDLE_BYTES: u64 = 1 << 30;
 /// user's PATH) or aren't for this kind of install (`devin-updater.exe` is the enterprise
 /// portal's), and its last, the setup wizard, is the one not wanted. All in Trek: nothing
 /// downloaded is run. What it did, a line a step, or why it couldn't.
-async fn install_devin_bundle(entry: &Path, manifest_url: &str, host: &str) -> Result<String, String> {
+async fn install_devin_bundle(
+    entry: &Path,
+    manifest_url: &str,
+    host: &str,
+) -> Result<String, String> {
     use sha2::Digest as _;
     use tokio::io::AsyncWriteExt as _;
-    let cli = entry.parent().and_then(Path::parent).ok_or_else(|| format!("{} isn't in Devin's install folder.", entry.display()))?;
-    let client = reqwest::Client::builder().user_agent(format!("Trek/{}", crate::VERSION)).connect_timeout(Duration::from_secs(10)).read_timeout(Duration::from_secs(60)).build().map_err(|e| e.to_string())?;
-    let manifest = async { client.get(manifest_url).send().await?.error_for_status()?.text().await }.await.map_err(|e| format!("Couldn't read Devin's release manifest: {e}"))?;
+    let cli = entry
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| format!("{} isn't in Devin's install folder.", entry.display()))?;
+    let client = reqwest::Client::builder()
+        .user_agent(format!("Trek/{}", crate::VERSION))
+        .connect_timeout(Duration::from_secs(10))
+        .read_timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let manifest = async {
+        client
+            .get(manifest_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await
+    }
+    .await
+    .map_err(|e| format!("Couldn't read Devin's release manifest: {e}"))?;
     let target = windows_target();
     let bundle = devin_bundle(&manifest, target, host).ok_or_else(|| format!("Devin's release manifest names no bundle for {target} that Trek can check (a download from {host} with its SHA-256), so Trek didn't install it."))?;
     let mut said = vec![format!("Devin {} for {target}", bundle.version)];
@@ -1363,17 +2076,35 @@ async fn install_devin_bundle(entry: &Path, manifest_url: &str, host: &str) -> R
     if exe.is_file() {
         said.push(format!("Already unpacked in {}", dir.display()));
     } else {
-        std::fs::create_dir_all(&versions).map_err(|e| format!("Couldn't make {}: {e}", versions.display()))?;
-        let (download, staging) = (versions.join(format!(".download-{}", std::process::id())), versions.join(format!(".unpack-{}", std::process::id())));
+        std::fs::create_dir_all(&versions)
+            .map_err(|e| format!("Couldn't make {}: {e}", versions.display()))?;
+        let (download, staging) = (
+            versions.join(format!(".download-{}", std::process::id())),
+            versions.join(format!(".unpack-{}", std::process::id())),
+        );
         let _ = std::fs::remove_dir_all(&staging);
         let fetched = async {
-            let mut resp = client.get(&bundle.url).send().await.and_then(|r| r.error_for_status()).map_err(|e| format!("Couldn't download {}: {e}", bundle.url))?;
-            let mut file = tokio::fs::File::create(&download).await.map_err(|e| e.to_string())?;
+            let mut resp = client
+                .get(&bundle.url)
+                .send()
+                .await
+                .and_then(|r| r.error_for_status())
+                .map_err(|e| format!("Couldn't download {}: {e}", bundle.url))?;
+            let mut file = tokio::fs::File::create(&download)
+                .await
+                .map_err(|e| e.to_string())?;
             let (mut hasher, mut done) = (sha2::Sha256::new(), 0u64);
-            while let Some(chunk) = resp.chunk().await.map_err(|e| format!("The download of {} was cut off: {e}", bundle.url))? {
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|e| format!("The download of {} was cut off: {e}", bundle.url))?
+            {
                 done += chunk.len() as u64;
                 if done > MAX_BUNDLE_BYTES {
-                    return Err(format!("{} is larger than 1 GB, so it wasn't installed.", bundle.url));
+                    return Err(format!(
+                        "{} is larger than 1 GB, so it wasn't installed.",
+                        bundle.url
+                    ));
                 }
                 hasher.update(&chunk);
                 file.write_all(&chunk).await.map_err(|e| e.to_string())?;
@@ -1381,22 +2112,38 @@ async fn install_devin_bundle(entry: &Path, manifest_url: &str, host: &str) -> R
             file.flush().await.map_err(|e| e.to_string())?;
             drop(file);
             if hex::encode(hasher.finalize()) != bundle.sha256 {
-                return Err(format!("{} doesn't match the SHA-256 in Devin's manifest, so it wasn't installed.", bundle.url));
+                return Err(format!(
+                    "{} doesn't match the SHA-256 in Devin's manifest, so it wasn't installed.",
+                    bundle.url
+                ));
             }
             let (zip, into) = (download.clone(), staging.clone());
-            tokio::task::spawn_blocking(move || crate::registry::unpack_zip(&zip, &into)).await.map_err(|e| e.to_string())?.map_err(|e| format!("Couldn't unpack {}: {e:#}", bundle.url))?;
+            tokio::task::spawn_blocking(move || crate::registry::unpack_zip(&zip, &into))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| format!("Couldn't unpack {}: {e:#}", bundle.url))?;
             if !staging.join("bin").join("devin.exe").is_file() {
                 return Err(format!("{} has no bin\\devin.exe.", bundle.url));
             }
             let _ = std::fs::remove_dir_all(&dir);
-            std::fs::rename(&staging, &dir).map_err(|e| format!("Couldn't move Devin {} into {}: {e}", bundle.version, dir.display()))?;
+            std::fs::rename(&staging, &dir).map_err(|e| {
+                format!(
+                    "Couldn't move Devin {} into {}: {e}",
+                    bundle.version,
+                    dir.display()
+                )
+            })?;
             Ok(done)
         }
         .await;
         let _ = std::fs::remove_file(&download);
         let _ = std::fs::remove_dir_all(&staging);
         let bytes = fetched?;
-        said.push(format!("Downloaded {} ({} MB); its SHA-256 matches the manifest's", bundle.url, bytes / (1 << 20)));
+        said.push(format!(
+            "Downloaded {} ({} MB); its SHA-256 matches the manifest's",
+            bundle.url,
+            bytes / (1 << 20)
+        ));
         said.push(format!("Unpacked into {}", dir.display()));
     }
     replace_entry(&exe, entry)?;
@@ -1408,23 +2155,35 @@ async fn install_devin_bundle(entry: &Path, manifest_url: &str, host: &str) -> R
 /// running program be renamed but not overwritten, so it's moved aside first, and put back
 /// should the copy fail. The copy moved aside goes now if it can, or at the next update.
 fn replace_entry(new: &Path, entry: &Path) -> Result<(), String> {
-    let (Some(dir), Some(name)) = (entry.parent(), entry.file_name().map(|n| n.to_string_lossy().into_owned())) else {
+    let (Some(dir), Some(name)) = (
+        entry.parent(),
+        entry.file_name().map(|n| n.to_string_lossy().into_owned()),
+    ) else {
         return Err(format!("{} isn't a file.", entry.display()));
     };
     let old = format!("{name}.old-");
-    for left in std::fs::read_dir(dir).into_iter().flatten().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&old)) {
+    for left in std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(&old))
+    {
         let _ = std::fs::remove_file(left.path());
     }
     let aside = dir.join(format!("{old}{}", crate::store::now_ms()));
     let moved = entry.exists();
     if moved {
-        std::fs::rename(entry, &aside).map_err(|e| format!("Couldn't move the old {} aside: {e}", entry.display()))?;
+        std::fs::rename(entry, &aside)
+            .map_err(|e| format!("Couldn't move the old {} aside: {e}", entry.display()))?;
     }
     if let Err(e) = std::fs::copy(new, entry) {
         if moved {
             let _ = std::fs::rename(&aside, entry);
         }
-        return Err(format!("Couldn't copy the new version to {}: {e}", entry.display()));
+        return Err(format!(
+            "Couldn't copy the new version to {}: {e}",
+            entry.display()
+        ));
     }
     if moved {
         let _ = std::fs::remove_file(&aside);
@@ -1443,8 +2202,30 @@ pub const UNANSWERED: &str = "Windows's prompt went unanswered for two minutes. 
 pub async fn run_elevated(vs: &[AgentVersion]) -> Vec<Outcome> {
     // Only what Trek works out itself goes to an administrator; the rest is answered, not run.
     let fit: Vec<bool> = vs.iter().map(is_what_trek_would_run).collect();
-    let rows: Vec<AgentVersion> = vs.iter().zip(&fit).map(|(v, &fit)| if fit { v.clone() } else { AgentVersion { command: None, ..v.clone() } }).collect();
-    let mut outcomes = run_elevated_with(&rows, if cfg!(windows) { SETTLE } else { (0, Duration::ZERO) }, crate::elevated::run_as_admin).await;
+    let rows: Vec<AgentVersion> = vs
+        .iter()
+        .zip(&fit)
+        .map(|(v, &fit)| {
+            if fit {
+                v.clone()
+            } else {
+                AgentVersion {
+                    command: None,
+                    ..v.clone()
+                }
+            }
+        })
+        .collect();
+    let mut outcomes = run_elevated_with(
+        &rows,
+        if cfg!(windows) {
+            SETTLE
+        } else {
+            (0, Duration::ZERO)
+        },
+        crate::elevated::run_as_admin,
+    )
+    .await;
     for ((outcome, v), &fit) in outcomes.iter_mut().zip(vs).zip(&fit) {
         if !fit && v.command.is_some() {
             *outcome = not_trek_command(v);
@@ -1454,7 +2235,11 @@ pub async fn run_elevated(vs: &[AgentVersion]) -> Vec<Outcome> {
 }
 
 /// `run_elevated`, the script started by `launch`.
-async fn run_elevated_with(vs: &[AgentVersion], settle: (u32, Duration), launch: crate::elevated::Launch) -> Vec<Outcome> {
+async fn run_elevated_with(
+    vs: &[AgentVersion],
+    settle: (u32, Duration),
+    launch: crate::elevated::Launch,
+) -> Vec<Outcome> {
     use crate::elevated::{Failure, Run, Step, code_file, output_file};
     let mut outcomes: Vec<Option<Outcome>> = vec![None; vs.len()];
     // Each step's row; rows whose program isn't there are answered without running anything.
@@ -1470,48 +2255,101 @@ async fn run_elevated_with(vs: &[AgentVersion], settle: (u32, Duration), launch:
             outcomes[i] = Some(not_installed(cmd));
             continue;
         };
-        steps.push(Step { program, args: cmd.args.clone(), env: cmd.env.clone(), path });
+        steps.push(Step {
+            program,
+            args: cmd.args.clone(),
+            env: cmd.env.clone(),
+            path,
+        });
         rows.push(i);
     }
     if !steps.is_empty() {
-        let fail_all = |outcomes: &mut Vec<Option<Outcome>>, summary: &dyn Fn(&UpdateCommand) -> String| {
+        let fail_all = |outcomes: &mut Vec<Option<Outcome>>,
+                        summary: &dyn Fn(&UpdateCommand) -> String| {
             for &i in &rows {
-                let cmd = vs[i].command.as_ref().expect("a row with a step has a command");
-                outcomes[i] = Some(Outcome::Failed { summary: summary(cmd), output: String::new() });
+                let cmd = vs[i]
+                    .command
+                    .as_ref()
+                    .expect("a row with a step has a command");
+                outcomes[i] = Some(Outcome::Failed {
+                    summary: summary(cmd),
+                    output: String::new(),
+                });
             }
         };
         // The script's folder is the run's alone, and what's in it is held as it was written until
         // the run is done (`Run`): it is read by an administrator's process after the user says yes.
         match Run::create(&crate::paths::data_dir().join("tmp")) {
-            Err(e) => fail_all(&mut outcomes, &|c| format!("Couldn't write the script that runs {} as an administrator: {e}", c.shown())),
+            Err(e) => fail_all(&mut outcomes, &|c| {
+                format!(
+                    "Couldn't write the script that runs {} as an administrator: {e}",
+                    c.shown()
+                )
+            }),
             Ok(mut run) => {
-                let written = crate::elevated::script(run.dir(), &steps).and_then(|text| run.seal(&text, steps.len()));
+                let written = crate::elevated::script(run.dir(), &steps)
+                    .and_then(|text| run.seal(&text, steps.len()));
                 let ran = match written {
-                    Err(why) => Err(Failure::Other(format!("Trek couldn't write the script for it: {why}"))),
-                    Ok(script) => tokio::task::spawn_blocking(move || launch(&script, UPDATE_TIMEOUT)).await.unwrap_or_else(|e| Err(Failure::Other(e.to_string()))),
+                    Err(why) => Err(Failure::Other(format!(
+                        "Trek couldn't write the script for it: {why}"
+                    ))),
+                    Ok(script) => {
+                        tokio::task::spawn_blocking(move || launch(&script, UPDATE_TIMEOUT))
+                            .await
+                            .unwrap_or_else(|e| Err(Failure::Other(e.to_string())))
+                    }
                 };
                 let dir = run.dir().to_path_buf();
                 match ran {
                     Err(Failure::Cancelled) => fail_all(&mut outcomes, &|_| DECLINED.into()),
                     Err(Failure::Unanswered) => fail_all(&mut outcomes, &|_| UNANSWERED.into()),
-                    Err(Failure::Other(e)) => fail_all(&mut outcomes, &|c| format!("Couldn't run {} as an administrator: {e}", c.shown())),
+                    Err(Failure::Other(e)) => fail_all(&mut outcomes, &|c| {
+                        format!("Couldn't run {} as an administrator: {e}", c.shown())
+                    }),
                     ran => {
                         let stopped = match ran {
                             Err(Failure::TimedOut { ended }) => Some(ended),
                             _ => None,
                         };
                         for (step, &i) in rows.iter().enumerate() {
-                            let (v, cmd) = (&vs[i], vs[i].command.as_ref().expect("a row with a step has a command"));
-                            let output = std::fs::read(output_file(&dir, step)).map(|b| all_output(&b, b"")).unwrap_or_default();
-                            let code = std::fs::read_to_string(code_file(&dir, step)).ok().and_then(|c| c.trim().parse::<i32>().ok());
+                            let (v, cmd) = (
+                                &vs[i],
+                                vs[i]
+                                    .command
+                                    .as_ref()
+                                    .expect("a row with a step has a command"),
+                            );
+                            let output = std::fs::read(output_file(&dir, step))
+                                .map(|b| all_output(&b, b""))
+                                .unwrap_or_default();
+                            let code = std::fs::read_to_string(code_file(&dir, step))
+                                .ok()
+                                .and_then(|c| c.trim().parse::<i32>().ok());
                             outcomes[i] = Some(match (code, stopped) {
-                                (Some(code), _) => conclude(v, cmd, Some(code), output, settle).await,
-                                (None, Some(true)) => Outcome::Failed { summary: format!("{} took longer than 15 minutes, so Trek stopped it.", cmd.shown()), output },
-                                (None, Some(false)) => Outcome::Failed {
-                                    summary: format!("{} took longer than 15 minutes. Trek stopped waiting, but Windows doesn't let it end what runs as an administrator: it may still be running.", cmd.shown()),
+                                (Some(code), _) => {
+                                    conclude(v, cmd, Some(code), output, settle).await
+                                }
+                                (None, Some(true)) => Outcome::Failed {
+                                    summary: format!(
+                                        "{} took longer than 15 minutes, so Trek stopped it.",
+                                        cmd.shown()
+                                    ),
                                     output,
                                 },
-                                (None, None) => Outcome::Failed { summary: format!("{} didn't say how it went: the administrator's script stopped before it was done.", cmd.shown()), output },
+                                (None, Some(false)) => Outcome::Failed {
+                                    summary: format!(
+                                        "{} took longer than 15 minutes. Trek stopped waiting, but Windows doesn't let it end what runs as an administrator: it may still be running.",
+                                        cmd.shown()
+                                    ),
+                                    output,
+                                },
+                                (None, None) => Outcome::Failed {
+                                    summary: format!(
+                                        "{} didn't say how it went: the administrator's script stopped before it was done.",
+                                        cmd.shown()
+                                    ),
+                                    output,
+                                },
                             });
                         }
                     }
@@ -1520,7 +2358,11 @@ async fn run_elevated_with(vs: &[AgentVersion], settle: (u32, Duration), launch:
             }
         }
     }
-    outcomes.into_iter().zip(vs).map(|(o, v)| o.unwrap_or_else(|| no_command(v))).collect()
+    outcomes
+        .into_iter()
+        .zip(vs)
+        .map(|(o, v)| o.unwrap_or_else(|| no_command(v)))
+        .collect()
 }
 
 /// `v`'s command is the one Trek itself works out for the install it found (`update_command`),
@@ -1528,31 +2370,63 @@ async fn run_elevated_with(vs: &[AgentVersion], settle: (u32, Duration), launch:
 /// upgrade, and the rows come back from `agent-versions.json`, a file any program of the user's
 /// can write. The command is worked out again from the install, and must be the same.
 fn is_what_trek_would_run(v: &AgentVersion) -> bool {
-    let (Some(cmd), Some(h)) = (&v.command, harness(&v.id)) else { return false };
+    let (Some(cmd), Some(h)) = (&v.command, harness(&v.id)) else {
+        return false;
+    };
     h.owns(&v.install)
-        && update_command(h, &v.install, &v.binary, false, v.installed.as_deref())
-            .is_some_and(|own| own.elevated == cmd.elevated && own.program == cmd.program && own.args == cmd.args && own.env == cmd.env && own.path == cmd.path && own.builtin == cmd.builtin)
+        && update_command(h, &v.install, &v.binary, false, v.installed.as_deref()).is_some_and(
+            |own| {
+                own.elevated == cmd.elevated
+                    && own.program == cmd.program
+                    && own.args == cmd.args
+                    && own.env == cmd.env
+                    && own.path == cmd.path
+                    && own.builtin == cmd.builtin
+            },
+        )
 }
 
 fn not_trek_command(v: &AgentVersion) -> Outcome {
-    Outcome::Failed { summary: format!("Trek didn't run the update of {}: its command isn't the one Trek works out for how it's installed. Check again, and then update.", v.name), output: String::new() }
+    Outcome::Failed {
+        summary: format!(
+            "Trek didn't run the update of {}: its command isn't the one Trek works out for how it's installed. Check again, and then update.",
+            v.name
+        ),
+        output: String::new(),
+    }
 }
 
 /// Everything a command printed: its stdout, then its stderr on a line of its own (a progress
 /// line left unfinished mustn't swallow what the error stream says next).
 fn all_output(stdout: &[u8], stderr: &[u8]) -> String {
-    let (out, err) = (strip_ansi(&String::from_utf8_lossy(stdout)), strip_ansi(&String::from_utf8_lossy(stderr)));
-    [out.trim(), err.trim()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n")
+    let (out, err) = (
+        strip_ansi(&String::from_utf8_lossy(stdout)),
+        strip_ansi(&String::from_utf8_lossy(stderr)),
+    );
+    [out.trim(), err.trim()]
+        .iter()
+        .filter(|s| !s.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// "code 1"; a Windows status as its documentation writes it ("code 0x8A15002B (-1978335189)").
 fn code_words(code: i32) -> String {
-    if code < 0 { format!("code 0x{:08X} ({code})", code as u32) } else { format!("code {code}") }
+    if code < 0 {
+        format!("code 0x{:08X} ({code})", code as u32)
+    } else {
+        format!("code {code}")
+    }
 }
 
 /// The last lines of what an updater printed, for a sentence: what it said is often the reason.
 fn last_lines(output: &str) -> Option<String> {
-    let lines: Vec<&str> = output.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&str> = output
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     let tail = &lines[lines.len().saturating_sub(3)..];
     (!tail.is_empty()).then(|| tail.join(" / "))
 }
@@ -1560,11 +2434,22 @@ fn last_lines(output: &str) -> Option<String> {
 /// What an update that ran without error came to, given the version installed afterwards.
 pub fn verify(v: &AgentVersion, now: Option<String>, output: String) -> Outcome {
     // An updater that exits 0 and changes nothing usually says why (Devin's: "To update, run: …").
-    let said = last_lines(&output).map(|l| format!(" It said: {l}")).unwrap_or_default();
+    let said = last_lines(&output)
+        .map(|l| format!(" It said: {l}"))
+        .unwrap_or_default();
     match now {
-        Some(now) if v.latest.as_ref().is_none_or(|l| !is_newer(l, &now)) => Outcome::Updated { version: now, output },
-        Some(now) => Outcome::Failed { summary: format!("{} is still at {now} after the update.{said}", v.name), output },
-        None => Outcome::Failed { summary: format!("{} didn't say its version after the update.{said}", v.name), output },
+        Some(now) if v.latest.as_ref().is_none_or(|l| !is_newer(l, &now)) => Outcome::Updated {
+            version: now,
+            output,
+        },
+        Some(now) => Outcome::Failed {
+            summary: format!("{} is still at {now} after the update.{said}", v.name),
+            output,
+        },
+        None => Outcome::Failed {
+            summary: format!("{} didn't say its version after the update.{said}", v.name),
+            output,
+        },
     }
 }
 
@@ -1573,8 +2458,19 @@ pub fn verify(v: &AgentVersion, now: Option<String>, output: String) -> Outcome 
 pub async fn dry_run(v: &AgentVersion) -> Outcome {
     tokio::time::sleep(Duration::from_millis(2500)).await;
     let shown = v.command.as_ref().map(|c| c.shown()).unwrap_or_default();
-    let how = if v.command.as_ref().is_some_and(|c| c.elevated) { " as an administrator" } else { "" };
-    Outcome::Updated { version: v.latest.clone().or_else(|| v.installed.clone()).unwrap_or_default(), output: format!("Dry run: Trek would have run `{shown}`{how}. Nothing was changed.") }
+    let how = if v.command.as_ref().is_some_and(|c| c.elevated) {
+        " as an administrator"
+    } else {
+        ""
+    };
+    Outcome::Updated {
+        version: v
+            .latest
+            .clone()
+            .or_else(|| v.installed.clone())
+            .unwrap_or_default(),
+        output: format!("Dry run: Trek would have run `{shown}`{how}. Nothing was changed."),
+    }
 }
 
 /// Made-up agents with updates out, as MonoCode's card shows them, for design review
@@ -1584,22 +2480,54 @@ pub fn mock_versions() -> Vec<AgentVersion> {
         let mut parts = cmd.split(' ');
         let program = parts.next().unwrap_or_default();
         AgentVersion {
-            id: HARNESSES.iter().find(|h| h.agent == agent && !h.adapter).map_or(agent, |h| h.binary).into(),
+            id: HARNESSES
+                .iter()
+                .find(|h| h.agent == agent && !h.adapter)
+                .map_or(agent, |h| h.binary)
+                .into(),
             agent: agent.into(),
             name: AgentId::from_key(agent).display_name(),
             binary: PathBuf::from(format!("/opt/homebrew/bin/{program}")),
             installed: Some(installed.into()),
             latest: Some(latest.into()),
             install,
-            command: Some(UpdateCommand { args: parts.map(String::from).collect(), ..UpdateCommand::new(program, &[]) }),
+            command: Some(UpdateCommand {
+                args: parts.map(String::from).collect(),
+                ..UpdateCommand::new(program, &[])
+            }),
             error: None,
         }
     };
-    let npm = |p: &str| Install::Npm { package: p.into(), prefix: "/opt/homebrew".into() };
+    let npm = |p: &str| Install::Npm {
+        package: p.into(),
+        prefix: "/opt/homebrew".into(),
+    };
     vec![
-        entry("codex", "0.159.2", "0.160.0", npm("@openai/codex"), "npm install -g @openai/codex@latest"),
-        entry("opencode", "1.18.32", "1.18.34", Install::Brew { formula: "opencode".into(), prefix: "/opt/homebrew".into(), tap: Some("anomalyco/tap".into()) }, "brew upgrade anomalyco/tap/opencode"),
-        entry("acp:pi", "0.99.2", "1.0.2", npm("@earendil-works/pi-coding-agent"), "npm install -g @earendil-works/pi-coding-agent@latest"),
+        entry(
+            "codex",
+            "0.159.2",
+            "0.160.0",
+            npm("@openai/codex"),
+            "npm install -g @openai/codex@latest",
+        ),
+        entry(
+            "opencode",
+            "1.18.32",
+            "1.18.34",
+            Install::Brew {
+                formula: "opencode".into(),
+                prefix: "/opt/homebrew".into(),
+                tap: Some("anomalyco/tap".into()),
+            },
+            "brew upgrade anomalyco/tap/opencode",
+        ),
+        entry(
+            "acp:pi",
+            "0.99.2",
+            "1.0.2",
+            npm("@earendil-works/pi-coding-agent"),
+            "npm install -g @earendil-works/pi-coding-agent@latest",
+        ),
     ]
 }
 
@@ -1613,7 +2541,10 @@ mod tests {
             ("2.1.289 (Claude Code)", "2.1.289"),
             ("codex-cli 0.160.0", "0.160.0"),
             ("1.18.34", "1.18.34"),
-            ("GitHub Copilot CLI 1.0.91.\nRun 'copilot update' to check for updates.", "1.0.91"),
+            (
+                "GitHub Copilot CLI 1.0.91.\nRun 'copilot update' to check for updates.",
+                "1.0.91",
+            ),
             ("0.42.0", "0.42.0"),
             ("grok 1.0.46 (2765805b9442) [stable]", "1.0.46"),
             ("devin 3000.11.3 (9c803229faa4)", "3000.11.3"),
@@ -1634,16 +2565,46 @@ mod tests {
         assert_eq!(parse_version("1.2.3-$(touch x)"), None);
         assert_eq!(parse_version("1.2.3-`id`"), None);
         assert_eq!(parse_version("1.2.3-a$b 1.2.4"), Some("1.2.4".into()));
-        assert_eq!(version_in_package_json(r#"{"version": "1.2.3-`id`"}"#), None);
+        assert_eq!(
+            version_in_package_json(r#"{"version": "1.2.3-`id`"}"#),
+            None
+        );
     }
 
     #[test]
     fn an_unsafe_installed_version_stays_out_of_the_shell_line() {
-        let old = Install::Npm { package: "@mariozechner/pi-coding-agent".into(), prefix: "/opt/homebrew".into() };
-        let cmd = update_command(h("acp:pi"), &old, Path::new("/opt/homebrew/bin/pi"), false, Some("0.73.1-$(id)")).unwrap();
-        assert!(cmd.args.iter().all(|a| !a.contains("$(id)")), "{:?}", cmd.args);
-        let cmd = update_command(h("acp:pi"), &old, Path::new("/opt/homebrew/bin/pi"), false, Some("0.73.1")).unwrap();
-        assert!(cmd.args.iter().any(|a| a.contains("@mariozechner/pi-coding-agent@0.73.1")), "{:?}", cmd.args);
+        let old = Install::Npm {
+            package: "@mariozechner/pi-coding-agent".into(),
+            prefix: "/opt/homebrew".into(),
+        };
+        let cmd = update_command(
+            h("acp:pi"),
+            &old,
+            Path::new("/opt/homebrew/bin/pi"),
+            false,
+            Some("0.73.1-$(id)"),
+        )
+        .unwrap();
+        assert!(
+            cmd.args.iter().all(|a| !a.contains("$(id)")),
+            "{:?}",
+            cmd.args
+        );
+        let cmd = update_command(
+            h("acp:pi"),
+            &old,
+            Path::new("/opt/homebrew/bin/pi"),
+            false,
+            Some("0.73.1"),
+        )
+        .unwrap();
+        assert!(
+            cmd.args
+                .iter()
+                .any(|a| a.contains("@mariozechner/pi-coding-agent@0.73.1")),
+            "{:?}",
+            cmd.args
+        );
     }
 
     #[test]
@@ -1656,7 +2617,10 @@ mod tests {
         assert!(is_newer("1.2.1", "1.2"));
         assert!(!is_newer("1.2.0", "1.2"));
         assert!(!is_newer("2.1.289", "2.1.289"));
-        assert!(!is_newer("2.1.285", "2.1.289"), "a stable channel behind latest is no update");
+        assert!(
+            !is_newer("2.1.285", "2.1.289"),
+            "a stable channel behind latest is no update"
+        );
         assert!(is_newer("1.2.0", "1.2.0-beta.1"));
         assert!(!is_newer("1.2.0-beta.1", "1.2.0"));
         // Cursor's builds: date and hash.
@@ -1670,39 +2634,111 @@ mod tests {
         let p = |s: &str| install_of(Path::new(s));
         assert_eq!(
             p("/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"),
-            Install::Npm { package: "@anthropic-ai/claude-code".into(), prefix: "/opt/homebrew".into() }
+            Install::Npm {
+                package: "@anthropic-ai/claude-code".into(),
+                prefix: "/opt/homebrew".into()
+            }
         );
         assert_eq!(
             p("/Users/me/.nvm/versions/node/v22.3.0/lib/node_modules/@openai/codex/bin/codex.js"),
-            Install::Npm { package: "@openai/codex".into(), prefix: "/Users/me/.nvm/versions/node/v22.3.0".into() }
+            Install::Npm {
+                package: "@openai/codex".into(),
+                prefix: "/Users/me/.nvm/versions/node/v22.3.0".into()
+            }
         );
-        assert_eq!(p("/usr/local/lib/node_modules/opencode-ai/bin/opencode"), Install::Npm { package: "opencode-ai".into(), prefix: "/usr/local".into() });
-        assert_eq!(p("/Users/me/.bun/install/global/node_modules/@moonshot-ai/kimi-code/dist/index.js"), Install::Bun { package: "@moonshot-ai/kimi-code".into() });
-        assert_eq!(p("/Users/me/Library/pnpm/global/5/node_modules/@qwen-code/qwen-code/cli.js"), Install::Pnpm { package: "@qwen-code/qwen-code".into() });
+        assert_eq!(
+            p("/usr/local/lib/node_modules/opencode-ai/bin/opencode"),
+            Install::Npm {
+                package: "opencode-ai".into(),
+                prefix: "/usr/local".into()
+            }
+        );
+        assert_eq!(
+            p("/Users/me/.bun/install/global/node_modules/@moonshot-ai/kimi-code/dist/index.js"),
+            Install::Bun {
+                package: "@moonshot-ai/kimi-code".into()
+            }
+        );
+        assert_eq!(
+            p("/Users/me/Library/pnpm/global/5/node_modules/@qwen-code/qwen-code/cli.js"),
+            Install::Pnpm {
+                package: "@qwen-code/qwen-code".into()
+            }
+        );
         // Homebrew is macOS's: on Windows these are folders like any other (see
         // `homebrew_is_not_looked_for_on_windows`).
         if !cfg!(windows) {
-            assert_eq!(p("/opt/homebrew/Cellar/opencode/1.18.34/bin/opencode"), Install::Brew { formula: "opencode".into(), prefix: "/opt/homebrew".into(), tap: None });
-            assert_eq!(p("/usr/local/Cellar/block-goose-cli/1.9.3/bin/goose"), Install::Brew { formula: "block-goose-cli".into(), prefix: "/usr/local".into(), tap: None });
-            assert_eq!(p("/opt/homebrew/Caskroom/copilot-cli/1.0.69/copilot"), Install::Cask { cask: "copilot-cli".into(), prefix: "/opt/homebrew".into() });
+            assert_eq!(
+                p("/opt/homebrew/Cellar/opencode/1.18.34/bin/opencode"),
+                Install::Brew {
+                    formula: "opencode".into(),
+                    prefix: "/opt/homebrew".into(),
+                    tap: None
+                }
+            );
+            assert_eq!(
+                p("/usr/local/Cellar/block-goose-cli/1.9.3/bin/goose"),
+                Install::Brew {
+                    formula: "block-goose-cli".into(),
+                    prefix: "/usr/local".into(),
+                    tap: None
+                }
+            );
+            assert_eq!(
+                p("/opt/homebrew/Caskroom/copilot-cli/1.0.69/copilot"),
+                Install::Cask {
+                    cask: "copilot-cli".into(),
+                    prefix: "/opt/homebrew".into()
+                }
+            );
             // Formulae that are npm packages installed into their keg: brew's, not npm's.
             assert_eq!(
-                p("/usr/local/Cellar/qwen-code/0.24.7/libexec/lib/node_modules/@qwen-code/qwen-code/cli.js"),
-                Install::Brew { formula: "qwen-code".into(), prefix: "/usr/local".into(), tap: None }
+                p(
+                    "/usr/local/Cellar/qwen-code/0.24.7/libexec/lib/node_modules/@qwen-code/qwen-code/cli.js"
+                ),
+                Install::Brew {
+                    formula: "qwen-code".into(),
+                    prefix: "/usr/local".into(),
+                    tap: None
+                }
             );
-            let keg = install_of(Path::new("/usr/local/Cellar/qwen-code/0.24.7/libexec/lib/node_modules/@qwen-code/qwen-code/cli.js"));
+            let keg = install_of(Path::new(
+                "/usr/local/Cellar/qwen-code/0.24.7/libexec/lib/node_modules/@qwen-code/qwen-code/cli.js",
+            ));
             assert!(h("acp:qwen-code").owns(&keg));
-            assert_eq!(update_command(h("acp:qwen-code"), &keg, Path::new("/usr/local/bin/qwen"), false, None).unwrap().shown(), "brew upgrade qwen-code");
+            assert_eq!(
+                update_command(
+                    h("acp:qwen-code"),
+                    &keg,
+                    Path::new("/usr/local/bin/qwen"),
+                    false,
+                    None
+                )
+                .unwrap()
+                .shown(),
+                "brew upgrade qwen-code"
+            );
         }
         // A global prefix of the user's own (npm's fix for EACCES).
         assert_eq!(
             p("/Users/me/.npm-global/lib/node_modules/@openai/codex/bin/codex.js"),
-            Install::Npm { package: "@openai/codex".into(), prefix: "/Users/me/.npm-global".into() }
+            Install::Npm {
+                package: "@openai/codex".into(),
+                prefix: "/Users/me/.npm-global".into()
+            }
         );
         // Volta: the binary on PATH is its shim (itself maybe in Volta's own keg), or a package image.
         assert_eq!(p("/Users/me/.volta/bin/volta-shim"), Install::Volta);
-        assert_eq!(p("/opt/homebrew/Cellar/volta/2.0.2/bin/volta-shim"), Install::Volta);
-        assert_eq!(p("/Users/me/.volta/tools/image/packages/@openai/codex/lib/node_modules/@openai/codex/bin/codex.js"), Install::Volta);
+        assert_eq!(
+            p("/opt/homebrew/Cellar/volta/2.0.2/bin/volta-shim"),
+            Install::Volta
+        );
+        assert_eq!(
+            p(
+                "/Users/me/.volta/tools/image/packages/@openai/codex/lib/node_modules/@openai/codex/bin/codex.js"
+            ),
+            Install::Volta
+        );
         // The vendors' own installers.
         for native in [
             "/Users/me/.codex/packages/standalone/releases/0.160.0-aarch64-apple-darwin/bin/codex",
@@ -1722,26 +2758,61 @@ mod tests {
         let shim = "#!/bin/sh\nbasedir=$(dirname \"$(echo \"$0\" | sed -e 's,\\\\,/,g')\")\n\ncase `uname` in\n    *CYGWIN*) basedir=`cygpath -w \"$basedir\"`;;\nesac\n\nif [ -x \"$basedir/node\" ]; then\n  exec \"$basedir/node\"  \"$basedir/global/5/node_modules/@qwen-code/qwen-code/cli.js\" \"$@\"\nelse\n  exec node  \"$basedir/global/5/node_modules/@qwen-code/qwen-code/cli.js\" \"$@\"\nfi\n";
         let at = Path::new("/Users/me/Library/pnpm/qwen");
         let target = shim_target(at, shim).unwrap();
-        assert_eq!(target, Path::new("/Users/me/Library/pnpm/global/5/node_modules/@qwen-code/qwen-code/cli.js"));
-        assert_eq!(install_of(&target), Install::Pnpm { package: "@qwen-code/qwen-code".into() });
-        let up = "#!/bin/sh\nexec node \"$basedir/../lib/node_modules/pi-acp/dist/index.js\" \"$@\"\n";
-        assert_eq!(shim_target(Path::new("/x/bin/pi-acp"), up).unwrap(), Path::new("/x/lib/node_modules/pi-acp/dist/index.js"));
+        assert_eq!(
+            target,
+            Path::new("/Users/me/Library/pnpm/global/5/node_modules/@qwen-code/qwen-code/cli.js")
+        );
+        assert_eq!(
+            install_of(&target),
+            Install::Pnpm {
+                package: "@qwen-code/qwen-code".into()
+            }
+        );
+        let up =
+            "#!/bin/sh\nexec node \"$basedir/../lib/node_modules/pi-acp/dist/index.js\" \"$@\"\n";
+        assert_eq!(
+            shim_target(Path::new("/x/bin/pi-acp"), up).unwrap(),
+            Path::new("/x/lib/node_modules/pi-acp/dist/index.js")
+        );
         // A binary, or a script that runs no package, isn't a shim.
         assert_eq!(shim_target(at, "\u{7f}ELF"), None);
-        assert_eq!(shim_target(at, "#!/bin/sh\nexec \"$basedir/real-binary\"\n"), None);
+        assert_eq!(
+            shim_target(at, "#!/bin/sh\nexec \"$basedir/real-binary\"\n"),
+            None
+        );
     }
 
     #[test]
     fn only_the_agents_own_packages_and_formulae_count() {
-        let brew = |formula: &str| Install::Brew { formula: formula.into(), prefix: "/opt/homebrew".into(), tap: None };
+        let brew = |formula: &str| Install::Brew {
+            formula: formula.into(),
+            prefix: "/opt/homebrew".into(),
+            tap: None,
+        };
         // `grok` the regex tool and `amp` the editor are formulae too: not the agents.
         assert!(!h("acp:grok").owns(&brew("grok")));
         assert!(!h("acp:amp").owns(&brew("amp")));
         assert!(h("acp:goose").owns(&brew("block-goose-cli")));
-        assert!(h("opencode").owns(&Install::Brew { formula: "opencode".into(), prefix: "/opt/homebrew".into(), tap: Some("anomalyco/tap".into()) }));
-        assert!(h("acp:github-copilot").owns(&Install::Cask { cask: "copilot-cli".into(), prefix: "/opt/homebrew".into() }));
-        assert!(!h("codex").owns(&Install::Npm { package: "codex".into(), prefix: "/usr/local".into() }), "another npm package named codex");
-        assert!(h("codex").owns(&Install::Npm { package: "@openai/codex".into(), prefix: "/usr/local".into() }));
+        assert!(h("opencode").owns(&Install::Brew {
+            formula: "opencode".into(),
+            prefix: "/opt/homebrew".into(),
+            tap: Some("anomalyco/tap".into())
+        }));
+        assert!(h("acp:github-copilot").owns(&Install::Cask {
+            cask: "copilot-cli".into(),
+            prefix: "/opt/homebrew".into()
+        }));
+        assert!(
+            !h("codex").owns(&Install::Npm {
+                package: "codex".into(),
+                prefix: "/usr/local".into()
+            }),
+            "another npm package named codex"
+        );
+        assert!(h("codex").owns(&Install::Npm {
+            package: "@openai/codex".into(),
+            prefix: "/usr/local".into()
+        }));
         assert!(h("acp:grok").owns(&Install::Native));
         // Agents are found by what `detect` looks for: Amp and Pi by their adapters.
         assert_eq!(h("acp:amp").detected_by(), "amp-acp");
@@ -1752,30 +2823,60 @@ mod tests {
         let adapter = harness("amp-acp").unwrap();
         assert!(adapter.adapter);
         assert_eq!(adapter.name(), "Amp ACP adapter");
-        assert_eq!(update_command(adapter, &Install::Npm { package: "amp-acp".into(), prefix: "/opt/homebrew".into() }, Path::new("/opt/homebrew/bin/amp-acp"), false, None).unwrap().shown(), "npm install -g amp-acp@latest");
+        assert_eq!(
+            update_command(
+                adapter,
+                &Install::Npm {
+                    package: "amp-acp".into(),
+                    prefix: "/opt/homebrew".into()
+                },
+                Path::new("/opt/homebrew/bin/amp-acp"),
+                false,
+                None
+            )
+            .unwrap()
+            .shown(),
+            "npm install -g amp-acp@latest"
+        );
     }
 
     #[test]
     fn claude_on_its_stable_channel_is_compared_with_stable() {
-        assert!(claude_on_stable(r#"{"model":"opus","autoUpdatesChannel":"stable"}"#));
+        assert!(claude_on_stable(
+            r#"{"model":"opus","autoUpdatesChannel":"stable"}"#
+        ));
         assert!(!claude_on_stable(r#"{"autoUpdatesChannel":"latest"}"#));
         assert!(!claude_on_stable("{}"));
         assert!(!claude_on_stable("not json"));
-        assert_eq!(urls(&Source::Feed(Feed::ClaudeStable)), ["https://downloads.claude.ai/claude-code-releases/stable"]);
-        assert_eq!(parse_latest(&Source::Feed(Feed::ClaudeStable), "2.1.285\n").unwrap().version, "2.1.285");
+        assert_eq!(
+            urls(&Source::Feed(Feed::ClaudeStable)),
+            ["https://downloads.claude.ai/claude-code-releases/stable"]
+        );
+        assert_eq!(
+            parse_latest(&Source::Feed(Feed::ClaudeStable), "2.1.285\n")
+                .unwrap()
+                .version,
+            "2.1.285"
+        );
     }
 
     #[test]
     fn a_formulas_tap_comes_from_its_receipt() {
         let receipt = r#"{"homebrew_version":"5.1.0","source":{"tap":"anomalyco/tap","spec":"stable","versions":{"stable":"1.18.34"}}}"#;
         assert_eq!(tap_from_receipt(receipt).as_deref(), Some("anomalyco/tap"));
-        assert_eq!(tap_from_receipt(r#"{"source":{"tap":"homebrew/core"}}"#), None);
+        assert_eq!(
+            tap_from_receipt(r#"{"source":{"tap":"homebrew/core"}}"#),
+            None
+        );
         assert_eq!(tap_from_receipt("not json"), None);
     }
 
     /// The CLI row of `agent`.
     fn h(agent: &str) -> &'static Harness {
-        HARNESSES.iter().find(|h| h.agent == agent && !h.adapter).unwrap()
+        HARNESSES
+            .iter()
+            .find(|h| h.agent == agent && !h.adapter)
+            .unwrap()
     }
 
     #[test]
@@ -1783,142 +2884,449 @@ mod tests {
         // OpenCode 2 is `@opencode/cli` on npm (binaries `opencode` and `opencode2`), the tap's
         // `opencode-v2` formula and homebrew/core's `opencode`; 1.x goes on as `opencode-ai`.
         let oc = h("opencode");
-        let npm = install_of(Path::new("/usr/local/lib/node_modules/@opencode/cli/bin/opencode.exe"));
-        assert_eq!(npm, Install::Npm { package: "@opencode/cli".into(), prefix: "/usr/local".into() });
+        let npm = install_of(Path::new(
+            "/usr/local/lib/node_modules/@opencode/cli/bin/opencode.exe",
+        ));
+        assert_eq!(
+            npm,
+            Install::Npm {
+                package: "@opencode/cli".into(),
+                prefix: "/usr/local".into()
+            }
+        );
         assert!(oc.owns(&npm));
-        assert_eq!(source(oc, &npm, Some("2.0.26")), Some(Source::Npm("@opencode/cli".into())));
+        assert_eq!(
+            source(oc, &npm, Some("2.0.26")),
+            Some(Source::Npm("@opencode/cli".into()))
+        );
         let bin = Path::new("/usr/local/bin/opencode");
-        assert_eq!(update_command(oc, &npm, bin, false, Some("2.0.26")).unwrap().shown(), "npm install -g @opencode/cli@latest");
+        assert_eq!(
+            update_command(oc, &npm, bin, false, Some("2.0.26"))
+                .unwrap()
+                .shown(),
+            "npm install -g @opencode/cli@latest"
+        );
         // The vendor's installer: its version says which line it's on.
-        assert_eq!(source(oc, &Install::Native, Some("2.0.26")), Some(Source::Npm("@opencode/cli".into())));
-        assert_eq!(source(oc, &Install::Native, Some("1.18.35")), Some(Source::Npm("opencode-ai".into())));
-        assert_eq!(source(oc, &Install::Native, None), Some(Source::Npm("opencode-ai".into())));
-        assert_eq!(update_command(oc, &Install::Volta, bin, false, Some("2.0.3")).unwrap().shown(), "volta install @opencode/cli@latest");
-        assert_eq!(update_command(oc, &Install::Volta, bin, false, Some("1.18.35")).unwrap().shown(), "volta install opencode-ai@latest");
-        let tapped = Install::Brew { formula: "opencode-v2".into(), prefix: "/opt/homebrew".into(), tap: Some("anomalyco/tap".into()) };
+        assert_eq!(
+            source(oc, &Install::Native, Some("2.0.26")),
+            Some(Source::Npm("@opencode/cli".into()))
+        );
+        assert_eq!(
+            source(oc, &Install::Native, Some("1.18.35")),
+            Some(Source::Npm("opencode-ai".into()))
+        );
+        assert_eq!(
+            source(oc, &Install::Native, None),
+            Some(Source::Npm("opencode-ai".into()))
+        );
+        assert_eq!(
+            update_command(oc, &Install::Volta, bin, false, Some("2.0.3"))
+                .unwrap()
+                .shown(),
+            "volta install @opencode/cli@latest"
+        );
+        assert_eq!(
+            update_command(oc, &Install::Volta, bin, false, Some("1.18.35"))
+                .unwrap()
+                .shown(),
+            "volta install opencode-ai@latest"
+        );
+        let tapped = Install::Brew {
+            formula: "opencode-v2".into(),
+            prefix: "/opt/homebrew".into(),
+            tap: Some("anomalyco/tap".into()),
+        };
         assert!(oc.owns(&tapped));
-        assert_eq!(update_command(oc, &tapped, bin, false, Some("2.0.25")).unwrap().shown(), "brew upgrade anomalyco/tap/opencode-v2");
-        assert_eq!(urls(&source(oc, &tapped, Some("2.0.25")).unwrap())[1], "https://raw.githubusercontent.com/anomalyco/homebrew-tap/HEAD/opencode-v2.rb");
+        assert_eq!(
+            update_command(oc, &tapped, bin, false, Some("2.0.25"))
+                .unwrap()
+                .shown(),
+            "brew upgrade anomalyco/tap/opencode-v2"
+        );
+        assert_eq!(
+            urls(&source(oc, &tapped, Some("2.0.25")).unwrap())[1],
+            "https://raw.githubusercontent.com/anomalyco/homebrew-tap/HEAD/opencode-v2.rb"
+        );
         // What 2's `--version` and the update feed say.
         assert_eq!(parse_version("opencode v2.0.26").as_deref(), Some("2.0.26"));
-        assert_eq!(parse_latest(&Source::Npm("@opencode/cli".into()), r#"{"name":"@opencode/cli","version":"2.0.26"}"#).unwrap().version, "2.0.26");
+        assert_eq!(
+            parse_latest(
+                &Source::Npm("@opencode/cli".into()),
+                r#"{"name":"@opencode/cli","version":"2.0.26"}"#
+            )
+            .unwrap()
+            .version,
+            "2.0.26"
+        );
         assert!(is_newer("2.0.26", "2.0.25") && !is_newer("1.18.35", "2.0.26"));
     }
 
     #[test]
     fn the_newest_version_is_asked_of_the_channel_it_came_through() {
-        let npm = Install::Npm { package: "@openai/codex".into(), prefix: "/opt/homebrew".into() };
-        assert_eq!(source(h("codex"), &npm, None), Some(Source::Npm("@openai/codex".into())));
-        assert_eq!(urls(&Source::Npm("@openai/codex".into())), ["https://registry.npmjs.org/@openai/codex/latest"]);
-        let tapped = Install::Brew { formula: "opencode".into(), prefix: "/opt/homebrew".into(), tap: Some("anomalyco/tap".into()) };
+        let npm = Install::Npm {
+            package: "@openai/codex".into(),
+            prefix: "/opt/homebrew".into(),
+        };
+        assert_eq!(
+            source(h("codex"), &npm, None),
+            Some(Source::Npm("@openai/codex".into()))
+        );
+        assert_eq!(
+            urls(&Source::Npm("@openai/codex".into())),
+            ["https://registry.npmjs.org/@openai/codex/latest"]
+        );
+        let tapped = Install::Brew {
+            formula: "opencode".into(),
+            prefix: "/opt/homebrew".into(),
+            tap: Some("anomalyco/tap".into()),
+        };
         let s = source(h("opencode"), &tapped, None).unwrap();
         assert_eq!(
             urls(&s),
-            ["https://raw.githubusercontent.com/anomalyco/homebrew-tap/HEAD/Formula/opencode.rb", "https://raw.githubusercontent.com/anomalyco/homebrew-tap/HEAD/opencode.rb"]
+            [
+                "https://raw.githubusercontent.com/anomalyco/homebrew-tap/HEAD/Formula/opencode.rb",
+                "https://raw.githubusercontent.com/anomalyco/homebrew-tap/HEAD/opencode.rb"
+            ]
         );
-        let core = Install::Brew { formula: "opencode".into(), prefix: "/opt/homebrew".into(), tap: None };
-        assert_eq!(urls(&source(h("opencode"), &core, None).unwrap()), ["https://formulae.brew.sh/api/formula/opencode.json"]);
+        let core = Install::Brew {
+            formula: "opencode".into(),
+            prefix: "/opt/homebrew".into(),
+            tap: None,
+        };
+        assert_eq!(
+            urls(&source(h("opencode"), &core, None).unwrap()),
+            ["https://formulae.brew.sh/api/formula/opencode.json"]
+        );
         // Native installs: the vendor's feed, or the npm package its builds share versions with.
-        assert_eq!(source(h("claude-code"), &Install::Native, None), Some(Source::Feed(Feed::ClaudeReleases)));
-        assert_eq!(source(h("codex"), &Install::Native, None), Some(Source::Npm("@openai/codex".into())));
-        assert_eq!(source(h("acp:grok"), &Install::Native, None), Some(Source::Feed(Feed::GrokStable)));
-        assert_eq!(source(h("acp:devin"), &Install::Native, None), Some(Source::Feed(Feed::DevinManifest)));
-        assert_eq!(source(h("acp:goose"), &Install::Native, None), Some(Source::Feed(Feed::GitHub("block/goose"))));
+        assert_eq!(
+            source(h("claude-code"), &Install::Native, None),
+            Some(Source::Feed(Feed::ClaudeReleases))
+        );
+        assert_eq!(
+            source(h("codex"), &Install::Native, None),
+            Some(Source::Npm("@openai/codex".into()))
+        );
+        assert_eq!(
+            source(h("acp:grok"), &Install::Native, None),
+            Some(Source::Feed(Feed::GrokStable))
+        );
+        assert_eq!(
+            source(h("acp:devin"), &Install::Native, None),
+            Some(Source::Feed(Feed::DevinManifest))
+        );
+        assert_eq!(
+            source(h("acp:goose"), &Install::Native, None),
+            Some(Source::Feed(Feed::GitHub("block/goose")))
+        );
     }
 
     #[test]
     fn recorded_feed_responses_give_the_newest_version() {
         let npm = r#"{"name":"@openai/codex","version":"0.160.0","bin":{"codex":"bin/codex.js"},"dist":{"tarball":"https://registry.npmjs.org/@openai/codex/-/codex-0.160.0.tgz"}}"#;
-        assert_eq!(parse_latest(&Source::Npm("@openai/codex".into()), npm).unwrap().version, "0.160.0");
+        assert_eq!(
+            parse_latest(&Source::Npm("@openai/codex".into()), npm)
+                .unwrap()
+                .version,
+            "0.160.0"
+        );
         let formula = r#"{"name":"opencode","full_name":"opencode","tap":"homebrew/core","versions":{"stable":"2.0.20","head":null,"bottle":true},"revision":0}"#;
-        assert_eq!(parse_latest(&Source::Formula("opencode".into()), formula).unwrap().version, "2.0.20");
+        assert_eq!(
+            parse_latest(&Source::Formula("opencode".into()), formula)
+                .unwrap()
+                .version,
+            "2.0.20"
+        );
         let cask = r#"{"token":"copilot-cli","version":"1.0.91","auto_updates":true,"url":"https://github.com/github/copilot-cli/releases/download/v1.0.91/copilot-darwin-arm64.tar.gz"}"#;
-        assert_eq!(parse_latest(&Source::Cask("copilot-cli".into()), cask), Some(Latest { version: "1.0.91".into(), auto_updates: true }));
+        assert_eq!(
+            parse_latest(&Source::Cask("copilot-cli".into()), cask),
+            Some(Latest {
+                version: "1.0.91".into(),
+                auto_updates: true
+            })
+        );
         let cask = r#"{"token":"some-app","version":"3.4.1,20261002","auto_updates":false}"#;
-        assert_eq!(parse_latest(&Source::Cask("some-app".into()), cask).unwrap().version, "3.4.1");
+        assert_eq!(
+            parse_latest(&Source::Cask("some-app".into()), cask)
+                .unwrap()
+                .version,
+            "3.4.1"
+        );
         let tap = "# This file was generated by GoReleaser. DO NOT EDIT.\nclass Opencode < Formula\n  desc \"The AI coding agent built for the terminal.\"\n  homepage \"https://github.com/anomalyco/opencode\"\n  version \"1.18.34\"\n\n  depends_on \"ripgrep\"\n";
-        assert_eq!(parse_latest(&Source::TapFormula { tap: "anomalyco/tap".into(), formula: "opencode".into() }, tap).unwrap().version, "1.18.34");
-        assert_eq!(parse_latest(&Source::Feed(Feed::ClaudeReleases), "2.1.289\n").unwrap().version, "2.1.289");
-        assert_eq!(parse_latest(&Source::Feed(Feed::GrokStable), "1.0.46").unwrap().version, "1.0.46");
+        assert_eq!(
+            parse_latest(
+                &Source::TapFormula {
+                    tap: "anomalyco/tap".into(),
+                    formula: "opencode".into()
+                },
+                tap
+            )
+            .unwrap()
+            .version,
+            "1.18.34"
+        );
+        assert_eq!(
+            parse_latest(&Source::Feed(Feed::ClaudeReleases), "2.1.289\n")
+                .unwrap()
+                .version,
+            "2.1.289"
+        );
+        assert_eq!(
+            parse_latest(&Source::Feed(Feed::GrokStable), "1.0.46")
+                .unwrap()
+                .version,
+            "1.0.46"
+        );
         let devin = r#"{"version":"3000.11.3","platforms":{"aarch64-apple-darwin":{"url":"https://static.devin.ai/cli/3000.11.3/devin-3000.11.3-aarch64-apple-darwin.tar.gz"}}}"#;
-        assert_eq!(parse_latest(&Source::Feed(Feed::DevinManifest), devin).unwrap().version, "3000.11.3");
+        assert_eq!(
+            parse_latest(&Source::Feed(Feed::DevinManifest), devin)
+                .unwrap()
+                .version,
+            "3000.11.3"
+        );
         let cursor = "TEMP_EXTRACT_DIR=\"$HOME/.local/share/cursor-agent/versions/.tmp-2026.10.01-e373342-$(date +%s)\"\nDOWNLOAD_URL=\"https://downloads.cursor.com/lab/2026.10.01-e373342/${OS}/${ARCH}/agent-cli-package.tar.gz\"\n";
-        assert_eq!(parse_latest(&Source::Feed(Feed::CursorInstaller), cursor).unwrap().version, "2026.10.01-e373342");
-        let droid = "binary_name=\"droid\"\nVER=\"0.233.0\"\nBASE_URL=\"https://downloads.factory.ai\"\n";
-        assert_eq!(parse_latest(&Source::Feed(Feed::DroidInstaller), droid).unwrap().version, "0.233.0");
+        assert_eq!(
+            parse_latest(&Source::Feed(Feed::CursorInstaller), cursor)
+                .unwrap()
+                .version,
+            "2026.10.01-e373342"
+        );
+        let droid =
+            "binary_name=\"droid\"\nVER=\"0.233.0\"\nBASE_URL=\"https://downloads.factory.ai\"\n";
+        assert_eq!(
+            parse_latest(&Source::Feed(Feed::DroidInstaller), droid)
+                .unwrap()
+                .version,
+            "0.233.0"
+        );
         let github = r#"{"tag_name":"v1.9.3","name":"v1.9.3","draft":false}"#;
-        assert_eq!(parse_latest(&Source::Feed(Feed::GitHub("block/goose")), github).unwrap().version, "1.9.3");
+        assert_eq!(
+            parse_latest(&Source::Feed(Feed::GitHub("block/goose")), github)
+                .unwrap()
+                .version,
+            "1.9.3"
+        );
         // Error pages and HTML aren't versions.
-        assert_eq!(parse_latest(&Source::Npm("x".into()), "<html>rate limited</html>"), None);
-        assert_eq!(parse_latest(&Source::Feed(Feed::GrokStable), "<!DOCTYPE html>"), None);
+        assert_eq!(
+            parse_latest(&Source::Npm("x".into()), "<html>rate limited</html>"),
+            None
+        );
+        assert_eq!(
+            parse_latest(&Source::Feed(Feed::GrokStable), "<!DOCTYPE html>"),
+            None
+        );
     }
 
     #[test]
     fn updates_run_the_vendors_documented_command() {
         let bin = Path::new("/opt/homebrew/bin/x");
         // Where an npm prefix keeps its programs, and how PATH strings are joined.
-        let (dir, sep) = (|prefix: &str| if cfg!(windows) { PathBuf::from(prefix) } else { Path::new(prefix).join("bin") }, if cfg!(windows) { ";" } else { ":" });
-        let shown = |agent: &str, install: Install, auto: bool| update_command(h(agent), &install, bin, auto, None).map(|c| c.shown());
-        let npm = |p: &str| Install::Npm { package: p.into(), prefix: "/opt/homebrew".into() };
-        assert_eq!(shown("acp:kimi", npm("@moonshot-ai/kimi-code"), false).as_deref(), Some("npm install -g @moonshot-ai/kimi-code@latest"));
+        let (dir, sep) = (
+            |prefix: &str| {
+                if cfg!(windows) {
+                    PathBuf::from(prefix)
+                } else {
+                    Path::new(prefix).join("bin")
+                }
+            },
+            if cfg!(windows) { ";" } else { ":" },
+        );
+        let shown = |agent: &str, install: Install, auto: bool| {
+            update_command(h(agent), &install, bin, auto, None).map(|c| c.shown())
+        };
+        let npm = |p: &str| Install::Npm {
+            package: p.into(),
+            prefix: "/opt/homebrew".into(),
+        };
+        assert_eq!(
+            shown("acp:kimi", npm("@moonshot-ai/kimi-code"), false).as_deref(),
+            Some("npm install -g @moonshot-ai/kimi-code@latest")
+        );
         // The npm (and node) of the prefix it's in first on PATH, and that prefix set outright.
         let cmd = update_command(h("codex"), &npm("@openai/codex"), bin, false, None).unwrap();
         assert_eq!(cmd.program, Path::new("npm"));
         assert_eq!(cmd.path, [dir("/opt/homebrew")]);
-        assert_eq!(cmd.env, [("npm_config_prefix".to_string(), "/opt/homebrew".to_string())]);
-        assert!(cmd.search_path().starts_with(&format!("{}{sep}", dir("/opt/homebrew").display())), "{}", cmd.search_path());
+        assert_eq!(
+            cmd.env,
+            [("npm_config_prefix".to_string(), "/opt/homebrew".to_string())]
+        );
+        assert!(
+            cmd.search_path()
+                .starts_with(&format!("{}{sep}", dir("/opt/homebrew").display())),
+            "{}",
+            cmd.search_path()
+        );
         // A prefix of the user's own has no npm in it: the one on PATH installs into it.
-        let own = Install::Npm { package: "@openai/codex".into(), prefix: "/Users/me/.npm-global".into() };
+        let own = Install::Npm {
+            package: "@openai/codex".into(),
+            prefix: "/Users/me/.npm-global".into(),
+        };
         let cmd = update_command(h("codex"), &own, bin, false, None).unwrap();
-        assert_eq!(cmd.env, [("npm_config_prefix".to_string(), "/Users/me/.npm-global".to_string())]);
+        assert_eq!(
+            cmd.env,
+            [(
+                "npm_config_prefix".to_string(),
+                "/Users/me/.npm-global".to_string()
+            )]
+        );
         assert_eq!(cmd.shown(), "npm install -g @openai/codex@latest");
-        let nvm = Install::Npm { package: "@openai/codex".into(), prefix: "/Users/me/.nvm/versions/node/v22.3.0".into() };
-        assert_eq!(update_command(h("codex"), &nvm, bin, false, None).unwrap().path, [dir("/Users/me/.nvm/versions/node/v22.3.0")]);
-        assert_eq!(shown("codex", Install::Volta, false).as_deref(), Some("volta install @openai/codex@latest"));
-        assert_eq!(shown("acp:grok", Install::Volta, false), None, "no package to install");
-        assert_eq!(shown("acp:kimi", Install::Bun { package: "@moonshot-ai/kimi-code".into() }, false).as_deref(), Some("bun add -g @moonshot-ai/kimi-code@latest"));
-        let tapped = Install::Brew { formula: "opencode".into(), prefix: "/opt/homebrew".into(), tap: Some("anomalyco/tap".into()) };
-        assert_eq!(shown("opencode", tapped, false).as_deref(), Some("brew upgrade anomalyco/tap/opencode"));
-        let core = Install::Brew { formula: "block-goose-cli".into(), prefix: "/usr/local".into(), tap: None };
-        assert_eq!(update_command(h("acp:goose"), &core, bin, false, None).unwrap().program, Path::new("/usr/local/bin/brew"));
+        let nvm = Install::Npm {
+            package: "@openai/codex".into(),
+            prefix: "/Users/me/.nvm/versions/node/v22.3.0".into(),
+        };
+        assert_eq!(
+            update_command(h("codex"), &nvm, bin, false, None)
+                .unwrap()
+                .path,
+            [dir("/Users/me/.nvm/versions/node/v22.3.0")]
+        );
+        assert_eq!(
+            shown("codex", Install::Volta, false).as_deref(),
+            Some("volta install @openai/codex@latest")
+        );
+        assert_eq!(
+            shown("acp:grok", Install::Volta, false),
+            None,
+            "no package to install"
+        );
+        assert_eq!(
+            shown(
+                "acp:kimi",
+                Install::Bun {
+                    package: "@moonshot-ai/kimi-code".into()
+                },
+                false
+            )
+            .as_deref(),
+            Some("bun add -g @moonshot-ai/kimi-code@latest")
+        );
+        let tapped = Install::Brew {
+            formula: "opencode".into(),
+            prefix: "/opt/homebrew".into(),
+            tap: Some("anomalyco/tap".into()),
+        };
+        assert_eq!(
+            shown("opencode", tapped, false).as_deref(),
+            Some("brew upgrade anomalyco/tap/opencode")
+        );
+        let core = Install::Brew {
+            formula: "block-goose-cli".into(),
+            prefix: "/usr/local".into(),
+            tap: None,
+        };
+        assert_eq!(
+            update_command(h("acp:goose"), &core, bin, false, None)
+                .unwrap()
+                .program,
+            Path::new("/usr/local/bin/brew")
+        );
         // A cask that updates itself does so with its own command; another one through brew.
-        let cask = Install::Cask { cask: "copilot-cli".into(), prefix: "/opt/homebrew".into() };
-        assert_eq!(shown("acp:github-copilot", cask.clone(), true).as_deref(), Some("x update"));
-        assert_eq!(shown("acp:github-copilot", cask, false).as_deref(), Some("brew upgrade --cask copilot-cli"));
+        let cask = Install::Cask {
+            cask: "copilot-cli".into(),
+            prefix: "/opt/homebrew".into(),
+        };
+        assert_eq!(
+            shown("acp:github-copilot", cask.clone(), true).as_deref(),
+            Some("x update")
+        );
+        assert_eq!(
+            shown("acp:github-copilot", cask, false).as_deref(),
+            Some("brew upgrade --cask copilot-cli")
+        );
         // Native installs: the CLI's own command, the install script, or nothing.
-        assert_eq!(shown("claude-code", Install::Native, false).as_deref(), Some("x update"));
-        assert_eq!(shown("opencode", Install::Native, false).as_deref(), Some("x upgrade"));
+        assert_eq!(
+            shown("claude-code", Install::Native, false).as_deref(),
+            Some("x update")
+        );
+        assert_eq!(
+            shown("opencode", Install::Native, false).as_deref(),
+            Some("x upgrade")
+        );
         let droid = update_command(h("droid"), &Install::Native, bin, false, None).unwrap();
         if cfg!(windows) {
             // Factory's PowerShell installer, re-run: it's the update.
-            assert_eq!(droid.program.file_stem().unwrap().to_string_lossy().to_lowercase(), "powershell");
-            assert_eq!(droid.shown(), "irm https://app.factory.ai/cli/windows | iex");
-            assert_eq!(droid.args.last().unwrap(), "irm https://app.factory.ai/cli/windows | iex");
+            assert_eq!(
+                droid
+                    .program
+                    .file_stem()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_lowercase(),
+                "powershell"
+            );
+            assert_eq!(
+                droid.shown(),
+                "irm https://app.factory.ai/cli/windows | iex"
+            );
+            assert_eq!(
+                droid.args.last().unwrap(),
+                "irm https://app.factory.ai/cli/windows | iex"
+            );
         } else {
             assert_eq!(droid.program, Path::new("/bin/sh"));
             assert_eq!(droid.shown(), "curl -fsSL https://app.factory.ai/cli | sh");
         }
-        assert_eq!(shown("acp:pi", Install::Native, false).as_deref(), Some("x update"));
-        assert_eq!(shown("acp:qwen-code", Install::Native, false), None, "no update command, no installer");
+        assert_eq!(
+            shown("acp:pi", Install::Native, false).as_deref(),
+            Some("x update")
+        );
+        assert_eq!(
+            shown("acp:qwen-code", Install::Native, false),
+            None,
+            "no update command, no installer"
+        );
     }
 
     #[test]
     fn pi_moved_package_and_its_old_installs_move_with_it() {
         let pi = h("acp:pi");
-        let new = Install::Npm { package: "@earendil-works/pi-coding-agent".into(), prefix: "/opt/homebrew".into() };
-        let old = Install::Npm { package: "@mariozechner/pi-coding-agent".into(), prefix: "/opt/homebrew".into() };
+        let new = Install::Npm {
+            package: "@earendil-works/pi-coding-agent".into(),
+            prefix: "/opt/homebrew".into(),
+        };
+        let old = Install::Npm {
+            package: "@mariozechner/pi-coding-agent".into(),
+            prefix: "/opt/homebrew".into(),
+        };
         assert!(pi.owns(&new) && pi.owns(&old));
-        assert!(!pi.owns(&Install::Npm { package: "pi".into(), prefix: "/opt/homebrew".into() }));
+        assert!(!pi.owns(&Install::Npm {
+            package: "pi".into(),
+            prefix: "/opt/homebrew".into()
+        }));
         // Both are compared with the new package: the old one's `latest` stopped at 0.73.1.
-        assert_eq!(source(pi, &new, None), Some(Source::Npm("@earendil-works/pi-coding-agent".into())));
-        assert_eq!(source(pi, &old, None), Some(Source::Npm("@earendil-works/pi-coding-agent".into())));
-        assert_eq!(source(pi, &Install::Bun { package: "@mariozechner/pi-coding-agent".into() }, None), Some(Source::Npm("@earendil-works/pi-coding-agent".into())));
+        assert_eq!(
+            source(pi, &new, None),
+            Some(Source::Npm("@earendil-works/pi-coding-agent".into()))
+        );
+        assert_eq!(
+            source(pi, &old, None),
+            Some(Source::Npm("@earendil-works/pi-coding-agent".into()))
+        );
+        assert_eq!(
+            source(
+                pi,
+                &Install::Bun {
+                    package: "@mariozechner/pi-coding-agent".into()
+                },
+                None
+            ),
+            Some(Source::Npm("@earendil-works/pi-coding-agent".into()))
+        );
         let bin = Path::new("/opt/homebrew/bin/pi");
-        assert_eq!(update_command(pi, &new, bin, false, None).unwrap().shown(), "npm install -g @earendil-works/pi-coding-agent@latest");
+        assert_eq!(
+            update_command(pi, &new, bin, false, None).unwrap().shown(),
+            "npm install -g @earendil-works/pi-coding-agent@latest"
+        );
         // The old package goes first: its `pi` would block the new one's.
         let cmd = update_command(pi, &old, bin, false, Some("0.73.1")).unwrap();
         if cfg!(windows) {
-            assert_eq!(cmd.program.file_stem().unwrap().to_string_lossy().to_lowercase(), "powershell");
+            assert_eq!(
+                cmd.program
+                    .file_stem()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_lowercase(),
+                "powershell"
+            );
             // Each package is quoted for PowerShell, where a bare `@scope/name` is splatting.
             let script = cmd.args.last().unwrap();
             assert!(script.contains("npm uninstall -g '@mariozechner/pi-coding-agent'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"), "{script}");
@@ -1928,11 +3336,36 @@ mod tests {
         } else {
             assert_eq!(cmd.program, Path::new("/bin/sh"));
         }
-        assert_eq!(cmd.shown(), "npm uninstall -g @mariozechner/pi-coding-agent && npm install -g @earendil-works/pi-coding-agent@latest");
-        assert_eq!(cmd.path, [if cfg!(windows) { PathBuf::from("/opt/homebrew") } else { PathBuf::from("/opt/homebrew/bin") }]);
-        assert_eq!(cmd.env, [("npm_config_prefix".to_string(), "/opt/homebrew".to_string())]);
-        let pnpm = update_command(pi, &Install::Pnpm { package: "@mariozechner/pi-coding-agent".into() }, bin, false, None).unwrap();
-        assert_eq!(pnpm.shown(), "pnpm remove -g @mariozechner/pi-coding-agent && pnpm add -g @earendil-works/pi-coding-agent@latest");
+        assert_eq!(
+            cmd.shown(),
+            "npm uninstall -g @mariozechner/pi-coding-agent && npm install -g @earendil-works/pi-coding-agent@latest"
+        );
+        assert_eq!(
+            cmd.path,
+            [if cfg!(windows) {
+                PathBuf::from("/opt/homebrew")
+            } else {
+                PathBuf::from("/opt/homebrew/bin")
+            }]
+        );
+        assert_eq!(
+            cmd.env,
+            [("npm_config_prefix".to_string(), "/opt/homebrew".to_string())]
+        );
+        let pnpm = update_command(
+            pi,
+            &Install::Pnpm {
+                package: "@mariozechner/pi-coding-agent".into(),
+            },
+            bin,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            pnpm.shown(),
+            "pnpm remove -g @mariozechner/pi-coding-agent && pnpm add -g @earendil-works/pi-coding-agent@latest"
+        );
         // An old install a check found then (`latest` from the new package) has an update out.
         let v = AgentVersion {
             id: "pi".into(),
@@ -1955,29 +3388,49 @@ mod tests {
         #[cfg(windows)]
         {
             // The redirection comes first: `echo 0.73.1>> log` would redirect handle 1.
-            let fails: String = fail.iter().map(|f| format!("if \"%*\"==\"{f}\" (>&2 echo npm error {f}& exit /b 1)\r\n")).collect();
-            let npm = format!("@echo off\r\n>> \"{}\" echo %*\r\n{fails}exit /b 0\r\n", log.display());
+            let fails: String = fail
+                .iter()
+                .map(|f| format!("if \"%*\"==\"{f}\" (>&2 echo npm error {f}& exit /b 1)\r\n"))
+                .collect();
+            let npm = format!(
+                "@echo off\r\n>> \"{}\" echo %*\r\n{fails}exit /b 0\r\n",
+                log.display()
+            );
             std::fs::write(root.join("npm.cmd"), npm).unwrap();
         }
         #[cfg(unix)]
         {
-            let fails: String = fail.iter().map(|f| format!("  \"{f}\") echo \"npm error {f}\" >&2; exit 1;;\n")).collect();
-            let npm = format!("#!/bin/sh\necho \"$*\" >> \"{}\"\ncase \"$*\" in\n{fails}esac\nexit 0\n", log.display());
+            let fails: String = fail
+                .iter()
+                .map(|f| format!("  \"{f}\") echo \"npm error {f}\" >&2; exit 1;;\n"))
+                .collect();
+            let npm = format!(
+                "#!/bin/sh\necho \"$*\" >> \"{}\"\ncase \"$*\" in\n{fails}esac\nexit 0\n",
+                log.display()
+            );
             let fake = root.join("bin/npm");
             std::fs::write(&fake, npm).unwrap();
-            std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
         }
     }
 
     /// Pi's move to its new package, run against a fake `npm` that logs what it's asked and fails
     /// at `fail` (each a line of arguments): the old package is never simply gone.
     fn move_pi(fail: &[&str]) -> (Outcome, Vec<String>) {
-        let root = std::env::temp_dir().join(format!("trek-pi-move-{}-{}", std::process::id(), fail.len()));
+        let root = std::env::temp_dir().join(format!(
+            "trek-pi-move-{}-{}",
+            std::process::id(),
+            fail.len()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("bin")).unwrap();
         let log = root.join("npm.log");
         fake_npm(&root, &log, fail);
-        let old = Install::Npm { package: "@mariozechner/pi-coding-agent".into(), prefix: root.clone() };
+        let old = Install::Npm {
+            package: "@mariozechner/pi-coding-agent".into(),
+            prefix: root.clone(),
+        };
         let v = AgentVersion {
             id: "pi".into(),
             agent: "acp:pi".into(),
@@ -1985,58 +3438,118 @@ mod tests {
             binary: root.join("bin/pi"),
             installed: Some("0.73.1".into()),
             latest: Some("1.0.2".into()),
-            command: update_command(h("acp:pi"), &old, &root.join("bin/pi"), false, Some("0.73.1")),
+            command: update_command(
+                h("acp:pi"),
+                &old,
+                &root.join("bin/pi"),
+                false,
+                Some("0.73.1"),
+            ),
             install: old,
             error: None,
         };
         let outcome = crate::runtime().block_on(run_update(&v));
-        let ran = std::fs::read_to_string(&log).unwrap_or_default().lines().map(String::from).collect();
+        let ran = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect();
         let _ = std::fs::remove_dir_all(&root);
         (outcome, ran)
     }
 
     #[test]
     fn a_failed_package_move_puts_the_old_package_back() {
-        let (remove, add, back) = ("uninstall -g @mariozechner/pi-coding-agent", "install -g @earendil-works/pi-coding-agent@latest", "install -g --prefer-offline @mariozechner/pi-coding-agent@0.73.1");
+        let (remove, add, back) = (
+            "uninstall -g @mariozechner/pi-coding-agent",
+            "install -g @earendil-works/pi-coding-agent@latest",
+            "install -g --prefer-offline @mariozechner/pi-coding-agent@0.73.1",
+        );
         // Offline mid-update: the new package doesn't come, the old one goes back from the cache.
         let (outcome, ran) = move_pi(&[add]);
         assert_eq!(ran, [remove, add, back]);
-        let Outcome::Failed { summary, output } = outcome else { panic!("{outcome:?}") };
-        assert_eq!(summary, "Couldn't install @earendil-works/pi-coding-agent, so @mariozechner/pi-coding-agent@0.73.1 was put back.");
-        assert!(output.contains("npm error install -g @earendil-works"), "{output}");
+        let Outcome::Failed { summary, output } = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert_eq!(
+            summary,
+            "Couldn't install @earendil-works/pi-coding-agent, so @mariozechner/pi-coding-agent@0.73.1 was put back."
+        );
+        assert!(
+            output.contains("npm error install -g @earendil-works"),
+            "{output}"
+        );
         // Neither comes: the summary says Pi is gone and how to get it.
         let (outcome, ran) = move_pi(&[add, back]);
         assert_eq!(ran, [remove, add, back]);
-        let Outcome::Failed { summary, .. } = outcome else { panic!() };
+        let Outcome::Failed { summary, .. } = outcome else {
+            panic!()
+        };
         assert!(summary.starts_with("Couldn't install @earendil-works/pi-coding-agent, nor put @mariozechner/pi-coding-agent@0.73.1 back: Pi isn't installed now."), "{summary}");
         // The old one wouldn't go: nothing else is tried, nothing changed.
         let (outcome, ran) = move_pi(&[remove]);
         assert_eq!(ran, [remove]);
-        let Outcome::Failed { summary, .. } = outcome else { panic!() };
-        assert_eq!(summary, "npm uninstall -g @mariozechner/pi-coding-agent && npm install -g @earendil-works/pi-coding-agent@latest stopped with code 1.");
+        let Outcome::Failed { summary, .. } = outcome else {
+            panic!()
+        };
+        assert_eq!(
+            summary,
+            "npm uninstall -g @mariozechner/pi-coding-agent && npm install -g @earendil-works/pi-coding-agent@latest stopped with code 1."
+        );
     }
 
     #[test]
     fn pis_own_installer_updates_with_pi_update() {
         // Pi's installer lays out an npm prefix of its own, marked as its: the installer's.
         let root = std::env::temp_dir().join(format!("trek-pi-managed-{}", std::process::id()));
-        let script = root.join("releases/1.0.2/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js");
+        let script = root
+            .join("releases/1.0.2/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js");
         std::fs::create_dir_all(script.parent().unwrap()).unwrap();
         std::fs::write(&script, "#!/usr/bin/env node\n").unwrap();
-        assert!(matches!(detect_install(&script), Install::Npm { .. }), "unmarked, it's an npm prefix");
-        std::fs::write(root.join("managed-install.json"), r#"{"kind":"pi-managed-install","schemaVersion":1}"#).unwrap();
+        assert!(
+            matches!(detect_install(&script), Install::Npm { .. }),
+            "unmarked, it's an npm prefix"
+        );
+        std::fs::write(
+            root.join("managed-install.json"),
+            r#"{"kind":"pi-managed-install","schemaVersion":1}"#,
+        )
+        .unwrap();
         assert_eq!(detect_install(&script), Install::Native);
-        assert_eq!(update_command(h("acp:pi"), &Install::Native, Path::new("/Users/me/.pi/agent/bin/pi"), false, None).unwrap().shown(), "pi update");
-        assert_eq!(source(h("acp:pi"), &Install::Native, None), Some(Source::Npm("@earendil-works/pi-coding-agent".into())));
+        assert_eq!(
+            update_command(
+                h("acp:pi"),
+                &Install::Native,
+                Path::new("/Users/me/.pi/agent/bin/pi"),
+                false,
+                None
+            )
+            .unwrap()
+            .shown(),
+            "pi update"
+        );
+        assert_eq!(
+            source(h("acp:pi"), &Install::Native, None),
+            Some(Source::Npm("@earendil-works/pi-coding-agent".into()))
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn adapters_versions_come_from_their_packages() {
         // amp-acp and pi-acp start serving ACP whatever their arguments: no `--version`.
-        assert_eq!(package_dir(Path::new("/opt/homebrew/lib/node_modules/pi-acp/dist/index.js")).unwrap(), Path::new("/opt/homebrew/lib/node_modules/pi-acp"));
         assert_eq!(
-            package_dir(Path::new("/Users/me/Library/pnpm/global/5/node_modules/@sourcegraph/amp/dist/main.js")).unwrap(),
+            package_dir(Path::new(
+                "/opt/homebrew/lib/node_modules/pi-acp/dist/index.js"
+            ))
+            .unwrap(),
+            Path::new("/opt/homebrew/lib/node_modules/pi-acp")
+        );
+        assert_eq!(
+            package_dir(Path::new(
+                "/Users/me/Library/pnpm/global/5/node_modules/@sourcegraph/amp/dist/main.js"
+            ))
+            .unwrap(),
             Path::new("/Users/me/Library/pnpm/global/5/node_modules/@sourcegraph/amp")
         );
         assert_eq!(package_dir(Path::new("/Users/me/.local/bin/grok")), None);
@@ -2061,9 +3574,18 @@ mod tests {
             std::fs::write(pkg.join("package.json"), pi_acp).unwrap();
             std::fs::write(pkg.join(r"dist\index.js"), "#!/usr/bin/env node\n").unwrap();
             let shim = root.join("pi-acp.cmd");
-            std::fs::write(&shim, CODEX_CMD.replace(r"@openai\codex\bin\codex.js", r"pi-acp\dist\index.js")).unwrap();
+            std::fs::write(
+                &shim,
+                CODEX_CMD.replace(r"@openai\codex\bin\codex.js", r"pi-acp\dist\index.js"),
+            )
+            .unwrap();
             let adapter = harness("pi-acp").unwrap();
-            assert_eq!(crate::runtime().block_on(installed_version(adapter, &shim)).as_deref(), Some("0.0.34"));
+            assert_eq!(
+                crate::runtime()
+                    .block_on(installed_version(adapter, &shim))
+                    .as_deref(),
+                Some("0.0.34")
+            );
             let _ = std::fs::remove_dir_all(&root);
         }
         #[cfg(unix)]
@@ -2078,7 +3600,12 @@ mod tests {
             let _ = std::fs::remove_file(&link);
             std::os::unix::fs::symlink(pkg.join("dist/index.js"), &link).unwrap();
             let adapter = harness("pi-acp").unwrap();
-            assert_eq!(crate::runtime().block_on(installed_version(adapter, &link)).as_deref(), Some("0.0.34"));
+            assert_eq!(
+                crate::runtime()
+                    .block_on(installed_version(adapter, &link))
+                    .as_deref(),
+                Some("0.0.34")
+            );
             let _ = std::fs::remove_dir_all(&root);
         }
     }
@@ -2091,27 +3618,73 @@ mod tests {
     #[cfg(windows)]
     fn npm_on_windows_has_no_lib_folder() {
         let p = |s: &str| install_of(Path::new(s));
-        let npm = |package: &str, prefix: &str| Install::Npm { package: package.into(), prefix: prefix.into() };
+        let npm = |package: &str, prefix: &str| Install::Npm {
+            package: package.into(),
+            prefix: prefix.into(),
+        };
         // The default prefix, `%APPDATA%\npm`.
         let roaming = r"C:\Users\me\AppData\Roaming\npm";
-        assert_eq!(p(r"C:\Users\me\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js"), npm("@openai/codex", roaming));
-        assert_eq!(p(r"C:\Users\me\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode.exe"), npm("opencode-ai", roaming));
-        assert_eq!(p(r"C:\Users\me\AppData\Roaming\npm\node_modules\@opencode\cli\bin\opencode.exe"), npm("@opencode/cli", roaming));
-        // `canonicalize` gives `\\?\C:\…`, which npm can't take as a prefix: it's the plain path.
-        assert_eq!(p(r"\\?\C:\Users\me\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js"), npm("@openai/codex", roaming));
-        assert_eq!(p(r"\\?\UNC\server\share\npm\node_modules\opencode-ai\bin\opencode"), npm("opencode-ai", r"\\server\share\npm"));
-        // nvm for Windows (and Node's own folder) keep packages beside node.exe.
-        assert_eq!(p(r"C:\Users\me\AppData\Local\nvm\v22.3.0\node_modules\@openai\codex\bin\codex.js"), npm("@openai/codex", r"C:\Users\me\AppData\Local\nvm\v22.3.0"));
-        // A Unix-shaped prefix (npm in Git Bash or MSYS) still has its `lib`.
-        assert_eq!(p(r"C:\npm\lib\node_modules\opencode-ai\bin\opencode"), npm("opencode-ai", r"C:\npm"));
-        // Other package managers.
-        assert_eq!(p(r"C:\Users\me\AppData\Local\pnpm\global\5\node_modules\@qwen-code\qwen-code\cli.js"), Install::Pnpm { package: "@qwen-code/qwen-code".into() });
-        assert_eq!(p(r"C:\Users\me\.bun\install\global\node_modules\@moonshot-ai\kimi-code\dist\index.js"), Install::Bun { package: "@moonshot-ai/kimi-code".into() });
-        assert_eq!(p(r"C:\Users\me\AppData\Local\Volta\bin\codex.exe"), Install::Volta);
-        assert_eq!(p(r"C:\Users\me\AppData\Local\Volta\tools\image\packages\@openai\codex\node_modules\@openai\codex\bin\codex.js"), Install::Volta);
         assert_eq!(
-            p(r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe\claude.exe"),
-            Install::Winget { id: "Anthropic.ClaudeCode".into() }
+            p(r"C:\Users\me\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js"),
+            npm("@openai/codex", roaming)
+        );
+        assert_eq!(
+            p(r"C:\Users\me\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode.exe"),
+            npm("opencode-ai", roaming)
+        );
+        assert_eq!(
+            p(r"C:\Users\me\AppData\Roaming\npm\node_modules\@opencode\cli\bin\opencode.exe"),
+            npm("@opencode/cli", roaming)
+        );
+        // `canonicalize` gives `\\?\C:\…`, which npm can't take as a prefix: it's the plain path.
+        assert_eq!(
+            p(r"\\?\C:\Users\me\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js"),
+            npm("@openai/codex", roaming)
+        );
+        assert_eq!(
+            p(r"\\?\UNC\server\share\npm\node_modules\opencode-ai\bin\opencode"),
+            npm("opencode-ai", r"\\server\share\npm")
+        );
+        // nvm for Windows (and Node's own folder) keep packages beside node.exe.
+        assert_eq!(
+            p(r"C:\Users\me\AppData\Local\nvm\v22.3.0\node_modules\@openai\codex\bin\codex.js"),
+            npm("@openai/codex", r"C:\Users\me\AppData\Local\nvm\v22.3.0")
+        );
+        // A Unix-shaped prefix (npm in Git Bash or MSYS) still has its `lib`.
+        assert_eq!(
+            p(r"C:\npm\lib\node_modules\opencode-ai\bin\opencode"),
+            npm("opencode-ai", r"C:\npm")
+        );
+        // Other package managers.
+        assert_eq!(
+            p(r"C:\Users\me\AppData\Local\pnpm\global\5\node_modules\@qwen-code\qwen-code\cli.js"),
+            Install::Pnpm {
+                package: "@qwen-code/qwen-code".into()
+            }
+        );
+        assert_eq!(
+            p(r"C:\Users\me\.bun\install\global\node_modules\@moonshot-ai\kimi-code\dist\index.js"),
+            Install::Bun {
+                package: "@moonshot-ai/kimi-code".into()
+            }
+        );
+        assert_eq!(
+            p(r"C:\Users\me\AppData\Local\Volta\bin\codex.exe"),
+            Install::Volta
+        );
+        assert_eq!(
+            p(
+                r"C:\Users\me\AppData\Local\Volta\tools\image\packages\@openai\codex\node_modules\@openai\codex\bin\codex.js"
+            ),
+            Install::Volta
+        );
+        assert_eq!(
+            p(
+                r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe\claude.exe"
+            ),
+            Install::Winget {
+                id: "Anthropic.ClaudeCode".into()
+            }
         );
         // The vendors' own installers, where they put the CLIs.
         for native in [
@@ -2127,47 +3700,99 @@ mod tests {
         }
         // The package managers' own folders: Scoop's shims and apps, Chocolatey's bin and lib.
         let scoop = |app: &str| Install::Scoop { app: app.into() };
-        let choco = |package: &str| Install::Chocolatey { package: package.into() };
-        assert_eq!(p(r"C:\Users\me\scoop\shims\opencode.exe"), scoop("opencode"));
-        assert_eq!(p(r"C:\Users\me\scoop\apps\opencode\current\opencode.exe"), scoop("opencode"));
-        assert_eq!(p(r"C:\Users\me\SCOOP\Apps\opencode\1.2.27\opencode.exe"), scoop("opencode"), "whatever the case");
-        assert_eq!(p(r"C:\ProgramData\scoop\shims\opencode.exe"), scoop("opencode"), "Scoop's global apps");
-        assert_eq!(p(r"C:\ProgramData\chocolatey\bin\opencode.exe"), choco("opencode"));
-        assert_eq!(p(r"C:\ProgramData\chocolatey\lib\opencode\tools\opencode.exe"), choco("opencode"));
+        let choco = |package: &str| Install::Chocolatey {
+            package: package.into(),
+        };
+        assert_eq!(
+            p(r"C:\Users\me\scoop\shims\opencode.exe"),
+            scoop("opencode")
+        );
+        assert_eq!(
+            p(r"C:\Users\me\scoop\apps\opencode\current\opencode.exe"),
+            scoop("opencode")
+        );
+        assert_eq!(
+            p(r"C:\Users\me\SCOOP\Apps\opencode\1.2.27\opencode.exe"),
+            scoop("opencode"),
+            "whatever the case"
+        );
+        assert_eq!(
+            p(r"C:\ProgramData\scoop\shims\opencode.exe"),
+            scoop("opencode"),
+            "Scoop's global apps"
+        );
+        assert_eq!(
+            p(r"C:\ProgramData\chocolatey\bin\opencode.exe"),
+            choco("opencode")
+        );
+        assert_eq!(
+            p(r"C:\ProgramData\chocolatey\lib\opencode\tools\opencode.exe"),
+            choco("opencode")
+        );
         // npm's packages inside a Node that Scoop or Chocolatey installed are npm's.
         assert_eq!(
             p(r"C:\Users\me\scoop\apps\nodejs\current\bin\node_modules\@openai\codex\bin\codex.js"),
-            Install::Npm { package: "@openai/codex".into(), prefix: r"C:\Users\me\scoop\apps\nodejs\current\bin".into() }
+            Install::Npm {
+                package: "@openai/codex".into(),
+                prefix: r"C:\Users\me\scoop\apps\nodejs\current\bin".into()
+            }
         );
         // A folder that merely has a manager's name later on isn't its install.
         assert_eq!(p(r"C:\Users\me\scoop\notes\opencode.exe"), Install::Native);
-        assert_eq!(p(r"C:\ProgramData\chocolatey\bin\sub\opencode.exe"), Install::Native);
+        assert_eq!(
+            p(r"C:\ProgramData\chocolatey\bin\sub\opencode.exe"),
+            Install::Native
+        );
     }
 
     #[test]
     #[cfg(windows)]
     fn scoop_and_chocolatey_only_count_for_the_agents_own_packages() {
-        let (scoop, choco) = (|a: &str| Install::Scoop { app: a.into() }, |p: &str| Install::Chocolatey { package: p.into() });
+        let (scoop, choco) = (
+            |a: &str| Install::Scoop { app: a.into() },
+            |p: &str| Install::Chocolatey { package: p.into() },
+        );
         assert!(h("opencode").owns(&scoop("opencode")) && h("opencode").owns(&choco("opencode")));
-        assert!(h("claude-code").owns(&scoop("claude-code")) && h("claude-code").owns(&choco("claude-code")));
+        assert!(
+            h("claude-code").owns(&scoop("claude-code"))
+                && h("claude-code").owns(&choco("claude-code"))
+        );
         assert!(!h("opencode").owns(&scoop("7zip")), "another app");
-        assert!(!h("codex").owns(&choco("opencode")), "another agent's package");
+        assert!(
+            !h("codex").owns(&choco("opencode")),
+            "another agent's package"
+        );
         // Not the agent's: the vendor's own install, as WinGet's other ids are.
         assert_eq!(h("opencode").reading(choco("fzf")), Install::Native);
         assert_eq!(h("opencode").reading(scoop("fzf")), Install::Native);
         assert_eq!(h("opencode").reading(choco("opencode")), choco("opencode"));
-        assert_eq!((scoop("x").label(), choco("x").label()), ("Scoop", "Chocolatey"));
+        assert_eq!(
+            (scoop("x").label(), choco("x").label()),
+            ("Scoop", "Chocolatey")
+        );
         // Their versions are the vendor's feed's, as WinGet's are.
-        assert_eq!(source(h("claude-code"), &choco("claude-code"), None), Some(Source::Chocolatey("claude-code".into())));
-        assert_eq!(source(h("opencode"), &scoop("opencode"), Some("1.2.27")), Some(Source::Npm("opencode-ai".into())));
+        assert_eq!(
+            source(h("claude-code"), &choco("claude-code"), None),
+            Some(Source::Chocolatey("claude-code".into()))
+        );
+        assert_eq!(
+            source(h("opencode"), &scoop("opencode"), Some("1.2.27")),
+            Some(Source::Npm("opencode-ai".into()))
+        );
     }
 
     #[test]
     #[cfg(windows)]
     fn a_scoop_shim_is_read_for_the_app_it_runs() {
         let shim = "path = \"C:\\Users\\me\\scoop\\apps\\7zip\\current\\7z.exe\"\r\n";
-        assert_eq!(scoop_shim_target(shim).unwrap(), Path::new(r"C:\Users\me\scoop\apps\7zip\current\7z.exe"));
-        assert_eq!(scoop_shim_target("path = C:\\x\\y.exe\r\nargs = --a\r\n").unwrap(), Path::new(r"C:\x\y.exe"));
+        assert_eq!(
+            scoop_shim_target(shim).unwrap(),
+            Path::new(r"C:\Users\me\scoop\apps\7zip\current\7z.exe")
+        );
+        assert_eq!(
+            scoop_shim_target("path = C:\\x\\y.exe\r\nargs = --a\r\n").unwrap(),
+            Path::new(r"C:\x\y.exe")
+        );
         assert_eq!(scoop_shim_target("args = --a\r\n"), None);
         assert_eq!(scoop_shim_target("path = \"relative\\y.exe\""), None);
         // From disk: the shim's name isn't the app's (`7z.exe` is the app `7zip`'s).
@@ -2176,11 +3801,26 @@ mod tests {
         let shims = root.join(r"scoop\shims");
         std::fs::create_dir_all(&shims).unwrap();
         std::fs::write(shims.join("7z.exe"), "").unwrap();
-        std::fs::write(shims.join("7z.shim"), format!("path = \"{}\"\r\n", root.join(r"scoop\apps\7zip\current\7z.exe").display())).unwrap();
-        assert_eq!(detect_install(&shims.join("7z.exe")), Install::Scoop { app: "7zip".into() });
+        std::fs::write(
+            shims.join("7z.shim"),
+            format!(
+                "path = \"{}\"\r\n",
+                root.join(r"scoop\apps\7zip\current\7z.exe").display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            detect_install(&shims.join("7z.exe")),
+            Install::Scoop { app: "7zip".into() }
+        );
         // No `.shim` beside it: named as the shim is.
         std::fs::write(shims.join("opencode.exe"), "").unwrap();
-        assert_eq!(detect_install(&shims.join("opencode.exe")), Install::Scoop { app: "opencode".into() });
+        assert_eq!(
+            detect_install(&shims.join("opencode.exe")),
+            Install::Scoop {
+                app: "opencode".into()
+            }
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2190,32 +3830,88 @@ mod tests {
         // Claude Code twice, as on a real machine: WinGet's package folder and Claude's own installer.
         let root = std::env::temp_dir().join(format!("trek-two-installs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let winget = root.join(r"Microsoft\WinGet\Packages\Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe");
+        let winget = root.join(
+            r"Microsoft\WinGet\Packages\Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe",
+        );
         let native = root.join(r".local\bin");
-        let (scoop, choco) = (root.join(r"scoop\shims"), root.join(r"ProgramData\chocolatey\bin"));
-        for (dir, file) in [(&winget, "claude.exe"), (&native, "claude.exe"), (&scoop, "opencode.exe"), (&choco, "opencode.exe")] {
+        let (scoop, choco) = (
+            root.join(r"scoop\shims"),
+            root.join(r"ProgramData\chocolatey\bin"),
+        );
+        for (dir, file) in [
+            (&winget, "claude.exe"),
+            (&native, "claude.exe"),
+            (&scoop, "opencode.exe"),
+            (&choco, "opencode.exe"),
+        ] {
             std::fs::create_dir_all(dir).unwrap();
             std::fs::write(dir.join(file), "").unwrap();
         }
-        let path = |dirs: &[&Path]| std::env::join_paths(dirs).unwrap().to_string_lossy().into_owned();
+        let path = |dirs: &[&Path]| {
+            std::env::join_paths(dirs)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
         let picked = |dirs: &[&Path], binary: &str| {
             let found = crate::detect::which_in(&path(dirs), binary).unwrap();
             (detect_install(&found), found)
         };
         let (install, found) = picked(&[&winget, &native], "claude");
-        assert_eq!((install, found), (Install::Winget { id: "Anthropic.ClaudeCode".into() }, winget.join("claude.exe")));
+        assert_eq!(
+            (install, found),
+            (
+                Install::Winget {
+                    id: "Anthropic.ClaudeCode".into()
+                },
+                winget.join("claude.exe")
+            )
+        );
         let (install, found) = picked(&[&native, &winget], "claude");
-        assert_eq!((install, found), (Install::Native, native.join("claude.exe")));
+        assert_eq!(
+            (install, found),
+            (Install::Native, native.join("claude.exe"))
+        );
         // OpenCode twice: Scoop's shim and Chocolatey's.
         let (install, found) = picked(&[&choco, &scoop], "opencode");
-        assert_eq!((install, found), (Install::Chocolatey { package: "opencode".into() }, choco.join("opencode.exe")));
+        assert_eq!(
+            (install, found),
+            (
+                Install::Chocolatey {
+                    package: "opencode".into()
+                },
+                choco.join("opencode.exe")
+            )
+        );
         let (install, found) = picked(&[&scoop, &choco], "opencode");
-        assert_eq!((install, found), (Install::Scoop { app: "opencode".into() }, scoop.join("opencode.exe")));
+        assert_eq!(
+            (install, found),
+            (
+                Install::Scoop {
+                    app: "opencode".into()
+                },
+                scoop.join("opencode.exe")
+            )
+        );
         // And what is updated follows: the install on the PATH, by its own owner.
-        let command = |install: Install, binary: PathBuf, agent: &str| update_command(h(agent), &install, &binary, false, None).unwrap();
+        let command = |install: Install, binary: PathBuf, agent: &str| {
+            update_command(h(agent), &install, &binary, false, None).unwrap()
+        };
         let first = command(Install::Native, native.join("claude.exe"), "claude-code");
-        assert_eq!((first.program.as_path(), first.args.as_slice()), (native.join("claude.exe").as_path(), &["update".to_string()][..]));
-        let second = command(Install::Winget { id: "Anthropic.ClaudeCode".into() }, winget.join("claude.exe"), "claude-code");
+        assert_eq!(
+            (first.program.as_path(), first.args.as_slice()),
+            (
+                native.join("claude.exe").as_path(),
+                &["update".to_string()][..]
+            )
+        );
+        let second = command(
+            Install::Winget {
+                id: "Anthropic.ClaudeCode".into(),
+            },
+            winget.join("claude.exe"),
+            "claude-code",
+        );
         assert_eq!(second.program, Path::new("winget"));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2225,26 +3921,81 @@ mod tests {
     fn each_windows_install_updates_through_its_own_manager() {
         let bin = |s: &str| PathBuf::from(s);
         // Scoop: its own `scoop update <app>`, run by Trek as it is.
-        let scoop = update_command(h("opencode"), &Install::Scoop { app: "opencode".into() }, &bin(r"C:\Users\me\scoop\shims\opencode.exe"), false, Some("1.2.27")).unwrap();
-        assert_eq!((scoop.shown().as_str(), scoop.elevated), ("scoop update opencode", false));
+        let scoop = update_command(
+            h("opencode"),
+            &Install::Scoop {
+                app: "opencode".into(),
+            },
+            &bin(r"C:\Users\me\scoop\shims\opencode.exe"),
+            false,
+            Some("1.2.27"),
+        )
+        .unwrap();
+        assert_eq!(
+            (scoop.shown().as_str(), scoop.elevated),
+            ("scoop update opencode", false)
+        );
         assert_eq!(scoop.program, Path::new("scoop"));
         // A machine-wide Scoop (ProgramData) updates as an administrator: run by Trek, Windows asking.
-        let global = update_command(h("opencode"), &Install::Scoop { app: "opencode".into() }, &bin(r"C:\ProgramData\scoop\shims\opencode.exe"), false, None).unwrap();
-        assert_eq!((global.shown().as_str(), global.elevated), ("scoop update opencode -g", true));
+        let global = update_command(
+            h("opencode"),
+            &Install::Scoop {
+                app: "opencode".into(),
+            },
+            &bin(r"C:\ProgramData\scoop\shims\opencode.exe"),
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            (global.shown().as_str(), global.elevated),
+            ("scoop update opencode -g", true)
+        );
         // Chocolatey: `choco upgrade <package> -y`, as an administrator.
-        let choco = update_command(h("opencode"), &Install::Chocolatey { package: "opencode".into() }, &bin(r"C:\ProgramData\chocolatey\bin\opencode.exe"), false, None).unwrap();
-        assert_eq!((choco.shown().as_str(), choco.elevated), ("choco upgrade opencode -y --no-progress", true));
+        let choco = update_command(
+            h("opencode"),
+            &Install::Chocolatey {
+                package: "opencode".into(),
+            },
+            &bin(r"C:\ProgramData\chocolatey\bin\opencode.exe"),
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            (choco.shown().as_str(), choco.elevated),
+            ("choco upgrade opencode -y --no-progress", true)
+        );
         assert_eq!(choco.program, Path::new("choco"));
         // WinGet: for the user it's run as it is, machine-wide as an administrator; both with
         // their failures said in words.
-        let winget = Install::Winget { id: "Anthropic.ClaudeCode".into() };
+        let winget = Install::Winget {
+            id: "Anthropic.ClaudeCode".into(),
+        };
         let user = update_command(h("claude-code"), &winget, &bin(r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\Anthropic.ClaudeCode_x\claude.exe"), false, None).unwrap();
         assert!(!user.elevated && user.on_exit.iter().any(|(code, _)| *code == -1978335189));
-        let machine = update_command(h("claude-code"), &winget, &bin(r"C:\Program Files\WinGet\Links\claude.exe"), false, None).unwrap();
-        assert_eq!(machine.shown(), "winget upgrade --id Anthropic.ClaudeCode --exact --accept-package-agreements --accept-source-agreements --disable-interactivity");
+        let machine = update_command(
+            h("claude-code"),
+            &winget,
+            &bin(r"C:\Program Files\WinGet\Links\claude.exe"),
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            machine.shown(),
+            "winget upgrade --id Anthropic.ClaudeCode --exact --accept-package-agreements --accept-source-agreements --disable-interactivity"
+        );
         assert!(machine.elevated && machine.on_exit.iter().any(|(code, _)| *code == -1978335189));
         // The native installer's own `claude update` is run by Trek as before.
-        let native = update_command(h("claude-code"), &Install::Native, &bin(r"C:\Users\me\.local\bin\claude.exe"), false, None).unwrap();
+        let native = update_command(
+            h("claude-code"),
+            &Install::Native,
+            &bin(r"C:\Users\me\.local\bin\claude.exe"),
+            false,
+            None,
+        )
+        .unwrap();
         assert!(!native.elevated && native.args == ["update"]);
         // No Windows arm is the user's to run any more.
         for cmd in [&scoop, &global, &choco, &user, &machine, &native] {
@@ -2255,10 +4006,42 @@ mod tests {
     #[test]
     fn nothing_runs_as_an_administrator_on_macos() {
         // Paths that would need an administrator on Windows mean nothing on macOS.
-        let choco = update_command(h("opencode"), &Install::Chocolatey { package: "opencode".into() }, Path::new("/ProgramData/chocolatey/bin/opencode"), false, None).unwrap();
-        let winget = update_command(h("claude-code"), &Install::Winget { id: "Anthropic.ClaudeCode".into() }, Path::new("/Program Files/WinGet/Links/claude"), false, None).unwrap();
-        assert_eq!((choco.elevated, winget.elevated), (cfg!(windows), cfg!(windows)));
-        let brew = update_command(h("opencode"), &Install::Brew { formula: "opencode".into(), prefix: "/opt/homebrew".into(), tap: None }, Path::new("/opt/homebrew/bin/opencode"), false, None).unwrap();
+        let choco = update_command(
+            h("opencode"),
+            &Install::Chocolatey {
+                package: "opencode".into(),
+            },
+            Path::new("/ProgramData/chocolatey/bin/opencode"),
+            false,
+            None,
+        )
+        .unwrap();
+        let winget = update_command(
+            h("claude-code"),
+            &Install::Winget {
+                id: "Anthropic.ClaudeCode".into(),
+            },
+            Path::new("/Program Files/WinGet/Links/claude"),
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            (choco.elevated, winget.elevated),
+            (cfg!(windows), cfg!(windows))
+        );
+        let brew = update_command(
+            h("opencode"),
+            &Install::Brew {
+                formula: "opencode".into(),
+                prefix: "/opt/homebrew".into(),
+                tap: None,
+            },
+            Path::new("/opt/homebrew/bin/opencode"),
+            false,
+            None,
+        )
+        .unwrap();
         assert!(!brew.elevated && brew.builtin.is_none());
     }
 
@@ -2273,13 +4056,21 @@ mod tests {
         let cli = root.join(r"devin\cli");
         std::fs::create_dir_all(cli.join("bin")).unwrap();
         let binary = cli.join(r"bin\devin.exe");
-        let devin = |install: &Install| update_command(h("acp:devin"), install, &binary, false, Some("3000.11.1")).unwrap();
+        let devin = |install: &Install| {
+            update_command(h("acp:devin"), install, &binary, false, Some("3000.11.1")).unwrap()
+        };
         // No marker (an install of another kind, or an older one): its own `devin update`.
         assert_eq!(devin(&Install::Native).args, ["update"]);
         std::fs::write(cli.join("distribution"), "irm-iex\n").unwrap();
         let cmd = devin(&Install::Native);
-        assert_eq!((cmd.builtin, cmd.program.as_path(), cmd.elevated), (Some(Builtin::DevinBundle), binary.as_path(), false));
-        assert_eq!(cmd.shown(), "Devin's installer steps, without its setup wizard");
+        assert_eq!(
+            (cmd.builtin, cmd.program.as_path(), cmd.elevated),
+            (Some(Builtin::DevinBundle), binary.as_path(), false)
+        );
+        assert_eq!(
+            cmd.shown(),
+            "Devin's installer steps, without its setup wizard"
+        );
         // An enterprise portal's install updates through its own updater: `devin update`.
         std::fs::write(cli.join("distribution"), "enterprise-portal").unwrap();
         assert_eq!(devin(&Install::Native).args, ["update"]);
@@ -2289,14 +4080,30 @@ mod tests {
     #[test]
     fn winget_failures_are_said_in_words() {
         let claude = h("claude-code");
-        let said = |code: u32| winget_exits(claude).into_iter().find(|(c, _)| *c == code as i32).map(|(_, m)| m);
+        let said = |code: u32| {
+            winget_exits(claude)
+                .into_iter()
+                .find(|(c, _)| *c == code as i32)
+                .map(|(_, m)| m)
+        };
         // 0x8A15002B: nothing newer in WinGet's source index yet, which follows winget-pkgs by hours.
-        assert_eq!(said(0x8A15002B).as_deref(), Some("WinGet's package list doesn't have this version of Claude Code yet. Trek tries again on its next check."));
-        for code in [0x8A150019, 0x8A150010, 0x8A150008, 0x8A150045, 0x8A15004B, 0x8A150101, 0x8A150103] {
+        assert_eq!(
+            said(0x8A15002B).as_deref(),
+            Some(
+                "WinGet's package list doesn't have this version of Claude Code yet. Trek tries again on its next check."
+            )
+        );
+        for code in [
+            0x8A150019, 0x8A150010, 0x8A150008, 0x8A150045, 0x8A15004B, 0x8A150101, 0x8A150103,
+        ] {
             assert!(said(code).is_some_and(|m| !m.is_empty()), "{code:#X}");
         }
         // Nothing for the user to type.
-        assert!(winget_exits(claude).iter().all(|(_, m)| !m.contains('`')), "{:?}", winget_exits(claude));
+        assert!(
+            winget_exits(claude).iter().all(|(_, m)| !m.contains('`')),
+            "{:?}",
+            winget_exits(claude)
+        );
         // Any other Windows status is shown the way its documentation writes it.
         assert_eq!(code_words(-1978335189), "code 0x8A15002B (-1978335189)");
         assert_eq!(code_words(1), "code 1");
@@ -2307,53 +4114,113 @@ mod tests {
     fn an_update_that_changed_nothing_says_what_the_updater_said() {
         let v = version("devin", "3000.11.1", Some("3000.11.3"));
         let output = "⡆⠀ Checking for updates... · 0s (esc twice to interrupt)\n◆ To update, run: irm https://cli.devin.ai/install.ps1 | iex";
-        let Outcome::Failed { summary, output: kept } = verify(&v, Some("3000.11.1".into()), output.into()) else { panic!() };
-        assert_eq!(summary, "devin is still at 3000.11.1 after the update. It said: ⡆⠀ Checking for updates... · 0s (esc twice to interrupt) / ◆ To update, run: irm https://cli.devin.ai/install.ps1 | iex");
+        let Outcome::Failed {
+            summary,
+            output: kept,
+        } = verify(&v, Some("3000.11.1".into()), output.into())
+        else {
+            panic!()
+        };
+        assert_eq!(
+            summary,
+            "devin is still at 3000.11.1 after the update. It said: ⡆⠀ Checking for updates... · 0s (esc twice to interrupt) / ◆ To update, run: irm https://cli.devin.ai/install.ps1 | iex"
+        );
         assert_eq!(kept, output, "the card's output is all of it");
         // Only the last lines, not a page of progress.
-        let long = (1..=10).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
-        let Outcome::Failed { summary, .. } = verify(&v, None, long) else { panic!() };
-        assert_eq!(summary, "devin didn't say its version after the update. It said: line 8 / line 9 / line 10");
+        let long = (1..=10)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let Outcome::Failed { summary, .. } = verify(&v, None, long) else {
+            panic!()
+        };
+        assert_eq!(
+            summary,
+            "devin didn't say its version after the update. It said: line 8 / line 9 / line 10"
+        );
         // Nothing said, nothing added.
-        let Outcome::Failed { summary, .. } = verify(&v, Some("3000.11.1".into()), "\n  \n".into()) else { panic!() };
+        let Outcome::Failed { summary, .. } = verify(&v, Some("3000.11.1".into()), "\n  \n".into())
+        else {
+            panic!()
+        };
         assert_eq!(summary, "devin is still at 3000.11.1 after the update.");
     }
 
     #[test]
     fn what_a_command_printed_is_kept_whole_stdout_then_stderr() {
         // An unfinished progress line on stdout mustn't swallow the first words of stderr.
-        assert_eq!(all_output(b"\x1b[32mChecking\x1b[0m...", b" \xe2\x97\x86 To update, run: x\r\n"), "Checking...\n\u{25c6} To update, run: x");
-        assert_eq!(all_output(b"", b"npm error code EACCES\n"), "npm error code EACCES");
+        assert_eq!(
+            all_output(
+                b"\x1b[32mChecking\x1b[0m...",
+                b" \xe2\x97\x86 To update, run: x\r\n"
+            ),
+            "Checking...\n\u{25c6} To update, run: x"
+        );
+        assert_eq!(
+            all_output(b"", b"npm error code EACCES\n"),
+            "npm error code EACCES"
+        );
         assert_eq!(all_output(b"ok\n", b""), "ok");
     }
 
     #[test]
     fn commands_an_older_trek_left_to_the_user_are_worked_out_again() {
         // Snapshots written before commands ran as an administrator still load.
-        let old: UpdateCommand = serde_json::from_value(serde_json::json!({ "program": "claude", "args": ["update"] })).unwrap();
+        let old: UpdateCommand =
+            serde_json::from_value(serde_json::json!({ "program": "claude", "args": ["update"] }))
+                .unwrap();
         assert_eq!(old, UpdateCommand::new("claude", &["update"]));
         // One an older Trek left to the user loads too (its `manual`), and is never written back.
         let manual = serde_json::json!({ "program": "choco", "args": ["upgrade", "opencode", "-y"], "manual": "OpenCode is installed with Chocolatey, which upgrades only from an administrator terminal." });
         let choco: UpdateCommand = serde_json::from_value(manual.clone()).unwrap();
         assert!(choco.manual.is_some() && !choco.elevated);
-        assert_eq!(serde_json::to_value(&choco).unwrap(), serde_json::json!({ "program": "choco", "args": ["upgrade", "opencode", "-y"], "path": [], "env": [] }));
+        assert_eq!(
+            serde_json::to_value(&choco).unwrap(),
+            serde_json::json!({ "program": "choco", "args": ["upgrade", "opencode", "-y"], "path": [], "env": [] })
+        );
         // Loaded from the cache, it's dropped: run as it was, it would fail without an
         // administrator; the next check works out the command that runs as one.
         let dir = std::env::temp_dir().join(format!("trek-old-snapshot-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         crate::paths::isolate_thread(dir.clone());
-        let mut agents = serde_json::to_value(vec![version("opencode", "1.2.27", Some("1.3.0")), version("codex", "0.159.2", Some("0.160.0"))]).unwrap();
+        let mut agents = serde_json::to_value(vec![
+            version("opencode", "1.2.27", Some("1.3.0")),
+            version("codex", "0.159.2", Some("0.160.0")),
+        ])
+        .unwrap();
         agents[0]["command"] = manual;
         agents[1]["command"] = serde_json::json!({ "program": "npm", "args": ["install", "-g", "@openai/codex@latest"] });
-        std::fs::write(crate::paths::data_dir().join("agent-versions.json"), serde_json::json!({ "checked_at": 1, "agents": agents }).to_string()).unwrap();
+        std::fs::write(
+            crate::paths::data_dir().join("agent-versions.json"),
+            serde_json::json!({ "checked_at": 1, "agents": agents }).to_string(),
+        )
+        .unwrap();
         let snap = Snapshot::load();
         assert_eq!(snap.agents[0].command, None);
-        assert_eq!(snap.agents[1].command.as_ref().map(|c| c.shown()).as_deref(), Some("npm install -g @openai/codex@latest"), "others stay");
+        assert_eq!(
+            snap.agents[1]
+                .command
+                .as_ref()
+                .map(|c| c.shown())
+                .as_deref(),
+            Some("npm install -g @openai/codex@latest"),
+            "others stay"
+        );
         // Round trips with the new fields.
-        let elevated = AgentVersion { command: Some(UpdateCommand::new("choco", &["upgrade", "opencode", "-y"]).as_admin()), ..version("opencode", "1.2.27", Some("1.3.0")) };
-        let bundle = AgentVersion { command: Some(UpdateCommand { builtin: Some(Builtin::DevinBundle), ..UpdateCommand::new(r"C:\x\devin.exe", &[]) }), ..version("devin", "1", Some("2")) };
+        let elevated = AgentVersion {
+            command: Some(UpdateCommand::new("choco", &["upgrade", "opencode", "-y"]).as_admin()),
+            ..version("opencode", "1.2.27", Some("1.3.0"))
+        };
+        let bundle = AgentVersion {
+            command: Some(UpdateCommand {
+                builtin: Some(Builtin::DevinBundle),
+                ..UpdateCommand::new(r"C:\x\devin.exe", &[])
+            }),
+            ..version("devin", "1", Some("2"))
+        };
         for v in [elevated, bundle] {
-            let back: AgentVersion = serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
+            let back: AgentVersion =
+                serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
             assert_eq!(back, v);
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -2362,34 +4229,84 @@ mod tests {
     #[test]
     fn devins_manifest_names_the_bundle_to_install_and_nothing_unsafe() {
         let sha = "dded69a40dc54012612eda47e0935f2fb394b97cd38cb4d7d84b1e1d71c5f7ea";
-        let manifest = |version: &str, url: &str, sha: &str| serde_json::json!({ "version": version, "platforms": { "x86_64-pc-windows": { "url": url, "sha256": sha } } }).to_string();
+        let manifest = |version: &str, url: &str, sha: &str| {
+            serde_json::json!({ "version": version, "platforms": { "x86_64-pc-windows": { "url": url, "sha256": sha } } }).to_string()
+        };
         let url = "https://static.devin.ai/cli/3000.11.3/devin-3000.11.3-x86_64-pc-windows.zip";
         let bundle = |m: &str| devin_bundle(m, "x86_64-pc-windows", DEVIN_HOST);
-        assert_eq!(bundle(&manifest("3000.11.3", url, sha)), Some(Bundle { version: "3000.11.3".into(), url: url.into(), sha256: sha.into() }));
-        assert_eq!(devin_bundle(&manifest("3000.11.3", url, sha), "aarch64-pc-windows", DEVIN_HOST), None, "no bundle for that platform");
-        assert_eq!(bundle(&manifest(r"..\..\x", url, sha)), None, "a version is a folder name");
-        assert_eq!(bundle(&manifest("3000.11.3", "https://example.com/devin.zip", sha)), None, "Devin's own host only");
-        assert_eq!(bundle(&manifest("3000.11.3", "https://static.devin.ai/../evil.zip", sha)), None);
-        assert_eq!(bundle(&manifest("3000.11.3", url, "abc")), None, "a SHA-256");
+        assert_eq!(
+            bundle(&manifest("3000.11.3", url, sha)),
+            Some(Bundle {
+                version: "3000.11.3".into(),
+                url: url.into(),
+                sha256: sha.into()
+            })
+        );
+        assert_eq!(
+            devin_bundle(
+                &manifest("3000.11.3", url, sha),
+                "aarch64-pc-windows",
+                DEVIN_HOST
+            ),
+            None,
+            "no bundle for that platform"
+        );
+        assert_eq!(
+            bundle(&manifest(r"..\..\x", url, sha)),
+            None,
+            "a version is a folder name"
+        );
+        assert_eq!(
+            bundle(&manifest("3000.11.3", "https://example.com/devin.zip", sha)),
+            None,
+            "Devin's own host only"
+        );
+        assert_eq!(
+            bundle(&manifest(
+                "3000.11.3",
+                "https://static.devin.ai/../evil.zip",
+                sha
+            )),
+            None
+        );
+        assert_eq!(
+            bundle(&manifest("3000.11.3", url, "abc")),
+            None,
+            "a SHA-256"
+        );
         // Without its checksum a bundle isn't installed, nor is the vendor's script run in its place.
         assert_eq!(bundle(&serde_json::json!({ "version": "3000.11.3", "platforms": { "x86_64-pc-windows": { "url": url } } }).to_string()), None);
         assert_eq!(bundle("not json"), None);
-        assert_eq!(bundle(&manifest("3000.11.3", url, &sha.to_uppercase())).map(|b| b.sha256).as_deref(), Some(sha), "compared in lower case");
+        assert_eq!(
+            bundle(&manifest("3000.11.3", url, &sha.to_uppercase()))
+                .map(|b| b.sha256)
+                .as_deref(),
+            Some(sha),
+            "compared in lower case"
+        );
     }
 
     /// A zip with `files` in it, and the manifest naming it (as `url`) for both Windows platforms.
     #[cfg(windows)]
-    fn serve_bundle(dir: &Path, version: &str, files: &[(&str, &[u8])], sha256: Option<&str>) -> String {
-        use std::io::Write as _;
+    fn serve_bundle(
+        dir: &Path,
+        version: &str,
+        files: &[(&str, &[u8])],
+        sha256: Option<&str>,
+    ) -> String {
         use sha2::Digest as _;
+        use std::io::Write as _;
         std::fs::create_dir_all(dir).unwrap();
         let mut zip = zip::ZipWriter::new(std::fs::File::create(dir.join("devin.zip")).unwrap());
         for (name, bytes) in files {
-            zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
             zip.write_all(bytes).unwrap();
         }
         zip.finish().unwrap();
-        let sha = hex::encode(sha2::Sha256::digest(std::fs::read(dir.join("devin.zip")).unwrap()));
+        let sha = hex::encode(sha2::Sha256::digest(
+            std::fs::read(dir.join("devin.zip")).unwrap(),
+        ));
         let base = serve(dir);
         let platform = serde_json::json!({ "url": format!("{base}/devin.zip"), "sha256": sha256.unwrap_or(&sha) });
         std::fs::write(dir.join("manifest.json"), serde_json::json!({ "version": version, "platforms": { "x86_64-pc-windows": platform, "aarch64-pc-windows": platform } }).to_string()).unwrap();
@@ -2409,39 +4326,108 @@ mod tests {
         let entry = cli.join(r"bin\devin.exe");
         let program = std::fs::read(trek_test_fixtures::bin("fixture")).unwrap();
         std::fs::write(&entry, &program).unwrap();
-        let mut running = KillOnDrop(crate::procs::command(&entry).args(["sleep", "60"]).stdin(std::process::Stdio::null()).spawn().unwrap());
+        let mut running = KillOnDrop(
+            crate::procs::command(&entry)
+                .args(["sleep", "60"])
+                .stdin(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
         // The new version's bundle: the program with a byte more, and a file beside it.
         let new_program = [program.as_slice(), b"\0"].concat();
-        let base = serve_bundle(&root.join("served"), "9000.1.2", &[("bin/devin.exe", &new_program), ("bin/readme.txt", b"hi")], None);
+        let base = serve_bundle(
+            &root.join("served"),
+            "9000.1.2",
+            &[("bin/devin.exe", &new_program), ("bin/readme.txt", b"hi")],
+            None,
+        );
         let manifest = format!("{base}/manifest.json");
-        let said = crate::runtime().block_on(install_devin_bundle(&entry, &manifest, "http://127.0.0.1:")).unwrap();
-        assert!(said.contains("SHA-256 matches") && said.contains("Copied it to"), "{said}");
+        let said = crate::runtime()
+            .block_on(install_devin_bundle(&entry, &manifest, "http://127.0.0.1:"))
+            .unwrap();
+        assert!(
+            said.contains("SHA-256 matches") && said.contains("Copied it to"),
+            "{said}"
+        );
         // Where the installer puts it: `_versions\<version>\bin\devin.exe`, copied over the entry
         // point (which was running, and is replaced all the same); nothing left over.
-        assert_eq!(std::fs::read(cli.join(r"_versions\9000.1.2\bin\devin.exe")).unwrap(), new_program);
-        assert_eq!(std::fs::read(cli.join(r"_versions\9000.1.2\bin\readme.txt")).unwrap(), b"hi");
+        assert_eq!(
+            std::fs::read(cli.join(r"_versions\9000.1.2\bin\devin.exe")).unwrap(),
+            new_program
+        );
+        assert_eq!(
+            std::fs::read(cli.join(r"_versions\9000.1.2\bin\readme.txt")).unwrap(),
+            b"hi"
+        );
         assert_eq!(std::fs::read(&entry).unwrap(), new_program);
-        assert!(running.0.try_wait().unwrap().is_none(), "the old one runs on");
-        let names = |dir: PathBuf| std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert!(
+            running.0.try_wait().unwrap().is_none(),
+            "the old one runs on"
+        );
+        let names = |dir: PathBuf| {
+            std::fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
         assert_eq!(names(cli.join("_versions")), ["9000.1.2"]);
-        assert_eq!(std::fs::read_to_string(cli.join("distribution")).unwrap(), "irm-iex\n", "its marker is left as it is");
+        assert_eq!(
+            std::fs::read_to_string(cli.join("distribution")).unwrap(),
+            "irm-iex\n",
+            "its marker is left as it is"
+        );
         // Once more (the same version, unpacked already): the entry point is made again from it.
         std::fs::write(&entry, b"damaged").unwrap();
-        let said = crate::runtime().block_on(install_devin_bundle(&entry, &manifest, "http://127.0.0.1:")).unwrap();
+        let said = crate::runtime()
+            .block_on(install_devin_bundle(&entry, &manifest, "http://127.0.0.1:"))
+            .unwrap();
         assert!(said.contains("Already unpacked"), "{said}");
         assert_eq!(std::fs::read(&entry).unwrap(), new_program);
         // A bundle that isn't the one the manifest says isn't installed, and leaves nothing behind.
         std::fs::write(&entry, &program).unwrap();
-        let base = serve_bundle(&root.join("bad"), "9000.1.3", &[("bin/devin.exe", &new_program)], Some(&"0".repeat(64)));
-        let Err(why) = crate::runtime().block_on(install_devin_bundle(&entry, &format!("{base}/manifest.json"), "http://127.0.0.1:")) else { panic!("installed") };
+        let base = serve_bundle(
+            &root.join("bad"),
+            "9000.1.3",
+            &[("bin/devin.exe", &new_program)],
+            Some(&"0".repeat(64)),
+        );
+        let Err(why) = crate::runtime().block_on(install_devin_bundle(
+            &entry,
+            &format!("{base}/manifest.json"),
+            "http://127.0.0.1:",
+        )) else {
+            panic!("installed")
+        };
         assert!(why.contains("doesn't match the SHA-256"), "{why}");
-        assert_eq!(std::fs::read(&entry).unwrap(), program, "the install is as it was");
+        assert_eq!(
+            std::fs::read(&entry).unwrap(),
+            program,
+            "the install is as it was"
+        );
         assert_eq!(names(cli.join("_versions")), ["9000.1.2"]);
         // One from another host isn't downloaded at all; nor is one with no program in it.
-        let Err(why) = crate::runtime().block_on(install_devin_bundle(&entry, &manifest, "https://static.devin.ai/")) else { panic!("installed") };
+        let Err(why) = crate::runtime().block_on(install_devin_bundle(
+            &entry,
+            &manifest,
+            "https://static.devin.ai/",
+        )) else {
+            panic!("installed")
+        };
         assert!(why.contains("names no bundle"), "{why}");
-        let base = serve_bundle(&root.join("empty"), "9000.1.4", &[("readme.txt", b"hi")], None);
-        let Err(why) = crate::runtime().block_on(install_devin_bundle(&entry, &format!("{base}/manifest.json"), "http://127.0.0.1:")) else { panic!("installed") };
+        let base = serve_bundle(
+            &root.join("empty"),
+            "9000.1.4",
+            &[("readme.txt", b"hi")],
+            None,
+        );
+        let Err(why) = crate::runtime().block_on(install_devin_bundle(
+            &entry,
+            &format!("{base}/manifest.json"),
+            "http://127.0.0.1:",
+        )) else {
+            panic!("installed")
+        };
         assert!(why.contains("has no bin\\devin.exe"), "{why}");
         assert_eq!(std::fs::read(&entry).unwrap(), program);
         assert_eq!(names(cli.join("_versions")), ["9000.1.2"]);
@@ -2474,10 +4460,16 @@ mod tests {
         std::fs::write(root.join(r"bin\devin.exe.old-1"), "older").unwrap();
         replace_entry(&new, &entry).unwrap();
         assert_eq!(std::fs::read_to_string(&entry).unwrap(), "new");
-        let left: Vec<_> = std::fs::read_dir(root.join("bin")).unwrap().flatten().map(|e| e.file_name()).collect();
+        let left: Vec<_> = std::fs::read_dir(root.join("bin"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
         assert_eq!(left, ["devin.exe"], "nothing left aside");
         // Nothing to copy: the old one is put back.
-        let Err(e) = replace_entry(&root.join("missing.exe"), &entry) else { panic!() };
+        let Err(e) = replace_entry(&root.join("missing.exe"), &entry) else {
+            panic!()
+        };
         assert!(e.starts_with("Couldn't copy the new version"), "{e}");
         assert_eq!(std::fs::read_to_string(&entry).unwrap(), "new");
         let _ = std::fs::remove_dir_all(&root);
@@ -2504,10 +4496,28 @@ mod tests {
         // real one on this computer, here): another install must not answer for it.
         // An updater that writes the new version, as `claude update` does for its own install.
         let updater = root.join("updater.cmd");
-        std::fs::write(&updater, format!("@echo off\r\necho 2.1.2> \"{}\"\r\necho updated\r\n", root.join(r"updated\version.txt").display())).unwrap();
-        let v = AgentVersion { id: "claude".into(), binary: cli, command: Some(UpdateCommand::new(&updater, &[])), ..version("claude", "2.1.1", Some("2.1.2")) };
+        std::fs::write(
+            &updater,
+            format!(
+                "@echo off\r\necho 2.1.2> \"{}\"\r\necho updated\r\n",
+                root.join(r"updated\version.txt").display()
+            ),
+        )
+        .unwrap();
+        let v = AgentVersion {
+            id: "claude".into(),
+            binary: cli,
+            command: Some(UpdateCommand::new(&updater, &[])),
+            ..version("claude", "2.1.1", Some("2.1.2"))
+        };
         let outcome = crate::runtime().block_on(run_update_settling(&v, (0, Duration::ZERO)));
-        assert_eq!(outcome, Outcome::Updated { version: "2.1.2".into(), output: "updated".into() });
+        assert_eq!(
+            outcome,
+            Outcome::Updated {
+                version: "2.1.2".into(),
+                output: "updated".into()
+            }
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2520,10 +4530,25 @@ mod tests {
         let updater = root.join("updater.cmd");
         // Devin's `update` on an installer-made install: all of it on stderr, exit 0.
         std::fs::write(&updater, "@echo off\r\necho Checking for updates...\r\n>&2 echo To update, run: irm https://cli.devin.ai/install.ps1 ^| iex\r\n").unwrap();
-        let v = AgentVersion { id: "claude".into(), binary: cli, command: Some(UpdateCommand::new(&updater, &[])), ..version("claude", "3000.11.1", Some("3000.11.3")) };
-        let Outcome::Failed { summary, output } = crate::runtime().block_on(run_update_settling(&v, (1, Duration::from_millis(20)))) else { panic!() };
-        assert_eq!(summary, "claude is still at 3000.11.1 after the update. It said: Checking for updates... / To update, run: irm https://cli.devin.ai/install.ps1 | iex");
-        assert_eq!(output, "Checking for updates...\nTo update, run: irm https://cli.devin.ai/install.ps1 | iex");
+        let v = AgentVersion {
+            id: "claude".into(),
+            binary: cli,
+            command: Some(UpdateCommand::new(&updater, &[])),
+            ..version("claude", "3000.11.1", Some("3000.11.3"))
+        };
+        let Outcome::Failed { summary, output } =
+            crate::runtime().block_on(run_update_settling(&v, (1, Duration::from_millis(20))))
+        else {
+            panic!()
+        };
+        assert_eq!(
+            summary,
+            "claude is still at 3000.11.1 after the update. It said: Checking for updates... / To update, run: irm https://cli.devin.ai/install.ps1 | iex"
+        );
+        assert_eq!(
+            output,
+            "Checking for updates...\nTo update, run: irm https://cli.devin.ai/install.ps1 | iex"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2540,12 +4565,29 @@ mod tests {
         std::fs::write(&cli, script).unwrap();
         let v = version("claude", "2.1.1", Some("2.1.2"));
         let claude = h("claude-code");
-        let waited = crate::runtime().block_on(settled_version(&v, claude, &cli, 5, Duration::from_millis(20)));
+        let waited = crate::runtime().block_on(settled_version(
+            &v,
+            claude,
+            &cli,
+            5,
+            Duration::from_millis(20),
+        ));
         assert_eq!(waited.as_deref(), Some("2.1.2"));
-        assert_eq!(std::fs::read_to_string(root.join("count.txt")).unwrap().trim(), "3", "asked until it changed, then no more");
+        assert_eq!(
+            std::fs::read_to_string(root.join("count.txt"))
+                .unwrap()
+                .trim(),
+            "3",
+            "asked until it changed, then no more"
+        );
         // Given no time to wait, the old version stands.
         std::fs::write(root.join("count.txt"), "0").unwrap();
-        assert_eq!(crate::runtime().block_on(settled_version(&v, claude, &cli, 0, Duration::ZERO)).as_deref(), Some("2.1.1"));
+        assert_eq!(
+            crate::runtime()
+                .block_on(settled_version(&v, claude, &cli, 0, Duration::ZERO))
+                .as_deref(),
+            Some("2.1.1")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2564,58 +4606,138 @@ mod tests {
     #[cfg(windows)]
     fn updates_run_as_an_administrator_go_together_in_one_script() {
         use crate::elevated::Failure;
-        let root = std::env::temp_dir().join(format!("trek-elevated-updates-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("trek-elevated-updates-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         crate::paths::isolate_thread(root.join("data"));
         // Two installs, in folders with what cmd.exe would read as operators; their package manager
         // a script that upgrades one and fails the other with WinGet's "nothing newer".
         let odd = root.join("Program Files (x86) & 100%");
         std::fs::create_dir_all(&odd).unwrap();
-        let (a, b) = (fake_cli(&root.join(r"clis\a"), "1.0.0"), fake_cli(&root.join(r"clis\b"), "1.18.32"));
+        let (a, b) = (
+            fake_cli(&root.join(r"clis\a"), "1.0.0"),
+            fake_cli(&root.join(r"clis\b"), "1.18.32"),
+        );
         let manager = odd.join("manager.cmd");
         // Its arguments arrive quoted (`"upgrade"`), as Trek's script passes every one: `%~1`.
-        let script = format!("@echo off\r\nif \"%~1\"==\"upgrade\" (\r\n  >\"{}\" echo 2.0.0\r\n  echo upgraded %~2\r\n  exit /b 0\r\n)\r\necho No newer package found.\r\nexit /b -1978335189\r\n", root.join(r"clis\a\version.txt").display());
+        let script = format!(
+            "@echo off\r\nif \"%~1\"==\"upgrade\" (\r\n  >\"{}\" echo 2.0.0\r\n  echo upgraded %~2\r\n  exit /b 0\r\n)\r\necho No newer package found.\r\nexit /b -1978335189\r\n",
+            root.join(r"clis\a\version.txt").display()
+        );
         std::fs::write(&manager, script).unwrap();
-        let admin = |args: &[&str], on_exit: Vec<(i32, String)>| Some(UpdateCommand { on_exit, ..UpdateCommand::new(&manager, args).as_admin() });
+        let admin = |args: &[&str], on_exit: Vec<(i32, String)>| {
+            Some(UpdateCommand {
+                on_exit,
+                ..UpdateCommand::new(&manager, args).as_admin()
+            })
+        };
         let rows = [
-            AgentVersion { id: "claude".into(), binary: a, command: admin(&["upgrade", "claude-code"], vec![]), ..version("claude", "1.0.0", Some("2.0.0")) },
-            AgentVersion { id: "opencode".into(), binary: b, command: admin(&["nothing"], winget_exits(h("claude-code"))), ..version("opencode", "1.18.32", Some("1.18.34")) },
+            AgentVersion {
+                id: "claude".into(),
+                binary: a,
+                command: admin(&["upgrade", "claude-code"], vec![]),
+                ..version("claude", "1.0.0", Some("2.0.0"))
+            },
+            AgentVersion {
+                id: "opencode".into(),
+                binary: b,
+                command: admin(&["nothing"], winget_exits(h("claude-code"))),
+                ..version("opencode", "1.18.32", Some("1.18.34"))
+            },
             // Its program isn't there: answered without running anything.
-            AgentVersion { command: Some(UpdateCommand::new(odd.join("gone.exe"), &["upgrade"]).as_admin()), ..version("fake", "1", Some("2")) },
+            AgentVersion {
+                command: Some(UpdateCommand::new(odd.join("gone.exe"), &["upgrade"]).as_admin()),
+                ..version("fake", "1", Some("2"))
+            },
         ];
         let before = LAUNCHES.load(std::sync::atomic::Ordering::SeqCst);
-        let outcomes = crate::runtime().block_on(run_elevated_with(&rows, (0, Duration::ZERO), counted));
-        assert_eq!(LAUNCHES.load(std::sync::atomic::Ordering::SeqCst) - before, 1, "one script, so one prompt");
-        assert_eq!(outcomes[0], Outcome::Updated { version: "2.0.0".into(), output: "upgraded claude-code".into() });
-        let Outcome::Failed { summary, output } = &outcomes[1] else { panic!("{:?}", outcomes[1]) };
-        assert!(summary.starts_with("WinGet's package list doesn't have this version of Claude Code yet"), "{summary}");
+        let outcomes =
+            crate::runtime().block_on(run_elevated_with(&rows, (0, Duration::ZERO), counted));
+        assert_eq!(
+            LAUNCHES.load(std::sync::atomic::Ordering::SeqCst) - before,
+            1,
+            "one script, so one prompt"
+        );
+        assert_eq!(
+            outcomes[0],
+            Outcome::Updated {
+                version: "2.0.0".into(),
+                output: "upgraded claude-code".into()
+            }
+        );
+        let Outcome::Failed { summary, output } = &outcomes[1] else {
+            panic!("{:?}", outcomes[1])
+        };
+        assert!(
+            summary
+                .starts_with("WinGet's package list doesn't have this version of Claude Code yet"),
+            "{summary}"
+        );
         assert_eq!(output, "No newer package found.", "each step's own output");
-        assert_eq!(outcomes[2], Outcome::Failed { summary: format!("{} isn't installed.", odd.join("gone.exe").display()), output: String::new() });
+        assert_eq!(
+            outcomes[2],
+            Outcome::Failed {
+                summary: format!("{} isn't installed.", odd.join("gone.exe").display()),
+                output: String::new()
+            }
+        );
         // Its files are cleared away.
-        assert_eq!(std::fs::read_dir(root.join(r"data\tmp")).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_dir(root.join(r"data\tmp")).unwrap().count(),
+            0
+        );
 
         // The prompt declined: said so for each, and never as a line to copy.
         fn cancelled(_: &Path, _: Duration) -> Result<u32, Failure> {
             Err(Failure::Cancelled)
         }
-        let outcomes = crate::runtime().block_on(run_elevated_with(&rows[..2], (0, Duration::ZERO), cancelled));
+        let outcomes = crate::runtime().block_on(run_elevated_with(
+            &rows[..2],
+            (0, Duration::ZERO),
+            cancelled,
+        ));
         for o in &outcomes {
-            assert_eq!(*o, Outcome::Failed { summary: "Windows didn't allow it (the prompt was cancelled).".into(), output: String::new() });
+            assert_eq!(
+                *o,
+                Outcome::Failed {
+                    summary: "Windows didn't allow it (the prompt was cancelled).".into(),
+                    output: String::new()
+                }
+            );
         }
         // Nobody there: the prompt gave up (Windows says the same as for a "No", only later).
         fn unanswered(_: &Path, _: Duration) -> Result<u32, Failure> {
             Err(Failure::Unanswered)
         }
-        let outcomes = crate::runtime().block_on(run_elevated_with(&rows[..1], (0, Duration::ZERO), unanswered));
+        let outcomes = crate::runtime().block_on(run_elevated_with(
+            &rows[..1],
+            (0, Duration::ZERO),
+            unanswered,
+        ));
         assert_eq!(outcomes[0], Outcome::Failed { summary: "Windows's prompt went unanswered for two minutes. Try Update again when you're at the computer.".into(), output: String::new() });
-        assert!(matches!(crate::elevated::refused(Duration::from_secs(4)), Failure::Cancelled));
-        assert!(matches!(crate::elevated::refused(Duration::from_secs(122)), Failure::Unanswered));
+        assert!(matches!(
+            crate::elevated::refused(Duration::from_secs(4)),
+            Failure::Cancelled
+        ));
+        assert!(matches!(
+            crate::elevated::refused(Duration::from_secs(122)),
+            Failure::Unanswered
+        ));
         // Past its time, with what it started out of Trek's reach.
         fn stuck(_: &Path, _: Duration) -> Result<u32, Failure> {
             Err(Failure::TimedOut { ended: false })
         }
-        let Outcome::Failed { summary, .. } = &crate::runtime().block_on(run_elevated_with(&rows[..1], (0, Duration::ZERO), stuck))[0] else { panic!() };
-        assert!(summary.contains("took longer than 15 minutes") && summary.contains("may still be running"), "{summary}");
+        let Outcome::Failed { summary, .. } =
+            &crate::runtime().block_on(run_elevated_with(&rows[..1], (0, Duration::ZERO), stuck))
+                [0]
+        else {
+            panic!()
+        };
+        assert!(
+            summary.contains("took longer than 15 minutes")
+                && summary.contains("may still be running"),
+            "{summary}"
+        );
         // One update on its own (an Update button) goes through the same script.
         assert!(rows[0].command.as_ref().is_some_and(|c| c.elevated));
         let _ = std::fs::remove_dir_all(&root);
@@ -2628,33 +4750,80 @@ mod tests {
     #[cfg(windows)]
     fn only_the_package_managers_own_upgrade_runs_as_an_administrator() {
         let binary = PathBuf::from(r"C:\ProgramData\chocolatey\bin\opencode.exe");
-        let install = Install::Chocolatey { package: "opencode".into() };
+        let install = Install::Chocolatey {
+            package: "opencode".into(),
+        };
         let own = update_command(h("opencode"), &install, &binary, false, Some("1.2.27")).unwrap();
         assert!(own.elevated);
-        let row = |command: UpdateCommand, install: Install| AgentVersion { id: "opencode".into(), binary: binary.clone(), install, command: Some(command), ..version("opencode", "1.2.27", Some("1.3.0")) };
+        let row = |command: UpdateCommand, install: Install| AgentVersion {
+            id: "opencode".into(),
+            binary: binary.clone(),
+            install,
+            command: Some(command),
+            ..version("opencode", "1.2.27", Some("1.3.0"))
+        };
         assert!(is_what_trek_would_run(&row(own.clone(), install.clone())));
         // Anything else in the file is not run: another program, other arguments, another folder
         // of programs or variable, another package, the same row asking for more.
         let swaps: [UpdateCommand; 5] = [
-            UpdateCommand { program: r"C:\Users\me\evil.exe".into(), ..own.clone() },
-            UpdateCommand { args: [own.args.clone(), vec!["--source".into(), "http://evil".into()]].concat(), ..own.clone() },
-            UpdateCommand { path: vec![r"C:\Users\me\evil".into()], ..own.clone() },
-            UpdateCommand { env: vec![("PATHEXT".into(), ".evil".into())], ..own.clone() },
+            UpdateCommand {
+                program: r"C:\Users\me\evil.exe".into(),
+                ..own.clone()
+            },
+            UpdateCommand {
+                args: [
+                    own.args.clone(),
+                    vec!["--source".into(), "http://evil".into()],
+                ]
+                .concat(),
+                ..own.clone()
+            },
+            UpdateCommand {
+                path: vec![r"C:\Users\me\evil".into()],
+                ..own.clone()
+            },
+            UpdateCommand {
+                env: vec![("PATHEXT".into(), ".evil".into())],
+                ..own.clone()
+            },
             UpdateCommand::new("cmd", &["/c", "calc"]).as_admin(),
         ];
         for swapped in swaps {
-            assert!(!is_what_trek_would_run(&row(swapped.clone(), install.clone())), "{:?}", swapped.shown());
+            assert!(
+                !is_what_trek_would_run(&row(swapped.clone(), install.clone())),
+                "{:?}",
+                swapped.shown()
+            );
             // Said so, and nothing run (this would bring up a prompt if it ran).
-            let Outcome::Failed { summary, output } = crate::runtime().block_on(run_elevated(&[row(swapped.clone(), install.clone())])).remove(0) else { panic!() };
+            let Outcome::Failed { summary, output } = crate::runtime()
+                .block_on(run_elevated(&[row(swapped.clone(), install.clone())]))
+                .remove(0)
+            else {
+                panic!()
+            };
             assert!(summary.starts_with("Trek didn't run the update of opencode: its command isn't the one Trek works out"), "{summary}");
             assert_eq!(output, "");
-            assert!(matches!(crate::runtime().block_on(run_update(&row(swapped, install.clone()))), Outcome::Failed { .. }));
+            assert!(matches!(
+                crate::runtime().block_on(run_update(&row(swapped, install.clone()))),
+                Outcome::Failed { .. }
+            ));
         }
         // A package that isn't the agent's, an agent Trek doesn't know, and no command at all.
-        let evil = Install::Chocolatey { package: "evil-package".into() };
-        assert!(!is_what_trek_would_run(&row(UpdateCommand::new("choco", &["upgrade", "evil-package", "-y"]).as_admin(), evil)));
-        assert!(!is_what_trek_would_run(&AgentVersion { id: "fake".into(), ..row(own.clone(), install.clone()) }));
-        assert!(!is_what_trek_would_run(&AgentVersion { command: None, ..row(own, install) }));
+        let evil = Install::Chocolatey {
+            package: "evil-package".into(),
+        };
+        assert!(!is_what_trek_would_run(&row(
+            UpdateCommand::new("choco", &["upgrade", "evil-package", "-y"]).as_admin(),
+            evil
+        )));
+        assert!(!is_what_trek_would_run(&AgentVersion {
+            id: "fake".into(),
+            ..row(own.clone(), install.clone())
+        }));
+        assert!(!is_what_trek_would_run(&AgentVersion {
+            command: None,
+            ..row(own, install)
+        }));
     }
 
     /// Serve the files in `dir` on 127.0.0.1; their base URL.
@@ -2675,27 +4844,60 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let fake = |name: &str, code: i32| {
             let file = root.join(name);
-            std::fs::write(&file, format!("@echo off\r\necho some output\r\n>&2 echo some error\r\nexit /b {code}\r\n")).unwrap();
+            std::fs::write(
+                &file,
+                format!(
+                    "@echo off\r\necho some output\r\n>&2 echo some error\r\nexit /b {code}\r\n"
+                ),
+            )
+            .unwrap();
             file
         };
         // WinGet's 0x8A15002B, as the command says it.
-        let winget = UpdateCommand { on_exit: winget_exits(h("claude-code")), ..UpdateCommand::new(fake("winget.cmd", -1978335189), &[]) };
-        let v = AgentVersion { command: Some(winget), ..version("fake", "2.1.292", Some("2.1.296")) };
-        let Outcome::Failed { summary, output } = crate::runtime().block_on(run_update(&v)) else { panic!() };
-        assert!(summary.starts_with("WinGet's package list doesn't have this version of Claude Code yet"), "{summary}");
-        assert_eq!(output, "some output\nsome error", "Show output holds stdout and stderr");
+        let winget = UpdateCommand {
+            on_exit: winget_exits(h("claude-code")),
+            ..UpdateCommand::new(fake("winget.cmd", -1978335189), &[])
+        };
+        let v = AgentVersion {
+            command: Some(winget),
+            ..version("fake", "2.1.292", Some("2.1.296"))
+        };
+        let Outcome::Failed { summary, output } = crate::runtime().block_on(run_update(&v)) else {
+            panic!()
+        };
+        assert!(
+            summary
+                .starts_with("WinGet's package list doesn't have this version of Claude Code yet"),
+            "{summary}"
+        );
+        assert_eq!(
+            output, "some output\nsome error",
+            "Show output holds stdout and stderr"
+        );
         // A status nobody gave words to: its hex, as WinGet's documentation lists them.
-        let other = AgentVersion { command: Some(UpdateCommand::new(fake("other.cmd", -1978335140), &[])), ..version("fake", "1", Some("2")) };
-        let Outcome::Failed { summary, .. } = crate::runtime().block_on(run_update(&other)) else { panic!() };
-        assert!(summary.ends_with("stopped with code 0x8A15005C (-1978335140)."), "{summary}");
+        let other = AgentVersion {
+            command: Some(UpdateCommand::new(fake("other.cmd", -1978335140), &[])),
+            ..version("fake", "1", Some("2"))
+        };
+        let Outcome::Failed { summary, .. } = crate::runtime().block_on(run_update(&other)) else {
+            panic!()
+        };
+        assert!(
+            summary.ends_with("stopped with code 0x8A15005C (-1978335140)."),
+            "{summary}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn homebrew_is_not_looked_for_on_windows() {
         // The code stays; a Windows path just can't be Homebrew's, whatever its folders are called.
-        let keg = install_of(Path::new("/opt/homebrew/Cellar/opencode/1.18.34/bin/opencode"));
-        let cask = install_of(Path::new("/opt/homebrew/Caskroom/copilot-cli/1.0.69/copilot"));
+        let keg = install_of(Path::new(
+            "/opt/homebrew/Cellar/opencode/1.18.34/bin/opencode",
+        ));
+        let cask = install_of(Path::new(
+            "/opt/homebrew/Caskroom/copilot-cli/1.0.69/copilot",
+        ));
         if cfg!(windows) {
             assert_eq!((keg, cask), (Install::Native, Install::Native));
         } else {
@@ -2708,24 +4910,57 @@ mod tests {
     fn a_cmd_shim_is_read_for_the_package_it_runs() {
         let at = Path::new(r"C:\nvm\v22.3.0\codex.cmd");
         let target = cmd_shim_target(at, CODEX_CMD).unwrap();
-        assert_eq!(target, Path::new(r"C:\nvm\v22.3.0\node_modules\@openai\codex\bin\codex.js"));
-        assert_eq!(install_of(&target), Install::Npm { package: "@openai/codex".into(), prefix: r"C:\nvm\v22.3.0".into() });
+        assert_eq!(
+            target,
+            Path::new(r"C:\nvm\v22.3.0\node_modules\@openai\codex\bin\codex.js")
+        );
+        assert_eq!(
+            install_of(&target),
+            Install::Npm {
+                package: "@openai/codex".into(),
+                prefix: r"C:\nvm\v22.3.0".into()
+            }
+        );
         // Older cmd-shim's `%~dp0\`, and a script reached through `..` (a prefix with `lib`).
         let old = "@IF EXIST \"%~dp0\\node.exe\" (\r\n  \"%~dp0\\node.exe\"  \"%~dp0\\..\\lib\\node_modules\\pi-acp\\dist\\index.js\" %*\r\n)\r\n";
-        assert_eq!(cmd_shim_target(Path::new(r"C:\x\bin\pi-acp.cmd"), old).unwrap(), Path::new(r"C:\x\lib\node_modules\pi-acp\dist\index.js"));
+        assert_eq!(
+            cmd_shim_target(Path::new(r"C:\x\bin\pi-acp.cmd"), old).unwrap(),
+            Path::new(r"C:\x\lib\node_modules\pi-acp\dist\index.js")
+        );
         // pnpm's global bin: its packages live under `global\5`.
         let pnpm = "@ECHO off\r\n\"%_prog%\"  \"%dp0%\\global\\5\\node_modules\\@qwen-code\\qwen-code\\cli.js\" %*\r\n";
-        let target = cmd_shim_target(Path::new(r"C:\Users\me\AppData\Local\pnpm\qwen.cmd"), pnpm).unwrap();
-        assert_eq!(install_of(&target), Install::Pnpm { package: "@qwen-code/qwen-code".into() });
+        let target =
+            cmd_shim_target(Path::new(r"C:\Users\me\AppData\Local\pnpm\qwen.cmd"), pnpm).unwrap();
+        assert_eq!(
+            install_of(&target),
+            Install::Pnpm {
+                package: "@qwen-code/qwen-code".into()
+            }
+        );
         // A batch file that runs no package isn't a shim.
-        assert_eq!(cmd_shim_target(at, "@echo off\r\necho \"%dp0%\\hello\"\r\n"), None);
-        assert!(cmd_shim_target(at, "@echo off\r\ncall \"%dp0%\\node_modules\\.bin\\x\"\r\n").is_some(), "any node_modules path counts");
+        assert_eq!(
+            cmd_shim_target(at, "@echo off\r\necho \"%dp0%\\hello\"\r\n"),
+            None
+        );
+        assert!(
+            cmd_shim_target(at, "@echo off\r\ncall \"%dp0%\\node_modules\\.bin\\x\"\r\n").is_some(),
+            "any node_modules path counts"
+        );
         // From disk: the shim in an npm prefix says what's installed there.
         let root = std::env::temp_dir().join(format!("trek-cmd-shim-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("codex.cmd"), CODEX_CMD).unwrap();
-        assert_eq!(detect_install(&root.join("codex.cmd")), Install::Npm { package: "@openai/codex".into(), prefix: root.clone() });
-        assert_eq!(script_of(&root.join("codex.cmd")), root.join(r"node_modules\@openai\codex\bin\codex.js"));
+        assert_eq!(
+            detect_install(&root.join("codex.cmd")),
+            Install::Npm {
+                package: "@openai/codex".into(),
+                prefix: root.clone()
+            }
+        );
+        assert_eq!(
+            script_of(&root.join("codex.cmd")),
+            root.join(r"node_modules\@openai\codex\bin\codex.js")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2734,14 +4969,35 @@ mod tests {
     fn a_bun_shim_is_read_for_the_package_it_runs() {
         // UNVERIFIED against a real Bun: the `.bunx` file is read as UTF-16 text holding the script's
         // path, which is how Bun's source writes it; a layout that differs reads as the vendor's own.
-        let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>();
+        let utf16 = |s: &str| {
+            s.encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<u8>>()
+        };
         let shim = Path::new(r"C:\Users\me\.bun\bin\kimi.exe");
-        let relative = utf16("..\\install\\global\\node_modules\\@moonshot-ai\\kimi-code\\dist\\index.js\0");
+        let relative =
+            utf16("..\\install\\global\\node_modules\\@moonshot-ai\\kimi-code\\dist\\index.js\0");
         let target = bunx_target(shim, &relative).unwrap();
-        assert_eq!(target, Path::new(r"C:\Users\me\.bun\install\global\node_modules\@moonshot-ai\kimi-code\dist\index.js"));
-        assert_eq!(install_of(&target), Install::Bun { package: "@moonshot-ai/kimi-code".into() });
-        let absolute = utf16("\\??\\C:\\Users\\me\\.bun\\install\\global\\node_modules\\qwen\\cli.js\0");
-        assert_eq!(install_of(&bunx_target(shim, &absolute).unwrap()), Install::Bun { package: "qwen".into() });
+        assert_eq!(
+            target,
+            Path::new(
+                r"C:\Users\me\.bun\install\global\node_modules\@moonshot-ai\kimi-code\dist\index.js"
+            )
+        );
+        assert_eq!(
+            install_of(&target),
+            Install::Bun {
+                package: "@moonshot-ai/kimi-code".into()
+            }
+        );
+        let absolute =
+            utf16("\\??\\C:\\Users\\me\\.bun\\install\\global\\node_modules\\qwen\\cli.js\0");
+        assert_eq!(
+            install_of(&bunx_target(shim, &absolute).unwrap()),
+            Install::Bun {
+                package: "qwen".into()
+            }
+        );
         assert_eq!(bunx_target(shim, &utf16("not a script\0")), None);
         assert_eq!(bunx_target(shim, &[1]), None);
     }
@@ -2749,25 +5005,59 @@ mod tests {
     #[test]
     fn winget_installs_update_with_winget() {
         let claude = h("claude-code");
-        let winget = Install::Winget { id: "Anthropic.ClaudeCode".into() };
+        let winget = Install::Winget {
+            id: "Anthropic.ClaudeCode".into(),
+        };
         assert!(claude.owns(&winget));
         assert!(!h("codex").owns(&winget), "another agent's package id");
-        assert!(!claude.owns(&Install::Winget { id: "Other.Tool".into() }));
+        assert!(!claude.owns(&Install::Winget {
+            id: "Other.Tool".into()
+        }));
         assert_eq!(winget.label(), "WinGet");
         // Copilot CLI's WinGet package (the one installed on a real Windows machine).
-        let copilot = Install::Winget { id: "GitHub.Copilot".into() };
+        let copilot = Install::Winget {
+            id: "GitHub.Copilot".into(),
+        };
         assert!(h("acp:github-copilot").owns(&copilot) && !claude.owns(&copilot));
         assert_eq!(h("acp:github-copilot").reading(copilot.clone()), copilot);
         // A package of another id isn't `winget upgrade`d on a guess: it's the vendor's own install.
-        assert_eq!(h("codex").reading(Install::Winget { id: "OpenAI.Codex".into() }), Install::Native);
+        assert_eq!(
+            h("codex").reading(Install::Winget {
+                id: "OpenAI.Codex".into()
+            }),
+            Install::Native
+        );
         assert_eq!(claude.reading(Install::Native), Install::Native);
         // Its newest is WinGet's, not the vendor's: `winget upgrade` installs only what WinGet has
         // (Claude Code 2.1.296 was out while WinGet still had 2.1.292, and the upgrade failed).
-        assert_eq!(source(claude, &winget, None), Some(Source::Winget("Anthropic.ClaudeCode".into())));
-        assert_eq!(source(claude, &Install::Winget { id: "Anthropic.Claude Code".into() }, None), None, "an id that doesn't go into a URL as it is");
-        let cmd = update_command(claude, &winget, Path::new(r"C:\x\claude.exe"), false, Some("2.1.1")).unwrap();
+        assert_eq!(
+            source(claude, &winget, None),
+            Some(Source::Winget("Anthropic.ClaudeCode".into()))
+        );
+        assert_eq!(
+            source(
+                claude,
+                &Install::Winget {
+                    id: "Anthropic.Claude Code".into()
+                },
+                None
+            ),
+            None,
+            "an id that doesn't go into a URL as it is"
+        );
+        let cmd = update_command(
+            claude,
+            &winget,
+            Path::new(r"C:\x\claude.exe"),
+            false,
+            Some("2.1.1"),
+        )
+        .unwrap();
         assert_eq!(cmd.program, Path::new("winget"));
-        assert_eq!(cmd.shown(), "winget upgrade --id Anthropic.ClaudeCode --exact --accept-package-agreements --accept-source-agreements --disable-interactivity");
+        assert_eq!(
+            cmd.shown(),
+            "winget upgrade --id Anthropic.ClaudeCode --exact --accept-package-agreements --accept-source-agreements --disable-interactivity"
+        );
     }
 
     /// A WinGet package is asked of `winget` first (what `winget upgrade` installs from), and of
@@ -2785,42 +5075,98 @@ mod tests {
         let winget = |name: &str, exit: i32| {
             let script = root.join(name);
             let asked = root.join(format!("{name}.asked"));
-            std::fs::write(&script, format!("@echo off\r\n>\"{}\" echo %*\r\ntype \"{}\"\r\nexit /b {exit}\r\n", asked.display(), root.join("table.txt").display())).unwrap();
+            std::fs::write(
+                &script,
+                format!(
+                    "@echo off\r\n>\"{}\" echo %*\r\ntype \"{}\"\r\nexit /b {exit}\r\n",
+                    asked.display(),
+                    root.join("table.txt").display()
+                ),
+            )
+            .unwrap();
             (script.display().to_string(), asked)
         };
         let source = Source::Winget("Anthropic.ClaudeCode".into());
         let listing = |version: &str| format!(r#"[{{"name":"{version}","type":"dir"}}]"#);
-        let ask = |feeds: &Feeds, program: &str, url: &str| crate::runtime().block_on(fetch_from(feeds, &source, vec![url.to_string()], program));
+        let ask = |feeds: &Feeds, program: &str, url: &str| {
+            crate::runtime().block_on(fetch_from(feeds, &source, vec![url.to_string()], program))
+        };
         let memory = || Feeds::memory(reqwest::Client::new(), crate::feeds::Cache::default());
 
         // `winget` answers: its newest version, asked with exactly what a lookup needs, and
         // winget-pkgs (which has a newer one) not asked at all.
-        let (base, seen) = serve(vec![reply("200 OK", &[("etag", "\"1\"".into())], &listing("2.1.296"))]);
+        let (base, seen) = serve(vec![reply(
+            "200 OK",
+            &[("etag", "\"1\"".into())],
+            &listing("2.1.296"),
+        )]);
         let (ok, asked) = winget("ok.cmd", 0);
-        assert_eq!(ask(&memory(), &ok, &format!("{base}/pkgs")).unwrap().version, "2.1.292");
-        assert_eq!(std::fs::read_to_string(asked).unwrap().trim(), "show --exact --id Anthropic.ClaudeCode --versions --source winget --disable-interactivity --accept-source-agreements");
+        assert_eq!(
+            ask(&memory(), &ok, &format!("{base}/pkgs"))
+                .unwrap()
+                .version,
+            "2.1.292"
+        );
+        assert_eq!(
+            std::fs::read_to_string(asked).unwrap().trim(),
+            "show --exact --id Anthropic.ClaudeCode --versions --source winget --disable-interactivity --accept-source-agreements"
+        );
         assert!(seen.lock().unwrap().is_empty(), "winget-pkgs wasn't asked");
 
         // It fails, or isn't there: winget-pkgs is asked, through the cache.
         let (broken, _) = winget("broken.cmd", 1);
         let missing = root.join("no-such-winget.exe").display().to_string();
         for program in [broken, missing] {
-            let (base, seen) = serve(vec![reply("200 OK", &[("etag", "\"1\"".into())], &listing("2.1.296"))]);
-            assert_eq!(ask(&memory(), &program, &format!("{base}/pkgs")).unwrap().version, "2.1.296", "{program}");
+            let (base, seen) = serve(vec![reply(
+                "200 OK",
+                &[("etag", "\"1\"".into())],
+                &listing("2.1.296"),
+            )]);
+            assert_eq!(
+                ask(&memory(), &program, &format!("{base}/pkgs"))
+                    .unwrap()
+                    .version,
+                "2.1.296",
+                "{program}"
+            );
             assert_eq!(seen.lock().unwrap().len(), 1);
         }
 
         // winget-pkgs out of requests: the answer kept from before stands, and says nothing; with
         // none kept the reason is said once, as no failure of the feed.
         let reset = (crate::store::now_ms() / 1000 + 3600).to_string();
-        let limited = reply("403 Forbidden", &[("x-ratelimit-remaining", "0".into()), ("x-ratelimit-reset", reset)], r#"{"message":"API rate limit exceeded"}"#);
-        let (base, _) = serve(vec![reply("200 OK", &[("etag", "\"1\"".into())], &listing("2.1.296")), limited.clone()]);
+        let limited = reply(
+            "403 Forbidden",
+            &[
+                ("x-ratelimit-remaining", "0".into()),
+                ("x-ratelimit-reset", reset),
+            ],
+            r#"{"message":"API rate limit exceeded"}"#,
+        );
+        let (base, _) = serve(vec![
+            reply("200 OK", &[("etag", "\"1\"".into())], &listing("2.1.296")),
+            limited.clone(),
+        ]);
         let (url, feeds) = (format!("{base}/pkgs"), memory());
-        assert_eq!(ask(&feeds, "no-such-winget", &url).unwrap().version, "2.1.296");
-        assert_eq!(ask(&feeds, "no-such-winget", &url).unwrap().version, "2.1.296", "limited: the kept answer");
-        assert_eq!(ask(&feeds, "no-such-winget", &url).unwrap().version, "2.1.296", "and not asked again");
+        assert_eq!(
+            ask(&feeds, "no-such-winget", &url).unwrap().version,
+            "2.1.296"
+        );
+        assert_eq!(
+            ask(&feeds, "no-such-winget", &url).unwrap().version,
+            "2.1.296",
+            "limited: the kept answer"
+        );
+        assert_eq!(
+            ask(&feeds, "no-such-winget", &url).unwrap().version,
+            "2.1.296",
+            "and not asked again"
+        );
         let (base, seen) = serve(vec![limited]);
-        assert_eq!(ask(&memory(), "no-such-winget", &format!("{base}/pkgs")), Err(LIMITED.to_string()));
+        assert_eq!(
+            ask(&memory(), "no-such-winget", &format!("{base}/pkgs")),
+            Err(LIMITED.to_string())
+        );
         assert_eq!(seen.lock().unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2834,46 +5180,142 @@ mod tests {
         let (base, seen) = serve(vec![
             reply("200 OK", &[("etag", "W/\"a\"".into())], &release("v0.9.1")),
             reply("304 Not Modified", &[], ""),
-            reply("403 Forbidden", &[("x-ratelimit-remaining", "0".into()), ("x-ratelimit-reset", reset)], r#"{"message":"API rate limit exceeded"}"#),
+            reply(
+                "403 Forbidden",
+                &[
+                    ("x-ratelimit-remaining", "0".into()),
+                    ("x-ratelimit-reset", reset),
+                ],
+                r#"{"message":"API rate limit exceeded"}"#,
+            ),
         ]);
         let source = Source::Feed(Feed::GitHub("o/r"));
         let feeds = Feeds::memory(reqwest::Client::new(), crate::feeds::Cache::default());
-        let ask = || crate::runtime().block_on(fetch_from(&feeds, &source, vec![format!("{base}/releases/latest")], "winget"));
+        let ask = || {
+            crate::runtime().block_on(fetch_from(
+                &feeds,
+                &source,
+                vec![format!("{base}/releases/latest")],
+                "winget",
+            ))
+        };
         assert_eq!(ask().unwrap().version, "0.9.1");
         assert_eq!(ask().unwrap().version, "0.9.1", "a 304 is the kept answer");
-        assert!(seen.lock().unwrap()[1].contains("if-none-match: w/\"a\""), "{}", seen.lock().unwrap()[1]);
-        assert_eq!(ask().unwrap().version, "0.9.1", "out of requests: the last answer, not a 403");
+        assert!(
+            seen.lock().unwrap()[1].contains("if-none-match: w/\"a\""),
+            "{}",
+            seen.lock().unwrap()[1]
+        );
+        assert_eq!(
+            ask().unwrap().version,
+            "0.9.1",
+            "out of requests: the last answer, not a 403"
+        );
         assert_eq!(ask().unwrap().version, "0.9.1");
         assert_eq!(seen.lock().unwrap().len(), 3, "and the fourth wasn't asked");
         // Offline stays what it was.
-        let port = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
         let feeds = Feeds::memory(reqwest::Client::new(), crate::feeds::Cache::default());
-        let offline = crate::runtime().block_on(fetch_from(&feeds, &source, vec![format!("http://127.0.0.1:{port}/x")], "winget"));
-        assert_eq!(offline, Err("Offline, or the release feed didn't answer".into()));
+        let offline = crate::runtime().block_on(fetch_from(
+            &feeds,
+            &source,
+            vec![format!("http://127.0.0.1:{port}/x")],
+            "winget",
+        ));
+        assert_eq!(
+            offline,
+            Err("Offline, or the release feed didn't answer".into())
+        );
     }
 
     #[test]
     fn winget_and_chocolatey_say_what_they_have() {
-        assert_eq!(urls(&Source::Winget("Anthropic.ClaudeCode".into())), ["https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/a/Anthropic/ClaudeCode"]);
-        assert_eq!(urls(&Source::Winget("GitHub.Copilot".into())), ["https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/g/GitHub/Copilot"]);
+        assert_eq!(
+            urls(&Source::Winget("Anthropic.ClaudeCode".into())),
+            [
+                "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/a/Anthropic/ClaudeCode"
+            ]
+        );
+        assert_eq!(
+            urls(&Source::Winget("GitHub.Copilot".into())),
+            [
+                "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/g/GitHub/Copilot"
+            ]
+        );
         // winget-pkgs lists its folders by name, not by version; a subfolder is another package.
         let folders = r#"[{"name":"2.1.10","type":"dir"},{"name":"2.1.292","type":"dir"},{"name":"2.1.96","type":"dir"},{"name":"Prerelease","type":"dir"},{"name":"9.9.9","type":"file"}]"#;
-        assert_eq!(parse_latest(&Source::Winget("Anthropic.ClaudeCode".into()), folders).unwrap().version, "2.1.292");
+        assert_eq!(
+            parse_latest(&Source::Winget("Anthropic.ClaudeCode".into()), folders)
+                .unwrap()
+                .version,
+            "2.1.292"
+        );
         let copilot = r#"[{"name":"v1.0.93","type":"dir"},{"name":"v1.0.95","type":"dir"}]"#;
-        assert_eq!(parse_latest(&Source::Winget("GitHub.Copilot".into()), copilot).unwrap().version, "1.0.95");
-        assert_eq!(parse_latest(&Source::Winget("x".into()), r#"{"message":"API rate limit exceeded"}"#), None);
+        assert_eq!(
+            parse_latest(&Source::Winget("GitHub.Copilot".into()), copilot)
+                .unwrap()
+                .version,
+            "1.0.95"
+        );
+        assert_eq!(
+            parse_latest(
+                &Source::Winget("x".into()),
+                r#"{"message":"API rate limit exceeded"}"#
+            ),
+            None
+        );
         assert_eq!(parse_latest(&Source::Winget("x".into()), "[]"), None);
         // Chocolatey's repository, asked for the package's latest.
         let choco = Source::Chocolatey("opencode".into());
-        assert_eq!(urls(&choco), ["https://community.chocolatey.org/api/v2/Packages()?$filter=Id%20eq%20'opencode'%20and%20IsLatestVersion&$select=Version"]);
+        assert_eq!(
+            urls(&choco),
+            [
+                "https://community.chocolatey.org/api/v2/Packages()?$filter=Id%20eq%20'opencode'%20and%20IsLatestVersion&$select=Version"
+            ]
+        );
         let feed = r#"<feed><entry><m:properties><d:Version>1.19.0</d:Version></m:properties></entry></feed>"#;
         assert_eq!(parse_latest(&choco, feed).unwrap().version, "1.19.0");
-        assert_eq!(parse_latest(&choco, "<feed></feed>"), None, "no such package");
+        assert_eq!(
+            parse_latest(&choco, "<feed></feed>"),
+            None,
+            "no such package"
+        );
         // What an id may hold to go into a URL; a package outside it has no source to ask.
-        assert_eq!(source(h("opencode"), &Install::Chocolatey { package: "opencode".into() }, None), Some(choco));
-        assert_eq!(source(h("opencode"), &Install::Chocolatey { package: "a'b".into() }, None), None);
+        assert_eq!(
+            source(
+                h("opencode"),
+                &Install::Chocolatey {
+                    package: "opencode".into()
+                },
+                None
+            ),
+            Some(choco)
+        );
+        assert_eq!(
+            source(
+                h("opencode"),
+                &Install::Chocolatey {
+                    package: "a'b".into()
+                },
+                None
+            ),
+            None
+        );
         // Scoop's buckets follow the vendor's release closely: its feed.
-        assert_eq!(source(h("opencode"), &Install::Scoop { app: "opencode".into() }, Some("1.2.27")), Some(Source::Npm("opencode-ai".into())));
+        assert_eq!(
+            source(
+                h("opencode"),
+                &Install::Scoop {
+                    app: "opencode".into()
+                },
+                Some("1.2.27")
+            ),
+            Some(Source::Npm("opencode-ai".into()))
+        );
     }
 
     #[test]
@@ -2884,21 +5326,44 @@ mod tests {
         for dir in [&first, &second] {
             std::fs::create_dir_all(dir).unwrap();
         }
-        let search = std::env::join_paths([&first, &second]).unwrap().to_string_lossy().into_owned();
+        let search = std::env::join_paths([&first, &second])
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         // On Windows the extensionless `tool` is a shell script, which Windows can't run: only
         // `tool.cmd` (and `.exe`, …) count, in `PATHEXT` order, and the first folder's one first.
         std::fs::write(first.join("tool"), "#!/bin/sh\n").unwrap();
-        assert_eq!(resolve_program(Path::new("tool"), &search), if cfg!(windows) { None } else { Some(first.join("tool")) });
+        assert_eq!(
+            resolve_program(Path::new("tool"), &search),
+            if cfg!(windows) {
+                None
+            } else {
+                Some(first.join("tool"))
+            }
+        );
         if cfg!(windows) {
             std::fs::write(second.join("tool.exe"), "").unwrap();
-            assert_eq!(resolve_program(Path::new("tool"), &search), Some(second.join("tool.exe")));
+            assert_eq!(
+                resolve_program(Path::new("tool"), &search),
+                Some(second.join("tool.exe"))
+            );
             std::fs::write(first.join("tool.cmd"), "").unwrap();
-            assert_eq!(resolve_program(Path::new("tool"), &search), Some(first.join("tool.cmd")));
-            assert_eq!(resolve_program(Path::new("tool.exe"), &search), Some(second.join("tool.exe")), "a name with its extension is taken as it is");
+            assert_eq!(
+                resolve_program(Path::new("tool"), &search),
+                Some(first.join("tool.cmd"))
+            );
+            assert_eq!(
+                resolve_program(Path::new("tool.exe"), &search),
+                Some(second.join("tool.exe")),
+                "a name with its extension is taken as it is"
+            );
         }
         assert_eq!(resolve_program(Path::new("nothing"), &search), None);
         // An absolute path is the program, found or not (`run_update` says it isn't there).
-        assert_eq!(resolve_program(&first.join("tool"), &search), Some(first.join("tool")));
+        assert_eq!(
+            resolve_program(&first.join("tool"), &search),
+            Some(first.join("tool"))
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2909,15 +5374,39 @@ mod tests {
         std::fs::create_dir_all(root.join("bin")).unwrap();
         let log = root.join("npm.log");
         fake_npm(&root, &log, &[]);
-        let install = Install::Npm { package: "@openai/codex".into(), prefix: root.clone() };
+        let install = Install::Npm {
+            package: "@openai/codex".into(),
+            prefix: root.clone(),
+        };
         // An id no harness has: nothing real is asked its version afterwards.
-        let v = AgentVersion { command: update_command(h("codex"), &install, &root.join("codex"), false, None), install, ..version("fake", "0.159.2", Some("0.160.0")) };
+        let v = AgentVersion {
+            command: update_command(h("codex"), &install, &root.join("codex"), false, None),
+            install,
+            ..version("fake", "0.159.2", Some("0.160.0"))
+        };
         let outcome = crate::runtime().block_on(run_update(&v));
-        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().collect::<Vec<_>>(), ["install -g @openai/codex@latest"]);
-        assert!(matches!(outcome, Outcome::Failed { ref summary, .. } if summary.contains("didn't say its version")), "{outcome:?}");
+        assert_eq!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            ["install -g @openai/codex@latest"]
+        );
+        assert!(
+            matches!(outcome, Outcome::Failed { ref summary, .. } if summary.contains("didn't say its version")),
+            "{outcome:?}"
+        );
         // A program that isn't there is said so.
-        let v = AgentVersion { command: Some(UpdateCommand::new("trek-no-such-package-manager", &["update"])), ..version("fake", "1.0.0", None) };
-        let Outcome::Failed { summary, .. } = crate::runtime().block_on(run_update(&v)) else { panic!() };
+        let v = AgentVersion {
+            command: Some(UpdateCommand::new(
+                "trek-no-such-package-manager",
+                &["update"],
+            )),
+            ..version("fake", "1.0.0", None)
+        };
+        let Outcome::Failed { summary, .. } = crate::runtime().block_on(run_update(&v)) else {
+            panic!()
+        };
         assert_eq!(summary, "trek-no-such-package-manager isn't installed.");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2937,8 +5426,16 @@ mod tests {
         let log = root.join("args.log");
         // `%1`, quotes and all (`%~1` would put `a&b` into the line `echo` is parsed from).
         // Redirection first: a digit before `>>` is a handle.
-        std::fs::write(root.join("fake.cmd"), format!("@echo off\r\n>> \"{}\" echo [%1][%2]\r\n", log.display())).unwrap();
-        let run = |args: &[&str]| std::process::Command::new(root.join("fake.cmd")).args(args).output();
+        std::fs::write(
+            root.join("fake.cmd"),
+            format!("@echo off\r\n>> \"{}\" echo [%1][%2]\r\n", log.display()),
+        )
+        .unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new(root.join("fake.cmd"))
+                .args(args)
+                .output()
+        };
         for (args, logged) in [
             (&["install", "-g"][..], "[install][-g]"),
             (&["@openai/codex@latest"], "[@openai/codex@latest][]"),
@@ -2947,25 +5444,44 @@ mod tests {
             (&["%PATH%"], r#"["%PATH%"][]"#),
             (&["a&b"], r#"["a&b"][]"#),
             (&["^x"], r#"["^x"][]"#),
-            (&[r"--prefix=C:\Program Files\x"], r#"["--prefix=C:\Program Files\x"][]"#),
+            (
+                &[r"--prefix=C:\Program Files\x"],
+                r#"["--prefix=C:\Program Files\x"][]"#,
+            ),
         ] {
             let _ = std::fs::remove_file(&log);
             assert!(run(args).unwrap().status.success(), "{args:?}");
-            assert_eq!(std::fs::read_to_string(&log).unwrap().trim_end(), logged, "{args:?}");
+            assert_eq!(
+                std::fs::read_to_string(&log).unwrap().trim_end(),
+                logged,
+                "{args:?}"
+            );
         }
         // Refused, not mangled: nothing runs.
         let _ = std::fs::remove_file(&log);
         for args in [&["a\nb"][..], &["a\r"]] {
             let err = run(args).unwrap_err();
             assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{args:?}");
-            assert!(err.to_string().contains("batch file arguments are invalid"), "{err}");
+            assert!(
+                err.to_string().contains("batch file arguments are invalid"),
+                "{err}"
+            );
         }
         assert!(!log.exists());
         // So an update command with such an argument fails with that said, and runs nothing.
         let bad = UpdateCommand::new(root.join("fake.cmd"), &["bad\nargument"]);
-        let v = AgentVersion { command: Some(bad), ..version("fake", "1.0.0", Some("1.1.0")) };
-        let Outcome::Failed { summary, .. } = crate::runtime().block_on(run_update(&v)) else { panic!() };
-        assert!(summary.starts_with("Couldn't run") && summary.contains("batch file arguments are invalid"), "{summary}");
+        let v = AgentVersion {
+            command: Some(bad),
+            ..version("fake", "1.0.0", Some("1.1.0"))
+        };
+        let Outcome::Failed { summary, .. } = crate::runtime().block_on(run_update(&v)) else {
+            panic!()
+        };
+        assert!(
+            summary.starts_with("Couldn't run")
+                && summary.contains("batch file arguments are invalid"),
+            "{summary}"
+        );
         assert!(!log.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2974,22 +5490,70 @@ mod tests {
     #[cfg(windows)]
     fn commands_on_windows_read_as_they_are_typed() {
         // A binary found as `claude.exe` or `npm.cmd` is typed `claude`, `npm`.
-        assert_eq!(UpdateCommand::new(r"C:\Users\me\.local\bin\claude.exe", &["update"]).shown(), "claude update");
-        assert_eq!(UpdateCommand::new(r"C:\nvm\v22\codex.cmd", &["update"]).shown(), "codex update");
-        assert_eq!(UpdateCommand::new("npm", &["install", "-g", "x@latest"]).shown(), "npm install -g x@latest");
+        assert_eq!(
+            UpdateCommand::new(r"C:\Users\me\.local\bin\claude.exe", &["update"]).shown(),
+            "claude update"
+        );
+        assert_eq!(
+            UpdateCommand::new(r"C:\nvm\v22\codex.cmd", &["update"]).shown(),
+            "codex update"
+        );
+        assert_eq!(
+            UpdateCommand::new("npm", &["install", "-g", "x@latest"]).shown(),
+            "npm install -g x@latest"
+        );
         // PATH is `;`-separated, the login PATH last.
-        let cmd = UpdateCommand { path: vec![r"C:\nvm\v22".into(), r"C:\other".into()], ..UpdateCommand::new("npm", &[]) };
-        assert!(cmd.search_path().starts_with(r"C:\nvm\v22;C:\other;"), "{}", cmd.search_path());
+        let cmd = UpdateCommand {
+            path: vec![r"C:\nvm\v22".into(), r"C:\other".into()],
+            ..UpdateCommand::new("npm", &[])
+        };
+        assert!(
+            cmd.search_path().starts_with(r"C:\nvm\v22;C:\other;"),
+            "{}",
+            cmd.search_path()
+        );
         // The vendor's PowerShell installers, run by Windows PowerShell with what's shown as typed.
         let droid = h("droid");
         let line = droid.installer_line().unwrap();
-        assert!(line.starts_with("irm https://") && line.ends_with(" | iex"), "{line}");
-        let cmd = update_command(droid, &Install::Native, Path::new(r"C:\Users\me\bin\droid.exe"), false, None).unwrap();
-        assert_eq!((cmd.shown().as_str(), cmd.args.last().map(String::as_str)), (line, Some(line)));
-        assert!(cmd.args.windows(2).any(|w| w == ["-ExecutionPolicy", "Bypass"]) && cmd.args.contains(&"-NoProfile".to_string()), "{:?}", cmd.args);
+        assert!(
+            line.starts_with("irm https://") && line.ends_with(" | iex"),
+            "{line}"
+        );
+        let cmd = update_command(
+            droid,
+            &Install::Native,
+            Path::new(r"C:\Users\me\bin\droid.exe"),
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            (cmd.shown().as_str(), cmd.args.last().map(String::as_str)),
+            (line, Some(line))
+        );
+        assert!(
+            cmd.args
+                .windows(2)
+                .any(|w| w == ["-ExecutionPolicy", "Bypass"])
+                && cmd.args.contains(&"-NoProfile".to_string()),
+            "{:?}",
+            cmd.args
+        );
         // The CLIs with their own update command use it, not the installer.
-        for (agent, bin) in [("claude-code", r"C:\Users\me\.local\bin\claude.exe"), ("acp:grok", r"C:\Users\me\.grok\bin\grok.exe"), ("acp:devin", r"C:\Users\me\AppData\Local\devin\cli\bin\devin.exe"), ("acp:cursor", r"C:\Users\me\AppData\Local\cursor-agent\cursor-agent.exe")] {
-            let cmd = update_command(h(agent), &Install::Native, Path::new(bin), false, None).unwrap();
+        for (agent, bin) in [
+            ("claude-code", r"C:\Users\me\.local\bin\claude.exe"),
+            ("acp:grok", r"C:\Users\me\.grok\bin\grok.exe"),
+            (
+                "acp:devin",
+                r"C:\Users\me\AppData\Local\devin\cli\bin\devin.exe",
+            ),
+            (
+                "acp:cursor",
+                r"C:\Users\me\AppData\Local\cursor-agent\cursor-agent.exe",
+            ),
+        ] {
+            let cmd =
+                update_command(h(agent), &Install::Native, Path::new(bin), false, None).unwrap();
             assert_eq!(cmd.program, Path::new(bin));
             assert_eq!(cmd.args, ["update"], "{agent}");
         }
@@ -2997,20 +5561,52 @@ mod tests {
 
     #[test]
     fn the_windows_install_scripts_of_cursor_and_factory_name_their_version_too() {
-        assert_eq!(urls(&Source::Feed(Feed::CursorInstaller)), ["https://cursor.com/install", "https://cursor.com/install?win32=true"]);
-        assert_eq!(urls(&Source::Feed(Feed::DroidInstaller)), ["https://app.factory.ai/cli", "https://app.factory.ai/cli/windows"]);
+        assert_eq!(
+            urls(&Source::Feed(Feed::CursorInstaller)),
+            [
+                "https://cursor.com/install",
+                "https://cursor.com/install?win32=true"
+            ]
+        );
+        assert_eq!(
+            urls(&Source::Feed(Feed::DroidInstaller)),
+            [
+                "https://app.factory.ai/cli",
+                "https://app.factory.ai/cli/windows"
+            ]
+        );
         // Cursor's PowerShell script (`$downloadUrl = 'https://downloads.cursor.com/lab/<version>/'`).
         let cursor = "$downloadUrl = 'https://downloads.cursor.com/lab/2026.10.01-e373342/'\r\n$agentPath = \"$env:LOCALAPPDATA\\cursor-agent\"\r\n";
-        assert_eq!(parse_latest(&Source::Feed(Feed::CursorInstaller), cursor).unwrap().version, "2026.10.01-e373342");
+        assert_eq!(
+            parse_latest(&Source::Feed(Feed::CursorInstaller), cursor)
+                .unwrap()
+                .version,
+            "2026.10.01-e373342"
+        );
         // Factory's: `$version = '0.237.0'`, where the shell one has `VER="0.233.0"`.
         let droid = "$ErrorActionPreference = 'Stop'\r\n$version = '0.237.0'\r\n$baseUrl = \"https://downloads.factory.ai\"\r\n";
-        assert_eq!(parse_latest(&Source::Feed(Feed::DroidInstaller), droid).unwrap().version, "0.237.0");
-        assert_eq!(parse_latest(&Source::Feed(Feed::DroidInstaller), "VER=\"0.233.0\"\n").unwrap().version, "0.233.0");
+        assert_eq!(
+            parse_latest(&Source::Feed(Feed::DroidInstaller), droid)
+                .unwrap()
+                .version,
+            "0.237.0"
+        );
+        assert_eq!(
+            parse_latest(&Source::Feed(Feed::DroidInstaller), "VER=\"0.233.0\"\n")
+                .unwrap()
+                .version,
+            "0.233.0"
+        );
         // The feeds say a version, not a download per platform: Devin's manifest lists its
         // Windows builds (`x86_64-pc-windows`, `aarch64-pc-windows`) beside the Mac's, and the
         // version is the same for all.
         let devin = r#"{"version":"3000.11.3","platforms":{"aarch64-pc-windows":{"url":"…"},"x86_64-pc-windows":{"url":"…"},"aarch64-apple-darwin":{"url":"…"}}}"#;
-        assert_eq!(parse_latest(&Source::Feed(Feed::DevinManifest), devin).unwrap().version, "3000.11.3");
+        assert_eq!(
+            parse_latest(&Source::Feed(Feed::DevinManifest), devin)
+                .unwrap()
+                .version,
+            "3000.11.3"
+        );
     }
 
     fn version(agent: &str, installed: &str, latest: Option<&str>) -> AgentVersion {
@@ -3029,9 +5625,15 @@ mod tests {
 
     #[test]
     fn an_offline_check_keeps_what_the_last_one_found() {
-        let before = vec![version("codex", "0.159.2", Some("0.160.0")), version("acp:kimi", "0.42.0", Some("2.1.1"))];
+        let before = vec![
+            version("codex", "0.159.2", Some("0.160.0")),
+            version("acp:kimi", "0.42.0", Some("2.1.1")),
+        ];
         // Offline now; Kimi was updated by hand meanwhile, so its old find no longer applies.
-        let mut fresh = vec![version("codex", "0.159.2", None), version("acp:kimi", "2.1.1", None)];
+        let mut fresh = vec![
+            version("codex", "0.159.2", None),
+            version("acp:kimi", "2.1.1", None),
+        ];
         carry_over(&mut fresh, &before);
         assert_eq!(fresh[0].latest.as_deref(), Some("0.160.0"));
         assert!(fresh[0].update_available());
@@ -3043,7 +5645,10 @@ mod tests {
     fn an_offline_check_keeps_the_command_the_last_one_worked_out() {
         // Copilot's cask updates itself: `copilot update`, as the cask's feed said. Offline, the
         // feed can't say so, and brew's path would come up in its place.
-        let cask = Install::Cask { cask: "copilot-cli".into(), prefix: "/opt/homebrew".into() };
+        let cask = Install::Cask {
+            cask: "copilot-cli".into(),
+            prefix: "/opt/homebrew".into(),
+        };
         let bin = Path::new("/opt/homebrew/bin/copilot");
         let copilot = h("acp:github-copilot");
         let entry = |latest: Option<&str>, auto: bool| AgentVersion {
@@ -3053,7 +5658,10 @@ mod tests {
         };
         let before = [entry(Some("1.0.92"), true)];
         let mut fresh = [entry(None, false)];
-        assert_eq!(fresh[0].command.as_ref().unwrap().shown(), "brew upgrade --cask copilot-cli");
+        assert_eq!(
+            fresh[0].command.as_ref().unwrap().shown(),
+            "brew upgrade --cask copilot-cli"
+        );
         carry_over(&mut fresh, &before);
         assert_eq!(fresh[0].latest.as_deref(), Some("1.0.92"));
         assert_eq!(fresh[0].command.as_ref().unwrap().shown(), "copilot update");
@@ -3062,17 +5670,35 @@ mod tests {
     #[test]
     fn an_update_counts_once_the_new_version_answers() {
         let v = version("codex", "0.159.2", Some("0.160.0"));
-        assert_eq!(verify(&v, Some("0.160.0".into()), "ok".into()), Outcome::Updated { version: "0.160.0".into(), output: "ok".into() });
+        assert_eq!(
+            verify(&v, Some("0.160.0".into()), "ok".into()),
+            Outcome::Updated {
+                version: "0.160.0".into(),
+                output: "ok".into()
+            }
+        );
         // Already past what the check found (a release came out meanwhile).
-        assert!(matches!(verify(&v, Some("0.161.0".into()), String::new()), Outcome::Updated { .. }));
-        let Outcome::Failed { summary, .. } = verify(&v, Some("0.159.2".into()), String::new()) else { panic!() };
+        assert!(matches!(
+            verify(&v, Some("0.161.0".into()), String::new()),
+            Outcome::Updated { .. }
+        ));
+        let Outcome::Failed { summary, .. } = verify(&v, Some("0.159.2".into()), String::new())
+        else {
+            panic!()
+        };
         assert_eq!(summary, "codex is still at 0.159.2 after the update.");
-        assert!(matches!(verify(&v, None, String::new()), Outcome::Failed { .. }));
+        assert!(matches!(
+            verify(&v, None, String::new()),
+            Outcome::Failed { .. }
+        ));
     }
 
     #[test]
     fn command_output_loses_its_terminal_codes() {
-        assert_eq!(strip_ansi("\u{1b}[32madded\u{1b}[0m 1 package\r\nok"), "added 1 package\nok");
+        assert_eq!(
+            strip_ansi("\u{1b}[32madded\u{1b}[0m 1 package\r\nok"),
+            "added 1 package\nok"
+        );
         assert_eq!(strip_ansi("10%\r50%\r100%"), "10%\n50%\n100%");
     }
 
@@ -3081,18 +5707,48 @@ mod tests {
         for h in HARNESSES {
             let id = AgentId::from_key(h.agent);
             assert_eq!(id.key(), h.agent);
-            assert_ne!(h.name(), h.agent.trim_start_matches("acp:"), "{} has a display name", h.agent);
-            assert!(h.feed != Feed::Npm || h.npm.is_some(), "{} needs its package for its feed", h.agent);
-            assert!(h.self_update.is_some() || h.installer.is_some() || h.npm.is_some(), "{} can be updated somehow", h.agent);
+            assert_ne!(
+                h.name(),
+                h.agent.trim_start_matches("acp:"),
+                "{} has a display name",
+                h.agent
+            );
+            assert!(
+                h.feed != Feed::Npm || h.npm.is_some(),
+                "{} needs its package for its feed",
+                h.agent
+            );
+            assert!(
+                h.self_update.is_some() || h.installer.is_some() || h.npm.is_some(),
+                "{} can be updated somehow",
+                h.agent
+            );
             // An installer to re-run is a line this platform's shell can run.
-            assert!(h.installer.is_none() || h.installer_line().is_some_and(|l| if cfg!(windows) { l.starts_with("irm https://") && l.ends_with(" | iex") } else { l.starts_with("curl ") }), "{} installer", h.agent);
-            assert_eq!(harness(h.binary).map(|o| o.agent), Some(h.agent), "{} is one row", h.binary);
+            assert!(
+                h.installer.is_none()
+                    || h.installer_line().is_some_and(|l| if cfg!(windows) {
+                        l.starts_with("irm https://") && l.ends_with(" | iex")
+                    } else {
+                        l.starts_with("curl ")
+                    }),
+                "{} installer",
+                h.agent
+            );
+            assert_eq!(
+                harness(h.binary).map(|o| o.agent),
+                Some(h.agent),
+                "{} is one row",
+                h.binary
+            );
         }
     }
 
     #[test]
     fn snapshots_round_trip() {
-        let snap = Snapshot { checked_at: 42, agents: mock_versions() };
+        let snap = Snapshot {
+            checked_at: 42,
+            agents: mock_versions(),
+        };
         let back: Snapshot = serde_json::from_str(&serde_json::to_string(&snap).unwrap()).unwrap();
         assert_eq!(back, snap);
         assert!(snap.agents.iter().all(|a| a.update_available()));
@@ -3105,7 +5761,18 @@ mod tests {
         let found = crate::runtime().block_on(check_all());
         for v in &found {
             let cmd = v.command.as_ref().map(|c| c.shown()).unwrap_or_default();
-            println!("{:<16} {:<10} {:>22} -> {:<22} update: {:<5} via `{cmd}`{}", v.name, v.install.label(), v.installed.as_deref().unwrap_or("?"), v.latest.as_deref().unwrap_or("?"), v.update_available(), v.error.as_ref().map(|e| format!("  ({e})")).unwrap_or_default());
+            println!(
+                "{:<16} {:<10} {:>22} -> {:<22} update: {:<5} via `{cmd}`{}",
+                v.name,
+                v.install.label(),
+                v.installed.as_deref().unwrap_or("?"),
+                v.latest.as_deref().unwrap_or("?"),
+                v.update_available(),
+                v.error
+                    .as_ref()
+                    .map(|e| format!("  ({e})"))
+                    .unwrap_or_default()
+            );
         }
     }
 
@@ -3119,8 +5786,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let entry = root.join(r"devin\cli\bin\devin.exe");
         std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
-        std::fs::write(entry.parent().unwrap().parent().unwrap().join("distribution"), "irm-iex\n").unwrap();
-        let said = crate::runtime().block_on(install_devin_bundle(&entry, &devin_manifest_url(), DEVIN_HOST)).unwrap();
+        std::fs::write(
+            entry
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("distribution"),
+            "irm-iex\n",
+        )
+        .unwrap();
+        let said = crate::runtime()
+            .block_on(install_devin_bundle(
+                &entry,
+                &devin_manifest_url(),
+                DEVIN_HOST,
+            ))
+            .unwrap();
         println!("{said}");
         let version = crate::runtime().block_on(installed_version(h("acp:devin"), &entry));
         println!("installed: {version:?}");

@@ -119,7 +119,10 @@ const MACOS: Words = Words {
     firewall_note: None,
 
     window_shadow_note: Some("Keep macOS's drop shadow around window snapshots."),
-    screen_recording: Some(("Screen Recording", "macOS asks once; snapshots of other apps need it.")),
+    screen_recording: Some((
+        "Screen Recording",
+        "macOS asks once; snapshots of other apps need it.",
+    )),
     snipping_tool_note: None,
 
     computer_use_note: None,
@@ -168,13 +171,19 @@ const WINDOWS: Words = Words {
 
     keep_awake_label: "Keep the PC awake while agents work",
 
-    firewall_note: Some("The first time this is on, Windows Firewall asks whether Trek may communicate on private networks. Allow it, or your iPhone can't reach this PC."),
+    firewall_note: Some(
+        "The first time this is on, Windows Firewall asks whether Trek may communicate on private networks. Allow it, or your iPhone can't reach this PC.",
+    ),
 
     window_shadow_note: None,
     screen_recording: None,
-    snipping_tool_note: Some("Snipping Tool decides whether a snapshot takes a window, an area or the screen, and Trek saves it as a PNG. Windows asks for no permission to capture the screen."),
+    snipping_tool_note: Some(
+        "Snipping Tool decides whether a snapshot takes a window, an area or the screen, and Trek saves it as a PNG. Windows asks for no permission to capture the screen.",
+    ),
 
-    computer_use_note: Some("Windows asks for no permission: once computer use is on, agents can see the screen, click and type. They can't type into apps running as administrator."),
+    computer_use_note: Some(
+        "Windows asks for no permission: once computer use is on, agents can see the screen, click and type. They can't type into apps running as administrator.",
+    ),
 
     trash: "Recycle Bin",
 
@@ -293,8 +302,14 @@ mod tests {
             ("keep_awake_label", keep_awake_label),
             ("firewall_note", firewall_note.unwrap_or(nothing)),
             ("window_shadow_note", window_shadow_note.unwrap_or(nothing)),
-            ("screen_recording_label", screen_recording.map_or(nothing, |(label, _)| label)),
-            ("screen_recording_note", screen_recording.map_or(nothing, |(_, note)| note)),
+            (
+                "screen_recording_label",
+                screen_recording.map_or(nothing, |(label, _)| label),
+            ),
+            (
+                "screen_recording_note",
+                screen_recording.map_or(nothing, |(_, note)| note),
+            ),
             ("snipping_tool_note", snipping_tool_note.unwrap_or(nothing)),
             ("computer_use_note", computer_use_note.unwrap_or(nothing)),
             ("trash", trash),
@@ -309,8 +324,22 @@ mod tests {
     #[test]
     fn the_windows_table_names_nothing_from_the_mac() {
         for (field, text) in strings(&for_platform(true)) {
-            for word in ["Finder", "Dock", "Keychain", "macOS", "Mac", "Spotlight", "menu bar", "Menu bar", "Homebrew", "Trash"] {
-                assert!(!text.contains(word), "Windows `{field}` still says {word}: {text}");
+            for word in [
+                "Finder",
+                "Dock",
+                "Keychain",
+                "macOS",
+                "Mac",
+                "Spotlight",
+                "menu bar",
+                "Menu bar",
+                "Homebrew",
+                "Trash",
+            ] {
+                assert!(
+                    !text.contains(word),
+                    "Windows `{field}` still says {word}: {text}"
+                );
             }
         }
     }
@@ -318,7 +347,18 @@ mod tests {
     #[test]
     fn the_macos_table_names_nothing_from_windows() {
         for (field, text) in strings(&for_platform(false)) {
-            for word in ["File Explorer", "Taskbar", "taskbar", "Credential Manager", "Windows", "WinGet", "PC", "tray", "Recycle Bin", "Snipping Tool"] {
+            for word in [
+                "File Explorer",
+                "Taskbar",
+                "taskbar",
+                "Credential Manager",
+                "Windows",
+                "WinGet",
+                "PC",
+                "tray",
+                "Recycle Bin",
+                "Snipping Tool",
+            ] {
                 assert!(!text.contains(word), "macOS `{field}` says {word}: {text}");
             }
         }
@@ -329,7 +369,10 @@ mod tests {
         let (mac, win) = (strings(&for_platform(false)), strings(&for_platform(true)));
         for ((field, m), (_, w)) in mac.into_iter().zip(win) {
             assert!(!m.is_empty() && !w.is_empty(), "`{field}` is blank");
-            assert_ne!(m, w, "`{field}` reads the same on both: it needn't be in the table");
+            assert_ne!(
+                m, w,
+                "`{field}` reads the same on both: it needn't be in the table"
+            );
         }
     }
 
@@ -341,30 +384,63 @@ mod tests {
         assert_eq!(w.reveal_in_file_manager, "Reveal in Finder");
         assert_eq!(w.match_system_theme, "Match macOS");
         assert_eq!(w.badge_label, "Dock badge");
-        assert_eq!(w.badge_note, "Count of threads waiting on you, on Trek's Dock icon.");
+        assert_eq!(
+            w.badge_note,
+            "Count of threads waiting on you, on Trek's Dock icon."
+        );
         assert_eq!(w.tray_label, "Menu bar icon");
-        assert_eq!(w.app_icon_note, "Shown in the Dock while Trek runs. Finder and the Dock keep Ember when Trek is closed.");
+        assert_eq!(
+            w.app_icon_note,
+            "Shown in the Dock while Trek runs. Finder and the Dock keep Ember when Trek is closed."
+        );
         assert_eq!(w.your_credential_store, "your Keychain");
         assert_eq!(w.this_computer, "this Mac");
         assert_eq!(w.the_computer, "the Mac");
         assert_eq!(w.keep_awake_label, "Keep the Mac awake while agents work");
-        assert_eq!(w.firewall_note, None, "the Mac's Phone page says nothing of a firewall");
+        assert_eq!(
+            w.firewall_note, None,
+            "the Mac's Phone page says nothing of a firewall"
+        );
         assert_eq!(w.open_in_viewer, "Open in Preview");
         assert_eq!(w.dictate_tip, "Dictate");
-        assert_eq!(w.browser_unavailable, "The embedded browser isn't available on this system.");
+        assert_eq!(
+            w.browser_unavailable,
+            "The embedded browser isn't available on this system."
+        );
         assert_eq!(w.quit_app, "Quit Trek");
         assert_eq!(format!("the {} build", w.build_name), "the Mac build");
-        assert_eq!(w.window_shadow_note, Some("Keep macOS's drop shadow around window snapshots."));
-        assert_eq!(w.screen_recording, Some(("Screen Recording", "macOS asks once; snapshots of other apps need it.")));
-        assert_eq!(w.snipping_tool_note, None, "the Mac's Snapshots page has every row");
-        assert_eq!(w.computer_use_note, None, "the Mac's Tools page has the two permissions");
+        assert_eq!(
+            w.window_shadow_note,
+            Some("Keep macOS's drop shadow around window snapshots.")
+        );
+        assert_eq!(
+            w.screen_recording,
+            Some((
+                "Screen Recording",
+                "macOS asks once; snapshots of other apps need it."
+            ))
+        );
+        assert_eq!(
+            w.snipping_tool_note, None,
+            "the Mac's Snapshots page has every row"
+        );
+        assert_eq!(
+            w.computer_use_note, None,
+            "the Mac's Tools page has the two permissions"
+        );
         assert_eq!(format!("Move to the {}", w.trash), "Move to the Trash");
         assert_eq!(
             w.api_keys_blurb,
             "Pay-as-you-go models outside your subscriptions. Keys live in the macOS Keychain; keys exported in your shell are used automatically."
         );
-        assert_eq!(format!("Saved in {}", w.your_credential_store), "Saved in your Keychain");
-        assert_eq!(format!("Runs on {}, nothing is billed", w.this_computer), "Runs on this Mac, nothing is billed");
+        assert_eq!(
+            format!("Saved in {}", w.your_credential_store),
+            "Saved in your Keychain"
+        );
+        assert_eq!(
+            format!("Runs on {}, nothing is billed", w.this_computer),
+            "Runs on this Mac, nothing is billed"
+        );
     }
 
     #[test]
@@ -374,18 +450,45 @@ mod tests {
         assert_eq!(w.match_system_theme, "Match Windows");
         assert_eq!(w.badge_label, "Taskbar badge");
         assert_eq!(w.tray_label, "System tray icon");
-        assert!(w.firewall_note.is_some_and(|n| n.contains("Windows Firewall") && n.contains("private networks")));
-        assert_eq!(w.open_in_viewer, "Open in default app", "Windows has no Preview, or Quick Look");
+        assert!(
+            w.firewall_note
+                .is_some_and(|n| n.contains("Windows Firewall") && n.contains("private networks"))
+        );
+        assert_eq!(
+            w.open_in_viewer, "Open in default app",
+            "Windows has no Preview, or Quick Look"
+        );
         assert_eq!(w.dictate_tip, "Press Win+H to dictate");
         assert_eq!(w.quit_app, "Exit Trek", "Windows apps exit; a Mac's quit");
         assert_eq!(format!("the {} build", w.build_name), "the Windows build");
-        assert_eq!(w.window_shadow_note, None, "Snipping Tool has no shadow to keep");
-        assert_eq!(w.screen_recording, None, "Windows has no permission to capture the screen");
-        assert!(w.snipping_tool_note.is_some_and(|n| n.contains("Snipping Tool decides") && n.contains("PNG")));
-        assert!(w.computer_use_note.is_some_and(|n| n.contains("asks for no permission")));
-        assert_eq!(format!("Move to the {}", w.trash), "Move to the Recycle Bin");
-        assert_eq!(format!("Saved in {}", w.your_credential_store), "Saved in Windows Credential Manager");
-        assert_eq!(format!("Runs on {}, nothing is billed", w.this_computer), "Runs on this PC, nothing is billed");
+        assert_eq!(
+            w.window_shadow_note, None,
+            "Snipping Tool has no shadow to keep"
+        );
+        assert_eq!(
+            w.screen_recording, None,
+            "Windows has no permission to capture the screen"
+        );
+        assert!(
+            w.snipping_tool_note
+                .is_some_and(|n| n.contains("Snipping Tool decides") && n.contains("PNG"))
+        );
+        assert!(
+            w.computer_use_note
+                .is_some_and(|n| n.contains("asks for no permission"))
+        );
+        assert_eq!(
+            format!("Move to the {}", w.trash),
+            "Move to the Recycle Bin"
+        );
+        assert_eq!(
+            format!("Saved in {}", w.your_credential_store),
+            "Saved in Windows Credential Manager"
+        );
+        assert_eq!(
+            format!("Runs on {}, nothing is billed", w.this_computer),
+            "Runs on this PC, nothing is billed"
+        );
     }
 
     #[test]
@@ -405,7 +508,15 @@ mod tests {
 
     /// What no visible string may spell out: each has a field in the table, so a hard-coded one is
     /// a Finder on a Windows window.
-    const MAC_ONLY: [&str; 7] = ["Finder", "Dock badge", "menu bar icon", "Menu bar icon", "Keychain", "this Mac", "Match macOS"];
+    const MAC_ONLY: [&str; 7] = [
+        "Finder",
+        "Dock badge",
+        "menu bar icon",
+        "Menu bar icon",
+        "Keychain",
+        "this Mac",
+        "Match macOS",
+    ];
 
     /// No wording of the Mac reaches the screen without passing the table: no line of the app's own
     /// code (outside comments, logs, tests and this file) spells one of `MAC_ONLY`. A line that
@@ -420,19 +531,29 @@ mod tests {
                     if path.file_name().is_some_and(|n| n != "tests") {
                         walk(&path, out);
                     }
-                } else if path.extension().is_some_and(|e| e == "rs") && path.file_name().is_some_and(|n| n != "words.rs") {
+                } else if path.extension().is_some_and(|e| e == "rs")
+                    && path.file_name().is_some_and(|n| n != "words.rs")
+                {
                     out.push(path);
                 }
             }
         }
         let mut files = vec![];
-        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
         assert!(files.len() > 50, "found {} files", files.len());
         let mut found = vec![];
         for path in files {
             let text = std::fs::read_to_string(&path).unwrap();
             for (n, line) in text.lines().enumerate() {
-                if line.trim_start().starts_with("#[cfg(test)]") && text.lines().nth(n + 1).is_some_and(|next| next.trim_start().starts_with("mod ")) {
+                if line.trim_start().starts_with("#[cfg(test)]")
+                    && text
+                        .lines()
+                        .nth(n + 1)
+                        .is_some_and(|next| next.trim_start().starts_with("mod "))
+                {
                     break; // the test module closes the file
                 }
                 let code = match line.find("//") {
@@ -440,14 +561,28 @@ mod tests {
                     Some(at) if line[..at].matches('"').count() % 2 == 0 => &line[..at],
                     _ => line,
                 };
-                if line.contains("words: ok") || code.contains("tracing::") || code.trim().is_empty() {
+                if line.contains("words: ok")
+                    || code.contains("tracing::")
+                    || code.trim().is_empty()
+                {
                     continue;
                 }
                 if let Some(word) = MAC_ONLY.iter().find(|w| code.contains(**w)) {
-                    found.push(format!("{}:{}: {word}: {}", path.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap().display(), n + 1, line.trim()));
+                    found.push(format!(
+                        "{}:{}: {word}: {}",
+                        path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                            .unwrap()
+                            .display(),
+                        n + 1,
+                        line.trim()
+                    ));
                 }
             }
         }
-        assert!(found.is_empty(), "Mac wording shown as it is (use crate::words::words()):\n{}", found.join("\n"));
+        assert!(
+            found.is_empty(),
+            "Mac wording shown as it is (use crate::words::words()):\n{}",
+            found.join("\n")
+        );
     }
 }

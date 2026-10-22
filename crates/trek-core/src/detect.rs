@@ -47,11 +47,14 @@ pub fn login_path() -> &'static str {
 #[cfg(unix)]
 fn base_path() -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    shell_output(crate::procs::command(shell).args(["-ilc", "printf %s \"$PATH\""]), LOGIN_SHELL_TIMEOUT)
-        .and_then(|o| String::from_utf8(o).ok())
-        .map(|s| s.lines().last().unwrap_or_default().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("PATH").ok())
+    shell_output(
+        crate::procs::command(shell).args(["-ilc", "printf %s \"$PATH\""]),
+        LOGIN_SHELL_TIMEOUT,
+    )
+    .and_then(|o| String::from_utf8(o).ok())
+    .map(|s| s.lines().last().unwrap_or_default().to_string())
+    .filter(|s| !s.is_empty())
+    .or_else(|| std::env::var("PATH").ok())
 }
 
 /// Windows has no login shell. A GUI app gets the PATH of whatever started it, which can be older
@@ -61,7 +64,13 @@ fn base_path() -> Option<String> {
 fn base_path() -> Option<String> {
     let process = std::env::var("PATH").ok();
     let registry = [registry_path(true), registry_path(false)];
-    Some(process.into_iter().chain(registry.into_iter().flatten()).collect::<Vec<_>>().join(";"))
+    Some(
+        process
+            .into_iter()
+            .chain(registry.into_iter().flatten())
+            .collect::<Vec<_>>()
+            .join(";"),
+    )
 }
 
 /// The `Path` value of the machine's or the user's environment, with its `%VAR%`s expanded.
@@ -69,11 +78,18 @@ fn base_path() -> Option<String> {
 fn registry_path(machine: bool) -> Option<String> {
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
     let (hive, key) = if machine {
-        (HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")
+        (
+            HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        )
     } else {
         (HKEY_CURRENT_USER, "Environment")
     };
-    let raw: String = winreg::RegKey::predef(hive).open_subkey_with_flags(key, KEY_READ).ok()?.get_value("Path").ok()?;
+    let raw: String = winreg::RegKey::predef(hive)
+        .open_subkey_with_flags(key, KEY_READ)
+        .ok()?
+        .get_value("Path")
+        .ok()?;
     Some(expand_env_refs(&raw, |name| std::env::var(name).ok()))
 }
 
@@ -86,7 +102,10 @@ pub(crate) fn expand_env_refs(value: &str, lookup: impl Fn(&str) -> Option<Strin
     while let Some(open) = rest.find('%') {
         out.push_str(&rest[..open]);
         let after = &rest[open + 1..];
-        let known = after.find('%').filter(|&len| len > 0).and_then(|len| Some((lookup(&after[..len])?, len)));
+        let known = after
+            .find('%')
+            .filter(|&len| len > 0)
+            .and_then(|len| Some((lookup(&after[..len])?, len)));
         match known {
             Some((found, len)) => {
                 out.push_str(&found);
@@ -106,9 +125,20 @@ pub(crate) fn expand_env_refs(value: &str, lookup: impl Fn(&str) -> Option<Strin
 /// Folders agent CLIs install into that a minimal PATH lacks.
 #[cfg(unix)]
 fn extra_dirs(home: &Path) -> Vec<PathBuf> {
-    let relative = [".local/bin", ".bun/bin", ".cargo/bin", ".npm-global/bin", ".opencode/bin", ".factory/bin"];
+    let relative = [
+        ".local/bin",
+        ".bun/bin",
+        ".cargo/bin",
+        ".npm-global/bin",
+        ".opencode/bin",
+        ".factory/bin",
+    ];
     let absolute = ["/opt/homebrew/bin", "/usr/local/bin"];
-    relative.iter().map(|d| home.join(d)).chain(absolute.iter().map(PathBuf::from)).collect()
+    relative
+        .iter()
+        .map(|d| home.join(d))
+        .chain(absolute.iter().map(PathBuf::from))
+        .collect()
 }
 
 #[cfg(windows)]
@@ -131,23 +161,44 @@ fn windows_dirs(home: &Path, var: impl Fn(&str) -> Option<std::ffi::OsString>) -
     let roaming = dir("APPDATA").unwrap_or_else(|| home.join(r"AppData\Roaming"));
     let program_data = dir("ProgramData").unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
     let program_files = dir("ProgramFiles").unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
-    let mut dirs: Vec<PathBuf> = [r".local\bin", r".bun\bin", r".cargo\bin", r".opencode\bin", r".factory\bin"].iter().map(|d| home.join(d)).collect();
+    let mut dirs: Vec<PathBuf> = [
+        r".local\bin",
+        r".bun\bin",
+        r".cargo\bin",
+        r".opencode\bin",
+        r".factory\bin",
+    ]
+    .iter()
+    .map(|d| home.join(d))
+    .collect();
     // The vendor installers that add a folder of their own to the user's PATH: Trek's PATH is
     // worked out once, so one installed while Trek runs is found here on the next check.
     // Devin's (`irm https://cli.devin.ai/install.ps1 | iex`), Cursor's, Factory's (`~\bin`).
-    dirs.extend([local.join(r"devin\cli\bin"), local.join("cursor-agent"), home.join("bin")]);
+    dirs.extend([
+        local.join(r"devin\cli\bin"),
+        local.join("cursor-agent"),
+        home.join("bin"),
+    ]);
     dirs.extend([
         // Scoop's shims, for the user and for the machine (`scoop install -g`).
-        dir("SCOOP").unwrap_or_else(|| home.join("scoop")).join("shims"),
-        dir("SCOOP_GLOBAL").unwrap_or_else(|| program_data.join("scoop")).join("shims"),
+        dir("SCOOP")
+            .unwrap_or_else(|| home.join("scoop"))
+            .join("shims"),
+        dir("SCOOP_GLOBAL")
+            .unwrap_or_else(|| program_data.join("scoop"))
+            .join("shims"),
         // WinGet's links to the portable packages it installs, for the user and for the machine.
         local.join(r"Microsoft\WinGet\Links"),
         program_files.join(r"WinGet\Links"),
-        dir("ChocolateyInstall").unwrap_or_else(|| program_data.join("chocolatey")).join("bin"),
+        dir("ChocolateyInstall")
+            .unwrap_or_else(|| program_data.join("chocolatey"))
+            .join("bin"),
         // npm's global prefix, where `claude.cmd` and `codex.cmd` land.
         roaming.join("npm"),
         dir("PNPM_HOME").unwrap_or_else(|| local.join("pnpm")),
-        dir("VOLTA_HOME").unwrap_or_else(|| local.join("Volta")).join("bin"),
+        dir("VOLTA_HOME")
+            .unwrap_or_else(|| local.join("Volta"))
+            .join("bin"),
         // nvm for Windows: the active Node's folder, where its global packages' shims land.
         dir("NVM_SYMLINK").unwrap_or_else(|| PathBuf::from(r"C:\nvm4w\nodejs")),
     ]);
@@ -157,12 +208,18 @@ fn windows_dirs(home: &Path, var: impl Fn(&str) -> Option<std::ffi::OsString>) -
 /// `from` (a PATH string) followed by the `extra_dirs` of `home`, without empty or repeated
 /// entries (Windows paths repeat in any letter case), as one PATH string.
 fn compose_path(from: Option<&str>, home: &Path) -> String {
-    let mut parts: Vec<PathBuf> = from.map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
+    let mut parts: Vec<PathBuf> = from
+        .map(|p| std::env::split_paths(p).collect())
+        .unwrap_or_default();
     parts.extend(extra_dirs(home));
     let mut seen = std::collections::HashSet::new();
     // An entry `join_paths` can't hold (a `"` on Windows) would lose the whole PATH.
-    parts.retain(|p| !p.as_os_str().is_empty() && std::env::join_paths([p]).is_ok() && seen.insert(dedup_key(p)));
-    std::env::join_paths(parts).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
+    parts.retain(|p| {
+        !p.as_os_str().is_empty() && std::env::join_paths([p]).is_ok() && seen.insert(dedup_key(p))
+    });
+    std::env::join_paths(parts)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 #[cfg(unix)]
@@ -172,7 +229,10 @@ fn dedup_key(dir: &Path) -> std::ffi::OsString {
 
 #[cfg(windows)]
 fn dedup_key(dir: &Path) -> std::ffi::OsString {
-    dir.to_string_lossy().trim_end_matches(['\\', '/']).to_lowercase().into()
+    dir.to_string_lossy()
+        .trim_end_matches(['\\', '/'])
+        .to_lowercase()
+        .into()
 }
 
 /// `command`'s stdout, if it's done within `timeout`; otherwise it (and what it started) is killed.
@@ -180,7 +240,12 @@ fn dedup_key(dir: &Path) -> std::ffi::OsString {
 fn shell_output(command: &mut std::process::Command, timeout: Duration) -> Option<Vec<u8>> {
     use std::io::Read as _;
     std::os::unix::process::CommandExt::process_group(command, 0);
-    let mut child = command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().ok()?;
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
     let mut stdout = child.stdout.take()?;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -227,7 +292,10 @@ pub fn which_in(path: &str, binary: &str) -> Option<PathBuf> {
 /// Whether Windows starts `program` through `cmd.exe`: a `.cmd` or `.bat` (npm's `claude.cmd` and
 /// `codex.cmd`), which `std::process::Command` runs as `cmd.exe /c`. Never on macOS.
 pub fn runs_through_cmd(program: &Path) -> bool {
-    cfg!(windows) && program.extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
+    cfg!(windows)
+        && program
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
 }
 
 /// cmd.exe's limit on the command line it's given, in UTF-16 units.
@@ -241,7 +309,10 @@ const CMD_LINE_MAX: usize = 8191;
 /// a secret). The length is what the arguments need at least: a line just short of the limit can
 /// still fail once std's quotes and the shim's own words are added, and then the program's output
 /// is cmd.exe's "The command line is too long."
-pub fn batch_args_problem(program: &Path, args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> Option<String> {
+pub fn batch_args_problem(
+    program: &Path,
+    args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+) -> Option<String> {
     if !runs_through_cmd(program) {
         return None;
     }
@@ -252,13 +323,19 @@ pub fn batch_args_problem(program: &Path, args: impl IntoIterator<Item = impl As
 /// told it. Split on either slash: the path is a Windows one whichever platform asks.
 pub fn script_name(program: &Path) -> String {
     let text = program.to_string_lossy();
-    text.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or(&text).to_string()
+    text.rsplit(['/', '\\'])
+        .find(|s| !s.is_empty())
+        .unwrap_or(&text)
+        .to_string()
 }
 
 /// `batch_args_problem` without asking whether this platform runs `program` through cmd.exe: for a
 /// caller that has decided it will (a command handed to an agent as `cmd /c`), and for tests on
 /// every platform.
-pub fn batch_script_problem(program: &Path, args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> Option<String> {
+pub fn batch_script_problem(
+    program: &Path,
+    args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+) -> Option<String> {
     let name = script_name(program);
     let mut len = program.as_os_str().to_string_lossy().encode_utf16().count();
     for (n, arg) in args.into_iter().enumerate() {
@@ -289,7 +366,9 @@ pub fn is_bare_name_on(command: &str, windows: bool) -> bool {
 /// The first file in `path`'s folders that is one of `candidate_names(binary, pathext)`.
 fn find_in(path: &str, binary: &str, pathext: &str) -> Option<PathBuf> {
     let names = candidate_names(binary, pathext);
-    std::env::split_paths(path).filter(|dir| !dir.as_os_str().is_empty()).find_map(|dir| names.iter().map(|n| dir.join(n)).find(|p| p.is_file()))
+    std::env::split_paths(path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .find_map(|dir| names.iter().map(|n| dir.join(n)).find(|p| p.is_file()))
 }
 
 /// The file names to try for `binary` in one folder, best first. Unix has just the name.
@@ -303,13 +382,26 @@ fn candidate_names(binary: &str, _pathext: &str) -> Vec<String> {
 /// shims), in order, and never bare: Windows can't run a file with no extension.
 #[cfg(windows)]
 fn candidate_names(binary: &str, pathext: &str) -> Vec<String> {
-    let exts: Vec<&str> = pathext.split(';').map(str::trim).filter(|e| e.len() > 1 && e.starts_with('.')).collect();
-    let exts = if exts.is_empty() { vec![".COM", ".EXE", ".BAT", ".CMD"] } else { exts };
+    let exts: Vec<&str> = pathext
+        .split(';')
+        .map(str::trim)
+        .filter(|e| e.len() > 1 && e.starts_with('.'))
+        .collect();
+    let exts = if exts.is_empty() {
+        vec![".COM", ".EXE", ".BAT", ".CMD"]
+    } else {
+        exts
+    };
     let lower = binary.to_ascii_lowercase();
-    if exts.iter().any(|e| lower.ends_with(&e.to_ascii_lowercase())) {
+    if exts
+        .iter()
+        .any(|e| lower.ends_with(&e.to_ascii_lowercase()))
+    {
         return vec![binary.to_string()];
     }
-    exts.iter().map(|e| format!("{binary}{}", e.to_ascii_lowercase())).collect()
+    exts.iter()
+        .map(|e| format!("{binary}{}", e.to_ascii_lowercase()))
+        .collect()
 }
 
 /// OpenCode's command.
@@ -335,13 +427,21 @@ pub async fn version_of(path: &Path) -> Option<String> {
     .ok()?
     .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
-    let line = text.lines().find(|l| !l.trim().is_empty())?.trim().to_string();
+    let line = text
+        .lines()
+        .find(|l| !l.trim().is_empty())?
+        .trim()
+        .to_string();
     Some(line)
 }
 
 async fn cli_agent(agent: AgentId, binary: &str, hint: &str) -> DetectedAgent {
     let name = agent.display_name();
-    let found = if agent == AgentId::OpenCode { opencode() } else { which(binary) };
+    let found = if agent == AgentId::OpenCode {
+        opencode()
+    } else {
+        which(binary)
+    };
     match found {
         Some(path) => {
             let version = version_of(&path).await;
@@ -386,19 +486,36 @@ async fn codex_logged_in(path: &Path) -> bool {
 
 async fn local_server(id: &str) -> DetectedAgent {
     let provider = crate::catalog::direct_provider(id).expect("known provider");
-    let client = reqwest::Client::builder().timeout(Duration::from_millis(1500)).build().unwrap();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(1500))
+        .build()
+        .unwrap();
     let models: Option<Vec<String>> = if id == "ollama" {
         let url = provider.base_url.trim_end_matches("/v1").to_string() + "/api/tags";
         match client.get(url).send().await {
             Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok().map(|v| {
-                v["models"].as_array().into_iter().flatten().filter_map(|m| m["name"].as_str().map(String::from)).collect()
+                v["models"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|m| m["name"].as_str().map(String::from))
+                    .collect()
             }),
             _ => None,
         }
     } else {
-        match client.get(format!("{}/models", provider.base_url)).send().await {
+        match client
+            .get(format!("{}/models", provider.base_url))
+            .send()
+            .await
+        {
             Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok().map(|v| {
-                v["data"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str().map(String::from)).collect()
+                v["data"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|m| m["id"].as_str().map(String::from))
+                    .collect()
             }),
             _ => None,
         }
@@ -408,7 +525,11 @@ async fn local_server(id: &str) -> DetectedAgent {
         name: provider.name.into(),
         path: None,
         version: None,
-        availability: if models.is_some() { Availability::Ready } else { Availability::Offline },
+        availability: if models.is_some() {
+            Availability::Ready
+        } else {
+            Availability::Offline
+        },
         models: models.unwrap_or_default(),
         install_hint: None,
     }
@@ -419,10 +540,22 @@ pub async fn detect_all() -> Vec<DetectedAgent> {
     use futures::future::join_all;
 
     let (claude, codex, opencode, droid) = tokio::join!(
-        cli_agent(AgentId::ClaudeCode, "claude", "npm i -g @anthropic-ai/claude-code"),
+        cli_agent(
+            AgentId::ClaudeCode,
+            "claude",
+            "npm i -g @anthropic-ai/claude-code"
+        ),
         cli_agent(AgentId::Codex, "codex", "npm i -g @openai/codex"),
-        cli_agent(AgentId::OpenCode, OPENCODE, "curl -fsSL https://opencode.ai/install | bash"),
-        cli_agent(AgentId::Droid, "droid", "curl -fsSL https://app.factory.ai/cli | sh"),
+        cli_agent(
+            AgentId::OpenCode,
+            OPENCODE,
+            "curl -fsSL https://opencode.ai/install | bash"
+        ),
+        cli_agent(
+            AgentId::Droid,
+            "droid",
+            "curl -fsSL https://app.factory.ai/cli | sh"
+        ),
     );
     let mut codex = codex;
     if let (Availability::Ready, Some(path)) = (&codex.availability, &codex.path) {
@@ -431,8 +564,19 @@ pub async fn detect_all() -> Vec<DetectedAgent> {
         }
     }
 
-    let acp = join_all(ACP_AGENTS.iter().map(|a| cli_agent(AgentId::Acp(a.id.into()), a.binary, a.install_hint))).await;
-    let local = join_all(DIRECT_PROVIDERS.iter().filter(|p| p.local).map(|p| local_server(p.id))).await;
+    let acp = join_all(
+        ACP_AGENTS
+            .iter()
+            .map(|a| cli_agent(AgentId::Acp(a.id.into()), a.binary, a.install_hint)),
+    )
+    .await;
+    let local = join_all(
+        DIRECT_PROVIDERS
+            .iter()
+            .filter(|p| p.local)
+            .map(|p| local_server(p.id)),
+    )
+    .await;
 
     let mut all = vec![claude, codex, opencode, droid];
     all.extend(acp);
@@ -448,7 +592,11 @@ pub fn added_agent(a: &crate::registry::AddedAgent) -> DetectedAgent {
     DetectedAgent {
         agent: AgentId::Acp(a.id.clone()),
         name: a.name.clone(),
-        availability: if path.is_some() { Availability::Ready } else { Availability::NotInstalled },
+        availability: if path.is_some() {
+            Availability::Ready
+        } else {
+            Availability::NotInstalled
+        },
         install_hint: path.is_none().then(|| a.missing()),
         path,
         version: a.version.clone(),
@@ -460,7 +608,10 @@ pub fn added_agent(a: &crate::registry::AddedAgent) -> DetectedAgent {
 pub fn env_api_keys() -> Vec<&'static str> {
     DIRECT_PROVIDERS
         .iter()
-        .filter(|p| p.env_key.is_some_and(|k| std::env::var(k).is_ok_and(|v| !v.is_empty())))
+        .filter(|p| {
+            p.env_key
+                .is_some_and(|k| std::env::var(k).is_ok_and(|v| !v.is_empty()))
+        })
         .map(|p| p.id)
         .collect()
 }
@@ -477,7 +628,10 @@ mod tests {
         let out = shell_output(fixture().args(["sleep", "30"]), Duration::from_millis(200));
         assert_eq!(out, None);
         assert!(started.elapsed() < Duration::from_secs(5));
-        let out = shell_output(fixture().args(["print", "/usr/bin"]), Duration::from_secs(5));
+        let out = shell_output(
+            fixture().args(["print", "/usr/bin"]),
+            Duration::from_secs(5),
+        );
         assert_eq!(out.as_deref(), Some(&b"/usr/bin"[..]));
     }
 }
@@ -509,7 +663,10 @@ mod tests_paths {
     }
 
     fn join(dirs: &[&Path]) -> String {
-        std::env::join_paths(dirs).unwrap().to_string_lossy().into_owned()
+        std::env::join_paths(dirs)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
     }
 
     fn entries(path: &str) -> Vec<PathBuf> {
@@ -532,7 +689,10 @@ mod tests_paths {
     #[test]
     fn no_path_leaves_just_the_extras() {
         let home = TempDir::new();
-        assert_eq!(entries(&compose_path(None, home.path())), extra_dirs(home.path()));
+        assert_eq!(
+            entries(&compose_path(None, home.path())),
+            extra_dirs(home.path())
+        );
     }
 
     #[test]
@@ -540,7 +700,12 @@ mod tests_paths {
         let home = TempDir::new();
         let (a, b) = (home.path().join("a"), home.path().join("b"));
         let sep = if cfg!(windows) { ";" } else { ":" };
-        let messy = format!("{sep}{}{sep}{sep}{}{sep}{}{sep}", a.display(), b.display(), a.display());
+        let messy = format!(
+            "{sep}{}{sep}{sep}{}{sep}{}{sep}",
+            a.display(),
+            b.display(),
+            a.display()
+        );
         let got = entries(&compose_path(Some(&messy), home.path()));
         assert_eq!(&got[..2], [a, b]);
         assert_eq!(got.len(), 2 + extra_dirs(home.path()).len());
@@ -555,7 +720,12 @@ mod tests_paths {
             "a:b:/home/me/.local/bin:/home/me/.bun/bin:/home/me/.cargo/bin:/home/me/.npm-global/bin:/home/me/.opencode/bin:/home/me/.factory/bin:/opt/homebrew/bin:/usr/local/bin"
         );
         // A folder already on it isn't added again.
-        assert_eq!(compose_path(Some("/usr/local/bin:a"), home).matches("/usr/local/bin").count(), 1);
+        assert_eq!(
+            compose_path(Some("/usr/local/bin:a"), home)
+                .matches("/usr/local/bin")
+                .count(),
+            1
+        );
     }
 
     #[cfg(windows)]
@@ -565,9 +735,21 @@ mod tests_paths {
         let got = compose_path(Some(r"C:\Tools;c:\tools\;C:\Users\ME\.CARGO\BIN"), home);
         assert!(got.starts_with(r"C:\Tools;"), "{got}");
         assert_eq!(got.to_lowercase().matches(r"c:\tools").count(), 1, "{got}");
-        assert_eq!(got.to_lowercase().matches(r".cargo\bin").count(), 1, "{got}");
-        for dir in [r".local\bin", r".bun\bin", r".opencode\bin", r".factory\bin"] {
-            assert!(got.contains(&format!(r"C:\Users\me\{dir}")), "{dir} in {got}");
+        assert_eq!(
+            got.to_lowercase().matches(r".cargo\bin").count(),
+            1,
+            "{got}"
+        );
+        for dir in [
+            r".local\bin",
+            r".bun\bin",
+            r".opencode\bin",
+            r".factory\bin",
+        ] {
+            assert!(
+                got.contains(&format!(r"C:\Users\me\{dir}")),
+                "{dir} in {got}"
+            );
         }
         assert!(!got.contains(";;") && !got.ends_with(';'), "{got}");
     }
@@ -575,8 +757,15 @@ mod tests_paths {
     /// `windows_dirs` with only these variables set.
     #[cfg(windows)]
     fn windows_dirs_with(vars: &[(&str, &str)]) -> Vec<String> {
-        let lookup = |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| std::ffi::OsString::from(v));
-        windows_dirs(Path::new(r"C:\Users\me"), lookup).iter().map(|d| d.display().to_string()).collect()
+        let lookup = |name: &str| {
+            vars.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| std::ffi::OsString::from(v))
+        };
+        windows_dirs(Path::new(r"C:\Users\me"), lookup)
+            .iter()
+            .map(|d| d.display().to_string())
+            .collect()
     }
 
     #[cfg(windows)]
@@ -612,8 +801,14 @@ mod tests_paths {
         );
         // With nothing set, the profile folders are found under home.
         let bare = windows_dirs_with(&[]);
-        assert!(bare.contains(&r"C:\Users\me\AppData\Roaming\npm".to_string()), "{bare:?}");
-        assert!(bare.contains(&r"C:\Users\me\AppData\Local\Microsoft\WinGet\Links".to_string()), "{bare:?}");
+        assert!(
+            bare.contains(&r"C:\Users\me\AppData\Roaming\npm".to_string()),
+            "{bare:?}"
+        );
+        assert!(
+            bare.contains(&r"C:\Users\me\AppData\Local\Microsoft\WinGet\Links".to_string()),
+            "{bare:?}"
+        );
     }
 
     #[cfg(windows)]
@@ -628,15 +823,31 @@ mod tests_paths {
             ("VOLTA_HOME", r"D:\volta"),
             ("NVM_SYMLINK", r"D:\nodejs"),
         ]);
-        for want in [r"D:\scoop\shims", r"E:\scoop-global\shims", r"D:\choco\bin", r"D:\pnpm-home", r"D:\volta\bin", r"D:\nodejs", r"D:\Local\Microsoft\WinGet\Links"] {
+        for want in [
+            r"D:\scoop\shims",
+            r"E:\scoop-global\shims",
+            r"D:\choco\bin",
+            r"D:\pnpm-home",
+            r"D:\volta\bin",
+            r"D:\nodejs",
+            r"D:\Local\Microsoft\WinGet\Links",
+        ] {
             assert!(got.contains(&want.to_string()), "{want} in {got:?}");
         }
-        for default in [r"C:\Users\me\scoop\shims", r"C:\ProgramData\chocolatey\bin", r"C:\nvm4w\nodejs"] {
+        for default in [
+            r"C:\Users\me\scoop\shims",
+            r"C:\ProgramData\chocolatey\bin",
+            r"C:\nvm4w\nodejs",
+        ] {
             assert!(!got.contains(&default.to_string()), "{default} in {got:?}");
         }
         // A relative value isn't a folder to trust: the default stands.
         let got = windows_dirs_with(&[("SCOOP", r"scoop"), ("NVM_SYMLINK", "")]);
-        assert!(got.contains(&r"C:\Users\me\scoop\shims".to_string()) && got.contains(&r"C:\nvm4w\nodejs".to_string()), "{got:?}");
+        assert!(
+            got.contains(&r"C:\Users\me\scoop\shims".to_string())
+                && got.contains(&r"C:\nvm4w\nodejs".to_string()),
+            "{got:?}"
+        );
     }
 
     /// Where Claude's own installer puts `claude.exe` comes before npm's `claude.cmd`.
@@ -646,13 +857,28 @@ mod tests_paths {
         let got = windows_dirs_with(&[]);
         let at = |d: &str| got.iter().position(|g| g.ends_with(d)).unwrap();
         assert!(at(r".local\bin") < at(r"Roaming\npm"), "{got:?}");
-        assert!(at(r"scoop\shims") < at(r"Roaming\npm") && at(r"chocolatey\bin") < at(r"Roaming\npm"), "{got:?}");
+        assert!(
+            at(r"scoop\shims") < at(r"Roaming\npm") && at(r"chocolatey\bin") < at(r"Roaming\npm"),
+            "{got:?}"
+        );
     }
 
     #[test]
     fn only_batch_scripts_on_windows_run_through_cmd() {
-        for (name, batch) in [("claude.cmd", true), ("x.BAT", true), (r"C:\a b\Codex.Cmd", true), ("claude.exe", false), ("claude", false), ("cmd", false), ("x.cmd.exe", false)] {
-            assert_eq!(runs_through_cmd(Path::new(name)), cfg!(windows) && batch, "{name}");
+        for (name, batch) in [
+            ("claude.cmd", true),
+            ("x.BAT", true),
+            (r"C:\a b\Codex.Cmd", true),
+            ("claude.exe", false),
+            ("claude", false),
+            ("cmd", false),
+            ("x.cmd.exe", false),
+        ] {
+            assert_eq!(
+                runs_through_cmd(Path::new(name)),
+                cfg!(windows) && batch,
+                "{name}"
+            );
         }
     }
 
@@ -662,19 +888,34 @@ mod tests_paths {
         let awkward = ["line\nbreak", "cr\r", long.as_str(), "\" & %PATH% ^"];
         assert_eq!(batch_args_problem(Path::new("claude.exe"), awkward), None);
         assert_eq!(batch_args_problem(Path::new("claude"), awkward), None);
-        assert_eq!(batch_args_problem(Path::new("claude.cmd"), ["\" & %PATH% ^", "", "日本語"]), None);
+        assert_eq!(
+            batch_args_problem(Path::new("claude.cmd"), ["\" & %PATH% ^", "", "日本語"]),
+            None
+        );
     }
 
     #[test]
     fn a_name_is_not_a_path() {
         for name in ["npx", "my-agent", "agent.exe", "npx.cmd"] {
-            assert!(is_bare_name_on(name, true) && is_bare_name_on(name, false), "{name}");
+            assert!(
+                is_bare_name_on(name, true) && is_bare_name_on(name, false),
+                "{name}"
+            );
         }
         for path in ["/opt/x/agent", "./agent", "bin/agent", "D:/x/agent"] {
-            assert!(!is_bare_name_on(path, true) && !is_bare_name_on(path, false), "{path}");
+            assert!(
+                !is_bare_name_on(path, true) && !is_bare_name_on(path, false),
+                "{path}"
+            );
         }
         // These are paths only where `\` and a drive colon mean something.
-        for path in [r"C:\tools\agent.exe", r".\agent.exe", r"\\server\share\agent", r"C:agent", "C:agent.exe"] {
+        for path in [
+            r"C:\tools\agent.exe",
+            r".\agent.exe",
+            r"\\server\share\agent",
+            r"C:agent",
+            "C:agent.exe",
+        ] {
             assert!(!is_bare_name_on(path, true), "{path}");
         }
         assert!(is_bare_name_on(r"odd\name", false));
@@ -685,27 +926,50 @@ mod tests_paths {
     #[test]
     fn the_batch_check_can_be_asked_on_any_platform() {
         let said = batch_script_problem(Path::new("npx.cmd"), ["-y", "a\nb"]).unwrap();
-        assert!(said.starts_with("npx.cmd is a batch script") && said.contains("argument 2"), "{said}");
+        assert!(
+            said.starts_with("npx.cmd is a batch script") && said.contains("argument 2"),
+            "{said}"
+        );
         // Named by its file name on every platform, even where `\` isn't a separator.
-        let said = batch_script_problem(Path::new(r"C:\Program Files\nodejs\npx.cmd"), ["a\nb"]).unwrap();
+        let said =
+            batch_script_problem(Path::new(r"C:\Program Files\nodejs\npx.cmd"), ["a\nb"]).unwrap();
         assert!(said.starts_with("npx.cmd is a batch script"), "{said}");
         assert_eq!(script_name(Path::new("D:/tools/run.cmd")), "run.cmd");
         assert_eq!(script_name(Path::new("npx.cmd")), "npx.cmd");
-        assert_eq!(batch_script_problem(Path::new("npx.cmd"), ["-y", "ok"]), None);
-        assert_eq!(batch_args_problem(Path::new("npx.cmd"), ["-y", "a\nb"]).is_some(), cfg!(windows));
+        assert_eq!(
+            batch_script_problem(Path::new("npx.cmd"), ["-y", "ok"]),
+            None
+        );
+        assert_eq!(
+            batch_args_problem(Path::new("npx.cmd"), ["-y", "a\nb"]).is_some(),
+            cfg!(windows)
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn a_batch_script_can_t_take_a_line_break_or_a_line_over_cmd_s_limit() {
         let cmd = Path::new(r"C:\Users\me\AppData\Roaming\npm\claude.cmd");
-        let said = batch_args_problem(cmd, ["-p", "--append-system-prompt", "secret one\nsecret two"]).unwrap();
-        assert!(said.starts_with("claude.cmd is a batch script") && said.contains("argument 3"), "{said}");
-        assert!(!said.contains("secret"), "the argument isn't repeated: {said}");
+        let said = batch_args_problem(
+            cmd,
+            ["-p", "--append-system-prompt", "secret one\nsecret two"],
+        )
+        .unwrap();
+        assert!(
+            said.starts_with("claude.cmd is a batch script") && said.contains("argument 3"),
+            "{said}"
+        );
+        assert!(
+            !said.contains("secret"),
+            "the argument isn't repeated: {said}"
+        );
         assert!(batch_args_problem(cmd, ["a\rb"]).is_some());
         let said = batch_args_problem(cmd, ["-p", "x".repeat(9000).as_str()]).unwrap();
         assert!(said.contains("over cmd.exe's limit of 8191"), "{said}");
-        assert_eq!(batch_args_problem(cmd, ["-p", "x".repeat(4000).as_str()]), None);
+        assert_eq!(
+            batch_args_problem(cmd, ["-p", "x".repeat(4000).as_str()]),
+            None
+        );
         // `.bat` too, in any case.
         assert!(batch_args_problem(Path::new("run.BAT"), ["\n"]).is_some());
     }
@@ -715,7 +979,10 @@ mod tests_paths {
     fn a_quoted_windows_entry_with_a_semicolon_survives() {
         let got = compose_path(Some(r#""C:\a;b";C:\c"#), Path::new(r"C:\Users\me"));
         let got = entries(&got);
-        assert_eq!(&got[..2], [PathBuf::from(r"C:\a;b"), PathBuf::from(r"C:\c")]);
+        assert_eq!(
+            &got[..2],
+            [PathBuf::from(r"C:\a;b"), PathBuf::from(r"C:\c")]
+        );
     }
 
     #[test]
@@ -725,9 +992,15 @@ mod tests_paths {
             "A" => Some("x".to_string()),
             _ => None,
         };
-        assert_eq!(expand_env_refs(r"%SystemRoot%\system32;%SystemRoot%", lookup), r"C:\Windows\system32;C:\Windows");
+        assert_eq!(
+            expand_env_refs(r"%SystemRoot%\system32;%SystemRoot%", lookup),
+            r"C:\Windows\system32;C:\Windows"
+        );
         // Unknown names, lone and empty `%`s stay as written; a failed reference doesn't swallow the next.
-        assert_eq!(expand_env_refs("%NOPE%;100%;%%;%A%", lookup), "%NOPE%;100%;%%;x");
+        assert_eq!(
+            expand_env_refs("%NOPE%;100%;%%;%A%", lookup),
+            "%NOPE%;100%;%%;x"
+        );
         assert_eq!(expand_env_refs("%NOPE%A%", lookup), "%NOPEx");
         assert_eq!(expand_env_refs("plain", lookup), "plain");
     }
@@ -745,7 +1018,8 @@ mod tests_paths {
         let file = dir.join(name);
         std::fs::write(&file, "").unwrap();
         #[cfg(unix)]
-        std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
         file
     }
 
@@ -754,8 +1028,14 @@ mod tests_paths {
         let (first, second) = (TempDir::new(), TempDir::new());
         let tool = touch_executable(second.path(), tool_name());
         let path = join(&[first.path(), second.path()]);
-        assert_eq!(find_in(&path, "tool", ".COM;.EXE;.BAT;.CMD"), Some(tool.clone()));
-        assert_eq!(find_in(&path, "tool", "").unwrap().file_name(), tool.file_name());
+        assert_eq!(
+            find_in(&path, "tool", ".COM;.EXE;.BAT;.CMD"),
+            Some(tool.clone())
+        );
+        assert_eq!(
+            find_in(&path, "tool", "").unwrap().file_name(),
+            tool.file_name()
+        );
         assert_eq!(find_in(&path, "missing", ".COM;.EXE;.BAT;.CMD"), None);
         assert_eq!(find_in("", "tool", ""), None);
     }
@@ -765,7 +1045,10 @@ mod tests_paths {
         let (first, second) = (TempDir::new(), TempDir::new());
         let wanted = touch_executable(first.path(), tool_name());
         touch_executable(second.path(), tool_name());
-        assert_eq!(find_in(&join(&[first.path(), second.path()]), "tool", ""), Some(wanted));
+        assert_eq!(
+            find_in(&join(&[first.path(), second.path()]), "tool", ""),
+            Some(wanted)
+        );
     }
 
     #[cfg(windows)]
@@ -773,30 +1056,58 @@ mod tests_paths {
     fn pathext_decides_between_extensions_and_case_does_not_matter() {
         let dir = TempDir::new();
         let path = join(&[dir.path()]);
-        let name = |p: Option<PathBuf>| p.map(|p| p.file_name().unwrap().to_string_lossy().to_lowercase());
+        let name =
+            |p: Option<PathBuf>| p.map(|p| p.file_name().unwrap().to_string_lossy().to_lowercase());
         let pathext = ".COM;.EXE;.BAT;.CMD";
 
         touch_executable(dir.path(), "tool.cmd");
-        assert_eq!(name(find_in(&path, "tool", pathext)), Some("tool.cmd".into()));
-        assert_eq!(name(find_in(&path, "TOOL", pathext)), Some("tool.cmd".into()));
-        assert_eq!(name(find_in(&path, "tool", ".cmd")), Some("tool.cmd".into()));
+        assert_eq!(
+            name(find_in(&path, "tool", pathext)),
+            Some("tool.cmd".into())
+        );
+        assert_eq!(
+            name(find_in(&path, "TOOL", pathext)),
+            Some("tool.cmd".into())
+        );
+        assert_eq!(
+            name(find_in(&path, "tool", ".cmd")),
+            Some("tool.cmd".into())
+        );
         // An explicit extension is tried as given, in any case.
-        assert_eq!(name(find_in(&path, "tool.cmd", pathext)), Some("tool.cmd".into()));
-        assert_eq!(name(find_in(&path, "Tool.CMD", pathext)), Some("tool.cmd".into()));
+        assert_eq!(
+            name(find_in(&path, "tool.cmd", pathext)),
+            Some("tool.cmd".into())
+        );
+        assert_eq!(
+            name(find_in(&path, "Tool.CMD", pathext)),
+            Some("tool.cmd".into())
+        );
         assert_eq!(find_in(&path, "tool.exe", pathext), None);
 
         // npm's extensionless shell script beside `claude.cmd` isn't something Windows can run.
         touch_executable(dir.path(), "shim");
         assert_eq!(find_in(&path, "shim", pathext), None);
         touch_executable(dir.path(), "shim.cmd");
-        assert_eq!(name(find_in(&path, "shim", pathext)), Some("shim.cmd".into()));
+        assert_eq!(
+            name(find_in(&path, "shim", pathext)),
+            Some("shim.cmd".into())
+        );
 
         // PATHEXT order, not the folder's: `.exe` before `.cmd`, and the reverse order reverses it.
         touch_executable(dir.path(), "tool.exe");
-        assert_eq!(name(find_in(&path, "tool", pathext)), Some("tool.exe".into()));
-        assert_eq!(name(find_in(&path, "tool", ".CMD;.EXE")), Some("tool.cmd".into()));
+        assert_eq!(
+            name(find_in(&path, "tool", pathext)),
+            Some("tool.exe".into())
+        );
+        assert_eq!(
+            name(find_in(&path, "tool", ".CMD;.EXE")),
+            Some("tool.cmd".into())
+        );
         // No usable PATHEXT falls back to the default four.
         assert_eq!(name(find_in(&path, "tool", "")), Some("tool.exe".into()));
-        assert_eq!(name(find_in(&path, "tool", ";;nonsense")), Some("tool.exe".into()));
+        assert_eq!(
+            name(find_in(&path, "tool", ";;nonsense")),
+            Some("tool.exe".into())
+        );
     }
 }

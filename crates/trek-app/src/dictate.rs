@@ -48,9 +48,16 @@ mod imp {
     use objc2::AllocAnyThread as _;
     use objc2::rc::Retained;
     use objc2::runtime::Bool;
-    use objc2_avf_audio::{AVAudioApplication, AVAudioApplicationRecordPermission, AVAudioCommonFormat, AVAudioEngine, AVAudioFormat, AVAudioPCMBuffer, AVAudioRecorder, AVAudioTime};
+    use objc2_avf_audio::{
+        AVAudioApplication, AVAudioApplicationRecordPermission, AVAudioCommonFormat, AVAudioEngine,
+        AVAudioFormat, AVAudioPCMBuffer, AVAudioRecorder, AVAudioTime,
+    };
     use objc2_foundation::{NSBundle, NSError, NSString, NSURL, ns_string};
-    use objc2_speech::{SFSpeechAudioBufferRecognitionRequest, SFSpeechRecognitionRequest, SFSpeechRecognitionResult, SFSpeechRecognitionTask, SFSpeechRecognizer, SFSpeechRecognizerAuthorizationStatus, SFSpeechURLRecognitionRequest};
+    use objc2_speech::{
+        SFSpeechAudioBufferRecognitionRequest, SFSpeechRecognitionRequest,
+        SFSpeechRecognitionResult, SFSpeechRecognitionTask, SFSpeechRecognizer,
+        SFSpeechRecognizerAuthorizationStatus, SFSpeechURLRecognitionRequest,
+    };
     use std::path::PathBuf;
     use std::ptr::NonNull;
     use std::sync::Arc;
@@ -69,8 +76,11 @@ mod imp {
             return false;
         }
         let info = NSBundle::mainBundle();
-        info.objectForInfoDictionaryKey(ns_string!("NSMicrophoneUsageDescription")).is_some()
-            && info.objectForInfoDictionaryKey(ns_string!("NSSpeechRecognitionUsageDescription")).is_some()
+        info.objectForInfoDictionaryKey(ns_string!("NSMicrophoneUsageDescription"))
+            .is_some()
+            && info
+                .objectForInfoDictionaryKey(ns_string!("NSSpeechRecognitionUsageDescription"))
+                .is_some()
     }
 
     /// `reply` hears `Ok` once the mic and Speech are both allowed, or why they aren't. The
@@ -84,7 +94,10 @@ mod imp {
             match AVAudioApplication::sharedInstance().recordPermission() {
                 p if p == AVAudioApplicationRecordPermission::Granted => speech_permission(reply),
                 p if p == AVAudioApplicationRecordPermission::Denied => {
-                    let _ = reply.try_send(Err("Trek has no microphone access — allow it in System Settings › Privacy.".into()));
+                    let _ = reply.try_send(Err(
+                        "Trek has no microphone access — allow it in System Settings › Privacy."
+                            .into(),
+                    ));
                 }
                 _ => {
                     let again = reply.clone();
@@ -92,7 +105,8 @@ mod imp {
                         if granted.as_bool() {
                             speech_permission(again.clone());
                         } else {
-                            let _ = again.try_send(Err("Trek needs the microphone to dictate.".into()));
+                            let _ =
+                                again.try_send(Err("Trek needs the microphone to dictate.".into()));
                         }
                     });
                     AVAudioApplication::requestRecordPermissionWithCompletionHandler(&block);
@@ -137,10 +151,19 @@ mod imp {
     enum Source {
         /// The engine's input tap feeds `request`; `level` is the loudest since last read, as
         /// f32 bits (non-negative floats order as their bits do, so `fetch_max` works).
-        Live { engine: Retained<AVAudioEngine>, request: Retained<SFSpeechAudioBufferRecognitionRequest>, level: Arc<AtomicU32>, open: bool },
+        Live {
+            engine: Retained<AVAudioEngine>,
+            request: Retained<SFSpeechAudioBufferRecognitionRequest>,
+            level: Arc<AtomicU32>,
+            open: bool,
+        },
         /// The fallback: a recording to `file`, transcribed once it stops. `ours`: `start`
         /// made the file and Drop removes it (`transcribe_file` borrows the caller's).
-        File { recorder: Option<Retained<AVAudioRecorder>>, file: PathBuf, ours: bool },
+        File {
+            recorder: Option<Retained<AVAudioRecorder>>,
+            file: PathBuf,
+            ours: bool,
+        },
     }
 
     impl Dictation {
@@ -152,8 +175,12 @@ mod imp {
         /// How loud the mic has been since the last call, 0 to 1 (0 once it's off).
         pub fn level(&self) -> f32 {
             match &self.source {
-                Source::Live { level, open: true, .. } => f32::from_bits(level.swap(0, Ordering::Relaxed)),
-                Source::File { recorder: Some(r), .. } => unsafe {
+                Source::Live {
+                    level, open: true, ..
+                } => f32::from_bits(level.swap(0, Ordering::Relaxed)),
+                Source::File {
+                    recorder: Some(r), ..
+                } => unsafe {
                     r.updateMeters();
                     loudness_db(r.averagePowerForChannel(0))
                 },
@@ -164,7 +191,12 @@ mod imp {
         /// Stop the mic; the take's text follows as [`Heard::Final`] (or `Failed`).
         pub fn finish(&mut self) {
             match &mut self.source {
-                Source::Live { engine, request, open, .. } => {
+                Source::Live {
+                    engine,
+                    request,
+                    open,
+                    ..
+                } => {
                     if std::mem::take(open) {
                         unsafe {
                             engine.inputNode().removeTapOnBus(0);
@@ -174,7 +206,9 @@ mod imp {
                     }
                 }
                 Source::File { recorder, file, .. } => {
-                    let Some(recorder) = recorder.take() else { return };
+                    let Some(recorder) = recorder.take() else {
+                        return;
+                    };
                     unsafe { recorder.stop() };
                     match transcribe_task(file, self.heard.clone()) {
                         Ok(task) => self.task = Some(task),
@@ -195,7 +229,12 @@ mod imp {
                 unsafe { task.cancel() };
             }
             match &mut self.source {
-                Source::Live { engine, request, open, .. } => {
+                Source::Live {
+                    engine,
+                    request,
+                    open,
+                    ..
+                } => {
                     if std::mem::take(open) {
                         unsafe {
                             engine.inputNode().removeTapOnBus(0);
@@ -204,7 +243,11 @@ mod imp {
                         }
                     }
                 }
-                Source::File { recorder, file, ours } => {
+                Source::File {
+                    recorder,
+                    file,
+                    ours,
+                } => {
                     if let Some(recorder) = recorder.take() {
                         unsafe { recorder.stop() };
                     }
@@ -222,15 +265,29 @@ mod imp {
     #[cfg(feature = "shots")]
     pub fn transcribe_file(file: PathBuf, heard: Sender<Heard>) -> Result<Dictation, String> {
         let task = transcribe_task(&file, heard.clone())?;
-        Ok(Dictation { source: Source::File { recorder: None, file, ours: false }, task: Some(task), heard })
+        Ok(Dictation {
+            source: Source::File {
+                recorder: None,
+                file,
+                ours: false,
+            },
+            task: Some(task),
+            heard,
+        })
     }
 
     /// The recognizer for the user's language, if Speech has one ready.
     fn recognizer() -> Result<Retained<SFSpeechRecognizer>, String> {
-        let missing = || format!("Speech recognition isn't available on {}.", crate::words::words().this_computer);
+        let missing = || {
+            format!(
+                "Speech recognition isn't available on {}.",
+                crate::words::words().this_computer
+            )
+        };
         unsafe {
             // `init` is failable (no supported locale); `new` would hand nil to Retained.
-            let recognizer = SFSpeechRecognizer::init(SFSpeechRecognizer::alloc()).ok_or_else(missing)?;
+            let recognizer =
+                SFSpeechRecognizer::init(SFSpeechRecognizer::alloc()).ok_or_else(missing)?;
             if !recognizer.isAvailable() {
                 return Err(missing());
             }
@@ -239,27 +296,44 @@ mod imp {
     }
 
     /// Start `request` on `recognizer`; every result and the failure go to `heard`.
-    fn recognize(recognizer: &SFSpeechRecognizer, request: &SFSpeechRecognitionRequest, heard: Sender<Heard>) -> Retained<SFSpeechRecognitionTask> {
+    fn recognize(
+        recognizer: &SFSpeechRecognizer,
+        request: &SFSpeechRecognitionRequest,
+        heard: Sender<Heard>,
+    ) -> Retained<SFSpeechRecognitionTask> {
         unsafe {
             request.setAddsPunctuation(true);
-            let block = RcBlock::new(move |result: *mut SFSpeechRecognitionResult, error: *mut NSError| {
-                if !result.is_null() {
-                    let text = (*result).bestTranscription().formattedString().to_string();
-                    let _ = heard.try_send(if (*result).isFinal() { Heard::Final(text) } else { Heard::Partial(text) });
-                } else if !error.is_null() {
-                    let _ = heard.try_send(Heard::Failed((*error).localizedDescription().to_string()));
-                }
-            });
+            let block = RcBlock::new(
+                move |result: *mut SFSpeechRecognitionResult, error: *mut NSError| {
+                    if !result.is_null() {
+                        let text = (*result).bestTranscription().formattedString().to_string();
+                        let _ = heard.try_send(if (*result).isFinal() {
+                            Heard::Final(text)
+                        } else {
+                            Heard::Partial(text)
+                        });
+                    } else if !error.is_null() {
+                        let _ = heard
+                            .try_send(Heard::Failed((*error).localizedDescription().to_string()));
+                    }
+                },
+            );
             recognizer.recognitionTaskWithRequest_resultHandler(request, &block)
         }
     }
 
     /// Speech over `file`: `heard` gets the transcription, or why it failed.
-    fn transcribe_task(file: &std::path::Path, heard: Sender<Heard>) -> Result<Retained<SFSpeechRecognitionTask>, String> {
+    fn transcribe_task(
+        file: &std::path::Path,
+        heard: Sender<Heard>,
+    ) -> Result<Retained<SFSpeechRecognitionTask>, String> {
         let recognizer = recognizer()?;
         unsafe {
             let url = NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()));
-            let request = SFSpeechURLRecognitionRequest::initWithURL(SFSpeechURLRecognitionRequest::alloc(), &url);
+            let request = SFSpeechURLRecognitionRequest::initWithURL(
+                SFSpeechURLRecognitionRequest::alloc(),
+                &url,
+            );
             request.setShouldReportPartialResults(false);
             Ok(recognize(&recognizer, &request, heard))
         }
@@ -297,40 +371,62 @@ mod imp {
             let tap = {
                 let request = request.clone();
                 let level = level.clone();
-                RcBlock::new(move |buffer: NonNull<AVAudioPCMBuffer>, _: NonNull<AVAudioTime>| {
-                    let buffer = buffer.as_ref();
-                    request.appendAudioPCMBuffer(buffer);
-                    let channels = buffer.floatChannelData();
-                    if !channels.is_null() {
-                        let frames = buffer.frameLength() as usize;
-                        let stride = buffer.stride().max(1);
-                        let first = (*channels).as_ptr();
-                        // The first channel, in place: this runs on the audio thread.
-                        let heard = if stride == 1 {
-                            loudness(std::slice::from_raw_parts(first, frames))
-                        } else {
-                            let square = (0..frames).map(|i| *first.add(i * stride)).map(|s| s * s).sum::<f32>();
-                            loudness_db(10. * (square / frames.max(1) as f32).max(1e-18).log10())
-                        };
-                        level.fetch_max(heard.to_bits(), Ordering::Relaxed);
-                    }
-                })
+                RcBlock::new(
+                    move |buffer: NonNull<AVAudioPCMBuffer>, _: NonNull<AVAudioTime>| {
+                        let buffer = buffer.as_ref();
+                        request.appendAudioPCMBuffer(buffer);
+                        let channels = buffer.floatChannelData();
+                        if !channels.is_null() {
+                            let frames = buffer.frameLength() as usize;
+                            let stride = buffer.stride().max(1);
+                            let first = (*channels).as_ptr();
+                            // The first channel, in place: this runs on the audio thread.
+                            let heard = if stride == 1 {
+                                loudness(std::slice::from_raw_parts(first, frames))
+                            } else {
+                                let square = (0..frames)
+                                    .map(|i| *first.add(i * stride))
+                                    .map(|s| s * s)
+                                    .sum::<f32>();
+                                loudness_db(
+                                    10. * (square / frames.max(1) as f32).max(1e-18).log10(),
+                                )
+                            };
+                            level.fetch_max(heard.to_bits(), Ordering::Relaxed);
+                        }
+                    },
+                )
             };
-            input.installTapOnBus_bufferSize_format_block(0, 1024, Some(&format), RcBlock::as_ptr(&tap));
+            input.installTapOnBus_bufferSize_format_block(
+                0,
+                1024,
+                Some(&format),
+                RcBlock::as_ptr(&tap),
+            );
             engine.prepare();
             if engine.startAndReturnError().is_err() {
                 input.removeTapOnBus(0);
                 return None;
             }
             let task = recognize(recognizer, &request, heard.clone());
-            Some(Dictation { source: Source::Live { engine, request, level, open: true }, task: Some(task), heard })
+            Some(Dictation {
+                source: Source::Live {
+                    engine,
+                    request,
+                    level,
+                    open: true,
+                },
+                task: Some(task),
+                heard,
+            })
         }
     }
 
     /// The fallback take: record to a temp `.caf`, metered for the waveform.
     fn start_file(heard: Sender<Heard>) -> Result<Dictation, String> {
         unsafe {
-            let file = std::env::temp_dir().join(format!("trek-dictate-{}.caf", std::process::id()));
+            let file =
+                std::env::temp_dir().join(format!("trek-dictate-{}.caf", std::process::id()));
             let Some(format) = AVAudioFormat::initWithCommonFormat_sampleRate_channels_interleaved(
                 AVAudioFormat::alloc(),
                 AVAudioCommonFormat::PCMFormatFloat32,
@@ -341,13 +437,22 @@ mod imp {
                 return Err("Couldn't set up recording.".into());
             };
             let url = NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()));
-            let recorder = AVAudioRecorder::initWithURL_format_error(AVAudioRecorder::alloc(), &url, &format)
-                .map_err(|e| e.localizedDescription().to_string())?;
+            let recorder =
+                AVAudioRecorder::initWithURL_format_error(AVAudioRecorder::alloc(), &url, &format)
+                    .map_err(|e| e.localizedDescription().to_string())?;
             recorder.setMeteringEnabled(true);
             if !recorder.record() {
                 return Err("Couldn't start recording.".into());
             }
-            Ok(Dictation { source: Source::File { recorder: Some(recorder), file, ours: true }, task: None, heard })
+            Ok(Dictation {
+                source: Source::File {
+                    recorder: Some(recorder),
+                    file,
+                    ours: true,
+                },
+                task: None,
+                heard,
+            })
         }
     }
 }
@@ -363,7 +468,10 @@ mod imp {
     /// What a dictation asked for says: that it isn't here (yet), and on Windows the way to its own.
     fn unavailable() -> String {
         if cfg!(windows) {
-            format!("Dictation isn't available on Windows yet. {}.", crate::words::words().dictate_tip)
+            format!(
+                "Dictation isn't available on Windows yet. {}.",
+                crate::words::words().dictate_tip
+            )
         } else {
             "Dictation is macOS-only for now.".into()
         }
@@ -400,7 +508,10 @@ mod imp {
         fn windows_says_dictation_isnt_here_yet() {
             let said = super::unavailable();
             if cfg!(windows) {
-                assert_eq!(said, "Dictation isn't available on Windows yet. Press Win+H to dictate.");
+                assert_eq!(
+                    said,
+                    "Dictation isn't available on Windows yet. Press Win+H to dictate."
+                );
             } else {
                 assert_eq!(said, "Dictation is macOS-only for now.");
             }
