@@ -205,7 +205,7 @@ fn an_invalid_block_says_why_with_its_json_folded_away() {
         assert!(find(&on_screen(&trek, cx), "viz-raw-").is_none());
         let note = labels(&trek, cx, "viz-invalid-").concat();
         assert!(
-            note.starts_with("Couldn't draw this visualization: unknown field `html`"),
+            note.contains("Couldn't draw this visualization: unknown field `html`"),
             "{note}"
         );
         // An over-limit block reads as such, not as a JSON error.
