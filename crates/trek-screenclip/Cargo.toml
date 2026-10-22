@@ -1,0 +1,18 @@
+[package]
+name = "trek-screenclip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Part of the Trek app (extracted from trek-app)."
+
+[features]
+# Items the UI tests reach for, on for `cargo test` via trek-app's dev-dep on itself.
+test-support = ["gpui-kit/test-support"]
+
+[dependencies]
+anyhow.workspace = true
+gpui-kit.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "tiff", "bmp", "ico", "pnm", "jpeg", "gif", "webp"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

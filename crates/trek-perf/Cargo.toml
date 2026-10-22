@@ -1,0 +1,17 @@
+[package]
+name = "trek-perf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Part of the Trek app (extracted from trek-app)."
+
+[features]
+shots = []
+# Items the UI tests reach for, on for `cargo test` via trek-app's dev-dep on itself.
+test-support = ["gpui-kit/test-support"]
+
+[dependencies]
+async-channel.workspace = true
+chrono.workspace = true
+gpui-kit.workspace = true
+tracing.workspace = true

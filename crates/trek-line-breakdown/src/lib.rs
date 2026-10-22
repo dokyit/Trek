@@ -37,7 +37,7 @@ pub fn hover(
 /// The card itself: label on the left, the counts in two right-aligned mono columns.
 fn card(id: &str, breakdown: &LineBreakdown, cx: &App) -> Stateful<Div> {
     let theme = cx.theme();
-    let (green, red) = (crate::palette::emerald(cx), crate::palette::red(cx));
+    let (green, red) = (trek_palette::emerald(cx), trek_palette::red(cx));
     let (added, removed) = breakdown.total();
     // Each column as wide as its longest number, so the rows line up.
     let digits = |n: u32| n.to_string().len() + 1;

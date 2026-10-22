@@ -281,7 +281,7 @@ mod imp {
         let missing = || {
             format!(
                 "Speech recognition isn't available on {}.",
-                crate::words::words().this_computer
+                trek_words::words().this_computer
             )
         };
         unsafe {
@@ -470,7 +470,7 @@ mod imp {
         if cfg!(windows) {
             format!(
                 "Dictation isn't available on Windows yet. {}.",
-                crate::words::words().dictate_tip
+                trek_words::words().dictate_tip
             )
         } else {
             "Dictation is macOS-only for now.".into()

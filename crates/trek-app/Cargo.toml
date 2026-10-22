@@ -11,15 +11,37 @@ path = "src/main.rs"
 
 [features]
 # Design review without Screen Recording: the window draws its frames to PNGs (src/shots.rs).
-shots = ["gpui-kit/test-support"]
+shots = ["gpui-kit/test-support", "trek-motion/shots", "trek-dictate/shots", "trek-perf/shots"]
 # What tests/ can reach from outside the crate (render counts, test-only view helpers). The
 # dev-dependency on trek-app itself turns it on for `cargo test`; a plain build leaves it off.
-test-support = ["gpui-kit/test-support", "dep:trek-test-fixtures"]
+test-support = ["gpui-kit/test-support", "dep:trek-test-fixtures", "trek-motion/test-support", "trek-shortcuts/test-support", "trek-screenclip/test-support", "trek-ipc-ui/test-support", "trek-words/test-support", "trek-window-place/test-support", "trek-logging/test-support", "trek-mascot/test-support", "trek-languages/test-support", "trek-time/test-support", "trek-mentions/test-support", "trek-perf/test-support", "trek-winlook/test-support", "trek-palette/test-support", "trek-integrations/test-support", "trek-brand/test-support", "trek-job/test-support", "trek-format/test-support", "trek-dictate/test-support", "trek-updater/test-support", "trek-line-breakdown/test-support", "trek-assets/test-support"]
 
 [dependencies]
 tokio.workspace = true
 trek-core.workspace = true
 trek-math = { path = "../trek-math" }
+trek-motion = { path = "../trek-motion" }
+trek-shortcuts = { path = "../trek-shortcuts" }
+trek-screenclip = { path = "../trek-screenclip" }
+trek-ipc-ui = { path = "../trek-ipc-ui" }
+trek-words = { path = "../trek-words" }
+trek-window-place = { path = "../trek-window-place" }
+trek-logging = { path = "../trek-logging" }
+trek-mascot = { path = "../trek-mascot" }
+trek-languages = { path = "../trek-languages" }
+trek-time = { path = "../trek-time" }
+trek-mentions = { path = "../trek-mentions" }
+trek-perf = { path = "../trek-perf" }
+trek-winlook = { path = "../trek-winlook" }
+trek-palette = { path = "../trek-palette" }
+trek-integrations = { path = "../trek-integrations" }
+trek-brand = { path = "../trek-brand" }
+trek-job = { path = "../trek-job" }
+trek-format = { path = "../trek-format" }
+trek-dictate = { path = "../trek-dictate" }
+trek-updater = { path = "../trek-updater" }
+trek-line-breakdown = { path = "../trek-line-breakdown" }
+trek-assets = { path = "../trek-assets" }
 trek-agents.workspace = true
 trek-ipc = { workspace = true, features = ["server"] }
 trek-remote = { path = "../trek-remote" }

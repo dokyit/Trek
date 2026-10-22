@@ -488,7 +488,7 @@ mod real {
     #[cfg(test)]
     mod tests {
         use super::{Clipboard, Guard};
-        use crate::screenclip::Source as _;
+        use crate::Source as _;
         use std::time::{Duration, Instant};
         use windows::Win32::System::DataExchange::{CloseClipboard, OpenClipboard};
 

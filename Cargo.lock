@@ -9166,17 +9166,57 @@ dependencies = [
  "tree-sitter-swift",
  "trek-agents",
  "trek-app",
+ "trek-assets",
+ "trek-brand",
  "trek-core",
+ "trek-dictate",
+ "trek-format",
+ "trek-integrations",
  "trek-ipc",
+ "trek-ipc-ui",
+ "trek-job",
+ "trek-languages",
+ "trek-line-breakdown",
+ "trek-logging",
+ "trek-mascot",
  "trek-math",
+ "trek-mentions",
+ "trek-motion",
+ "trek-palette",
+ "trek-perf",
  "trek-remote",
+ "trek-screenclip",
+ "trek-shortcuts",
  "trek-test-fixtures",
+ "trek-time",
+ "trek-updater",
+ "trek-window-place",
+ "trek-winlook",
+ "trek-words",
  "uuid",
  "vt100",
  "webview2-com",
  "windows 0.61.3",
  "windows 0.62.2",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "trek-assets"
+version = "0.4.11"
+dependencies = [
+ "gpui-kit",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "trek-brand"
+version = "0.4.11"
+dependencies = [
+ "gpui-kit",
 ]
 
 [[package]]
@@ -9213,6 +9253,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "trek-dictate"
+version = "0.4.11"
+dependencies = [
+ "async-channel",
+ "block2 0.6.2",
+ "objc2 0.6.4",
+ "objc2-avf-audio",
+ "objc2-foundation 0.3.2",
+ "objc2-speech",
+ "trek-words",
+]
+
+[[package]]
+name = "trek-format"
+version = "0.4.11"
+dependencies = [
+ "tokio",
+ "tracing",
+ "trek-core",
+ "trek-job",
+ "trek-test-fixtures",
+]
+
+[[package]]
+name = "trek-integrations"
+version = "0.4.11"
+dependencies = [
+ "serde_json",
+ "trek-core",
+]
+
+[[package]]
 name = "trek-ipc"
 version = "0.4.11"
 dependencies = [
@@ -9222,6 +9294,72 @@ dependencies = [
  "tokio",
  "tracing",
  "windows-sys 0.60.2",
+]
+
+[[package]]
+name = "trek-ipc-ui"
+version = "0.4.11"
+dependencies = [
+ "async-channel",
+ "libc",
+ "serde_json",
+ "tokio",
+ "trek-core",
+ "trek-ipc",
+]
+
+[[package]]
+name = "trek-job"
+version = "0.4.11"
+dependencies = [
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "trek-languages"
+version = "0.4.11"
+dependencies = [
+ "gpui-kit",
+ "ropey",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cmake",
+ "tree-sitter-javascript",
+ "tree-sitter-kotlin-sg",
+ "tree-sitter-swift",
+]
+
+[[package]]
+name = "trek-line-breakdown"
+version = "0.4.11"
+dependencies = [
+ "gpui-kit",
+ "trek-core",
+ "trek-palette",
+]
+
+[[package]]
+name = "trek-logging"
+version = "0.4.11"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "gpui-pre-windows",
+ "lb-wry",
+ "log",
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+ "trek-core",
+]
+
+[[package]]
+name = "trek-mascot"
+version = "0.4.11"
+dependencies = [
+ "gpui-kit",
 ]
 
 [[package]]
@@ -9252,6 +9390,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "trek-mentions"
+version = "0.4.11"
+dependencies = [
+ "chrono",
+ "trek-core",
+]
+
+[[package]]
+name = "trek-motion"
+version = "0.4.11"
+dependencies = [
+ "gpui-kit",
+]
+
+[[package]]
+name = "trek-palette"
+version = "0.4.11"
+dependencies = [
+ "gpui-kit",
+ "serde_json",
+ "trek-core",
+]
+
+[[package]]
+name = "trek-perf"
+version = "0.4.11"
+dependencies = [
+ "async-channel",
+ "chrono",
+ "gpui-kit",
+ "tracing",
+]
+
+[[package]]
 name = "trek-remote"
 version = "0.4.11"
 dependencies = [
@@ -9274,6 +9446,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "trek-screenclip"
+version = "0.4.11"
+dependencies = [
+ "anyhow",
+ "gpui-kit",
+ "image",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "trek-shortcuts"
+version = "0.4.11"
+dependencies = [
+ "tracing",
+ "trek-core",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "trek-test-fixtures"
 version = "0.4.11"
 dependencies = [
@@ -9284,11 +9475,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "trek-time"
+version = "0.4.11"
+dependencies = [
+ "chrono",
+ "trek-core",
+]
+
+[[package]]
 name = "trek-update"
 version = "0.4.11"
 dependencies = [
  "trek-test-fixtures",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "trek-updater"
+version = "0.4.11"
+dependencies = [
+ "semver",
+ "tracing",
+ "trek-core",
+ "trek-shortcuts",
+ "trek-words",
+]
+
+[[package]]
+name = "trek-window-place"
+version = "0.4.11"
+dependencies = [
+ "gpui-kit",
+ "serde",
+ "serde_json",
+ "tracing",
+ "trek-core",
+]
+
+[[package]]
+name = "trek-winlook"
+version = "0.4.11"
+dependencies = [
+ "gpui-kit",
+ "raw-window-handle",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "trek-words"
+version = "0.4.11"
+dependencies = [
+ "tracing",
 ]
 
 [[package]]

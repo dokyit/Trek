@@ -1,0 +1,17 @@
+[package]
+name = "trek-format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Part of the Trek app (extracted from trek-app)."
+
+[features]
+# Items the UI tests reach for, on for `cargo test` via trek-app's dev-dep on itself.
+test-support = ["dep:trek-test-fixtures"]
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+trek-core.workspace = true
+trek-job = { path = "../trek-job" }
+trek-test-fixtures = { workspace = true, optional = true }

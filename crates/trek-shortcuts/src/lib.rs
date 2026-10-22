@@ -719,7 +719,7 @@ mod tests {
     #[cfg(windows)]
     mod shell {
         use super::*;
-        use crate::shortcuts::com::{ShellLinks, with_com};
+        use crate::com::{ShellLinks, with_com};
 
         /// A shortcut file made the way Explorer makes one.
         fn make(lnk: &Path, target: &Path, dir: &Path, icon: &Path) {

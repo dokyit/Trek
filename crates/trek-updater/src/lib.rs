@@ -108,14 +108,14 @@ pub struct OldCopy {
     pub to: PathBuf,
     /// What the move did to the user's shortcuts, which this launch knows only when the move was
     /// its own.
-    pub shortcuts: crate::shortcuts::Report,
+    pub shortcuts: trek_shortcuts::Report,
     /// Windows turned the removal away: the rest is the user's.
     pub refused: bool,
 }
 
 /// What Trek says about a move: where it runs now, and what became of the user's shortcuts.
 /// (`said` has no full stop; this adds it.)
-pub fn with_shortcuts(said: &str, shortcuts: &crate::shortcuts::Report) -> String {
+pub fn with_shortcuts(said: &str, shortcuts: &trek_shortcuts::Report) -> String {
     let mut out = said.to_string();
     if let Some(changed) = shortcuts.changed_clause() {
         out = format!("{out}, and {changed}");
@@ -439,7 +439,7 @@ pub fn describe_update(
     };
     if let Some(blocker) = blocker {
         // Windows: Trek can move itself out of where it is, in one click.
-        if crate::words::is_windows() && blocker.movable() {
+        if trek_words::is_windows() && blocker.movable() {
             // The cause only: the message's advice to move the folder by hand would contradict
             // the button. One Windows may lift (it refused a write; the user may have told it to
             // let Trek be) can be asked again beside the move (`blocker_now`).
@@ -479,7 +479,7 @@ pub fn describe_update(
         UpdateStatus::Coming { version } => view(
             format!(
                 "Trek {version} is out; the {} build is on its way. Check again in a while.",
-                crate::words::words().build_name
+                trek_words::words().build_name
             ),
             Some(UpdateAction::Check),
         ),
@@ -512,8 +512,8 @@ pub fn describe_update(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shortcuts::Report;
     use trek_core::update::Artifact;
+    use trek_shortcuts::Report;
 
     const HOUR: i64 = 60 * 60 * 1000;
 
@@ -607,7 +607,7 @@ mod tests {
     #[test]
     fn builds_that_cant_replace_themselves_offer_nothing() {
         // (Windows offers a move out of a shared folder: `trek_can_move_itself_out_of_where_it_cant_update`.)
-        let _platform = crate::words::pretend(false);
+        let _platform = trek_words::pretend(false);
         let dev = describe_update(&UpdateStatus::Idle, true, Some(Blocker::DevBuild));
         assert_eq!((dev.action, dev.line), (None, Blocker::DevBuild.message()));
         assert_eq!(
@@ -624,7 +624,7 @@ mod tests {
     fn a_blocker_windows_may_lift_can_be_checked_again() {
         // Ransomware protection judges each program as it runs, and may be turned off: "Check now"
         // asks again (`blocker_now`). (Windows offers the move instead: `trek_can_move_itself_out_of_where_it_cant_update`.)
-        let _platform = crate::words::pretend(false);
+        let _platform = trek_words::pretend(false);
         let guarded = Blocker::GuardedFolder(trek_core::update::KnownFolder::Documents);
         let v = describe_update(&UpdateStatus::UpToDate, true, Some(guarded));
         assert_eq!(
@@ -641,7 +641,7 @@ mod tests {
     #[test]
     fn trek_can_move_itself_out_of_where_it_cant_update() {
         use trek_core::update::KnownFolder;
-        let _platform = crate::words::pretend(true);
+        let _platform = trek_words::pretend(true);
         let moves = trek_core::update::relocate::moves_line();
         assert!(
             moves.starts_with("Trek will move itself to ")
@@ -734,7 +734,7 @@ mod tests {
         }
         // And not on a Mac, whatever the blocker: its own words and actions are unchanged.
         drop(_platform);
-        let _mac = crate::words::pretend(false);
+        let _mac = trek_words::pretend(false);
         let v = describe_update(&UpdateStatus::Idle, true, Some(Blocker::ReadOnlyLocation));
         assert_eq!(
             (v.action, v.secondary, v.line),
@@ -842,7 +842,7 @@ mod tests {
 
     #[test]
     fn shortcuts_that_couldnt_be_changed_are_said_after_the_move() {
-        let left = crate::shortcuts::Left {
+        let left = trek_shortcuts::Left {
             lnk: PathBuf::from("Trek.lnk"),
             place: "on your Desktop",
             refused: true,
@@ -901,7 +901,7 @@ mod tests {
                 "Trek 0.4.1-beta.2 is out; the Mac build is on its way. Check again in a while.",
             ),
         ] {
-            let _platform = crate::words::pretend(windows);
+            let _platform = trek_words::pretend(windows);
             let v = describe_update(&u.status, true, None);
             assert_eq!(
                 (v.line.as_str(), v.action, v.busy),
