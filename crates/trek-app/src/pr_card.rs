@@ -59,7 +59,9 @@ pub enum Phase {
     /// A release is under way (`script/release.sh`, a `release.yml` run).
     Releasing,
     Published,
-    /// The command that made it failed.
+    /// A workflow run (`gh run watch`) finished green.
+    Passed,
+    /// The command that made it failed (a run: it finished red or was cancelled).
     Failed,
 }
 
@@ -68,7 +70,7 @@ impl Phase {
     pub fn terminal(self) -> bool {
         matches!(
             self,
-            Phase::Merged | Phase::Closed | Phase::Published | Phase::Failed
+            Phase::Merged | Phase::Closed | Phase::Published | Phase::Passed | Phase::Failed
         )
     }
 
@@ -85,6 +87,7 @@ impl Phase {
             Phase::Closed => "Closed",
             Phase::Releasing => "Releasing",
             Phase::Published => "Published",
+            Phase::Passed => "Passed",
             Phase::Failed => "Failed",
         }
     }
@@ -95,7 +98,7 @@ impl Phase {
             Phase::Creating | Phase::Open => cx.theme().muted_foreground,
             Phase::Checking | Phase::Merging | Phase::Releasing => crate::palette::sky(cx),
             Phase::Conflicted => crate::palette::amber(cx),
-            Phase::Ready => crate::palette::emerald(cx),
+            Phase::Ready | Phase::Passed => crate::palette::emerald(cx),
             Phase::Merged | Phase::Published => crate::palette::indigo(cx),
             Phase::Closed | Phase::Failed => crate::palette::red(cx),
         }
@@ -109,6 +112,9 @@ pub enum Kind {
     #[default]
     Pr,
     Release,
+    /// A GitHub Actions run the agent watches (`gh run watch <id>`): its id is `number`, its
+    /// workflow's name `title`, its jobs `stages`.
+    Run,
 }
 
 /// One CI check, as `statusCheckRollup` reports it.
@@ -178,6 +184,8 @@ pub struct Card {
     pub version: String,
     pub channel: String,
     pub stages: Vec<Stage>,
+    /// Run cards: what the run is for (its commit's subject, `displayTitle`).
+    pub subject: String,
     /// When it was made.
     pub created_ms: i64,
 }
@@ -197,6 +205,7 @@ impl Card {
                     format!("v{}", self.version)
                 }
             }
+            Kind::Run => run_name(self).to_string(),
         };
         let state = if self.resolving {
             "Resolving"
@@ -215,7 +224,17 @@ impl Card {
                 self.phase.label()
             ),
             Kind::Release => format!("Release {} · {}", self.version, self.phase.label()),
+            Kind::Run => format!("{} run · {}", run_name(self), self.phase.label()),
         }
+    }
+}
+
+/// A run card's name: its workflow's, once `gh` said it.
+fn run_name(card: &Card) -> &str {
+    if card.title.is_empty() {
+        "Workflow"
+    } else {
+        &card.title
     }
 }
 
@@ -286,8 +305,11 @@ pub enum Call {
     },
     /// `gh pr merge` — the PR argument when there is one (a number or a url).
     PrMerge(Option<String>),
-    /// `gh run watch`, `gh pr checks`: the card's checks are what it's waiting on.
-    Checks,
+    /// `gh run watch [<run id>]`: a run card follows the run it names (none named: the PR
+    /// card's checks are what it's waiting on, or the id `gh` prints once it's done).
+    RunWatch(Option<String>),
+    /// `gh pr checks [<pr>]`: the PR card's checks are what it's waiting on.
+    PrChecks(Option<String>),
     /// `script/release.sh <version> [--channel …]` — a local release.
     Release { version: String, channel: String },
     /// `gh workflow run release.yml -f version=… -f channel=…`.
@@ -314,6 +336,48 @@ fn is_gh(words: &[String], sub: &[&str]) -> bool {
     words
         .windows(sub.len() + 1)
         .any(|w| w[0] == "gh" && w[1..] == *sub)
+}
+
+/// The words after `gh <sub…>` (none when it isn't there).
+fn after<'a>(words: &'a [String], sub: &[&str]) -> &'a [String] {
+    let ix = words
+        .windows(sub.len() + 1)
+        .position(|w| w[0] == "gh" && w[1..] == *sub)
+        .map(|i| i + sub.len() + 1)
+        .unwrap_or(words.len());
+    &words[ix..]
+}
+
+fn is_number(w: &str) -> bool {
+    !w.is_empty() && w.chars().all(|c| c.is_ascii_digit())
+}
+
+/// The PR `gh <sub…>` names, when it names one (a number or a url).
+fn pr_arg(words: &[String], sub: &[&str]) -> Option<String> {
+    after(words, sub)
+        .iter()
+        .find(|w| !w.starts_with('-'))
+        .filter(|w| w.contains("/pull/") || is_number(w))
+        .cloned()
+}
+
+/// The run id `gh run watch` prints ("✓ main CI · 39779843418", or a `…/actions/runs/<id>`
+/// url), for a watch whose id the command line didn't spell out (`gh run watch "$id"`).
+pub fn run_id_in(output: &str) -> Option<String> {
+    output.lines().find_map(|l| {
+        if let Some(i) = l.find("/actions/runs/") {
+            let id: String = l[i + 14..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if !id.is_empty() {
+                return Some(id);
+            }
+        }
+        let (_, tail) = l.rsplit_once(" · ")?;
+        let id = tail.trim();
+        (id.len() >= 5 && is_number(id)).then(|| id.to_string())
+    })
 }
 
 fn flag(words: &[String], names: &[&str]) -> Option<String> {
@@ -393,20 +457,18 @@ fn call_in(words: &[String]) -> Option<Call> {
         });
     }
     if is_gh(words, &["pr", "merge"]) {
-        let ix = words
-            .windows(3)
-            .position(|w| w[0] == "gh" && w[1..] == ["pr", "merge"])
-            .map(|i| i + 3)
-            .unwrap_or(words.len());
-        let pr = words[ix..]
+        return Some(Call::PrMerge(pr_arg(words, &["pr", "merge"])));
+    }
+    if is_gh(words, &["run", "watch"]) {
+        let run = after(words, &["run", "watch"])
             .iter()
             .find(|w| !w.starts_with('-'))
-            .filter(|w| w.contains("/pull/") || w.chars().all(|c| c.is_ascii_digit()))
+            .filter(|w| is_number(w))
             .cloned();
-        return Some(Call::PrMerge(pr));
+        return Some(Call::RunWatch(run));
     }
-    if is_gh(words, &["run", "watch"]) || is_gh(words, &["pr", "checks"]) {
-        return Some(Call::Checks);
+    if is_gh(words, &["pr", "checks"]) {
+        return Some(Call::PrChecks(pr_arg(words, &["pr", "checks"])));
     }
     if is_gh(words, &["workflow", "run"]) {
         if positional(words).iter().any(|w| w.contains("release")) {
@@ -542,14 +604,36 @@ pub fn tool_started(
                 fx.watch.push(id);
             }
         }
-        Call::Checks => {
-            if let Some((ix, id, mut c)) = latest_pr(live) {
-                if !c.phase.terminal() {
-                    c.phase = Phase::Checking;
-                    c.step = "Watching checks".into();
-                    rewrite(live, ix, &c, &mut fx);
-                    fx.watch.push(id);
-                }
+        Call::RunWatch(Some(run)) => watch_run(live, call_id, &run, &dir, &mut fx),
+        Call::RunWatch(None) => {
+            // No id on the line (`gh run watch "$id"`): the PR card's checks, else the id `gh`
+            // prints says which run once the call is over.
+            if !watch_checks(live, None, &mut fx) {
+                live.pr_calls
+                    .insert(call_id.to_string(), row_id(RUN_UNKNOWN));
+            }
+        }
+        Call::PrChecks(pr) => {
+            if !watch_checks(live, pr.as_deref(), &mut fx) {
+                // No card for it yet: one for the PR it names (the branch's, named none), filled
+                // in by `gh pr view`.
+                let key = match pr.as_deref() {
+                    Some(p) => format!("checks-{p}"),
+                    None => format!("checks-{call_id}"),
+                };
+                let card = Card {
+                    kind: Kind::Pr,
+                    title: "Pull request".into(),
+                    number: pr.as_deref().and_then(|p| p.parse().ok()),
+                    url: pr.filter(|p| p.contains("/pull/")),
+                    repo_dir: dir.to_string_lossy().into_owned(),
+                    phase: Phase::Checking,
+                    step: "Watching checks".into(),
+                    created_ms: now_ms(),
+                    ..Default::default()
+                };
+                push(live, &key, &card, &mut fx);
+                fx.watch.push(row_id(&key));
             }
         }
         Call::ReleaseWorkflow { version, channel } => {
@@ -608,6 +692,68 @@ pub fn tool_started(
     fx
 }
 
+/// `pr_calls`' mark for a `gh run watch` whose run is only known from its output.
+const RUN_UNKNOWN: &str = "run-?";
+
+/// The PR card `pr` names (none: the thread's latest) goes to Checking and is followed;
+/// `false` when there's no such card still open.
+fn watch_checks(
+    live: &mut crate::workspace::LiveThread,
+    pr: Option<&str>,
+    fx: &mut Effects,
+) -> bool {
+    let target = match pr {
+        Some(p) => cards(live).into_iter().find(|(_, _, c)| {
+            c.kind == Kind::Pr
+                && (c.url.as_deref() == Some(p) || c.number.is_some_and(|n| n.to_string() == p))
+        }),
+        None => latest_pr(live),
+    };
+    let Some((ix, id, mut c)) = target.filter(|(_, _, c)| !c.phase.terminal()) else {
+        return false;
+    };
+    c.phase = Phase::Checking;
+    c.step = "Watching checks".into();
+    rewrite(live, ix, &c, fx);
+    fx.watch.push(id);
+    true
+}
+
+/// `gh run watch <run>`: the run's card (made now, or one the thread has for it, back to
+/// watching) is followed until the run is over, whatever state it's in already.
+fn watch_run(
+    live: &mut crate::workspace::LiveThread,
+    call_id: &str,
+    run: &str,
+    dir: &Path,
+    fx: &mut Effects,
+) {
+    let key = format!("run-{run}");
+    let row = row_id(&key);
+    let existing = cards(live).into_iter().find(|(_, id, _)| *id == row);
+    match existing {
+        Some((ix, _, mut c)) => {
+            c.phase = Phase::Checking;
+            c.step = "Watching the run".into();
+            rewrite(live, ix, &c, fx);
+        }
+        None => {
+            let card = Card {
+                kind: Kind::Run,
+                number: run.parse().ok(),
+                repo_dir: dir.to_string_lossy().into_owned(),
+                phase: Phase::Checking,
+                step: "Watching the run".into(),
+                created_ms: now_ms(),
+                ..Default::default()
+            };
+            push(live, &key, &card, fx);
+        }
+    }
+    live.pr_calls.insert(call_id.to_string(), row.clone());
+    fx.watch.push(row);
+}
+
 fn release_card(version: &str, channel: &str, stage: &str, step: &str, dir: &Path) -> Card {
     Card {
         kind: Kind::Release,
@@ -630,17 +776,27 @@ fn release_card(version: &str, channel: &str, stage: &str, step: &str, dir: &Pat
     }
 }
 
-/// A tracked command call ended: `gh pr create`'s output names the PR it made.
+/// A tracked command call ended: `gh pr create`'s output names the PR it made, `gh run
+/// watch`'s the run it watched. `cwd`: where its `gh` ran.
 pub fn tool_finished(
     live: &mut crate::workspace::LiveThread,
     call_id: &str,
     ok: bool,
     output: &str,
+    cwd: Option<&Path>,
 ) -> Effects {
     let mut fx = Effects::default();
     let Some(row) = live.pr_calls.remove(call_id) else {
         return fx;
     };
+    if row == row_id(RUN_UNKNOWN) {
+        if let Some(run) = run_id_in(output) {
+            let dir = cwd.unwrap_or_else(|| Path::new(""));
+            watch_run(live, call_id, &run, dir, &mut fx);
+            live.pr_calls.remove(call_id);
+        }
+        return fx;
+    }
     let Some(ix) = live
         .items
         .iter()
@@ -655,6 +811,11 @@ pub fn tool_finished(
         return fx;
     };
     match card.kind {
+        // `gh` says how the run went (the call's own status is its pipe's, `| tail`'s).
+        Kind::Run => {
+            fx.watch.push(row);
+            return fx;
+        }
         Kind::Pr if card.phase == Phase::Creating => {
             if ok {
                 if let Some((url, number, repo)) = output.lines().find_map(pr_url) {
@@ -733,6 +894,7 @@ fn push(live: &mut crate::workspace::LiveThread, key: &str, card: &Card, fx: &mu
         title: match card.kind {
             Kind::Pr => "Pull request".into(),
             Kind::Release => "Release".into(),
+            Kind::Run => "Workflow run".into(),
         },
         detail: serde_json::to_string(card).unwrap_or_default(),
         output: String::new(),
@@ -785,7 +947,122 @@ pub fn fetch(card: &Card) -> Option<Card> {
     match card.kind {
         Kind::Pr => fetch_pr(card, &dir),
         Kind::Release => fetch_release(card, &dir),
+        Kind::Run => fetch_run(card, &dir),
     }
+}
+
+/// A job of `gh run view --json jobs` (its states lowercase: `completed`, `success`).
+#[derive(Deserialize)]
+struct JobJson {
+    name: String,
+    status: String,
+    conclusion: String,
+}
+
+/// Jobs as stage chips.
+fn job_stages(jobs: &[JobJson]) -> Vec<Stage> {
+    jobs.iter()
+        .filter_map(|j| {
+            check(&CheckJson {
+                name: j.name.clone(),
+                status: j.status.to_uppercase(),
+                conclusion: j.conclusion.to_uppercase(),
+                ..Default::default()
+            })
+            .map(|c| Stage {
+                label: c.name,
+                state: c.state,
+            })
+        })
+        .collect()
+}
+
+/// The run `card.number` names: its workflow, jobs and how it ended.
+fn fetch_run(card: &Card, dir: &Path) -> Option<Card> {
+    let run = card.number?.to_string();
+    let out = gh(dir)?
+        .args([
+            "run",
+            "view",
+            &run,
+            "--json",
+            "workflowName,displayTitle,headBranch,status,conclusion,url,jobs",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    #[derive(Deserialize)]
+    struct RunJson {
+        #[serde(rename = "workflowName")]
+        workflow: String,
+        #[serde(rename = "displayTitle")]
+        subject: String,
+        #[serde(rename = "headBranch")]
+        branch: String,
+        status: String,
+        conclusion: String,
+        url: String,
+        jobs: Vec<JobJson>,
+    }
+    let view: RunJson = serde_json::from_slice(&out.stdout).ok()?;
+    Some(run_card(
+        card,
+        view.workflow,
+        view.subject,
+        view.branch,
+        &view.status,
+        &view.conclusion,
+        view.url,
+        &view.jobs,
+    ))
+}
+
+/// `card` as `gh run view` reports its run.
+#[allow(clippy::too_many_arguments)]
+fn run_card(
+    card: &Card,
+    workflow: String,
+    subject: String,
+    branch: String,
+    status: &str,
+    conclusion: &str,
+    url: String,
+    jobs: &[JobJson],
+) -> Card {
+    let mut card = card.clone();
+    if !workflow.is_empty() {
+        card.title = workflow;
+    }
+    card.subject = subject;
+    card.head = branch;
+    if !url.is_empty() {
+        card.url = Some(url);
+    }
+    card.stages = job_stages(jobs);
+    let failed: Vec<&str> = card
+        .stages
+        .iter()
+        .filter(|s| s.state == CheckState::Fail)
+        .map(|s| s.label.as_str())
+        .collect();
+    (card.phase, card.step) = match (status, conclusion) {
+        ("completed", "success" | "neutral" | "skipped") => (Phase::Passed, "Passed".into()),
+        ("completed", "cancelled") => (Phase::Failed, "Cancelled".into()),
+        ("completed", _) if failed.is_empty() => (Phase::Failed, "Run failed".into()),
+        ("completed", _) => (Phase::Failed, format!("Failed: {}", failed.join(", "))),
+        _ => {
+            let pending = card.stages.iter().filter(|s| s.state.pending()).count();
+            let step = match pending {
+                0 => "Waiting for jobs".into(),
+                1 => "Watching 1 job".into(),
+                n => format!("Watching {n} jobs"),
+            };
+            (Phase::Checking, step)
+        }
+    };
+    card
 }
 
 fn gh(dir: &Path) -> Option<std::process::Command> {
@@ -854,12 +1131,15 @@ fn check(j: &CheckJson) -> Option<Check> {
 }
 
 fn fetch_pr(card: &Card, dir: &Path) -> Option<Card> {
+    // Neither known yet (`gh pr checks` with no PR named): the branch's own PR.
     let pr = card
         .url
         .clone()
-        .or_else(|| card.number.map(|n| n.to_string()))?;
+        .or_else(|| card.number.map(|n| n.to_string()));
     let out = gh(dir)?
-        .args(["pr", "view", &pr, "--json", PR_FIELDS])
+        .args(["pr", "view"])
+        .args(pr.as_slice())
+        .args(["--json", PR_FIELDS])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -1046,37 +1326,12 @@ fn fetch_release(card: &Card, dir: &Path) -> Option<Card> {
             .and_then(|o| {
                 #[derive(Deserialize)]
                 struct Jobs {
-                    jobs: Vec<JobJ>,
+                    jobs: Vec<JobJson>,
                 }
-                #[derive(Deserialize)]
-                struct JobJ {
-                    name: String,
-                    status: String,
-                    conclusion: String,
-                }
-                let j: Jobs = serde_json::from_slice(&o.stdout).ok()?;
-                Some(
-                    j.jobs
-                        .into_iter()
-                        .map(|j| CheckJson {
-                            name: j.name,
-                            status: j.status,
-                            conclusion: j.conclusion,
-                            ..Default::default()
-                        })
-                        .collect::<Vec<_>>(),
-                )
+                serde_json::from_slice::<Jobs>(&o.stdout).ok()
             })
         {
-            card.stages = jobs
-                .iter()
-                .filter_map(|j| {
-                    check(j).map(|c| Stage {
-                        label: c.name,
-                        state: c.state,
-                    })
-                })
-                .collect();
+            card.stages = job_stages(&jobs.jobs);
         }
         card.step = "Release workflow running".into();
         return Some(card);
@@ -1119,7 +1374,7 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let tint = card.phase.tint(cx);
-    let merged = matches!(card.phase, Phase::Merged | Phase::Published);
+    let merged = matches!(card.phase, Phase::Merged | Phase::Published | Phase::Passed);
 
     let badge = h_flex()
         .flex_none()
@@ -1150,6 +1405,10 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
             None => card.title.clone(),
         },
         Kind::Release => card.title.clone(),
+        Kind::Run => match card.number {
+            Some(n) => format!("{} run {n}", run_name(card)),
+            None => format!("{} run", run_name(card)),
+        },
     };
     let head = h_flex()
         .id(("pr-head", ix))
@@ -1163,6 +1422,7 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
             Icon::new(match card.kind {
                 Kind::Pr => crate::assets::Lucide::GitPullRequest,
                 Kind::Release => crate::assets::Lucide::Rocket,
+                Kind::Run => crate::assets::Lucide::Workflow,
             })
             .size(px(15.))
             .text_color(tint),
@@ -1190,7 +1450,15 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
 
     // `head → base · N commits · +a −b` — each only when known.
     let mut sub: Vec<String> = vec![];
-    if card.phase == Phase::Merged {
+    if card.kind == Kind::Run {
+        // `main · Give the PR status chip a pill treatment`
+        sub.extend(
+            [&card.head, &card.subject]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .cloned(),
+        );
+    } else if card.phase == Phase::Merged {
         let mut tail = format!("Merged into {}", card.base);
         if card.branch_deleted && !card.head.is_empty() {
             tail.push_str(&format!(" · {} was deleted", card.head));
@@ -1246,7 +1514,7 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
             .pb(px(8.))
             .gap(px(6.))
             .flex_wrap()
-            .children(card.stages.iter().take(5).map(|s| {
+            .children(card.stages.iter().take(8).map(|s| {
                 check_chip(
                     &Check {
                         name: s.label.clone(),
@@ -1696,6 +1964,35 @@ pub fn demo(state: &str) -> Card {
                 Stage {
                     label: "publish".into(),
                     state: CheckState::Queued,
+                },
+            ],
+            ..base
+        },
+        "run" => Card {
+            kind: Kind::Run,
+            title: "CI".into(),
+            number: Some(39779843418),
+            url: Some("https://github.com/dokyit/Trek/actions/runs/39779843418".into()),
+            head: "main".into(),
+            base: String::new(),
+            subject: "Give the PR status chip a pill treatment".into(),
+            commits: None,
+            added: None,
+            removed: None,
+            phase: Phase::Failed,
+            step: "Failed: Test (Windows), Test (macOS)".into(),
+            stages: vec![
+                Stage {
+                    label: "Clippy".into(),
+                    state: CheckState::Pass,
+                },
+                Stage {
+                    label: "Test (Windows)".into(),
+                    state: CheckState::Fail,
+                },
+                Stage {
+                    label: "Test (macOS)".into(),
+                    state: CheckState::Fail,
                 },
             ],
             ..base
