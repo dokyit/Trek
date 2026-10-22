@@ -10,3 +10,4 @@ research_notes/
 
 # Local agent state (worktrees made by Claude Code sessions)
 .claude/
+__pycache__/
