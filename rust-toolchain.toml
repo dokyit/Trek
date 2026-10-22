@@ -1,0 +1,6 @@
+# One exact toolchain for local builds and CI: every stable release changes dependency
+# fingerprints and empties the CI caches, so the channel moves only when someone bumps it
+# here and in the `toolchain:` inputs of .github/workflows/*.yml (same value).
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]

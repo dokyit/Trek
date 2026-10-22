@@ -4,14 +4,21 @@
 # to the release it already made.
 #
 #   pwsh script/release.ps1 <version> [-Channel stable|beta|nightly] [-Notes FILE] [-Publish]
+#   pwsh script/release.ps1 <version> [-Channel C] -BuildOnly [-SkipTests]
+#   pwsh script/release.ps1 <version> [-Channel C] -PublishOnly [-Publish] [-ExistingManifest FILE]
 #
 # Sets the workspace version for the build, builds trek.exe and trek-mcp.exe (release,
 # --locked), smokes trek-core, packs Trek-<version>-windows-x86_64.zip flat, signs it with
-# minisign (trusted comment "Trek <version> windows-x86_64") and writes the channel manifest
-# to dist/release/<version>/. With -Publish it uploads to the channel's EXISTING GitHub
-# release - zip and .minisig first, the merged <channel>.json last, --clobber - like
-# release.sh does. It never creates a release, tag or commit, and always puts Cargo.toml and
-# Cargo.lock back; without -Publish nothing leaves the machine.
+# minisign (trusted comment "Trek <version> windows-x86_64"), builds the Inno installer and
+# writes the channel manifest to dist/release/<version>/. With -Publish it uploads to the
+# channel's EXISTING GitHub release - zip and .minisig first, the merged <channel>.json last,
+# --clobber - like release.sh does. It never creates a release, tag or commit, and always puts
+# Cargo.toml and Cargo.lock back; without -Publish nothing leaves the machine.
+#
+# The halves also run separately, so the release workflow can build the zip while the Mac is
+# still working: -BuildOnly stops once the zip, installer, signature and notes are in
+# dist/release/<version>/, and -PublishOnly takes that directory, merges windows-x86_64 into
+# the release's <channel>.json and, with -Publish, uploads.
 #
 # Environment (same names as release.sh):
 #   TREK_MINISIGN_KEY          secret key (default ~/.trek-signing/minisign.key); a locked one
@@ -51,6 +58,15 @@ param(
     # Upload the zip, signature and merged manifest to the release that must already exist.
     [switch]$Publish,
 
+    # Stop after the build, zip, installer, signature and notes: the manifest merge and upload
+    # need the Mac's release, so they're the -PublishOnly half (the release workflow's publish
+    # job) while this half runs in parallel with it.
+    [switch]$BuildOnly,
+
+    # Only the publish half: dist/release/<version>/ must already hold the build half's zip
+    # (and its .minisig and installer, if it made them).
+    [switch]$PublishOnly,
+
     # Skip the `cargo test -p trek-core --locked` smoke (still runs by default, like the
     # workflow).
     [switch]$SkipTests
@@ -62,6 +78,72 @@ Set-Location (Split-Path $PSScriptRoot -Parent)
 
 function Say([string]$Msg) { Write-Host $Msg }
 function Die([string]$Msg) { [Console]::Error.WriteLine("release: $Msg"); exit 1 }
+
+function Invoke-TrekReleasePublish {
+    # The shared publish tail: take the manifest to merge into (-Publish downloads the release's
+    # own; a dry run gets -ExistingManifest), merge the windows-x86_64 entry in and write
+    # <channel>.json into $Out. With -Publish it then uploads zip, signature, installer and
+    # manifest and drops stale archives; without it, it only says what would be uploaded.
+    # Reads what the build half produced through $sha, $signature, $haveInstaller, $installerPath.
+    $base = if ($env:TREK_RELEASE_DOWNLOAD_URL) { $env:TREK_RELEASE_DOWNLOAD_URL } else { "https://github.com/$Repo/releases/download/$ReleaseTag" }
+    $url = "$($base.TrimEnd('/'))/$Name"
+    $manifestPath = Join-Path $Out "$Channel.json"
+    $existing = $null
+    if ($Publish) {
+        $dl = Join-Path ([IO.Path]::GetTempPath()) "trek-manifest-$PID"
+        New-Item -ItemType Directory -Force $dl | Out-Null
+        & gh release download $ReleaseTag --repo $Repo -p "$Channel.json" -D $dl --clobber
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $dl "$Channel.json"))) {
+            Die "no $Channel.json on release $ReleaseTag - the Mac's release.sh publishes it first"
+        }
+        $existing = Get-Content (Join-Path $dl "$Channel.json") -Raw | ConvertFrom-Json
+        Remove-Item $dl -Recurse -Force -ErrorAction SilentlyContinue
+    } elseif ($ExistingManifest) {
+        if (-not (Test-Path $ExistingManifest)) { Die "no manifest at $ExistingManifest" }
+        $existing = Get-Content $ExistingManifest -Raw | ConvertFrom-Json
+    }
+    # Notes fill a fresh manifest only; an existing one keeps the Mac's. The build half leaves
+    # notes.md in $Out.
+    $notesText = ''
+    if (Test-Path "$Out\notes.md") { $notesText = (Get-Content "$Out\notes.md" -Raw).Trim() }
+    $merged = Merge-TrekReleaseManifest -Manifest $existing -Version $Version -Platform $Platform `
+        -Url $url -Sha256 $sha -Signature $signature -Notes $notesText
+    if ($existing -and -not ($merged.platforms.PSObject.Properties.Name | Where-Object { $_ -like 'darwin-*' })) {
+        # The Mac publishes first, always; a manifest without its entry is the wrong release or a
+        # half-published one, and attaching Windows to it would ship an update only Windows sees.
+        $msg = 'the existing manifest has no darwin-* entry - is this the right release, did the Mac publish?'
+        if ($Publish) { Die $msg } else { Say " ! $msg" }
+    }
+    [IO.File]::WriteAllText($manifestPath, ($merged | ConvertTo-Json -Depth 8) + "`n")
+    Say " $manifestPath -> $url"
+
+    $assets = @("$Out\$Name") + $(if ($signature) { @("$Out\$Name.minisig") } else { @() }) + $(if ($haveInstaller) { @($installerPath) } else { @() }) + @($manifestPath)
+    if (-not $Publish) {
+        Say " dry run: $Out ready; not publishing. Would upload to ${Repo}'s release $ReleaseTag ($Channel):"
+        foreach ($a in $assets) { Say "   $(Split-Path $a -Leaf)" }
+        exit 0
+    }
+
+    # ---------- publish ----------
+    # Archive and signature first, the manifest that points at them last (release.sh's order):
+    # a client that fetches the manifest mid-upload finds the zip already there.
+    $uploadFiles = @("$Out\$Name")
+    if ($signature) { $uploadFiles += "$Out\$Name.minisig" }
+    if ($haveInstaller) { $uploadFiles += $installerPath }
+    & gh release upload $ReleaseTag --repo $Repo --clobber @uploadFiles
+    if ($LASTEXITCODE -ne 0) { Die 'uploading the archive failed' }
+    & gh release upload $ReleaseTag --repo $Repo --clobber $manifestPath
+    if ($LASTEXITCODE -ne 0) { Die 'uploading the manifest failed - the release still has the previous one' }
+    # Stale Windows archives under the moving beta/nightly tags get removed, like release.sh
+    # does for the Mac's.
+    $assetNames = & gh release view $ReleaseTag --repo $Repo --json assets --jq '.assets[].name'
+    foreach ($asset in $assetNames) {
+        if ($asset -like "Trek-*-$Platform.zip*" -and $asset -ne $Name -and $asset -ne "$Name.minisig") {
+            & gh release delete-asset $ReleaseTag $asset --repo $Repo -y
+        }
+    }
+    Say " published Trek $Version for $Platform on $Channel`: https://github.com/$Repo/releases/tag/$ReleaseTag"
+}
 
 if ([string]::IsNullOrWhiteSpace($Version)) {
     [Console]::Error.WriteLine('usage: pwsh script/release.ps1 <version> [-Channel stable|beta|nightly] [-Notes FILE] [-Publish]')
@@ -83,6 +165,10 @@ if ($Notes -and -not (Test-Path $Notes)) { Die "no notes file at $Notes" }
 if ($Publish -and $env:BUILD -eq '0') { Die 'BUILD=0 only exercises a dry run; -Publish builds for real' }
 if ($Publish -and $PubKey) { Die '-Publish verifies against assets/update/minisign.pub, not a test key' }
 if ($Publish -and $ExistingManifest) { Die '-Publish downloads the release''s own manifest; -ExistingManifest is for dry runs' }
+if ($BuildOnly -and $PublishOnly) { Die 'choose -BuildOnly or -PublishOnly, not both' }
+if ($BuildOnly -and $Publish) { Die '-BuildOnly never uploads; the upload half is -PublishOnly -Publish' }
+if ($BuildOnly -and $ExistingManifest) { Die '-ExistingManifest feeds the manifest merge, which is the -PublishOnly half' }
+if ($PublishOnly -and $SkipTests) { Say ' ! -SkipTests does nothing with -PublishOnly: no build, no tests' }
 if (-not $PubKey) { $PubKey = 'assets\update\minisign.pub' }
 
 $Repo = if ($env:TREK_RELEASE_REPO) { $env:TREK_RELEASE_REPO } else { 'dokyit/Trek' }
@@ -94,6 +180,31 @@ $TargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { 'target
 $BinDir = Join-Path $TargetDir 'release'
 
 # ---------- checks ----------
+if ($PublishOnly) {
+    # The build half's output is this half's input: dist\release\<version>\ as it left it (the
+    # release workflow's publish job downloads it as an artifact). Recompute what it knew.
+    if (-not (Test-Path "$Out\$Name")) { Die "no $Out\$Name - the -BuildOnly half runs first" }
+    $sha = (Get-FileHash "$Out\$Name" -Algorithm SHA256).Hash.ToLowerInvariant()
+    $signature = ''
+    if (Test-Path "$Out\$Name.minisig") {
+        # minisign.exe writes CRLF; the Mac's manifest has LF, and so should this one.
+        $signature = (Get-Content "$Out\$Name.minisig" -Raw).Trim() -replace "`r`n", "`n"
+    }
+    if ($Publish -and -not $signature) { Die "$Out\$Name.minisig is missing - an unsigned update is refused by every Trek" }
+    $installerName = "Trek-Setup-x86_64.exe"
+    $installerPath = Join-Path $Out $installerName
+    $haveInstaller = Test-Path $installerPath
+    if ($Notes) { Copy-Item $Notes "$Out\notes.md" -Force }
+    if ($Publish) {
+        & gh auth status *> $null
+        if ($LASTEXITCODE -ne 0) { Die "gh isn't logged in" }
+        & gh release view $ReleaseTag --repo $Repo *> $null
+        if ($LASTEXITCODE -ne 0) { Die "release $ReleaseTag doesn't exist - the Mac's script/release.sh publishes first" }
+    }
+    Invoke-TrekReleasePublish
+    exit 0
+}
+
 if (-not $Key) { $Key = $env:TREK_MINISIGN_KEY }
 if (-not $Key) {
     $default = Join-Path $HOME '.trek-signing\minisign.key'
@@ -136,7 +247,8 @@ try {
     if ($Version -ne $current) {
         # The Mac's script committed (stable) or tagged (beta, nightly) a tree that already has the
         # version; a runner building a tree that doesn't has the wrong ref and would ship a Trek
-        # whose own version disagrees with its manifest.
+        # whose own version disagrees with its manifest. (The release workflow's build job runs
+        # -BuildOnly on the run's commit and bumps it here itself, in parallel with the Mac.)
         if ($Publish -and $env:GITHUB_ACTIONS) { Die "the checked-out tree is version $current, not $Version - wrong ref?" }
         Say " version $current -> $Version"
         $inPkg = $false
@@ -267,60 +379,14 @@ try {
         [IO.File]::WriteAllText((Join-Path $Out 'notes.md'), $text)
     }
 
-    # ---------- manifest ----------
-    $base = if ($env:TREK_RELEASE_DOWNLOAD_URL) { $env:TREK_RELEASE_DOWNLOAD_URL } else { "https://github.com/$Repo/releases/download/$ReleaseTag" }
-    $url = "$($base.TrimEnd('/'))/$Name"
-    $manifestPath = Join-Path $Out "$Channel.json"
-    $existing = $null
-    if ($Publish) {
-        $dl = Join-Path $backup 'manifest'
-        New-Item -ItemType Directory -Force $dl | Out-Null
-        & gh release download $ReleaseTag --repo $Repo -p "$Channel.json" -D $dl --clobber
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $dl "$Channel.json"))) {
-            Die "no $Channel.json on release $ReleaseTag - the Mac's release.sh publishes it first"
-        }
-        $existing = Get-Content (Join-Path $dl "$Channel.json") -Raw | ConvertFrom-Json
-    } elseif ($ExistingManifest) {
-        if (-not (Test-Path $ExistingManifest)) { Die "no manifest at $ExistingManifest" }
-        $existing = Get-Content $ExistingManifest -Raw | ConvertFrom-Json
-    }
-    $merged = Merge-TrekReleaseManifest -Manifest $existing -Version $Version -Platform $Platform `
-        -Url $url -Sha256 $sha -Signature $signature -Notes ((Get-Content "$Out\notes.md" -Raw).Trim())
-    if ($existing -and -not ($merged.platforms.PSObject.Properties.Name | Where-Object { $_ -like 'darwin-*' })) {
-        # The Mac publishes first, always; a manifest without its entry is the wrong release or a
-        # half-published one, and attaching Windows to it would ship an update only Windows sees.
-        $msg = 'the existing manifest has no darwin-* entry - is this the right release, did the Mac publish?'
-        if ($Publish) { Die $msg } else { Say " ! $msg" }
-    }
-    [IO.File]::WriteAllText($manifestPath, ($merged | ConvertTo-Json -Depth 8) + "`n")
-    Say " $manifestPath -> $url"
-
-    $assets = @("$Out\$Name") + $(if ($signature) { @("$Out\$Name.minisig") } else { @() }) + $(if ($haveInstaller) { @($installerPath) } else { @() }) + @($manifestPath)
-    if (-not $Publish) {
-        Say " dry run: built $Out; not publishing. Would upload to ${Repo}'s release $ReleaseTag ($Channel):"
-        foreach ($a in $assets) { Say "   $(Split-Path $a -Leaf)" }
+    if ($BuildOnly) {
+        # The manifest merge needs the release the Mac is still publishing, so it waits for the
+        # -PublishOnly half; the workflow carries $Out there as an artifact.
+        Say " build half done: $Out"
+        foreach ($a in Get-ChildItem $Out) { Say "   $($a.Name)" }
         exit 0
     }
-
-    # ---------- publish ----------
-    # Archive and signature first, the manifest that points at them last (release.sh's order):
-    # a client that fetches the manifest mid-upload finds the zip already there.
-    $uploadFiles = @("$Out\$Name")
-    if ($signature) { $uploadFiles += "$Out\$Name.minisig" }
-    if ($haveInstaller) { $uploadFiles += $installerPath }
-    & gh release upload $ReleaseTag --repo $Repo --clobber @uploadFiles
-    if ($LASTEXITCODE -ne 0) { Die 'uploading the archive failed' }
-    & gh release upload $ReleaseTag --repo $Repo --clobber $manifestPath
-    if ($LASTEXITCODE -ne 0) { Die 'uploading the manifest failed - the release still has the previous one' }
-    # Stale Windows archives under the moving beta/nightly tags get removed, like release.sh
-    # does for the Mac's.
-    $assetNames = & gh release view $ReleaseTag --repo $Repo --json assets --jq '.assets[].name'
-    foreach ($asset in $assetNames) {
-        if ($asset -like "Trek-*-$Platform.zip*" -and $asset -ne $Name -and $asset -ne "$Name.minisig") {
-            & gh release delete-asset $ReleaseTag $asset --repo $Repo -y
-        }
-    }
-    Say " published Trek $Version for $Platform on $Channel`: https://github.com/$Repo/releases/tag/$ReleaseTag"
+    Invoke-TrekReleasePublish
 } finally {
     Copy-Item "$backup\Cargo.toml", "$backup\Cargo.lock" . -Force
     Remove-Item $backup -Recurse -Force -ErrorAction SilentlyContinue

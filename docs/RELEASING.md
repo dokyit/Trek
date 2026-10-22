@@ -167,9 +167,12 @@ as `--notes`; empty means the commit subjects as usual; the install block is add
 either way) and `dry_run`. Run it on the branch you release
 from: a stable release commits `Release v<version>` to that branch and pushes it (as the runner's
 `github-actions[bot]`, so CI doesn't run on that commit, and a protected branch would refuse the push
-before anything is published), and a beta or nightly is built from its head. The macOS job takes about 15
-minutes, the Windows job about 27 more. Between the two, Trek on Windows sees the new version without a
-Windows build and says "the Windows build is on its way"; Mac users can update at once.
+before anything is published), and a beta or nightly is built from its head. The macOS job and the Windows `build` job run in
+parallel — each takes about 15–20 minutes once the release-profile cache is warm (`warm-release.yml`
+keeps it warm on every push to main), and only the small `publish` job that merges the Windows asset
+into the release waits on both. Between the macOS publish and the Windows publish, Trek on Windows
+sees the new version without a Windows build and says "the Windows build is on its way"; Mac users can
+update at once.
 
 If the Windows job fails, the release exists with only `darwin-aarch64`: re-run just that job (**Re-run
 failed jobs** on the run, or `gh workflow run release-windows.yml --ref windows-port` with the same version

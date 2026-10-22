@@ -50,6 +50,13 @@ lto = "thin"
 codegen-units = 16
 strip = true
 
+# Local app bundles skip thin LTO: the link alone ran about a minute of script/bundle.sh,
+# and a build you'll install from source doesn't need link-time optimisation. Releases keep
+# the real thing — script/release.sh sets TREK_RELEASE_BUILD=1 and bundle.sh uses --release.
+[profile.bundle]
+inherits = "release"
+lto = false
+
 # Trek carries a small patch to gpui-base: semibold (not bold) emphasis, calmer heading sizes,
 # and a few opt-in style knobs for rendered markdown (bold colour, a measure for running text,
 # list spacing and marker colour), and coloured text and highlights from inline `<span style="color: …">`
