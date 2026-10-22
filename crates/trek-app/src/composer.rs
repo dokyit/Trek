@@ -3668,6 +3668,12 @@ impl Render for Composer {
                             .gap(px(5.))
                             .items_center()
                             .flex_none()
+                            .px(px(7.))
+                            .h(px(18.))
+                            .rounded_full()
+                            .bg(tint.opacity(0.14))
+                            .border_1()
+                            .border_color(tint.opacity(0.35))
                             .child(
                                 Icon::new(match card.kind {
                                     crate::pr_card::Kind::Pr => {
