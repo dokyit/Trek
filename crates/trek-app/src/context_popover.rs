@@ -9,15 +9,20 @@
 use crate::composer::Composer;
 use crate::palette;
 use crate::ui::{self, Pill};
-use crate::workspace::{Scope, Workspace, fmt_tokens};
-use gpui_kit::component::button::Button;
-use gpui_kit::component::tooltip::Tooltip;
+use crate::workspace::{Scope, Workspace};
+use gpui_kit::base::{
+    Align, MotionStatus, POPUP_PRIORITY, Placement, Positioner, Transition, transition,
+    transition_with_status,
+};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
     StyledExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::time::Duration;
 use trek_agents::{CommandKind, UsageLimit};
 use trek_core::AgentId;
@@ -29,6 +34,10 @@ const CHARS_PER_TOKEN: usize = 4;
 const SKILL_TOKENS: u64 = 80;
 /// What one MCP server's tool definitions cost the agent, roughly.
 const MCP_SERVER_TOKENS: u64 = 900;
+/// The most an agent's own prompt and built-in tool definitions take, roughly (Claude Code's
+/// are about 15–25k): past that, what nothing else accounts for is conversation Trek's
+/// transcript doesn't hold in full (file reads, images, tool output it trimmed).
+const SYSTEM_TOKENS: u64 = 24_000;
 /// The segmented bar's height.
 const BAR: f32 = 8.;
 /// How far a row's hover fill reaches past its text, which lines up with the header's.
@@ -37,10 +46,36 @@ const ROW_INSET: f32 = 6.;
 pub const QUIET: f32 = 0.2;
 /// From this share the ring says how much is used.
 pub const NEAR: f32 = 0.6;
+/// What the agent keeps of the window so compacting has room: a thirtieth, as an estimate — no
+/// agent reports its reserve, so the card says it's one.
+const RESERVE: f64 = 1. / 30.;
+/// How long the messages column takes to fold up once a compaction lands.
+const COLLAPSE: Duration = Duration::from_millis(1_100);
+/// A hover's cross-fade, and the card's and the flyout's open.
+const FADE: Duration = Duration::from_millis(140);
+/// The most small blocks the messages segment folds into while compacting.
+const BLOCKS: u64 = 18;
 
 /// How full the window is, 0–1.
 pub fn fraction(used: u64, window: u64) -> f32 {
     (used as f32 / window.max(1) as f32).clamp(0., 1.)
+}
+
+/// "604.1k", "33k", "1M": a decimal only where it tells.
+pub fn fmt_tokens(n: u64) -> String {
+    let (v, suffix) = match n {
+        0..=999 => return n.to_string(),
+        // Up to what still rounds below 1000 of the unit; from there it's the next one.
+        ..=999_949 => (n as f64 / 1_000., "k"),
+        ..=999_949_999 => (n as f64 / 1_000_000., "M"),
+        _ => (n as f64 / 1_000_000_000., "B"),
+    };
+    let v = (v * 10.).round() / 10.;
+    if v.fract() == 0. {
+        format!("{v:.0}{suffix}")
+    } else {
+        format!("{v:.1}{suffix}")
+    }
 }
 
 /// The ring that fills as the window does, with the share beside it from `NEAR`. The composer
@@ -174,34 +209,50 @@ pub enum Compact {
     },
 }
 
-/// One segment of the bar.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// One segment of the bar: a column of the legend too.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Kind {
     System,
-    Skills,
     Mcp,
+    Skills,
     Messages,
     Free,
+    Reserved,
 }
 
 impl Kind {
     fn label(self) -> &'static str {
         match self {
-            Kind::System => "System & tools",
-            Kind::Skills => "Skills",
+            Kind::System => "System",
             Kind::Mcp => "MCP",
+            Kind::Skills => "Skills",
             Kind::Messages => "Messages",
             Kind::Free => "Free",
+            Kind::Reserved => "Reserved",
         }
     }
 
-    fn id(self) -> &'static str {
+    /// The legend row's id (`context-seg-*` are the shots driver's handles).
+    fn row_id(self) -> &'static str {
         match self {
             Kind::System => "context-seg-system",
-            Kind::Skills => "context-seg-skills",
             Kind::Mcp => "context-seg-mcp",
+            Kind::Skills => "context-seg-skills",
             Kind::Messages => "context-seg-messages",
             Kind::Free => "context-seg-free",
+            Kind::Reserved => "context-seg-reserved",
+        }
+    }
+
+    /// The bar segment's id.
+    fn bar_id(self) -> &'static str {
+        match self {
+            Kind::System => "context-bar-system",
+            Kind::Mcp => "context-bar-mcp",
+            Kind::Skills => "context-bar-skills",
+            Kind::Messages => "context-bar-messages",
+            Kind::Free => "context-bar-free",
+            Kind::Reserved => "context-bar-reserved",
         }
     }
 
@@ -209,23 +260,25 @@ impl Kind {
         let theme = cx.theme();
         match self {
             Kind::System => palette::indigo(cx),
-            Kind::Skills => palette::ember(cx),
             Kind::Mcp => palette::emerald(cx),
+            Kind::Skills => palette::ember(cx),
             Kind::Messages => palette::sky(cx),
-            Kind::Free => theme.foreground.opacity(0.13),
+            Kind::Free => theme.foreground.opacity(0.12),
+            Kind::Reserved => theme.foreground.opacity(0.32),
         }
     }
 }
 
-/// A segment: its size in the window, and what the legend row says about it.
+/// A segment: its size in the window, and what its flyout says about it.
 struct Part {
     kind: Kind,
     tokens: u64,
     /// Its share of the window, 0–1.
     share: f32,
-    /// Whether the size is Trek's estimate rather than the agent's own count.
-    estimated: bool,
-    tip: (String, Vec<String>),
+    /// The flyout's breakdown rows: a label, and its value where there is one.
+    detail: Vec<(String, Option<String>)>,
+    /// A muted line under the rows.
+    note: Option<String>,
 }
 
 /// One of the plan's usage windows.
@@ -234,7 +287,9 @@ struct LimitRow {
     label: String,
     percent: f32,
     resets: String,
-    tip: (String, Vec<String>),
+    /// What fills the window when the agent breaks it down (the weekly's per-model shares, say).
+    /// Empty where the agent doesn't say: the row then keeps its plain bar on hover.
+    split: Vec<(String, f32)>,
 }
 
 /// The plan's usage limits, as the agent last reported them.
@@ -249,6 +304,9 @@ struct Limits {
 pub struct Card {
     used: u64,
     window: u64,
+    /// What the agent keeps free of the window so compacting has room (`RESERVE`): it isn't part
+    /// of "used", and "until auto-compact" is the free space left after it.
+    reserved: u64,
     parts: Vec<Part>,
     limits: Limits,
     compact: Compact,
@@ -259,6 +317,12 @@ pub struct Card {
     /// Nothing to compact (a draft, or no session yet).
     no_thread: bool,
 }
+
+/// Keyed element state (it goes away with the card): the hovered part and its rows' bounds, for
+/// dimming and the flyout's placement.
+type HoveredPart = Entity<Option<Kind>>;
+type RowBounds = Entity<RefCell<HashMap<Kind, Bounds<Pixels>>>>;
+type HoveredLimit = Entity<Option<&'static str>>;
 
 impl Card {
     /// The card for `scope`'s thread, `used` of `window` tokens in its context.
@@ -272,6 +336,8 @@ impl Card {
     ) -> Card {
         let window = window.max(1);
         let used = used.min(window);
+        let reserved = ((window as f64 * RESERVE) as u64).min(window.saturating_sub(used));
+        let free = window - used - reserved;
         let id = thread.map(|t| t.id.as_str());
         let live = id.and_then(|id| ws.live.get(id));
         let (messages, transcript_tokens) = live.map(|l| transcript(&l.items)).unwrap_or((0, 0));
@@ -296,8 +362,13 @@ impl Card {
             skills: skill_tokens,
             mcp: mcp_tokens,
             messages: message_tokens,
-        } = split(used, transcript_tokens, skills.len(), mcp.len());
-        let free = window - used;
+        } = split(
+            used,
+            transcript_tokens,
+            skills.len(),
+            mcp.len(),
+            instructions.unwrap_or(0),
+        );
         let share = |n: u64| n as f32 / window as f32;
         let count =
             |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
@@ -307,15 +378,32 @@ impl Card {
                 kind: Kind::System,
                 tokens: system_tokens,
                 share: share(system_tokens),
-                estimated: true,
-                tip: (
-                    "System & tools".into(),
-                    vec![
-                        "The agent's own prompt and its tools' definitions.".into(),
-                        "Estimated: what the agent counts that isn't a message, skill or server."
-                            .into(),
-                    ],
+                detail: vec![(
+                    "The agent's own prompt and its tools' definitions".into(),
+                    None,
+                )],
+                note: Some(
+                    "Estimated: what the agent counts that isn't a message, skill or server."
+                        .into(),
                 ),
+            });
+        }
+        if mcp_tokens > 0 {
+            let mut detail = vec![(
+                mcp.join(", "),
+                Some(fmt_tokens(mcp_tokens - instructions.unwrap_or(0))),
+            )];
+            if let Some(tokens) = instructions {
+                detail.push(("Instructions".into(), Some(fmt_tokens(tokens))));
+            }
+            parts.push(Part {
+                kind: Kind::Mcp,
+                tokens: mcp_tokens,
+                share: share(mcp_tokens),
+                detail,
+                note: Some(format!(
+                    "Estimated, about {MCP_SERVER_TOKENS} tokens a server."
+                )),
             });
         }
         if skill_tokens > 0 {
@@ -323,89 +411,66 @@ impl Card {
                 kind: Kind::Skills,
                 tokens: skill_tokens,
                 share: share(skill_tokens),
-                estimated: true,
-                tip: (
-                    "Skills".into(),
-                    vec![
-                        format!(
-                            "{} the agent can be asked for, about {SKILL_TOKENS} tokens each.",
-                            count(skills.len(), "skill prompt", "skill prompts")
-                        ),
-                        skills.join(", "),
-                    ],
-                ),
-            });
-        }
-        if mcp_tokens > 0 {
-            let per = mcp_tokens / mcp.len() as u64;
-            let mut lines: Vec<String> = mcp
-                .iter()
-                .map(|name| format!("{name} · about {} tokens", fmt_tokens(per)))
-                .collect();
-            if let Some(tokens) = instructions {
-                lines.push(format!(
-                    "Instructions · about {} tokens (what Trek tells it about the project)",
-                    fmt_tokens(tokens)
-                ));
-            }
-            lines.push(format!(
-                "{} about {MCP_SERVER_TOKENS} tokens each. Estimated.",
-                count(mcp.len(), "server", "servers")
-            ));
-            parts.push(Part {
-                kind: Kind::Mcp,
-                tokens: mcp_tokens,
-                share: share(mcp_tokens),
-                estimated: true,
-                tip: ("MCP".into(), lines),
+                detail: vec![(
+                    format!(
+                        "{} the agent can be asked for",
+                        count(skills.len(), "skill prompt", "skill prompts")
+                    ),
+                    None,
+                )],
+                note: Some(format!(
+                    "{} · estimated, about {SKILL_TOKENS} tokens each.",
+                    skills.join(", ")
+                )),
             });
         }
         if message_tokens > 0 {
-            let mut lines = vec![
-                format!(
-                    "{} in the transcript.",
-                    count(
-                        messages,
-                        "message and tool result",
-                        "messages and tool results"
-                    )
+            let mut detail = vec![(
+                count(
+                    messages,
+                    "message and tool result",
+                    "messages and tool results",
                 ),
-                format!(
-                    "About {} tokens from their text ({CHARS_PER_TOKEN} characters a token).",
-                    fmt_tokens(message_tokens)
-                ),
-            ];
+                None,
+            )];
             if message_tokens < transcript_tokens {
-                lines.push(
-                    "The transcript holds more text than the window: the agent has summarized it."
+                detail.push((
+                    "The transcript holds more than the window: the agent has summarized it."
                         .into(),
-                );
+                    None,
+                ));
             }
             parts.push(Part {
                 kind: Kind::Messages,
                 tokens: message_tokens,
                 share: share(message_tokens),
-                estimated: true,
-                tip: ("Messages".into(), lines),
+                detail,
+                note: Some(format!(
+                    "Estimated from their text ({CHARS_PER_TOKEN} characters a token)."
+                )),
             });
         }
         parts.push(Part {
             kind: Kind::Free,
             tokens: free,
             share: share(free),
-            estimated: false,
-            tip: (
-                "Free".into(),
-                vec![format!(
-                    "{} left in the {} window.",
-                    fmt_tokens(free),
-                    fmt_tokens(window)
-                )],
-            ),
+            detail: vec![(
+                "Room for the conversation, before the agent has to compact.".into(),
+                None,
+            )],
+            note: None,
+        });
+        parts.push(Part {
+            kind: Kind::Reserved,
+            tokens: reserved,
+            share: share(reserved),
+            detail: vec![("Kept free so compacting has room to run".into(), None)],
+            note: Some("Estimated: no agent reports its reserve.".into()),
         });
         Card {
             used,
             window,
+            reserved,
             parts,
             limits: Limits::of(ws, thread),
             compact,
@@ -415,20 +480,72 @@ impl Card {
         }
     }
 
-    pub fn render(&self, me: WeakEntity<Composer>, cx: &App) -> AnyElement {
+    fn part(&self, kind: Kind) -> Option<&Part> {
+        self.parts.iter().find(|p| p.kind == kind)
+    }
+
+    pub fn render(
+        &self,
+        me: WeakEntity<Composer>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
-        let frac = fraction(self.used, self.window);
+        let hover = window.use_keyed_state("context-hover", cx, |_, _| None::<Kind>);
+        let rows = window.use_keyed_state("context-rows", cx, |_, _| {
+            RefCell::new(HashMap::<Kind, Bounds<Pixels>>::new())
+        });
+        let bounds = window.use_keyed_state("context-bounds", cx, |_, _| {
+            Cell::new(Bounds::<Pixels>::default())
+        });
+        let limit_hover = window.use_keyed_state("context-limit", cx, |_, _| None::<&'static str>);
+        let hovered = *hover.read(cx);
+        // Shown values: the messages column folds up as the compaction's reports land, and
+        // everything it feeds (used, free, the header's share) follows it.
+        let messages = self.part(Kind::Messages).map(|p| p.tokens).unwrap_or(0);
+        let folded = transition_with_status(
+            "context-messages",
+            messages as f32,
+            Transition::new(COLLAPSE).ease(|t| 1. - (1. - t).powi(3)),
+            window,
+            cx,
+        );
+        let shown_messages = folded.value.max(0.) as u64;
+        let shown_used = self
+            .used
+            .saturating_sub(messages.saturating_sub(shown_messages));
+        let shown_free = self
+            .window
+            .saturating_sub(self.reserved)
+            .saturating_sub(shown_used);
+        // While Compact now runs (or the fold is still playing) the messages segment is small
+        // blocks collapsing left; the rest of the time it's one piece like the others.
+        let folding = matches!(self.compact, Compact::Running { .. })
+            || folded.status == MotionStatus::Running;
+        if matches!(self.compact, Compact::Running { .. }) {
+            // The shimmer and the fold need frames; idle, the card asks for none.
+            window.request_animation_frame();
+        }
+        let frac = fraction(shown_used, self.window);
         let header = h_flex()
             .w_full()
             .items_baseline()
-            .gap(px(6.))
+            .gap(px(5.))
             .child(
                 div()
                     .text_sm()
                     .font_medium()
                     .text_color(theme.foreground)
                     .child("Context"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .font_medium()
+                    .font_features(figures())
+                    .text_color(level_color(frac, theme.foreground, cx))
+                    .child(format!("{:.0}%", frac * 100.)),
             )
             .child(div().flex_1())
             .child(
@@ -438,52 +555,92 @@ impl Card {
                     .font_features(figures())
                     .child(format!(
                         "{} of {}",
-                        fmt_tokens(self.used),
+                        fmt_tokens(shown_used),
                         fmt_tokens(self.window)
                     )),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .font_medium()
-                    .font_features(figures())
-                    .text_color(level_color(frac, theme.foreground, cx))
-                    .child(format!("{:.0}%", frac * 100.)),
             );
         // Every segment that holds something keeps a sliver, so a few hundred tokens of skills
         // still show beside a hundred thousand of messages; the hairline gaps let it read as
-        // parts. GPUI clips to rectangles, so the ends are rounded on the segments themselves.
-        let segments: Vec<&Part> = self.parts.iter().filter(|p| p.tokens > 0).collect();
-        let last = segments.len().saturating_sub(1);
-        let bar =
-            h_flex()
-                .w_full()
-                .h(px(BAR))
-                .gap(px(2.))
-                .children(segments.iter().enumerate().map(|(i, p)| {
-                    div()
+        // parts. The free middle shows the track through its spacer; Reserved is the grey block
+        // at the far right.
+        let dim = |kind: Kind, window: &mut Window, cx: &mut App| {
+            transition(
+                SharedString::from(format!("context-dim-{}", kind.row_id())),
+                if hovered.is_some() && hovered != Some(kind) {
+                    0.35
+                } else {
+                    1.
+                },
+                Transition::new(FADE),
+                window,
+                cx,
+            )
+        };
+        let hover_seg = |kind: Kind, hover: HoveredPart, me: WeakEntity<Composer>| {
+            move |on: &bool, _window: &mut Window, cx: &mut App| {
+                hover.update(cx, |h, _| *h = on.then_some(kind));
+                let _ = me.update(cx, |_, cx| cx.notify());
+            }
+        };
+        let track = theme.foreground.opacity(0.09);
+        let last = self.parts.len() - 1;
+        let bar = h_flex()
+            .w_full()
+            .h(px(BAR))
+            .gap(px(2.))
+            .rounded(px(BAR / 2.))
+            .bg(track)
+            .children(self.parts.iter().enumerate().map(|(i, p)| {
+                let opacity = dim(p.kind, window, cx);
+                let share = match p.kind {
+                    Kind::Messages => shown_messages as f32 / self.window as f32,
+                    Kind::Free => shown_free as f32 / self.window as f32,
+                    _ => p.share,
+                };
+                let seg = |el: Div| {
+                    el.id(p.kind.bar_id())
+                        .test_support()
                         .h_full()
-                        .w(relative(p.share))
+                        .w(relative(share.max(0.)))
+                        .opacity(opacity)
+                        .on_hover(hover_seg(p.kind, hover.clone(), me.clone()))
+                };
+                match p.kind {
+                    Kind::Free => {
+                        // The spacer's hitbox hovers the flyout; the track shows through it.
+                        seg(div()).into_any_element()
+                    }
+                    Kind::Messages if folding => {
+                        let chunk = ((messages.max(shown_messages) + BLOCKS - 1) / BLOCKS).max(1);
+                        let n = shown_messages.div_ceil(chunk).max(1);
+                        seg(h_flex())
+                            .gap(px(1.))
+                            .children((0..n).map(|_| {
+                                div()
+                                    .h_full()
+                                    .flex_1()
+                                    .rounded(px(1.))
+                                    .bg(Kind::Messages.color(cx))
+                            }))
+                            // The fill's edge while it folds: a caret the free space follows.
+                            .child(
+                                div()
+                                    .w(px(2.))
+                                    .h_full()
+                                    .flex_none()
+                                    .bg(theme.foreground.opacity(0.8)),
+                            )
+                            .into_any_element()
+                    }
+                    _ => seg(div())
                         .min_w(px(3.))
                         .rounded(px(1.5))
                         .when(i == 0, |el| el.rounded_l(px(BAR / 2.)))
                         .when(i == last, |el| el.rounded_r(px(BAR / 2.)))
                         .bg(p.kind.color(cx))
-                }));
-        // While compacting, the bar gives up its right end as if the messages were being folded
-        // away; it's the same segments, shrinking.
-        let bar = match self.compact {
-            Compact::Running { generation, .. } => div()
-                .w_full()
-                .child(bar)
-                .with_animation(
-                    ("context-compress", generation),
-                    Animation::new(Duration::from_millis(1_400)),
-                    |el, t| el.pr(px(170. * t)),
-                )
-                .into_any_element(),
-            _ => bar.into_any_element(),
-        };
+                        .into_any_element(),
+                }
+            }));
         // Two columns, the rows' hover fill reaching past the text so the swatches line up with
         // the header above.
         let legend = div()
@@ -491,38 +648,113 @@ impl Card {
             .grid()
             .grid_cols(2)
             .gap_x(px(4.))
-            .children(self.parts.iter().map(|p| legend_row(p, cx)));
+            .children(self.parts.iter().map(|p| {
+                legend_row(
+                    p,
+                    hovered,
+                    hover.clone(),
+                    rows.clone(),
+                    me.clone(),
+                    window,
+                    cx,
+                )
+            }));
+        // The flyout to the card's right (flipped left when there's no room), on the row the
+        // pointer hovers.
+        let flyout = hovered
+            .and_then(|kind| self.part(kind))
+            .and_then(|p| {
+                let anchor = rows
+                    .read(cx)
+                    .borrow()
+                    .get(&p.kind)
+                    .copied()
+                    .unwrap_or_else(|| bounds.read(cx).get());
+                (anchor.size.width > px(0.)).then(|| (p, anchor))
+            })
+            .map(|(p, anchor)| {
+                deferred(
+                    Positioner::side(anchor)
+                        .placement(Placement::Right)
+                        .align(Align::Start)
+                        .offset(px(10.))
+                        .margin(px(8.))
+                        .occlude()
+                        .child(flyout(p, cx)),
+                )
+                .with_priority(POPUP_PRIORITY + 1)
+                .into_any_element()
+            });
         let rule = || div().h(px(1.)).w_full().bg(theme.border);
-        ui::menu_surface(cx)
+        div()
+            .relative()
             .child(
-                v_flex()
-                    .w(px(340.))
-                    .p(px(11.))
-                    .gap(px(10.))
-                    .child(v_flex().gap(px(8.)).child(header).child(bar))
-                    .child(legend)
-                    .when_some(self.limits.render(cx), |el, limits| {
-                        el.child(rule()).child(limits)
-                    })
-                    .child(rule())
-                    .child(self.footer(me, cx)),
+                canvas(
+                    move |b, _w, cx| {
+                        bounds.update(cx, |c, _| c.set(b));
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full()
+                .top_0()
+                .left_0(),
+            )
+            .child(
+                ui::menu_surface(cx).child(
+                    v_flex()
+                        .w(px(340.))
+                        .p(px(11.))
+                        .gap(px(10.))
+                        .child(v_flex().gap(px(8.)).child(header).child(bar))
+                        .child(legend)
+                        .when_some(
+                            self.limits
+                                .render(limit_hover.clone(), me.clone(), window, cx),
+                            |el, limits| el.child(rule()).child(limits),
+                        )
+                        .child(rule())
+                        .child(self.footer(me, window, shown_free, folding, cx)),
+                ),
+            )
+            .when_some(flyout, |el, f| el.child(f))
+            .with_animation(
+                "context-card",
+                Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()),
+                |el, t| el.opacity(t).mt(px(4. * (1. - t))),
             )
             .into_any_element()
     }
 
-    fn footer(&self, me: WeakEntity<Composer>, cx: &App) -> AnyElement {
+    fn footer(
+        &self,
+        me: WeakEntity<Composer>,
+        window: &mut Window,
+        until: u64,
+        folding: bool,
+        cx: &mut App,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let emerald = palette::emerald(cx);
-        // What's free is the legend's last row; the footer speaks only when it has news.
+        // What's free is the legend's last row but one; the footer speaks only when it has news,
+        // else it says how much room is left before the agent compacts on its own.
+        let summarizing = |window: &mut Window| -> AnyElement {
+            window.request_animation_frame();
+            div()
+                .text_xs()
+                .child(crate::working_bar::shimmer(
+                    "Summarizing messages".into(),
+                    clock(),
+                    cx.reduce_motion(),
+                    muted,
+                    theme.foreground,
+                ))
+                .into_any_element()
+        };
         let status = match self.compact {
-            Compact::Running { .. } => Some(
-                div()
-                    .text_xs()
-                    .text_color(theme.foreground)
-                    .child("Summarizing messages")
-                    .into_any_element(),
-            ),
+            Compact::Running { .. } => Some(summarizing(window)),
+            Compact::Freed { .. } if folding => Some(summarizing(window)),
             Compact::Freed { tokens, .. } => Some(
                 h_flex()
                     .gap(px(5.))
@@ -549,13 +781,19 @@ impl Card {
                     .child("The window is full")
                     .into_any_element(),
             ),
-            Compact::Idle => None,
+            Compact::Idle => Some(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .font_features(figures())
+                    .child(format!("{} until auto-compact", fmt_tokens(until)))
+                    .into_any_element(),
+            ),
         };
         let button = match self.compact {
             Compact::Running { .. } => Button::new("context-compact")
                 .small()
-                .label("Compacting…")
-                .loading(true)
+                .label("Compact now")
                 .disabled(true),
             Compact::Freed { .. } => Button::new("context-compact")
                 .small()
@@ -580,6 +818,7 @@ impl Card {
                 );
                 Button::new("context-compact")
                     .small()
+                    .info()
                     .label("Compact now")
                     .disabled(self.no_thread || self.running || self.limits.paused.is_some())
                     .tooltip(why)
@@ -596,6 +835,13 @@ impl Card {
             .child(button)
             .into_any_element()
     }
+}
+
+/// Seconds since the process start, for the shimmer's sweep: any monotonic phase does.
+fn clock() -> f32 {
+    static T0: std::sync::LazyLock<std::time::Instant> =
+        std::sync::LazyLock::new(std::time::Instant::now);
+    T0.elapsed().as_secs_f32()
 }
 
 /// Tabular figures, so numbers that change in place don't jitter. Only on numbers: on the
@@ -615,21 +861,33 @@ fn level_color(frac: f32, calm: Hsla, cx: &App) -> Hsla {
     }
 }
 
-/// A legend cell: swatch, name, size. Estimates read "≈"; the tooltip says what went into one.
-/// Hovering lifts the row and brings its name up from muted, so the detail is findable.
-fn legend_row(part: &Part, cx: &App) -> AnyElement {
+/// A legend cell: swatch, name, size. Hovering lifts the row, dims the rest, and opens the
+/// part's flyout to the card's side.
+fn legend_row(
+    part: &Part,
+    hovered: Option<Kind>,
+    hover: HoveredPart,
+    rows: RowBounds,
+    me: WeakEntity<Composer>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     let theme = cx.theme().clone();
-    let value = if part.estimated {
-        format!("≈ {}", fmt_tokens(part.tokens))
-    } else {
-        fmt_tokens(part.tokens)
-    };
-    let (title, lines) = (part.tip.0.clone(), part.tip.1.clone());
+    let on = hovered == Some(part.kind);
+    let opacity = transition(
+        SharedString::from(format!("context-dim-{}", part.kind.row_id())),
+        if hovered.is_some() && !on { 0.35 } else { 1. },
+        Transition::new(FADE),
+        window,
+        cx,
+    );
+    let kind = part.kind;
     // The name takes the row's color: GPUI fixes a text's color when it lays it out, before a
     // group hover is known, but the row's own hover is known by then.
     h_flex()
-        .id(part.kind.id())
+        .id(kind.row_id())
         .test_support()
+        .relative()
         .min_w_0()
         .h(px(24.))
         .px(px(ROW_INSET))
@@ -637,11 +895,30 @@ fn legend_row(part: &Part, cx: &App) -> AnyElement {
         .rounded(px(6.))
         .items_center()
         .text_xs()
+        .opacity(opacity)
         .text_color(theme.muted_foreground)
         .hover(|s| {
             s.bg(theme.foreground.opacity(0.07))
                 .text_color(theme.foreground)
         })
+        .on_hover(move |on: &bool, _window: &mut Window, cx: &mut App| {
+            hover.update(cx, |h, _| *h = on.then_some(kind));
+            let _ = me.update(cx, |_, cx| cx.notify());
+        })
+        .child(
+            canvas(
+                move |b, _w, cx| {
+                    rows.update(cx, |rows, _| {
+                        rows.borrow_mut().insert(kind, b);
+                    });
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full()
+            .top_0()
+            .left_0(),
+        )
         .child(
             div()
                 .size(px(8.))
@@ -656,9 +933,89 @@ fn legend_row(part: &Part, cx: &App) -> AnyElement {
                 .text_xs()
                 .text_color(theme.foreground)
                 .font_features(figures())
-                .child(value),
+                .child(fmt_tokens(part.tokens)),
         )
-        .tooltip(tooltip(title, lines))
+        .into_any_element()
+}
+
+/// A part's flyout: a colour dash, its name, its size and share, then its breakdown.
+fn flyout(part: &Part, cx: &App) -> AnyElement {
+    let theme = cx.theme().clone();
+    let muted = theme.muted_foreground;
+    let row = |(label, value): &(String, Option<String>)| {
+        h_flex()
+            .gap(px(8.))
+            .items_baseline()
+            .child(
+                div()
+                    .min_w_0()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(label.clone()),
+            )
+            .child(div().flex_1())
+            .when_some(value.clone(), |el, value| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .font_features(figures())
+                        .text_color(theme.foreground)
+                        .child(value),
+                )
+            })
+    };
+    ui::menu_surface(cx)
+        .child(
+            v_flex()
+                .w(px(240.))
+                .p(px(10.))
+                .gap(px(6.))
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(7.))
+                        .child(
+                            div()
+                                .w(px(10.))
+                                .h(px(3.))
+                                .rounded(px(1.5))
+                                .flex_none()
+                                .bg(part.kind.color(cx)),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_medium()
+                                .text_color(theme.foreground)
+                                .child(part.kind.label()),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_features(figures())
+                                .text_color(theme.foreground)
+                                .child(fmt_tokens(part.tokens)),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_features(figures())
+                                .text_color(muted)
+                                .child(format!("{:.0}%", part.share * 100.)),
+                        ),
+                )
+                .children(part.detail.iter().map(row))
+                .when_some(part.note.clone(), |el, note| {
+                    el.child(div().text_xs().text_color(muted.opacity(0.8)).child(note))
+                }),
+        )
+        .with_animation(
+            SharedString::from(format!("context-flyout-{}", part.kind.row_id())),
+            Animation::new(FADE).with_easing(ease_out_quint()),
+            |el, t| el.opacity(t).mt(px(4. * (1. - t))),
+        )
         .into_any_element()
 }
 
@@ -697,21 +1054,25 @@ impl Limits {
                 label == "weekly limit" || (label.starts_with("weekly") && !l.label.contains('·'))
             })
             .map(|l| row(l, now, true));
-        // The per-model windows the plan reports ("Weekly · Opus"), for the weekly row's detail.
+        // The per-model windows the plan reports ("Weekly · Opus"): the weekly row's split.
         let models: Vec<(String, f32)> = limits
             .iter()
             .filter(|l| l.label.contains('·'))
-            .map(|l| (l.label.clone(), l.percent))
+            .map(|l| {
+                (
+                    l.label
+                        .rsplit('·')
+                        .next()
+                        .unwrap_or(&l.label)
+                        .trim()
+                        .to_string(),
+                    l.percent,
+                )
+            })
             .collect();
         let mut weekly = weekly;
         if let Some(w) = weekly.as_mut() {
-            if models.is_empty() {
-                w.tip.1.push("No per-model windows reported.".into());
-            } else {
-                for (label, percent) in &models {
-                    w.tip.1.push(format!("{label} · {percent:.0}%"));
-                }
-            }
+            w.split = models;
         }
         Limits {
             session,
@@ -722,27 +1083,30 @@ impl Limits {
 
     /// The section, or nothing when the agent reports no plan limits: the card doesn't spend a
     /// row saying it has nothing to say.
-    fn render(&self, cx: &App) -> Option<AnyElement> {
+    fn render(
+        &self,
+        hover: HoveredLimit,
+        me: WeakEntity<Composer>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
         if self.session.is_none() && self.weekly.is_none() && self.paused.is_none() {
             return None;
         }
-        let theme = cx.theme().clone();
+        let hovered = *hover.read(cx);
         Some(
             v_flex()
                 .w_full()
-                .gap(px(4.))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child("Limits"),
+                .gap(px(2.))
+                .children(
+                    self.session
+                        .iter()
+                        .map(|row| limit_row(row, hovered, hover.clone(), me.clone(), window, cx)),
                 )
-                .child(
-                    v_flex()
-                        .mx(px(-ROW_INSET))
-                        .gap(px(2.))
-                        .children(self.session.as_ref().map(|row| limit_row(row, cx)))
-                        .children(self.weekly.as_ref().map(|row| limit_row(row, cx))),
+                .children(
+                    self.weekly
+                        .iter()
+                        .map(|row| limit_row(row, hovered, hover.clone(), me.clone(), window, cx)),
                 )
                 .when_some(self.paused.clone(), |el, paused| {
                     el.child(div().text_xs().text_color(palette::amber(cx)).child(paused))
@@ -755,20 +1119,9 @@ impl Limits {
 fn row(limit: &UsageLimit, now: i64, weekly: bool) -> LimitRow {
     let resets = match limit.resets_at {
         Some(at) if weekly => format!("Resets {}", day_clock(at)),
-        Some(at) => format!("Resets in {}", crate::time::countdown(at, now)),
+        Some(at) => format!("Resets in {}", resets_in(at - now)),
         None => "Reset time unknown".to_string(),
     };
-    let mut lines = vec![format!("{:.0}% of the window used", limit.percent)];
-    if let Some(at) = limit.resets_at {
-        lines.push(format!(
-            "Resets {} (in {})",
-            crate::time::reset_clock(at, now),
-            crate::time::countdown(at, now)
-        ));
-    }
-    if !weekly {
-        lines.push("One window shared by every model.".into());
-    }
     LimitRow {
         id: if weekly {
             "context-limit-weekly"
@@ -778,7 +1131,18 @@ fn row(limit: &UsageLimit, now: i64, weekly: bool) -> LimitRow {
         label: limit.label.clone(),
         percent: limit.percent,
         resets,
-        tip: (limit.label.clone(), lines),
+        split: vec![],
+    }
+}
+
+/// "2 hr 49 min", for a reset inside a day.
+fn resets_in(ms: i64) -> String {
+    let s = (ms / 1000).max(0);
+    match s {
+        0..=59 => "under a minute".into(),
+        60..=3_599 => format!("{} min", (s + 30) / 60),
+        3_600..=86_399 => format!("{} hr {} min", s / 3_600, (s % 3_600) / 60),
+        _ => format!("{} days", (s + 86_399) / 86_400),
     }
 }
 
@@ -793,16 +1157,120 @@ fn day_clock(at: i64) -> String {
         .unwrap_or_default()
 }
 
-fn limit_row(row: &LimitRow, cx: &App) -> AnyElement {
+/// A limit row: its window's name, share and reset, then its bar. Where the agent says what the
+/// window holds, hovering splits the bar by it (and dims the other row).
+fn limit_row(
+    row: &LimitRow,
+    hovered: Option<&'static str>,
+    hover: HoveredLimit,
+    me: WeakEntity<Composer>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     let theme = cx.theme().clone();
+    let on = hovered == Some(row.id);
+    let opacity = transition(
+        SharedString::from(format!("context-dim-{}", row.id)),
+        if hovered.is_some() && !on { 0.35 } else { 1. },
+        Transition::new(FADE),
+        window,
+        cx,
+    );
     let color = if row.percent >= 95. {
         palette::red(cx)
     } else if row.percent >= 85. {
         palette::amber(cx)
     } else {
-        theme.foreground.opacity(0.55)
+        palette::sky(cx)
     };
-    let (title, lines) = (row.tip.0.clone(), row.tip.1.clone());
+    let expanded = on && !row.split.is_empty();
+    let header = if expanded {
+        h_flex()
+            .w_full()
+            .gap(px(14.))
+            .items_baseline()
+            .children(row.split.iter().enumerate().map(|(i, (name, percent))| {
+                h_flex()
+                    .gap(px(6.))
+                    .items_center()
+                    .child(
+                        div()
+                            .w(px(10.))
+                            .h(px(3.))
+                            .rounded(px(1.5))
+                            .flex_none()
+                            .bg(split_tone(i, color)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.foreground)
+                            .child(name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_features(figures())
+                            .text_color(theme.muted_foreground)
+                            .child(format!("{percent:.0}%")),
+                    )
+            }))
+            .into_any_element()
+    } else {
+        h_flex()
+            .w_full()
+            .gap(px(6.))
+            .items_baseline()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.foreground)
+                    .child(row.label.clone()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .font_medium()
+                    .font_features(figures())
+                    .text_color(theme.foreground)
+                    .child(format!("{:.0}%", row.percent)),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .font_features(figures())
+                    .child(row.resets.clone()),
+            )
+            .into_any_element()
+    };
+    let bar = div()
+        .w_full()
+        .h(px(4.))
+        .rounded_full()
+        .bg(theme.foreground.opacity(0.08))
+        .child(if expanded {
+            h_flex()
+                .size_full()
+                .gap(px(2.))
+                .children(row.split.iter().enumerate().map(|(i, (_, percent))| {
+                    div()
+                        .h_full()
+                        .rounded_full()
+                        .w(relative((percent / 100.).clamp(0., 1.)))
+                        .bg(split_tone(i, color))
+                }))
+                .into_any_element()
+        } else {
+            div()
+                .h_full()
+                .rounded_full()
+                .w(relative((row.percent / 100.).clamp(0., 1.)))
+                .bg(color)
+                .into_any_element()
+        });
+    let id = row.id;
     v_flex()
         .id(row.id)
         .test_support()
@@ -811,72 +1279,26 @@ fn limit_row(row: &LimitRow, cx: &App) -> AnyElement {
         .px(px(ROW_INSET))
         .py(px(5.))
         .rounded(px(6.))
-        .hover(|s| s.bg(theme.foreground.opacity(0.07)))
-        .child(
-            h_flex()
-                .w_full()
-                .gap(px(6.))
-                .items_baseline()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.foreground)
-                        .child(row.label.clone()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .font_features(figures())
-                        .child(format!("{:.0}%", row.percent)),
-                )
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .font_features(figures())
-                        .child(row.resets.clone()),
-                ),
-        )
-        .child(
-            div()
-                .w_full()
-                .h(px(4.))
-                .rounded_full()
-                .bg(theme.foreground.opacity(0.08))
-                .child(
-                    div()
-                        .h_full()
-                        .rounded_full()
-                        .w(relative((row.percent / 100.).clamp(0., 1.)))
-                        .bg(color),
-                ),
-        )
-        .tooltip(tooltip(title, lines))
+        .opacity(opacity)
+        .when(!row.split.is_empty(), |el| {
+            el.hover(|s| s.bg(theme.foreground.opacity(0.07))).on_hover(
+                move |on: &bool, _window: &mut Window, cx: &mut App| {
+                    hover.update(cx, |h, _| *h = on.then_some(id));
+                    let _ = me.update(cx, |_, cx| cx.notify());
+                },
+            )
+        })
+        .child(header)
+        .child(bar)
         .into_any_element()
 }
 
-/// A tooltip with a title and a few lines under it.
-fn tooltip(
-    title: String,
-    lines: Vec<String>,
-) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-    move |window, cx| {
-        let (title, lines) = (title.clone(), lines.clone());
-        Tooltip::element(move |_, cx| {
-            v_flex()
-                .gap(px(3.))
-                .max_w(px(300.))
-                .child(div().text_sm().font_medium().child(title.clone()))
-                .children(lines.iter().map(|line| {
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(line.clone())
-                }))
-        })
-        .build(window, cx)
+/// The split's tones: the first share full colour, the rest ever fainter.
+fn split_tone(i: usize, color: Hsla) -> Hsla {
+    match i {
+        0 => color,
+        1 => color.opacity(0.45),
+        _ => color.opacity(0.25),
     }
 }
 
@@ -892,13 +1314,15 @@ struct Split {
 /// What Trek knows is configured is in every request, so it's counted first, at rough per-item
 /// sizes. The transcript's share comes out of what's left: the agent's count is the truth, and a
 /// summarized transcript holds more text than the window does. The rest is the agent's own
-/// prompt and its tools' definitions.
-fn split(used: u64, transcript: u64, skills: usize, mcp: usize) -> Split {
-    let mcp = (mcp as u64 * MCP_SERVER_TOKENS).min(used);
+/// prompt and its tools' definitions, up to what such a prompt plausibly takes; anything past
+/// that is conversation too.
+fn split(used: u64, transcript: u64, skills: usize, mcp: usize, instructions: u64) -> Split {
+    let mcp = (mcp as u64 * MCP_SERVER_TOKENS + instructions).min(used);
     let skills = (skills as u64 * SKILL_TOKENS).min(used - mcp);
-    let messages = transcript.min(used - mcp - skills);
+    let rest = used - mcp - skills;
+    let messages = transcript.min(rest).max(rest.saturating_sub(SYSTEM_TOKENS));
     Split {
-        system: used - mcp - skills - messages,
+        system: rest - messages,
         skills,
         mcp,
         messages,
@@ -945,17 +1369,20 @@ fn tokens_of_len(chars: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{MCP_SERVER_TOKENS, SKILL_TOKENS, Split, day_clock, split, transcript};
+    use super::{
+        MCP_SERVER_TOKENS, SKILL_TOKENS, SYSTEM_TOKENS, Split, day_clock, fmt_tokens, split,
+        transcript,
+    };
     use trek_core::store::Item;
 
     #[test]
     fn a_transcript_longer_than_the_window_leaves_the_configured_parts_their_share() {
         // A summarized thread: its transcript estimates more than the agent counts.
-        let s = split(200_000, 500_000, 4, 2);
+        let s = split(200_000, 500_000, 4, 2, 3_200);
         assert_eq!(
             s.mcp,
-            2 * MCP_SERVER_TOKENS,
-            "the servers are in every request"
+            2 * MCP_SERVER_TOKENS + 3_200,
+            "the servers and the instructions are in every request"
         );
         assert_eq!(s.skills, 4 * SKILL_TOKENS);
         assert_eq!(s.messages, 200_000 - s.mcp - s.skills);
@@ -964,7 +1391,7 @@ mod tests {
 
     #[test]
     fn what_no_part_accounts_for_is_the_agents_own_prompt() {
-        let s = split(11_000, 168, 4, 2);
+        let s = split(11_000, 168, 4, 2, 0);
         assert_eq!(
             s,
             Split {
@@ -975,8 +1402,16 @@ mod tests {
             }
         );
         // And a window smaller than the estimates never goes negative.
-        let tiny = split(500, 10, 4, 2);
+        let tiny = split(500, 10, 4, 2, 0);
         assert_eq!(tiny.mcp + tiny.skills + tiny.messages + tiny.system, 500);
+    }
+
+    #[test]
+    fn what_the_transcript_doesnt_hold_is_still_conversation_past_a_prompts_size() {
+        // A long thread whose file reads and images Trek's transcript only summarizes.
+        let s = split(120_400, 315, 4, 3, 0);
+        assert_eq!(s.system, SYSTEM_TOKENS, "a prompt is only so big");
+        assert_eq!(s.messages, 120_400 - SYSTEM_TOKENS - s.mcp - s.skills);
     }
 
     #[test]
@@ -1008,5 +1443,17 @@ mod tests {
         let at = 1_793_026_800_000;
         let day = day_clock(at);
         assert!(day.starts_with("Mon "), "{day}");
+    }
+
+    #[test]
+    fn token_counts_read_as_the_card_writes_them() {
+        assert_eq!(fmt_tokens(999), "999");
+        assert_eq!(fmt_tokens(8_300), "8.3k");
+        assert_eq!(fmt_tokens(32_900), "32.9k");
+        assert_eq!(fmt_tokens(33_000), "33k");
+        assert_eq!(fmt_tokens(604_100), "604.1k");
+        assert_eq!(fmt_tokens(541_600), "541.6k");
+        assert_eq!(fmt_tokens(1_000_000), "1M");
+        assert_eq!(fmt_tokens(1_500_000), "1.5M");
     }
 }

@@ -870,8 +870,8 @@ impl Composer {
         let tip = format!(
             "Context {:.0}% · {} of {}",
             crate::context_popover::fraction(used, window) * 100.,
-            crate::workspace::fmt_tokens(used),
-            crate::workspace::fmt_tokens(window)
+            crate::context_popover::fmt_tokens(used),
+            crate::context_popover::fmt_tokens(window)
         );
         let me = cx.entity().downgrade();
         Popover::new("context-card")
@@ -880,6 +880,17 @@ impl Composer {
             .offset(px(6.))
             .appearance(false)
             .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+                // Closed after a compaction finished: its result has been seen, and the ring
+                // goes back to showing only past `QUIET`.
+                if !*open
+                    && matches!(
+                        this.compact,
+                        crate::context_popover::Compact::Freed { .. }
+                            | crate::context_popover::Compact::Unchanged { .. }
+                    )
+                {
+                    this.compact = crate::context_popover::Compact::Idle;
+                }
                 if *open {
                     // A compaction reported before the context moved on is old news.
                     let used = this
@@ -912,11 +923,22 @@ impl Composer {
             }))
             .trigger(crate::context_popover::RingTrigger::new(
                 tip,
-                crate::context_popover::dial(used, window, cx).into_any_element(),
+                // A turn of `/compact` shows on the ring as a folding arrow.
+                if matches!(
+                    self.compact,
+                    crate::context_popover::Compact::Running { .. }
+                ) {
+                    Icon::new(crate::assets::Lucide::RefreshCw)
+                        .small()
+                        .text_color(cx.theme().foreground.opacity(0.75))
+                        .into_any_element()
+                } else {
+                    crate::context_popover::dial(used, window, cx).into_any_element()
+                },
             ))
             // Gathered only while the card is open: the transcript is walked to estimate its
             // share, which is no work to do on every keystroke behind a closed card.
-            .content(move |_, _, cx| match me.upgrade() {
+            .content(move |_, win, cx| match me.upgrade() {
                 Some(composer) => {
                     let card = {
                         let composer = composer.read(cx);
@@ -935,11 +957,67 @@ impl Composer {
                             composer.compact.clone(),
                         )
                     };
-                    card.render(me.clone(), cx)
+                    card.render(me.clone(), win, cx)
                 }
                 None => div().into_any_element(),
             })
             .into_any_element()
+    }
+
+    /// The reference's "Create PR": on a branch other than the default one, with work on it
+    /// (changed files or commits not pushed), in a thread with no pull request card yet. It asks
+    /// the agent in words, so the card that follows is the one `gh pr create` brings.
+    fn create_pr_pill(&self, running: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let ws = self.workspace.read(cx);
+        let id = ws.thread_id_in(&self.scope)?.to_string();
+        let git = ws.git_in(&self.scope)?;
+        let has_work = git.changed > 0 || git.ahead > 0;
+        let has_pr = ws
+            .pr_chip(&id)
+            .is_some_and(|c| c.kind == crate::pr_card::Kind::Pr);
+        if running
+            || !git.is_repo
+            || git.branch.is_none()
+            || git.on_default()
+            || !has_work
+            || has_pr
+        {
+            return None;
+        }
+        let theme = cx.theme();
+        let (fg, bg) = (theme.background, theme.foreground);
+        let ws = self.workspace.clone();
+        Some(
+            h_flex()
+                .id("create-pr")
+                .test_support()
+                .aria_label("Create PR")
+                .flex_none()
+                .gap(px(5.))
+                .items_center()
+                .h(px(24.))
+                .px(px(10.))
+                .rounded_full()
+                .bg(bg.opacity(0.92))
+                .hover(move |s| s.bg(bg))
+                .cursor_pointer()
+                .text_size(px(12.))
+                .font_medium()
+                .text_color(fg)
+                .child(
+                    Icon::new(crate::assets::Lucide::GitPullRequest)
+                        .size(px(12.))
+                        .text_color(fg),
+                )
+                .child("Create PR")
+                .on_click(move |_, _, cx| {
+                    let id = id.clone();
+                    ws.update(cx, |ws, cx| {
+                        ws.send_to(&id, "Create PR".to_string(), vec![], cx)
+                    });
+                })
+                .into_any_element(),
+        )
     }
 
     /// Compact now: send the agent's own `/compact`, then watch its context reports for what it
@@ -3527,7 +3605,7 @@ impl Render for Composer {
                             )
                         })
                         .child(div().flex_1())
-
+                        .children(self.create_pr_pill(running, cx))
                 )
             })
             .when_some(missing, |el, (wt, id)| el.child(self.missing_worktree(&wt, id, cx)))
@@ -3582,9 +3660,12 @@ impl Render for Composer {
                             .on_click(cx.listener(|this, _, _, cx| pickers::update_prefs(this, cx, |p| p.plan = !p.plan))),
                     )
                     .child(div().flex_1().min_w(px(4.)))
+                    // Past `QUIET`, or while Compact now runs and says what it freed: the
+                    // compaction itself drops the window below it, and the card must stay.
                     .when_some(
                         context.filter(|(used, window)| {
                             *used as f32 / *window as f32 >= crate::context_popover::QUIET
+                                || !matches!(self.compact, crate::context_popover::Compact::Idle)
                         }),
                         |el, (used, window)| el.child(self.context_card(used, window, cx)),
                     )
@@ -3665,32 +3746,48 @@ impl Render for Composer {
                 })
                 .when(queued > 0, |el| el.child(format!("{queued} queued")))
                 .when_some(pr_chip, |el, card| {
+                    // A soft, borderless pill: a live mark, the card's name, its state in colour.
                     let tint = crate::pr_card::chip_tint(&card, cx);
+                    let (what, state) = card.chip_parts();
+                    let busy = card.resolving
+                        || matches!(
+                            card.phase,
+                            crate::pr_card::Phase::Creating
+                                | crate::pr_card::Phase::Checking
+                                | crate::pr_card::Phase::Merging
+                                | crate::pr_card::Phase::Releasing
+                        );
+                    let mark = if busy {
+                        gpui_kit::component::spinner::Spinner::new()
+                            .xsmall()
+                            .color(tint)
+                            .into_any_element()
+                    } else if card.phase == crate::pr_card::Phase::Merged {
+                        Icon::new(crate::assets::Lucide::GitMerge)
+                            .size(px(10.))
+                            .text_color(tint)
+                            .into_any_element()
+                    } else {
+                        div()
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(tint)
+                            .into_any_element()
+                    };
                     el.child(
                         h_flex()
                             .id("pr-chip")
                             .test_support()
-                            .gap(px(5.))
+                            .gap(px(6.))
                             .items_center()
                             .flex_none()
-                            .px(px(7.))
+                            .px(px(8.))
                             .h(px(18.))
                             .rounded_full()
-                            .bg(tint.opacity(0.14))
-                            .border_1()
-                            .border_color(tint.opacity(0.35))
-                            .child(
-                                Icon::new(match card.kind {
-                                    crate::pr_card::Kind::Pr => {
-                                        crate::assets::Lucide::GitPullRequest
-                                    }
-                                    crate::pr_card::Kind::Release => crate::assets::Lucide::Rocket,
-                                    crate::pr_card::Kind::Run => crate::assets::Lucide::Workflow,
-                                })
-                                .size(px(11.))
-                                .text_color(tint),
-                            )
-                            .child(div().text_color(tint).child(card.chip())),
+                            .bg(tint.opacity(0.10))
+                            .child(mark)
+                            .child(div().text_color(theme.foreground.opacity(0.9)).child(what))
+                            .child(div().text_color(tint).child(state)),
                     )
                 })
                 .when(crowded.is_some(), |el| {
