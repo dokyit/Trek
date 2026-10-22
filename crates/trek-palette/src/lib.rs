@@ -113,7 +113,8 @@ mod tests {
     /// Paper's surfaces small text sits on, from the theme file.
     fn paper_surfaces() -> Vec<u32> {
         let themes: serde_json::Value =
-            serde_json::from_str(include_str!("../assets/themes/trek.json")).unwrap();
+            serde_json::from_str(include_str!("../../trek-assets/assets/themes/trek.json"))
+                .unwrap();
         let paper = themes["themes"]
             .as_array()
             .unwrap()

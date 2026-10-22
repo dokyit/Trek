@@ -854,7 +854,8 @@ mod tests {
 
     fn theme(name: &str) -> Colors {
         let themes: serde_json::Value =
-            serde_json::from_str(include_str!("../assets/themes/trek.json")).unwrap();
+            serde_json::from_str(include_str!("../../trek-assets/assets/themes/trek.json"))
+                .unwrap();
         let t = themes["themes"]
             .as_array()
             .unwrap()

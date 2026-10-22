@@ -1,0 +1,22 @@
+[package]
+name = "trek-dictate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Part of the Trek app (extracted from trek-app)."
+
+[features]
+shots = []
+# Items the UI tests reach for, on for `cargo test` via trek-app's dev-dep on itself.
+test-support = []
+
+[dependencies]
+async-channel.workspace = true
+trek-words = { path = "../trek-words" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-avf-audio = "0.3"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSFileManager", "NSURL", "NSError", "NSBundle", "NSData", "NSGeometry", "objc2-core-foundation"] }
+objc2-speech = "0.3"

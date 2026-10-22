@@ -110,7 +110,7 @@ pub async fn run(
     // cmd.exe only; the job, dropped with this, ends node too. One that can't be had (Trek runs
     // in a job that forbids it) leaves the formatter to be ended alone.
     #[cfg(windows)]
-    let _job = crate::job::hold(&child)
+    let _job = trek_job::hold(&child)
         .map_err(|e| {
             tracing::warn!("couldn't put {name} in a job; what it starts may outlive it: {e}")
         })

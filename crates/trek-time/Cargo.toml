@@ -1,0 +1,14 @@
+[package]
+name = "trek-time"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Part of the Trek app (extracted from trek-app)."
+
+[features]
+# Items the UI tests reach for, on for `cargo test` via trek-app's dev-dep on itself.
+test-support = []
+
+[dependencies]
+chrono.workspace = true
+trek-core.workspace = true

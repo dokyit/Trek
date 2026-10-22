@@ -1,3 +1,5 @@
+#![cfg(windows)]
+
 //! Windows job objects for the language servers: the stand-in for the process group a server
 //! gets on Unix (`process_group(0)`, then KILL to the group). Everything a server starts is in
 //! its job, and the job ends with its last handle, so a Trek that crashes takes the servers (and

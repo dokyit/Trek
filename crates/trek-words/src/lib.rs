@@ -540,7 +540,7 @@ mod tests {
         }
         let mut files = vec![];
         walk(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../trek-app/src"),
             &mut files,
         );
         assert!(files.len() > 50, "found {} files", files.len());
@@ -581,7 +581,7 @@ mod tests {
         }
         assert!(
             found.is_empty(),
-            "Mac wording shown as it is (use crate::words::words()):\n{}",
+            "Mac wording shown as it is (use crate::words()):\n{}",
             found.join("\n")
         );
     }

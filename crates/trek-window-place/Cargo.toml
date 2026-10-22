@@ -1,0 +1,17 @@
+[package]
+name = "trek-window-place"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Part of the Trek app (extracted from trek-app)."
+
+[features]
+# Items the UI tests reach for, on for `cargo test` via trek-app's dev-dep on itself.
+test-support = ["gpui-kit/test-support"]
+
+[dependencies]
+gpui-kit.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+trek-core.workspace = true
