@@ -5173,7 +5173,13 @@ impl Workspace {
                         output,
                         ok,
                     } => {
-                        let fx = crate::pr_card::tool_finished(live, &tid, ok, &output);
+                        let fx = crate::pr_card::tool_finished(
+                            live,
+                            &tid,
+                            ok,
+                            &output,
+                            pr_cwd.as_deref(),
+                        );
                         pr_fx.watch.extend(fx.watch);
                         pr_fx.changed.extend(fx.changed);
                         if let Some(Item::Tool {
@@ -5789,7 +5795,10 @@ impl Workspace {
         let task = cx.spawn(async move |this, cx| {
             let mut polls = 0u32;
             loop {
-                let wait = if polls < 30 {
+                // The first look comes soon: a run watched after it ended shows how it ended.
+                let wait = if polls == 0 {
+                    Duration::from_secs(1)
+                } else if polls < 30 {
                     Duration::from_secs(4)
                 } else {
                     Duration::from_secs(20)
@@ -5858,6 +5867,9 @@ impl Workspace {
                                         id: tid.clone(),
                                         appended: false,
                                     });
+                                    // The composer's chip mirrors it; the store keeps it.
+                                    cx.notify();
+                                    this.persist_soon(&tid, cx);
                                 }
                                 !next.phase.terminal()
                             }
@@ -5974,6 +5986,7 @@ impl Workspace {
                     id: tid.clone(),
                     appended: false,
                 });
+                cx.notify();
             });
         });
         self.keep(task);

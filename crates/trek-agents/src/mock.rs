@@ -38,6 +38,7 @@
 //! | `error`                      | a turn that fails                                             |
 //! | `mock:limit` [dur]           | a usage limit that resets `dur` from now (default 5s)        |
 //! | `mock:write [file]`          | adds a line to `NOTES.md` (or `file`) in its folder (for real) |
+//! | `mock:watch-run` id          | runs `gh run watch id` (for real) as a command call           |
 //! | `recall`                     | the messages it remembers from this conversation             |
 //! | `mock:told`                  | what Trek told the session besides its messages (its          |
 //! |                              | `SessionConfig::instructions`)                                |
@@ -239,6 +240,8 @@ enum Script {
     Error,
     /// Add a note to a file in the session's folder: `NOTES.md`, or the file named after it.
     Write(Option<String>),
+    /// `gh run watch <id>` run for real, as an agent's command call (Trek's run card).
+    WatchRun(String),
     /// Edit lines of a file in place, as Trek's ⌘K inline edit asks (`trek_core::inline_edit`).
     InlineEdit {
         path: String,
@@ -394,6 +397,13 @@ impl Script {
                         .unwrap_or(100)
                         .clamp(1, MAX_HISTORY),
                 ),
+                // Only a run id goes on its command line.
+                "watch-run" if w.starts_with("mock:") => match words.get(i + 1) {
+                    Some(id) if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) => {
+                        Script::WatchRun(id.clone())
+                    }
+                    _ => return None,
+                },
                 // The one script that changes files: only when asked for by its full name.
                 "write" if w.starts_with("mock:") => Script::Write(
                     raw.get(i + 1)
@@ -510,6 +520,7 @@ pub fn title(request: &str) -> String {
         Script::History(_) => "Harden the request parser",
         Script::Error => "Fix the failing build",
         Script::Write(_) => "Add a note",
+        Script::WatchRun(_) => "Watch the CI run",
         Script::InlineEdit { .. } => "Edit the selection",
         Script::Compact => "Compacted the conversation",
         Script::Recall => "What was said",
@@ -1113,6 +1124,18 @@ impl Session {
             Script::Explore(total) => self.explore(total).await?,
             Script::History(rounds) => self.history(rounds).await?,
             Script::Write(file) => self.write(file.as_deref().unwrap_or("NOTES.md")).await?,
+            Script::WatchRun(id) => {
+                self.say("Watching the CI run.").await?;
+                let ok = self
+                    .run(&format!("gh run watch {id} --exit-status"))
+                    .await?;
+                self.say(if ok {
+                    "The run passed."
+                } else {
+                    "The run didn't pass: see its output above."
+                })
+                .await?
+            }
             Script::InlineEdit { path, lines } => self.inline_edit(&path, lines).await?,
             Script::Compact => self.compact().await?,
             Script::Recall => {
@@ -3618,6 +3641,15 @@ mod tests {
             Script::parse("mock:write CHANGELOG.md", false),
             Script::Write(Some("CHANGELOG.md".into())),
             "the file's name as written"
+        );
+        assert_eq!(
+            Script::parse("mock:watch-run 39779843418", false),
+            Script::WatchRun("39779843418".into())
+        );
+        assert_ne!(
+            Script::parse("mock:watch-run 1;rm", false),
+            Script::WatchRun("1;rm".into()),
+            "only an id goes on the command line"
         );
         assert_eq!(
             Script::parse("Start one: mock:write docs/Notes.md.", false),
