@@ -63,3 +63,7 @@ lto = false
 # and `<mark>` (for notes). See "Trek:" in vendor/gpui-base/src/text/{node,style}.rs and format/markdown.rs.
 [patch.crates-io]
 gpui-base = { path = "vendor/gpui-base" }
+# And to gpui-pre-macos: an app that set the Accessory activation policy before launching keeps
+# it, so capture and test runs (TREK_SHOT_DIR, TREK_BACKGROUND) never put a Trek tile in the
+# Dock. See "Trek:" in vendor/gpui-pre-macos/src/platform.rs.
+gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
