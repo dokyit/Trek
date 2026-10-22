@@ -11,7 +11,7 @@ mod restore;
 mod review;
 mod transcript;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub use input::AiInput;
 pub use input::UndoAllOrStop;
 pub use pane::AiPane;

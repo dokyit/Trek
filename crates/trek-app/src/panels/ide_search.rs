@@ -27,7 +27,7 @@ struct Hit {
 const MAX_FILES: usize = 30_000;
 
 /// The files under `root` git doesn't ignore, relative to it (folders left out).
-pub(crate) fn list_files(root: &std::path::Path) -> Vec<String> {
+pub fn list_files(root: &std::path::Path) -> Vec<String> {
     let walk = ignore::WalkBuilder::new(root)
         .hidden(false)
         .parents(true)
@@ -197,16 +197,16 @@ impl IdeSearch {
         }));
     }
 
-    #[cfg(test)]
-    pub(crate) fn hits(&self) -> Vec<String> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn hits(&self) -> Vec<String> {
         self.hits
             .iter()
             .map(|h| format!("{}:{}", h.rel, h.line))
             .collect()
     }
 
-    #[cfg(test)]
-    pub(crate) fn searching(&self) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn searching(&self) -> bool {
         self.searching
     }
 }

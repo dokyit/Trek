@@ -108,9 +108,17 @@ const ACP_WAIT: Duration = Duration::from_secs(50);
 /// How long a report waits for others before it wakes its parent: sub-agents that finish
 /// together wake it once, with all their answers. Longer in tests: on a loaded CI runner, two
 /// mock sub-agents started together can finish a few hundred milliseconds apart.
-const GATHER: Duration = Duration::from_millis(if cfg!(test) { 600 } else { 120 });
+const GATHER: Duration = Duration::from_millis(if cfg!(any(test, feature = "test-support")) {
+    600
+} else {
+    120
+});
 /// After a launch, reports held from before it wait this long: Trek finds its feet first.
-const LAUNCH_WAKE: Duration = Duration::from_secs(if cfg!(test) { 0 } else { 3 });
+const LAUNCH_WAKE: Duration = Duration::from_secs(if cfg!(any(test, feature = "test-support")) {
+    0
+} else {
+    3
+});
 /// How long a sub-agent whose agent's own sub-agents have all ended gets to take the turn their
 /// reports start (Claude Code takes it within a second) before it's taken to be done without it.
 const SELF_TURN_GRACE: Duration = Duration::from_secs(15);
@@ -260,7 +268,7 @@ impl Workspace {
     }
 
     /// A tool call from an agent's session.
-    pub(crate) fn handle_call(&mut self, call: Call, cx: &mut Context<Self>) {
+    pub fn handle_call(&mut self, call: Call, cx: &mut Context<Self>) {
         let id = || {
             call.params
                 .get("id")
@@ -380,7 +388,7 @@ impl Workspace {
     }
 
     /// How long a call from `caller`'s agent can wait on a sub-agent before its client gives up.
-    pub(crate) fn longest_wait(&self, caller: &str) -> Duration {
+    pub fn longest_wait(&self, caller: &str) -> Duration {
         match self.thread(caller).map(|t| &t.agent) {
             Some(AgentId::Acp(_) | AgentId::OpenCode | AgentId::Droid) => ACP_WAIT,
             _ => Duration::MAX,
@@ -389,7 +397,7 @@ impl Workspace {
 
     /// Whether `id` is a sub-agent that only advises, still on its task: nothing it does may
     /// change files.
-    pub(crate) fn advising(&self, id: &str) -> bool {
+    pub fn advising(&self, id: &str) -> bool {
         self.delegations
             .get(id)
             .is_some_and(|d| d.mode == Mode::Advise && d.outcome.is_none())
@@ -1790,10 +1798,10 @@ fn still_parked(items: &[Item]) -> bool {
     notice.is_some_and(|n| user.is_none_or(|u| u < n))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Workspace {
     /// `parent` has reports in line that a delivery already tried and held back.
-    pub(crate) fn wakes_held(&self, parent: &str) -> bool {
+    pub fn wakes_held(&self, parent: &str) -> bool {
         !self.gathering.contains_key(parent)
             && self.wakes.get(parent).is_some_and(|w| !w.is_empty())
     }

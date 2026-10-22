@@ -24,8 +24,8 @@ const TAB_MIN: f32 = 120.;
 
 pub struct AiPane {
     workspace: Entity<Workspace>,
-    pub(crate) transcript: Entity<AiTranscript>,
-    pub(crate) input: Entity<AiInput>,
+    pub transcript: Entity<AiTranscript>,
+    pub input: Entity<AiInput>,
     /// A chat tab being renamed: its thread and the title being typed.
     renaming: Option<(String, Entity<InputState>, Subscription)>,
     /// The strip of tabs, scrolled to keep the active one in view.
@@ -580,8 +580,8 @@ impl AiPane {
 
 impl Render for AiPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        crate::tests::rendered("AiPane");
+        #[cfg(any(test, feature = "test-support"))]
+        crate::test_support::rendered("AiPane");
         let ws = self.workspace.read(cx);
         let draft = ws.ide_chat.is_draft();
         let thread = ws.ide_chat.active_thread().map(str::to_string);

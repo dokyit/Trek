@@ -154,7 +154,7 @@ pub fn place(window: &Window, bottom: Pixels, cx: &mut App) {
 }
 
 /// The toasts mounted in `window`, ones on their way out included.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn count(window: &Window, cx: &App) -> usize {
     layer(window, cx).map_or(0, |l| l.read(cx).items.len())
 }

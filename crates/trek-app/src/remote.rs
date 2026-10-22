@@ -36,15 +36,15 @@ use trek_remote as tr;
 mod attachments;
 mod background;
 mod basecamp;
-pub(crate) mod bonjour;
+pub mod bonjour;
 mod commands;
 mod git;
 mod icons;
-pub(crate) mod link;
+pub mod link;
 mod machines;
 mod notes;
 mod queue;
-pub(crate) mod search;
+pub mod search;
 mod settings;
 mod sub_agents;
 mod thread_actions;
@@ -53,7 +53,7 @@ mod usage;
 /// How often changes go out to phones.
 const TICK: Duration = Duration::from_millis(250);
 /// A phone server that couldn't start is tried again after this long.
-pub(crate) const RETRY: Duration = Duration::from_secs(10);
+pub const RETRY: Duration = Duration::from_secs(10);
 /// How often this Mac's network interfaces are looked at while the server runs, so a new address
 /// (another network, DHCP, Wi-Fi back after sleep) is the one phones are told to dial. The server
 /// listens on every interface, so it carries on as it is meanwhile.
@@ -78,30 +78,30 @@ pub struct Remote {
     pub devices: Vec<tr::DeviceInfo>,
     pub connected: HashSet<String>,
     /// Thread rows as last sent.
-    pub(crate) sent: HashMap<String, tr::ThreadSummary>,
+    pub sent: HashMap<String, tr::ThreadSummary>,
     /// Rows of threads the list leaves out (sub-agents, threads opened from a search), as last sent.
-    pub(crate) unlisted: HashMap<String, tr::ThreadSummary>,
+    pub unlisted: HashMap<String, tr::ThreadSummary>,
     /// How phones answered requests, by thread and request id, so their cards close saying so.
-    pub(crate) answered: HashMap<(String, String), tr::AnswerResponse>,
+    pub answered: HashMap<(String, String), tr::AnswerResponse>,
     /// Transcripts phones have open: followed every tick.
-    pub(crate) watched: HashMap<String, Watched>,
+    pub watched: HashMap<String, Watched>,
     /// Transcripts no phone has open any more, as they were last sent: nothing is done for them
     /// each tick, and a phone opening one again carries on where they left off (seq, and what
     /// changed since).
-    pub(crate) dormant: HashMap<String, Watched>,
+    pub dormant: HashMap<String, Watched>,
     /// What the thread rows were last built from (`push_remote_changes`).
     rows_key: Option<(u64, u64, i64)>,
     /// The projects, agents (with their models) and Full access phones were last sent, hashed:
     /// only a snapshot carries them, so one goes out when they change (`push_remote_changes`).
-    pub(crate) snapshot_key: Option<u64>,
+    pub snapshot_key: Option<u64>,
     /// The server announced on the local network, on Wi-Fi (`bonjour`).
     advert: Option<bonjour::Advert>,
     /// What Bonjour announces it as: this Mac's name and lasting id. `None`: never announced
     /// (tests).
-    pub(crate) announce: Option<(String, String)>,
+    pub announce: Option<(String, String)>,
     /// Which connections the server takes; the server reads it as each one comes, and
     /// `follow_addresses` keeps the tailnet address in it current.
-    pub(crate) policy: Arc<std::sync::Mutex<link::LinkPolicy>>,
+    pub policy: Arc<std::sync::Mutex<link::LinkPolicy>>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -109,7 +109,7 @@ impl Remote {
     /// A server just started, with nothing sent through it yet. Its paired devices and the
     /// phones connected already are read from it: call this after subscribing to its notices
     /// (`hear_notices`), as a phone that connected before then was announced to no one.
-    pub(crate) fn new(
+    pub fn new(
         handle: tr::RemoteHandle,
         addresses: Addresses,
         advertise: String,
@@ -154,9 +154,9 @@ impl Remote {
 }
 
 /// A transcript phones follow: what each item looked like when last sent.
-pub(crate) struct Watched {
+pub struct Watched {
     /// The last seq handed out.
-    pub(crate) seq: u64,
+    pub seq: u64,
     /// Phones that saw less than this get the whole transcript again (`tr::Transcript::base`).
     base: u64,
     /// Each item, by index: its seq, and the hash of what was sent.
@@ -260,7 +260,7 @@ pub struct Tailnet {
 
 impl Tailnet {
     /// Read from `tailscale status --json`.
-    pub(crate) fn parse(json: &str) -> Option<Self> {
+    pub fn parse(json: &str) -> Option<Self> {
         let v: serde_json::Value = serde_json::from_str(json).ok()?;
         let user = v.get("Self")?.get("UserID")?.as_i64()?;
         let account = v
@@ -311,11 +311,8 @@ impl Addresses {
     /// Which of `interfaces` (name, address) phones reach this Mac at. Tailscale's is the one its
     /// CLI names (`asked`), else a 100.64/10 address on a tunnel (`utun…`): that range alone is
     /// also carrier-grade NAT, which hotspots and some ISPs hand out on Wi-Fi.
-    #[cfg(test)]
-    pub(crate) fn from_interfaces(
-        interfaces: &[(String, Ipv4Addr)],
-        asked: Option<Ipv4Addr>,
-    ) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_interfaces(interfaces: &[(String, Ipv4Addr)], asked: Option<Ipv4Addr>) -> Self {
         Self::from_interfaces_preferring(interfaces, asked, None)
     }
 
@@ -323,7 +320,7 @@ impl Addresses {
     /// Interface enumeration order is not meaningful: on Windows in particular a VirtualBox or
     /// Hyper-V adapter can otherwise come before Wi-Fi and put its host-only address in the
     /// pairing link.
-    pub(crate) fn from_interfaces_preferring(
+    pub fn from_interfaces_preferring(
         interfaces: &[(String, Ipv4Addr)],
         asked: Option<Ipv4Addr>,
         default_route: Option<Ipv4Addr>,
@@ -488,14 +485,14 @@ fn tailscale(args: &[&str]) -> Option<String> {
 }
 
 /// The first IPv4 address on a line of `tailscale ip -4`'s output (one per line, CRLF on Windows).
-pub(crate) fn first_ipv4(output: &str) -> Option<Ipv4Addr> {
+pub fn first_ipv4(output: &str) -> Option<Ipv4Addr> {
     output.lines().find_map(|l| l.trim().parse().ok())
 }
 
 /// What the pairing code tells phones to dial first. The server listens on every interface
 /// whatever this says; the `reach` setting decides per connection which it serves
 /// (`link::LinkPolicy`).
-pub(crate) fn remote_endpoint(
+pub fn remote_endpoint(
     addresses: &Addresses,
     reach: trek_core::settings::Reach,
     port: u16,
@@ -519,7 +516,7 @@ pub(crate) fn remote_endpoint(
 /// when Tailscale is up, so a phone paired at home still finds this Mac away from it (the
 /// tailnet is the user's own network). "Tailscale" is the tailnet alone: whoever chose it may
 /// not want Trek answering on the Wi-Fi it's on (and it doesn't: `link::LinkPolicy`).
-pub(crate) fn other_endpoint(
+pub fn other_endpoint(
     addresses: &Addresses,
     reach: trek_core::settings::Reach,
     port: u16,
@@ -534,7 +531,7 @@ pub(crate) fn other_endpoint(
 }
 
 /// Every `host:port` phones may dial, the pairing code's first.
-pub(crate) fn remote_routes(
+pub fn remote_routes(
     addresses: &Addresses,
     reach: trek_core::settings::Reach,
     port: u16,
@@ -594,7 +591,7 @@ fn mobile_dir() -> PathBuf {
 }
 
 /// The Mac as phones see it: a lasting id, its name, Trek's version.
-pub(crate) fn host_info() -> tr::HostInfo {
+pub fn host_info() -> tr::HostInfo {
     let id_file = mobile_dir().join("host-id");
     let id = std::fs::read_to_string(&id_file)
         .ok()
@@ -677,7 +674,7 @@ impl Workspace {
     }
 
     fn start_remote(&mut self, cx: &mut Context<Self>) {
-        if cfg!(test) {
+        if cfg!(any(test, feature = "test-support")) {
             return;
         }
         self.remote_starting = true;
@@ -788,8 +785,8 @@ impl Workspace {
 
     /// A phone server on the loopback, plain and in memory, with a phone taken as connected:
     /// what `start_remote` sets up, for tests of what goes out to phones.
-    #[cfg(test)]
-    pub(crate) fn start_test_remote(&mut self) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn start_test_remote(&mut self) {
         let mut config = tr::ServerConfig::new(tr::HostInfo {
             id: "test".into(),
             name: "Test Mac".into(),
@@ -869,7 +866,7 @@ impl Workspace {
 
     // ---- requests from phones ----
 
-    pub(crate) fn remote_request(&mut self, req: tr::HostRequest, cx: &mut Context<Self>) {
+    pub fn remote_request(&mut self, req: tr::HostRequest, cx: &mut Context<Self>) {
         match req {
             tr::HostRequest::Snapshot { reply } => {
                 let snapshot = self.remote_snapshot();
@@ -1478,7 +1475,7 @@ impl Workspace {
     }
 
     /// A turn of `id` was counted (or may have moved): phones following it hear on the next tick.
-    pub(crate) fn remote_turn_changes_moved(&mut self, id: &str) {
+    pub fn remote_turn_changes_moved(&mut self, id: &str) {
         if let Some(remote) = self.remote.as_mut()
             && let Some(w) = remote
                 .watched
@@ -2073,7 +2070,7 @@ impl Workspace {
     /// The reply to a phone's `subscribe`: what changed since `after_seq` when that can be told,
     /// else the last `limit` items (all of them without one), with what follows them, and every
     /// open request. From then on the thread is followed every tick.
-    pub(crate) fn remote_transcript(
+    pub fn remote_transcript(
         &mut self,
         id: &str,
         after_seq: Option<u64>,
@@ -2175,7 +2172,7 @@ impl Workspace {
 
     /// The reply to `transcript_before`: up to `limit` items just before item `before` (`i…`,
     /// or a turn's `c…`, which follows its turn end), with their turns' changed files.
-    pub(crate) fn remote_transcript_before(
+    pub fn remote_transcript_before(
         &mut self,
         id: &str,
         before: &str,
@@ -2260,7 +2257,7 @@ impl Workspace {
 
     /// Send phones what changed since the last tick: thread rows, and the transcripts they
     /// follow (only what can have changed in them).
-    pub(crate) fn push_remote_changes(&mut self, cx: &mut Context<Self>) {
+    pub fn push_remote_changes(&mut self, cx: &mut Context<Self>) {
         let Some(remote) = self.remote.as_ref() else {
             return;
         };
@@ -2317,7 +2314,7 @@ impl Workspace {
         };
         if let Some(snapshot) = snapshot {
             remote.snapshot_key = Some(choices_key);
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             tests::SNAPSHOTS_PUSHED.with(|n| n.set(n.get() + 1));
             remote.handle.push(tr::HostEvent::Snapshot(snapshot));
         }
@@ -2371,11 +2368,7 @@ impl Workspace {
 
     /// This Mac's addresses are now `addresses`: tell phones (the routes in the next `welcome`
     /// and pairing code), Bonjour and the reach policy, without stopping the server.
-    pub(crate) fn remote_addresses_changed(
-        &mut self,
-        addresses: Addresses,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn remote_addresses_changed(&mut self, addresses: Addresses, cx: &mut Context<Self>) {
         let Some(remote) = self.remote.as_mut() else {
             return;
         };
@@ -2439,8 +2432,8 @@ impl Workspace {
     /// are told to dial, the name Bonjour announces, which connections it takes, and the last
     /// phone that connected (when, and on which of this Mac's addresses). `None` while the
     /// server isn't running.
-    #[cfg_attr(not(test), allow(dead_code))] // for Settings › Phone, which is yet to show it
-    pub(crate) fn phone_link(&self) -> Option<link::PhoneLink> {
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))] // for Settings › Phone, which is yet to show it
+    pub fn phone_link(&self) -> Option<link::PhoneLink> {
         let remote = self.remote.as_ref()?;
         let policy = remote.policy();
         let last_connection = remote
@@ -2470,7 +2463,7 @@ impl Workspace {
         })
     }
 
-    pub(crate) fn remote_notice(&mut self, notice: tr::ServerNotice, cx: &mut Context<Self>) {
+    pub fn remote_notice(&mut self, notice: tr::ServerNotice, cx: &mut Context<Self>) {
         let Some(remote) = self.remote.as_mut() else {
             return;
         };
@@ -2794,7 +2787,7 @@ fn item_event(
 
 /// What the turn ending at `turn_end` changed, as a `changes` item, once the Mac has counted it.
 fn turn_changes(ws: &Workspace, id: &str, turn_end: usize) -> Option<tr::ItemBody> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(files) =
         tests::TURN_FILES.with(|f| f.borrow().get(&(id.to_string(), turn_end)).cloned())
     {
@@ -2840,7 +2833,7 @@ fn changes_item(files: Vec<tr::ChangedFile>) -> tr::ItemBody {
 }
 
 /// An agent as phones see it: its key, name and the logo the Mac draws for it.
-pub(crate) fn agent_ref(agent: &AgentId) -> tr::AgentRef {
+pub fn agent_ref(agent: &AgentId) -> tr::AgentRef {
     tr::AgentRef {
         key: agent.key(),
         name: agent.display_name(),
@@ -3104,8 +3097,9 @@ fn hear_notices(
     })
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
+    #[cfg(test)]
     use super::is_trek_command;
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -3113,9 +3107,9 @@ pub(crate) mod tests {
     thread_local! {
         /// Changed files tests give turns, by (thread, turn end index), until the Mac works
         /// them out itself (`turn_changes`).
-        pub(crate) static TURN_FILES: RefCell<HashMap<(String, usize), Vec<trek_remote::ChangedFile>>> = RefCell::default();
+        pub static TURN_FILES: RefCell<HashMap<(String, usize), Vec<trek_remote::ChangedFile>>> = RefCell::default();
         /// Snapshots `push_remote_changes` has pushed to phones.
-        pub(crate) static SNAPSHOTS_PUSHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        pub static SNAPSHOTS_PUSHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
     #[test]

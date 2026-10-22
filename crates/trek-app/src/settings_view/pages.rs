@@ -1248,7 +1248,7 @@ impl SettingsView {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
         let view = ws.update_view();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         super::shown::text(&view.line);
         let pending = ws.pending_changes();
         // The release history: what this channel has published up to the update on offer.

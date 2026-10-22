@@ -217,13 +217,13 @@ impl Sidebar {
 
     /// How far the row for `key` (a thread id) is drawn from its place right now, while it
     /// slides there.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn row_offset(&self, key: &str, cx: &App) -> Option<f32> {
         self.flip.borrow().offset(key, crate::motion::now(cx))
     }
 
     /// The threads whose rows are fading away.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn ghosts(&self) -> Vec<String> {
         self.ghosts.iter().map(|g| g.id.clone()).collect()
     }
@@ -729,7 +729,7 @@ impl Sidebar {
 
     /// What `t` has at work: its sub-agents (Trek's, and its agent's own, in its turn or working
     /// in the background), by logo and name, and what else its agent runs in the background.
-    pub(crate) fn at_work(
+    pub fn at_work(
         &self,
         t: &Thread,
         cx: &App,
@@ -2122,10 +2122,7 @@ fn no_project_badge(cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-pub(crate) fn card_tip(
-    kids: &[(trek_core::AgentId, String)],
-    background: &[String],
-) -> Option<String> {
+pub fn card_tip(kids: &[(trek_core::AgentId, String)], background: &[String]) -> Option<String> {
     let kids: Vec<String> = kids.iter().map(|(_, name)| name.clone()).collect();
     let parts: Vec<String> = [
         ("Sub-agents at work", &kids[..]),
@@ -2139,7 +2136,7 @@ pub(crate) fn card_tip(
 }
 
 /// What a thread waiting on the user waits for, from its pending request.
-pub(crate) fn needs_label(ws: &Workspace, id: &str) -> &'static str {
+pub fn needs_label(ws: &Workspace, id: &str) -> &'static str {
     match ws
         .live
         .get(id)
@@ -2164,8 +2161,8 @@ fn live_order(inbox: Vec<Thread>, working: Vec<Thread>) -> Vec<Thread> {
 
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        crate::tests::rendered("Sidebar");
+        #[cfg(any(test, feature = "test-support"))]
+        crate::test_support::rendered("Sidebar");
         let ws = self.workspace.read(cx);
         self.graph = Graph {
             parents: ws

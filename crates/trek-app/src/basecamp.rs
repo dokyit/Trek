@@ -66,7 +66,7 @@ pub struct Basecamp {
     key: Option<Key>,
     computing: bool,
     /// Passes over the store run so far (switching range runs none).
-    pub(crate) passes: usize,
+    pub passes: usize,
     /// On screen (the main window's route).
     open: bool,
     /// The chart's bar under the pointer.
@@ -84,7 +84,7 @@ impl Basecamp {
     pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
         let _subscription = cx.observe(&workspace, |this, _, cx| this.sync(cx));
         // Read once in the background soon after launch, so the first open has its numbers.
-        let _warm_up = (!cfg!(test)).then(|| {
+        let _warm_up = (!cfg!(any(test, feature = "test-support"))).then(|| {
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(WARM_UP).await;
                 let _ = this.update(cx, |this, cx| this.refresh(cx));
@@ -120,19 +120,19 @@ impl Basecamp {
     }
 
     /// Everything on screen, once it's up to date.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn summary(&self) -> Option<&Summary> {
         self.shown().map(|s| &**s).filter(|_| !self.computing)
     }
 
     /// Everything on screen now, up to date or not.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn shown_summary(&self) -> Option<&Summary> {
         self.shown().map(|s| &**s)
     }
 
     /// The chart's bar under the pointer.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn hovered_bar(&self) -> Option<usize> {
         self.hovered
     }
@@ -741,8 +741,8 @@ impl Basecamp {
 
 impl Render for Basecamp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        crate::tests::rendered("Basecamp");
+        #[cfg(any(test, feature = "test-support"))]
+        crate::test_support::rendered("Basecamp");
         let theme = cx.theme().clone();
         let review: Vec<Thread> = self
             .workspace
@@ -939,7 +939,7 @@ fn needs_row(
 }
 
 /// "$1.28", or "—" when none of it has a price.
-pub(crate) fn cost(spend: &Spend) -> String {
+pub fn cost(spend: &Spend) -> String {
     if spend.priced() {
         crate::cost::usd(spend.usd())
     } else {
@@ -948,7 +948,7 @@ pub(crate) fn cost(spend: &Spend) -> String {
 }
 
 /// "<1m", "42m", "1h 2m".
-pub(crate) fn agent_time(secs: u64) -> String {
+pub fn agent_time(secs: u64) -> String {
     if secs < 60 {
         "<1m".to_string()
     } else {
@@ -998,7 +998,7 @@ pub enum Step {
 
 impl Step {
     /// "hour", "day", "week", "4 weeks".
-    pub(crate) fn noun(self) -> String {
+    pub fn noun(self) -> String {
         match self {
             Step::Hour => "hour".into(),
             Step::Day => "day".into(),
@@ -1018,7 +1018,7 @@ pub struct Bar {
 
 impl Bar {
     /// What's said over it when it's hovered: "2 PM–3 PM · 4 turns · 12K tokens".
-    pub(crate) fn line(&self) -> String {
+    pub fn line(&self) -> String {
         let mut parts = vec![
             self.label.clone(),
             basecamp::count(self.turns, "turn", "turns"),
@@ -1422,7 +1422,7 @@ fn hour_name(h: u32) -> String {
 
 /// What a stat tile shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TileKind {
+pub enum TileKind {
     BestModel,
     WorkedMostOn,
     Tokens,
@@ -1433,7 +1433,7 @@ pub(crate) enum TileKind {
 
 /// A tile's words, and what's drawn beside its figure: Basecamp's and the phone's.
 #[derive(Debug, Clone)]
-pub(crate) struct TileData {
+pub struct TileData {
     pub kind: TileKind,
     pub label: String,
     pub figure: String,
@@ -1449,7 +1449,7 @@ pub(crate) struct TileData {
 
 /// The tiles under the profile, in order: the best model, the project worked on most, the
 /// tokens, the agents' time, then what's left of each plan that reports limits.
-pub(crate) fn tile_data(recap: &Recap, ws: &Workspace) -> Vec<TileData> {
+pub fn tile_data(recap: &Recap, ws: &Workspace) -> Vec<TileData> {
     let mut tiles = vec![];
     let tile = |kind, label: &str, figure: String, note: String| TileData {
         kind,
@@ -1571,7 +1571,7 @@ pub(crate) fn tile_data(recap: &Recap, ws: &Workspace) -> Vec<TileData> {
 }
 
 /// The line beside "Basecamp": a greeting with the date, or for all time, since when.
-pub(crate) fn greeting_line(range: Range, recap: Option<&Recap>) -> String {
+pub fn greeting_line(range: Range, recap: Option<&Recap>) -> String {
     let now = chrono::Local::now();
     let hello = basecamp::greeting(chrono::Timelike::hour(&now));
     let since = recap
@@ -1588,7 +1588,7 @@ pub(crate) fn greeting_line(range: Range, recap: Option<&Recap>) -> String {
 }
 
 /// "Today's trek", "This week's trek", "Your trek so far".
-pub(crate) fn trek_title(range: Range) -> &'static str {
+pub fn trek_title(range: Range) -> &'static str {
     match range {
         Range::Today => "Today's trek",
         Range::Week => "This week's trek",
@@ -1597,7 +1597,7 @@ pub(crate) fn trek_title(range: Range) -> &'static str {
 }
 
 /// What the empty recap invites to.
-pub(crate) fn invitation(range: Range) -> String {
+pub fn invitation(range: Range) -> String {
     match range {
         Range::All => "Nothing on the trail yet — start a thread.".to_string(),
         range => format!(
@@ -1651,7 +1651,7 @@ impl Waiting {
 }
 
 /// The line over the profile: the hovered stretch's numbers, else where the summit was.
-pub(crate) fn profile_line(recap: &Recap, hovered: Option<usize>) -> String {
+pub fn profile_line(recap: &Recap, hovered: Option<usize>) -> String {
     match hovered.and_then(|i| recap.buckets.get(i).map(|b| (i, b))) {
         Some((i, b)) => {
             let mut parts = vec![stretch_label(recap, i)];
@@ -1683,7 +1683,7 @@ const HOUR: i64 = 3_600_000;
 const DAY: i64 = 24 * HOUR;
 
 /// The range as a sentence ends with it: "Nothing failed today", "… so far".
-pub(crate) fn during(range: Range) -> &'static str {
+pub fn during(range: Range) -> &'static str {
     match range {
         Range::Today => "today",
         Range::Week => "this week",
@@ -1715,7 +1715,7 @@ fn day(start: i64) -> String {
 
 /// A stretch of the profile, for the line above it: "2–3 PM", "Tue 3–6 PM", "Sep 14", "week of
 /// Sep 8", "Sep 8 – Oct 5".
-pub(crate) fn stretch_label(recap: &Recap, i: usize) -> String {
+pub fn stretch_label(recap: &Recap, i: usize) -> String {
     let w = &recap.window;
     let start = w.start + i as i64 * w.bucket_ms;
     if w.bucket_ms >= 2 * 7 * DAY {
@@ -1741,7 +1741,7 @@ pub(crate) fn stretch_label(recap: &Recap, i: usize) -> String {
 }
 
 /// Where the summit was: "at 2 PM", "on Tuesday", "on Sep 14", "the week of Sep 8".
-pub(crate) fn summit_label(recap: &Recap, i: usize) -> String {
+pub fn summit_label(recap: &Recap, i: usize) -> String {
     let w = &recap.window;
     let start = w.start + i as i64 * w.bucket_ms;
     if w.bucket_ms >= 2 * 7 * DAY {
@@ -1759,7 +1759,7 @@ pub(crate) fn summit_label(recap: &Recap, i: usize) -> String {
 
 /// The profile's axis labels, as fractions of its width: the hours of a day, the days of a few,
 /// else five dates spread across it ("Sep 14", or "Sep 2025" when it reaches back past this year).
-pub(crate) fn ticks(w: &basecamp::Window) -> Vec<(f32, String)> {
+pub fn ticks(w: &basecamp::Window) -> Vec<(f32, String)> {
     let span = (w.end - w.start).max(1) as f32;
     if w.bucket_ms < 3 * HOUR {
         return [(6, "6 AM"), (12, "Noon"), (18, "6 PM")]
@@ -1801,7 +1801,7 @@ pub(crate) fn ticks(w: &basecamp::Window) -> Vec<(f32, String)> {
 /// have a price, saying how many haven't), then where they came from. Kept short, as the tile is
 /// narrow and a caveat saying the total is incomplete has to stay in view: with one, the span
 /// goes (the header's range already names it).
-pub(crate) fn tokens_note(recap: &basecamp::Recap, when: &str) -> String {
+pub fn tokens_note(recap: &basecamp::Recap, when: &str) -> String {
     let partial = recap
         .tokens_partial()
         .then(|| format!("{} of {} threads", recap.threads_with_tokens, recap.threads));

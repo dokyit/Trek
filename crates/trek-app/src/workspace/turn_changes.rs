@@ -298,7 +298,7 @@ impl Workspace {
     }
 
     /// Whether the turn ending at `end` of `id` has been worked out and isn't being again.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn turn_changes_settled(&self, id: &str, end: usize) -> bool {
         let key = self
             .live
@@ -437,7 +437,7 @@ impl Workspace {
     /// The turns of `id` whose changes may have moved are worked out again when next asked
     /// for: the latest turn's (counted against the files as they are) and any waiting, or with
     /// `all` every one (a rewind; turns it took away are dropped). Views showing them hear of it.
-    pub(crate) fn forget_turn_changes(&mut self, id: &str, all: bool, cx: &mut Context<Self>) {
+    pub fn forget_turn_changes(&mut self, id: &str, all: bool, cx: &mut Context<Self>) {
         // The same goes for what an open review of them has pending.
         self.review_moved(id, cx);
         let live = self.live.get(id);
@@ -504,7 +504,7 @@ fn inside(path: &str, cwd: Option<&Path>) -> String {
 /// checkpoint taken as it ended (`end`: `None` when none was, or the turn didn't start from one),
 /// over `items`.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Stretch {
+pub struct Stretch {
     pub start: usize,
     pub end: Option<usize>,
     pub items: Range<usize>,
@@ -515,7 +515,7 @@ pub(crate) struct Stretch {
 /// turn one taken as it ended. What lies between a turn's end and the next turn's start (the
 /// user at work, other threads) is in no stretch. A turn from before Trek took end checkpoints,
 /// or one still running, has no `end`.
-pub(crate) fn stretches(
+pub fn stretches(
     items: &[Item],
     from: usize,
     checkpointed: impl Fn(usize) -> bool,
@@ -556,7 +556,7 @@ pub(crate) fn stretches(
 
 /// The files the agent's edit tools named in `items` (not failed or denied), as it gave them:
 /// absolute, or relative to the thread's folder.
-pub(crate) fn edited_paths(items: &[Item]) -> Vec<String> {
+pub fn edited_paths(items: &[Item]) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     for item in items {
         let Item::Tool {

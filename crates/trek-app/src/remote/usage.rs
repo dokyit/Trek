@@ -40,7 +40,7 @@ impl Workspace {
     /// Usage as known now, as the Usage card shows it: its providers in its order (what was kept
     /// from an earlier run marked with when, today's tokens for those without limits), and the
     /// resets Codex granted.
-    pub(crate) fn usage_now(&self) -> tr::Usage {
+    pub fn usage_now(&self) -> tr::Usage {
         let providers = self
             .usage_rows()
             .into_iter()

@@ -12,8 +12,8 @@
 //! to the machine as protocol messages (`send`, `interrupt`, `answer`, `set_prefs`, `thread_action`).
 //! Nothing of theirs is ever written to the local store; the machine owns the thread.
 
-pub(crate) mod clone;
-pub(crate) mod sheets;
+pub mod clone;
+pub mod sheets;
 
 use crate::workspace::{PendingPermission, Route, Scope, Workspace, WorkspaceEvent};
 use gpui_kit::{Context, Task};
@@ -729,7 +729,7 @@ fn this_name() -> String {
 
 impl Workspace {
     /// At launch: the machines paired before, each connected again.
-    pub(crate) fn start_machines(&mut self, cx: &mut Context<Self>) {
+    pub fn start_machines(&mut self, cx: &mut Context<Self>) {
         let (device_id, entries) = load();
         self.machines.device_id = device_id;
         for entry in entries {
@@ -818,7 +818,7 @@ impl Workspace {
     }
 
     /// Something machine `host`'s connection brought.
-    pub(crate) fn machine_event(&mut self, host: &str, event: Event, cx: &mut Context<Self>) {
+    pub fn machine_event(&mut self, host: &str, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::Connected { paired, .. } => {
                 let Some(m) = self.machines.get_mut(host) else {
@@ -987,7 +987,7 @@ impl Workspace {
 
     /// Open a machine's thread here: subscribe to its transcript (once; the connection subscribes
     /// again after a reconnect) and tell the machine it's been seen.
-    pub(crate) fn follow_machine_thread(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn follow_machine_thread(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some((host, tid)) = split_id(id).map(|(h, t)| (h.to_string(), t.to_string())) else {
             return;
         };
@@ -1083,7 +1083,7 @@ impl Workspace {
     }
 
     /// A message to a machine's thread (the composer of a thread on another machine).
-    pub(crate) fn machine_send(
+    pub fn machine_send(
         &mut self,
         id: &str,
         text: String,
@@ -1114,7 +1114,7 @@ impl Workspace {
         );
     }
 
-    pub(crate) fn machine_interrupt(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn machine_interrupt(&mut self, id: &str, cx: &mut Context<Self>) {
         self.machine_request(
             id,
             "stop it",
@@ -1124,7 +1124,7 @@ impl Workspace {
     }
 
     /// Answer a card in a machine's thread; it leaves the screen at once (the machine says so too).
-    pub(crate) fn machine_answer(
+    pub fn machine_answer(
         &mut self,
         id: &str,
         request_id: &str,
@@ -1153,7 +1153,7 @@ impl Workspace {
 
     /// `respond` in a machine's thread: an approval's decision, or a plan kept planning, or
     /// questions skipped.
-    pub(crate) fn machine_respond(
+    pub fn machine_respond(
         &mut self,
         id: &str,
         request_id: &str,
@@ -1186,7 +1186,7 @@ impl Workspace {
 
     /// The composer's model, effort, access or plan changed on a machine's thread: what changed
     /// goes to the machine (it may refuse an agent or model it doesn't have).
-    pub(crate) fn machine_set_prefs(
+    pub fn machine_set_prefs(
         &mut self,
         id: &str,
         prefs: crate::workspace::Prefs,
@@ -1229,7 +1229,7 @@ impl Workspace {
     }
 
     /// Pin, settle, archive or rename a machine's thread.
-    pub(crate) fn machine_thread_action(
+    pub fn machine_thread_action(
         &mut self,
         id: &str,
         action: tr::ThreadAction,
@@ -1266,7 +1266,7 @@ impl Workspace {
     /// Start a thread on machine `host` in its copy of `project`, with the draft's choices and
     /// `text`, and open it. Said in a toast (and the message goes back to the composer) when the
     /// machine has no copy of the project or refuses.
-    pub(crate) fn machine_start_thread(
+    pub fn machine_start_thread(
         &mut self,
         host: &str,
         project: PathBuf,
@@ -1620,7 +1620,7 @@ impl Workspace {
 
     /// What can't be done to a thread on another machine yet (rewind, fork, retry, delete,
     /// snooze): said in a toast. True when `id` is such a thread.
-    pub(crate) fn machine_refuses(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+    pub fn machine_refuses(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
         let Some((host, _)) = split_id(id) else {
             return false;
         };

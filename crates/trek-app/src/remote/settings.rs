@@ -178,7 +178,7 @@ impl Workspace {
         if change.push_test {
             self.test_push(cx);
         }
-        if let Some(choice) = theme.filter(|_| !cfg!(test)) {
+        if let Some(choice) = theme.filter(|_| !cfg!(any(test, feature = "test-support"))) {
             cx.defer(move |cx| crate::apply_theme(choice, None, cx));
         }
         Ok(self.remote_settings())

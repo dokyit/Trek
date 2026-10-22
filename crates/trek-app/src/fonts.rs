@@ -9,10 +9,10 @@
 use std::borrow::Cow;
 
 /// The interface's family, as `trek.json` names it (the tests check the two agree).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub const UI: &str = "Inter";
 /// The monospace family, as `trek.json` names it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub const MONO: &str = "JetBrains Mono NL";
 
 macro_rules! font {

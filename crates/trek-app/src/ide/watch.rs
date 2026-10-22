@@ -31,7 +31,7 @@ pub(super) struct FolderWatch {
 
 /// What git ignores under a folder: the rules of each `.gitignore` (read as first needed), the
 /// repository's `info/exclude` and the user's global excludes.
-pub(crate) struct Ignores {
+pub struct Ignores {
     root: PathBuf,
     /// The repository's own rules (`info/exclude`) and the global ones.
     base: Vec<Gitignore>,
@@ -40,7 +40,7 @@ pub(crate) struct Ignores {
 }
 
 impl Ignores {
-    pub(crate) fn new(root: &Path) -> Self {
+    pub fn new(root: &Path) -> Self {
         let mut base = vec![];
         let (global, _) = Gitignore::global();
         base.push(global);
@@ -82,7 +82,7 @@ impl Ignores {
 
     /// Whether git ignores `path` (under the root): the nearest `.gitignore` with a say decides,
     /// a folder ignored ignoring what's in it.
-    pub(crate) fn ignored(&mut self, path: &Path, is_dir: bool) -> bool {
+    pub fn ignored(&mut self, path: &Path, is_dir: bool) -> bool {
         let Ok(rel) = path.strip_prefix(&self.root) else {
             return false;
         };
@@ -131,13 +131,13 @@ impl Ignores {
 /// A batch of changed paths, sorted: the files that matter (not in `.git`, not ignored), and
 /// whether git's own state moved.
 #[derive(Debug, Default, PartialEq)]
-pub(crate) struct Batch {
+pub struct Batch {
     pub files: Vec<PathBuf>,
     pub git: bool,
 }
 
 /// Sort `paths` (as FSEvents names them, under `real`) into a `Batch` of paths under `given`.
-pub(crate) fn sort(paths: Vec<PathBuf>, real: &Path, given: &Path, ignores: &mut Ignores) -> Batch {
+pub fn sort(paths: Vec<PathBuf>, real: &Path, given: &Path, ignores: &mut Ignores) -> Batch {
     let mut batch = Batch::default();
     let mut paths: Vec<PathBuf> = paths
         .into_iter()
@@ -182,7 +182,7 @@ impl IdeWorkbench {
     /// Watch the IDE folder (again, when it moved) while the editor is on screen; none without
     /// one, or in Agents mode.
     pub(super) fn watch_root(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if cfg!(test) {
+        if cfg!(any(test, feature = "test-support")) {
             return;
         }
         let ws = self.workspace.read(cx);

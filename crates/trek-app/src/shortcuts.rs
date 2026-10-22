@@ -181,7 +181,7 @@ fn is_in_the_cloud(entry: &std::fs::DirEntry) -> bool {
 /// `FILE_ATTRIBUTE_OFFLINE`, `…_RECALL_ON_OPEN` or `…_RECALL_ON_DATA_ACCESS`: the data isn't on the disk.
 /// (The editor's previews ask it too, `ide::preview::online_only`.)
 #[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) fn is_online_only(attributes: u32) -> bool {
+pub fn is_online_only(attributes: u32) -> bool {
     const OFFLINE: u32 = 0x0000_1000;
     const RECALL_ON_OPEN: u32 = 0x0004_0000;
     const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;

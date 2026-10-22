@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::process::Command;
 
-pub(crate) fn command(dir: &Path) -> Command {
+pub fn command(dir: &Path) -> Command {
     let mut c = trek_core::procs::command("git");
     c.current_dir(dir)
         .env("PATH", trek_core::detect::login_path())
@@ -37,7 +37,7 @@ pub(crate) fn command(dir: &Path) -> Command {
 }
 
 /// Run git in `dir`: its output, or what it said on failure.
-pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
+pub fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
     let out = command(dir)
         .args(args)
         .output()
@@ -56,7 +56,7 @@ pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
 
 /// The repository's top folder holding `dir`, named the way `dir` is (`/var/…`, not git's
 /// `/private/var/…`), so paths built on it match the editor's.
-pub(crate) fn top(dir: &Path) -> Option<std::path::PathBuf> {
+pub fn top(dir: &Path) -> Option<std::path::PathBuf> {
     let real = run(dir, &["rev-parse", "--show-toplevel"])
         .ok()
         .map(|s| std::path::PathBuf::from(s.trim()))

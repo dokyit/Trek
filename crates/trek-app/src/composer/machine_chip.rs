@@ -13,7 +13,7 @@ use gpui_kit::*;
 use std::path::PathBuf;
 
 /// A reachable machine's dot, or a quiet one.
-pub(crate) fn reach_dot(reachable: bool, cx: &App) -> Div {
+pub fn reach_dot(reachable: bool, cx: &App) -> Div {
     div()
         .flex_none()
         .size(px(7.))

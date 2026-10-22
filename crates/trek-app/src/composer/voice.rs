@@ -12,7 +12,7 @@ use std::ops::Range;
 
 /// Where the toolbar row is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Phase {
+pub enum Phase {
     /// The usual toolbar, with the mic.
     Idle,
     /// The mic was pressed and macOS is asked for the mic and Speech; the mic spins.
@@ -25,7 +25,7 @@ pub(crate) enum Phase {
 
 /// What happens to voice mode.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Event {
+pub enum Event {
     /// The mic button (or the shots harness's `dictate`): start a take, or confirm the open one.
     Mic,
     /// The take is recording. `live`: partial text will come (the audio-buffer request); else
@@ -54,7 +54,7 @@ pub(crate) enum Event {
 
 /// What the composer does about an [`Event`].
 #[derive(Debug, Default, PartialEq)]
-pub(crate) struct Effect {
+pub struct Effect {
     /// Ask for the mic and Speech, then start a take (`Started`) or say why not (`Failed`).
     pub ask: bool,
     /// Stop the mic; the final text follows (and, for a live take, arm [`GRACE`]).
@@ -68,13 +68,13 @@ pub(crate) struct Effect {
 }
 
 /// How long ✓ waits for the recognizer's final text before it puts in what was on screen.
-pub(crate) const GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+pub const GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// How often the waveform takes a level and redraws while listening (20 fps).
-pub(crate) const TICK: std::time::Duration = std::time::Duration::from_millis(50);
+pub const TICK: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Voice mode's state: the phase, the text heard so far, and the levels for the waveform.
-pub(crate) struct Voice {
+pub struct Voice {
     pub phase: Phase,
     /// Partial text keeps coming (else the text only arrives after ✓).
     pub live: bool,
@@ -234,7 +234,7 @@ impl Voice {
 
 /// Dictated `text` as it goes in at `cursor` of `value`: trimmed, with a space either side
 /// where it would otherwise run into a word.
-pub(crate) fn spaced(value: &str, cursor: usize, text: &str) -> String {
+pub fn spaced(value: &str, cursor: usize, text: &str) -> String {
     let cursor = cursor.min(value.len());
     let left = cursor > 0 && !value[..cursor].ends_with(char::is_whitespace);
     let right = cursor < value.len() && !value[cursor..].starts_with(char::is_whitespace);
@@ -248,16 +248,16 @@ pub(crate) fn spaced(value: &str, cursor: usize, text: &str) -> String {
 
 /// The waveform's history: one smoothed level per tick, newest last, each 0 (silence, a dot)
 /// to 1 (loud, a full bar).
-pub(crate) struct Levels {
+pub struct Levels {
     bars: VecDeque<f32>,
     /// The smoothed level, between ticks.
     now: f32,
 }
 
 /// Bars kept: more than the widest strip shows at [`PITCH`].
-pub(crate) const KEPT: usize = 400;
+pub const KEPT: usize = 400;
 /// A bar and its gap, in px: at 20 ticks a second the strip scrolls 80 px/s.
-pub(crate) const PITCH: f32 = 4.;
+pub const PITCH: f32 = 4.;
 
 impl Default for Levels {
     fn default() -> Self {
@@ -295,7 +295,7 @@ impl Levels {
 }
 
 /// The scrolling bar strip: newest at the right edge, silence as dots, the left end faded.
-pub(crate) fn waveform(levels: Vec<f32>, color: Hsla) -> impl IntoElement {
+pub fn waveform(levels: Vec<f32>, color: Hsla) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {

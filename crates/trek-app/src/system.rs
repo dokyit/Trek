@@ -60,7 +60,7 @@ static SYSTEM_REDUCES_MOTION: std::sync::atomic::AtomicBool =
 /// dialogs sliding in) read the app's flag, which follows either. Nothing tells gpui when the
 /// system's changes, so it's asked every couple of seconds; Trek's setting is followed in `sync`.
 fn follow_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
-    if cfg!(test) {
+    if cfg!(any(test, feature = "test-support")) {
         return;
     }
     SYSTEM_REDUCES_MOTION.store(reduce_motion(), std::sync::atomic::Ordering::Relaxed);
@@ -88,7 +88,7 @@ fn follow_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
 
 /// The app's reduce-motion flag: the system's preference or Trek's.
 fn apply_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
-    if cfg!(test) {
+    if cfg!(any(test, feature = "test-support")) {
         return;
     }
     reduce_motion_as(
@@ -101,7 +101,7 @@ fn apply_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
 /// Set the app's reduce-motion flag from what the system asks (`system`) and Trek's own setting:
 /// either one stills every animation. Split from the read so that a test can say what the system
 /// asked, as the clock is told in the motion tests.
-pub(crate) fn reduce_motion_as(system: bool, workspace: &Entity<Workspace>, cx: &mut App) {
+pub fn reduce_motion_as(system: bool, workspace: &Entity<Workspace>, cx: &mut App) {
     let on = system || workspace.read(cx).settings.appearance.reduce_motion;
     if cx.reduce_motion() != on {
         cx.set_reduce_motion(on)
@@ -189,7 +189,7 @@ pub fn apply_ui_font_size(size: f32, cx: &mut App) {
 
 /// Show `count` on the Dock tile (cleared at 0). Must run on the main thread. Whether it was
 /// shown; `main` is the main window, which only the taskbar's badge belongs to.
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
 fn set_dock_badge(count: usize, _main: Option<AnyWindowHandle>, _cx: &mut App) -> bool {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSApplication;
@@ -205,7 +205,7 @@ fn set_dock_badge(count: usize, _main: Option<AnyWindowHandle>, _cx: &mut App) -
 
 /// The taskbar button's overlay badge, on the main window's button. With no main window there is
 /// no button; the count is put up when one opens.
-#[cfg(all(windows, not(test)))]
+#[cfg(all(windows, not(any(test, feature = "test-support"))))]
 fn set_dock_badge(count: usize, main: Option<AnyWindowHandle>, cx: &mut App) -> bool {
     let Some(main) = main else { return count == 0 };
     let hwnd = main
@@ -215,7 +215,11 @@ fn set_dock_badge(count: usize, main: Option<AnyWindowHandle>, cx: &mut App) -> 
     hwnd.is_some_and(|hwnd| crate::winsys::set_overlay_badge(hwnd, count))
 }
 
-#[cfg(all(not(target_os = "macos"), not(windows), not(test)))]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(windows),
+    not(any(test, feature = "test-support"))
+))]
 fn set_dock_badge(_: usize, _: Option<AnyWindowHandle>, _: &mut App) -> bool {
     true
 }
@@ -232,7 +236,7 @@ pub fn app_icon_image(icon: AppIcon) -> &'static str {
 /// Show `icon` in the Dock while Trek runs. The bundle's own icon (Ember) is what Finder and a
 /// quit app's Dock tile show: macOS only lets a running app change its tile. Whether it was put
 /// up (the Windows one, below, asks again when a window couldn't take it).
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
 fn set_app_icon(icon: AppIcon, _cx: &mut App) -> bool {
     use objc2::{AllocAnyThread as _, MainThreadMarker};
     use objc2_app_kit::{NSApplication, NSImage};
@@ -254,7 +258,7 @@ fn set_app_icon(icon: AppIcon, _cx: &mut App) -> bool {
 /// On Windows the icon is each window's (`WM_SETICON`) and its class's, taken from the exe's icon
 /// resources (`winsys::icon_resource`): the taskbar button and title bar show it while Trek runs,
 /// and the exe's own icon (Explorer, a shortcut) stays Ember.
-#[cfg(all(windows, not(test)))]
+#[cfg(all(windows, not(any(test, feature = "test-support"))))]
 fn set_app_icon(icon: AppIcon, cx: &mut App) -> bool {
     let resource = crate::winsys::icon_resource(icon);
     let mut all = true;
@@ -268,7 +272,11 @@ fn set_app_icon(icon: AppIcon, cx: &mut App) -> bool {
     all
 }
 
-#[cfg(all(not(target_os = "macos"), not(windows), not(test)))]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(windows),
+    not(any(test, feature = "test-support"))
+))]
 fn set_app_icon(_: AppIcon, _: &mut App) -> bool {
     true
 }
@@ -277,9 +285,9 @@ fn set_app_icon(_: AppIcon, _: &mut App) -> bool {
 /// changed): on Windows its icons, cut for the old scale, are put on again at the new one's size.
 /// Called from the window's own update, so it asks the window rather than updating it.
 pub fn scale_changed(window: &Window, cx: &App) {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     SCALE_CHANGES.with(|n| n.set(n.get() + 1));
-    #[cfg(all(windows, not(test)))]
+    #[cfg(all(windows, not(any(test, feature = "test-support"))))]
     if let (Some(workspace), Some(hwnd)) = (
         cx.try_global::<crate::workspace::GlobalWorkspace>(),
         crate::winsys::hwnd_of(window),
@@ -287,17 +295,17 @@ pub fn scale_changed(window: &Window, cx: &App) {
         let icon = workspace.0.read(cx).settings.appearance.app_icon;
         crate::winsys::set_window_icon(hwnd, crate::winsys::icon_resource(icon));
     }
-    #[cfg(not(all(windows, not(test))))]
+    #[cfg(not(all(windows, not(any(test, feature = "test-support")))))]
     let _ = (window, cx);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn set_app_icon(icon: AppIcon, _: &mut App) -> bool {
     APP_ICON.with(|i| i.set(Some(icon)));
     true
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// What tests would have shown on the Dock tile (each GPUI test runs on its own thread).
     pub static DOCK_BADGE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -311,7 +319,7 @@ thread_local! {
     pub static SCALE_CHANGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn set_dock_badge(count: usize, main: Option<AnyWindowHandle>, _: &mut App) -> bool {
     DOCK_BADGE.with(|b| b.set(count));
     BADGE_ON.with(|w| w.set(main));
@@ -365,7 +373,7 @@ fn reduce_motion() -> bool {
 }
 
 /// Move `path` to the Trash, where the user can still get it back.
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
 pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
     use objc2_foundation::{NSFileManager, NSString, NSURL};
     let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
@@ -375,7 +383,7 @@ pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
 }
 
 /// Tests' folders are their own: gone for good, not into the user's Trash.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
     if path.is_dir() {
         std::fs::remove_dir_all(path)
@@ -386,7 +394,7 @@ pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
 }
 
 /// The Recycle Bin (Windows) or the XDG trash (Linux).
-#[cfg(all(not(target_os = "macos"), not(test)))]
+#[cfg(all(not(target_os = "macos"), not(any(test, feature = "test-support"))))]
 pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
     trek_core::paths::trash(path)
 }
@@ -524,9 +532,9 @@ pub fn activate_window(window: &mut Window, cx: &mut App) {
         }
         // GPUI's test platform: no system window behind it. (Never GPUI's own activation on a
         // real one: that is the one that sends the Alt key.)
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         _ => return window.activate_window(),
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         _ => return,
     };
     after_update(cx, move |_| {
@@ -687,7 +695,11 @@ pub mod lately {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    const KEPT: Duration = Duration::from_secs(if cfg!(test) { 0 } else { 2 });
+    const KEPT: Duration = Duration::from_secs(if cfg!(any(test, feature = "test-support")) {
+        0
+    } else {
+        2
+    });
 
     #[derive(Clone, Copy, PartialEq, Eq, Hash)]
     enum Asked {
@@ -741,7 +753,7 @@ pub mod lately {
 /// Play the alert sound off the main thread. One at a time: threads that finish together chime
 /// once, rather than each start a player of its own (two hundred of them at once kept chiming
 /// for minutes, and Trek crawled meanwhile).
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 pub fn play_alert_sound() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static PLAYING: AtomicBool = AtomicBool::new(false);
@@ -765,7 +777,7 @@ pub fn play_alert_sound() {
     });
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn play_alert_sound() {
     SOUNDS.with(|n| n.set(n.get() + 1));
 }

@@ -12,6 +12,9 @@ path = "src/main.rs"
 [features]
 # Design review without Screen Recording: the window draws its frames to PNGs (src/shots.rs).
 shots = ["gpui-kit/test-support"]
+# What tests/ can reach from outside the crate (render counts, test-only view helpers). The
+# dev-dependency on trek-app itself turns it on for `cargo test`; a plain build leaves it off.
+test-support = ["gpui-kit/test-support", "dep:trek-test-fixtures"]
 
 [dependencies]
 tokio.workspace = true
@@ -57,6 +60,9 @@ lsp-types = "0.97"
 ignore = "0.4"
 notify = "7"
 ropey = "2.0.0-beta.1"
+# Fixture binaries tests spawn as fake agents/formatters (src/format.rs, src/lsp_client.rs,
+# tests/): optional so plain builds don't compile it; test-support enables it.
+trek-test-fixtures = { workspace = true, optional = true }
 # gpui-kit 0.7 compiles these grammars in without their highlight queries (they parse and colour
 # nothing); src/languages.rs registers the queries the grammar crates carry. The versions
 # gpui-component already uses.
@@ -117,11 +123,13 @@ windows-61 = { package = "windows", version = "0.61", features = ["Win32_System_
 embed-resource = "3"
 
 [dev-dependencies]
-# Headless UI tests (src/tests): GPUI's test platform, plus CoreText from the macOS platform so
+# Headless UI tests (tests/): GPUI's test platform, plus CoreText from the macOS platform so
 # text lays out as it does in the app.
 gpui-kit = { workspace = true, features = ["test-support"] }
 ctor = "1"
-trek-test-fixtures.workspace = true
+# Integration tests link the library with its test-only surface (test_support, the views' test
+# hooks) on: this dev-dependency on the crate itself is what enables the feature.
+trek-app = { path = ".", features = ["test-support"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 gpui_macos = { package = "gpui-pre-macos", version = "=0.3.7" }

@@ -11,7 +11,7 @@ pub const APP_NAME: &str = "Trek";
 
 /// The overlay badge's pixels, RGBA: a red disc with `count` on it in white (99 at most). Drawn
 /// at `size` px square; the taskbar scales it to its 16 px slot.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, test, feature = "test-support"))]
 pub fn badge_rgba(count: usize, size: usize) -> Vec<u8> {
     // Digits as 3×5 bitmaps, a row per three bits.
     const DIGITS: [[u8; 5]; 10] = [
@@ -66,7 +66,7 @@ pub fn badge_rgba(count: usize, size: usize) -> Vec<u8> {
 }
 
 /// What the taskbar button's badge says to a screen reader.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, test, feature = "test-support"))]
 pub fn badge_description(count: usize) -> String {
     format!(
         "{count} thread{} need{} you",
@@ -78,7 +78,7 @@ pub fn badge_description(count: usize) -> String {
 /// Put `count` on the taskbar button of window `hwnd` (cleared at 0). Returns whether it was
 /// applied: the button may not exist yet, in which case the caller asks again.
 #[cfg(windows)]
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 pub fn set_overlay_badge(hwnd: isize, count: usize) -> bool {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
@@ -150,7 +150,7 @@ pub fn set_overlay_badge(hwnd: isize, count: usize) -> bool {
 /// The id of the icon resource in `trek.exe` for `icon`. `build.rs` embeds the three `.ico`s
 /// under these numbers (ember stays 1: GPUI's window class and Explorer read the exe's icon
 /// from there), and a test keeps the two lists the same.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, test, feature = "test-support"))]
 pub fn icon_resource(icon: trek_core::settings::AppIcon) -> u16 {
     use trek_core::settings::AppIcon;
     match icon {
@@ -210,7 +210,7 @@ pub fn taskbar_dpi() -> u32 {
 /// of another scale is given its icons again (`system::scale_changed`). Whether the icons could
 /// be loaded.
 #[cfg(windows)]
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 pub fn set_window_icon(hwnd: isize, resource: u16) -> bool {
     use windows_sys::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -249,7 +249,7 @@ pub fn set_window_icon(hwnd: isize, resource: u16) -> bool {
 
 /// The window's handle, the way Win32 knows it.
 #[cfg(windows)]
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 pub fn hwnd_of(window: &gpui_kit::Window) -> Option<isize> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     // Not `window.window_handle()`: GPUI's own method of that name is a different thing.
@@ -262,7 +262,7 @@ pub fn hwnd_of(window: &gpui_kit::Window) -> Option<isize> {
 /// Seconds from the last keyboard or mouse input (`GetLastInputInfo`'s tick) to `now_ms`
 /// (`GetTickCount`). Both are 32-bit milliseconds since boot that wrap every 49.7 days, so the
 /// difference is taken modulo 2³²: a wrap between the two still reads as the few seconds it was.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, test, feature = "test-support"))]
 pub fn idle_seconds_between(now_ms: u32, last_input_ms: u32) -> f64 {
     f64::from(now_ms.wrapping_sub(last_input_ms)) / 1000.0
 }
@@ -288,7 +288,7 @@ pub fn idle_seconds() -> Option<f64> {
 /// the one on the console (`WTSDisconnected`: another user's turn after a fast switch, or a remote
 /// desktop that was closed). Either way nobody is looking at Trek. `flags` is `SessionFlags`:
 /// `WTS_SESSIONSTATE_LOCK` is 0 (Windows 8 and later; Windows 7 had it the other way round).
-#[cfg(any(windows, test))]
+#[cfg(any(windows, test, feature = "test-support"))]
 pub fn session_is_away(state: i32, flags: i32) -> bool {
     const WTS_DISCONNECTED: i32 = 4;
     const WTS_SESSIONSTATE_LOCK: i32 = 0;
@@ -338,7 +338,7 @@ pub fn session_locked() -> bool {
 /// the AppUserModelID's name (`set_app_identity`); an unpackaged app also needs an icon there, or
 /// its toasts show a blank one. Written once per run, to the current user's classes only.
 #[cfg(windows)]
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 pub fn register_toast_identity(app_id: &str, name: &str, icon_png: &[u8]) {
     use windows_sys::Win32::System::Registry::{
         HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
@@ -392,7 +392,7 @@ pub fn register_toast_identity(app_id: &str, name: &str, icon_png: &[u8]) {
 /// What Windows runs for a `trek://` link: Trek, with the link as its one argument. Quoted both
 /// ways: a path with spaces, and a link with `&` in it. `LINK_ARG` before it says the launch is a
 /// link's, so that arguments a link with a `"` in it makes of itself are refused, not opened.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, test, feature = "test-support"))]
 pub fn protocol_command(exe: &std::path::Path) -> String {
     format!(
         "\"{}\" {} \"%1\"",
@@ -444,8 +444,8 @@ pub fn register_protocol(root: &str, exe: &std::path::Path) -> std::io::Result<R
 /// which takes the links: not a capture run or a process with a data folder of its own. The Trek
 /// that moved starts its copy with neither (`relocate::mover_command` drops what a restart
 /// doesn't keep), so the copy registers itself at its first launch.
-#[cfg(any(windows, test))]
-fn takes_over_links(
+#[cfg(any(windows, test, feature = "test-support"))]
+pub fn takes_over_links(
     shot_dir: Option<&std::ffi::OsStr>,
     data_dir: Option<&std::ffi::OsStr>,
 ) -> bool {
@@ -457,7 +457,7 @@ fn takes_over_links(
 /// data folder of its own (a test, a capture run, a trial build): it mustn't take over the links
 /// of the Trek the user has.
 #[cfg(windows)]
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 pub fn register_trek_protocol() {
     if !takes_over_links(
         std::env::var_os("TREK_SHOT_DIR").as_deref(),
@@ -564,7 +564,7 @@ fn reg_write(key: &str, value: &str, text: &str) -> std::io::Result<()> {
 
 /// The system's notification sound, waiting until it has played.
 #[cfg(windows)]
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 pub fn play_notification_sound() {
     use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_NODEFAULT};
     let alias: Vec<u16> = "SystemNotification".encode_utf16().chain([0]).collect();
@@ -582,7 +582,7 @@ pub fn play_notification_sound() {
 /// system says: the window the cursor is over, by its root. Not the window's own notion of it, which
 /// is told when the cursor comes and goes and so lags a draw behind either.
 #[cfg(windows)]
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 pub fn cursor_over_window(hwnd: isize) -> bool {
     use windows_sys::Win32::Foundation::{HWND, POINT};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -600,7 +600,7 @@ pub fn cursor_over_window(hwnd: isize) -> bool {
 }
 
 /// What Windows calls a `WM_NCHITTEST` answer: the name of the code, as the SDK spells it.
-#[cfg(any(all(windows, feature = "shots"), test))]
+#[cfg(any(all(windows, feature = "shots"), test, feature = "test-support"))]
 pub fn hit_name(code: isize) -> &'static str {
     match code {
         0 => "HTNOWHERE",
@@ -1109,7 +1109,7 @@ mod tests {
 /// By hand (`cargo test -p trek-app overlay -- --ignored`): puts the badge on the taskbar button of
 /// a window made for the purpose, which shows for a second or two, and clears it. The tests
 /// above only draw the pixels; this is the one that asks Windows.
-#[cfg(all(windows, test))]
+#[cfg(all(windows, any(test, feature = "test-support")))]
 mod by_hand {
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
     use windows_sys::Win32::Foundation::HWND;

@@ -11,14 +11,14 @@ use trek_core::Effort;
 use trek_core::orchestrate::{Consult, Consultant, Style};
 
 /// `/new` or `/clear`, alone.
-pub(crate) fn is_new_chat(text: &str) -> bool {
+pub fn is_new_chat(text: &str) -> bool {
     matches!(text.trim(), "/new" | "/clear")
 }
 
 /// `/consult sol high, opus max: <message>` (also `discuss`, `advise`, `arena`, `report`,
 /// `implement`): `consult` with the consultants and style it names, and the message to send
 /// (`None`: just picked, for the next message). `None` overall when `text` isn't the command.
-pub(crate) fn consult_command(
+pub fn consult_command(
     ws: &Workspace,
     text: &str,
     mut consult: Consult,
@@ -103,7 +103,7 @@ pub(crate) fn consult_command(
 }
 
 /// "Sol · High": how a consultant is named to the agent and on the input's chip.
-pub(crate) fn consultant_name(ws: &Workspace, c: &Consultant) -> String {
+pub fn consultant_name(ws: &Workspace, c: &Consultant) -> String {
     format!(
         "{} · {}",
         model_name(&ws.models_for(&c.agent), &c.model),
@@ -112,11 +112,7 @@ pub(crate) fn consultant_name(ws: &Workspace, c: &Consultant) -> String {
 }
 
 /// `text` with `consult`'s instructions for the agent, an arena's judge picked when none is.
-pub(crate) fn consult_prompt(
-    ws: &Workspace,
-    text: &str,
-    consult: &Consult,
-) -> Result<String, String> {
+pub fn consult_prompt(ws: &Workspace, text: &str, consult: &Consult) -> Result<String, String> {
     let mut consult = consult.clone();
     if consult.style == Style::Arena && consult.judge.is_none() {
         let prefs = ws.prefs_in(&Scope::Ide);

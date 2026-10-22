@@ -1106,8 +1106,8 @@ impl Attaching for AiInput {
 
 impl Render for AiInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        crate::tests::rendered("AiInput");
+        #[cfg(any(test, feature = "test-support"))]
+        crate::test_support::rendered("AiInput");
         let theme = cx.theme().clone();
         let narrow = self.workspace.read(cx).settings.ide.layout.ai_width < NARROW;
         if self.narrow != narrow {
@@ -1355,18 +1355,13 @@ impl Render for AiInput {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl AiInput {
-    pub(crate) fn text(&self, cx: &App) -> String {
+    pub fn text(&self, cx: &App) -> String {
         self.input.read(cx).value().to_string()
     }
 
-    pub(crate) fn set_text_for_test(
-        &mut self,
-        text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_text_for_test(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.input
             .update(cx, |s, cx| s.set_value(text.to_string(), window, cx));
     }

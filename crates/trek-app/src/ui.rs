@@ -68,7 +68,7 @@ pub fn apply_glass(
         return;
     }
     *applied = Some(state);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     BACKDROP_ASKS.with(|n| n.set(n.get() + 1));
     let native = crate::system::native_glass(window, on);
     let mica = cfg!(windows) && on;
@@ -116,7 +116,7 @@ pub fn chrome_alpha(tint: f32, material: Material) -> f32 {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// How many times a window has been told its glass and tone (each GPUI test runs on its own thread).
     pub static BACKDROP_ASKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };

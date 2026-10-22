@@ -208,14 +208,14 @@ static WIN: Words = for_platform(true);
 
 /// The wording of the platform running.
 pub fn words() -> &'static Words {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(windows) = PRETEND.with(std::cell::Cell::get) {
         return if windows { &WIN } else { &MAC };
     }
     if cfg!(windows) { &WIN } else { &MAC }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// The platform a test is pretending to be on, so one run sees both tables (each GPUI test
     /// runs on its own thread).
@@ -229,8 +229,8 @@ pub fn is_windows() -> bool {
 }
 
 /// Until the guard drops, `words()` answers for Windows (`true`) or the Mac (`false`).
-#[cfg(test)]
-pub(crate) fn pretend(windows: bool) -> impl Drop {
+#[cfg(any(test, feature = "test-support"))]
+pub fn pretend(windows: bool) -> impl Drop {
     struct Restore(Option<bool>);
     impl Drop for Restore {
         fn drop(&mut self) {

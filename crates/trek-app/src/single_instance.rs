@@ -129,7 +129,7 @@ pub fn launch_args(args: impl IntoIterator<Item = OsString>, cwd: &Path) -> Vec<
 
 /// `claim` for the data folder `dir`, trying for at most `wait` to reach a running Trek.
 #[cfg(windows)]
-pub(crate) fn claim_in(dir: &Path, open: Open, wait: Duration) -> Claim {
+pub fn claim_in(dir: &Path, open: Open, wait: Duration) -> Claim {
     use trek_ipc::instance::ForwardError;
     let deadline = std::time::Instant::now() + wait;
     let mut why = "it hasn't said where it listens".to_string();
@@ -342,7 +342,7 @@ pub fn hear(
 
 /// Another launch's arguments: Trek comes forward (unless that launch was in the background),
 /// then each opens.
-pub(crate) fn take(
+pub fn take(
     open: Open,
     ws: &Entity<Workspace>,
     links: &async_channel::Sender<String>,
@@ -379,7 +379,7 @@ const MAX_LINK: usize = 64 * 1024;
 
 /// What one argument of a launch means.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Arg {
+pub enum Arg {
     /// A `trek://` link, for the place macOS sends its open-URL events (`deep_link::open`).
     Link(String),
     /// A file: opens in the editor, as a `trek://edit` link to it would.
@@ -393,7 +393,7 @@ pub(crate) enum Arg {
 /// Sort `arg` out. Arguments come from other processes (a link from any web page, anything a
 /// user's tools launch Trek with), so only a short `trek://` link or an absolute path to a file or
 /// folder that exists is acted on.
-pub(crate) fn classify(arg: &str) -> Arg {
+pub fn classify(arg: &str) -> Arg {
     if is_link(arg) {
         if arg.len() > MAX_LINK {
             return Arg::Ignored("a link that is too long");

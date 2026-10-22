@@ -13,7 +13,7 @@ pub const SERVICE: &str = "_trek._tcp";
 
 /// The TXT record: `id=<host id>` and `name=<this Mac's name>`, as DNS-SD wants it (each entry
 /// led by its length, at most 255 bytes: a longer name is cut at a character boundary).
-pub(crate) fn txt_record(host_id: &str, name: &str) -> Vec<u8> {
+pub fn txt_record(host_id: &str, name: &str) -> Vec<u8> {
     let mut out = Vec::new();
     for entry in [format!("id={host_id}"), format!("name={name}")] {
         let mut end = entry.len().min(255);

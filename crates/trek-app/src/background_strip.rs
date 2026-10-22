@@ -680,8 +680,8 @@ impl RenderOnce for Trigger {
 
 impl Render for BackgroundStrip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        crate::tests::rendered("BackgroundStrip");
+        #[cfg(any(test, feature = "test-support"))]
+        crate::test_support::rendered("BackgroundStrip");
         let Some(shown) = self.shown.clone() else {
             return div().into_any_element();
         };
@@ -811,16 +811,16 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl BackgroundStrip {
     /// The task whose output is open.
-    pub(crate) fn output_open(&self) -> Option<String> {
+    pub fn output_open(&self) -> Option<String> {
         self.output.clone()
     }
 
     /// The rows as shown: "npm run dev — ➜ Local: http://localhost:5173/", with "(stop)" where
     /// it can be stopped.
-    pub(crate) fn rows(&self) -> Vec<String> {
+    pub fn rows(&self) -> Vec<String> {
         let Some(s) = &self.shown else { return vec![] };
         if self.hidden.contains(&s.thread) {
             return vec![format!("Background · {} running", s.rows.len())];

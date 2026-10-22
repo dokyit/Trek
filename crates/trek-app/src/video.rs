@@ -193,7 +193,7 @@ fn title_of(source: &str) -> String {
 
 /// Under a finished `watch_video` row: the video, and the frames the model saw.
 #[derive(IntoElement)]
-pub(crate) struct WatchedVideo {
+pub struct WatchedVideo {
     /// The call's answer (its text).
     pub output: String,
     /// The row's item, for the card's key.
@@ -299,7 +299,7 @@ fn strip(w: &Arc<Watched>, ix: usize, cx: &App) -> AnyElement {
 /// The videos attached to a message (it names them as `@path`, `media::mentioned_videos`), each
 /// in a player under it.
 #[derive(IntoElement)]
-pub(crate) struct AttachedVideos {
+pub struct AttachedVideos {
     pub paths: Vec<PathBuf>,
     pub ix: usize,
 }

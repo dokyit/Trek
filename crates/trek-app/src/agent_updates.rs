@@ -47,14 +47,14 @@ pub enum Runner {
     /// failure and its output can be looked at.
     Mock,
     /// Tests decide the outcome.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Fake(std::sync::Arc<dyn Fn(&AgentVersion) -> Outcome + Send + Sync>),
     /// Tests: runs until let go, then reaches the newest version.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Gated(async_channel::Receiver<()>),
     /// Tests: notes the rows of each run (one, or a batch run as an administrator) and reaches
     /// the newest version.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Recorded(std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>),
 }
 
@@ -70,7 +70,7 @@ impl Runner {
             Runner::Real if vs.len() > 1 && elevated => {
                 trek_core::agent_update::run_elevated(&vs).await
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Runner::Recorded(runs) => {
                 runs.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -102,9 +102,9 @@ impl Runner {
                 Outcome::Failed { summary: "npm install -g @earendil-works/pi-coding-agent@latest stopped with code 243.".into(), output }
             }
             Runner::Mock => trek_core::agent_update::dry_run(&v).await,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Runner::Fake(f) => f(&v),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Runner::Gated(gate) => {
                 let _ = gate.recv().await;
                 Outcome::Updated {
@@ -112,7 +112,7 @@ impl Runner {
                     output: String::new(),
                 }
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Runner::Recorded(_) => {
                 Box::pin(self.run_all(vec![v]))
                     .await

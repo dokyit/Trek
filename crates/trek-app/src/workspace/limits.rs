@@ -25,7 +25,7 @@ impl Default for Clock {
 }
 
 impl Clock {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new(f: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
         Clock(Arc::new(f))
     }
@@ -40,11 +40,11 @@ impl Clock {
 const RECHECK: Duration = Duration::from_secs(30);
 
 /// How long after launch overdue resumes wait: the windows are up and the agents found first.
-pub(crate) const LAUNCH_DELAY_MS: i64 = 8_000;
+pub const LAUNCH_DELAY_MS: i64 = 8_000;
 
 /// A limit the running turn reported, applied when the turn ends.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Hit {
+pub struct Hit {
     pub message: String,
     pub resets_at: Option<i64>,
     pub scope: LimitScope,
@@ -54,14 +54,14 @@ pub(crate) struct Hit {
 
 /// How full one of a plan's usage windows is (0–100), and when it resets (unix ms).
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Window {
+pub struct Window {
     pub scope: LimitScope,
     pub percent: f32,
     pub resets_at: Option<i64>,
 }
 
 /// The window a running turn was asked to wrap up ahead of.
-pub(crate) type WrapUp = Window;
+pub type WrapUp = Window;
 
 /// How full a window is when Trek starts re-reading an agent's usage more often for the turns
 /// running on it (`Workspace::usage_every`).
@@ -82,7 +82,7 @@ fn due(windows: impl IntoIterator<Item = Window>) -> Option<Window> {
 /// A turn that resumes a thread after its usage limit: the message of the user's it sent (sent
 /// again if the limit is still there), and how many resumes before it met the limit again.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Resuming {
+pub struct Resuming {
     pub sent: Option<Queued>,
     pub tries: u32,
 }
@@ -259,7 +259,7 @@ impl Workspace {
 
     /// `agent`'s usage was just read (`refresh_usage`, `refresh_devin_usage`): the turns running
     /// on it that a window close to its limit applies to are asked to wrap up.
-    pub(crate) fn wrap_up_where_due(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
+    pub fn wrap_up_where_due(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
         let Some(limits) = self
             .agent_status
             .get(&agent.key())
@@ -569,7 +569,7 @@ impl Workspace {
 
     /// Set the timer for the next pause to end (one timer for all threads), or none. A thread whose
     /// agent is being asked about its limit waits for the answer (`resume_when_clear`).
-    pub(crate) fn schedule_limits(&mut self, cx: &mut Context<Self>) {
+    pub fn schedule_limits(&mut self, cx: &mut Context<Self>) {
         let checking = &self.limit_checks;
         let next = trek_core::limit::next_end(
             self.threads

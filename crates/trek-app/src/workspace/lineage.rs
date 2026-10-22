@@ -22,7 +22,7 @@ use trek_core::store::{Item, Thread, now_ms};
 use trek_core::{RunState, ThreadSource};
 
 /// Whether an agent started `t` (`start_thread`), or it took over another thread's work (`handoff`).
-pub(crate) fn agent_started(t: &Thread) -> bool {
+pub fn agent_started(t: &Thread) -> bool {
     t.started_by.is_some() || t.continued_from.is_some()
 }
 

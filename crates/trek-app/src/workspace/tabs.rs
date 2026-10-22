@@ -192,7 +192,7 @@ impl Workspace {
     }
 
     fn save_tabs(&self) {
-        if cfg!(test) {
+        if cfg!(any(test, feature = "test-support")) {
             return;
         }
         // Written beside it and moved over it, so a crash mid-write can't leave half a file.

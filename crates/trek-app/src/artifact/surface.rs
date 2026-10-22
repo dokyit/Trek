@@ -40,7 +40,7 @@ pub trait Surface {
     /// The card's colour changed (a theme switch): what shows where the page draws nothing, on
     /// Windows (WebView2 can't be see-through over GPUI; WKWebView is).
     fn set_background(&self, rgb: (u8, u8, u8));
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn placed(&self) -> Option<Placement> {
         None
     }

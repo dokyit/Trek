@@ -30,7 +30,7 @@ pub type UsageFetch =
 const READ_EVERY_MS: i64 = 30_000;
 
 /// Claude Code's or Codex's own report, with its usage or without, read on Trek's tokio runtime.
-pub(crate) fn read_agent(
+pub fn read_agent(
     agent: &AgentId,
     cwd: &Path,
     with_usage: bool,
@@ -78,7 +78,7 @@ fn snapshots_file() -> PathBuf {
 }
 
 /// The snapshots kept last time (none when there's no file, or it can't be read).
-pub(crate) fn load_snapshots() -> HashMap<String, Snapshot> {
+pub fn load_snapshots() -> HashMap<String, Snapshot> {
     std::fs::read(snapshots_file())
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
@@ -141,7 +141,7 @@ impl Workspace {
     }
 
     /// What `key`'s agent said this run, if that included its usage.
-    pub(crate) fn usage_status(&self, key: &str) -> Option<&AgentStatus> {
+    pub fn usage_status(&self, key: &str) -> Option<&AgentStatus> {
         self.agent_status
             .get(key)
             .filter(|_| !self.usage_unread.contains(key))

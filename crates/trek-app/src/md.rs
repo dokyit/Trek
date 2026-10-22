@@ -435,7 +435,7 @@ struct PathRef {
 
 /// The file a link points at on disk, if it does: absolute and `~` paths as written, `file://`
 /// unwrapped, and relative links resolved against the answer's folder. Only real paths count.
-pub(crate) fn link_path(url: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+pub fn link_path(url: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     let raw = url.strip_prefix("file://").unwrap_or(url);
     let path = if let Some(rest) = raw.strip_prefix("~/") {
         trek_core::paths::home().join(rest)

@@ -71,11 +71,7 @@ fn body(lines: Vec<(String, bool)>, cx: &App) -> AnyElement {
 
 /// What goes with the worktree, in words: uncommitted work (lost) and the branch (kept with its
 /// unmerged commits, or deleted).
-pub(crate) fn losses(
-    wt: &Worktree,
-    r: &Removal,
-    delete_unmerged: Option<bool>,
-) -> Vec<(String, bool)> {
+pub fn losses(wt: &Worktree, r: &Removal, delete_unmerged: Option<bool>) -> Vec<(String, bool)> {
     let mut out = vec![];
     if r.missing {
         out.push(("Its worktree folder is already gone.".to_string(), false));

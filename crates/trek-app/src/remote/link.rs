@@ -10,7 +10,7 @@
 //! before TLS. This Mac itself is always let in.
 
 // `PhoneLink` is for Settings › Phone, which is yet to show it.
-#![cfg_attr(not(test), allow(dead_code))]
+#![cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use trek_core::settings::Reach;

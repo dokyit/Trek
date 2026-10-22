@@ -7,8 +7,8 @@ mod pages;
 
 /// What the settings pages said, in words, since the last `take`: row titles and descriptions,
 /// headings and notes. The test harness sees elements, not text, so a test asks this instead.
-#[cfg(test)]
-pub(crate) mod shown {
+#[cfg(any(test, feature = "test-support"))]
+pub mod shown {
     use std::cell::RefCell;
 
     thread_local! {
@@ -29,7 +29,7 @@ pub(crate) mod shown {
         text(description);
     }
 
-    pub(crate) fn take() -> Vec<String> {
+    pub fn take() -> Vec<String> {
         SAID.with(|s| std::mem::take(&mut *s.borrow_mut()))
     }
 }
@@ -57,7 +57,7 @@ use trek_core::settings::{Settings, secrets};
 const SIMULATOR_NEEDS_A_MAC: &str =
     "The iOS Simulator needs macOS, so Trek doesn't offer it on Windows.";
 
-pub(crate) fn page_icon(p: SettingsPage) -> Icon {
+pub fn page_icon(p: SettingsPage) -> Icon {
     match p {
         SettingsPage::Project => Icon::new(crate::assets::Lucide::FolderCog),
         SettingsPage::General => Icon::new(IconName::Settings2),
@@ -109,7 +109,7 @@ const NAV_GROUPS: &[(&str, &[SettingsPage])] = &[
 ];
 
 /// Every settings page, in the order the navigation lists them.
-pub(crate) fn pages() -> impl Iterator<Item = SettingsPage> {
+pub fn pages() -> impl Iterator<Item = SettingsPage> {
     NAV_GROUPS
         .iter()
         .flat_map(|(_, pages)| pages.iter().copied())
@@ -129,7 +129,7 @@ pub fn page_named(name: &str) -> Option<SettingsPage> {
     })
 }
 
-pub(crate) fn page_blurb(p: SettingsPage) -> std::borrow::Cow<'static, str> {
+pub fn page_blurb(p: SettingsPage) -> std::borrow::Cow<'static, str> {
     let w = crate::words::words();
     match p {
         SettingsPage::Snapshots => crate::keys::localize("Screenshots you attach from the composer’s + menu or with ⌘⇧S."),
@@ -401,11 +401,11 @@ impl SnapshotsProbe {
 }
 
 /// Liquid glass's tint at frost `percent` (the slider), and back.
-pub(crate) fn tint_at(percent: f32) -> f32 {
+pub fn tint_at(percent: f32) -> f32 {
     0.2 + percent.clamp(0., 100.) / 100. * 0.75
 }
 
-pub(crate) fn frost_of(tint: f32) -> f32 {
+pub fn frost_of(tint: f32) -> f32 {
     ((tint - 0.2) / 0.75 * 100.).clamp(0., 100.)
 }
 
@@ -729,7 +729,7 @@ impl SettingsView {
         cx: &App,
     ) -> AnyElement {
         let description: SharedString = description.into();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         shown::title_and(&title, &description);
         h_flex()
             .w_full()
@@ -767,7 +767,7 @@ impl SettingsView {
 
     /// Section heading: more space above than below (rhythm), real weight instead of an eyebrow.
     fn heading(text: &str, cx: &App) -> AnyElement {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         shown::text(text);
         div()
             .pt(px(36.))
@@ -780,7 +780,7 @@ impl SettingsView {
     }
 
     fn note(text: &str, cx: &App) -> AnyElement {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         shown::text(text);
         div()
             .pb(px(16.))

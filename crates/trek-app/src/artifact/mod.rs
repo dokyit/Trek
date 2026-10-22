@@ -18,7 +18,7 @@
 //! replay their last frame without laying out again, so the end runs each frame regardless).
 
 // Tests use stand-in views (`fake_web`): the native one is never made there.
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 mod native;
 mod surface;
 
@@ -53,7 +53,7 @@ const OPEN_EVERY: Duration = Duration::from_secs(1);
 // ---------- the block ----------
 
 /// A closed `trek-html` block: the document and what the card shows of it.
-pub(crate) struct Doc {
+pub struct Doc {
     pub html: Arc<str>,
     pub hash: u64,
     pub title: Option<String>,
@@ -463,7 +463,7 @@ fn summary_of(doc: &Doc) -> String {
 
 /// A video in a note, played in place in a card; `None` when interactive artifacts are off (the
 /// note shows its file chip instead).
-pub(crate) fn video_card(
+pub fn video_card(
     doc: &Arc<Doc>,
     key: usize,
     window: &mut Window,
@@ -761,7 +761,7 @@ fn font_stack(name: &str, mono: bool) -> String {
 }
 
 /// Trek's theme as the document sees it.
-pub(crate) fn theme(cx: &App) -> core::Theme {
+pub fn theme(cx: &App) -> core::Theme {
     let t = cx.theme();
     let dark = t.mode.is_dark();
     let size = cx
@@ -840,7 +840,7 @@ struct Geom {
 /// One artifact card's page: its view while it has one, its snapshot, its height. Kept by the
 /// window for as long as the card is drawn (`use_keyed_state`), so a card that's no longer drawn
 /// (scrolled out of the transcript's rows, another thread shown) takes its view with it.
-pub(crate) struct ArtifactState {
+pub struct ArtifactState {
     doc: Arc<Doc>,
     mode: Mode,
     /// The theme's stylesheet in the document now.
@@ -1641,7 +1641,7 @@ fn sync_window(window: &mut Window, cx: &mut App) {
 
 /// Take the video playing `hash` in `window` (its card in the transcript) to `secs`. False when no
 /// card plays it there.
-pub(crate) fn seek(hash: u64, secs: f64, window: &Window, cx: &mut App) -> bool {
+pub fn seek(hash: u64, secs: f64, window: &Window, cx: &mut App) -> bool {
     let Some(entry) = cx
         .try_global::<Registry>()
         .and_then(|r| r.windows.get(&window.window_handle().window_id()))
@@ -1664,7 +1664,7 @@ pub(crate) fn seek(hash: u64, secs: f64, window: &Window, cx: &mut App) -> bool 
 // ---------- making views ----------
 
 fn make_surface(spec: native::Spec, window: &mut Window) -> Result<Box<dyn Surface>, String> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         let _ = window;
         match FAKE.with(|f| f.borrow().clone()) {
@@ -1683,21 +1683,21 @@ fn make_surface(spec: native::Spec, window: &mut Window) -> Result<Box<dyn Surfa
             None => Err("no web view in tests".to_string()),
         }
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     {
         native::NativeSurface::new(spec, window).map(|s| Box::new(s) as Box<dyn Surface>)
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FAKE: RefCell<Option<Rc<RefCell<FakeLog>>>> = const { RefCell::new(None) };
 }
 
 /// What stand-in views were asked to do, in a test.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
-pub(crate) struct FakeLog {
+pub struct FakeLog {
     pub made: usize,
     pub scripts: Vec<String>,
     pub reloads: usize,
@@ -1707,14 +1707,14 @@ pub(crate) struct FakeLog {
 
 /// Tests on this thread get stand-in views, which log to what this returns (`None`: no views at
 /// all, as without WebView2).
-#[cfg(test)]
-pub(crate) fn fake_web(on: bool) -> Option<Rc<RefCell<FakeLog>>> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn fake_web(on: bool) -> Option<Rc<RefCell<FakeLog>>> {
     let log = on.then(|| Rc::new(RefCell::new(FakeLog::default())));
     FAKE.with(|f| *f.borrow_mut() = log.clone());
     log
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 struct FakeSurface {
     log: Rc<RefCell<FakeLog>>,
     #[allow(dead_code)]
@@ -1722,7 +1722,7 @@ struct FakeSurface {
     placed: Option<Placement>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Surface for FakeSurface {
     fn place(&mut self, at: Option<Placement>, _: &Window) {
         self.placed = at;
@@ -1744,8 +1744,8 @@ impl Surface for FakeSurface {
 }
 
 /// The cards in `window` as the layer last placed them: whether each is live, and where.
-#[cfg(any(test, feature = "shots"))]
-pub(crate) fn placements(window: &Window, cx: &App) -> Vec<ArtifactReport> {
+#[cfg(any(test, feature = "test-support", feature = "shots"))]
+pub fn placements(window: &Window, cx: &App) -> Vec<ArtifactReport> {
     let Some(entry) = cx
         .try_global::<Registry>()
         .and_then(|r| r.windows.get(&window.window_handle().window_id()))
@@ -1767,7 +1767,7 @@ pub(crate) fn placements(window: &Window, cx: &App) -> Vec<ArtifactReport> {
                 height: s.height,
                 body: s.geom.as_ref().map(|g| g.body),
                 mask: s.geom.as_ref().map(|g| g.mask),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 placed: s.surface.as_ref().and_then(|v| v.placed()),
                 has_snapshot: s.shot.is_some(),
                 has_keys: s.has_keys,
@@ -1776,10 +1776,10 @@ pub(crate) fn placements(window: &Window, cx: &App) -> Vec<ArtifactReport> {
         .collect()
 }
 
-#[cfg(any(test, feature = "shots"))]
+#[cfg(any(test, feature = "test-support", feature = "shots"))]
 #[derive(Debug, Clone)]
-#[cfg_attr(test, allow(dead_code))]
-pub(crate) struct ArtifactReport {
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
+pub struct ArtifactReport {
     pub title: Option<String>,
     pub expanded: bool,
     pub has_view: bool,
@@ -1788,7 +1788,7 @@ pub(crate) struct ArtifactReport {
     pub height: f32,
     pub body: Option<Bounds<Pixels>>,
     pub mask: Option<Bounds<Pixels>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub placed: Option<Placement>,
     pub has_snapshot: bool,
     /// The page has the keyboard.
@@ -1797,8 +1797,8 @@ pub(crate) struct ArtifactReport {
 
 /// Feed a test's stand-in view the page's message `body` (as its bootstrap would send it), for
 /// every card in the window. `{nonce}` in `body` is replaced by each view's secret.
-#[cfg(test)]
-pub(crate) fn post(window: &mut Window, body: &str, cx: &mut App) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn post(window: &mut Window, body: &str, cx: &mut App) {
     let Some(entry) = cx
         .try_global::<Registry>()
         .and_then(|r| r.windows.get(&window.window_handle().window_id()))
@@ -1817,8 +1817,8 @@ pub(crate) fn post(window: &mut Window, body: &str, cx: &mut App) {
 }
 
 /// Tell every test view in the window that its page has loaded, as the engine would.
-#[cfg(test)]
-pub(crate) fn load_all(window: &mut Window, cx: &mut App) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn load_all(window: &mut Window, cx: &mut App) {
     let Some(entry) = cx
         .try_global::<Registry>()
         .and_then(|r| r.windows.get(&window.window_handle().window_id()))

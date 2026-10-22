@@ -294,8 +294,8 @@ enum Web {
 }
 
 pub struct PreviewView {
-    pub(crate) path: PathBuf,
-    pub(crate) kind: Kind,
+    pub path: PathBuf,
+    pub kind: Kind,
     status: Status,
     bytes: Option<u64>,
     pixels: Option<(u32, u32)>,
@@ -448,7 +448,7 @@ impl PreviewView {
     }
 
     /// Whether its web view is on screen (`None`: it has none).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn web_shown(&self) -> Option<bool> {
         matches!(self.web, Web::Made(_)).then_some(self.shown)
     }
@@ -463,7 +463,7 @@ impl PreviewView {
     }
 
     /// What its note says, when it shows one rather than the file.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn note_text(&self) -> Option<String> {
         match (&self.status, self.kind, &self.web) {
             (Status::Unreadable(why), ..) => Some(why.clone()),
@@ -981,33 +981,33 @@ impl Render for PreviewView {
 
 /// Make the web view a PDF or a video plays in, or `None` when there's none to be had.
 fn make_web(path: &Path, window: &mut Window, cx: &mut App) -> Option<Box<dyn WebSurface>> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         let _ = (path, window, cx);
         FAKE_WEB
             .with(std::cell::Cell::get)
             .then(|| Box::new(FakeWeb) as Box<dyn WebSurface>)
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     native_web(path, window, cx)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Whether tests get a stand-in web view (none, as with no WebView2, when not).
     static FAKE_WEB: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Tests on this thread get a stand-in web view (`true`) or none at all.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn fake_web(on: bool) {
     FAKE_WEB.with(|f| f.set(on));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 struct FakeWeb;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl WebSurface for FakeWeb {
     fn element(&self) -> AnyElement {
         div()
@@ -1118,7 +1118,7 @@ fn parse_range(range: Option<&str>, len: u64) -> Result<Option<(u64, u64)>, ()> 
 }
 
 /// The answer to a request for the file: all of it, or the range asked for.
-pub(crate) fn serve(path: &Path, range: Option<&str>) -> wry::http::Response<Vec<u8>> {
+pub fn serve(path: &Path, range: Option<&str>) -> wry::http::Response<Vec<u8>> {
     use std::io::{Read as _, Seek as _};
     let mime = mime(path);
     let fail = |status: u16| {
@@ -1203,7 +1203,7 @@ impl WebSurface for NativeWeb {
     }
 }
 
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 fn native_web(path: &Path, window: &mut Window, cx: &mut App) -> Option<Box<dyn WebSurface>> {
     use raw_window_handle::HasWindowHandle as _;
     let handle = window.window_handle().ok()?;

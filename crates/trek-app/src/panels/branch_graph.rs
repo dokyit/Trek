@@ -12,7 +12,7 @@ use trek_core::worktree::MergeBlock;
 
 /// How the merge arc ends on the base line.
 #[derive(Clone, Copy, PartialEq)]
-pub(crate) enum EndState {
+pub enum EndState {
     /// Nothing in the way: dashed arc out to a hollow green point.
     Ready,
     /// A merge, push or pull-request op is in flight: the point breathes.
@@ -25,7 +25,7 @@ pub(crate) enum EndState {
 }
 
 /// What the card needs from the review.
-pub(crate) struct GraphArgs<'a> {
+pub struct GraphArgs<'a> {
     pub base: &'a str,
     pub branch: &'a str,
     /// Commits on the branch its base doesn't have.
@@ -43,7 +43,7 @@ pub(crate) struct GraphArgs<'a> {
 }
 
 /// The endpoint's state from the merge block, a busy label, and whether the branch is ahead.
-pub(crate) fn end_state(ahead: usize, block: Option<&MergeBlock>, busy: bool) -> EndState {
+pub fn end_state(ahead: usize, block: Option<&MergeBlock>, busy: bool) -> EndState {
     if busy {
         return EndState::Working;
     }
@@ -57,7 +57,7 @@ pub(crate) fn end_state(ahead: usize, block: Option<&MergeBlock>, busy: bool) ->
 }
 
 /// The status line under the diagram.
-pub(crate) fn end_label(end: EndState, base: &str) -> String {
+pub fn end_label(end: EndState, base: &str) -> String {
     match end {
         EndState::Ready => "Ready to merge".to_string(),
         EndState::Working => "Working…".to_string(),
@@ -176,7 +176,7 @@ fn ring(at: Point<Pixels>, r: f32, w: f32, color: Hsla, fill_c: Hsla, window: &m
 }
 
 /// The branch diagram for a worktree review: labels on the left, the painted graph on the right.
-pub(crate) fn card(args: GraphArgs, cx: &App) -> AnyElement {
+pub fn card(args: GraphArgs, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let base_c = theme.foreground.opacity(0.30);

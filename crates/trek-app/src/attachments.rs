@@ -151,7 +151,7 @@ pub fn pasted(item: &ClipboardItem) -> Option<Pasted> {
     (!images.is_empty()).then_some(Pasted::Images(images))
 }
 
-pub(crate) fn timestamp() -> String {
+pub fn timestamp() -> String {
     chrono::Local::now().format("%Y%m%d-%H%M%S-%3f").to_string()
 }
 

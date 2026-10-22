@@ -14,7 +14,7 @@
 //! text until it closes.
 
 mod detect;
-mod layout;
+pub mod layout;
 mod parse;
 mod tables;
 

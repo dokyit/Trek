@@ -9165,6 +9165,7 @@ dependencies = [
  "tree-sitter-kotlin-sg",
  "tree-sitter-swift",
  "trek-agents",
+ "trek-app",
  "trek-core",
  "trek-ipc",
  "trek-remote",
