@@ -15,3 +15,7 @@ tracing.workspace = true
 trek-core.workspace = true
 trek-job = { path = "../trek-job" }
 trek-test-fixtures = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The crate's own tests build without the test-support feature.
+trek-test-fixtures = { workspace = true }
