@@ -50,12 +50,12 @@ stats `tiles`[{label,value:string,delta?:string,trend?:[numbers]}]; \
 table `columns`, `rows` of [string|number] or {cells,tone}; \
 heatmap `x_labels`, `y_labels`, `values` (one row per y label); \
 treemap `items`[{label,weight>0}]; \
-timeline `events`[{label,start,end?,lane?}]: numeric positions + `unit`?:string (e.g. \"minutes\"), OR string positions from `ticks`?:[axis labels]; \
+timeline `events`[{label,start,end?,lane?}]: numeric positions + `unit`?:string, OR string positions naming `ticks`?[axis labels]; \
 flow `nodes`[{id,label,detail?,group?}], `edges`[{from,to,label?}]; \
 layers `layers`[{label,detail?,items?:[string]}], top first; \
-mockup `nodes` tree of {kind,text?,value?,children?}: containers row, column, card, list, nav, tabs (text children; value = active), frame with `device` phone|browser|window|tablet; leaves with `text`: text, button, badge, metric (+value), input (value?), toggle (value on|off), avatar; image (placeholder; value wide|square|tall), progress (value 0-100), divider. \
+mockup `nodes` tree of {kind,text?,value?,children?}: containers row, column, card, list, nav, tabs (text children; value = active), frame with `device` phone|browser|window|tablet; leaves with `text`: text, button, badge, metric (+value), input (value?), toggle (value on|off), avatar; image (value wide|square|tall), progress (value 0-100), divider. \
 Marks may set `tone`: neutral, accent, positive, warning, negative, info. Never put HTML, CSS, URLs, paths or scripts in it. Limits: 32 KiB, text 256 chars (ids, units, stat values 48), 128 marks, mockup depth 6. \
-Common mistakes (coerced only if unambiguous): scalar→array; text arrays→joined text; numeric strings↔numbers; singular keys→plural (`event`→`events`); close type aliases; semantic `color`/`colour`→`tone`; missing version/type/title/summary inferred. `ticks`:\"minutes\" means `unit`:\"minutes\", not tick labels. \
+Common mistakes (coerced only if unambiguous): scalar→array; text arrays join; number strings (units ok)↔numbers; singular keys→plural; close type/key aliases (`data`, `links`, `source`/`target`, `name`/`x`/`y`); `color`/`colour`/colour names→`tone`; version/type/title/summary inferred; date endpoints get ordinal `ticks`; heatmap `values` flipped; comments, trailing commas, an inner fence dropped. `ticks`:\"minutes\" means `unit`:\"minutes\". \
 TeX math renders typeset: `$…$` or `\\(…\\)` inline, `$$…$$` or `\\[…\\]` on its own line.";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -566,6 +566,77 @@ pub fn parse_partial(payload: &str) -> Partial {
     partial
 }
 
+/// Strip JSON5-ish noise a strict parser rejects: `//` and `/* */` comments and commas that
+/// only precede a closing bracket — all outside strings, so a "https://" in a label survives.
+fn tidy(payload: &str) -> String {
+    let bytes = payload.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let (mut i, mut in_string, mut escaped) = (0, false, false);
+    // Skip whitespace and comments starting at `j`; return where the next token begins.
+    let skip_gap = |mut j: usize| {
+        loop {
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            match bytes.get(j..j + 2) {
+                Some(b"//") => {
+                    while j < bytes.len() && bytes[j] != b'\n' {
+                        j += 1;
+                    }
+                }
+                Some(b"/*") => {
+                    j += 2;
+                    while j + 1 < bytes.len() && bytes[j..j + 2] != *b"*/" {
+                        j += 1;
+                    }
+                    j = (j + 2).min(bytes.len());
+                }
+                _ => return j,
+            }
+        }
+    };
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            out.push(b);
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' => {
+                in_string = true;
+                out.push(b);
+                i += 1;
+            }
+            b'/' if bytes.get(i..i + 2) == Some(b"//") => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i..i + 2) == Some(b"/*") => {
+                i += 2;
+                while i + 1 < bytes.len() && bytes[i..i + 2] != *b"*/" {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+            }
+            b',' if matches!(bytes.get(skip_gap(i + 1)), Some(b']' | b'}')) => i += 1,
+            _ => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| payload.to_string())
+}
+
 /// Parse and validate a visualization JSON payload (without its markdown fence).
 pub fn parse(payload: &str) -> Result<Visualization, VisualizationError> {
     if payload.len() > MAX_PAYLOAD_BYTES {
@@ -574,7 +645,8 @@ pub fn parse(payload: &str) -> Result<Visualization, VisualizationError> {
             max: MAX_PAYLOAD_BYTES,
         });
     }
-    let mut value: Value = serde_json::from_str(payload)
+    let tidied = tidy(payload);
+    let mut value: Value = serde_json::from_str(&tidied)
         .map_err(|error| VisualizationError::InvalidJson(error.to_string()))?;
     normalize(&mut value)?;
     reject_unknown_top_level_fields(&value)?;
@@ -584,24 +656,74 @@ pub fn parse(payload: &str) -> Result<Visualization, VisualizationError> {
     Ok(visualization)
 }
 
-/// Parse a string containing exactly one `trek-viz` fenced block.
-pub fn parse_fenced(block: &str) -> Result<Visualization, VisualizationError> {
+/// The JSON inside a `trek-viz` fenced block.
+fn fenced_payload(block: &str) -> Result<&str, VisualizationError> {
     let trimmed = block.trim();
     let info = trimmed
         .strip_prefix("```trek-viz")
         .ok_or(VisualizationError::InvalidFence)?
         .trim_start_matches([' ', '\t']);
-    let payload = info
-        .strip_prefix('\n')
+    info.strip_prefix('\n')
         .or_else(|| info.strip_prefix("\r\n"))
         .ok_or(VisualizationError::InvalidFence)?
         .strip_suffix("```")
-        .ok_or(VisualizationError::InvalidFence)?
-        .trim_end_matches(['\r', '\n']);
+        .map(|payload| payload.trim_end_matches(['\r', '\n']))
+        .ok_or(VisualizationError::InvalidFence)
+}
+
+/// One stray inner fence, when a model wraps the JSON in ```json…``` inside the block.
+fn unwrap_inner_fence(payload: &str) -> &str {
+    let Some(rest) = payload.trim().strip_prefix("```") else {
+        return payload;
+    };
+    let Some((_, body)) = rest.split_once('\n') else {
+        return payload;
+    };
+    let Some(inner) = body.trim_end().strip_suffix("```") else {
+        return payload;
+    };
+    if inner.contains("```") {
+        payload
+    } else {
+        inner
+    }
+}
+
+/// Parse a string containing exactly one `trek-viz` fenced block.
+pub fn parse_fenced(block: &str) -> Result<Visualization, VisualizationError> {
+    let payload = unwrap_inner_fence(fenced_payload(block)?);
     if payload.contains("```") {
         return Err(VisualizationError::InvalidFence);
     }
     parse(payload)
+}
+
+/// The title and summary a block declares even when it doesn't parse: shown on the failure
+/// note so the answer still carries its message.
+pub fn declared_metadata(block: &str) -> (Option<String>, Option<String>) {
+    let Ok(payload) = fenced_payload(block) else {
+        return (None, None);
+    };
+    let Ok(mut value) = serde_json::from_str::<Value>(&tidy(unwrap_inner_fence(payload))) else {
+        return (None, None);
+    };
+    let Some(object) = value.as_object_mut() else {
+        return (None, None);
+    };
+    let mut text = |keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            let value = object.get_mut(*key)?;
+            coerce(value, Shape::Text);
+            value
+                .as_str()
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_string)
+        })
+    };
+    (
+        text(&["title", "name", "heading"]),
+        text(&["summary", "description", "subtitle"]),
+    )
 }
 
 /// Validate a programmatically constructed visualization.
@@ -921,30 +1043,377 @@ const PLURALS: &[(&str, &str)] = &[
     ("value", "values"),
     ("x_label", "x_labels"),
     ("y_label", "y_labels"),
+    ("milestone", "events"),
+    ("slice", "parts"),
 ];
 const TYPE_ALIASES: &[(&str, &str)] = &[
     ("bars", "bar"),
     ("bar_chart", "bar"),
     ("barchart", "bar"),
+    ("bar_graph", "bar"),
+    ("column_chart", "bar"),
+    ("histogram", "bar"),
     ("line_chart", "line"),
     ("linechart", "line"),
     ("area", "line"),
     ("doughnut", "donut"),
     ("pie", "donut"),
     ("pie_chart", "donut"),
+    ("pie_graph", "donut"),
     ("stat", "stats"),
     ("statistics", "stats"),
     ("metrics", "stats"),
+    ("kpi", "stats"),
+    ("kpis", "stats"),
     ("heat_map", "heatmap"),
+    ("matrix", "heatmap"),
     ("tree_map", "treemap"),
     ("gantt", "timeline"),
     ("time_line", "timeline"),
+    ("roadmap", "timeline"),
+    ("schedule", "timeline"),
     ("flowchart", "flow"),
     ("flow_chart", "flow"),
+    ("diagram", "flow"),
+    ("graph", "flow"),
     ("layer", "layers"),
     ("stack", "layers"),
+    ("tiers", "layers"),
     ("wireframe", "mockup"),
+    ("wire_frame", "mockup"),
+    ("mock", "mockup"),
 ];
+
+// One type's collection under another name. `data` is mapped only where the type has a single
+// obvious dataset; on `flow` (nodes or edges?) and `heatmap`'s `rows` it stays an error.
+const FIELD_ALIASES: &[(&str, &str, &str)] = &[
+    ("bar", "data", "bars"),
+    ("line", "data", "series"),
+    ("line", "labels", "x_labels"),
+    ("line", "categories", "x_labels"),
+    ("line", "x_axis", "x_label"),
+    ("line", "y_axis", "y_label"),
+    ("line", "units", "unit"),
+    ("donut", "data", "parts"),
+    ("donut", "slices", "parts"),
+    ("donut", "segments", "parts"),
+    ("donut", "units", "unit"),
+    ("stats", "data", "tiles"),
+    ("stats", "metrics", "tiles"),
+    ("stats", "cards", "tiles"),
+    ("stats", "kpis", "tiles"),
+    ("table", "data", "rows"),
+    ("table", "headers", "columns"),
+    ("heatmap", "data", "values"),
+    ("treemap", "data", "items"),
+    ("timeline", "data", "events"),
+    ("timeline", "phases", "events"),
+    ("timeline", "milestones", "events"),
+    ("timeline", "units", "unit"),
+    ("flow", "links", "edges"),
+    ("flow", "connections", "edges"),
+    ("layers", "tiers", "layers"),
+    ("bar", "x_axis", "x_label"),
+    ("bar", "y_axis", "y_label"),
+];
+
+// Keys a mark carries under another name, per type (and collection, where a type has two).
+// `"*"` matches every collection of the type. Conflicting originals stay errors via `rename`.
+const MARK_ALIASES: &[(&str, &str, &str, &str)] = &[
+    ("*", "*", "name", "label"),
+    ("*", "*", "title", "label"),
+    ("bar", "*", "x", "label"),
+    ("bar", "*", "y", "value"),
+    ("donut", "*", "x", "label"),
+    ("donut", "*", "y", "value"),
+    ("treemap", "*", "x", "label"),
+    ("treemap", "*", "y", "weight"),
+    ("treemap", "*", "size", "weight"),
+    ("treemap", "*", "value", "weight"),
+    ("line", "series", "data", "values"),
+    ("line", "series", "points", "values"),
+    ("stats", "*", "change", "delta"),
+    ("stats", "*", "sparkline", "trend"),
+    ("stats", "*", "data", "trend"),
+    ("timeline", "*", "date", "start"),
+    ("timeline", "*", "time", "start"),
+    ("timeline", "*", "at", "start"),
+    ("timeline", "*", "begin", "start"),
+    ("timeline", "*", "from", "start"),
+    ("timeline", "*", "until", "end"),
+    ("timeline", "*", "through", "end"),
+    ("timeline", "*", "to", "end"),
+    ("timeline", "*", "track", "lane"),
+    ("timeline", "*", "swimlane", "lane"),
+    ("timeline", "*", "group", "lane"),
+    ("flow", "edges", "source", "from"),
+    ("flow", "edges", "target", "to"),
+    ("flow", "edges", "text", "label"),
+    ("flow", "nodes", "key", "id"),
+    ("layers", "*", "contents", "items"),
+    ("layers", "*", "components", "items"),
+    ("layers", "*", "includes", "items"),
+    ("table", "rows", "data", "cells"),
+    ("table", "rows", "values", "cells"),
+    ("mockup", "*", "type", "kind"),
+    ("mockup", "*", "name", "text"),
+    ("mockup", "*", "title", "text"),
+    ("mockup", "*", "body", "text"),
+    ("mockup", "*", "content", "text"),
+    ("mockup", "*", "items", "children"),
+    ("mockup", "*", "nodes", "children"),
+];
+
+// `tone` names a renderer maps onto the six semantic tones; CSS and hex stay errors.
+const TONE_ALIASES: &[(&str, &str)] = &[
+    ("neutral", "neutral"),
+    ("gray", "neutral"),
+    ("grey", "neutral"),
+    ("muted", "neutral"),
+    ("secondary", "neutral"),
+    ("default", "neutral"),
+    ("accent", "accent"),
+    ("primary", "accent"),
+    ("purple", "accent"),
+    ("violet", "accent"),
+    ("positive", "positive"),
+    ("green", "positive"),
+    ("success", "positive"),
+    ("ok", "positive"),
+    ("good", "positive"),
+    ("warning", "warning"),
+    ("warn", "warning"),
+    ("yellow", "warning"),
+    ("orange", "warning"),
+    ("amber", "warning"),
+    ("caution", "warning"),
+    ("negative", "negative"),
+    ("red", "negative"),
+    ("danger", "negative"),
+    ("error", "negative"),
+    ("fail", "negative"),
+    ("failure", "negative"),
+    ("critical", "negative"),
+    ("info", "info"),
+    ("blue", "info"),
+    ("information", "info"),
+];
+
+fn tone_alias(name: &str) -> Option<&'static str> {
+    let name = name.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+    TONE_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == name)
+        .map(|(_, tone)| *tone)
+}
+
+// The mockup kinds models reach for that aren't in the schema, to the nearest one that is.
+const MOCK_KIND_ALIASES: &[(&str, &str)] = &[
+    ("hstack", "row"),
+    ("col", "column"),
+    ("vstack", "column"),
+    ("stack", "column"),
+    ("box", "column"),
+    ("container", "column"),
+    ("div", "column"),
+    ("section", "column"),
+    ("group", "column"),
+    ("panel", "card"),
+    ("sheet", "card"),
+    ("modal", "card"),
+    ("dialog", "card"),
+    ("popup", "card"),
+    ("screen", "card"),
+    ("label", "text"),
+    ("heading", "text"),
+    ("h1", "text"),
+    ("h2", "text"),
+    ("h3", "text"),
+    ("paragraph", "text"),
+    ("p", "text"),
+    ("span", "text"),
+    ("caption", "text"),
+    ("text_field", "input"),
+    ("textfield", "input"),
+    ("field", "input"),
+    ("search", "input"),
+    ("search_bar", "input"),
+    ("textarea", "input"),
+    ("checkbox", "toggle"),
+    ("switch", "toggle"),
+    ("radio", "toggle"),
+    ("slider", "progress"),
+    ("spinner", "progress"),
+    ("loader", "progress"),
+    ("img", "image"),
+    ("picture", "image"),
+    ("photo", "image"),
+    ("placeholder", "image"),
+    ("icon", "avatar"),
+    ("tag", "badge"),
+    ("chip", "badge"),
+    ("pill", "badge"),
+    ("link", "button"),
+    ("cta", "button"),
+    ("hr", "divider"),
+    ("separator", "divider"),
+    ("spacer", "divider"),
+    ("line", "divider"),
+    ("stat", "metric"),
+    ("kpi", "metric"),
+    ("counter", "metric"),
+    ("header", "nav"),
+    ("footer", "nav"),
+    ("toolbar", "nav"),
+    ("navbar", "nav"),
+    ("nav_bar", "nav"),
+    ("menu", "nav"),
+    ("menubar", "nav"),
+    ("menu_bar", "nav"),
+    ("sidebar", "nav"),
+    ("tabbar", "nav"),
+    ("tab_bar", "nav"),
+    ("tab", "tabs"),
+    ("segmented", "tabs"),
+    ("segmented_control", "tabs"),
+    ("ul", "list"),
+    ("ol", "list"),
+    ("window", "frame"),
+    ("app", "frame"),
+];
+
+const MOCK_DEVICE_ALIASES: &[(&str, &str)] = &[
+    ("ios", "phone"),
+    ("iphone", "phone"),
+    ("mobile", "phone"),
+    ("mac", "window"),
+    ("desktop", "window"),
+    ("app", "window"),
+    ("web", "browser"),
+    ("site", "browser"),
+    ("page", "browser"),
+    ("ipad", "tablet"),
+];
+
+// Every top-level and mark-level field or alias, for folding a wrong-case key to its spelling.
+const KNOWN_KEYS: &[&str] = &[
+    "version",
+    "title",
+    "summary",
+    "type",
+    "bars",
+    "x_label",
+    "y_label",
+    "x_labels",
+    "y_labels",
+    "values",
+    "items",
+    "nodes",
+    "series",
+    "area",
+    "unit",
+    "parts",
+    "tiles",
+    "columns",
+    "rows",
+    "events",
+    "ticks",
+    "edges",
+    "layers",
+    "data",
+    "slices",
+    "segments",
+    "metrics",
+    "cards",
+    "kpis",
+    "headers",
+    "links",
+    "connections",
+    "tiers",
+    "phases",
+    "milestones",
+    "labels",
+    "categories",
+    "x_axis",
+    "y_axis",
+    "units",
+    "description",
+    "subtitle",
+    "name",
+    "heading",
+    "label",
+    "value",
+    "weight",
+    "tone",
+    "color",
+    "colour",
+    "text",
+    "kind",
+    "children",
+    "device",
+    "start",
+    "end",
+    "lane",
+    "id",
+    "detail",
+    "group",
+    "cells",
+    "delta",
+    "trend",
+    "from",
+    "to",
+    "x",
+    "y",
+    "points",
+    "change",
+    "sparkline",
+    "size",
+    "date",
+    "time",
+    "at",
+    "begin",
+    "until",
+    "through",
+    "track",
+    "swimlane",
+    "key",
+    "body",
+    "content",
+    "contents",
+    "components",
+    "includes",
+    "source",
+    "target",
+    "bar",
+    "part",
+    "tile",
+    "column",
+    "row",
+    "item",
+    "event",
+    "tick",
+    "node",
+    "edge",
+    "layer",
+    "child",
+    "milestone",
+    "slice",
+];
+
+/// Rename a key that only differs from a known one in case ("Title" -> "title"). If the right
+/// spelling is already taken, the odd key stays put and remains an unknown field.
+fn fold_key_case(object: &mut Map<String, Value>) {
+    for key in object.keys().cloned().collect::<Vec<_>>() {
+        let lower = key.to_ascii_lowercase();
+        if lower != key
+            && KNOWN_KEYS.contains(&lower.as_str())
+            && !object.contains_key(&lower)
+            && let Some(value) = object.remove(&key)
+        {
+            object.insert(lower, value);
+        }
+    }
+}
 
 fn rename(object: &mut Map<String, Value>, from: &str, to: &str) -> Result<(), VisualizationError> {
     if let Some(value) = object.remove(from) {
@@ -983,11 +1452,8 @@ fn coerce(value: &mut Value, shape: Shape) {
             _ => {}
         },
         Shape::Number => {
-            if let Some(text) = value.as_str() {
-                // JSON number syntax only: no currency, percentages, commas, NaN or infinity.
-                if let Ok(Value::Number(number)) = serde_json::from_str::<Value>(text.trim()) {
-                    *value = Value::Number(number);
-                }
+            if let Some(number) = value.as_str().and_then(loose_number) {
+                *value = Value::Number(number);
             }
         }
         Shape::Texts | Shape::Numbers | Shape::Objects => {
@@ -1020,6 +1486,144 @@ fn coerce(value: &mut Value, shape: Shape) {
     }
 }
 
+/// A number a model dressed up: commas, a currency sign, a percent sign or a k/M/B scale —
+/// dropped only when what's left is still one number ("1,200" yes, "1,2,3" no).
+fn loose_number(text: &str) -> Option<serde_json::Number> {
+    let mut text = text.trim();
+    text = text
+        .strip_prefix(['$', '€', '£', '¥'])
+        .map_or(text, str::trim_start);
+    text = text.strip_suffix('%').map_or(text, str::trim_end);
+    let mut scale = 1.0;
+    // Lowercase k and uppercase M/B only: "m" and "b" mean too many other things.
+    if let Some(rest) = text.strip_suffix(['k', 'K', 'M', 'B'])
+        && !rest.is_empty()
+    {
+        scale = match text.as_bytes()[text.len() - 1] {
+            b'k' | b'K' => 1e3,
+            b'M' => 1e6,
+            _ => 1e9,
+        };
+        text = rest.trim_end();
+    }
+    let cleaned;
+    if text.contains(',') {
+        let (int, frac) = match text.split('.').collect::<Vec<_>>().as_slice() {
+            [int] => (*int, ""),
+            [int, frac] if frac.bytes().all(|b| b.is_ascii_digit()) => (*int, *frac),
+            _ => return None,
+        };
+        let int = int.strip_prefix('-').unwrap_or(int);
+        let mut groups = int.split(',');
+        let head = groups.next().unwrap_or_default();
+        if !(1..=3).contains(&head.len()) || !head.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let mut joined = String::with_capacity(text.len());
+        if text.starts_with('-') {
+            joined.push('-');
+        }
+        joined.push_str(head);
+        for group in groups {
+            if group.len() != 3 || !group.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            joined.push_str(group);
+        }
+        if !frac.is_empty() {
+            joined.push('.');
+            joined.push_str(frac);
+        }
+        cleaned = joined;
+        text = &cleaned;
+    }
+    let number = serde_json::from_str::<serde_json::Number>(text).ok()?;
+    if scale == 1.0 {
+        Some(number)
+    } else {
+        serde_json::Number::from_f64(number.as_f64()? * scale)
+    }
+}
+
+/// Vocabularies models use as timeline endpoints that already carry an order: ISO dates and
+/// years (0), months (1), weekdays (2), quarters (3). Endpoints from different vocabularies
+/// don't sort together.
+fn time_rank(text: &str) -> Option<(u8, i64)> {
+    const MONTHS: &[&str] = &[
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    ];
+    const WEEKDAYS: &[&str] = &[
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ];
+    let text = text.trim();
+    if text.len() >= 4
+        && text.bytes().all(|b| b.is_ascii_digit() || b == b'-')
+        && !text.contains("--")
+    {
+        let mut parts = text.split('-');
+        let year = parts.next()?;
+        let month: i64 = parts.next().map_or(Ok(0), str::parse).ok()?;
+        let day: i64 = parts.next().map_or(Ok(0), str::parse).ok()?;
+        if year.len() == 4
+            && parts.next().is_none()
+            && (0..=12).contains(&month)
+            && (0..=31).contains(&day)
+        {
+            return Some((0, year.parse::<i64>().ok()? * 400 + month * 32 + day));
+        }
+        return None;
+    }
+    let lower = text.to_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let year = tokens
+        .iter()
+        .find_map(|t| (t.len() == 4).then(|| t.parse::<i64>().ok()).flatten());
+    if let Some(month) = tokens.iter().find_map(|t| {
+        MONTHS
+            .iter()
+            .position(|m| t.len() >= 3 && m.starts_with(t) && t.len() <= m.len())
+    }) {
+        return Some((1, year.unwrap_or(0) * 100 + month as i64));
+    }
+    if let [day] = tokens.as_slice()
+        && let Some(day) = WEEKDAYS
+            .iter()
+            .position(|d| day.len() >= 3 && d.starts_with(day) && day.len() <= d.len())
+    {
+        return Some((2, day as i64));
+    }
+    if let [quarter, ..] = tokens.as_slice()
+        && let Some(q) = quarter
+            .strip_prefix('q')
+            .and_then(|rest| rest.parse::<i64>().ok())
+        && (1..=4).contains(&q)
+        && tokens[1..].iter().all(|t| t.parse::<i64>().is_ok())
+    {
+        return Some((3, year.unwrap_or(0) * 10 + q));
+    }
+    None
+}
+
 fn fields(
     object: &mut Map<String, Value>,
     rules: &[(&str, Shape)],
@@ -1041,6 +1645,13 @@ fn normalize(value: &mut Value) -> Result<(), VisualizationError> {
     let Some(object) = value.as_object_mut() else {
         return Ok(());
     };
+    fold_key_case(object);
+    // A null reads as "not given": let the defaults and inference below apply.
+    for key in ["version", "type", "title", "summary"] {
+        if object.get(key) == Some(&Value::Null) {
+            object.remove(key);
+        }
+    }
     // A type is inferable only from a unique, type-specific collection. Never guess an axis.
     if !object.contains_key("type") {
         let candidates = [
@@ -1065,6 +1676,30 @@ fn normalize(value: &mut Value) -> Result<(), VisualizationError> {
         if let [(kind, _)] = candidates.as_slice() {
             object.insert("type".into(), Value::String((*kind).into()));
         }
+        if !object.contains_key("type") {
+            // A field alias that only one type uses ("links" -> flow's edges) gives it away;
+            // one shared by several ("data") doesn't.
+            let mut kinds = FIELD_ALIASES
+                .iter()
+                .filter(|(_, from, _)| object.contains_key(*from))
+                .filter(|(_, from, _)| {
+                    FIELD_ALIASES
+                        .iter()
+                        .filter(|(_, other, _)| other == from)
+                        .count()
+                        == 1
+                })
+                .map(|(kind, _, _)| *kind)
+                .collect::<Vec<_>>();
+            kinds.sort_unstable();
+            kinds.dedup();
+            if let [kind] = kinds.as_slice() {
+                object.insert("type".into(), Value::String((*kind).into()));
+            }
+        }
+    }
+    if let Some(kind) = object.get_mut("type") {
+        coerce(kind, Shape::Text);
     }
     if let Some(Value::String(kind)) = object.get_mut("type") {
         let name = kind.trim().to_ascii_lowercase().replace(['-', ' '], "_");
@@ -1091,6 +1726,16 @@ fn normalize(value: &mut Value) -> Result<(), VisualizationError> {
         return Ok(());
     }
     object.entry("version").or_insert(Value::from(VERSION));
+    // The metadata and the collection under the names models actually write.
+    rename(object, "name", "title")?;
+    rename(object, "heading", "title")?;
+    rename(object, "description", "summary")?;
+    rename(object, "subtitle", "summary")?;
+    for &(k, from, to) in FIELD_ALIASES {
+        if k == kind {
+            rename(object, from, to)?;
+        }
+    }
     fields(
         object,
         &[
@@ -1160,6 +1805,121 @@ fn normalize(value: &mut Value) -> Result<(), VisualizationError> {
         _ => {}
     }
     fields(object, &rules)?;
+    // Mark key aliases ("from" -> "start") settle before ticks are derived or a matrix is
+    // read off the heatmap.
+    for &(field, shape) in &rules {
+        if !matches!(shape, Shape::Objects) {
+            continue;
+        }
+        if let Some(marks) = object.get_mut(field).and_then(Value::as_array_mut) {
+            for mark in marks {
+                if let Some(mark) = mark.as_object_mut() {
+                    shape_mark(mark, &kind, field)?;
+                }
+            }
+        }
+    }
+    if kind == "heatmap" {
+        // `values` is one row per y label. Rows that instead run one per x label are
+        // transposed — but only when they can't already be right (a square grid stays put).
+        let matrix = object.get("values").and_then(Value::as_array).map(|rows| {
+            rows.iter()
+                .map(|row| row.as_array().cloned().unwrap_or_default())
+                .collect::<Vec<Vec<Value>>>()
+        });
+        if let (Some(x), Some(y), Some(matrix)) = (
+            object
+                .get("x_labels")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            object
+                .get("y_labels")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            matrix,
+        ) {
+            let fits = |m: &[Vec<Value>], w: usize, h: usize| {
+                m.len() == h && m.iter().all(|row| row.len() == w)
+            };
+            if fits(&matrix, y, x) && !fits(&matrix, x, y) {
+                let mut flipped = vec![Vec::with_capacity(x); y];
+                for row in &matrix {
+                    for (column, cell) in row.iter().enumerate() {
+                        flipped[column].push(cell.clone());
+                    }
+                }
+                object.insert(
+                    "values".into(),
+                    Value::Array(flipped.into_iter().map(Value::Array).collect()),
+                );
+            } else if !fits(&matrix, x, y)
+                && x > 1
+                && matrix.len() == x * y
+                && matrix.iter().all(|row| row.len() == 1)
+            {
+                // A flat row-major list ("values":[1,2,3,4]) chunked to fill the grid.
+                let flat: Vec<Value> = matrix
+                    .into_iter()
+                    .map(|mut row| row.pop().unwrap_or(Value::Null))
+                    .collect();
+                object.insert(
+                    "values".into(),
+                    Value::Array(
+                        flat.chunks(x)
+                            .map(|chunk| Value::Array(chunk.to_vec()))
+                            .collect(),
+                    ),
+                );
+            }
+        }
+    }
+    if kind == "timeline"
+        && !object.contains_key("ticks")
+        && let Some(events) = object.get("events").and_then(Value::as_array)
+        && !events.is_empty()
+        && events.iter().all(|event| {
+            event.get("start").is_some_and(Value::is_string)
+                && event
+                    .get("end")
+                    .is_none_or(|end| end.is_null() || end.is_string())
+        })
+    {
+        // Every endpoint a string and no `ticks`: the endpoints are the axis — unless every
+        // one is a dressed-up number, which is a numeric axis, not a set of labels.
+        let mut ordered: Vec<String> = Vec::new();
+        for event in events {
+            for key in ["start", "end"] {
+                if let Some(point) = event.get(key).and_then(Value::as_str)
+                    && !ordered.iter().any(|seen| seen == point)
+                {
+                    ordered.push(point.to_string());
+                }
+            }
+        }
+        if !ordered.iter().all(|point| loose_number(point).is_some()) {
+            // When they're all dates, months, weekdays or quarters they sort into that
+            // order; otherwise first appearance wins — and an event ending before it
+            // starts still errors.
+            let ranks = ordered
+                .iter()
+                .map(|point| time_rank(point))
+                .collect::<Option<Vec<_>>>();
+            let one_vocabulary = ranks.as_ref().is_some_and(|r| {
+                r.iter()
+                    .all(|(class, _)| Some(*class) == r.first().map(|f| f.0))
+            });
+            if one_vocabulary && let Some(ranks) = ranks {
+                let mut ranked: Vec<(i64, String)> = ranks
+                    .into_iter()
+                    .map(|(_, rank)| rank)
+                    .zip(ordered)
+                    .collect();
+                ranked.sort_by_key(|(rank, _)| *rank);
+                ordered = ranked.into_iter().map(|(_, point)| point).collect();
+            }
+            object.insert("ticks".into(), ordered.into());
+        }
+    }
     let ticks = object.get("ticks").and_then(Value::as_array).cloned();
     for &(field, shape) in &rules {
         if !matches!(shape, Shape::Objects) {
@@ -1171,30 +1931,67 @@ fn normalize(value: &mut Value) -> Result<(), VisualizationError> {
             }
         }
     }
-    // Toned table rows also accept semantic colour spelling aliases.
+    // Toned table rows get mark-level aliases and semantic colour spellings too.
     if kind == "table"
         && let Some(rows) = object.get_mut("rows").and_then(Value::as_array_mut)
     {
         for row in rows {
-            if let Some(row) = row.as_object_mut() {
-                normalize_tone(row)?;
-            }
+            normalize_mark(row, "table", "rows", None)?;
         }
     }
     Ok(())
 }
 
 fn normalize_tone(object: &mut Map<String, Value>) -> Result<(), VisualizationError> {
-    // Only semantic names, never CSS/hex colours. Unknown colours remain unknown fields.
+    // Only semantic names (or the colour words for them), never CSS/hex colours; those stay
+    // unknown fields.
     for alias in ["color", "colour"] {
-        if object.get(alias).and_then(Value::as_str).is_some_and(|v| {
-            [
-                "neutral", "accent", "positive", "warning", "negative", "info",
-            ]
-            .contains(&v)
-        }) {
+        if object
+            .get(alias)
+            .and_then(Value::as_str)
+            .is_some_and(|v| tone_alias(v).is_some())
+        {
             rename(object, alias, "tone")?;
         }
+    }
+    if let Some(name) = object
+        .get("tone")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    {
+        let Some(tone) = tone_alias(&name) else {
+            return invalid(format!(
+                "`tone` must be one of neutral, accent, positive, warning, negative, info (got `{name}`)"
+            ));
+        };
+        object.insert("tone".into(), tone.into());
+    }
+    Ok(())
+}
+
+/// The renaming half of mark normalization — case-folded keys, synonym aliases, tone names,
+/// mockup kinds. It runs once before timeline ticks are derived (aliases like `from`/`to`
+/// must be `start`/`end` by then), then again as part of `normalize_mark`; both idempotent.
+fn shape_mark(
+    object: &mut Map<String, Value>,
+    kind: &str,
+    field: &str,
+) -> Result<(), VisualizationError> {
+    fold_key_case(object);
+    for &(k, f, from, to) in MARK_ALIASES {
+        // `*` marks the aliases every labelled mark takes; mockup nodes take their own set.
+        let applies = (if k == "*" {
+            kind != "mockup"
+        } else {
+            k == kind
+        }) && (f == "*" || f == field);
+        if applies {
+            rename(object, from, to)?;
+        }
+    }
+    normalize_tone(object)?;
+    if kind == "mockup" {
+        normalize_mock_node(object)?;
     }
     Ok(())
 }
@@ -1208,7 +2005,7 @@ fn normalize_mark(
     let Some(object) = value.as_object_mut() else {
         return Ok(());
     };
-    normalize_tone(object)?;
+    shape_mark(object, kind, field)?;
     let mut rules = vec![("label", Shape::Text)];
     match kind {
         "bar" | "donut" => rules.push(("value", Shape::Number)),
@@ -1254,12 +2051,68 @@ fn normalize_mark(
         _ => {}
     }
     fields(object, &rules)?;
-    if kind == "mockup"
-        && let Some(children) = object.get_mut("children").and_then(Value::as_array_mut)
-    {
-        for child in children {
-            normalize_mark(child, kind, "children", None)?;
+    if kind == "mockup" {
+        // A toggle's value written as a boolean is its on/off state.
+        if object.get("kind").and_then(Value::as_str) == Some("toggle")
+            && let Some(on) = object.get("value").and_then(Value::as_bool)
+        {
+            object.insert("value".into(), (if on { "on" } else { "off" }).into());
         }
+        if let Some(children) = object.get_mut("children").and_then(Value::as_array_mut) {
+            for child in children {
+                normalize_mark(child, kind, "children", None)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+const MOCK_KINDS: &[&str] = &[
+    "row", "column", "card", "text", "metric", "button", "badge", "divider", "input", "toggle",
+    "progress", "avatar", "image", "list", "tabs", "nav", "frame",
+];
+
+/// Fold a mockup node's `kind` and `device` to schema spellings — aliasing what it meant, or
+/// inferring a kind from what the node carries (device → frame, children → column, text → text).
+fn normalize_mock_node(object: &mut Map<String, Value>) -> Result<(), VisualizationError> {
+    match object.get("kind") {
+        Some(Value::String(kind)) => {
+            let mut name = kind.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+            if let Some((_, to)) = MOCK_KIND_ALIASES.iter().find(|(from, _)| *from == name) {
+                name = (*to).into();
+            }
+            if !MOCK_KINDS.contains(&name.as_str()) {
+                return invalid(format!("`{kind}` isn't a mockup kind"));
+            }
+            object.insert("kind".into(), name.into());
+        }
+        None | Some(Value::Null) => {
+            let inferred = if object.contains_key("device") {
+                "frame"
+            } else if object.contains_key("children") {
+                "column"
+            } else if object.contains_key("text") {
+                "text"
+            } else {
+                return invalid("a mockup node needs a `kind`");
+            };
+            object.insert("kind".into(), inferred.into());
+        }
+        _ => {}
+    }
+    if let Some(device) = object
+        .get("device")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    {
+        let mut name = device.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+        if let Some((_, to)) = MOCK_DEVICE_ALIASES.iter().find(|(from, _)| *from == name) {
+            name = (*to).into();
+        }
+        if !["phone", "browser", "window", "tablet"].contains(&name.as_str()) {
+            return invalid(format!("`{device}` isn't a mockup device"));
+        }
+        object.insert("device".into(), name.into());
     }
     Ok(())
 }
@@ -1740,6 +2593,26 @@ mod tests {
     }
 
     #[test]
+    fn the_minutes_timeline_a_user_hit_still_parses() {
+        // Regression: this exact payload once read "invalid type: string \"minutes\"".
+        let payload = r#"{"version":1,"title":"Where the minutes go","summary":"Build, CI, and release all pay the same two costs.","type":"timeline","events":[{"label":"Local dev build","start":0,"end":2,"lane":"Local"},{"label":"cargo test","start":2,"end":4,"lane":"Local"},{"label":"ci.yml macOS job","start":0,"end":40,"lane":"CI"},{"label":"ci.yml Windows job","start":0,"end":75,"lane":"CI"},{"label":"Release","start":0,"end":42,"lane":"Release"}],"ticks":"minutes"}"#;
+        let viz = parse_fenced(&format!("```trek-viz\n{payload}\n```")).unwrap();
+        let VisualizationContent::Timeline {
+            events,
+            ticks,
+            unit,
+        } = &viz.content
+        else {
+            panic!()
+        };
+        assert_eq!(unit.as_deref(), Some("minutes"));
+        assert!(ticks.is_none());
+        assert_eq!(events.len(), 5);
+        let lanes: Vec<_> = events.iter().filter_map(|e| e.lane.as_deref()).collect();
+        assert_eq!(lanes, ["Local", "Local", "CI", "CI", "Release"]);
+    }
+
+    #[test]
     fn timeline_string_ticks_are_a_numeric_axis_unit() {
         // Regression: the real-world failure ended with `"ticks":"minutes"`.
         let payload = r#"{"version":1,"title":"Plan","summary":"Duration","type":"timeline","events":[{"label":"Build","start":0,"end":5},{"label":"Test","start":5,"end":12}],"ticks":"minutes"}"#;
@@ -1965,7 +2838,8 @@ mod tests {
                 "bar",
                 r#""bar":[{"label":"A","value":1}],"bars":[{"label":"B","value":2}]"#,
             ),
-            ("bar", r#""bars":[{"label":"A","value":"1,000"}]"#),
+            // "1,2,3" isn't grouped thousands; it stays a string and can't be a value.
+            ("bar", r#""bars":[{"label":"A","value":"1,2,3"}]"#),
             ("bar", r#""bars":[{"label":"A","value":"NaN"}]"#),
             (
                 "bar",
@@ -1984,6 +2858,247 @@ mod tests {
                 r#""x_labels":["a","b"],"series":[{"label":"A","values":[1,2]}],"area":false"#
             )
             .contains("conflicts")
+        );
+    }
+
+    /// Slip cases as whole `common()` bodies: each parses, or fails with a reason short
+    /// enough for the failure note (`invalid_note` truncates at 160 chars) and specific
+    /// enough to say what was wrong.
+    #[test]
+    fn realistic_model_slips_parse_or_fail_clearly() {
+        let ok: &[(&str, &str)] = &[
+            // Synonym and wrong-case keys; numbers dressed with units and commas.
+            (
+                "bar",
+                r#""data":[{"name":"Build","value":"1,200"},{"x":"Test","y":"45%"}]"#,
+            ),
+            ("bar", r#""Bars":[{"Label":"A","Value":"$3.2k"}]"#),
+            (
+                "donut",
+                r#""slices":[{"name":"Rust","value":"62%"},{"name":"Other","value":38}],"units":"%""#,
+            ),
+            (
+                "line",
+                r#""labels":["Mon","Tue"],"data":{"label":"p95","values":["1,000","2.5k"]},"y_axis":"ms""#,
+            ),
+            (
+                "stats",
+                r#""metrics":[{"name":"Uptime","value":"99.9%","change":"+0.1","data":["1","2","3"]}]"#,
+            ),
+            ("stats", r#""kpis":{"label":"One","value":1}"#),
+            (
+                "table",
+                r#""headers":["Service","p95"],"data":[["API","1,200"],{"cells":["DB",42],"color":"green"}]"#,
+            ),
+            (
+                "table",
+                r#""columns":["A"],"rows":[{"data":["x"],"tone":"red"}]"#,
+            ),
+            (
+                "heatmap",
+                r#""x_labels":["Mon","Tue"],"y_labels":["AM","PM"],"data":[["1","2"],["3","4"]]"#,
+            ),
+            // A matrix that runs one row per x label instead: transposed.
+            (
+                "heatmap",
+                r#""x_labels":["Mon","Tue"],"y_labels":["AM","PM","Mid"],"values":[[1,2,3],[4,5,6]]"#,
+            ),
+            // A flat row-major list that exactly fills the grid.
+            (
+                "heatmap",
+                r#""x_labels":["A","B"],"y_labels":["C","D"],"values":[1,2,3,4]"#,
+            ),
+            (
+                "treemap",
+                r#""data":[{"name":"Core","size":"2k"},{"label":"UI","value":3}]"#,
+            ),
+            // Date-string endpoints, no ticks: ordinal ticks, sorted into date order.
+            (
+                "timeline",
+                r#""phases":[{"title":"Ship","from":"2026-08","to":"2026-11"},{"title":"Design","from":"2026-01","until":"2026-03"}]"#,
+            ),
+            (
+                "timeline",
+                r#""events":[{"label":"Ship","start":"Mar","end":"May","track":"Ops","tone":"green"}]"#,
+            ),
+            // Nulls in optional fields read as "not given".
+            (
+                "timeline",
+                r#""events":[{"label":"Ship","start":1,"end":2,"lane":null,"tone":null}]"#,
+            ),
+            (
+                "flow",
+                r#""nodes":[{"id":"a","name":"API"},{"id":"b","label":"DB"}],"links":[{"source":"a","target":"b","text":"reads"}]"#,
+            ),
+            (
+                "layers",
+                r#""tiers":[{"name":"UI","contents":["Sidebar","Transcript"]},{"name":"Core"}]"#,
+            ),
+            // `type` for `kind`, nearest kinds, a boolean toggle, an inferred leaf.
+            (
+                "mockup",
+                r#""nodes":[{"type":"panel","children":[{"kind":"Heading","text":"Hi"},{"kind":"switch","text":"On","value":true},{"kind":"spinner","text":"Load","value":"30%"}]}]"#,
+            ),
+            ("mockup", r#""nodes":[{"text":"a bare leaf"}]"#),
+            ("mockup", r#""nodes":[{"kind":"frame","device":"iphone"}]"#),
+        ];
+        for (kind, body) in ok {
+            assert!(
+                parse(&common(kind, body)).is_ok(),
+                "{kind}: {body} -> {:?}",
+                parse(&common(kind, body)).unwrap_err()
+            );
+        }
+        // Type aliases reach the same shapes.
+        for (alias, body) in [
+            ("pie", r#""parts":[{"label":"A","value":1}]"#),
+            ("gantt", r#""events":[{"label":"A","start":0}]"#),
+            ("kpi", r#""tiles":[{"label":"A","value":"1"}]"#),
+            ("metrics", r#""tiles":[{"label":"A","value":"1"}]"#),
+            ("diagram", r#""nodes":[{"id":"a","label":"A"}]"#),
+            ("graph", r#""nodes":[{"id":"a","label":"A"}]"#),
+            ("stack", r#""layers":[{"label":"A"}]"#),
+        ] {
+            let viz = parse(&common(alias, body)).unwrap();
+            assert!(TYPES.contains(&viz.content.kind()), "{alias}");
+        }
+        // What must stay an error is still short and specific.
+        let errors: &[(&str, &str, &str)] = &[
+            // `data` on a flow could be its nodes or its edges.
+            (
+                "flow",
+                r#""data":[{"id":"a","label":"A"}]"#,
+                "unknown field `data`",
+            ),
+            // Two different readings of the same list.
+            (
+                "bar",
+                r#""data":[{"label":"A","value":1}],"bars":[{"label":"A","value":2}]"#,
+                "conflicting",
+            ),
+            // A unit word on `ticks` can't be both a unit and a label when an endpoint
+            // isn't a number.
+            (
+                "timeline",
+                r#""ticks":"minutes","events":[{"label":"A","start":"Monday"}]"#,
+                "must be an array of axis labels",
+            ),
+            // A hex colour is presentation, not a tone.
+            (
+                "bar",
+                r##""bars":[{"label":"A","value":1,"tone":"#fff"}]"##,
+                "`tone` must be one of",
+            ),
+            (
+                "bar",
+                r##""bars":[{"label":"A","value":1,"color":"chartreuse"}]"##,
+                "unknown field `color`",
+            ),
+            (
+                "mockup",
+                r#""nodes":[{"kind":"carousel"}]"#,
+                "isn't a mockup kind",
+            ),
+            (
+                "mockup",
+                r#""nodes":[{"kind":"frame","device":"watch"}]"#,
+                "isn't a mockup device",
+            ),
+            (
+                "bar",
+                r#""bars":[{"label":"A","value":1}],"footnote":"x""#,
+                "unknown field `footnote`",
+            ),
+            // A number written as a list doesn't fit a value slot.
+            (
+                "bar",
+                r#""bars":[{"label":"A","values":[1,2]}]"#,
+                "unknown field `values`",
+            ),
+        ];
+        for (kind, body, needle) in errors {
+            let error = parse(&common(kind, body))
+                .expect_err(&format!("{kind}: {body}"))
+                .reason();
+            assert!(error.contains(needle), "{kind}: {body} -> {error}");
+            assert!(error.len() < 160, "{kind}: {body} -> {error}");
+        }
+    }
+
+    #[test]
+    fn date_string_endpoints_become_ordinal_ticks_in_order() {
+        let viz = parse(&common(
+            "timeline",
+            r#""events":[{"label":"Build","start":"2026-04","end":"2026-08"},{"label":"Design","start":"2026-01","end":"2026-04"},{"label":"Ship","start":"2026-10"}]"#,
+        ))
+        .unwrap();
+        let VisualizationContent::Timeline { ticks, events, .. } = viz.content else {
+            panic!()
+        };
+        let ticks = ticks.unwrap();
+        assert_eq!(ticks, ["2026-01", "2026-04", "2026-08", "2026-10"]);
+        assert_eq!(events[1].end, Some(TimePoint::Tick("2026-04".into())));
+        // Months and quarters sort in their own order too; anything else keeps the
+        // order the events arrived in.
+        let viz = parse(&common(
+            "timeline",
+            r#""events":[{"label":"B","start":"March","end":"May"},{"label":"A","start":"January","end":"March"}]"#,
+        ))
+        .unwrap();
+        let VisualizationContent::Timeline { ticks, .. } = viz.content else {
+            panic!()
+        };
+        assert_eq!(ticks.unwrap(), ["January", "March", "May"]);
+        let viz = parse(&common(
+            "timeline",
+            r#""events":[{"label":"A","start":"alpha","end":"beta"},{"label":"B","start":"gamma"}]"#,
+        ))
+        .unwrap();
+        let VisualizationContent::Timeline { ticks, .. } = viz.content else {
+            panic!()
+        };
+        assert_eq!(ticks.unwrap(), ["alpha", "beta", "gamma"]);
+        // But the derived axis can't rescue an event that ends before it starts.
+        assert!(
+            err(
+                "timeline",
+                r#""events":[{"label":"A","start":"May","end":"Jan"}]"#
+            )
+            .contains("ends before it starts")
+        );
+    }
+
+    #[test]
+    fn json5ish_noise_and_a_second_fence_are_stripped() {
+        let body = r#"{
+            // the build, by phase
+            "version": 1,
+            "title": "Build",
+            "summary": "Where it went",
+            "type": "bar",
+            "bars": [
+                {"label": "compile", "value": 3,},
+                {"label": "link", "value": 1}, /* tail */
+            ],
+        }"#;
+        let viz = parse(body).unwrap();
+        let VisualizationContent::Bar { bars, .. } = viz.content else {
+            panic!()
+        };
+        assert_eq!(bars.len(), 2);
+        // A JSON fence inside the trek-viz fence unwraps; deeper nesting still fails.
+        assert!(parse_fenced(&format!("```trek-viz\n```json\n{body}\n```\n```")).is_ok());
+        assert_eq!(
+            parse_fenced("```trek-viz\n```a\n```b\n{}\n```\n```\n```"),
+            Err(VisualizationError::InvalidFence)
+        );
+        // A comment-looking token inside a string is text, not a comment.
+        assert!(
+            parse(&common(
+                "bar",
+                r#""bars":[{"label":"https://x","value":1}]"#
+            ))
+            .is_ok()
         );
     }
 
@@ -2092,7 +3207,7 @@ mod tests {
         assert!(
             err(
                 "line",
-                r#""x_labels":["a","b"],"series":[{"label":"s","values":[1,2],"color":"red"}]"#
+                r##""x_labels":["a","b"],"series":[{"label":"s","values":[1,2],"color":"#f00"}]"##
             )
             .contains("unknown field `color`")
         );
@@ -2204,8 +3319,13 @@ mod tests {
             )
             .contains("not one of the ticks")
         );
+        // A mixed axis — a number here, a name there — still can't be read either way.
         assert!(
-            err("timeline", r#""events":[{"label":"x","start":"Jan"}]"#).contains("needs `ticks`")
+            err(
+                "timeline",
+                r#""events":[{"label":"x","start":0},{"label":"y","start":"Jan"}]"#
+            )
+            .contains("needs `ticks`")
         );
         assert!(
             err(

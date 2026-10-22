@@ -58,8 +58,14 @@ enum Block {
         complete: bool,
         source: String,
     },
-    /// Closed, but not something Trek can draw: why, and the block as written.
-    Invalid { reason: String, source: String },
+    /// Closed, but not something Trek can draw: why, the block as written, and the title and
+    /// summary it still carries (shown as plain text, so the answer keeps its message).
+    Invalid {
+        reason: String,
+        source: String,
+        title: Option<String>,
+        summary: Option<String>,
+    },
 }
 
 /// Identifies one visualization across re-renders, re-parses and the deltas of its stream (its
@@ -127,13 +133,26 @@ impl MarkdownPlugin for VisualizationPlugin {
                         text,
                     )
                 }
-                Err(error) => (
-                    Block::Invalid {
-                        reason: error.reason(),
-                        source: source.to_string(),
-                    },
-                    invalid_note(&error.reason()),
-                ),
+                Err(error) => {
+                    let (title, summary) = trek_core::visualization::declared_metadata(source);
+                    let note = invalid_note(&error.reason());
+                    let text = [&title, &summary]
+                        .into_iter()
+                        .flatten()
+                        .cloned()
+                        .chain([note])
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    (
+                        Block::Invalid {
+                            reason: error.reason(),
+                            source: source.to_string(),
+                            title,
+                            summary,
+                        },
+                        text,
+                    )
+                }
             }
         } else {
             let partial = trek_core::visualization::parse_partial(&code.value);
@@ -195,17 +214,31 @@ impl MarkdownPlugin for VisualizationPlugin {
             Some(Block::Arriving { kind, title, .. }) if self.live => {
                 pending(kind.as_deref(), title.as_deref(), key, window, cx)
             }
-            Some(Block::Arriving { source, .. }) => invalid(
+            Some(Block::Arriving { source, title, .. }) => invalid(
                 "the answer ended before the block was finished",
                 source,
                 key,
                 self.size,
+                title.as_deref(),
+                None,
                 window,
                 cx,
             ),
-            Some(Block::Invalid { reason, source }) => {
-                invalid(reason, source, key, self.size, window, cx)
-            }
+            Some(Block::Invalid {
+                reason,
+                source,
+                title,
+                summary,
+            }) => invalid(
+                reason,
+                source,
+                key,
+                self.size,
+                title.as_deref(),
+                summary.as_deref(),
+                window,
+                cx,
+            ),
             None => return div().into_any_element(),
         };
         div().py_2().child(shown).into_any_element()
@@ -1057,12 +1090,17 @@ fn invalid_note(reason: &str) -> String {
     )
 }
 
-/// A failed block stays one quiet line until the reader asks to inspect its source.
+/// A failed block stays one quiet line until the reader asks to inspect its source. Whatever
+/// title or summary the spec still carries renders above it as plain text, so the answer
+/// keeps its message.
+#[allow(clippy::too_many_arguments)]
 fn invalid(
     reason: &str,
     source: &str,
     key: usize,
     size: Pixels,
+    title: Option<&str>,
+    summary: Option<&str>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -1080,6 +1118,27 @@ fn invalid(
         .test_support()
         .w_full()
         .gap(px(6.))
+        .when_some(title, |el, title| {
+            el.child(
+                div()
+                    .id(SharedString::from(format!("viz-invalid-title-{key}")))
+                    .aria_label(title.to_string())
+                    .test_support()
+                    .text_size(size)
+                    .font_medium()
+                    .child(title.to_string()),
+            )
+        })
+        .when_some(summary.filter(|s| Some(*s) != title), |el, summary| {
+            el.child(
+                div()
+                    .id(SharedString::from(format!("viz-invalid-summary-{key}")))
+                    .aria_label(summary.to_string())
+                    .test_support()
+                    .text_color(look.muted)
+                    .child(summary.to_string()),
+            )
+        })
         .child(
             h_flex()
                 .id(SharedString::from(format!("viz-invalid-toggle-{key}")))
