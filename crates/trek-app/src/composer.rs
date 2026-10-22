@@ -3428,7 +3428,7 @@ impl Render for Composer {
                     gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared(if finishing {
                         "Finishing…"
                     } else {
-                        "Insert the text (↩)"
+                        "Insert the text (↩)" // keys::shared
                     }))
                     .build(window, cx)
                 })
@@ -3723,9 +3723,9 @@ impl Render for Composer {
                 .when(main, |el| {
                     let open = self.workspace.read(cx).settings.layout.terminal_open;
                     let tip = crate::keys::shared(if open {
-                        "Hide the terminal (⌃`)"
+                        "Hide the terminal (⌃`)" // keys::shared
                     } else {
-                        "A terminal under the chat (⌃`)"
+                        "A terminal under the chat (⌃`)" // keys::shared
                     });
                     el.child(
                         h_flex()
@@ -3864,9 +3864,9 @@ fn placeholder(running: Option<FollowUp>) -> std::borrow::Cow<'static, str> {
 /// which key steers it and which queues for after it.
 pub fn delivery_hint(cmd_enter: bool, follow: FollowUp, running: bool) -> String {
     let (send, line) = if cmd_enter {
-        ("⌘↩", "↩")
+        ("⌘↩", "↩") // keys::localize below
     } else {
-        ("↩", "⇧↩")
+        ("↩", "⇧↩") // keys::localize below
     }; // keys::localize below
     let text = if !running {
         format!("Send {send} · New line {line}")

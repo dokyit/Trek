@@ -110,7 +110,7 @@ pub fn pending_bar(
                                 if busy {
                                     "Stop the running turn to undo"
                                 } else {
-                                    "Undo all (⌘⇧⌫, twice)"
+                                    "Undo all (⌘⇧⌫, twice)" // keys::shared
                                 },
                             ))
                             .build(window, cx)

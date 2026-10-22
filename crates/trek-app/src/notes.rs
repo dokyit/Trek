@@ -1213,7 +1213,7 @@ impl NotesView {
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
                                 .child(crate::keys::shared(
-                                    "No notes yet. Start typing, or press ⌘N.",
+                                    "No notes yet. Start typing, or press ⌘N.", // keys::shared
                                 )),
                         )
                     })

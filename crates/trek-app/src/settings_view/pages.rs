@@ -328,15 +328,15 @@ impl SettingsView {
                     Self::row(
                         "Send with",
                         crate::keys::shared(if s.general.send_with_cmd_enter {
-                            "↩ adds a new line; ⌘↩ sends."
+                            "↩ adds a new line; ⌘↩ sends." // keys::shared
                         } else {
-                            "↩ sends; ⇧↩ adds a new line."
+                            "↩ sends; ⇧↩ adds a new line." // keys::shared
                         }),
                         ui::segmented(
                             "send-key",
                             // Windows has no Command key: its second key is Ctrl.
                             if crate::keys::is_mac() {
-                                vec![(false, "↩ Return"), (true, "⌘↩ Command-Return")]
+                                vec![(false, "↩ Return"), (true, "⌘↩ Command-Return")] // keys::is_mac picks this branch
                             } else {
                                 vec![(false, "Enter"), (true, "Ctrl+Enter")]
                             },
@@ -349,7 +349,7 @@ impl SettingsView {
                     Self::row(
                         "Messages sent while an agent works",
                         crate::keys::shared(
-                            "Steer slips your message in at the agent's next step. Queue holds it until the turn ends. ⌥↩ sends a message the other way.",
+                            "Steer slips your message in at the agent's next step. Queue holds it until the turn ends. ⌥↩ sends a message the other way.", // keys::shared
                         ),
                         ui::segmented(
                             "follow-up",
@@ -441,13 +441,13 @@ impl SettingsView {
                     "Open links in",
                     match s.terminal.open_links {
                         OpenLinks::Ask => crate::keys::shared(
-                            "⌘-click a link in a terminal to open it. The first one asks where.",
+                            "⌘-click a link in a terminal to open it. The first one asks where.", // keys::shared
                         ),
                         OpenLinks::BuiltIn => crate::keys::shared(
-                            "⌘-click a link in a terminal to open it in the Browser tool beside the chat.",
+                            "⌘-click a link in a terminal to open it in the Browser tool beside the chat.", // keys::shared
                         ),
                         OpenLinks::Default => crate::keys::shared(
-                            "⌘-click a link in a terminal to open it in your default browser.",
+                            "⌘-click a link in a terminal to open it in your default browser.", // keys::shared
                         ),
                     },
                     ui::segmented(
