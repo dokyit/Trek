@@ -101,8 +101,10 @@ pub async fn claude_commands(cwd: &Path) -> Result<AgentStatus> {
 }
 
 async fn claude_read(cwd: &Path, with_usage: bool) -> Result<AgentStatus> {
-    let bin = detect::which("claude")
-        .context("Claude Code isn't installed (npm i -g @anthropic-ai/claude-code)")?;
+    let hint = trek_core::catalog::install_hint("claude-code")
+        .map(|h| h.here())
+        .unwrap_or_default();
+    let bin = detect::which("claude").context(format!("Claude Code isn't installed ({hint})"))?;
     // In a group of its own: the MCP servers it starts go with it.
     let mut command = trek_core::procs::async_command(bin);
     command
@@ -693,11 +695,10 @@ pub(crate) fn capitalize(s: &str) -> String {
 /// no session. Credentials stay with Devin: nothing of `auth status` but the email and the
 /// plan's name is kept, and none of it is logged.
 pub async fn devin_status() -> Result<AgentStatus> {
-    #[cfg(windows)]
-    let missing = "Devin isn't installed";
-    #[cfg(not(windows))]
-    let missing = "Devin isn't installed (curl -fsSL https://cli.devin.ai/install.sh | bash)";
-    let bin = detect::which("devin").context(missing)?;
+    let hint = trek_core::catalog::install_hint("devin")
+        .map(|h| h.here())
+        .unwrap_or_default();
+    let bin = detect::which("devin").context(format!("Devin isn't installed ({hint})"))?;
     let out = crate::output_group(
         trek_core::procs::async_command(&bin)
             .args(["auth", "status"])
