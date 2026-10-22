@@ -5,6 +5,7 @@
 //! presentation from these semantic values.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::fmt;
 
 pub const VERSION: u8 = 1;
@@ -49,11 +50,12 @@ stats `tiles`[{label,value:string,delta?:string,trend?:[numbers]}]; \
 table `columns`, `rows` of [string|number] or {cells,tone}; \
 heatmap `x_labels`, `y_labels`, `values` (one row per y label); \
 treemap `items`[{label,weight>0}]; \
-timeline `events`[{label,start,end?,lane?}], positions numbers, or strings from `ticks`; \
+timeline `events`[{label,start,end?,lane?}]: numeric positions + `unit`?:string (e.g. \"minutes\"), OR string positions from `ticks`?:[axis labels]; \
 flow `nodes`[{id,label,detail?,group?}], `edges`[{from,to,label?}]; \
 layers `layers`[{label,detail?,items?:[string]}], top first; \
 mockup `nodes` tree of {kind,text?,value?,children?}: containers row, column, card, list, nav, tabs (text children; value = active), frame with `device` phone|browser|window|tablet; leaves with `text`: text, button, badge, metric (+value), input (value?), toggle (value on|off), avatar; image (placeholder; value wide|square|tall), progress (value 0-100), divider. \
 Marks may set `tone`: neutral, accent, positive, warning, negative, info. Never put HTML, CSS, URLs, paths or scripts in it. Limits: 32 KiB, text 256 chars (ids, units, stat values 48), 128 marks, mockup depth 6. \
+Common mistakes (coerced only if unambiguous): scalar→array; text arrays→joined text; numeric strings↔numbers; singular keys→plural (`event`→`events`); close type aliases; semantic `color`/`colour`→`tone`; missing version/type/title/summary inferred. `ticks`:\"minutes\" means `unit`:\"minutes\", not tick labels. \
 TeX math renders typeset: `$…$` or `\\(…\\)` inline, `$$…$$` or `\\[…\\]` on its own line.";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -572,8 +574,11 @@ pub fn parse(payload: &str) -> Result<Visualization, VisualizationError> {
             max: MAX_PAYLOAD_BYTES,
         });
     }
-    reject_unknown_top_level_fields(payload)?;
-    let visualization: Visualization = serde_json::from_str(payload)
+    let mut value: Value = serde_json::from_str(payload)
+        .map_err(|error| VisualizationError::InvalidJson(error.to_string()))?;
+    normalize(&mut value)?;
+    reject_unknown_top_level_fields(&value)?;
+    let visualization: Visualization = serde_json::from_value(value)
         .map_err(|error| VisualizationError::InvalidJson(error.to_string()))?;
     validate(&visualization)?;
     Ok(visualization)
@@ -868,9 +873,398 @@ pub fn validate(visualization: &Visualization) -> Result<(), VisualizationError>
     Ok(())
 }
 
-fn reject_unknown_top_level_fields(payload: &str) -> Result<(), VisualizationError> {
-    let value: serde_json::Value = serde_json::from_str(payload)
-        .map_err(|error| VisualizationError::InvalidJson(error.to_string()))?;
+// Normalize only at schema-known fields, then run the ordinary strict deserializer and all
+// safety/shape bounds. No data is invented, truncated, sorted, split on punctuation or dropped.
+#[derive(Clone, Copy)]
+enum Shape {
+    Text,
+    Number,
+    Texts,
+    Numbers,
+    Objects,
+    Matrix,
+}
+
+// The coercion table: scalar <-> sequence and numeric <-> textual values are only meaningful
+// in these contexts. In particular, table cells retain their types and ids are never joined.
+const COLLECTIONS: &[(&str, &str, Shape)] = &[
+    ("bar", "bars", Shape::Objects),
+    ("line", "series", Shape::Objects),
+    ("line", "x_labels", Shape::Texts),
+    ("donut", "parts", Shape::Objects),
+    ("stats", "tiles", Shape::Objects),
+    ("table", "columns", Shape::Texts),
+    ("heatmap", "x_labels", Shape::Texts),
+    ("heatmap", "y_labels", Shape::Texts),
+    ("heatmap", "values", Shape::Matrix),
+    ("treemap", "items", Shape::Objects),
+    ("timeline", "events", Shape::Objects),
+    ("timeline", "ticks", Shape::Texts),
+    ("flow", "nodes", Shape::Objects),
+    ("flow", "edges", Shape::Objects),
+    ("layers", "layers", Shape::Objects),
+    ("mockup", "nodes", Shape::Objects),
+];
+const PLURALS: &[(&str, &str)] = &[
+    ("bar", "bars"),
+    ("part", "parts"),
+    ("tile", "tiles"),
+    ("column", "columns"),
+    ("row", "rows"),
+    ("item", "items"),
+    ("event", "events"),
+    ("tick", "ticks"),
+    ("node", "nodes"),
+    ("edge", "edges"),
+    ("layer", "layers"),
+    ("child", "children"),
+    ("value", "values"),
+    ("x_label", "x_labels"),
+    ("y_label", "y_labels"),
+];
+const TYPE_ALIASES: &[(&str, &str)] = &[
+    ("bars", "bar"),
+    ("bar_chart", "bar"),
+    ("barchart", "bar"),
+    ("line_chart", "line"),
+    ("linechart", "line"),
+    ("area", "line"),
+    ("doughnut", "donut"),
+    ("pie", "donut"),
+    ("pie_chart", "donut"),
+    ("stat", "stats"),
+    ("statistics", "stats"),
+    ("metrics", "stats"),
+    ("heat_map", "heatmap"),
+    ("tree_map", "treemap"),
+    ("gantt", "timeline"),
+    ("time_line", "timeline"),
+    ("flowchart", "flow"),
+    ("flow_chart", "flow"),
+    ("layer", "layers"),
+    ("stack", "layers"),
+    ("wireframe", "mockup"),
+];
+
+fn rename(object: &mut Map<String, Value>, from: &str, to: &str) -> Result<(), VisualizationError> {
+    if let Some(value) = object.remove(from) {
+        if let Some(existing) = object.get(to) {
+            if existing != &value {
+                return invalid(format!("conflicting `{from}` and `{to}`"));
+            }
+        } else {
+            object.insert(to.into(), value);
+        }
+    }
+    Ok(())
+}
+
+fn coerce(value: &mut Value, shape: Shape) {
+    match shape {
+        Shape::Text => match value {
+            Value::Number(n) => *value = Value::String(n.to_string()),
+            Value::Array(items) => {
+                // Only strings/numbers: flattening nested objects would hide a schema error.
+                for item in items.iter_mut() {
+                    if item.is_number() {
+                        coerce(item, Shape::Text);
+                    }
+                }
+                if items.iter().all(Value::is_string) {
+                    *value = Value::String(
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    );
+                }
+            }
+            _ => {}
+        },
+        Shape::Number => {
+            if let Some(text) = value.as_str() {
+                // JSON number syntax only: no currency, percentages, commas, NaN or infinity.
+                if let Ok(Value::Number(number)) = serde_json::from_str::<Value>(text.trim()) {
+                    *value = Value::Number(number);
+                }
+            }
+        }
+        Shape::Texts | Shape::Numbers | Shape::Objects => {
+            let singleton = match shape {
+                Shape::Texts => value.is_string() || value.is_number(),
+                Shape::Numbers => value.is_number() || value.is_string(),
+                Shape::Objects => value.is_object(),
+                _ => false,
+            };
+            if singleton {
+                *value = Value::Array(vec![value.take()]);
+            }
+            if let Some(items) = value.as_array_mut() {
+                for item in items {
+                    match shape {
+                        Shape::Texts if item.is_number() => coerce(item, Shape::Text),
+                        Shape::Numbers => coerce(item, Shape::Number),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Shape::Matrix => {
+            if let Some(rows) = value.as_array_mut() {
+                for row in rows {
+                    coerce(row, Shape::Numbers);
+                }
+            }
+        }
+    }
+}
+
+fn fields(
+    object: &mut Map<String, Value>,
+    rules: &[(&str, Shape)],
+) -> Result<(), VisualizationError> {
+    for &(from, to) in PLURALS {
+        if rules.iter().any(|(field, _)| *field == to) {
+            rename(object, from, to)?;
+        }
+    }
+    for &(field, shape) in rules {
+        if let Some(value) = object.get_mut(field) {
+            coerce(value, shape);
+        }
+    }
+    Ok(())
+}
+
+fn normalize(value: &mut Value) -> Result<(), VisualizationError> {
+    let Some(object) = value.as_object_mut() else {
+        return Ok(());
+    };
+    // A type is inferable only from a unique, type-specific collection. Never guess an axis.
+    if !object.contains_key("type") {
+        let candidates = [
+            ("bar", "bars"),
+            ("line", "series"),
+            ("donut", "parts"),
+            ("stats", "tiles"),
+            ("table", "rows"),
+            ("heatmap", "y_labels"),
+            ("treemap", "items"),
+            ("timeline", "events"),
+            ("layers", "layers"),
+        ]
+        .into_iter()
+        .filter(|(_, field)| {
+            object.contains_key(*field)
+                || PLURALS
+                    .iter()
+                    .any(|(from, to)| to == field && object.contains_key(*from))
+        })
+        .collect::<Vec<_>>();
+        if let [(kind, _)] = candidates.as_slice() {
+            object.insert("type".into(), Value::String((*kind).into()));
+        }
+    }
+    if let Some(Value::String(kind)) = object.get_mut("type") {
+        let name = kind.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+        *kind = TYPE_ALIASES
+            .iter()
+            .find(|(alias, _)| *alias == name)
+            .map_or(name.clone(), |(_, canonical)| (*canonical).into());
+        if name == "area" {
+            if object
+                .get("area")
+                .is_some_and(|area| area != &Value::Bool(true))
+            {
+                return invalid("type `area` conflicts with `area`");
+            }
+            object.insert("area".into(), Value::Bool(true));
+        }
+    }
+    let kind = object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if !TYPES.contains(&kind.as_str()) {
+        return Ok(());
+    }
+    object.entry("version").or_insert(Value::from(VERSION));
+    fields(
+        object,
+        &[
+            ("version", Shape::Number),
+            ("title", Shape::Text),
+            ("summary", Shape::Text),
+            ("unit", Shape::Text),
+        ],
+    )?;
+    // Reuse provided metadata, not made-up chart titles or data labels.
+    for (missing, supplied) in [("summary", "title"), ("title", "summary")] {
+        if !object.contains_key(missing)
+            && let Some(text) = object.get(supplied).filter(|v| v.is_string()).cloned()
+        {
+            object.insert(missing.into(), text);
+        }
+    }
+    let mut rules = COLLECTIONS
+        .iter()
+        .filter(|(k, _, _)| *k == kind)
+        .map(|(_, field, shape)| (*field, *shape))
+        .collect::<Vec<_>>();
+    match kind.as_str() {
+        "bar" => rules.extend([("x_label", Shape::Text), ("y_label", Shape::Text)]),
+        "line" => rules.push(("y_label", Shape::Text)),
+        "table" => {
+            rename(object, "row", "rows")?;
+        }
+        "timeline" => {
+            rename(object, "tick", "ticks")?;
+            // A string isn't a set of ordinal ticks. It means a numeric axis unit only when
+            // every supplied endpoint is numeric; otherwise this ambiguity must stay an error.
+            if let Some(Value::String(unit)) = object.get("ticks").cloned() {
+                let events = object.get("events").or_else(|| object.get("event"));
+                let events: Vec<&Value> = match events {
+                    Some(Value::Array(events)) => events.iter().collect(),
+                    Some(event) if event.is_object() => vec![event],
+                    _ => vec![],
+                };
+                let numeric = !events.is_empty()
+                    && events.iter().all(|event| {
+                        event.get("start").is_some()
+                            && ["start", "end"]
+                                .iter()
+                                .filter_map(|key| event.get(*key))
+                                .all(|v| {
+                                    let mut v = v.clone();
+                                    coerce(&mut v, Shape::Number);
+                                    v.is_number()
+                                })
+                    });
+                if !numeric {
+                    return invalid(
+                        "`ticks` must be an array of axis labels; use `unit` for a numeric axis unit",
+                    );
+                }
+                object.remove("ticks");
+                let mut alias = Map::new();
+                alias.insert("ticks".into(), Value::String(unit));
+                if let Some(unit) = object.get("unit") {
+                    alias.insert("unit".into(), unit.clone());
+                }
+                rename(&mut alias, "ticks", "unit")?;
+                object.insert("unit".into(), alias.remove("unit").unwrap());
+            }
+        }
+        _ => {}
+    }
+    fields(object, &rules)?;
+    let ticks = object.get("ticks").and_then(Value::as_array).cloned();
+    for &(field, shape) in &rules {
+        if !matches!(shape, Shape::Objects) {
+            continue;
+        }
+        if let Some(marks) = object.get_mut(field).and_then(Value::as_array_mut) {
+            for mark in marks {
+                normalize_mark(mark, &kind, field, ticks.as_deref())?;
+            }
+        }
+    }
+    // Toned table rows also accept semantic colour spelling aliases.
+    if kind == "table"
+        && let Some(rows) = object.get_mut("rows").and_then(Value::as_array_mut)
+    {
+        for row in rows {
+            if let Some(row) = row.as_object_mut() {
+                normalize_tone(row)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn normalize_tone(object: &mut Map<String, Value>) -> Result<(), VisualizationError> {
+    // Only semantic names, never CSS/hex colours. Unknown colours remain unknown fields.
+    for alias in ["color", "colour"] {
+        if object.get(alias).and_then(Value::as_str).is_some_and(|v| {
+            [
+                "neutral", "accent", "positive", "warning", "negative", "info",
+            ]
+            .contains(&v)
+        }) {
+            rename(object, alias, "tone")?;
+        }
+    }
+    Ok(())
+}
+
+fn normalize_mark(
+    value: &mut Value,
+    kind: &str,
+    field: &str,
+    ticks: Option<&[Value]>,
+) -> Result<(), VisualizationError> {
+    let Some(object) = value.as_object_mut() else {
+        return Ok(());
+    };
+    normalize_tone(object)?;
+    let mut rules = vec![("label", Shape::Text)];
+    match kind {
+        "bar" | "donut" => rules.push(("value", Shape::Number)),
+        "treemap" => rules.push(("weight", Shape::Number)),
+        "line" => rules.push(("values", Shape::Numbers)),
+        "stats" => rules.extend([
+            ("value", Shape::Text),
+            ("delta", Shape::Text),
+            ("trend", Shape::Numbers),
+        ]),
+        "timeline" => {
+            rules.push(("lane", Shape::Text));
+            for key in ["start", "end"] {
+                if let Some(value) = object.get_mut(key) {
+                    if ticks.is_none() {
+                        coerce(value, Shape::Number);
+                    } else if value.is_number() {
+                        let text = value.to_string();
+                        if ticks
+                            .is_some_and(|ticks| ticks.iter().any(|t| t.as_str() == Some(&text)))
+                        {
+                            *value = Value::String(text);
+                        }
+                    }
+                }
+            }
+        }
+        "flow" => {
+            rules.extend([("detail", Shape::Text), ("group", Shape::Text)]);
+            if field == "nodes"
+                && !object.contains_key("label")
+                && let Some(id) = object.get("id").filter(|v| v.is_string()).cloned()
+            {
+                object.insert("label".into(), id);
+            }
+        }
+        "layers" => rules.extend([("detail", Shape::Text), ("items", Shape::Texts)]),
+        "mockup" => rules.extend([
+            ("text", Shape::Text),
+            ("value", Shape::Text),
+            ("children", Shape::Objects),
+        ]),
+        _ => {}
+    }
+    fields(object, &rules)?;
+    if kind == "mockup"
+        && let Some(children) = object.get_mut("children").and_then(Value::as_array_mut)
+    {
+        for child in children {
+            normalize_mark(child, kind, "children", None)?;
+        }
+    }
+    Ok(())
+}
+
+fn reject_unknown_top_level_fields(value: &Value) -> Result<(), VisualizationError> {
     let object = value
         .as_object()
         .ok_or_else(|| VisualizationError::InvalidJson("top level must be an object".into()))?;
@@ -1346,6 +1740,254 @@ mod tests {
     }
 
     #[test]
+    fn timeline_string_ticks_are_a_numeric_axis_unit() {
+        // Regression: the real-world failure ended with `"ticks":"minutes"`.
+        let payload = r#"{"version":1,"title":"Plan","summary":"Duration","type":"timeline","events":[{"label":"Build","start":0,"end":5},{"label":"Test","start":5,"end":12}],"ticks":"minutes"}"#;
+        let viz = parse_fenced(&format!("```trek-viz\n{payload}\n```")).unwrap();
+        let VisualizationContent::Timeline {
+            events,
+            ticks,
+            unit,
+        } = &viz.content
+        else {
+            panic!()
+        };
+        assert_eq!(unit.as_deref(), Some("minutes"));
+        assert!(ticks.is_none());
+        assert_eq!(events[1].end, Some(TimePoint::Number(12.)));
+        assert_eq!(parse_partial(payload).drawable.as_ref(), Some(&viz));
+    }
+
+    #[test]
+    fn singleton_sequences_and_singular_keys_are_schema_aware() {
+        for (kind, body) in [
+            ("bar", r#""bar":{"label":"one","value":1}"#),
+            ("timeline", r#""event":{"label":"one","start":1}"#),
+            ("donut", r#""part":{"label":"one","value":1}"#),
+            ("stats", r#""tile":{"label":"one","value":"1"}"#),
+            ("treemap", r#""item":{"label":"one","weight":1}"#),
+            ("layers", r#""layer":{"label":"one","item":"API"}"#),
+            (
+                "mockup",
+                r#""node":{"kind":"card","child":{"kind":"text","text":"Hi"}}"#,
+            ),
+            ("table", r#""column":"A","row":[[1]]"#),
+            ("flow", r#""node":{"id":"a","label":"A"}"#),
+            (
+                "line",
+                r#""x_labels":["a","b"],"series":{"label":"A","value":[1,2]}"#,
+            ),
+        ] {
+            assert!(parse(&common(kind, body)).is_ok(), "{kind}: {body}");
+        }
+        // A string sequence is a single label, not arbitrarily split on spaces or commas.
+        let layers = parse(&common(
+            "layers",
+            r#""layers":[{"label":"L","items":"A, B"}]"#,
+        ))
+        .unwrap();
+        let VisualizationContent::Layers { layers } = layers.content else {
+            panic!()
+        };
+        assert_eq!(layers[0].items, ["A, B"]);
+    }
+
+    #[test]
+    fn text_arrays_join_and_numbers_become_text_only_in_text_fields() {
+        let viz = parse(r#"{"version":"1","title":["Build","time"],"summary":42,"type":"stats","tiles":[{"label":2026,"value":12.5,"delta":["+1","today"]}]}"#).unwrap();
+        assert_eq!(viz.title, "Build time");
+        assert_eq!(viz.summary, "42");
+        let VisualizationContent::Stats { tiles } = viz.content else {
+            panic!()
+        };
+        assert_eq!(
+            (
+                &*tiles[0].label,
+                &*tiles[0].value,
+                tiles[0].delta.as_deref()
+            ),
+            ("2026", "12.5", Some("+1 today"))
+        );
+    }
+
+    #[test]
+    fn numeric_strings_are_coerced_without_changing_ordinal_ticks_or_table_cells() {
+        let bar = parse(&common("bar", r#""bars":[{"label":"A","value":"1.25e2"}]"#)).unwrap();
+        let VisualizationContent::Bar { bars, .. } = bar.content else {
+            panic!()
+        };
+        assert_eq!(bars[0].value, 125.);
+        let line = parse(&common(
+            "line",
+            r#""x_labels":[1,2],"series":[{"label":"A","values":["1","2"]}]"#,
+        ))
+        .unwrap();
+        let VisualizationContent::Line {
+            x_labels, series, ..
+        } = line.content
+        else {
+            panic!()
+        };
+        assert_eq!(x_labels, ["1", "2"]);
+        assert_eq!(series[0].values, [1., 2.]);
+        let numeric = parse(&common(
+            "timeline",
+            r#""events":[{"label":"A","start":"0","end":"12.5"}],"ticks":"minutes""#,
+        ))
+        .unwrap();
+        let VisualizationContent::Timeline { events, .. } = numeric.content else {
+            panic!()
+        };
+        assert_eq!(events[0].start, TimePoint::Number(0.));
+        let ordinal = parse(&common(
+            "timeline",
+            r#""ticks":["2025","2026"],"events":[{"label":"A","start":"2025","end":2026}]"#,
+        ))
+        .unwrap();
+        let VisualizationContent::Timeline { events, .. } = ordinal.content else {
+            panic!()
+        };
+        assert_eq!(events[0].start, TimePoint::Tick("2025".into()));
+        assert_eq!(events[0].end, Some(TimePoint::Tick("2026".into())));
+        let table = parse(&common("table", r#""columns":["ID"],"rows":[["001"]]"#)).unwrap();
+        let VisualizationContent::Table { rows, .. } = table.content else {
+            panic!()
+        };
+        assert_eq!(rows[0].cells(), [TableCell::Text("001".into())]);
+    }
+
+    #[test]
+    fn close_type_aliases_have_explicit_meanings() {
+        for (alias, canonical) in TYPE_ALIASES {
+            let body = match *canonical {
+                "bar" => r#""bars":[{"label":"A","value":1}]"#,
+                "line" => r#""x_labels":["a","b"],"series":[{"label":"A","values":[1,2]}]"#,
+                "donut" => r#""parts":[{"label":"A","value":1}]"#,
+                "stats" => r#""tiles":[{"label":"A","value":"1"}]"#,
+                "heatmap" => r#""x_labels":["a"],"y_labels":["b"],"values":[[1]]"#,
+                "treemap" => r#""items":[{"label":"A","weight":1}]"#,
+                "timeline" => r#""events":[{"label":"A","start":1}]"#,
+                "flow" => r#""nodes":[{"id":"a","label":"A"}]"#,
+                "layers" => r#""layers":[{"label":"A"}]"#,
+                "mockup" => r#""nodes":[{"kind":"divider"}]"#,
+                _ => panic!(),
+            };
+            let viz = parse(&common(alias, body)).unwrap();
+            assert_eq!(viz.content.kind(), *canonical, "{alias}");
+            if *alias == "area" {
+                assert!(matches!(
+                    viz.content,
+                    VisualizationContent::Line { area: true, .. }
+                ));
+            }
+        }
+        assert_eq!(
+            parse(&common("Bar Chart", r#""bars":[{"label":"A","value":1}]"#))
+                .unwrap()
+                .content
+                .kind(),
+            "bar"
+        );
+    }
+
+    #[test]
+    fn semantic_colour_spellings_are_tone_aliases_not_css() {
+        for spelling in ["color", "colour"] {
+            let body = format!(r#""bars":[{{"label":"A","value":1,"{spelling}":"positive"}}]"#);
+            let viz = parse(&common("bar", &body)).unwrap();
+            let VisualizationContent::Bar { bars, .. } = viz.content else {
+                panic!()
+            };
+            assert_eq!(bars[0].tone, Some(SemanticTone::Positive));
+        }
+        assert!(
+            parse(&common(
+                "mockup",
+                r#""nodes":[{"kind":"badge","text":"OK","colour":"positive"}]"#
+            ))
+            .is_ok()
+        );
+        assert!(
+            parse(&common(
+                "table",
+                r#""columns":["a"],"rows":[{"cells":[1],"color":"info"}]"#
+            ))
+            .is_ok()
+        );
+        assert!(
+            err(
+                "bar",
+                r##""bars":[{"label":"A","value":1,"colour":"#f00"}]"##
+            )
+            .contains("unknown field")
+        );
+    }
+
+    #[test]
+    fn missing_metadata_is_inferred_only_from_supplied_content() {
+        let viz = parse(r#"{"title":"Plan","event":{"label":"A","start":0}}"#).unwrap();
+        assert_eq!(viz.version, VERSION);
+        assert_eq!(viz.summary, "Plan");
+        assert_eq!(viz.content.kind(), "timeline");
+        assert_eq!(
+            parse(r#"{"summary":"Build","bars":[{"label":"A","value":1}]}"#)
+                .unwrap()
+                .title,
+            "Build"
+        );
+        let flow = parse(&common("flow", r#""nodes":[{"id":"api"}]"#)).unwrap();
+        let VisualizationContent::Flow { nodes, .. } = flow.content else {
+            panic!()
+        };
+        assert_eq!(nodes[0].label, "api");
+        assert!(
+            parse(r#"{"bars":[{"label":"A","value":1}]}"#).is_err(),
+            "no invented title"
+        );
+        assert!(
+            parse(r#"{"title":"A","nodes":[{"id":"api"}]}"#).is_err(),
+            "ambiguous type"
+        );
+    }
+
+    #[test]
+    fn ambiguous_coercions_and_conflicting_aliases_still_fail() {
+        for (kind, body) in [
+            (
+                "timeline",
+                r#""ticks":"minutes","events":[{"label":"A","start":"Monday"}]"#,
+            ),
+            (
+                "timeline",
+                r#""ticks":"minutes","unit":"hours","events":[{"label":"A","start":0}]"#,
+            ),
+            (
+                "bar",
+                r#""bar":[{"label":"A","value":1}],"bars":[{"label":"B","value":2}]"#,
+            ),
+            ("bar", r#""bars":[{"label":"A","value":"1,000"}]"#),
+            ("bar", r#""bars":[{"label":"A","value":"NaN"}]"#),
+            (
+                "bar",
+                r#""bars":[{"label":"A","value":1,"color":"positive","tone":"negative"}]"#,
+            ),
+            (
+                "line",
+                r#""x_labels":[["a","b"],"c"],"series":[{"label":"A","values":[1,2]}]"#,
+            ),
+        ] {
+            assert!(parse(&common(kind, body)).is_err(), "{kind}: {body}");
+        }
+        assert!(
+            err(
+                "area",
+                r#""x_labels":["a","b"],"series":[{"label":"A","values":[1,2]}],"area":false"#
+            )
+            .contains("conflicts")
+        );
+    }
+
+    #[test]
     fn instructions_stay_compact_and_cover_every_type() {
         assert!(
             AGENT_INSTRUCTIONS.chars().count() < 2_000,
@@ -1481,9 +2123,13 @@ mod tests {
             )
             .contains("2 to 64 values")
         );
-        assert!(
-            err("stats", r#""tiles":[{"label":"a","value":1}]"#).contains("invalid"),
-            "values are preformatted strings"
+        let numeric = parse(&common("stats", r#""tiles":[{"label":"a","value":1}]"#)).unwrap();
+        let VisualizationContent::Stats { tiles } = numeric.content else {
+            panic!()
+        };
+        assert_eq!(
+            tiles[0].value, "1",
+            "unformatted numeric values become strings"
         );
         assert!(
             err(
