@@ -30,7 +30,9 @@ const SKILL_TOKENS: u64 = 80;
 /// What one MCP server's tool definitions cost the agent, roughly.
 const MCP_SERVER_TOKENS: u64 = 900;
 /// The segmented bar's height.
-const BAR: f32 = 10.;
+const BAR: f32 = 8.;
+/// How far a row's hover fill reaches past its text, which lines up with the header's.
+const ROW_INSET: f32 = 6.;
 /// Below this share of the context window the ring stays out of the way.
 pub const QUIET: f32 = 0.2;
 /// From this share the ring says how much is used.
@@ -210,7 +212,7 @@ impl Kind {
             Kind::Skills => palette::ember(cx),
             Kind::Mcp => palette::emerald(cx),
             Kind::Messages => palette::sky(cx),
-            Kind::Free => theme.foreground.opacity(0.1),
+            Kind::Free => theme.foreground.opacity(0.13),
         }
     }
 }
@@ -241,8 +243,6 @@ struct Limits {
     weekly: Option<LimitRow>,
     /// The thread is paused at a limit right now.
     paused: Option<String>,
-    /// Why there are no rows (the agent reports none, or hasn't been read).
-    note: Option<String>,
 }
 
 /// Everything the card shows, gathered once per render.
@@ -275,8 +275,6 @@ impl Card {
         let id = thread.map(|t| t.id.as_str());
         let live = id.and_then(|id| ws.live.get(id));
         let (messages, transcript_tokens) = live.map(|l| transcript(&l.items)).unwrap_or((0, 0));
-        // The agent's count is the truth; the transcript can't hold more of it than that.
-        let message_tokens = transcript_tokens.min(used);
         let skills: Vec<String> = thread
             .map(|t| {
                 ws.slash_commands(scope, &t.agent)
@@ -293,13 +291,12 @@ impl Card {
             .and_then(|l| l.notes_pending.clone())
             .or_else(|| thread.and_then(|t| ws.notes_for(t)))
             .map(|notes| tokens_of(&notes));
-        // What the agent counts that isn't a message: its prompt and its tools' definitions.
-        // Split by what Trek knows is configured, at rough per-item sizes; the rest is the
-        // agent's own prompt.
-        let rest = used - message_tokens;
-        let mcp_tokens = (mcp.len() as u64 * MCP_SERVER_TOKENS).min(rest);
-        let skill_tokens = (skills.len() as u64 * SKILL_TOKENS).min(rest - mcp_tokens);
-        let system_tokens = rest - mcp_tokens - skill_tokens;
+        let Split {
+            system: system_tokens,
+            skills: skill_tokens,
+            mcp: mcp_tokens,
+            messages: message_tokens,
+        } = split(used, transcript_tokens, skills.len(), mcp.len());
         let free = window - used;
         let share = |n: u64| n as f32 / window as f32;
         let count =
@@ -421,35 +418,58 @@ impl Card {
     pub fn render(&self, me: WeakEntity<Composer>, cx: &App) -> AnyElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
-        let percent = (self.used as f32 / self.window as f32 * 100.).round() as u32;
+        let frac = fraction(self.used, self.window);
         let header = h_flex()
             .w_full()
-            .items_center()
-            .gap(px(8.))
+            .items_baseline()
+            .gap(px(6.))
             .child(
                 div()
                     .text_sm()
                     .font_medium()
                     .text_color(theme.foreground)
-                    .child(format!("Context {percent}%")),
+                    .child("Context"),
             )
             .child(div().flex_1())
-            .child(div().text_xs().text_color(muted).child(format!(
-                "{} of {}",
-                fmt_tokens(self.used),
-                fmt_tokens(self.window)
-            )));
-        let bar = h_flex()
-            .w_full()
-            .h(px(BAR))
-            .rounded(px(BAR / 2.))
-            .overflow_hidden()
-            .bg(theme.foreground.opacity(0.06))
-            .children(
-                self.parts
-                    .iter()
-                    .map(|p| div().h_full().w(relative(p.share)).bg(p.kind.color(cx))),
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .font_features(figures())
+                    .child(format!(
+                        "{} of {}",
+                        fmt_tokens(self.used),
+                        fmt_tokens(self.window)
+                    )),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .font_medium()
+                    .font_features(figures())
+                    .text_color(level_color(frac, theme.foreground, cx))
+                    .child(format!("{:.0}%", frac * 100.)),
             );
+        // Every segment that holds something keeps a sliver, so a few hundred tokens of skills
+        // still show beside a hundred thousand of messages; the hairline gaps let it read as
+        // parts. GPUI clips to rectangles, so the ends are rounded on the segments themselves.
+        let segments: Vec<&Part> = self.parts.iter().filter(|p| p.tokens > 0).collect();
+        let last = segments.len().saturating_sub(1);
+        let bar =
+            h_flex()
+                .w_full()
+                .h(px(BAR))
+                .gap(px(2.))
+                .children(segments.iter().enumerate().map(|(i, p)| {
+                    div()
+                        .h_full()
+                        .w(relative(p.share))
+                        .min_w(px(3.))
+                        .rounded(px(1.5))
+                        .when(i == 0, |el| el.rounded_l(px(BAR / 2.)))
+                        .when(i == last, |el| el.rounded_r(px(BAR / 2.)))
+                        .bg(p.kind.color(cx))
+                }));
         // While compacting, the bar gives up its right end as if the messages were being folded
         // away; it's the same segments, shrinking.
         let bar = match self.compact {
@@ -464,74 +484,72 @@ impl Card {
                 .into_any_element(),
             _ => bar.into_any_element(),
         };
-        let legend = v_flex().w_full().gap(px(1.)).children(
-            self.parts
-                .iter()
-                .filter(|p| p.kind != Kind::Free)
-                .map(|p| legend_row(p, cx)),
-        );
-        let footer = self.footer(me, cx);
-        let mut card = ui::menu_surface(cx).child(
-            v_flex()
-                .w(px(360.))
-                .p(px(11.))
-                .gap(px(10.))
-                .child(header)
-                .child(bar)
-                .child(legend)
-                .child(div().h(px(1.)).w_full().bg(theme.border))
-                .child(self.limits.render(cx))
-                .child(div().h(px(1.)).w_full().bg(theme.border))
-                .child(footer),
-        );
-        if self.parts.iter().all(|p| p.kind == Kind::Free) {
-            // Nothing counted yet: say so rather than show an empty bar.
-            card = card.child(div());
-        }
-        card.into_any_element()
+        // Two columns, the rows' hover fill reaching past the text so the swatches line up with
+        // the header above.
+        let legend = div()
+            .mx(px(-ROW_INSET))
+            .grid()
+            .grid_cols(2)
+            .gap_x(px(4.))
+            .children(self.parts.iter().map(|p| legend_row(p, cx)));
+        let rule = || div().h(px(1.)).w_full().bg(theme.border);
+        ui::menu_surface(cx)
+            .child(
+                v_flex()
+                    .w(px(340.))
+                    .p(px(11.))
+                    .gap(px(10.))
+                    .child(v_flex().gap(px(8.)).child(header).child(bar))
+                    .child(legend)
+                    .when_some(self.limits.render(cx), |el, limits| {
+                        el.child(rule()).child(limits)
+                    })
+                    .child(rule())
+                    .child(self.footer(me, cx)),
+            )
+            .into_any_element()
     }
 
     fn footer(&self, me: WeakEntity<Composer>, cx: &App) -> AnyElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let emerald = palette::emerald(cx);
+        // What's free is the legend's last row; the footer speaks only when it has news.
         let status = match self.compact {
-            Compact::Running { .. } => h_flex()
-                .gap(px(5.))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.foreground)
-                        .child("Summarizing messages"),
-                )
-                .into_any_element(),
-            Compact::Freed { tokens, .. } => h_flex()
-                .gap(px(5.))
-                .child(Icon::new(IconName::Check).xsmall().text_color(emerald))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(emerald)
-                        .child(format!("Freed {} tokens", fmt_tokens(tokens))),
-                )
-                .into_any_element(),
-            Compact::Unchanged { .. } => div()
-                .text_xs()
-                .text_color(muted)
-                .child("The agent kept the context as it was")
-                .into_any_element(),
-            Compact::Idle => {
-                let left = self.window - self.used;
+            Compact::Running { .. } => Some(
+                div()
+                    .text_xs()
+                    .text_color(theme.foreground)
+                    .child("Summarizing messages")
+                    .into_any_element(),
+            ),
+            Compact::Freed { tokens, .. } => Some(
+                h_flex()
+                    .gap(px(5.))
+                    .child(Icon::new(IconName::Check).xsmall().text_color(emerald))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(emerald)
+                            .child(format!("Freed {} tokens", fmt_tokens(tokens))),
+                    )
+                    .into_any_element(),
+            ),
+            Compact::Unchanged { .. } => Some(
                 div()
                     .text_xs()
                     .text_color(muted)
-                    .child(if left == 0 {
-                        "The window is full".to_string()
-                    } else {
-                        format!("{} until the window is full", fmt_tokens(left))
-                    })
-                    .into_any_element()
-            }
+                    .child("The agent kept the context as it was")
+                    .into_any_element(),
+            ),
+            Compact::Idle if self.used >= self.window => Some(
+                div()
+                    .text_xs()
+                    .text_color(palette::red(cx))
+                    .child("The window is full")
+                    .into_any_element(),
+            ),
+            Compact::Idle => None,
         };
         let button = match self.compact {
             Compact::Running { .. } => Button::new("context-compact")
@@ -574,48 +592,70 @@ impl Card {
             .w_full()
             .items_center()
             .gap(px(8.))
-            .child(div().flex_1().min_w_0().child(status))
+            .child(div().flex_1().min_w_0().children(status))
             .child(button)
             .into_any_element()
     }
 }
 
+/// Tabular figures, so numbers that change in place don't jitter. Only on numbers: on the
+/// labels they'd widen the "5" of "5-hour".
+fn figures() -> FontFeatures {
+    FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]))
+}
+
+/// Red at 90%, amber at 75%, `calm` below: the dial's thresholds.
+fn level_color(frac: f32, calm: Hsla, cx: &App) -> Hsla {
+    if frac >= 0.9 {
+        palette::red(cx)
+    } else if frac >= 0.75 {
+        palette::amber(cx)
+    } else {
+        calm
+    }
+}
+
+/// A legend cell: swatch, name, size. Estimates read "≈"; the tooltip says what went into one.
+/// Hovering lifts the row and brings its name up from muted, so the detail is findable.
 fn legend_row(part: &Part, cx: &App) -> AnyElement {
     let theme = cx.theme().clone();
     let value = if part.estimated {
-        format!("{} est.", fmt_tokens(part.tokens))
+        format!("≈ {}", fmt_tokens(part.tokens))
     } else {
         fmt_tokens(part.tokens)
     };
     let (title, lines) = (part.tip.0.clone(), part.tip.1.clone());
+    // The name takes the row's color: GPUI fixes a text's color when it lays it out, before a
+    // group hover is known, but the row's own hover is known by then.
     h_flex()
         .id(part.kind.id())
         .test_support()
-        .w_full()
+        .min_w_0()
         .h(px(24.))
-        .px(px(5.))
-        .gap(px(8.))
+        .px(px(ROW_INSET))
+        .gap(px(7.))
         .rounded(px(6.))
         .items_center()
-        .hover(|s| s.bg(theme.foreground.opacity(0.06)))
+        .text_xs()
+        .text_color(theme.muted_foreground)
+        .hover(|s| {
+            s.bg(theme.foreground.opacity(0.07))
+                .text_color(theme.foreground)
+        })
         .child(
             div()
                 .size(px(8.))
-                .rounded_full()
+                .rounded(px(2.5))
                 .flex_none()
                 .bg(part.kind.color(cx)),
         )
+        .child(div().flex_1().min_w_0().truncate().child(part.kind.label()))
         .child(
             div()
+                .flex_none()
                 .text_xs()
                 .text_color(theme.foreground)
-                .child(part.kind.label()),
-        )
-        .child(div().flex_1())
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
+                .font_features(figures())
                 .child(value),
         )
         .tooltip(tooltip(title, lines))
@@ -629,7 +669,6 @@ impl Limits {
                 session: None,
                 weekly: None,
                 paused: None,
-                note: None,
             };
         };
         let now = ws.now();
@@ -674,40 +713,42 @@ impl Limits {
                 }
             }
         }
-        let note = if limits.is_empty() {
-            Some(match status {
-                Some(_) => format!("{} reports no plan limits", thread.agent.display_name()),
-                None => format!("No plan limits read for {}", thread.agent.display_name()),
-            })
-        } else {
-            None
-        };
         Limits {
             session,
             weekly,
             paused,
-            note,
         }
     }
 
-    fn render(&self, cx: &App) -> AnyElement {
+    /// The section, or nothing when the agent reports no plan limits: the card doesn't spend a
+    /// row saying it has nothing to say.
+    fn render(&self, cx: &App) -> Option<AnyElement> {
+        if self.session.is_none() && self.weekly.is_none() && self.paused.is_none() {
+            return None;
+        }
         let theme = cx.theme().clone();
-        let muted = theme.muted_foreground;
-        v_flex()
-            .w_full()
-            .gap(px(6.))
-            .child(div().text_xs().text_color(muted).child("Limits"))
-            .when_some(self.session.as_ref(), |el, row| {
-                el.child(limit_row(row, cx))
-            })
-            .when_some(self.weekly.as_ref(), |el, row| el.child(limit_row(row, cx)))
-            .when_some(self.note.clone(), |el, note| {
-                el.child(div().text_xs().text_color(muted).child(note))
-            })
-            .when_some(self.paused.clone(), |el, paused| {
-                el.child(div().text_xs().text_color(palette::amber(cx)).child(paused))
-            })
-            .into_any_element()
+        Some(
+            v_flex()
+                .w_full()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("Limits"),
+                )
+                .child(
+                    v_flex()
+                        .mx(px(-ROW_INSET))
+                        .gap(px(2.))
+                        .children(self.session.as_ref().map(|row| limit_row(row, cx)))
+                        .children(self.weekly.as_ref().map(|row| limit_row(row, cx))),
+                )
+                .when_some(self.paused.clone(), |el, paused| {
+                    el.child(div().text_xs().text_color(palette::amber(cx)).child(paused))
+                })
+                .into_any_element(),
+        )
     }
 }
 
@@ -766,27 +807,35 @@ fn limit_row(row: &LimitRow, cx: &App) -> AnyElement {
         .id(row.id)
         .test_support()
         .w_full()
-        .gap(px(4.))
-        .px(px(5.))
-        .py(px(4.))
+        .gap(px(5.))
+        .px(px(ROW_INSET))
+        .py(px(5.))
         .rounded(px(6.))
-        .hover(|s| s.bg(theme.foreground.opacity(0.06)))
+        .hover(|s| s.bg(theme.foreground.opacity(0.07)))
         .child(
             h_flex()
                 .w_full()
                 .gap(px(6.))
-                .items_center()
+                .items_baseline()
                 .child(
                     div()
                         .text_xs()
                         .text_color(theme.foreground)
-                        .child(format!("{} {:.0}%", row.label, row.percent)),
+                        .child(row.label.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .font_features(figures())
+                        .child(format!("{:.0}%", row.percent)),
                 )
                 .child(div().flex_1())
                 .child(
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
+                        .font_features(figures())
                         .child(row.resets.clone()),
                 ),
         )
@@ -794,12 +843,12 @@ fn limit_row(row: &LimitRow, cx: &App) -> AnyElement {
             div()
                 .w_full()
                 .h(px(4.))
-                .rounded(px(2.))
-                .overflow_hidden()
+                .rounded_full()
                 .bg(theme.foreground.opacity(0.08))
                 .child(
                     div()
                         .h_full()
+                        .rounded_full()
                         .w(relative((row.percent / 100.).clamp(0., 1.)))
                         .bg(color),
                 ),
@@ -828,6 +877,31 @@ fn tooltip(
                 }))
         })
         .build(window, cx)
+    }
+}
+
+/// The agent's `used` tokens, split by what fills them.
+#[derive(Debug, PartialEq, Eq)]
+struct Split {
+    system: u64,
+    skills: u64,
+    mcp: u64,
+    messages: u64,
+}
+
+/// What Trek knows is configured is in every request, so it's counted first, at rough per-item
+/// sizes. The transcript's share comes out of what's left: the agent's count is the truth, and a
+/// summarized transcript holds more text than the window does. The rest is the agent's own
+/// prompt and its tools' definitions.
+fn split(used: u64, transcript: u64, skills: usize, mcp: usize) -> Split {
+    let mcp = (mcp as u64 * MCP_SERVER_TOKENS).min(used);
+    let skills = (skills as u64 * SKILL_TOKENS).min(used - mcp);
+    let messages = transcript.min(used - mcp - skills);
+    Split {
+        system: used - mcp - skills - messages,
+        skills,
+        mcp,
+        messages,
     }
 }
 
@@ -871,8 +945,39 @@ fn tokens_of_len(chars: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{day_clock, transcript};
+    use super::{MCP_SERVER_TOKENS, SKILL_TOKENS, Split, day_clock, split, transcript};
     use trek_core::store::Item;
+
+    #[test]
+    fn a_transcript_longer_than_the_window_leaves_the_configured_parts_their_share() {
+        // A summarized thread: its transcript estimates more than the agent counts.
+        let s = split(200_000, 500_000, 4, 2);
+        assert_eq!(
+            s.mcp,
+            2 * MCP_SERVER_TOKENS,
+            "the servers are in every request"
+        );
+        assert_eq!(s.skills, 4 * SKILL_TOKENS);
+        assert_eq!(s.messages, 200_000 - s.mcp - s.skills);
+        assert_eq!(s.system, 0, "nothing left to guess at");
+    }
+
+    #[test]
+    fn what_no_part_accounts_for_is_the_agents_own_prompt() {
+        let s = split(11_000, 168, 4, 2);
+        assert_eq!(
+            s,
+            Split {
+                system: 11_000 - 168 - 4 * SKILL_TOKENS - 2 * MCP_SERVER_TOKENS,
+                skills: 4 * SKILL_TOKENS,
+                mcp: 2 * MCP_SERVER_TOKENS,
+                messages: 168,
+            }
+        );
+        // And a window smaller than the estimates never goes negative.
+        let tiny = split(500, 10, 4, 2);
+        assert_eq!(tiny.mcp + tiny.skills + tiny.messages + tiny.system, 500);
+    }
 
     #[test]
     fn the_transcript_is_estimated_at_four_characters_a_token() {

@@ -1934,7 +1934,7 @@ fn usage_demo(ws: &Entity<Workspace>, cx: &mut App) {
 
 /// `pr-demo <state>`: a PR/release card with made-up contents appended to the thread on
 /// screen (`pr_card::demo`), so its states can be shot without a real `gh`. States: open,
-/// creating, checking, conflicted, resolving, ready, merged, release.
+/// creating, checking, conflicted, resolving, ready, merged, release, run.
 fn pr_demo(ws: &Entity<Workspace>, arg: &str, cx: &mut App) {
     ws.update(cx, |ws, cx| {
         let Some(id) = ws

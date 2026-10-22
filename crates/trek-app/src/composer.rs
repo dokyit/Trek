@@ -3582,7 +3582,12 @@ impl Render for Composer {
                             .on_click(cx.listener(|this, _, _, cx| pickers::update_prefs(this, cx, |p| p.plan = !p.plan))),
                     )
                     .child(div().flex_1().min_w(px(4.)))
-                    .when_some(context, |el, (used, window)| el.child(self.context_card(used, window, cx)))
+                    .when_some(
+                        context.filter(|(used, window)| {
+                            *used as f32 / *window as f32 >= crate::context_popover::QUIET
+                        }),
+                        |el, (used, window)| el.child(self.context_card(used, window, cx)),
+                    )
                     .children(mic)
                     .child(send),
             ));
@@ -3680,6 +3685,7 @@ impl Render for Composer {
                                         crate::assets::Lucide::GitPullRequest
                                     }
                                     crate::pr_card::Kind::Release => crate::assets::Lucide::Rocket,
+                                    crate::pr_card::Kind::Run => crate::assets::Lucide::Workflow,
                                 })
                                 .size(px(11.))
                                 .text_color(tint),
