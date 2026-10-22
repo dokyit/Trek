@@ -22,8 +22,6 @@ Voice mode needs a bundled build and real permissions; the shots verbs are `dict
 
 Prompts containing `tools`, `permission`, `question`, `plan`, `error`, `mock:long 5s`, `mock:stream 5s`, or `mock:visualization` exercise those mock-agent paths. The isolated profile cannot invoke a real vendor CLI.
 
-While a turn runs, the transcript's top shows a "Thinking Ns" timeline of the agent's steps (thoughts, tool calls with file chips); `tools` walks it, `agents`/`subagents` fan out two parallel scouts and merge back at a hollow node, `error` draws a dashed dead end, and `mock:history 60` folds older steps into "…and N earlier steps". When the turn ends the header reads "Thought for Ns" and the timeline collapses — click the header or its chevron to reopen it (the closing blue "Finished thinking" node is the last row).
-
 ## Code
 
 `crates/trek-app/src/composer.rs` (voice mode in `composer/voice.rs`, audio and Speech in `dictate.rs`), `thread_view.rs`, `workspace.rs`, `workspace/agent_updates.rs`; agent sessions in `crates/trek-agents/src/` and mock scripts in `mock.rs`.
