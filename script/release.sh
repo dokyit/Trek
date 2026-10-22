@@ -99,7 +99,10 @@ if [[ -n $VERSION_TAG ]] && git rev-parse -q --verify "refs/tags/$VERSION_TAG" >
 fi
 CURRENT=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
 LAST_NIGHTLY=$(git for-each-ref --format='%(contents:subject)' refs/tags/nightly | sed -n 's/^Trek //p')
-python3 - "$CHANNEL" "$VERSION" "$CURRENT" "$LAST_NIGHTLY" $(git tag --list 'v[0-9]*') <<'PY' || exit 1
+# This release's own tag (on HEAD, see above) isn't an earlier release to be newer than.
+RELEASED=(${(f)"$(git tag --list 'v[0-9]*')"})
+(( TAG_ON_HEAD )) && RELEASED=(${RELEASED:#$VERSION_TAG})
+python3 - "$CHANNEL" "$VERSION" "$CURRENT" "$LAST_NIGHTLY" "${RELEASED[@]}" <<'PY' || exit 1
 import re, sys
 channel, new, current, last_nightly, *tags = sys.argv[1:]
 def key(v):
