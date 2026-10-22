@@ -3,8 +3,10 @@ name: Release
 # Publish a whole Trek release from any machine (docs/RELEASING.md, "Publishing from anywhere").
 # The macOS job runs script/release.sh on GitHub's Mac, as the maintainer's Mac would: builds and
 # code-signs Trek.app with "Trek Local Signing", minisigns the archive, tags, and creates (or, for
-# beta and nightly, refreshes) the GitHub release with darwin-aarch64 in <channel>.json. Then the
-# Windows job (release-windows.yml) attaches the Windows zip to that release.
+# beta and nightly, refreshes) the GitHub release with darwin-aarch64 in <channel>.json. The
+# Windows build runs alongside it (release.ps1 -BuildOnly: its own version bump, cargo build, zip,
+# Inno installer, minisig); only the publish half needs the Mac's release, so a short publish job
+# does the manifest merge and upload once both are done (release.ps1 -PublishOnly -Publish).
 #
 #   gh workflow run release.yml -f version=0.4.1-beta.4 -f channel=beta
 #   gh workflow run release.yml -f version=0.4.1-beta.4 -f channel=beta -f dry_run=true
@@ -63,7 +65,7 @@ env:
 jobs:
   macos:
     name: macOS app
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 90
     steps:
       # Full history and tags: release.sh checks the version against earlier releases' tags and
@@ -73,12 +75,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.99.0'
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # One cache for the whole workspace, shared with ci.yml.
-          shared-key: workspace
+          # The release-profile cache warm-release.yml keeps hot on every main push. Not shared
+          # with ci.yml's dev-profile cache (a release build can't reuse its artifacts).
+          shared-key: release
           save-if: false
 
       # gpui compiles its Metal shaders at build time with `xcrun metal` (see ci.yml).
@@ -90,17 +95,17 @@ jobs:
           fi
           xcrun -sdk macosx metal --version
 
-      # bundle.sh renders the icons with resvg; iconutil, PlistBuddy, codesign, python3 and gh
-      # are on the image already.
-      - name: Install resvg
+      # bundle.sh renders the icons with resvg; pigz compresses the archive on every core.
+      # iconutil, PlistBuddy, codesign, python3 and gh are on the image already.
+      - name: Install resvg and pigz
         env:
           HOMEBREW_NO_AUTO_UPDATE: 1
           HOMEBREW_NO_INSTALL_CLEANUP: 1
-        run: brew install resvg
+        run: brew install resvg pigz
 
       # Pinned by hash: this binary signs every update. (The zip's own .minisig verifies with
       # jedisct1's key, RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3; the hash below
-      # was taken from a copy that did.) An arm64 build, like macos-latest.
+      # was taken from a copy that did.) An arm64 build, like macos-15.
       - name: Install minisign
         run: |
           ver=0.12
@@ -277,18 +282,146 @@ jobs:
           security delete-keychain "$RUNNER_TEMP/throwaway.keychain-db" 2>/dev/null || true
           rm -rf "$RUNNER_TEMP/minisign.key" "$RUNNER_TEMP/codesign.p12" "$RUNNER_TEMP/throwaway-signing" "$RUNNER_TEMP/notes.md"
 
-  # Only after the Mac published: release.ps1 -Publish merges into the <channel>.json it made.
-  # (A release created with this run's token raises no `release: published` event, so
-  # release-windows.yml doesn't also start on its own for a stable release.)
-  windows:
-    name: Windows
-    needs: macos
-    uses: ./.github/workflows/release-windows.yml
-    permissions:
-      contents: write
-    secrets: inherit
-    with:
-      version: ${{ inputs.version }}
-      channel: ${{ inputs.channel }}
-      dry_run: ${{ inputs.dry_run }}
-      manifest_artifact: ${{ inputs.dry_run && 'mac-manifest' || '' }}
+  # The Windows build needs nothing the Mac makes: release.ps1 bumps the checked-out version
+  # itself. It runs in parallel and hands dist\release\<version>\ to the publish job, which is
+  # the only part that waits for the Mac's release (its manifest merge).
+  build:
+    name: Windows build
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      # Deep build paths under the runner's workspace can pass MAX_PATH.
+      - name: Long paths
+        run: git config --system core.longpaths true
+
+      # The commit this run started from: the version tag doesn't exist yet (the macOS job is
+      # still building it). Full history for the notes' `git log`.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.99.0'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The release-profile cache warm-release.yml keeps hot; a release run only reads it
+          # (the version bump rewrites Cargo.lock, so anything it saved wouldn't be reused).
+          shared-key: release
+          save-if: false
+
+      # The runner image carries the Windows SDK (rc.exe, fxc.exe) that ci.yml's Windows job
+      # builds with too, so minisign is the only thing to install. Pinned by hash: this binary
+      # signs every update.
+      - name: Install minisign
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = '0.12'
+          $zip = "$env:RUNNER_TEMP\minisign-$ver-win64.zip"
+          Invoke-WebRequest "https://github.com/jedisct1/minisign/releases/download/$ver/minisign-$ver-win64.zip" -OutFile $zip
+          $expected = '37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479'
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "minisign $ver win64 sha256 mismatch: got $actual, want $expected" }
+          Expand-Archive $zip "$env:RUNNER_TEMP\minisign" -Force
+          "TREK_MINISIGN_EXE=$env:RUNNER_TEMP\minisign\minisign-win64\x86_64\minisign.exe" >> $env:GITHUB_ENV
+
+      - name: Install Inno Setup
+        run: |
+          choco install innosetup --no-progress -y
+          "C:\Program Files (x86)\Inno Setup 6" >> $env:GITHUB_PATH
+
+      # The secret is the key file's whole contents (it is all ASCII).
+      - name: minisign secret key
+        env:
+          TREK_MINISIGN_KEY_FILE: ${{ secrets.TREK_MINISIGN_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:TREK_MINISIGN_KEY_FILE)) {
+            throw 'the TREK_MINISIGN_KEY secret is not set (docs/RELEASING.md)'
+          }
+          $key = "$env:RUNNER_TEMP\minisign.key"
+          [System.IO.File]::WriteAllText($key, $env:TREK_MINISIGN_KEY_FILE)
+          "TREK_MINISIGN_KEY=$key" >> $env:GITHUB_ENV
+
+      # -SkipTests: ci.yml runs the whole suite on every push, and a dev-profile test build
+      # against the release cache compiles the world again for no new signal.
+      - name: Build, sign and package
+        env:
+          TREK_MINISIGN_PASSWORD: ${{ secrets.TREK_MINISIGN_PASSWORD }}
+          TREK_VERSION: ${{ inputs.version }}
+          TREK_CHANNEL: ${{ inputs.channel }}
+        run: >-
+          ./script/release.ps1 $env:TREK_VERSION -Channel $env:TREK_CHANNEL
+          -Minisign $env:TREK_MINISIGN_EXE -BuildOnly -SkipTests
+
+      - name: Windows build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: dist/release/
+          if-no-files-found: error
+
+  # Only the manifest merge needs the macOS release to exist (release.ps1 -PublishOnly downloads
+  # the <channel>.json release.sh wrote), so this is a short tail after both builds.
+  publish:
+    name: Windows publish
+    needs: [macos, build]
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      # release.ps1 lives here; full history for the notes' `git log` fallback.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Windows build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-build
+          path: dist/release
+
+      # A dry run's stand-in for the release's <channel>.json, as the macOS job left it.
+      - name: Manifest from the macOS dry run
+        if: inputs.dry_run == true
+        uses: actions/download-artifact@v4
+        with:
+          name: mac-manifest
+          path: ${{ runner.temp }}/mac-manifest
+
+      - name: Merge manifest and attach
+        if: inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TREK_VERSION: ${{ inputs.version }}
+          TREK_CHANNEL: ${{ inputs.channel }}
+        run: >-
+          ./script/release.ps1 $env:TREK_VERSION -Channel $env:TREK_CHANNEL
+          -PublishOnly -Publish
+
+      - name: Merge manifest (dry run)
+        if: inputs.dry_run == true
+        env:
+          TREK_VERSION: ${{ inputs.version }}
+          TREK_CHANNEL: ${{ inputs.channel }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:TREK_VERSION.TrimStart('v')
+          $more = @{}
+          $mac = "$env:RUNNER_TEMP\mac-manifest\$env:TREK_CHANNEL.json"
+          if (Test-Path $mac) { $more.ExistingManifest = $mac }
+          ./script/release.ps1 $env:TREK_VERSION -Channel $env:TREK_CHANNEL -PublishOnly @more
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $out = "dist\release\$version"
+          $zip = Get-Item "$out\Trek-$version-windows-x86_64.zip"
+          $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $manifest = Get-Content "$out\$env:TREK_CHANNEL.json" -Raw
+          @(
+            "### Windows (dry run: nothing uploaded)"
+            ''
+            "``$($zip.Name)`` sha256 ``$sha``"
+            ''
+            '```json'
+            $manifest.TrimEnd()
+            '```'
+          ) -join "`n" >> $env:GITHUB_STEP_SUMMARY

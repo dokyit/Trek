@@ -93,7 +93,53 @@ class Driver:
         # inode while a new process locks a replacement and enters the same profile concurrently.
         self.lock_path = self.home.with_name(f".{self.home.name}.lock")
         self.pending_path = self.home / "pending.json"
-        self.provenance_path = self.root / "target" / ".trek-verify-shots.json"
+        # The verified binary and its provenance live beside the runtime state, not in the
+        # target dir: on a shared target dir another checkout's build can overwrite
+        # debug/trek between the build and the launch (same race the Windows driver copies
+        # around).
+        self.bin_dir = self.home / "bin"
+        self.shots_binary = self.bin_dir / "trek"
+        self.provenance_path = self.bin_dir / ".trek-verify-shots.json"
+
+    def is_worktree(self) -> bool:
+        """True when this checkout is a linked worktree rather than the main checkout."""
+        proc = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+            cwd=self.root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        if proc.returncode:
+            return False
+        lines = proc.stdout.splitlines()
+        return len(lines) == 2 and Path(lines[0]) != Path(lines[1])
+
+    def cargo_target_dir(self) -> Path:
+        """Base Cargo target directory for this checkout's isolated builds.
+
+        An explicit CARGO_TARGET_DIR always wins — the Windows driver honours a shared
+        D:\\trek-target the same way. Otherwise the main checkout keeps its own target/
+        (a symlink to target.nosync) while a linked worktree builds into one shared
+        directory outside the repo, so it reuses the ~1,000 already-compiled dependencies
+        instead of cold-building them for every tree. Path dependencies — the workspace
+        crates — still compile per checkout.
+        """
+        if os.environ.get("CARGO_TARGET_DIR"):
+            override = Path(os.environ["CARGO_TARGET_DIR"])
+            return override if override.is_absolute() else self.root / override
+        if self.is_worktree():
+            return Path.home() / "Library" / "Caches" / "Trek" / "target.nosync"
+        return self.root / "target"
+
+    def shots_target_dir(self) -> Path:
+        """Target dir for the shots-feature build: its own subdirectory.
+
+        The shots feature pulls gpui-kit/test-support through the whole GPUI stack, so its
+        dependency fingerprints differ from both plain `cargo build` and `cargo test`;
+        sharing one directory made every variant rebuild the other's world.
+        """
+        return self.cargo_target_dir() / "shots"
 
     @contextmanager
     def locked(self):
@@ -197,7 +243,7 @@ class Driver:
             )
         started = time.monotonic()
         env = os.environ.copy()
-        env["CARGO_TARGET_DIR"] = str(self.root / "target")
+        env["CARGO_TARGET_DIR"] = str(self.shots_target_dir())
         proc = subprocess.run(
             ["cargo", "build", "--locked", "-p", "trek-app", "--features", "shots", "--message-format", "json-render-diagnostics"],
             cwd=self.root,
@@ -213,15 +259,17 @@ class Driver:
             raise CliError("Cargo reported success but did not report the Trek executable artifact.")
         binary = binary.resolve()
         try:
-            binary.relative_to((self.root / "target").resolve())
+            binary.relative_to(self.shots_target_dir().resolve())
         except ValueError:
             raise CliError("Cargo reported a Trek executable outside this checkout's controlled target directory.", details=str(binary))
         if not os.access(binary, os.X_OK):
             raise CliError("Cargo reported success but its Trek executable is missing or not executable.", details=str(binary))
+        self.bin_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(binary, self.shots_binary)
         provenance = {
             "root": str(self.root),
-            "binary": str(binary),
-            "sha256": file_sha256(binary),
+            "binary": str(self.shots_binary),
+            "sha256": file_sha256(self.shots_binary),
             "feature": "shots",
             "built_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -229,7 +277,7 @@ class Driver:
         tmp = self.provenance_path.with_name(f"{self.provenance_path.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(provenance, indent=2) + "\n")
         os.replace(tmp, self.provenance_path)
-        return {"binary": str(binary), "seconds": round(time.monotonic() - started, 2)}
+        return {"binary": str(self.shots_binary), "seconds": round(time.monotonic() - started, 2)}
 
     def verified_binary(self) -> Path:
         try:
@@ -245,9 +293,9 @@ class Driver:
             )
         binary = Path(binary_value).resolve()
         try:
-            binary.relative_to((self.root / "target").resolve())
+            binary.relative_to(self.bin_dir.resolve())
         except ValueError:
-            raise CliError("The recorded shots executable is outside this checkout's controlled target directory.", details=str(binary))
+            raise CliError("The recorded shots executable is outside this checkout's controlled bin directory.", details=str(binary))
         if not os.access(binary, os.X_OK):
             raise CliError("The recorded shots executable is missing or not executable.", hint="rerun without --no-build", details=str(binary))
         if file_sha256(binary) != expected:
@@ -558,7 +606,7 @@ def run_check(driver: Driver, *, quick: bool) -> dict[str, Any]:
     def run_step(name: str, command: list[str]) -> None:
         started = time.monotonic()
         env = os.environ.copy()
-        env["CARGO_TARGET_DIR"] = str(driver.root / "target")
+        env["CARGO_TARGET_DIR"] = str(driver.cargo_target_dir())
         proc = subprocess.run(command, cwd=driver.root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         step = {"name": name, "passed": proc.returncode == 0, "seconds": round(time.monotonic() - started, 2), "command": command}
         if proc.returncode:
@@ -705,7 +753,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif cmd == "start":
             if not re.fullmatch(r"[0-9]{3,5}x[0-9]{3,5}", args.size):
                 raise CliError("--size must look like 1280x820.")
-            data = dry_result(cmd, ["build Trek with the shots feature" if not args.no_build else "reuse target/debug/trek", f"launch isolated mock-only app at {driver.home}"]) if args.dry_run else driver.start(build=not args.no_build, size=args.size)
+            data = dry_result(cmd, ["build Trek with the shots feature" if not args.no_build else "reuse the last verified shots binary", f"launch isolated mock-only app at {driver.home}"]) if args.dry_run else driver.start(build=not args.no_build, size=args.size)
         elif cmd == "open":
             line = route_command(args.route)
             data = dry_result(cmd, [f"send {line!r} to isolated Trek"]) if args.dry_run else (driver.batch([line]) and {"opened": args.route, "command_sent": line})

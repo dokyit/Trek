@@ -148,8 +148,12 @@ TREK_RELEASE_BUILD=1 script/bundle.sh
 
 # ---------- archive, checksum, signature ----------
 rm -rf "$OUT"; mkdir -p "$OUT"
-COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -czf "$OUT/$NAME" -C dist Trek.app
-SHA=$(shasum -a 256 "$OUT/$NAME" | cut -d' ' -f1)
+# One pass over the app: tee writes the compressed stream to the archive while shasum hashes
+# the same bytes, so the file isn't read a second time for the checksum. pigz compresses on
+# every core; gzip is the fallback.
+GZ=gzip; (( $+commands[pigz] )) && GZ=pigz
+SHA=$(COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -cf - -C dist Trek.app \
+  | "$GZ" -c | tee "$OUT/$NAME" | shasum -a 256 | cut -d' ' -f1)
 # The trusted comment is signed too; the updater requires it to name this version.
 if (( KEY_LOCKED )) && [[ -n ${TREK_MINISIGN_PASSWORD:-} ]]; then
   # No terminal on a CI runner: minisign reads the password from stdin. print is a builtin, so

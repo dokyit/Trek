@@ -1,0 +1,80 @@
+name: Warm release cache
+
+# Release runs build --release, whose artifacts share nothing with ci.yml's dev-profile cache:
+# every release used to compile all of crates.io cold (~15-25 min). A push to main rebuilds the
+# release dependencies under the "release" shared key, so a dispatched release restores them
+# (the version bump rewrites Cargo.lock, so it matches the cache by prefix, not by key).
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', 'media/**', '**.md', 'ios/**', 'assets/brand/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: warm-release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental builds don't help a fresh runner and bloat the cache.
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
+
+jobs:
+  macos:
+    name: Release deps (macOS)
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.99.0'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The key the release jobs restore. Workspace crates' artifacts are no use to a
+          # release (the version bump rebuilds them anyway), so only deps are kept.
+          shared-key: release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # trek-app's build compiles gpui's Metal shaders (see ci.yml).
+      - name: Metal toolchain
+        run: |
+          xcodebuild -version
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
+
+      # What script/bundle.sh builds for a release.
+      - name: cargo build --release
+        run: cargo build --release --locked -p trek-app -p trek-mcp
+
+  windows:
+    name: Release deps (Windows)
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      # Deep build paths under the runner's workspace can pass MAX_PATH.
+      - name: Long paths
+        run: git config --system core.longpaths true
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.99.0'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # What script/release.ps1 builds for a release (trek-update while the crate exists).
+      - name: cargo build --release
+        run: cargo build --release --locked -p trek-app -p trek-mcp -p trek-update

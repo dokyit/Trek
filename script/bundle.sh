@@ -22,25 +22,49 @@ OUT=dist; APP="$OUT/Trek.app"
 RELEASE_KEY=""
 if [[ ${TREK_RELEASE_BUILD:-} == 1 ]]; then RELEASE_KEY="<key>TrekRelease</key><true/>"; fi
 
-echo "• building release $VERSION"
-cargo build --release -p trek-app -p trek-mcp
+# Local bundles skip thin LTO ([profile.bundle] in Cargo.toml): the link was about a minute
+# of this script's time. Only release.sh's builds (TREK_RELEASE_BUILD=1) keep --release.
+TARGET_DIR=${CARGO_TARGET_DIR:-target}
+PROFILE=bundle
+if [[ ${TREK_RELEASE_BUILD:-} == 1 ]]; then PROFILE=release; fi
+echo "• building $PROFILE $VERSION"
+cargo build --profile "$PROFILE" -p trek-app -p trek-mcp
 
 echo "• icon"
-ICONSET=$(mktemp -d)/AppIcon.iconset; mkdir -p "$ICONSET"
-for s in 16 32 128 256 512; do
-  resvg -w $s -h $s assets/brand/trek-icon-ember.svg "$ICONSET/icon_${s}x${s}.png"
-  resvg -w $((s*2)) -h $((s*2)) assets/brand/trek-icon-ember.svg "$ICONSET/icon_${s}x${s}@2x.png"
-done
+# The artwork below all derives from assets/brand/*.svg; rerender only when those files, the
+# resvg version, or the sizes change. The cache lives under the target dir, so deleting dist/
+# doesn't cost a rerender either.
+ICON_CACHE="$TARGET_DIR/icons"
+ICON_KEY=$( { shasum -a 256 assets/brand/*.svg; resvg --version; print -r -- "iconset 16 32 128 256 512 @2x; menubar 22 44"; } | shasum -a 256 | cut -d' ' -f1 )
+if [[ $(cat "$ICON_CACHE/stamp" 2>/dev/null) != "$ICON_KEY" \
+      || ! -f "$ICON_CACHE/AppIcon.icns" \
+      || ! -f "$ICON_CACHE/MenuBarIconTemplate.png" \
+      || ! -f "$ICON_CACHE/MenuBarIconTemplate@2x.png" ]]; then
+  mkdir -p "$ICON_CACHE"
+  ICONSET=$(mktemp -d)/AppIcon.iconset; mkdir -p "$ICONSET"
+  pids=()
+  for s in 16 32 128 256 512; do
+    resvg -w $s -h $s assets/brand/trek-icon-ember.svg "$ICONSET/icon_${s}x${s}.png" & pids+=($!)
+    resvg -w $((s*2)) -h $((s*2)) assets/brand/trek-icon-ember.svg "$ICONSET/icon_${s}x${s}@2x.png" & pids+=($!)
+  done
+  for p in $pids; do wait $p; done
+  iconutil -c icns "$ICONSET" -o "$ICON_CACHE/AppIcon.icns"
+  pids=()
+  resvg -w 22 -h 22 assets/brand/menubar-idle.svg "$ICON_CACHE/MenuBarIconTemplate.png" & pids+=($!)
+  resvg -w 44 -h 44 assets/brand/menubar-idle.svg "$ICON_CACHE/MenuBarIconTemplate@2x.png" & pids+=($!)
+  for p in $pids; do wait $p; done
+  print -r -- "$ICON_KEY" > "$ICON_CACHE/stamp"
+fi
 rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+cp "$ICON_CACHE/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
 echo "• bundle"
-cp target/release/trek "$APP/Contents/MacOS/trek"
-cp target/release/trek-mcp "$APP/Contents/MacOS/trek-mcp"
+cp "$TARGET_DIR/$PROFILE/trek" "$APP/Contents/MacOS/trek"
+cp "$TARGET_DIR/$PROFILE/trek-mcp" "$APP/Contents/MacOS/trek-mcp"
 # Menu bar glyph as a bundle resource, so menu bar managers (Shelf, …) can show Trek's real
 # template icon instead of the colour app icon when they stand in for an evicted item.
-resvg -w 22 -h 22 assets/brand/menubar-idle.svg "$APP/Contents/Resources/MenuBarIconTemplate.png"
-resvg -w 44 -h 44 assets/brand/menubar-idle.svg "$APP/Contents/Resources/MenuBarIconTemplate@2x.png"
+cp "$ICON_CACHE/MenuBarIconTemplate.png" "$APP/Contents/Resources/MenuBarIconTemplate.png"
+cp "$ICON_CACHE/MenuBarIconTemplate@2x.png" "$APP/Contents/Resources/MenuBarIconTemplate@2x.png"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
