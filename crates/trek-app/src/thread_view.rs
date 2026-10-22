@@ -106,6 +106,10 @@ enum Row {
     Lineage {
         ix: usize,
     },
+    /// A pull request or release the thread's agent pushed out (`pr_card`).
+    Pr {
+        ix: usize,
+    },
 }
 
 impl Row {
@@ -124,7 +128,8 @@ impl Row {
             | Row::Error { ix }
             | Row::Limit { ix }
             | Row::Handoff { ix }
-            | Row::Lineage { ix } => *ix,
+            | Row::Lineage { ix }
+            | Row::Pr { ix } => *ix,
         }
     }
 }
@@ -652,6 +657,11 @@ impl ThreadView {
                     {
                         this.changes_in(end, cx)
                     }
+                    WorkspaceEvent::CardChanged { id, item }
+                        if this.current.as_ref() == Some(id) =>
+                    {
+                        this.card_changed_in(item, cx)
+                    }
                     _ => {}
                 },
             ),
@@ -1092,6 +1102,26 @@ impl ThreadView {
         cx.notify();
     }
 
+    /// A card row (PR, release) moved in place: the transcript item `item`'s row is measured
+    /// and drawn again.
+    fn card_changed_in(&mut self, item: &str, cx: &mut Context<Self>) {
+        let ws = self.workspace.read(cx);
+        let Some(ix) = self
+            .current
+            .as_ref()
+            .and_then(|id| ws.live.get(id))
+            .and_then(|l| l.items.position(item))
+        else {
+            return;
+        };
+        let rows = self.rows(cx);
+        if let Some(row) = rows.row_of(ix) {
+            self.scroller
+                .update(cx, |s, cx| _ = s.remeasure_items(row..row + 1, cx));
+        }
+        cx.notify();
+    }
+
     /// Opened sub-agent rows showing what their sub-agent is doing: (row, key, lines shown).
     fn open_activity(&self, cx: &App) -> Vec<(usize, String, usize)> {
         let ws = self.workspace.read(cx);
@@ -1405,6 +1435,9 @@ impl ThreadView {
                         },
                         Item::Tool { id, .. } if trek_core::lineage::of_row(id).is_some() => {
                             Row::Lineage { ix }
+                        }
+                        Item::Tool { id, .. } if crate::pr_card::of_row(id).is_some() => {
+                            Row::Pr { ix }
                         }
                         Item::Tool { title, .. } if trek_core::media::is_watch_call(title) => {
                             Row::Tool {
@@ -3171,6 +3204,47 @@ impl ThreadView {
                     .into_any_element(),
                 }
             }
+            (
+                Row::Pr { ix },
+                Item::Tool {
+                    id: row_id, detail, ..
+                },
+            ) => {
+                let Some(card) = crate::pr_card::read(&row_id, &detail) else {
+                    return div().into_any_element();
+                };
+                let thread = at.thread.clone();
+                let ws = at.workspace.clone();
+                let row = row_id.clone();
+                let merge = (card.url.is_some() || card.number.is_some()).then(|| {
+                    let (ws, thread, row) = (ws.clone(), thread.clone(), row.clone());
+                    std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
+                        ws.update(cx, |ws, cx| ws.pr_merge(&thread, &row, cx));
+                    }) as std::rc::Rc<dyn Fn(&mut Window, &mut App)>
+                });
+                let resolve = {
+                    let (ws, thread, row) = (ws.clone(), thread.clone(), row.clone());
+                    std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
+                        ws.update(cx, |ws, cx| ws.pr_resolve(&thread, &row, cx));
+                    }) as std::rc::Rc<dyn Fn(&mut Window, &mut App)>
+                };
+                let open = card.url.clone().map(|url| {
+                    std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
+                        cx.open_url(&url);
+                    }) as std::rc::Rc<dyn Fn(&mut Window, &mut App)>
+                });
+                let actions = crate::pr_card::Actions {
+                    merge,
+                    resolve: Some(resolve),
+                    open,
+                };
+                column(
+                    div()
+                        .w_full()
+                        .child(crate::pr_card::card(ix, &card, actions, at.clock, cx)),
+                )
+                .into_any_element()
+            }
             // The transcript changed under the row (it's rebuilt on the next render).
             _ => div().into_any_element(),
         }
@@ -4562,6 +4636,7 @@ impl ThreadView {
                 Row::Error { .. } => format!("{indent}error"),
                 Row::Limit { .. } => format!("{indent}limit"),
                 Row::Handoff { .. } => format!("{indent}handoff"),
+                Row::Pr { .. } => format!("{indent}pr-card"),
                 Row::Lineage { ix } => match items.get(*ix) {
                     Some(Item::Tool { id, detail, .. }) => match LineageRow::read(ws, id, detail) {
                         Some(l) => format!(

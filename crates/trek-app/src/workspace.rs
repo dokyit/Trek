@@ -210,6 +210,10 @@ pub struct LiveThread {
     pub revision: u64,
     /// Lines each tool call that changed a file added and removed, by call id (kept in the store).
     pub lines: HashMap<String, (u32, u32)>,
+    /// Command calls moving a PR/release card (`pr_card`), call id → the card's `Item::Tool` id.
+    pub pr_calls: HashMap<String, String>,
+    /// `gh` watchers for the thread's live cards, by card row id.
+    pub pr_watching: HashMap<String, Task<()>>,
     /// The group of tool calls folding into its summary row now that it's over (`activity`).
     pub fold: Option<crate::activity::Fold>,
     /// Shows the folded group in the transcript once the fold is over.
@@ -1099,6 +1103,12 @@ pub enum WorkspaceEvent {
     TurnChanges {
         id: String,
         end: String,
+    },
+    /// A PR/release card row (`pr_card`) changed in place: the row of transcript item `item`
+    /// (its id) is measured and drawn again.
+    CardChanged {
+        id: String,
+        item: String,
     },
     /// Show the changes of the turn ending at `end` (by item id) of `thread` in the Git tool,
     /// with `path`'s diff open (relative to the repository's top folder).
@@ -3293,6 +3303,7 @@ impl Workspace {
                     this.persist_items(&id, cx);
                 }
                 this.settle_cut_off_rows(&id, cx);
+                this.pr_resume(&id, cx);
                 // Messages sent while it loaded go out now, after the history; then reports from
                 // its sub-agents.
                 this.send_queued(&id, cx);
@@ -3342,6 +3353,7 @@ impl Workspace {
                 self.persist_items(id, cx);
             }
             self.settle_cut_off_rows(id, cx);
+            self.pr_resume(id, cx);
             return;
         }
         let Some(thread) = thread else { return };
@@ -3395,6 +3407,7 @@ impl Workspace {
                 live.reasoning = live.reasoning.map(|i| i + n);
                 live.revision += 1;
                 this.settle_cut_off_rows(&id, cx);
+                this.pr_resume(&id, cx);
                 // Messages sent while it loaded go out now, after the history; then reports from
                 // its sub-agents.
                 this.send_queued(&id, cx);
@@ -4810,6 +4823,10 @@ impl Workspace {
         // It's another session than the thread's: its points so far are unknown.
         let mut new_session = false;
         let current_native = self.thread(id).and_then(|t| t.native_id.clone());
+        // `gh`/`git` command calls may move a PR/release card (`pr_card`); its side-effects
+        // (watchers, remeasures) are collected and applied once `live` is free.
+        let pr_cwd = self.thread(id).and_then(|t| t.cwd.clone());
+        let mut pr_fx = crate::pr_card::Effects::default();
         // The group of tool calls on show in the working bar, which these events may end.
         let live_group = self.live_group_start(id);
         let mut diff: Option<(i64, i64)> = None;
@@ -5110,15 +5127,24 @@ impl Workspace {
                         live.streaming = None;
                         live.reasoning = None;
                         live.items.push(Item::Tool {
-                            id: tid,
-                            title,
-                            detail,
+                            id: tid.clone(),
+                            title: title.clone(),
+                            detail: detail.clone(),
                             output: String::new(),
                             status: ToolStatus::Running,
                         });
                         // A sub-agent row waiting for this call goes right after it, before any
                         // text later in the batch opens a new message.
                         live.place_task_rows(false);
+                        let fx = crate::pr_card::tool_started(
+                            live,
+                            &tid,
+                            &title,
+                            &detail,
+                            pr_cwd.as_deref(),
+                        );
+                        pr_fx.watch.extend(fx.watch);
+                        pr_fx.changed.extend(fx.changed);
                     }
                     AgentEvent::ToolLines {
                         id: tid,
@@ -5147,6 +5173,9 @@ impl Workspace {
                         output,
                         ok,
                     } => {
+                        let fx = crate::pr_card::tool_finished(live, &tid, ok, &output);
+                        pr_fx.watch.extend(fx.watch);
+                        pr_fx.changed.extend(fx.changed);
                         if let Some(Item::Tool {
                             output: o, status, ..
                         }) = live
@@ -5315,6 +5344,7 @@ impl Workspace {
                 && live.turn_started.is_none()
                 && live.background_agents().next().is_none();
         }
+        self.pr_apply(id, pr_fx, cx);
         if agents_lost {
             self.background_agents_lost(id, cx);
         } else if agents_gone {
@@ -5700,6 +5730,307 @@ impl Workspace {
                 && l.turn_started.is_none()
                 && l.background_agents().next().is_none()
         })
+    }
+
+    // ---------- PR and release cards (`pr_card`) ----------
+
+    /// What a batch of agent events did to `id`'s cards: remeasure the rows it touched and
+    /// (re)start the watchers of the cards still live.
+    fn pr_apply(&mut self, id: &str, fx: crate::pr_card::Effects, cx: &mut Context<Self>) {
+        if fx.changed.is_empty() && fx.watch.is_empty() {
+            return;
+        }
+        for item in fx.changed {
+            cx.emit(WorkspaceEvent::CardChanged {
+                id: id.to_string(),
+                item,
+            });
+        }
+        for row in fx.watch {
+            self.watch_pr(id, &row, cx);
+        }
+    }
+
+    /// Cards read back from the store that are still live get their `gh` watchers back.
+    fn pr_resume(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(live) = self.live.get(id) else {
+            return;
+        };
+        let rows: Vec<String> = live
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Tool { id, detail, .. } => crate::pr_card::read(id, detail)
+                    .and_then(|c| (!c.phase.terminal()).then(|| id.clone())),
+                _ => None,
+            })
+            .collect();
+        for row in rows {
+            self.watch_pr(id, &row, cx);
+        }
+    }
+
+    /// Follow the card row `row` (`Item::Tool` id) of `id` with `gh`: every few seconds at
+    /// first, slower later, until it's merged, closed or done, or the thread is gone.
+    fn watch_pr(&mut self, id: &str, row: &str, cx: &mut Context<Self>) {
+        if trek_core::detect::which("gh").is_none() {
+            return;
+        }
+        let Some(live) = self.live.get_mut(id) else {
+            return;
+        };
+        if live.pr_watching.contains_key(row) {
+            return;
+        }
+        let tid = id.to_string();
+        let row = row.to_string();
+        let row_key = row.clone();
+        let row_ins = row.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let mut polls = 0u32;
+            loop {
+                let wait = if polls < 30 {
+                    Duration::from_secs(4)
+                } else {
+                    Duration::from_secs(20)
+                };
+                cx.background_executor().timer(wait).await;
+                polls += 1;
+                // An hour at most; a PR open longer keeps its last state.
+                if polls > 240 {
+                    break;
+                }
+                let card = this
+                    .update(cx, |this, _| {
+                        this.live.get(&tid).and_then(|l| {
+                            l.items.iter().find_map(|i| match i {
+                                Item::Tool { id, detail, .. } if *id == row => {
+                                    crate::pr_card::read(id, detail)
+                                }
+                                _ => None,
+                            })
+                        })
+                    })
+                    .ok()
+                    .flatten();
+                let Some(card) = card else { break };
+                if card.phase.terminal() {
+                    break;
+                }
+                let fetched = cx
+                    .background_executor()
+                    .spawn({
+                        let card = card.clone();
+                        async move { crate::pr_card::fetch(&card) }
+                    })
+                    .await;
+                let keep = this
+                    .update(cx, |this, cx| {
+                        let Some(live) = this.live.get_mut(&tid) else {
+                            return false;
+                        };
+                        let Some(ix) = live
+                            .items
+                            .iter()
+                            .position(|i| matches!(i, Item::Tool { id, .. } if *id == row))
+                        else {
+                            return false;
+                        };
+                        match fetched {
+                            Some(next) => {
+                                let same = live.items.get(ix).is_some_and(|i| match i {
+                                    Item::Tool { id, detail, .. } => {
+                                        crate::pr_card::read(id, detail).is_some_and(|c| c == next)
+                                    }
+                                    _ => false,
+                                });
+                                if !same {
+                                    crate::pr_card::edit(live, ix, |c| *c = next.clone());
+                                    let item = live.items.id_at(ix).map(str::to_string);
+                                    live.revision += 1;
+                                    if let Some(item) = item {
+                                        cx.emit(WorkspaceEvent::CardChanged {
+                                            id: tid.clone(),
+                                            item,
+                                        });
+                                    }
+                                    cx.emit(WorkspaceEvent::Transcript {
+                                        id: tid.clone(),
+                                        appended: false,
+                                    });
+                                }
+                                !next.phase.terminal()
+                            }
+                            None => true,
+                        }
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |this, _| {
+                if let Some(l) = this.live.get_mut(&tid) {
+                    l.pr_watching.remove(&row_key);
+                }
+            });
+        });
+        live.pr_watching.insert(row_ins, task);
+    }
+
+    /// The card's Merge button: `gh pr merge --merge --delete-branch` off the main thread, the
+    /// card showing Merging meanwhile (the next fetch sees it merged, or the call fails it).
+    pub fn pr_merge(&mut self, id: &str, row: &str, cx: &mut Context<Self>) {
+        let Some(live) = self.live.get_mut(id) else {
+            return;
+        };
+        let Some(ix) = live
+            .items
+            .iter()
+            .position(|i| matches!(i, Item::Tool { id, .. } if *id == row))
+        else {
+            return;
+        };
+        let Some(card) = live.items.get(ix).and_then(|i| match i {
+            Item::Tool { id, detail, .. } => crate::pr_card::read(id, detail),
+            _ => None,
+        }) else {
+            return;
+        };
+        crate::pr_card::edit(live, ix, |c| {
+            c.merging = true;
+            c.phase = crate::pr_card::Phase::Merging;
+            c.step = "Merging the pull request".into();
+        });
+        if let Some(item) = live.items.id_at(ix) {
+            let item = item.to_string();
+            cx.emit(WorkspaceEvent::CardChanged {
+                id: id.to_string(),
+                item,
+            });
+        }
+        live.revision += 1;
+        let Some(pr) = card
+            .url
+            .clone()
+            .or_else(|| card.number.map(|n| n.to_string()))
+        else {
+            return;
+        };
+        let dir = PathBuf::from(&card.repo_dir);
+        let tid = id.to_string();
+        let row = row.to_string();
+        let row2 = row.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let out = cx
+                .background_executor()
+                .spawn(async move {
+                    let gh = trek_core::detect::which("gh")?;
+                    trek_core::procs::command(gh)
+                        .env("PATH", trek_core::detect::login_path())
+                        .current_dir(dir)
+                        .args(["pr", "merge", &pr, "--merge", "--delete-branch"])
+                        .output()
+                        .ok()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let ok = out.as_ref().is_some_and(|o| o.status.success());
+                let Some(live) = this.live.get_mut(&tid) else {
+                    return;
+                };
+                let Some(ix) = live
+                    .items
+                    .iter()
+                    .position(|i| matches!(i, Item::Tool { id, .. } if *id == row))
+                else {
+                    return;
+                };
+                crate::pr_card::edit(live, ix, |c| {
+                    c.merging = false;
+                    c.branch_deleted |= ok;
+                    if ok {
+                        c.phase = crate::pr_card::Phase::Merging;
+                    } else {
+                        let why = out
+                            .and_then(|o| {
+                                let e = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                                (!e.is_empty()).then_some(e)
+                            })
+                            .unwrap_or_else(|| "couldn't merge".into());
+                        c.step = format!("Merge failed: {why}");
+                        c.phase = crate::pr_card::Phase::Open;
+                    }
+                });
+                if let Some(item) = live.items.id_at(ix) {
+                    let item = item.to_string();
+                    cx.emit(WorkspaceEvent::CardChanged {
+                        id: tid.clone(),
+                        item,
+                    });
+                }
+                live.revision += 1;
+                cx.emit(WorkspaceEvent::Transcript {
+                    id: tid.clone(),
+                    appended: false,
+                });
+            });
+        });
+        self.keep(task);
+        self.watch_pr(id, &row2, cx);
+        self.persist_soon(id, cx);
+    }
+
+    /// The card's Resolve conflicts: the thread's agent is asked to merge the base into the
+    /// head and push; the card counts down as the files clear.
+    pub fn pr_resolve(&mut self, id: &str, row: &str, cx: &mut Context<Self>) {
+        let Some(live) = self.live.get_mut(id) else {
+            return;
+        };
+        let Some(ix) = live
+            .items
+            .iter()
+            .position(|i| matches!(i, Item::Tool { id, .. } if *id == row))
+        else {
+            return;
+        };
+        let Some(card) = live.items.get(ix).and_then(|i| match i {
+            Item::Tool { id, detail, .. } => crate::pr_card::read(id, detail),
+            _ => None,
+        }) else {
+            return;
+        };
+        crate::pr_card::edit(live, ix, |c| {
+            c.resolving = true;
+            c.step = "Resolving the conflicts".into();
+        });
+        if let Some(item) = live.items.id_at(ix) {
+            let item = item.to_string();
+            cx.emit(WorkspaceEvent::CardChanged {
+                id: id.to_string(),
+                item,
+            });
+        }
+        live.revision += 1;
+        let pr = card
+            .number
+            .map(|n| format!(" #{n}"))
+            .unwrap_or_else(|| " pull request".to_string());
+        let (head, base) = (card.head.clone(), card.base.clone());
+        self.send_to(
+            id,
+            format!(
+                "The pull request{pr} has merge conflicts with `{base}`. Merge `{base}` into `{head}` (or rebase `{head}` on it), resolve the conflicts and push, so the pull request can merge."
+            ),
+            vec![],
+            cx,
+        );
+        self.persist_soon(id, cx);
+    }
+
+    /// The composer's mirror of `id`'s latest card, when there is one: its chip.
+    pub fn pr_chip(&self, id: &str) -> Option<crate::pr_card::Card> {
+        crate::pr_card::latest(self.live.get(id)?).map(|(_, c)| c)
     }
 
     /// Save `id`'s transcript a second from now (longer once a changed row is large, see

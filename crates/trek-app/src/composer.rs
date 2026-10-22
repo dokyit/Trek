@@ -63,6 +63,12 @@ pub struct Composer {
     editing: Option<Editing>,
     /// Redraws the usage-limit bar's countdown while it's up.
     limit_tick: Option<Task<()>>,
+    /// What the context card's Compact now is doing.
+    compact: crate::context_popover::Compact,
+    /// Counts compact runs, so each one's bar animation is its own.
+    compact_gen: u64,
+    /// Watches the context after Compact now, to say what it freed.
+    _compact_watch: Option<Task<()>>,
     /// Models to consult with the next message, and how (see `trek_core::orchestrate`).
     consult: Consult,
     /// Keep the consultants after sending (else they clear).
@@ -365,6 +371,9 @@ impl Composer {
             height: std::rc::Rc::new(std::cell::Cell::new(px(0.))),
             editing: None,
             limit_tick: None,
+            compact: crate::context_popover::Compact::Idle,
+            compact_gen: 0,
+            _compact_watch: None,
             consult: Consult {
                 implement: true,
                 ..Default::default()
@@ -853,6 +862,175 @@ impl Composer {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// The context ring, and the card it opens: what fills the window, the plan's limits, and
+    /// Compact now.
+    fn context_card(&mut self, used: u64, window: u64, cx: &mut Context<Self>) -> AnyElement {
+        let tip = format!(
+            "Context {:.0}% · {} of {}",
+            crate::context_popover::fraction(used, window) * 100.,
+            crate::workspace::fmt_tokens(used),
+            crate::workspace::fmt_tokens(window)
+        );
+        let me = cx.entity().downgrade();
+        Popover::new("context-card")
+            // Above the ring, right-aligned with it.
+            .anchor(Anchor::BottomRight)
+            .offset(px(6.))
+            .appearance(false)
+            .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+                if *open {
+                    // A compaction reported before the context moved on is old news.
+                    let used = this
+                        .workspace
+                        .read(cx)
+                        .thread_id_in(&this.scope)
+                        .and_then(|id| this.workspace.read(cx).live.get(id).and_then(|l| l.context))
+                        .map(|c| c.0);
+                    let before = match this.compact {
+                        crate::context_popover::Compact::Freed { before, .. }
+                        | crate::context_popover::Compact::Unchanged { before } => Some(before),
+                        _ => None,
+                    };
+                    if before.is_some_and(|before| used.is_some_and(|used| used > before)) {
+                        this.compact = crate::context_popover::Compact::Idle;
+                    }
+                    // The plan's limits, read without asking the agent anything, so the card has
+                    // them even when the Usage card doesn't show this agent.
+                    let agent = this
+                        .workspace
+                        .read(cx)
+                        .thread_in(&this.scope)
+                        .map(|t| t.agent.clone());
+                    if let Some(agent) = agent {
+                        this.workspace
+                            .update(cx, |ws, cx| ws.read_usage_for(agent, cx));
+                    }
+                }
+                cx.notify();
+            }))
+            .trigger(crate::context_popover::RingTrigger::new(
+                tip,
+                crate::context_popover::dial(used, window, cx).into_any_element(),
+            ))
+            // Gathered only while the card is open: the transcript is walked to estimate its
+            // share, which is no work to do on every keystroke behind a closed card.
+            .content(move |_, _, cx| match me.upgrade() {
+                Some(composer) => {
+                    let card = {
+                        let composer = composer.read(cx);
+                        let ws = composer.workspace.read(cx);
+                        let (used, window) = ws
+                            .thread_id_in(&composer.scope)
+                            .and_then(|id| ws.live.get(id))
+                            .and_then(|l| l.context)
+                            .unwrap_or((used, window));
+                        crate::context_popover::Card::of(
+                            ws,
+                            &composer.scope,
+                            ws.thread_in(&composer.scope),
+                            used,
+                            window,
+                            composer.compact.clone(),
+                        )
+                    };
+                    card.render(me.clone(), cx)
+                }
+                None => div().into_any_element(),
+            })
+            .into_any_element()
+    }
+
+    /// Compact now: send the agent's own `/compact`, then watch its context reports for what it
+    /// freed. The card says what happened; nothing is assumed when the agent says nothing.
+    pub(crate) fn compact_now(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.compact,
+            crate::context_popover::Compact::Running { .. }
+        ) {
+            return;
+        }
+        let (id, before) = {
+            let ws = self.workspace.read(cx);
+            let Some(id) = ws.thread_id_in(&self.scope).map(str::to_string) else {
+                return;
+            };
+            if ws.turn_running(&id) || ws.pause(&id).is_some() {
+                return;
+            }
+            let Some(before) = ws.live.get(&id).and_then(|l| l.context).map(|c| c.0) else {
+                return;
+            };
+            (id, before)
+        };
+        self.workspace.update(cx, |ws, cx| {
+            ws.send_to(&id, "/compact".to_string(), vec![], cx)
+        });
+        self.compact_gen += 1;
+        self.compact = crate::context_popover::Compact::Running {
+            generation: self.compact_gen,
+            before,
+        };
+        cx.notify();
+        self._compact_watch = Some(cx.spawn(async move |this, cx| {
+            let mut saw_turn = false;
+            // Five minutes: longer than a compaction takes, short enough to stop watching.
+            for _ in 0..600 {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
+                let done = this
+                    .update(cx, |this, cx| {
+                        let (used, running) = {
+                            let ws = this.workspace.read(cx);
+                            let used = ws.live.get(&id).and_then(|l| l.context).map(|c| c.0);
+                            (used, ws.turn_running(&id))
+                        };
+                        match used {
+                            Some(used) if used < before => {
+                                this.compact = crate::context_popover::Compact::Freed {
+                                    tokens: before - used,
+                                    before,
+                                };
+                                cx.notify();
+                                true
+                            }
+                            // Its turn is over and the context only grew: the agent answered
+                            // rather than compacted.
+                            Some(used) if !running && used > before => {
+                                this.compact =
+                                    crate::context_popover::Compact::Unchanged { before };
+                                cx.notify();
+                                true
+                            }
+                            _ if saw_turn && !running => {
+                                this.compact =
+                                    crate::context_popover::Compact::Unchanged { before };
+                                cx.notify();
+                                true
+                            }
+                            _ => {
+                                saw_turn |= running;
+                                false
+                            }
+                        }
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |this, cx| {
+                if matches!(
+                    this.compact,
+                    crate::context_popover::Compact::Running { .. }
+                ) {
+                    this.compact = crate::context_popover::Compact::Unchanged { before };
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     /// The bar above the prompt while the thread is paused at a usage limit: when it resets, what
@@ -3086,6 +3264,8 @@ impl Render for Composer {
             .and_then(|_| crate::cost::CacheHits::of(&spend));
         let billing_tip = crate::cost::billing_note(billing.as_ref());
         let queued = thread.as_ref().map_or(0, |t| ws.queued(&t.id));
+        // A PR/release the thread pushed out (`pr_card`), mirrored next to the controls.
+        let pr_chip = thread.as_ref().and_then(|t| ws.pr_chip(&t.id));
         let theme = cx.theme().clone();
         let empty = self.input.read(cx).value().trim().is_empty()
             && self.outbox.paths.is_empty()
@@ -3402,7 +3582,7 @@ impl Render for Composer {
                             .on_click(cx.listener(|this, _, _, cx| pickers::update_prefs(this, cx, |p| p.plan = !p.plan))),
                     )
                     .child(div().flex_1().min_w(px(4.)))
-                    .when_some(context, |el, (used, window)| el.child(pickers::context_ring(used, window, cx)))
+                    .when_some(context, |el, (used, window)| el.child(self.context_card(used, window, cx)))
                     .children(mic)
                     .child(send),
             ));
@@ -3479,6 +3659,28 @@ impl Render for Composer {
                     )
                 })
                 .when(queued > 0, |el| el.child(format!("{queued} queued")))
+                .when_some(pr_chip, |el, card| {
+                    let tint = crate::pr_card::chip_tint(&card, cx);
+                    el.child(
+                        h_flex()
+                            .id("pr-chip")
+                            .test_support()
+                            .gap(px(5.))
+                            .items_center()
+                            .flex_none()
+                            .child(
+                                Icon::new(match card.kind {
+                                    crate::pr_card::Kind::Pr => {
+                                        crate::assets::Lucide::GitPullRequest
+                                    }
+                                    crate::pr_card::Kind::Release => crate::assets::Lucide::Rocket,
+                                })
+                                .size(px(11.))
+                                .text_color(tint),
+                            )
+                            .child(div().text_color(tint).child(card.chip())),
+                    )
+                })
                 .when(crowded.is_some(), |el| {
                     let ws = self.workspace.clone();
                     el.child(

@@ -15,7 +15,7 @@
 //! `send <prompt>`, `attach <image>` (into the main composer's outbox), `note text <markdown>|image <path>…|mode write|split|preview` (Notes; see `run`), `project <folder>` (added, and a draft in it), `diff` (the latest turn's changes in the Git tool),
 //! `pair` (a pairing code, its link written to `pair.txt`), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
 //! `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `tools on|off|git|explorer|terminal|browser|sidechat|simulator`,
-//! `range today|week|all` (Basecamp's), `usage-demo` (plans and limits for the Usage card, no real agent asked), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
+//! `range today|week|all` (Basecamp's), `usage-demo` (plans and limits for the Usage card, no real agent asked), `limits-demo` (the same windows for the mock agent, for the composer's context card), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
 //! `wait <ms>` or `wait idle|permission|question|plan [cap ms]`, `record <name> <ms> [fps]` (frames
 //! to `<name>.frames/` plus `<name>.ffconcat` for ffmpeg's concat demuxer; `record stop`, `record wait`),
 //! `editor on|off|root|view|panel|chat|ai|open …` (Trek IDE; see `run`), `terminal feed <text>|link <n>`
@@ -1049,6 +1049,14 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         usage_demo(ws, cx);
         return Ok(());
     }
+    if verb == "limits-demo" {
+        limits_demo(ws, cx);
+        return Ok(());
+    }
+    if verb == "pr-demo" {
+        pr_demo(ws, arg, cx);
+        return Ok(());
+    }
     if verb == "toast" {
         anyhow::ensure!(!arg.is_empty(), "toast [undo|error] <message>");
         let (kind, rest) = arg.split_once(' ').unwrap_or((arg, ""));
@@ -1920,6 +1928,86 @@ fn usage_demo(ws: &Entity<Workspace>, cx: &mut App) {
         };
         ws.usage_cached
             .insert(crate::workspace::devin_agent().key(), devin);
+        cx.notify();
+    });
+}
+
+/// `pr-demo <state>`: a PR/release card with made-up contents appended to the thread on
+/// screen (`pr_card::demo`), so its states can be shot without a real `gh`. States: open,
+/// creating, checking, conflicted, resolving, ready, merged, release.
+fn pr_demo(ws: &Entity<Workspace>, arg: &str, cx: &mut App) {
+    ws.update(cx, |ws, cx| {
+        let Some(id) = ws
+            .thread_id_in(&crate::workspace::Scope::Main)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let card = crate::pr_card::demo(arg);
+        let mut fx = crate::pr_card::Effects::default();
+        if let Some(live) = ws.live.get_mut(&id) {
+            let key = format!("demo-{}", arg);
+            live.items.push(trek_core::store::Item::Tool {
+                id: crate::pr_card::row_id(&key),
+                title: "Pull request".into(),
+                detail: serde_json::to_string(&card).unwrap_or_default(),
+                output: String::new(),
+                status: trek_core::store::ToolStatus::Done,
+            });
+            live.revision += 1;
+            if let Some(item) = live.items.id_at(live.items.len() - 1) {
+                fx.changed.push(item.to_string());
+            }
+        }
+        for item in fx.changed {
+            cx.emit(crate::workspace::WorkspaceEvent::CardChanged {
+                id: id.to_string(),
+                item,
+            });
+        }
+        cx.emit(crate::workspace::WorkspaceEvent::Transcript {
+            id: id.to_string(),
+            appended: false,
+        });
+    });
+}
+
+/// `limits-demo`: a plan's usage windows for the mock agent the isolated app runs threads on, as
+/// Claude Code reports them, so the composer's context card has limits to draw (and hover) without
+/// asking any real agent.
+fn limits_demo(ws: &Entity<Workspace>, cx: &mut App) {
+    use trek_agents::{AgentStatus, CommandKind, SlashCommand, UsageLimit};
+    ws.update(cx, |ws, cx| {
+        let now = ws.now();
+        let limit = |label: &str, window: &str, percent: f32, hours: i64| UsageLimit {
+            label: label.into(),
+            percent,
+            resets_at: Some(now + hours * 3_600_000 + 1_380_000),
+            window: window.into(),
+        };
+        ws.agent_status.insert(
+            trek_core::AgentId::Direct(trek_core::catalog::MOCK_PROVIDER.into()).key(),
+            AgentStatus {
+                plan: Some("Max".into()),
+                logged_in: true,
+                limits: vec![
+                    limit("5-hour limit", "5h", 68., 2),
+                    limit("Weekly limit", "7d", 24., 50),
+                    limit("Weekly · Opus", "7d", 17., 50),
+                    limit("Weekly · Sonnet", "7d", 7., 50),
+                ],
+                // A few skills, so the context card has their share to estimate too.
+                commands: ["verify-trek", "trek-bug-finder", "emil-design-eng", "higs"]
+                    .into_iter()
+                    .map(|name| SlashCommand {
+                        name: name.into(),
+                        description: String::new(),
+                        kind: CommandKind::Skill,
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+        );
         cx.notify();
     });
 }

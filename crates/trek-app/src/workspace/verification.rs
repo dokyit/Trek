@@ -338,6 +338,13 @@ impl Workspace {
             .then(|| verification::instructions(&v, project, cwd))
     }
 
+    /// The notes Trek gives an agent working in `t`'s project (its verification skill), for the
+    /// composer's context card.
+    pub fn notes_for(&self, t: &Thread) -> Option<String> {
+        let cwd = t.cwd.clone().unwrap_or_else(trek_core::paths::home);
+        self.project_notes(self.project_dir(t).as_deref(), &cwd)
+    }
+
     /// How to tell a turn in `t` ran its project's verification CLI (`verification::verdict`).
     pub fn verify_probe(&self, t: &Thread) -> Option<verification::Probe> {
         let project = self.project_dir(t)?;

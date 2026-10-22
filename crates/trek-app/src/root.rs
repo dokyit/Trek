@@ -408,7 +408,8 @@ impl TrekWindow {
                     // The transcript views and the background strip redraw themselves.
                     WorkspaceEvent::Transcript { .. }
                     | WorkspaceEvent::Background { .. }
-                    | WorkspaceEvent::TurnChanges { .. } => {}
+                    | WorkspaceEvent::TurnChanges { .. }
+                    | WorkspaceEvent::CardChanged { .. } => {}
                 },
             ),
             cx.on_focus_lost(window, |this, window, cx| this.focus.focus(window, cx)),
