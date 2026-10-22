@@ -188,11 +188,15 @@ fn an_invalid_block_says_why_with_its_json_folded_away() {
         answered(
             &trek,
             cx,
-            "Here:\n\n```trek-viz\n{\"version\":1,\"title\":\"x\",\"summary\":\"y\",\"type\":\"bar\",\"bars\":[],\"html\":\"<b>\"}\n```\n",
+            "Here:\n\n```trek-viz\n{\"version\":1,\"title\":\"Build times\",\"summary\":\"Linking dominates.\",\"type\":\"bar\",\"bars\":[],\"html\":\"<b>\"}\n```\n",
         );
         let ids = on_screen(&trek, cx);
         assert!(find(&ids, "trek-viz-").is_none(), "{ids:?}");
         assert!(find(&ids, "viz-invalid-").is_some(), "{ids:?}");
+        // The spec's own words still show as plain text: the answer keeps its message.
+        let words = labels(&trek, cx, "viz-invalid-").concat();
+        assert!(words.contains("Build times"), "{words}");
+        assert!(words.contains("Linking dominates."), "{words}");
         // No code block (or its copy button) is mounted until the disclosure opens.
         assert!(find(&ids, "viz-raw-").is_none(), "{ids:?}");
         assert!(!ids.iter().any(|id| id == "copy"), "{ids:?}");
