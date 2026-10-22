@@ -23,10 +23,10 @@ use std::ffi::{CStr, c_void};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use foreign_types::ForeignType as _;
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventType, CGMouseButton, ScrollEventUnit};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
+use foreign_types::ForeignType as _;
 
 use super::{Button, Input, WindowInfo};
 use crate::keys::KeyCombo;
@@ -69,11 +69,16 @@ fn calls() -> &'static Calls {
         // SAFETY: each symbol is cast to the signature the window server's own callers use.
         unsafe {
             Calls {
-                post: find(c"SLEventPostToPid").map(|p| std::mem::transmute::<*mut c_void, PostToPid>(p)),
-                set_field: find(c"SLEventSetIntegerValueField").map(|p| std::mem::transmute::<*mut c_void, SetIntegerField>(p)),
-                set_window_location: find(c"CGEventSetWindowLocation").map(|p| std::mem::transmute::<*mut c_void, SetWindowLocation>(p)),
-                post_record: find(c"SLPSPostEventRecordTo").map(|p| std::mem::transmute::<*mut c_void, PostEventRecordTo>(p)),
-                process_for_pid: find(c"GetProcessForPID").map(|p| std::mem::transmute::<*mut c_void, ProcessForPid>(p)),
+                post: find(c"SLEventPostToPid")
+                    .map(|p| std::mem::transmute::<*mut c_void, PostToPid>(p)),
+                set_field: find(c"SLEventSetIntegerValueField")
+                    .map(|p| std::mem::transmute::<*mut c_void, SetIntegerField>(p)),
+                set_window_location: find(c"CGEventSetWindowLocation")
+                    .map(|p| std::mem::transmute::<*mut c_void, SetWindowLocation>(p)),
+                post_record: find(c"SLPSPostEventRecordTo")
+                    .map(|p| std::mem::transmute::<*mut c_void, PostEventRecordTo>(p)),
+                process_for_pid: find(c"GetProcessForPID")
+                    .map(|p| std::mem::transmute::<*mut c_void, ProcessForPid>(p)),
             }
         }
     })
@@ -126,7 +131,9 @@ fn post(pid: i32, event: &CGEvent) {
 /// when the window server won't take the records, events are still posted.
 fn make_key(pid: i32, wid: u32) {
     let c = calls();
-    let (Some(post_record), Some(process_for_pid)) = (c.post_record, c.process_for_pid) else { return };
+    let (Some(post_record), Some(process_for_pid)) = (c.post_record, c.process_for_pid) else {
+        return;
+    };
     let mut psn = [0u8; 8];
     // SAFETY: `psn` is the 8-byte ProcessSerialNumber the call fills in.
     if unsafe { process_for_pid(pid, psn.as_mut_ptr().cast()) } != 0 {
@@ -172,20 +179,53 @@ struct Pointer<'a> {
 
 impl<'a> Pointer<'a> {
     fn new(w: &'a WindowInfo) -> Result<Self, String> {
-        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).map_err(|_| "Failed to create CGEventSource".to_string())?;
-        let gesture = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_nanos() as i64;
-        Ok(Self { w, pid: w.pid as i32, source, gesture })
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|_| "Failed to create CGEventSource".to_string())?;
+        let gesture = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as i64;
+        Ok(Self {
+            w,
+            pid: w.pid as i32,
+            source,
+            gesture,
+        })
     }
 
     /// Post one event at `local` (the window's own coordinates; `NOWHERE` stays outside it).
-    fn send(&self, ty: CGEventType, local: (f64, f64), button: Button, phase: i64, click_state: i64) -> Result<(), String> {
-        let screen = if local == NOWHERE { NOWHERE } else { (self.w.x + local.0, self.w.y + local.1) };
-        let cg_button = if button == Button::Right { CGMouseButton::Right } else { CGMouseButton::Left };
-        let event = CGEvent::new_mouse_event(self.source.clone(), ty, CGPoint::new(screen.0, screen.1), cg_button)
-            .map_err(|_| "Failed to create mouse event".to_string())?;
+    fn send(
+        &self,
+        ty: CGEventType,
+        local: (f64, f64),
+        button: Button,
+        phase: i64,
+        click_state: i64,
+    ) -> Result<(), String> {
+        let screen = if local == NOWHERE {
+            NOWHERE
+        } else {
+            (self.w.x + local.0, self.w.y + local.1)
+        };
+        let cg_button = if button == Button::Right {
+            CGMouseButton::Right
+        } else {
+            CGMouseButton::Left
+        };
+        let event = CGEvent::new_mouse_event(
+            self.source.clone(),
+            ty,
+            CGPoint::new(screen.0, screen.1),
+            cg_button,
+        )
+        .map_err(|_| "Failed to create mouse event".to_string())?;
         self.stamp(&event, local, phase);
         set(&event, field::CLICK_STATE, click_state);
-        set(&event, field::BUTTON, if button == Button::Right { 1 } else { 0 });
+        set(
+            &event,
+            field::BUTTON,
+            if button == Button::Right { 1 } else { 0 },
+        );
         post(self.pid, &event);
         Ok(())
     }
@@ -239,7 +279,12 @@ pub fn deliver(w: &WindowInfo, input: &Input) -> Result<(), String> {
         }
         _ if wid == 0 => Err("That app has no window to click in yet.".into()),
         Input::Move(x, y) => Pointer::new(w)?.hover((*x, *y)),
-        Input::Click { x, y, button, count } => {
+        Input::Click {
+            x,
+            y,
+            button,
+            count,
+        } => {
             make_key(pid, wid);
             let p = Pointer::new(w)?;
             let at = (*x, *y);
@@ -284,10 +329,16 @@ pub fn deliver(w: &WindowInfo, input: &Input) -> Result<(), String> {
             p.hover(at)?;
             sleep_ms(15);
             // CGEvent wheel deltas are positive for up/left; ours are positive for down/right.
-            let event = CGEvent::new_scroll_event(p.source.clone(), ScrollEventUnit::LINE, 2, -dy, -dx, 0)
-                .map_err(|_| "Failed to create scroll event".to_string())?;
+            let event =
+                CGEvent::new_scroll_event(p.source.clone(), ScrollEventUnit::LINE, 2, -dy, -dx, 0)
+                    .map_err(|_| "Failed to create scroll event".to_string())?;
             // SAFETY: a live CGEvent.
-            unsafe { CGEventSetLocation(event.as_ptr() as *mut c_void, CGPoint::new(w.x + at.0, w.y + at.1)) };
+            unsafe {
+                CGEventSetLocation(
+                    event.as_ptr() as *mut c_void,
+                    CGPoint::new(w.x + at.0, w.y + at.1),
+                )
+            };
             p.stamp(&event, at, 0);
             post(pid, &event);
             Ok(())
@@ -297,14 +348,16 @@ pub fn deliver(w: &WindowInfo, input: &Input) -> Result<(), String> {
 
 fn key_source() -> Result<CGEventSource, String> {
     // Private: what the user holds on their keyboard doesn't mix into these.
-    CGEventSource::new(CGEventSourceStateID::Private).map_err(|_| "Failed to create CGEventSource".to_string())
+    CGEventSource::new(CGEventSourceStateID::Private)
+        .map_err(|_| "Failed to create CGEventSource".to_string())
 }
 
 fn press(pid: i32, combo: KeyCombo) -> Result<(), String> {
     let source = key_source()?;
     let flags = CGEventFlags::from_bits_truncate(combo.flags);
     for down in [true, false] {
-        let event = CGEvent::new_keyboard_event(source.clone(), combo.keycode, down).map_err(|_| "Failed to create keyboard event".to_string())?;
+        let event = CGEvent::new_keyboard_event(source.clone(), combo.keycode, down)
+            .map_err(|_| "Failed to create keyboard event".to_string())?;
         event.set_flags(flags);
         event.post_to_pid(pid);
         sleep_ms(if down { 15 } else { 0 });
@@ -316,10 +369,17 @@ fn type_text(pid: i32, text: &str) -> Result<(), String> {
     let source = key_source()?;
     for segment in super::macos::split_for_typing(text) {
         match segment {
-            super::macos::TypeSegment::Key(code) => press(pid, KeyCombo { keycode: code, flags: 0 })?,
+            super::macos::TypeSegment::Key(code) => press(
+                pid,
+                KeyCombo {
+                    keycode: code,
+                    flags: 0,
+                },
+            )?,
             super::macos::TypeSegment::Text(chunk) => {
                 for down in [true, false] {
-                    let event = CGEvent::new_keyboard_event(source.clone(), 0, down).map_err(|_| "Failed to create keyboard event".to_string())?;
+                    let event = CGEvent::new_keyboard_event(source.clone(), 0, down)
+                        .map_err(|_| "Failed to create keyboard event".to_string())?;
                     event.set_flags(CGEventFlags::empty());
                     event.set_string_from_utf16_unchecked(&chunk);
                     event.post_to_pid(pid);

@@ -9,20 +9,20 @@ mod orchestrate;
 mod tabs;
 #[cfg(test)]
 pub use tabs::MAX_TABS;
+mod ide;
+pub(crate) mod relocate;
+mod review;
 mod turn_changes;
 pub(crate) mod usage;
 mod verification;
 mod worktrees;
-mod ide;
-mod review;
-pub(crate) mod relocate;
 
 pub use ide::{ChatMode, IdeChat, IdeTab, Mode};
 pub use review::{FileReview, Review, as_given};
 
-pub use added_agents::{AddedAgents, Install as AgentInstall, is_added};
 #[cfg(test)]
 pub(crate) use added_agents::Step as InstallStep;
+pub use added_agents::{AddedAgents, Install as AgentInstall, is_added};
 pub use agent_updates::Hold;
 pub use limits::Clock;
 pub use lineage::{LineageRow, ThreadState};
@@ -31,18 +31,25 @@ pub use orchestrate::{TaskState, waiting_label};
 pub use turn_changes::{TurnRange, TurnSpans};
 pub use verification::ago;
 
-use gpui_kit::{AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Task};
+use gpui_kit::{
+    AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Task,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use trek_agents::{AcpInfo, AgentEvent, AgentStatus, Billing, Command, Decision, McpServer, SessionConfig, SlashCommand};
+use trek_agents::{
+    AcpInfo, AgentEvent, AgentStatus, Billing, Command, Decision, McpServer, SessionConfig,
+    SlashCommand,
+};
 use trek_core::catalog::{self, ModelInfo};
 use trek_core::detect::{Availability, DetectedAgent};
 use trek_core::import::ImportSummary;
-use trek_core::settings::{FollowUp, Settings};
 use trek_core::rewind::Reopen;
-use trek_core::store::{Item, Project, ResumePoint, SearchHit, Section, Store, Thread, ToolStatus, now_ms};
+use trek_core::settings::{FollowUp, Settings};
+use trek_core::store::{
+    Item, Project, ResumePoint, SearchHit, Section, Store, Thread, ToolStatus, now_ms,
+};
 use trek_core::transcript::Transcript;
 use trek_core::{AgentId, Effort, HandHolding, RunState, ThreadSource};
 
@@ -52,7 +59,9 @@ pub const NO_PROJECT: &str = "";
 #[derive(Debug, Clone, PartialEq)]
 pub enum Route {
     /// Composing a new thread in a project.
-    Draft { project: Option<PathBuf> },
+    Draft {
+        project: Option<PathBuf>,
+    },
     Thread(String),
     Settings(SettingsPage),
     /// The recap of the day's (or week's) work, with what's ready for review.
@@ -60,13 +69,16 @@ pub enum Route {
     /// Notes: things jotted down, in markdown.
     Notes,
     /// A file open in the in-app editor.
-    Editor { path: PathBuf },
+    Editor {
+        path: PathBuf,
+    },
     Onboarding,
 }
 
 /// Spends one reset credit by id (`Workspace::reset_consumer`).
 pub type ResetConsumer = std::sync::Arc<dyn Fn(String) -> ResetFuture + Send + Sync>;
-pub type ResetFuture = std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>;
+pub type ResetFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>;
 
 /// What a transcript or composer is bound to: whatever the main window shows, one thread (a
 /// thread window, which never follows the main window's route), or the editor's AI side bar
@@ -218,9 +230,6 @@ pub struct LiveThread {
     /// Sub-agents launched this turn (and those still out from earlier ones), keyed by the tool
     /// call that started them.
     pub tasks: Vec<SubTask>,
-    /// Tool call ids that ran alongside another (a `ToolStarted` arrived while an earlier call
-    /// was still running). The thinking timeline draws these as one parallel fan-out.
-    pub parallel: HashSet<String>,
     /// What the agent has running in the background (`AgentEvent::Background`): shells, monitors
     /// and its own sub-agents. They outlive the turn that started them; the session ending ends
     /// them.
@@ -305,16 +314,27 @@ enum GitJob {
     Checkpoint { cwd: PathBuf, item: String },
     /// Find where the agent's `session` stands (`trek_agents::session_tail`), for message `item`
     /// sent in a thread that doesn't know yet (imported, or kept by an older Trek).
-    FindPoint { agent: AgentId, session: String, item: String },
+    FindPoint {
+        agent: AgentId,
+        session: String,
+        item: String,
+    },
     /// Put the files back as checkpoint `sha` of `repo` has them: those `only` names.
-    Restore { repo: PathBuf, sha: String, only: RestoreOnly },
+    Restore {
+        repo: PathBuf,
+        sha: String,
+        only: RestoreOnly,
+    },
     /// Drop checkpoints by message (theirs left the transcript).
     Forget { repo: PathBuf, items: Vec<String> },
     /// Drop every checkpoint of the thread, and what would undo its last restore (its worktree
     /// went).
     ForgetAll { repo: PathBuf },
     /// Give a fork the checkpoints of the messages it copied: `(item, commit)`.
-    Link { repo: PathBuf, checkpoints: Vec<(String, String)> },
+    Link {
+        repo: PathBuf,
+        checkpoints: Vec<(String, String)>,
+    },
 }
 
 /// Which files a restore puts back; every other file is left as it is.
@@ -349,7 +369,9 @@ impl RewindFiles {
     /// What restoring changes, file by file: the files the turns taken back changed, and only
     /// those. Blocks on git.
     pub fn changes(&self) -> anyhow::Result<Vec<trek_core::checkpoint::FileChange>> {
-        let r = trek_core::checkpoint::Repo::find(&self.repo).ok_or_else(|| anyhow::anyhow!("{} isn't a git repository any more", self.repo.display()))?;
+        let r = trek_core::checkpoint::Repo::find(&self.repo).ok_or_else(|| {
+            anyhow::anyhow!("{} isn't a git repository any more", self.repo.display())
+        })?;
         let only = self.spans.paths(&self.store, &self.thread, &r)?;
         if only.is_empty() {
             return Ok(vec![]);
@@ -399,9 +421,16 @@ impl NoCheckpoint {
     /// Why message `pos` of `live` can't have its files restored now; `None` when it can.
     /// `worktree_missing`: the thread's worktree folder is gone (see `Workspace::restorable_checkpoint`);
     /// it was a git checkout, whatever the folder left behind looks like.
-    pub fn now(live: &LiveThread, pos: usize, in_repo: bool, worktree_missing: bool) -> Option<NoCheckpoint> {
+    pub fn now(
+        live: &LiveThread,
+        pos: usize,
+        in_repo: bool,
+        worktree_missing: bool,
+    ) -> Option<NoCheckpoint> {
         if worktree_missing {
-            return Some(NoCheckpoint::of(live, pos, true).unwrap_or(NoCheckpoint::WorktreeMissing));
+            return Some(
+                NoCheckpoint::of(live, pos, true).unwrap_or(NoCheckpoint::WorktreeMissing),
+            );
         }
         NoCheckpoint::of(live, pos, in_repo)
     }
@@ -417,7 +446,9 @@ impl NoCheckpoint {
             NoCheckpoint::Failed(why.clone())
         } else if !in_repo {
             NoCheckpoint::NotGit
-        } else if trek_core::rewind::turn_start(&live.items, pos + 1).is_some_and(|start| start != pos) {
+        } else if trek_core::rewind::turn_start(&live.items, pos + 1)
+            .is_some_and(|start| start != pos)
+        {
             NoCheckpoint::Steered
         } else {
             NoCheckpoint::Missing
@@ -470,7 +501,12 @@ impl Background {
 
     /// Its output's last line with something on it.
     pub fn last_line(&self) -> Option<&str> {
-        self.output.as_deref()?.lines().rev().map(str::trim).find(|l| !l.is_empty())
+        self.output
+            .as_deref()?
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
     }
 }
 
@@ -499,7 +535,10 @@ pub struct SubTask {
 impl LiveThread {
     /// Whole seconds reasoning item `item` took, when it was seen here and took one or more.
     pub fn thought_secs(&self, item: &str) -> Option<u64> {
-        self.thought.get(item).map(|(a, b)| b.saturating_duration_since(*a).as_secs()).filter(|s| *s > 0)
+        self.thought
+            .get(item)
+            .map(|(a, b)| b.saturating_duration_since(*a).as_secs())
+            .filter(|s| *s > 0)
     }
 
     pub fn active_tasks(&self) -> usize {
@@ -511,21 +550,45 @@ impl LiveThread {
     /// think anything since (Codex's spawn call returns at once; only its `wait`, which gets no
     /// row, blocks). Empty otherwise, mid-turn or not.
     pub fn blocked_on_tasks(&self) -> impl Iterator<Item = &SubTask> {
-        let calls_last = self.items.iter().rev().find(|i| matches!(i, Item::Assistant { .. } | Item::Reasoning { .. } | Item::Tool { .. } | Item::User { .. }));
-        let running: Vec<&str> = if self.turn_started.is_some() && self.permissions.is_empty() && matches!(calls_last, Some(Item::Tool { .. })) {
+        let calls_last = self.items.iter().rev().find(|i| {
+            matches!(
+                i,
+                Item::Assistant { .. }
+                    | Item::Reasoning { .. }
+                    | Item::Tool { .. }
+                    | Item::User { .. }
+            )
+        });
+        let running: Vec<&str> = if self.turn_started.is_some()
+            && self.permissions.is_empty()
+            && matches!(calls_last, Some(Item::Tool { .. }))
+        {
             // The turn's own calls: back to the message that started it.
             self.items
                 .iter()
                 .rev()
                 .take_while(|i| !matches!(i, Item::User { .. }))
-                .filter_map(|i| if let Item::Tool { id, status: ToolStatus::Running, .. } = i { Some(id.as_str()) } else { None })
+                .filter_map(|i| {
+                    if let Item::Tool {
+                        id,
+                        status: ToolStatus::Running,
+                        ..
+                    } = i
+                    {
+                        Some(id.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .collect()
         } else {
             vec![]
         };
         let out = |id: &str| self.tasks.iter().any(|k| k.id == id && k.done.is_none());
         let blocked = !running.is_empty() && running.iter().all(|id| out(id));
-        self.tasks.iter().filter(move |k| blocked && k.done.is_none() && running.contains(&k.id.as_str()))
+        self.tasks
+            .iter()
+            .filter(move |k| blocked && k.done.is_none() && running.contains(&k.id.as_str()))
     }
 
     /// The agent's own sub-agents working in the background (it takes a turn when they report).
@@ -544,8 +607,17 @@ impl LiveThread {
         self.background = tasks
             .into_iter()
             .map(|task| match old.iter().position(|b| b.task.id == task.id) {
-                Some(ix) => Background { task, ..old.swap_remove(ix) },
-                None => Background { task, started: Instant::now(), output: None, output_rev: 0, stopping: false },
+                Some(ix) => Background {
+                    task,
+                    ..old.swap_remove(ix)
+                },
+                None => Background {
+                    task,
+                    started: Instant::now(),
+                    output: None,
+                    output_rev: 0,
+                    stopping: false,
+                },
             })
             .collect();
     }
@@ -559,19 +631,42 @@ impl LiveThread {
     /// that were still out end, failed, and the transcript says what else stopped (the dev server
     /// the user was told to try).
     fn lose_background(&mut self) {
-        let work: Vec<&str> = self.background_work().map(|b| b.task.title.as_str()).collect();
+        let work: Vec<&str> = self
+            .background_work()
+            .map(|b| b.task.title.as_str())
+            .collect();
         let notice = match work[..] {
             [] => None,
-            [one] => Some(format!("{} stopped with the session", one.lines().next().unwrap_or_default().trim().chars().take(80).collect::<String>())),
-            _ => Some(format!("{} background tasks stopped with the session", work.len())),
+            [one] => Some(format!(
+                "{} stopped with the session",
+                one.lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .chars()
+                    .take(80)
+                    .collect::<String>()
+            )),
+            _ => Some(format!(
+                "{} background tasks stopped with the session",
+                work.len()
+            )),
         };
-        let out: Vec<String> = self.background_agents().filter_map(|b| b.task.call.clone()).collect();
-        for t in self.tasks.iter_mut().filter(|t| t.done.is_none() && out.contains(&t.id)) {
+        let out: Vec<String> = self
+            .background_agents()
+            .filter_map(|b| b.task.call.clone())
+            .collect();
+        for t in self
+            .tasks
+            .iter_mut()
+            .filter(|t| t.done.is_none() && out.contains(&t.id))
+        {
             t.done = Some(false);
             t.ended = Some(Instant::now());
         }
         for ix in 0..self.items.len() {
-            if matches!(&self.items[ix], Item::Tool { id, status: ToolStatus::Running, .. } if out.contains(id)) {
+            if matches!(&self.items[ix], Item::Tool { id, status: ToolStatus::Running, .. } if out.contains(id))
+            {
                 if let Some(Item::Tool { status, .. }) = self.items.get_mut(ix) {
                     *status = ToolStatus::Failed;
                 }
@@ -602,7 +697,9 @@ impl LiveThread {
             }
         }
         if ended {
-            self.items.push(Item::Notice { text: ORPHANS_ENDED.into() });
+            self.items.push(Item::Notice {
+                text: ORPHANS_ENDED.into(),
+            });
             self.revision += 1;
         }
         ended
@@ -619,7 +716,9 @@ impl LiveThread {
             if !flush && calls <= rows {
                 return;
             }
-            let Some(row) = self.pending_rows.pop_front() else { return };
+            let Some(row) = self.pending_rows.pop_front() else {
+                return;
+            };
             self.streaming = None;
             self.reasoning = None;
             self.items.push(row);
@@ -632,15 +731,26 @@ impl LiveThread {
     /// agent's that it says run in the background (they end when it says).
     fn close_turn(&mut self, ok: bool) {
         self.place_task_rows(true);
-        let out: Vec<String> = self.background_agents().filter_map(|b| b.task.call.clone()).collect();
-        for t in self.tasks.iter_mut().filter(|t| t.done.is_none() && !out.contains(&t.id)) {
+        let out: Vec<String> = self
+            .background_agents()
+            .filter_map(|b| b.task.call.clone())
+            .collect();
+        for t in self
+            .tasks
+            .iter_mut()
+            .filter(|t| t.done.is_none() && !out.contains(&t.id))
+        {
             t.done = Some(ok);
             t.ended = Some(Instant::now());
         }
         for ix in 0..self.items.len() {
             let ends = matches!(&self.items[ix], Item::Tool { status: ToolStatus::Running, id, .. } if trek_core::orchestrate::task_of_row(id).is_none() && !out.contains(id));
             if let (true, Some(Item::Tool { status, .. })) = (ends, self.items.get_mut(ix)) {
-                *status = if ok { ToolStatus::Done } else { ToolStatus::Failed };
+                *status = if ok {
+                    ToolStatus::Done
+                } else {
+                    ToolStatus::Failed
+                };
             }
         }
     }
@@ -653,7 +763,12 @@ impl LiveThread {
 
     /// Drop prompts offered after their turn: a new message answers them instead.
     fn drop_after_turn(&mut self) {
-        let stale: Vec<String> = self.permissions.iter().filter(|p| p.after_turn).map(|p| p.request_id.clone()).collect();
+        let stale: Vec<String> = self
+            .permissions
+            .iter()
+            .filter(|p| p.after_turn)
+            .map(|p| p.request_id.clone())
+            .collect();
         for rid in stale {
             self.settle_prompt(&rid);
         }
@@ -688,7 +803,10 @@ impl ItemRef {
 /// left open go unanswered. Also says whether the typed answer is a secret.
 /// Card answers as the user's message: the answer alone for one question, else one line per
 /// question under its short header. Secret answers are left out; `true` if there were any.
-fn answers_text(questions: &[trek_agents::Question], answers: &[(String, String)]) -> (String, bool) {
+fn answers_text(
+    questions: &[trek_agents::Question],
+    answers: &[(String, String)],
+) -> (String, bool) {
     let mut secret = false;
     let mut lines = Vec::new();
     for (question, answer) in answers {
@@ -697,22 +815,47 @@ fn answers_text(questions: &[trek_agents::Question], answers: &[(String, String)
             secret = true;
             continue;
         }
-        let label = q.map(|q| if q.header.trim().is_empty() { q.question.as_str() } else { q.header.as_str() }).unwrap_or(question);
+        let label = q
+            .map(|q| {
+                if q.header.trim().is_empty() {
+                    q.question.as_str()
+                } else {
+                    q.header.as_str()
+                }
+            })
+            .unwrap_or(question);
         lines.push((label.trim().to_string(), answer.trim().to_string()));
     }
     let text = match lines.as_slice() {
         [(_, answer)] if answers.len() == 1 => answer.clone(),
-        _ => lines.iter().map(|(label, answer)| format!("{label}: {answer}")).collect::<Vec<_>>().join("\n"),
+        _ => lines
+            .iter()
+            .map(|(label, answer)| format!("{label}: {answer}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
     };
     (text, secret)
 }
 
-fn typed_answers(questions: &[trek_agents::Question], picked: impl Fn(usize) -> Option<String>, typed: &str) -> (Vec<(String, String)>, bool) {
-    let target = (0..questions.len()).find(|i| picked(*i).is_none()).unwrap_or(questions.len().saturating_sub(1));
+fn typed_answers(
+    questions: &[trek_agents::Question],
+    picked: impl Fn(usize) -> Option<String>,
+    typed: &str,
+) -> (Vec<(String, String)>, bool) {
+    let target = (0..questions.len())
+        .find(|i| picked(*i).is_none())
+        .unwrap_or(questions.len().saturating_sub(1));
     let answers = questions
         .iter()
         .enumerate()
-        .filter_map(|(i, q)| if i == target { Some(typed.to_string()) } else { picked(i) }.map(|a| (q.question.clone(), a)))
+        .filter_map(|(i, q)| {
+            if i == target {
+                Some(typed.to_string())
+            } else {
+                picked(i)
+            }
+            .map(|a| (q.question.clone(), a))
+        })
         .collect();
     (answers, questions.get(target).is_some_and(|q| q.secret))
 }
@@ -740,7 +883,10 @@ pub struct SearchResults {
 
 impl SearchResults {
     fn from_hits(query: String, hits: Vec<SearchHit>) -> Self {
-        let mut out = SearchResults { query, ..Default::default() };
+        let mut out = SearchResults {
+            query,
+            ..Default::default()
+        };
         for h in hits {
             if h.position.is_some() {
                 out.messages.insert(h.thread_id.clone(), h);
@@ -769,13 +915,26 @@ impl SearchResults {
 
     /// The message that put `t` in the list, when its title didn't.
     pub fn content_hit(&self, query: &str, t: &Thread) -> Option<&SearchHit> {
-        if self.title_matches(query, t) { None } else { self.messages.get(&t.id) }
+        if self.title_matches(query, t) {
+            None
+        } else {
+            self.messages.get(&t.id)
+        }
     }
 }
 
 /// What a pre-warmed draft session was started with; it's used only if the draft still matches.
 /// The last: the project notes it was given, so a skill set up or changed since starts afresh.
-type WarmKey = (AgentId, PathBuf, Option<String>, Effort, HandHolding, bool, bool, Option<String>);
+type WarmKey = (
+    AgentId,
+    PathBuf,
+    Option<String>,
+    Effort,
+    HandHolding,
+    bool,
+    bool,
+    Option<String>,
+);
 
 pub use crate::updater::{UpdateAction, UpdateStatus, UpdateView};
 
@@ -791,7 +950,14 @@ pub enum PanelTool {
 }
 
 impl PanelTool {
-    pub const ALL: [PanelTool; 6] = [PanelTool::Terminal, PanelTool::Browser, PanelTool::Simulator, PanelTool::Explorer, PanelTool::SideChat, PanelTool::Git];
+    pub const ALL: [PanelTool; 6] = [
+        PanelTool::Terminal,
+        PanelTool::Browser,
+        PanelTool::Simulator,
+        PanelTool::Explorer,
+        PanelTool::SideChat,
+        PanelTool::Git,
+    ];
 
     /// The tools this platform has, in `ALL`'s order: the iOS Simulator needs Xcode's tools, so
     /// Windows has no Simulator tab.
@@ -800,7 +966,10 @@ impl PanelTool {
     }
 
     pub fn offered_on(windows: bool) -> Vec<PanelTool> {
-        Self::ALL.into_iter().filter(|t| !(windows && *t == PanelTool::Simulator)).collect()
+        Self::ALL
+            .into_iter()
+            .filter(|t| !(windows && *t == PanelTool::Simulator))
+            .collect()
     }
     pub fn label(self) -> &'static str {
         match self {
@@ -849,33 +1018,60 @@ pub enum WorkspaceEvent {
     /// Open a page in the tools panel's Browser (a link clicked in a terminal).
     OpenInBrowser(String),
     /// A toast-worthy message with an optional undo.
-    Toast { message: String, undo: Option<UndoAction> },
+    Toast {
+        message: String,
+        undo: Option<UndoAction>,
+    },
     /// A thread needs the user or finished: an in-app toast when it's off screen, plus a system
     /// banner / sound per the notification settings.
-    Attention { message: String, thread: String, button: Option<&'static str> },
+    Attention {
+        message: String,
+        thread: String,
+        button: Option<&'static str>,
+    },
     FocusComposer,
     /// The editor's AI side bar takes the keys (a chat tab switched or opened, the editor shown).
     FocusAiInput,
     /// Run one of Trek's own shell commands (an agent install or sign-in) in a new terminal tab,
     /// in `cwd` or else the folder on screen, then rescan agents. On Windows it runs in PowerShell,
     /// which these are written for, whatever `[terminal] shell` is.
-    RunInTerminal { command: String, cwd: Option<PathBuf> },
+    RunInTerminal {
+        command: String,
+        cwd: Option<PathBuf>,
+    },
     /// The same for one of the user's project actions, which the shell they chose runs.
-    RunProjectAction { command: String, cwd: Option<PathBuf> },
+    RunProjectAction {
+        command: String,
+        cwd: Option<PathBuf>,
+    },
     /// Insert text at the composer's cursor (e.g. an element picked in the browser).
     InsertIntoComposer(String),
     /// Open `path` in the in-app editor, at `line` when given (Explorer, `trek://edit`).
     /// `preview`: in the editor, a tab the next preview replaces until it's edited or kept.
-    OpenEditor { path: PathBuf, line: Option<u32>, preview: bool },
+    OpenEditor {
+        path: PathBuf,
+        line: Option<u32>,
+        preview: bool,
+    },
     /// Do something to the file in front in the editor (the palette, the header's ×).
     Editor(EditorCommand),
     /// Attach an image to the composer (e.g. a browser screenshot).
     AttachImage(std::path::PathBuf),
     /// Follow-ups held for a turn that stopped or failed go back into the composer showing `thread`.
-    RestoreQueued { thread: String, text: String, images: Vec<PathBuf> },
+    RestoreQueued {
+        thread: String,
+        text: String,
+        images: Vec<PathBuf>,
+    },
     /// A message goes back into the composer of `scope` (on `thread`): taken back by a rewind, or
     /// (`edit`: its item id) to be edited and sent again in its place.
-    ComposeIn { scope: Scope, thread: String, text: String, images: Vec<PathBuf>, edit: Option<String> },
+    ComposeIn {
+        scope: Scope,
+        thread: String,
+        text: String,
+        images: Vec<PathBuf>,
+        edit: Option<String>,
+    },
     /// Something in a thread window changed what the main window shows: bring it forward.
     ActivateMain,
     /// ⌘K from a thread window: the palette opens in the main window (its commands act there),
@@ -883,23 +1079,42 @@ pub enum WorkspaceEvent {
     OpenPalette,
     /// The user said a restatement isn't quite right: the composer of `scope` (on `thread`) takes
     /// focus, asking for a restatement of the correction too.
-    CorrectRestatement { scope: Scope, thread: String },
+    CorrectRestatement {
+        scope: Scope,
+        thread: String,
+    },
     /// Only this thread's transcript changed (streamed text, tool calls). Sent instead of a
     /// notification, so views that don't draw transcripts aren't redrawn for every batch.
     /// `appended`: all that changed is text added to the messages already streaming.
-    Transcript { id: String, appended: bool },
+    Transcript {
+        id: String,
+        appended: bool,
+    },
     /// Only the output of this thread's background tasks changed (it's read while they run).
-    Background { id: String },
+    Background {
+        id: String,
+    },
     /// What the turn ending at `end` (its `TurnEnd`, by item id) changed is in, or may have moved
     /// (`Workspace::load_turn_changes`).
-    TurnChanges { id: String, end: String },
+    TurnChanges {
+        id: String,
+        end: String,
+    },
     /// Show the changes of the turn ending at `end` (by item id) of `thread` in the Git tool,
     /// with `path`'s diff open (relative to the repository's top folder).
-    ShowTurnDiff { thread: String, end: String, path: Option<String> },
+    ShowTurnDiff {
+        thread: String,
+        end: String,
+        path: Option<String>,
+    },
     /// A thread's review (Keep / Undo) moved: its pending files, or it closed.
-    ReviewChanged { id: String },
+    ReviewChanged {
+        id: String,
+    },
     /// Show the review of `thread`'s pending changes in the editor's diff tab.
-    OpenReview { thread: String },
+    OpenReview {
+        thread: String,
+    },
     /// "Add to Chat" (the Explorer, the terminal): a chip for the editor's AI side bar.
     AddToChat(crate::ide::ai::context::ContextChip),
     /// Send what the main window's composer holds, as its send button would (a project was just
@@ -913,7 +1128,12 @@ pub enum UndoAction {
     Unarchive(String),
     /// Put `paths` (relative to the top folder of `repo`) back as they were before a restore
     /// (`Restored::undo`, or the undo kept before a review's Undo); other files are left as they are.
-    Unrestore { thread: String, repo: PathBuf, sha: String, paths: Vec<String> },
+    Unrestore {
+        thread: String,
+        repo: PathBuf,
+        sha: String,
+        paths: Vec<String>,
+    },
     /// Call off a restart to update that's counting down (`RESTART_GRACE`); it waits for a click
     /// or a quit again.
     CancelRestart,
@@ -985,36 +1205,56 @@ pub(crate) fn read_git_info(cwd: &std::path::Path) -> GitInfo {
     // The rest are independent reads, each a process of its own: one after another they're ten
     // spawns, which on Windows (a hundred milliseconds apiece, or more under a virus scanner) kept
     // the branch chip off the composer for over a second. Side by side it waits for the slowest.
-    let (branch, worktrees, head, status, ahead, behind, default_branch, branches, remote) = std::thread::scope(|s| {
-        let branch = s.spawn(|| run(&["branch", "--show-current"]).filter(|b| !b.is_empty()));
-        let worktrees = s.spawn(|| run(&["worktree", "list", "--porcelain"]));
-        let head = s.spawn(|| run(&["rev-parse", "--verify", "-q", "HEAD"]));
-        // Every untracked file, not their folders, so the count matches the Git panel's list.
-        let status = s.spawn(|| run(&["status", "--porcelain", "-uall"]));
-        let ahead = s.spawn(|| run(&["rev-list", "--count", "@{u}..HEAD"]));
-        let behind = s.spawn(|| run(&["rev-list", "--count", "HEAD..@{u}"]));
-        let default_branch = s.spawn(|| {
-            run(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).and_then(|s| s.split_once('/').map(|(_, b)| b.to_string())).or_else(|| {
-                let local = run(&["branch", "--format=%(refname:short)"]).unwrap_or_default();
-                ["main", "master", "trunk"].iter().find(|b| local.lines().any(|l| l == **b)).map(|b| b.to_string())
-            })
+    let (branch, worktrees, head, status, ahead, behind, default_branch, branches, remote) =
+        std::thread::scope(|s| {
+            let branch = s.spawn(|| run(&["branch", "--show-current"]).filter(|b| !b.is_empty()));
+            let worktrees = s.spawn(|| run(&["worktree", "list", "--porcelain"]));
+            let head = s.spawn(|| run(&["rev-parse", "--verify", "-q", "HEAD"]));
+            // Every untracked file, not their folders, so the count matches the Git panel's list.
+            let status = s.spawn(|| run(&["status", "--porcelain", "-uall"]));
+            let ahead = s.spawn(|| run(&["rev-list", "--count", "@{u}..HEAD"]));
+            let behind = s.spawn(|| run(&["rev-list", "--count", "HEAD..@{u}"]));
+            let default_branch = s.spawn(|| {
+                run(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+                    .and_then(|s| s.split_once('/').map(|(_, b)| b.to_string()))
+                    .or_else(|| {
+                        let local =
+                            run(&["branch", "--format=%(refname:short)"]).unwrap_or_default();
+                        ["main", "master", "trunk"]
+                            .iter()
+                            .find(|b| local.lines().any(|l| l == **b))
+                            .map(|b| b.to_string())
+                    })
+            });
+            let branches = s.spawn(|| {
+                run(&[
+                    "for-each-ref",
+                    "--sort=-committerdate",
+                    "--format=%(refname:short)",
+                    "refs/heads",
+                ])
+            });
+            let remote = s.spawn(|| trek_core::store::git_remote(cwd));
+            (
+                branch.join().unwrap_or_default(),
+                worktrees.join().unwrap_or_default(),
+                head.join().unwrap_or_default(),
+                status.join().unwrap_or_default(),
+                ahead.join().unwrap_or_default(),
+                behind.join().unwrap_or_default(),
+                default_branch.join().unwrap_or_default(),
+                branches.join().unwrap_or_default(),
+                remote.join().unwrap_or_default(),
+            )
         });
-        let branches = s.spawn(|| run(&["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads"]));
-        let remote = s.spawn(|| trek_core::store::git_remote(cwd));
-        (
-            branch.join().unwrap_or_default(),
-            worktrees.join().unwrap_or_default(),
-            head.join().unwrap_or_default(),
-            status.join().unwrap_or_default(),
-            ahead.join().unwrap_or_default(),
-            behind.join().unwrap_or_default(),
-            default_branch.join().unwrap_or_default(),
-            branches.join().unwrap_or_default(),
-            remote.join().unwrap_or_default(),
-        )
-    });
     let elsewhere = worktrees
-        .map(|s| s.lines().filter_map(|l| l.strip_prefix("branch refs/heads/")).filter(|b| Some(*b) != branch.as_deref()).map(str::to_string).collect())
+        .map(|s| {
+            s.lines()
+                .filter_map(|l| l.strip_prefix("branch refs/heads/"))
+                .filter(|b| Some(*b) != branch.as_deref())
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default();
     GitInfo {
         is_repo: true,
@@ -1025,7 +1265,9 @@ pub(crate) fn read_git_info(cwd: &std::path::Path) -> GitInfo {
         ahead: ahead.and_then(|s| s.parse().ok()).unwrap_or(0),
         behind: behind.and_then(|s| s.parse().ok()).unwrap_or(0),
         default_branch,
-        branches: branches.map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default(),
+        branches: branches
+            .map(|s| s.lines().map(str::to_string).collect())
+            .unwrap_or_default(),
         remote,
     }
 }
@@ -1034,15 +1276,42 @@ pub(crate) fn read_git_info(cwd: &std::path::Path) -> GitInfo {
 /// files it names (local changes a checkout would overwrite), else `fallback`.
 pub(crate) fn git_error(stderr: &str, fallback: &str) -> String {
     let lines: Vec<&str> = stderr.lines().collect();
-    let Some(at) = lines.iter().position(|l| l.starts_with("error:") || l.starts_with("fatal:")) else {
-        return stderr.trim().lines().last().filter(|l| !l.trim().is_empty()).unwrap_or(fallback).trim().to_string();
+    let Some(at) = lines
+        .iter()
+        .position(|l| l.starts_with("error:") || l.starts_with("fatal:"))
+    else {
+        return stderr
+            .trim()
+            .lines()
+            .last()
+            .filter(|l| !l.trim().is_empty())
+            .unwrap_or(fallback)
+            .trim()
+            .to_string();
     };
-    let head = lines[at].split_once(':').map_or(lines[at], |(_, rest)| rest).trim();
-    let mut msg: String = head.chars().take(1).flat_map(char::to_uppercase).chain(head.chars().skip(1)).collect();
-    let files: Vec<&str> = lines[at + 1..].iter().take_while(|l| l.starts_with(char::is_whitespace)).map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let head = lines[at]
+        .split_once(':')
+        .map_or(lines[at], |(_, rest)| rest)
+        .trim();
+    let mut msg: String = head
+        .chars()
+        .take(1)
+        .flat_map(char::to_uppercase)
+        .chain(head.chars().skip(1))
+        .collect();
+    let files: Vec<&str> = lines[at + 1..]
+        .iter()
+        .take_while(|l| l.starts_with(char::is_whitespace))
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
     if !files.is_empty() {
         let shown = files.iter().take(5).copied().collect::<Vec<_>>().join(", ");
-        let more = if files.len() > 5 { format!(" and {} more", files.len() - 5) } else { String::new() };
+        let more = if files.len() > 5 {
+            format!(" and {} more", files.len() - 5)
+        } else {
+            String::new()
+        };
         msg = format!("{} {shown}{more}.", msg.trim_end_matches(':'));
     }
     if stderr.contains("commit your changes or stash them") {
@@ -1296,21 +1565,31 @@ impl Workspace {
             // The main window asks whether to quit or go on with nothing saved (`store_error`).
             Err(e) => {
                 tracing::error!("database: {e:#}; nothing is saved this session");
-                (Store::in_memory().expect("in-memory store"), Some(format!("{e:#}")))
+                (
+                    Store::in_memory().expect("in-memory store"),
+                    Some(format!("{e:#}")),
+                )
             }
         };
         let alone = hold_data_folder();
         // Agents and language servers a crashed run left behind go first.
-        cx.background_executor().spawn(async { trek_core::procs::reap_stale() }).detach();
-        let mut launch_toasts: Vec<String> = settings_problem.map(|p| p.message()).into_iter().collect();
-        launch_toasts.extend(crate::logging::take_crash_note(&trek_core::paths::data_dir()));
+        cx.background_executor()
+            .spawn(async { trek_core::procs::reap_stale() })
+            .detach();
+        let mut launch_toasts: Vec<String> =
+            settings_problem.map(|p| p.message()).into_iter().collect();
+        launch_toasts.extend(crate::logging::take_crash_note(
+            &trek_core::paths::data_dir(),
+        ));
         if store.newer_schema().is_some() {
             launch_toasts.push("This data folder was last used by a newer Trek. Threads it saved may show only in part here, and rewinding or editing them is off until you update.".into());
         }
         // Two Treks on one data folder would each write their own copy of the settings over the
         // other's: the one that came second leaves the file alone.
         if !alone {
-            settings.guard.block("another Trek is using this data folder");
+            settings
+                .guard
+                .block("another Trek is using this data folder");
             launch_toasts.push("Another Trek is using this data folder, so settings changed in this one aren't saved.".into());
         }
         // Side chats an earlier run started from a draft can't be reopened: they go before any
@@ -1326,10 +1605,13 @@ impl Workspace {
             cx.background_executor()
                 .spawn(async move {
                     for (thread, checkpoints) in orphans {
-                        let mut repos: HashSet<PathBuf> = checkpoints.into_iter().map(|c| c.repo).collect();
+                        let mut repos: HashSet<PathBuf> =
+                            checkpoints.into_iter().map(|c| c.repo).collect();
                         repos.extend(thread.cwd.filter(|c| in_repo(Some(c))));
                         for repo in repos {
-                            if let Some(Err(e)) = trek_core::checkpoint::Repo::find(&repo).map(|r| r.delete_all(&thread.id)) {
+                            if let Some(Err(e)) = trek_core::checkpoint::Repo::find(&repo)
+                                .map(|r| r.delete_all(&thread.id))
+                            {
                                 tracing::warn!("drop checkpoints of {}: {e:#}", thread.id);
                             }
                         }
@@ -1355,14 +1637,22 @@ impl Workspace {
             this.index_for_search(cx);
         }
         // Only a bundled Trek manages updates; a dev build sharing the data folder leaves them be.
-        let after_update = if trek_core::update::blocker().is_none() { trek_core::update::after_launch() } else { None };
+        let after_update = if trek_core::update::blocker().is_none() {
+            trek_core::update::after_launch()
+        } else {
+            None
+        };
         // Toasts with a button: a move out of where Trek is, and the old copy it left.
         let mut launch_actions: Vec<(String, UndoAction)> = vec![];
         let windows = crate::words::is_windows();
         // Where Trek runs now, and the old copy: told by a toast and the Updates page (`arrived`),
         // once the user's shortcuts have been looked through.
         if windows && let Some(relocated) = trek_core::update::relocate::at_launch() {
-            tracing::info!("relocation: now running from {}, moved from {}", relocated.moved.to.display(), relocated.moved.from.display());
+            tracing::info!(
+                "relocation: now running from {}, moved from {}",
+                relocated.moved.to.display(),
+                relocated.moved.from.display()
+            );
             this.arrived(relocated, cx);
         }
         if trek_core::update::blocker().is_none() {
@@ -1376,21 +1666,32 @@ impl Workspace {
             // A first launch has nothing new to show; one after an update shows what it brought
             // (from a build older than "What's new", whose setting is still empty).
             if this.settings.updates.seen_notes.is_empty() {
-                this.settings.updates.seen_notes = after_update.clone().unwrap_or_else(|| trek_core::VERSION.into());
+                this.settings.updates.seen_notes = after_update
+                    .clone()
+                    .unwrap_or_else(|| trek_core::VERSION.into());
                 this.save_settings(cx);
             }
             this.fetch_changelog(cx);
         }
-        launch_actions.extend(relocate::guarded_offer(trek_core::update::blocker(), windows));
+        launch_actions.extend(relocate::guarded_offer(
+            trek_core::update::blocker(),
+            windows,
+        ));
         if !launch_toasts.is_empty() || !launch_actions.is_empty() {
             // Spawned so they land after the window has subscribed to workspace events.
             cx.spawn(async move |this, cx| {
                 let _ = this.update(cx, |_, cx| {
                     for message in launch_toasts {
-                        cx.emit(WorkspaceEvent::Toast { message, undo: None });
+                        cx.emit(WorkspaceEvent::Toast {
+                            message,
+                            undo: None,
+                        });
                     }
                     for (message, undo) in launch_actions {
-                        cx.emit(WorkspaceEvent::Toast { message, undo: Some(undo) });
+                        cx.emit(WorkspaceEvent::Toast {
+                            message,
+                            undo: Some(undo),
+                        });
                     }
                 });
             })
@@ -1399,9 +1700,17 @@ impl Workspace {
         if let Some(from) = after_update {
             tracing::info!("updated from {from} to {}", trek_core::VERSION);
             // Spawned so it lands after the window has subscribed to workspace events.
-            let message = format!("Trek updated to {} (from {from}). See what changed under What's new, at the bottom of the sidebar.", trek_core::VERSION);
+            let message = format!(
+                "Trek updated to {} (from {from}). See what changed under What's new, at the bottom of the sidebar.",
+                trek_core::VERSION
+            );
             cx.spawn(async move |this, cx| {
-                let _ = this.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message, undo: None }));
+                let _ = this.update(cx, |_, cx| {
+                    cx.emit(WorkspaceEvent::Toast {
+                        message,
+                        undo: None,
+                    })
+                });
             })
             .detach();
         }
@@ -1419,16 +1728,26 @@ impl Workspace {
         // The phone server, if it was on.
         this.sync_remote(cx);
         let keep = this.settings.snapshots.keep_days;
-        cx.background_executor().spawn(async move { crate::mentions::prune_snapshots(keep) }).detach();
+        cx.background_executor()
+            .spawn(async move { crate::mentions::prune_snapshots(keep) })
+            .detach();
         // TREK_MOCK_PROMPT starts a mock thread at launch, for performance measurements and demos
         // that can't touch the UI. Only with the mock agent on, and in a scratch folder of its
         // own: in one of the user's repos its turns would leave checkpoint refs behind.
-        if let Some(prompt) = std::env::var("TREK_MOCK_PROMPT").ok().filter(|_| this.mock_agent) {
+        if let Some(prompt) = std::env::var("TREK_MOCK_PROMPT")
+            .ok()
+            .filter(|_| this.mock_agent)
+        {
             let scratch = trek_core::paths::data_dir().join("mock-project");
-            match std::fs::create_dir_all(&scratch).map_err(anyhow::Error::from).and_then(|_| this.store.ensure_project(&scratch)) {
+            match std::fs::create_dir_all(&scratch)
+                .map_err(anyhow::Error::from)
+                .and_then(|_| this.store.ensure_project(&scratch))
+            {
                 Ok(p) => {
                     this.reload(cx);
-                    this.route = Route::Draft { project: Some(p.path) };
+                    this.route = Route::Draft {
+                        project: Some(p.path),
+                    };
                     this.draft_prefs.agent = AgentId::Direct(catalog::MOCK_PROVIDER.into());
                     this.draft_prefs.model = None;
                     this.draft_prefs.worktree = false;
@@ -1452,11 +1771,18 @@ impl Workspace {
         // No session runs yet: turns an earlier run left open (it quit or crashed mid-turn, or
         // with a card up) are over, and saying otherwise would leave them "Working" for good.
         // Unless another Trek has the data folder: those turns may well be its own, running.
-        let closed = if alone { store.close_interrupted_turns() } else { Ok(vec![]) };
+        let closed = if alone {
+            store.close_interrupted_turns()
+        } else {
+            Ok(vec![])
+        };
         let closed = match closed {
             Ok(closed) => {
                 if !closed.is_empty() {
-                    tracing::info!("turns an earlier run left open, now closed: {}", closed.len());
+                    tracing::info!(
+                        "turns an earlier run left open, now closed: {}",
+                        closed.len()
+                    );
                 }
                 closed
             }
@@ -1465,7 +1791,11 @@ impl Workspace {
                 vec![]
             }
         };
-        let route = if settings.onboarding.completed { Route::Draft { project: None } } else { Route::Onboarding };
+        let route = if settings.onboarding.completed {
+            Route::Draft { project: None }
+        } else {
+            Route::Onboarding
+        };
         let applied_defaults = default_prefs_key(&settings);
         let draft_prefs = Prefs {
             agent: AgentId::from_key(&settings.general.default_agent),
@@ -1498,7 +1828,11 @@ impl Workspace {
             updater: Default::default(),
             agent_updates: Default::default(),
             sidebar_collapsed: false,
-            tabs: if cfg!(test) { vec![] } else { tabs::load_tabs() },
+            tabs: if cfg!(test) {
+                vec![]
+            } else {
+                tabs::load_tabs()
+            },
             remote: None,
             machines: Default::default(),
             remote_starting: false,
@@ -1597,7 +1931,8 @@ impl Workspace {
             draft_became: None,
             verify_runs: HashMap::new(),
             changes_cache: Default::default(),
-            end_children_on_quit: (!cfg!(test)).then_some(trek_core::procs::end_all as fn(std::time::Duration)),
+            end_children_on_quit: (!cfg!(test))
+                .then_some(trek_core::procs::end_all as fn(std::time::Duration)),
         };
         this.reload(cx);
         // The machines paired before connect again.
@@ -1650,15 +1985,27 @@ impl Workspace {
     }
 
     /// Show a session the import left out after all; later imports leave it in the sidebar.
-    pub fn show_left_out(&mut self, session: &trek_core::import::ImportedThread, cx: &mut Context<Self>) {
+    pub fn show_left_out(
+        &mut self,
+        session: &trek_core::import::ImportedThread,
+        cx: &mut Context<Self>,
+    ) {
         match self.store.keep_imported(session) {
             Ok(t) => {
                 if let Some(summary) = self.import_summary.as_mut() {
-                    summary.left_out.retain(|s| !(s.source == session.source && s.native_id == session.native_id));
+                    summary.left_out.retain(|s| {
+                        !(s.source == session.source && s.native_id == session.native_id)
+                    });
                 }
-                cx.emit(WorkspaceEvent::Toast { message: format!("“{}” is in the sidebar", t.title), undo: None });
+                cx.emit(WorkspaceEvent::Toast {
+                    message: format!("“{}” is in the sidebar", t.title),
+                    undo: None,
+                });
             }
-            Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't show it: {e}"), undo: None }),
+            Err(e) => cx.emit(WorkspaceEvent::Toast {
+                message: format!("Couldn't show it: {e}"),
+                undo: None,
+            }),
         }
         self.reload(cx);
         // Its messages become searchable like the rest of the import's.
@@ -1670,7 +2017,10 @@ impl Workspace {
     pub fn card_thread(&self, html: &str) -> Option<(String, bool)> {
         let mut best: Option<(&String, usize)> = None;
         for (id, live) in &self.live {
-            let at = live.items.iter().rposition(|i| matches!(i, Item::Assistant { text } if text.contains(html)));
+            let at = live
+                .items
+                .iter()
+                .rposition(|i| matches!(i, Item::Assistant { text } if text.contains(html)));
             if let Some(at) = at {
                 let newer = best.is_none_or(|(_, b)| at > b);
                 if newer {
@@ -1684,7 +2034,9 @@ impl Workspace {
     }
 
     pub fn thread(&self, id: &str) -> Option<&Thread> {
-        self.threads.iter().find(|t| t.id == id)
+        self.threads
+            .iter()
+            .find(|t| t.id == id)
             // A thread on another machine, as its row there reads (`machines`).
             .or_else(|| self.machines.thread(id))
     }
@@ -1754,7 +2106,12 @@ impl Workspace {
             Mode::Agents => Scope::Main,
             Mode::Editor => Scope::Ide,
         };
-        shown_in(id, self.in_main(id).then_some(main), self.thread_windows.contains_key(id), self.main_window.is_some())
+        shown_in(
+            id,
+            self.in_main(id).then_some(main),
+            self.thread_windows.contains_key(id),
+            self.main_window.is_some(),
+        )
     }
 
     /// The main window shows `id`: the harness on it, or the editor's AI side bar.
@@ -1774,11 +2131,21 @@ impl Workspace {
     /// Trek window is frontmost) in any of them.
     pub fn viewing(&self, thread: &str, active: Option<AnyWindowHandle>) -> bool {
         let in_main = self.main_window.is_some() && self.in_main(thread);
-        viewing(in_main, self.thread_windows.get(thread).copied(), self.main_window, active)
+        viewing(
+            in_main,
+            self.thread_windows.get(thread).copied(),
+            self.main_window,
+            active,
+        )
     }
 
     /// A window now shows `id` on its own.
-    pub fn thread_window_opened(&mut self, id: &str, handle: AnyWindowHandle, cx: &mut Context<Self>) {
+    pub fn thread_window_opened(
+        &mut self,
+        id: &str,
+        handle: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
         self.thread_windows.insert(id.to_string(), handle);
         self.mutate_thread(id, cx, |t| t.last_seen_at = now_ms().max(t.updated_at));
         self.load_for_view(id, cx);
@@ -1798,8 +2165,15 @@ impl Workspace {
     /// for the plan's usage.
     fn fetch_claude_commands(&mut self, cwd: PathBuf, cx: &mut Context<Self>) {
         let key = (AgentId::ClaudeCode.key(), cwd);
-        let ready = self.agents.iter().any(|a| a.agent == AgentId::ClaudeCode && a.availability == Availability::Ready);
-        if !ready || trek_core::paths::isolated() || self.settings.disabled_agents.contains(&key.0) || self.agent_commands.contains_key(&key) {
+        let ready = self
+            .agents
+            .iter()
+            .any(|a| a.agent == AgentId::ClaudeCode && a.availability == Availability::Ready);
+        if !ready
+            || trek_core::paths::isolated()
+            || self.settings.disabled_agents.contains(&key.0)
+            || self.agent_commands.contains_key(&key)
+        {
             return;
         }
         let (tx, rx) = async_channel::bounded(1);
@@ -1817,7 +2191,12 @@ impl Workspace {
         self.keep(task);
     }
 
-    pub fn thread_window_closed(&mut self, id: &str, handle: AnyWindowHandle, cx: &mut Context<Self>) {
+    pub fn thread_window_closed(
+        &mut self,
+        id: &str,
+        handle: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
         if forget_window(&mut self.thread_windows, id, handle) {
             cx.notify();
         }
@@ -1857,7 +2236,9 @@ impl Workspace {
     /// The transcript column's widest at the current text size (`md::column`): the transcript,
     /// its cards, the working bar and the composer line up on it.
     pub fn column(&self) -> gpui_kit::Pixels {
-        crate::md::column(gpui_kit::px(self.settings.appearance.transcript_font_size()))
+        crate::md::column(gpui_kit::px(
+            self.settings.appearance.transcript_font_size(),
+        ))
     }
 
     /// Motion is allowed: neither Trek's Reduce motion setting nor the system asks for less.
@@ -1879,8 +2260,10 @@ impl Workspace {
             let before = t.title.clone();
             f(t);
             if t.title != before && motion {
-                self.retitled.retain(|_, (_, at)| at.elapsed() < TITLE_REVEAL);
-                self.retitled.insert(id.to_string(), (before, Instant::now()));
+                self.retitled
+                    .retain(|_, (_, at)| at.elapsed() < TITLE_REVEAL);
+                self.retitled
+                    .insert(id.to_string(), (before, Instant::now()));
             }
             if let Err(e) = self.store.save_thread(t) {
                 tracing::warn!("save thread: {e}");
@@ -1912,7 +2295,10 @@ impl Workspace {
     /// `save_settings` calls this on its own when the defaults change.
     pub fn apply_default_prefs(&mut self, cx: &mut Context<Self>) {
         let (agent, model, effort, hand) = default_prefs_key(&self.settings);
-        let (old_agent, old_model, old_effort, old_hand) = std::mem::replace(&mut self.applied_defaults, (agent.clone(), model.clone(), effort, hand));
+        let (old_agent, old_model, old_effort, old_hand) = std::mem::replace(
+            &mut self.applied_defaults,
+            (agent.clone(), model.clone(), effort, hand),
+        );
         let agent_id = AgentId::from_key(&agent);
         // The editor's new chats start from the same defaults as the harness's drafts.
         for p in [&mut self.draft_prefs, &mut self.ide_chat.draft_prefs] {
@@ -1943,7 +2329,11 @@ impl Workspace {
     #[allow(dead_code)] // for the settings / composer UI
     pub fn diagnostics(&self) -> String {
         #[cfg(windows)]
-        let os = format!("{} · {}", crate::system::windows_version(), std::env::consts::ARCH);
+        let os = format!(
+            "{} · {}",
+            crate::system::windows_version(),
+            std::env::consts::ARCH
+        );
         #[cfg(not(windows))]
         let os = {
             let sw = |flag: &str| {
@@ -1955,7 +2345,12 @@ impl Workspace {
                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                     .unwrap_or_else(|| "unknown".into())
             };
-            format!("macOS {} ({}) · {}", sw("-productVersion"), sw("-buildVersion"), std::env::consts::ARCH)
+            format!(
+                "macOS {} ({}) · {}",
+                sw("-productVersion"),
+                sw("-buildVersion"),
+                std::env::consts::ARCH
+            )
         };
         let mut out = vec![
             format!("Trek {}", env!("CARGO_PKG_VERSION")),
@@ -1966,7 +2361,11 @@ impl Workspace {
             "Agents:".into(),
         ];
         if self.agents.is_empty() {
-            out.push(if self.detecting { "  (detecting…)".into() } else { "  (none detected)".into() });
+            out.push(if self.detecting {
+                "  (detecting…)".into()
+            } else {
+                "  (none detected)".into()
+            });
         }
         for a in &self.agents {
             let state = match a.availability {
@@ -1975,9 +2374,21 @@ impl Workspace {
                 Availability::NeedsLogin => "needs login",
                 Availability::Offline => "offline",
             };
-            let disabled = if self.settings.disabled_agents.contains(&a.agent.key()) { ", disabled" } else { "" };
-            let version = a.version.as_deref().map(|v| format!(" {v}")).unwrap_or_default();
-            let path = a.path.as_ref().map(|p| format!(" · {}", p.display())).unwrap_or_default();
+            let disabled = if self.settings.disabled_agents.contains(&a.agent.key()) {
+                ", disabled"
+            } else {
+                ""
+            };
+            let version = a
+                .version
+                .as_deref()
+                .map(|v| format!(" {v}"))
+                .unwrap_or_default();
+            let path = a
+                .path
+                .as_ref()
+                .map(|p| format!(" · {}", p.display()))
+                .unwrap_or_default();
             out.push(format!("  {}{version}: {state}{disabled}{path}", a.name));
         }
         out.join("\n")
@@ -1995,12 +2406,17 @@ impl Workspace {
             }
             if let Some(p) = &self.project_filter {
                 // `NO_PROJECT` keeps the threads that belong to none.
-                if t.project_id.as_ref() != Some(p) && !(p == NO_PROJECT && t.project_id.is_none()) {
+                if t.project_id.as_ref() != Some(p) && !(p == NO_PROJECT && t.project_id.is_none())
+                {
                     continue;
                 }
             }
             // A search finds sub-agents too, though the inbox lists them only in their parent.
-            let section = if q.is_empty() { t.section(now) } else { t.own_section(now) };
+            let section = if q.is_empty() {
+                t.section(now)
+            } else {
+                t.own_section(now)
+            };
             // Waiting on its sub-agents, a thread is still at work.
             let section = match section {
                 Some(Section::Inbox) if waiting.contains(&t.id) => Some(Section::Working),
@@ -2031,7 +2447,12 @@ impl Workspace {
         let sub_agents = self.waiting_on_sub_agents();
         self.threads
             .iter()
-            .filter(|t| t.parent_id.is_none() && t.archived_at.is_none() && t.side_of.is_none() && (t.needs_you() || sub_agents.contains(&t.id)))
+            .filter(|t| {
+                t.parent_id.is_none()
+                    && t.archived_at.is_none()
+                    && t.side_of.is_none()
+                    && (t.needs_you() || sub_agents.contains(&t.id))
+            })
             .count()
     }
 
@@ -2045,17 +2466,33 @@ impl Workspace {
     /// earlier run that quit mid-turn don't count, nor do shells and monitors left running: a dev
     /// server can run all day, and whatever it reports wakes its agent into a turn.
     pub fn any_turn_running(&self) -> bool {
-        self.threads.iter().any(|t| t.run_state == RunState::Working && self.live.get(&t.id).is_some_and(|l| l.turn_started.is_some()))
-            || self.live.values().any(|l| l.commands.is_some() && l.background_agents().next().is_some())
+        self.threads.iter().any(|t| {
+            t.run_state == RunState::Working
+                && self
+                    .live
+                    .get(&t.id)
+                    .is_some_and(|l| l.turn_started.is_some())
+        }) || self
+            .live
+            .values()
+            .any(|l| l.commands.is_some() && l.background_agents().next().is_some())
     }
 
     /// Ask `thread`'s agent for the end of background task `task`'s output (it arrives as a
     /// `WorkspaceEvent::Background`). Nothing happens when its session is gone.
     pub fn read_background(&mut self, thread: &str, task: &str) {
-        let Some(live) = self.live.get(thread) else { return };
-        if live.background.iter().any(|b| b.task.id == task && b.task.readable) {
+        let Some(live) = self.live.get(thread) else {
+            return;
+        };
+        if live
+            .background
+            .iter()
+            .any(|b| b.task.id == task && b.task.readable)
+        {
             if let Some(tx) = &live.commands {
-                let _ = tx.try_send(Command::ReadTask { id: task.to_string() });
+                let _ = tx.try_send(Command::ReadTask {
+                    id: task.to_string(),
+                });
             }
         }
     }
@@ -2064,17 +2501,31 @@ impl Workspace {
     /// `STOP_WAIT` later (the agent couldn't stop it, and said so in the transcript), it can be
     /// asked again.
     pub fn stop_background(&mut self, thread: &str, task: &str, cx: &mut Context<Self>) {
-        let Some(live) = self.live.get_mut(thread) else { return };
-        let Some(b) = live.background.iter_mut().find(|b| b.task.id == task && b.task.stoppable && !b.stopping) else { return };
+        let Some(live) = self.live.get_mut(thread) else {
+            return;
+        };
+        let Some(b) = live
+            .background
+            .iter_mut()
+            .find(|b| b.task.id == task && b.task.stoppable && !b.stopping)
+        else {
+            return;
+        };
         b.stopping = true;
         if let Some(tx) = &live.commands {
-            let _ = tx.try_send(Command::StopTask { id: task.to_string() });
+            let _ = tx.try_send(Command::StopTask {
+                id: task.to_string(),
+            });
         }
         let (id, task) = (thread.to_string(), task.to_string());
         let again = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(STOP_WAIT).await;
             let _ = this.update(cx, |ws, cx| {
-                if let Some(b) = ws.live.get_mut(&id).and_then(|l| l.background.iter_mut().find(|b| b.task.id == task && b.stopping)) {
+                if let Some(b) = ws.live.get_mut(&id).and_then(|l| {
+                    l.background
+                        .iter_mut()
+                        .find(|b| b.task.id == task && b.stopping)
+                }) {
                     b.stopping = false;
                     cx.emit(WorkspaceEvent::Background { id: id.clone() });
                     cx.notify();
@@ -2085,21 +2536,30 @@ impl Workspace {
         cx.notify();
     }
 
-
     // ---------- navigation ----------
 
     /// Projects worth offering in pickers: repos and folders the user added.
     pub fn workspace_projects(&self) -> Vec<&Project> {
         self.projects
             .iter()
-            .filter(|p| p.is_workspace(&self.settings.user_projects) && !self.settings.hidden_projects.contains(&p.path.display().to_string()))
+            .filter(|p| {
+                p.is_workspace(&self.settings.user_projects)
+                    && !self
+                        .settings
+                        .hidden_projects
+                        .contains(&p.path.display().to_string())
+            })
             .collect()
     }
 
     pub fn refresh_git(&mut self, cx: &mut Context<Self>) {
         if let Some(cwd) = self.current_cwd() {
             // Tab/project cycling lands here: a folder read moments ago doesn't need another.
-            if self.git_fetched.get(&cwd).is_some_and(|at| at.elapsed() < Duration::from_secs(2)) {
+            if self
+                .git_fetched
+                .get(&cwd)
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(2))
+            {
                 return;
             }
             self.refresh_git_at(cwd, cx);
@@ -2117,7 +2577,10 @@ impl Workspace {
         self.git_inflight += 1;
         let task = cx.spawn(async move |this, cx| {
             let c = cwd.clone();
-            let info = cx.background_executor().spawn(async move { read_git_info(&c) }).await;
+            let info = cx
+                .background_executor()
+                .spawn(async move { read_git_info(&c) })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.git_inflight = this.git_inflight.saturating_sub(1);
                 if this.git_reads.get(&cwd) != Some(&seq) {
@@ -2142,7 +2605,12 @@ impl Workspace {
     /// window or a subfolder's thread shows the same branch.
     pub(crate) fn refresh_checkout(&mut self, cwd: PathBuf, cx: &mut Context<Self>) {
         let root = trek_core::worktree::checkout_root(&cwd);
-        let mut dirs: Vec<PathBuf> = self.git_info.keys().filter(|k| trek_core::worktree::checkout_root(k) == root).cloned().collect();
+        let mut dirs: Vec<PathBuf> = self
+            .git_info
+            .keys()
+            .filter(|k| trek_core::worktree::checkout_root(k) == root)
+            .cloned()
+            .collect();
         if !dirs.contains(&cwd) {
             dirs.push(cwd);
         }
@@ -2157,23 +2625,36 @@ impl Workspace {
         self.threads
             .iter()
             .filter(|t| t.id != except && t.cwd.as_deref().is_some_and(|c| c.starts_with(&root)))
-            .find(|t| t.run_state == RunState::Working || self.live.get(&t.id).is_some_and(|l| l.turn_started.is_some()))
+            .find(|t| {
+                t.run_state == RunState::Working
+                    || self
+                        .live
+                        .get(&t.id)
+                        .is_some_and(|l| l.turn_started.is_some())
+            })
             .map(|t| t.title.clone())
     }
 
     /// Why another branch can't be checked out in `cwd` right now, if it can't: an agent working
     /// anywhere in that checkout would have its files changed mid-turn.
     pub fn switch_blocked(&self, cwd: &Path) -> Option<String> {
-        if self.switching.contains(&trek_core::worktree::checkout_root(cwd)) {
+        if self
+            .switching
+            .contains(&trek_core::worktree::checkout_root(cwd))
+        {
             return Some("Switching branches…".into());
         }
-        self.working_in_checkout(cwd, "").map(|_| "A thread is working in this folder: switch once it's done.".to_string())
+        self.working_in_checkout(cwd, "")
+            .map(|_| "A thread is working in this folder: switch once it's done.".to_string())
     }
 
     /// `git switch <branch>` in `cwd`: never under a working agent, one at a time per checkout.
     pub fn switch_branch(&mut self, cwd: PathBuf, branch: String, cx: &mut Context<Self>) {
         if let Some(why) = self.switch_blocked(&cwd) {
-            cx.emit(WorkspaceEvent::Toast { message: why, undo: None });
+            cx.emit(WorkspaceEvent::Toast {
+                message: why,
+                undo: None,
+            });
             return;
         }
         let root = trek_core::worktree::checkout_root(&cwd);
@@ -2186,15 +2667,27 @@ impl Workspace {
                 .spawn(async move {
                     // `--no-guess`: a branch deleted since the menu was drawn isn't quietly
                     // re-made from origin; `--`: a name can't be read as an option.
-                    trek_core::procs::command("git").args(["switch", "--no-guess", "--", &branch]).current_dir(&dir).output()
+                    trek_core::procs::command("git")
+                        .args(["switch", "--no-guess", "--", &branch])
+                        .current_dir(&dir)
+                        .output()
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.switching.remove(&root);
                 match out {
                     Ok(o) if o.status.success() => this.files_epoch += 1,
-                    Ok(o) => cx.emit(WorkspaceEvent::Toast { message: git_error(&String::from_utf8_lossy(&o.stderr), "git switch failed"), undo: None }),
-                    Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("git: {e}"), undo: None }),
+                    Ok(o) => cx.emit(WorkspaceEvent::Toast {
+                        message: git_error(
+                            &String::from_utf8_lossy(&o.stderr),
+                            "git switch failed",
+                        ),
+                        undo: None,
+                    }),
+                    Err(e) => cx.emit(WorkspaceEvent::Toast {
+                        message: format!("git: {e}"),
+                        undo: None,
+                    }),
                 }
                 this.refresh_checkout(cwd, cx);
                 cx.notify();
@@ -2217,7 +2710,12 @@ impl Workspace {
             return;
         }
         // Screens only the harness draws (settings, Basecamp, notes) bring it back from the editor.
-        if self.ide() && matches!(route, Route::Settings(_) | Route::Basecamp | Route::Notes | Route::Onboarding) {
+        if self.ide()
+            && matches!(
+                route,
+                Route::Settings(_) | Route::Basecamp | Route::Notes | Route::Onboarding
+            )
+        {
             self.mode = Mode::Agents;
         }
         if let Route::Thread(id) = &route {
@@ -2248,7 +2746,8 @@ impl Workspace {
             self.editor_back = Some(self.route.clone()).filter(|r| !matches!(r, Route::Onboarding));
         }
         if route == Route::Basecamp && self.route != Route::Basecamp {
-            self.basecamp_back = Some(self.route.clone()).filter(|r| !matches!(r, Route::Onboarding));
+            self.basecamp_back =
+                Some(self.route.clone()).filter(|r| !matches!(r, Route::Onboarding));
             // Plan limits for its "Left on" tiles (asked at most every 30 seconds).
             self.refresh_usage(cx);
             self.refresh_devin_usage(cx);
@@ -2269,7 +2768,11 @@ impl Workspace {
     /// Open a thread scrolled to one of its messages (a search result).
     pub fn open_thread_at(&mut self, id: &str, item: ItemRef, cx: &mut Context<Self>) {
         let seq = self.reveal.as_ref().map_or(1, |r| r.seq + 1);
-        self.reveal = Some(Reveal { thread: id.to_string(), item, seq });
+        self.reveal = Some(Reveal {
+            thread: id.to_string(),
+            item,
+            seq,
+        });
         self.navigate(Route::Thread(id.to_string()), cx);
     }
 
@@ -2300,7 +2803,10 @@ impl Workspace {
         let store = self.store.clone();
         self._search_task = Some(cx.spawn(async move |this, cx| {
             let q = query.clone();
-            let hits = cx.background_executor().spawn(async move { store.search(&q, 500) }).await;
+            let hits = cx
+                .background_executor()
+                .spawn(async move { store.search(&q, 500) })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if this.search.trim() != query {
                     return;
@@ -2340,13 +2846,23 @@ impl Workspace {
         let store = self.store.clone();
         let task = cx.spawn(async move |this, cx| {
             let s = store.clone();
-            if let Err(e) = cx.background_executor().spawn(async move { s.prune_search() }).await {
+            if let Err(e) = cx
+                .background_executor()
+                .spawn(async move { s.prune_search() })
+                .await
+            {
                 tracing::warn!("search prune: {e}");
             }
             loop {
                 let s = store.clone();
-                let more = cx.background_executor().spawn(async move { index_step(&s) }).await;
-                if this.update(cx, |this, cx| this.search_index_changed(cx)).is_err() {
+                let more = cx
+                    .background_executor()
+                    .spawn(async move { index_step(&s) })
+                    .await;
+                if this
+                    .update(cx, |this, cx| this.search_index_changed(cx))
+                    .is_err()
+                {
                     return;
                 }
                 if !more {
@@ -2366,46 +2882,81 @@ impl Workspace {
     // ---------- projects: preferences ----------
 
     pub fn project_prefs(&self, path: &std::path::Path) -> trek_core::settings::ProjectPrefs {
-        self.settings.projects.get(&path.display().to_string()).cloned().unwrap_or_default()
+        self.settings
+            .projects
+            .get(&path.display().to_string())
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// The icon and colour chosen for a project folder, if any.
     pub fn project_look(&self, path: &std::path::Path) -> crate::ui::ProjectLook {
-        self.settings.projects.get(&path.display().to_string()).map(crate::ui::ProjectLook::of).unwrap_or_default()
+        self.settings
+            .projects
+            .get(&path.display().to_string())
+            .map(crate::ui::ProjectLook::of)
+            .unwrap_or_default()
     }
 
     /// The look of the project a thread belongs to.
     pub fn thread_project_look(&self, t: &Thread) -> crate::ui::ProjectLook {
-        let project = t.project_id.as_ref().and_then(|pid| self.projects.iter().find(|p| &p.id == pid));
-        project.map(|p| self.project_look(&p.path)).unwrap_or_default()
+        let project = t
+            .project_id
+            .as_ref()
+            .and_then(|pid| self.projects.iter().find(|p| &p.id == pid));
+        project
+            .map(|p| self.project_look(&p.path))
+            .unwrap_or_default()
     }
 
     /// The colour the folders of a thread's project are tinted with (`ui::project_tint`).
     pub fn thread_project_tint(&self, t: &Thread, cx: &App) -> Option<gpui_kit::Hsla> {
         let pid = t.project_id.as_ref()?;
         let p = self.projects.iter().find(|p| &p.id == pid)?;
-        Some(crate::ui::project_tint(&p.name, &self.project_look(&p.path), cx))
+        Some(crate::ui::project_tint(
+            &p.name,
+            &self.project_look(&p.path),
+            cx,
+        ))
     }
 
     /// The folder tint of the project in the project folder `path`.
     pub fn project_tint_at(&self, path: &std::path::Path, cx: &App) -> Option<gpui_kit::Hsla> {
         let p = self.projects.iter().find(|p| p.path == path)?;
-        Some(crate::ui::project_tint(&p.name, &self.project_look(&p.path), cx))
+        Some(crate::ui::project_tint(
+            &p.name,
+            &self.project_look(&p.path),
+            cx,
+        ))
     }
 
     /// The folder tint of the project on screen: the thread's, or the draft's.
     #[cfg(test)]
     pub fn current_project_tint(&self, cx: &App) -> Option<gpui_kit::Hsla> {
         match &self.route {
-            Route::Thread(id) => self.thread(id).and_then(|t| self.thread_project_tint(t, cx)),
-            Route::Draft { project: Some(path) } => self.project_tint_at(path, cx),
+            Route::Thread(id) => self
+                .thread(id)
+                .and_then(|t| self.thread_project_tint(t, cx)),
+            Route::Draft {
+                project: Some(path),
+            } => self.project_tint_at(path, cx),
             _ => None,
         }
     }
 
-    pub fn update_project_prefs(&mut self, path: &std::path::Path, f: impl FnOnce(&mut trek_core::settings::ProjectPrefs), cx: &mut Context<Self>) {
+    pub fn update_project_prefs(
+        &mut self,
+        path: &std::path::Path,
+        f: impl FnOnce(&mut trek_core::settings::ProjectPrefs),
+        cx: &mut Context<Self>,
+    ) {
         let key = path.display().to_string();
-        let mut prefs = self.settings.projects.get(&key).cloned().unwrap_or_default();
+        let mut prefs = self
+            .settings
+            .projects
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
         f(&mut prefs);
         if prefs.is_empty() {
             self.settings.projects.remove(&key);
@@ -2419,14 +2970,21 @@ impl Workspace {
     fn apply_project_defaults(&mut self, project: &std::path::Path) {
         let g = &self.settings.general;
         let prefs = self.project_prefs(project);
-        let agent = prefs.agent.as_deref().map(AgentId::from_key).filter(|a| self.ready_agents().contains(a));
+        let agent = prefs
+            .agent
+            .as_deref()
+            .map(AgentId::from_key)
+            .filter(|a| self.ready_agents().contains(a));
         // With no agent of its own, a project can still pick the model Trek's default agent uses
         // (Settings → Project offers that agent's models); one that agent doesn't have is ignored.
         let default_agent = AgentId::from_key(&g.default_agent);
-        let model_for_default = prefs
-            .model
-            .clone()
-            .filter(|m| prefs.agent.is_none() && self.models_for(&default_agent).iter().any(|i| crate::composer::same_model(m, &i.id)));
+        let model_for_default = prefs.model.clone().filter(|m| {
+            prefs.agent.is_none()
+                && self
+                    .models_for(&default_agent)
+                    .iter()
+                    .any(|i| crate::composer::same_model(m, &i.id))
+        });
         let p = &mut self.draft_prefs;
         match agent {
             Some(a) => {
@@ -2440,8 +2998,11 @@ impl Workspace {
         }
         p.effort = prefs.effort.unwrap_or(g.default_effort);
         p.hand_holding = prefs.hand_holding.unwrap_or(g.hand_holding);
-        p.worktree = prefs.run_in == trek_core::settings::RunIn::Worktree && project.join(".git").exists();
-        if p.hand_holding == HandHolding::FullAccess && !self.settings.permissions.full_access_unlocked {
+        p.worktree =
+            prefs.run_in == trek_core::settings::RunIn::Worktree && project.join(".git").exists();
+        if p.hand_holding == HandHolding::FullAccess
+            && !self.settings.permissions.full_access_unlocked
+        {
             p.hand_holding = HandHolding::Auto;
         }
     }
@@ -2454,17 +3015,34 @@ impl Workspace {
             return;
         }
         if matches!(self.route, Route::Settings(_)) {
-            self.navigate(Route::Draft { project: Some(dir.clone()) }, cx);
+            self.navigate(
+                Route::Draft {
+                    project: Some(dir.clone()),
+                },
+                cx,
+            );
         }
-        cx.emit(WorkspaceEvent::RunProjectAction { command, cwd: Some(dir) });
+        cx.emit(WorkspaceEvent::RunProjectAction {
+            command,
+            cwd: Some(dir),
+        });
     }
 
     pub fn open_project_settings(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
         let current = self
             .current_thread()
             .and_then(|t| t.project_id.clone())
-            .or_else(|| self.current_cwd().and_then(|c| self.projects.iter().find(|p| p.path == trek_core::store::project_root(&c)).map(|p| p.id.clone())));
-        self.settings_project = project_id.or(current).or_else(|| self.workspace_projects().first().map(|p| p.id.clone()));
+            .or_else(|| {
+                self.current_cwd().and_then(|c| {
+                    self.projects
+                        .iter()
+                        .find(|p| p.path == trek_core::store::project_root(&c))
+                        .map(|p| p.id.clone())
+                })
+            });
+        self.settings_project = project_id
+            .or(current)
+            .or_else(|| self.workspace_projects().first().map(|p| p.id.clone()));
         self.navigate(Route::Settings(SettingsPage::Project), cx);
     }
 
@@ -2474,7 +3052,10 @@ impl Workspace {
             return;
         }
         if let Err(e) = self.store.rename_project(id, name) {
-            cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't rename: {e}"), undo: None });
+            cx.emit(WorkspaceEvent::Toast {
+                message: format!("Couldn't rename: {e}"),
+                undo: None,
+            });
         }
         self.reload(cx);
     }
@@ -2482,9 +3063,16 @@ impl Workspace {
     /// Take a project out of Trek: its threads are archived and it leaves every list. Files on
     /// disk and the agents' own history aren't touched; opening the folder again brings it back.
     pub fn remove_project(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(project) = self.projects.iter().find(|p| p.id == id).cloned() else { return };
+        let Some(project) = self.projects.iter().find(|p| p.id == id).cloned() else {
+            return;
+        };
         let key = project.path.display().to_string();
-        let ids: Vec<String> = self.threads.iter().filter(|t| t.project_id.as_deref() == Some(id)).map(|t| t.id.clone()).collect();
+        let ids: Vec<String> = self
+            .threads
+            .iter()
+            .filter(|t| t.project_id.as_deref() == Some(id))
+            .map(|t| t.id.clone())
+            .collect();
         for tid in &ids {
             if let Some(tx) = self.live.get(tid).and_then(|l| l.commands.clone()) {
                 let _ = tx.try_send(Command::Shutdown);
@@ -2512,7 +3100,10 @@ impl Workspace {
         if gone || matches!(self.route, Route::Settings(_)) {
             self.navigate(Route::Draft { project: None }, cx);
         }
-        cx.emit(WorkspaceEvent::Toast { message: format!("Removed {} from Trek", project.name), undo: None });
+        cx.emit(WorkspaceEvent::Toast {
+            message: format!("Removed {} from Trek", project.name),
+            undo: None,
+        });
     }
 
     /// ⌘N, the menu's New Thread and the sidebar's new-thread button: a thread in no project.
@@ -2540,7 +3131,13 @@ impl Workspace {
     pub fn leave_editor(&mut self, cx: &mut Context<Self>) {
         match self.editor_back.take() {
             Some(Route::Thread(id)) if self.thread(&id).is_none() => self.new_thread(cx),
-            Some(route @ (Route::Thread(_) | Route::Draft { .. } | Route::Basecamp | Route::Notes | Route::Settings(_))) => self.navigate(route, cx),
+            Some(
+                route @ (Route::Thread(_)
+                | Route::Draft { .. }
+                | Route::Basecamp
+                | Route::Notes
+                | Route::Settings(_)),
+            ) => self.navigate(route, cx),
             _ => self.new_thread(cx),
         }
     }
@@ -2559,7 +3156,11 @@ impl Workspace {
             .iter()
             .filter(|t| match t.section(now) {
                 Some(_) if sub_agents.contains(&t.id) => true,
-                Some(Section::Inbox | Section::Pinned) => t.run_state != RunState::Working && !waiting.contains(&t.id) && (t.needs_you() || t.is_unseen()),
+                Some(Section::Inbox | Section::Pinned) => {
+                    t.run_state != RunState::Working
+                        && !waiting.contains(&t.id)
+                        && (t.needs_you() || t.is_unseen())
+                }
                 _ => false,
             })
             .collect();
@@ -2576,7 +3177,12 @@ impl Workspace {
     /// user stays.
     pub fn mark_all_read(&mut self, cx: &mut Context<Self>) {
         let now = now_ms();
-        let unread: Vec<String> = self.ready_for_review().into_iter().filter(|t| t.is_unseen()).map(|t| t.id.clone()).collect();
+        let unread: Vec<String> = self
+            .ready_for_review()
+            .into_iter()
+            .filter(|t| t.is_unseen())
+            .map(|t| t.id.clone())
+            .collect();
         for id in unread {
             self.mutate_thread(&id, cx, |t| t.last_seen_at = now.max(t.updated_at));
         }
@@ -2601,7 +3207,12 @@ impl Workspace {
             let read = cx
                 .background_executor()
                 .spawn(async move {
-                    let checkpointed: HashSet<String> = store.checkpoints(&tid).unwrap_or_default().into_iter().map(|c| c.item_id).collect();
+                    let checkpointed: HashSet<String> = store
+                        .checkpoints(&tid)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|c| c.item_id)
+                        .collect();
                     let spend_data = if need_spend {
                         let own = store.usage_of(&[tid.clone()]).unwrap_or_default();
                         let subs = store.descendants(&tid).unwrap_or_default();
@@ -2610,14 +3221,28 @@ impl Workspace {
                     } else {
                         None
                     };
-                    (tid.clone(), checkpointed, store.tool_lines(&tid).unwrap_or_default(), store.items_with_ids(&tid).unwrap_or_default(), spend_data)
+                    (
+                        tid.clone(),
+                        checkpointed,
+                        store.tool_lines(&tid).unwrap_or_default(),
+                        store.items_with_ids(&tid).unwrap_or_default(),
+                        spend_data,
+                    )
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let (id, checkpointed, lines, rows, spend_data) = read;
                 if let Some((own, subs, theirs)) = spend_data {
-                    let sub_threads = theirs.iter().map(|r| r.thread_id.as_str()).collect::<HashSet<_>>().len();
-                    let consults = subs.iter().all(|c| this.delegations.get(c).is_none_or(|d| d.mode == trek_core::orchestrate::Mode::Advise));
+                    let sub_threads = theirs
+                        .iter()
+                        .map(|r| r.thread_id.as_str())
+                        .collect::<HashSet<_>>()
+                        .len();
+                    let consults = subs.iter().all(|c| {
+                        this.delegations
+                            .get(c)
+                            .is_none_or(|d| d.mode == trek_core::orchestrate::Mode::Advise)
+                    });
                     let spend = crate::cost::ThreadSpend {
                         own: trek_core::store::UsageRow::spend(&own),
                         subs: trek_core::store::UsageRow::spend(&theirs),
@@ -2629,7 +3254,9 @@ impl Workspace {
                         live.spend = Some(spend);
                     }
                 }
-                let Some(live) = this.live.get_mut(&id) else { return };
+                let Some(live) = this.live.get_mut(&id) else {
+                    return;
+                };
                 live.loading = false;
                 // Deleted while it was read: nothing is left to show it in.
                 if this.thread(&id).is_none() {
@@ -2649,7 +3276,10 @@ impl Workspace {
                 let arrived = std::mem::replace(&mut live.items, Transcript::stored(rows));
                 if matches!(live.items.last(), Some(Item::Assistant { .. })) {
                     // As in `ensure_loaded`: a turn saved before Trek marked ends gets one.
-                    live.items.push(Item::TurnEnd { at: updated_at, took_secs: 0 });
+                    live.items.push(Item::TurnEnd {
+                        at: updated_at,
+                        took_secs: 0,
+                    });
                 }
                 let n = live.items.len();
                 for item in arrived.iter().cloned() {
@@ -2686,7 +3316,13 @@ impl Workspace {
         if live.loaded || live.loading {
             return;
         }
-        live.checkpointed = self.store.checkpoints(id).unwrap_or_default().into_iter().map(|c| c.item_id).collect();
+        live.checkpointed = self
+            .store
+            .checkpoints(id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| c.item_id)
+            .collect();
         live.lines = self.store.tool_lines(id).unwrap_or_default();
         live.items.mark_edited(0);
         let rows = self.store.items_with_ids(id).unwrap_or_default();
@@ -2695,7 +3331,10 @@ impl Workspace {
             // Turns saved before Trek marked their ends have none: the last one gets its end
             // (and with it the footer that copies, undoes, retries and forks it).
             if matches!(live.items.last(), Some(Item::Assistant { .. })) {
-                live.items.push(Item::TurnEnd { at: thread.as_ref().map_or_else(now_ms, |t| t.updated_at), took_secs: 0 });
+                live.items.push(Item::TurnEnd {
+                    at: thread.as_ref().map_or_else(now_ms, |t| t.updated_at),
+                    took_secs: 0,
+                });
             }
             live.loaded = true;
             live.revision += 1;
@@ -2706,7 +3345,10 @@ impl Workspace {
             return;
         }
         let Some(thread) = thread else { return };
-        let (Some(native), true) = (thread.native_id.clone(), thread.source != ThreadSource::Trek) else {
+        let (Some(native), true) = (
+            thread.native_id.clone(),
+            thread.source != ThreadSource::Trek,
+        ) else {
             live.loaded = true;
             return;
         };
@@ -2723,13 +3365,19 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     let items = trek_core::import::load_transcript(source, &native)?;
-                    let to_index = (!s.imported_indexed(&tid, updated_at).unwrap_or(false)).then(|| items.clone());
+                    let to_index = (!s.imported_indexed(&tid, updated_at).unwrap_or(false))
+                        .then(|| items.clone());
                     anyhow::Ok((items, to_index))
                 })
                 .await;
             let (items, to_index) = match result {
                 Ok((items, to_index)) => (items, to_index),
-                Err(e) => (vec![Item::Error { text: format!("Couldn't load this thread: {e}") }], None),
+                Err(e) => (
+                    vec![Item::Error {
+                        text: format!("Couldn't load this thread: {e}"),
+                    }],
+                    None,
+                ),
             };
             let _ = this.update(cx, |this, cx| {
                 // Deleted while its history was read: nothing is left to show it in.
@@ -2755,7 +3403,11 @@ impl Workspace {
             });
             if let Some(items) = to_index {
                 let tid = id.clone();
-                match cx.background_executor().spawn(async move { store.index_imported(&tid, Some(&items), updated_at) }).await {
+                match cx
+                    .background_executor()
+                    .spawn(async move { store.index_imported(&tid, Some(&items), updated_at) })
+                    .await
+                {
                     Ok(true) => _ = this.update(cx, |this, cx| this.search_index_changed(cx)),
                     Ok(false) => {}
                     Err(e) => tracing::warn!("search index {id}: {e}"),
@@ -2792,7 +3444,11 @@ impl Workspace {
     }
 
     pub fn set_prefs_in(&mut self, scope: &Scope, prefs: Prefs, cx: &mut Context<Self>) {
-        if let Some(id) = self.thread_id_in(scope).filter(|id| crate::machines::is_remote(id)).map(str::to_string) {
+        if let Some(id) = self
+            .thread_id_in(scope)
+            .filter(|id| crate::machines::is_remote(id))
+            .map(str::to_string)
+        {
             return self.machine_set_prefs(&id, prefs, cx);
         }
         match self.thread_id_in(scope).map(str::to_string) {
@@ -2830,7 +3486,9 @@ impl Workspace {
                         // A message still held for its checkpoint goes nowhere: the new agent's
                         // session would otherwise be sent it, interrupted as it shows.
                         live.held.retain(|c| !matches!(c, Command::Prompt { .. }));
-                        live.items.push(Item::Notice { text: "Interrupted".into() });
+                        live.items.push(Item::Notice {
+                            text: "Interrupted".into(),
+                        });
                         live.revision += 1;
                         cut = true;
                     }
@@ -2850,12 +3508,18 @@ impl Workspace {
                     // resume), and running ones once their turn is over. One with work running in
                     // the background can't restart (it would end that work, and its sub-agents
                     // would never report): it's told the new settings as it runs.
-                    let at_launch = fast_changed || plan_changed || (prefs.agent == AgentId::ClaudeCode && before.effort != prefs.effort);
+                    let at_launch = fast_changed
+                        || plan_changed
+                        || (prefs.agent == AgentId::ClaudeCode && before.effort != prefs.effort);
                     let relaunch = at_launch && live.free_to_relaunch();
                     let in_place = at_launch && !relaunch && live.turn_started.is_none();
                     live.relaunch |= at_launch && !relaunch && !in_place;
                     if in_place && before.agent == prefs.agent {
-                        let _ = tx.try_send(Command::SetModes { plan: prefs.plan, fast: fast_tier, effort: prefs.effort });
+                        let _ = tx.try_send(Command::SetModes {
+                            plan: prefs.plan,
+                            fast: fast_tier,
+                            effort: prefs.effort,
+                        });
                     }
                     if before.agent != prefs.agent || relaunch {
                         let _ = tx.try_send(Command::Shutdown);
@@ -2869,7 +3533,10 @@ impl Workspace {
                         }
                         if before.model != prefs.model || before.effort != prefs.effort {
                             if let Some(m) = prefs.model.clone() {
-                                let _ = tx.try_send(Command::SetModel { model: m, effort: prefs.effort });
+                                let _ = tx.try_send(Command::SetModel {
+                                    model: m,
+                                    effort: prefs.effort,
+                                });
                             }
                         }
                     }
@@ -2892,12 +3559,19 @@ impl Workspace {
                     // so, and a usage limit on the old one holds nothing back any more. Within one
                     // agent, only another model gets past a limit on a model.
                     let past_limit = if agent != prefs.agent {
-                        if self.note_handoff(&id, (&agent, model), (&prefs.agent, prefs.model.clone())) {
+                        if self.note_handoff(
+                            &id,
+                            (&agent, model),
+                            (&prefs.agent, prefs.model.clone()),
+                        ) {
                             self.persist_items(&id, cx);
                         }
                         true
                     } else {
-                        model != prefs.model && self.pause(&id).is_some_and(|p| matches!(p.scope, trek_agents::LimitScope::Model(_)))
+                        model != prefs.model
+                            && self.pause(&id).is_some_and(|p| {
+                                matches!(p.scope, trek_agents::LimitScope::Model(_))
+                            })
                     };
                     if past_limit && self.pause(&id).is_some() {
                         self.end_pause(&id, false, cx);
@@ -2929,11 +3603,27 @@ impl Workspace {
     /// Thread `id`'s session said which effort levels `model` offers (they can change with the
     /// model: OpenCode 2's do) and the one it's on. The model's levels are those from now on; a
     /// thread on an effort the model doesn't have takes the session's (its default, mostly).
-    fn model_efforts(&mut self, id: &str, model: &str, offered: Vec<Effort>, effort: Option<Effort>, cx: &mut Context<Self>) {
+    fn model_efforts(
+        &mut self,
+        id: &str,
+        model: &str,
+        offered: Vec<Effort>,
+        effort: Option<Effort>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(t) = self.thread(id) else { return };
-        let (agent, on_model, current) = (t.agent.clone(), t.model.as_deref().is_none_or(|m| crate::composer::same_model(m, model)), t.effort);
+        let (agent, on_model, current) = (
+            t.agent.clone(),
+            t.model
+                .as_deref()
+                .is_none_or(|m| crate::composer::same_model(m, model)),
+            t.effort,
+        );
         if let Some(Ok(info)) = self.acp_info.get_mut(&agent.key())
-            && let Some(m) = info.models.iter_mut().find(|m| crate::composer::same_model(&m.id, model))
+            && let Some(m) = info
+                .models
+                .iter_mut()
+                .find(|m| crate::composer::same_model(&m.id, model))
         {
             m.efforts = offered.clone();
         }
@@ -2956,7 +3646,17 @@ impl Workspace {
             }
             if let Some(found) = self.agents.iter().find(|a| &a.agent == agent) {
                 if !found.models.is_empty() {
-                    return found.models.iter().map(|m| ModelInfo { id: m.clone(), name: m.clone(), efforts: vec![], tier: 0, fast: None }).collect();
+                    return found
+                        .models
+                        .iter()
+                        .map(|m| ModelInfo {
+                            id: m.clone(),
+                            name: m.clone(),
+                            efforts: vec![],
+                            tier: 0,
+                            fast: None,
+                        })
+                        .collect();
                 }
             }
             return match p.as_str() {
@@ -2974,7 +3674,11 @@ impl Workspace {
             }
         }
         if *agent == AgentId::ClaudeCode {
-            if let Some(st) = self.agent_status.get(&agent.key()).filter(|s| !s.models.is_empty()) {
+            if let Some(st) = self
+                .agent_status
+                .get(&agent.key())
+                .filter(|s| !s.models.is_empty())
+            {
                 return st.models.clone();
             }
         }
@@ -2984,7 +3688,9 @@ impl Workspace {
     /// The window-wide backdrop image, when the user chose "Everywhere".
     pub fn backdrop(&self) -> Option<(String, f32)> {
         let a = &self.settings.appearance;
-        (a.background_placement == trek_core::settings::BackgroundPlacement::Everywhere).then(|| a.background.clone().map(|b| (b, a.background_dim))).flatten()
+        (a.background_placement == trek_core::settings::BackgroundPlacement::Everywhere)
+            .then(|| a.background.clone().map(|b| (b, a.background_dim)))
+            .flatten()
     }
 
     /// Liquid glass's tint, when it's on and no window-wide image covers the desktop (and the
@@ -3022,14 +3728,20 @@ impl Workspace {
 
     /// ⌥⌘E and the title bar's switch: Agents ⇄ Editor (`set_mode`).
     pub fn toggle_ide(&mut self, cx: &mut Context<Self>) {
-        let mode = if self.ide() { Mode::Agents } else { Mode::Editor };
+        let mode = if self.ide() {
+            Mode::Agents
+        } else {
+            Mode::Editor
+        };
         self.set_mode(mode, cx);
     }
 
     /// Pick the folder the IDE's file tree roots at.
     pub fn set_ide_root(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.move_ide_root(Some(path.clone()));
-        self.settings.ide.remember_folder(&path.display().to_string());
+        self.settings
+            .ide
+            .remember_folder(&path.display().to_string());
         let _ = self.settings.save();
         cx.notify();
     }
@@ -3076,7 +3788,10 @@ impl Workspace {
         if cfg!(test) {
             return None;
         }
-        let root = self.ide_root.clone().unwrap_or_else(|| trek_core::store::project_root(path));
+        let root = self
+            .ide_root
+            .clone()
+            .unwrap_or_else(|| trek_core::store::project_root(path));
         self.lsp_servers.get_or_start(root, lang)
     }
 
@@ -3089,12 +3804,20 @@ impl Workspace {
     /// Open `path` in the main window's editor; `line` puts the caret there (Explorer,
     /// `trek://edit` deep links).
     pub fn open_editor(&mut self, path: PathBuf, line: Option<u32>, cx: &mut Context<Self>) {
-        cx.emit(WorkspaceEvent::OpenEditor { path, line, preview: false });
+        cx.emit(WorkspaceEvent::OpenEditor {
+            path,
+            line,
+            preview: false,
+        });
     }
 
     /// A single click in the editor's Explorer: open `path` in the preview tab.
     pub fn preview_editor(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        cx.emit(WorkspaceEvent::OpenEditor { path, line: None, preview: true });
+        cx.emit(WorkspaceEvent::OpenEditor {
+            path,
+            line: None,
+            preview: true,
+        });
     }
 
     /// Working directory for whatever is on screen: the thread's folder or the draft's project.
@@ -3111,19 +3834,30 @@ impl Workspace {
     pub fn set_background_image(&mut self, src: PathBuf, cx: &mut Context<Self>) {
         let dir = trek_core::paths::data_dir().join("backgrounds");
         let _ = std::fs::create_dir_all(&dir);
-        let name = src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "background".into());
+        let name = src
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "background".into());
         let dest = dir.join(name);
         match std::fs::copy(&src, &dest) {
             Ok(_) => {
                 self.settings.appearance.background = Some(dest.display().to_string());
                 self.save_settings(cx);
             }
-            Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't use that image: {e}"), undo: None }),
+            Err(e) => cx.emit(WorkspaceEvent::Toast {
+                message: format!("Couldn't use that image: {e}"),
+                undo: None,
+            }),
         }
     }
 
     pub fn pick_background_image(&mut self, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Use as Background".into()) });
+        let rx = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Use as Background".into()),
+        });
         let task = cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
                 if let Some(p) = paths.into_iter().next() {
@@ -3143,8 +3877,20 @@ impl Workspace {
         };
         let p = self.prefs();
         // Same project as its thread, and the same folder (a worktree, maybe).
-        let project = self.current_thread().and_then(|t| self.project_dir(t)).or_else(|| cwd.clone().filter(|c| !trek_core::paths::is_chat_dir(c)));
-        let mut t = self.store.create_thread(project.as_deref(), p.agent, p.model, p.effort, HandHolding::Supervised).ok()?;
+        let project = self
+            .current_thread()
+            .and_then(|t| self.project_dir(t))
+            .or_else(|| cwd.clone().filter(|c| !trek_core::paths::is_chat_dir(c)));
+        let mut t = self
+            .store
+            .create_thread(
+                project.as_deref(),
+                p.agent,
+                p.model,
+                p.effort,
+                HandHolding::Supervised,
+            )
+            .ok()?;
         t.cwd = cwd;
         t.title = "Side chat".into();
         t.side_of = Some(parent);
@@ -3162,7 +3908,13 @@ impl Workspace {
     fn keyed_providers(&self) -> Vec<&'static str> {
         self.keyed_providers
             .borrow_mut()
-            .get_or_insert_with(|| catalog::DIRECT_PROVIDERS.iter().filter(|p| !p.local && trek_core::settings::secrets::api_key(p.id).is_some()).map(|p| p.id).collect())
+            .get_or_insert_with(|| {
+                catalog::DIRECT_PROVIDERS
+                    .iter()
+                    .filter(|p| !p.local && trek_core::settings::secrets::api_key(p.id).is_some())
+                    .map(|p| p.id)
+                    .collect()
+            })
             .clone()
     }
 
@@ -3181,7 +3933,10 @@ impl Workspace {
                 AgentId::ClaudeCode | AgentId::Codex => true,
                 AgentId::Direct(_) => !a.models.is_empty(),
                 // ACP agents are pickable once probed and signed in.
-                other => self.acp_info.get(&other.key()).is_some_and(|i| i.as_ref().is_ok_and(|i| !i.needs_auth)),
+                other => self
+                    .acp_info
+                    .get(&other.key())
+                    .is_some_and(|i| i.as_ref().is_ok_and(|i| !i.needs_auth)),
             })
             .map(|a| a.agent.clone())
             .collect();
@@ -3219,7 +3974,10 @@ impl Workspace {
         if matches!(self.route, Route::Draft { .. }) {
             if let Some(reply) = self.run_builtin_command(None, &text, cx) {
                 if !reply.is_empty() {
-                    cx.emit(WorkspaceEvent::Toast { message: reply.replace("**", "").replace('`', ""), undo: None });
+                    cx.emit(WorkspaceEvent::Toast {
+                        message: reply.replace("**", "").replace('`', ""),
+                        undo: None,
+                    });
                 }
                 return;
             }
@@ -3228,7 +3986,9 @@ impl Workspace {
             Route::Thread(id) => id,
             Route::Draft { project } => {
                 let prefs = self.draft_prefs.clone();
-                let Some(id) = self.start_thread(project, prefs, &text, &images, cx) else { return };
+                let Some(id) = self.start_thread(project, prefs, &text, &images, cx) else {
+                    return;
+                };
                 // The draft's tab becomes the thread's.
                 self.open_tab(&id);
                 self.route = Route::Thread(id.clone());
@@ -3245,11 +4005,21 @@ impl Workspace {
     /// if that still fits. Puts it nowhere on screen (the harness's draft and the editor's AI side
     /// bar each do that their own way) and sends nothing. `None` when it couldn't be made (said in
     /// a toast; the message goes back to the composer).
-    pub fn start_thread(&mut self, project: Option<PathBuf>, prefs: Prefs, text: &str, images: &[PathBuf], cx: &mut Context<Self>) -> Option<String> {
+    pub fn start_thread(
+        &mut self,
+        project: Option<PathBuf>,
+        prefs: Prefs,
+        text: &str,
+        images: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
         match self.make_thread(project, prefs, text, true, |_| {}, cx) {
             Ok(id) => Some(id),
             Err(e) => {
-                cx.emit(WorkspaceEvent::Toast { message: e.to_string(), undo: None });
+                cx.emit(WorkspaceEvent::Toast {
+                    message: e.to_string(),
+                    undo: None,
+                });
                 // The message goes back to the composer (which let go of it as it was sent).
                 cx.emit(WorkspaceEvent::InsertIntoComposer(text.to_string()));
                 for image in images {
@@ -3263,25 +4033,49 @@ impl Workspace {
     /// `start_thread`'s work, saying what went wrong rather than showing it. `warm`: the session
     /// warmed up while the user typed may be the thread's (an agent's thread leaves it for the
     /// user's draft). `shape` adjusts the thread before it's first saved.
-    pub(crate) fn make_thread(&mut self, project: Option<PathBuf>, prefs: Prefs, text: &str, warm: bool, shape: impl FnOnce(&mut Thread), cx: &mut Context<Self>) -> Result<String, MakeThreadError> {
+    pub(crate) fn make_thread(
+        &mut self,
+        project: Option<PathBuf>,
+        prefs: Prefs,
+        text: &str,
+        warm: bool,
+        shape: impl FnOnce(&mut Thread),
+        cx: &mut Context<Self>,
+    ) -> Result<String, MakeThreadError> {
         // No project: the thread gets a folder of its own to work in, and belongs to none.
         let chat = project.is_none();
         let cwd = match project {
             Some(cwd) => cwd,
-            None => trek_core::paths::new_chat_dir().map_err(|e| MakeThreadError::Folder(e.to_string()))?,
+            None => trek_core::paths::new_chat_dir()
+                .map_err(|e| MakeThreadError::Folder(e.to_string()))?,
         };
         let p = prefs;
         // A worktree of its own: its branch and folder are picked now, and it's made in
         // the background while the message waits. Other threads' worktrees are taken,
         // made yet or not.
-        let taken: Vec<_> = self.threads.iter().filter_map(|t| t.worktree.clone()).collect();
-        let planned = match (p.worktree && !chat).then(|| trek_core::worktree::plan(&trek_core::worktree::worktrees_dir(), &cwd, text, &taken)) {
+        let taken: Vec<_> = self
+            .threads
+            .iter()
+            .filter_map(|t| t.worktree.clone())
+            .collect();
+        let planned = match (p.worktree && !chat).then(|| {
+            trek_core::worktree::plan(&trek_core::worktree::worktrees_dir(), &cwd, text, &taken)
+        }) {
             Some(Err(e)) => return Err(MakeThreadError::Worktree(e.to_string())),
             Some(Ok(wt)) => Some(wt),
             None => None,
         };
         let key = self.draft_key_with(&p, &cwd);
-        let mut thread = self.store.create_thread((!chat).then_some(cwd.as_path()), p.agent, p.model, p.effort, p.hand_holding).map_err(|e| MakeThreadError::Create(e.to_string()))?;
+        let mut thread = self
+            .store
+            .create_thread(
+                (!chat).then_some(cwd.as_path()),
+                p.agent,
+                p.model,
+                p.effort,
+                p.hand_holding,
+            )
+            .map_err(|e| MakeThreadError::Create(e.to_string()))?;
         thread.title = trek_core::import_title(text);
         if chat {
             thread.cwd = Some(cwd.clone());
@@ -3305,7 +4099,11 @@ impl Workspace {
             None => match self.warm.take() {
                 Some((k, handle, _)) if k == key => {
                     // A new session, given the project notes the key says.
-                    let notes = k.7.filter(|_| !self.thread(&id).is_some_and(|t| trek_agents::notes_in_system_prompt(&t.agent)));
+                    let notes = k.7.filter(|_| {
+                        !self
+                            .thread(&id)
+                            .is_some_and(|t| trek_agents::notes_in_system_prompt(&t.agent))
+                    });
                     self.live.entry(id.clone()).or_default().notes_pending = notes;
                     self.attach(&id, handle, cx);
                     let ipc = self.warm_ipc.take();
@@ -3325,16 +4123,26 @@ impl Workspace {
     /// Send from `scope`'s composer: the main window's (which may start a new thread), a thread
     /// window's, or the editor's AI side bar (whose new chat starts a thread without moving the
     /// harness off what it shows).
-    pub fn send_in(&mut self, scope: &Scope, text: String, images: Vec<PathBuf>, cx: &mut Context<Self>) {
+    pub fn send_in(
+        &mut self,
+        scope: &Scope,
+        text: String,
+        images: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         match scope {
             // A draft whose project is set to start on another machine starts its thread there.
             Scope::Main => {
                 let machine = match &self.route {
-                    Route::Draft { project: Some(p) } => self.draft_machine(p).map(|host| (host, p.clone())),
+                    Route::Draft { project: Some(p) } => {
+                        self.draft_machine(p).map(|host| (host, p.clone()))
+                    }
                     _ => None,
                 };
                 match machine {
-                    Some((host, project)) => self.machine_start_thread(&host, project, text, images, cx),
+                    Some((host, project)) => {
+                        self.machine_start_thread(&host, project, text, images, cx)
+                    }
                     None => self.send(text, images, cx),
                 }
             }
@@ -3354,13 +4162,26 @@ impl Workspace {
     }
 
     /// Send a prompt to a specific thread (main view or a side chat).
-    pub fn send_to(&mut self, id: &str, text: String, images: Vec<PathBuf>, cx: &mut Context<Self>) {
+    pub fn send_to(
+        &mut self,
+        id: &str,
+        text: String,
+        images: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         self.send_as(id, text, images, None, cx);
     }
 
     /// `send_to`, saying how a message sent while a turn runs goes: queued for after it, or
     /// steering it now (`None`: as Settings › General has it).
-    pub fn send_as(&mut self, id: &str, text: String, images: Vec<PathBuf>, follow: Option<FollowUp>, cx: &mut Context<Self>) {
+    pub fn send_as(
+        &mut self,
+        id: &str,
+        text: String,
+        images: Vec<PathBuf>,
+        follow: Option<FollowUp>,
+        cx: &mut Context<Self>,
+    ) {
         if crate::machines::is_remote(id) {
             return self.machine_send(id, text, images, follow, cx);
         }
@@ -3381,8 +4202,16 @@ impl Workspace {
         if self.holds_messages(&id) {
             // Held for an agent update: sent when it's done (`agent_released`). Follow-ups a
             // failed turn left queued ahead of it aren't.
-            if self.thread(&id).is_some_and(|t| self.agent_updating(&t.agent.key())) && !self.agent_updates.held.contains_key(&id) {
-                let left = if self.stale_queue(&id) && !self.holds_queue(&id) { self.queued(&id) } else { 0 };
+            if self
+                .thread(&id)
+                .is_some_and(|t| self.agent_updating(&t.agent.key()))
+                && !self.agent_updates.held.contains_key(&id)
+            {
+                let left = if self.stale_queue(&id) && !self.holds_queue(&id) {
+                    self.queued(&id)
+                } else {
+                    0
+                };
                 self.agent_updates.held.insert(id.clone(), left);
             }
             let live = self.live.entry(id).or_default();
@@ -3396,7 +4225,13 @@ impl Workspace {
                 return;
             }
             let live = self.live.entry(id.clone()).or_default();
-            live.items.push(Item::User { text: text.clone(), images: vec![], at: Some(now_ms()), resume: None, aside: true });
+            live.items.push(Item::User {
+                text: text.clone(),
+                images: vec![],
+                at: Some(now_ms()),
+                resume: None,
+                aside: true,
+            });
             live.items.push(Item::Notice { text: reply });
             live.revision += 1;
             self.persist_items(&id, cx);
@@ -3404,24 +4239,52 @@ impl Workspace {
             return;
         }
         // The agent is waiting on a question: what the user types is their answer, in their own words.
-        let question = self.live.get(&id).and_then(|l| l.permissions.first()).and_then(|p| match &p.prompt {
-            Some(trek_agents::Prompt::Questions(q)) => Some((p.request_id.clone(), q.clone())),
-            _ => None,
-        });
+        let question = self
+            .live
+            .get(&id)
+            .and_then(|l| l.permissions.first())
+            .and_then(|p| match &p.prompt {
+                Some(trek_agents::Prompt::Questions(q)) => Some((p.request_id.clone(), q.clone())),
+                _ => None,
+            });
         if let Some((request_id, questions)) = question {
-            let picks = self.live.get(&id).map(|l| l.picks.clone()).unwrap_or_default();
-            let picked = |i: usize| picks.get(&(request_id.clone(), i)).filter(|v| !v.is_empty()).map(|v| v.join(", "));
+            let picks = self
+                .live
+                .get(&id)
+                .map(|l| l.picks.clone())
+                .unwrap_or_default();
+            let picked = |i: usize| {
+                picks
+                    .get(&(request_id.clone(), i))
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v.join(", "))
+            };
             let (answers, secret) = typed_answers(&questions, picked, &text);
             if let Some(live) = self.live.get_mut(&id) {
                 // A secret (a token, a password) goes to the agent and nowhere else.
-                live.items.push(if secret { Item::Notice { text: "Private answer sent".into() } } else { Item::User { text, images: vec![], at: Some(now_ms()), resume: None, aside: true } });
+                live.items.push(if secret {
+                    Item::Notice {
+                        text: "Private answer sent".into(),
+                    }
+                } else {
+                    Item::User {
+                        text,
+                        images: vec![],
+                        at: Some(now_ms()),
+                        resume: None,
+                        aside: true,
+                    }
+                });
             }
             self.send_answers(&id, &request_id, answers, cx);
             self.persist_items(&id, cx);
             return;
         }
         // Queue mode: hold follow-ups until the running turn finishes (see `apply_events`).
-        let running = self.live.get(&id).is_some_and(|l| l.turn_started.is_some() && l.commands.is_some());
+        let running = self
+            .live
+            .get(&id)
+            .is_some_and(|l| l.turn_started.is_some() && l.commands.is_some());
         // Paused at a usage limit: it goes when the limit resets.
         let (text, images) = match running {
             false => match self.send_while_paused(&id, text, images, cx) {
@@ -3442,7 +4305,16 @@ impl Workspace {
         // kept): it's read from the agent's files before the message goes, or a rewind to it
         // couldn't take the agent's own session back.
         let find_point = match (&resume, self.thread(&id)) {
-            (Some(ResumePoint { session, after: None }), Some(t)) if !running && t.reopen.is_none() && trek_agents::resumes_partway(&t.agent, t.model.as_deref()) => {
+            (
+                Some(ResumePoint {
+                    session,
+                    after: None,
+                }),
+                Some(t),
+            ) if !running
+                && t.reopen.is_none()
+                && trek_agents::resumes_partway(&t.agent, t.model.as_deref()) =>
+            {
                 Some((t.agent.clone(), session.clone()))
             }
             _ => None,
@@ -3451,14 +4323,26 @@ impl Workspace {
         self.ensure_session(&id, cx);
         let live = self.live.entry(id.clone()).or_default();
         live.drop_after_turn();
-        let ix = live.items.push(Item::User { text: text.clone(), images: images.iter().map(|p| p.display().to_string()).collect(), at: Some(now_ms()), resume, aside: false });
+        let ix = live.items.push(Item::User {
+            text: text.clone(),
+            images: images.iter().map(|p| p.display().to_string()).collect(),
+            at: Some(now_ms()),
+            resume,
+            aside: false,
+        });
         if let (Some((agent, session)), Some(item)) = (find_point, live.items.id_at(ix)) {
-            live.git_jobs.push_back(GitJob::FindPoint { agent, session, item: item.to_string() });
+            live.git_jobs.push_back(GitJob::FindPoint {
+                agent,
+                session,
+                item: item.to_string(),
+            });
         }
         live.streaming = None;
         live.reasoning = None;
         // A turn starting: the message it starts from (a review of its changes may open there).
-        let started = (!running).then(|| live.items.id_at(ix).map(str::to_string)).flatten();
+        let started = (!running)
+            .then(|| live.items.id_at(ix).map(str::to_string))
+            .flatten();
         // A message sent while a turn runs steers that turn: its clock and its sub-agents go on.
         if !running {
             live.turn_started = Some(Instant::now());
@@ -3471,7 +4355,11 @@ impl Workspace {
             live.tasks.retain(|t| t.done.is_none());
             // A new turn starts from a checkpoint of the files, taken before the agent has the
             // message (it's held until then): a rewind can put them back.
-            if let (Some(cwd), Some(item), true) = (cwd.clone(), live.items.id_at(ix).map(str::to_string), in_repo(cwd.as_deref())) {
+            if let (Some(cwd), Some(item), true) = (
+                cwd.clone(),
+                live.items.id_at(ix).map(str::to_string),
+                in_repo(cwd.as_deref()),
+            ) {
                 live.git_jobs.push_back(GitJob::Checkpoint { cwd, item });
             }
         }
@@ -3495,7 +4383,26 @@ impl Workspace {
     /// The agent restated the request and got it right: it goes ahead, with whatever else the
     /// request asked for (a consult, an arena) that waited for the restatement.
     pub fn go_ahead(&mut self, id: &str, cx: &mut Context<Self>) {
-        let users = self.live.get(id).map(|l| l.items.iter().rev().filter_map(|i| if let Item::User { text, aside: false, .. } = i { Some(text.as_str()) } else { None }).collect::<Vec<_>>()).unwrap_or_default();
+        let users = self
+            .live
+            .get(id)
+            .map(|l| {
+                l.items
+                    .iter()
+                    .rev()
+                    .filter_map(|i| {
+                        if let Item::User {
+                            text, aside: false, ..
+                        } = i
+                        {
+                            Some(text.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let text = trek_core::restate::go_ahead_after(users);
         self.send_to(id, text, vec![], cx);
     }
@@ -3503,15 +4410,22 @@ impl Workspace {
     /// Messages to `id` wait: its history is still being read, its worktree is being made,
     /// removed or has gone missing, or its agent's CLI is being updated.
     fn holds_messages(&self, id: &str) -> bool {
-        self.holds_queue(id) || self.thread(id).is_some_and(|t| self.agent_updating(&t.agent.key()))
+        self.holds_queue(id)
+            || self
+                .thread(id)
+                .is_some_and(|t| self.agent_updating(&t.agent.key()))
     }
 
     /// What's queued for `id` waits to go: its history is still being read, its worktree is
     /// being made, removed or has gone missing, or it was sent while its agent's CLI updated.
     /// Otherwise follow-ups queued while it has no turn were left by one that failed or stopped.
     fn holds_queue(&self, id: &str) -> bool {
-        self.live.get(id).is_some_and(|l| l.loading || l.preparing || l.removing)
-            || self.thread(id).is_some_and(|t| t.worktree.as_ref().is_some_and(|w| w.is_missing()))
+        self.live
+            .get(id)
+            .is_some_and(|l| l.loading || l.preparing || l.removing)
+            || self
+                .thread(id)
+                .is_some_and(|t| t.worktree.as_ref().is_some_and(|w| w.is_missing()))
             || self.agent_updates.held.contains_key(id)
     }
 
@@ -3519,16 +4433,35 @@ impl Workspace {
     /// message starts a turn, and the rest wait for it as queued follow-ups do.
     fn send_queued(&mut self, id: &str, cx: &mut Context<Self>) {
         // A message its session never took (it ended under it) needs one to go to.
-        if !self.holds_messages(id) && self.live.get(id).is_some_and(|l| l.commands.is_none() && l.held.iter().any(|c| matches!(c, Command::Prompt { .. }))) {
+        if !self.holds_messages(id)
+            && self.live.get(id).is_some_and(|l| {
+                l.commands.is_none() && l.held.iter().any(|c| matches!(c, Command::Prompt { .. }))
+            })
+        {
             self.ensure_session(id, cx);
         }
-        while !self.holds_messages(id) && self.live.get(id).is_some_and(|l| l.turn_started.is_none()) {
-            let Some((text, images)) = self.live.get_mut(id).and_then(|l| (!l.queued.is_empty()).then(|| l.queued.remove(0))) else { break };
+        while !self.holds_messages(id)
+            && self.live.get(id).is_some_and(|l| l.turn_started.is_none())
+        {
+            let Some((text, images)) = self
+                .live
+                .get_mut(id)
+                .and_then(|l| (!l.queued.is_empty()).then(|| l.queued.remove(0)))
+            else {
+                break;
+            };
             self.send_to(id, text, images, cx);
         }
         // Ready to go but for an agent update that started meanwhile (its worktree or history
         // came in while it ran): held for it, so they go once it's done (`agent_released`).
-        if self.live.get(id).is_some_and(|l| !l.queued.is_empty() && l.turn_started.is_none()) && self.thread(id).is_some_and(|t| self.agent_updating(&t.agent.key())) {
+        if self
+            .live
+            .get(id)
+            .is_some_and(|l| !l.queued.is_empty() && l.turn_started.is_none())
+            && self
+                .thread(id)
+                .is_some_and(|t| self.agent_updating(&t.agent.key()))
+        {
             self.agent_updates.held.entry(id.to_string()).or_insert(0);
         }
     }
@@ -3538,15 +4471,27 @@ impl Workspace {
             return None;
         }
         let models = self.models_for(agent);
-        model.and_then(|m| models.iter().find(|i| crate::composer::same_model(m, &i.id))).and_then(|m| m.fast.clone())
+        model
+            .and_then(|m| {
+                models
+                    .iter()
+                    .find(|i| crate::composer::same_model(m, &i.id))
+            })
+            .and_then(|m| m.fast.clone())
     }
 
     fn ensure_session(&mut self, id: &str, cx: &mut Context<Self>) {
         if crate::machines::is_remote(id) {
             return;
         }
-        let Some(thread) = self.thread(id).cloned() else { return };
-        if self.live.get(id).is_some_and(|l| l.commands.is_some() || l.preparing || l.removing) {
+        let Some(thread) = self.thread(id).cloned() else {
+            return;
+        };
+        if self
+            .live
+            .get(id)
+            .is_some_and(|l| l.commands.is_some() || l.preparing || l.removing)
+        {
             return;
         }
         // A recap is made from the history, so none starts before it's in: one still being read
@@ -3557,12 +4502,23 @@ impl Workspace {
         }
         // No folder to run in until the worktree is back (or the thread moves to the project's),
         // and no CLI to run while it's being updated.
-        if thread.worktree.as_ref().is_some_and(|w| w.is_missing()) || self.agent_updating(&thread.agent.key()) {
+        if thread.worktree.as_ref().is_some_and(|w| w.is_missing())
+            || self.agent_updating(&thread.agent.key())
+        {
             return;
         }
-        let (plan, fast_on, asking) = self.live.get(id).map(|l| (l.plan, l.fast, l.ask)).unwrap_or_default();
+        let (plan, fast_on, asking) = self
+            .live
+            .get(id)
+            .map(|l| (l.plan, l.fast, l.ask))
+            .unwrap_or_default();
         // After a rewind or a fork the session picks up from part of one, or from a recap.
-        let recap = || self.live.get(id).map(|l| trek_core::rewind::recap(&l.items)).filter(|r| !r.is_empty());
+        let recap = || {
+            self.live
+                .get(id)
+                .map(|l| trek_core::rewind::recap(&l.items))
+                .filter(|r| !r.is_empty())
+        };
         let (resume, resume_at, fork, recap) = match thread.reopen.clone() {
             Some(Reopen::Native { session, at, fork }) => (Some(session), at, fork, recap()),
             Some(Reopen::Recap) => (None, None, false, recap()),
@@ -3578,18 +4534,32 @@ impl Workspace {
             self.refresh_verification(p, cx);
         }
         let cwd = thread.cwd.clone().unwrap_or_else(trek_core::paths::home);
-        let told = resume.is_some().then(|| self.store.told_notes(id).ok().flatten()).flatten();
+        let told = resume
+            .is_some()
+            .then(|| self.store.told_notes(id).ok().flatten())
+            .flatten();
         // A sub-agent that only advises, and a side chat, change nothing: they aren't asked for a recap.
         let recaps = !self.advising(id) && thread.side_of.is_none();
-        let instructions = verification::notes_to_give(self.session_notes(project.as_deref(), &cwd, recaps), &thread.agent, resume.is_some(), told.as_deref());
-        self.live.entry(id.to_string()).or_default().notes_pending = instructions.clone().filter(|_| !trek_agents::notes_in_system_prompt(&thread.agent));
+        let instructions = verification::notes_to_give(
+            self.session_notes(project.as_deref(), &cwd, recaps),
+            &thread.agent,
+            resume.is_some(),
+            told.as_deref(),
+        );
+        self.live.entry(id.to_string()).or_default().notes_pending = instructions
+            .clone()
+            .filter(|_| !trek_agents::notes_in_system_prompt(&thread.agent));
         let handle = start_session(SessionConfig {
             agent: thread.agent.clone(),
             cwd,
             model: thread.model.clone(),
             effort: thread.effort,
             // Codex reads only in its Supervised sandbox: Ask mode holds it there.
-            hand_holding: if asking && thread.agent == AgentId::Codex { HandHolding::Supervised } else { thread.hand_holding },
+            hand_holding: if asking && thread.agent == AgentId::Codex {
+                HandHolding::Supervised
+            } else {
+                thread.hand_holding
+            },
             plan,
             // A sub-agent that only advises can't change anything, nor can a chat in Ask mode.
             read_only: self.advising(id) || asking,
@@ -3637,7 +4607,9 @@ impl Workspace {
                     break;
                 }
                 // Cap UI updates at ~60 Hz while streaming.
-                cx.background_executor().timer(Duration::from_millis(16)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
             }
         }));
         // What was held for a session that had gone (`run_git`) goes to this one.
@@ -3647,19 +4619,45 @@ impl Workspace {
     /// What a session warmed up for a new thread in `cwd` with `p` was started with: one that
     /// still matches when the message goes takes it.
     fn draft_key_with(&self, p: &Prefs, cwd: &std::path::Path) -> WarmKey {
-        (p.agent.clone(), cwd.to_path_buf(), p.model.clone(), p.effort, p.hand_holding, p.plan, p.fast, self.session_notes(Some(cwd), cwd, true))
+        (
+            p.agent.clone(),
+            cwd.to_path_buf(),
+            p.model.clone(),
+            p.effort,
+            p.hand_holding,
+            p.plan,
+            p.fast,
+            self.session_notes(Some(cwd), cwd, true),
+        )
     }
 
     /// What a new session is told besides its messages (`SessionConfig::instructions`): Trek's
     /// native visualization capability, interactive artifacts while those are on, the project's
     /// notes, and the recap Trek asks for at the end of work while that's on and the session
     /// `recaps` (it can change things).
-    pub(crate) fn session_notes(&self, project: Option<&std::path::Path>, cwd: &std::path::Path, recaps: bool) -> Option<String> {
-        let recap = (recaps && self.settings.general.ask_recap).then(|| trek_core::changes::RECAP.to_string());
-        let artifacts = self.settings.general.interactive_artifacts.then(|| trek_core::artifact::AGENT_INSTRUCTIONS.to_string());
+    pub(crate) fn session_notes(
+        &self,
+        project: Option<&std::path::Path>,
+        cwd: &std::path::Path,
+        recaps: bool,
+    ) -> Option<String> {
+        let recap = (recaps && self.settings.general.ask_recap)
+            .then(|| trek_core::changes::RECAP.to_string());
+        let artifacts = self
+            .settings
+            .general
+            .interactive_artifacts
+            .then(|| trek_core::artifact::AGENT_INSTRUCTIONS.to_string());
         // Only where the watcher is handed over (`mcp_servers`): a build without trek-mcp has none.
-        let video = (self.settings.tools.video && trek_mcp_binary().is_some()).then(|| trek_core::media::AGENT_INSTRUCTIONS.to_string());
-        let notes: Vec<String> = std::iter::once(trek_core::visualization::AGENT_INSTRUCTIONS.to_string()).chain(artifacts).chain(video).chain(self.project_notes(project, cwd)).chain(recap).collect();
+        let video = (self.settings.tools.video && trek_mcp_binary().is_some())
+            .then(|| trek_core::media::AGENT_INSTRUCTIONS.to_string());
+        let notes: Vec<String> =
+            std::iter::once(trek_core::visualization::AGENT_INSTRUCTIONS.to_string())
+                .chain(artifacts)
+                .chain(video)
+                .chain(self.project_notes(project, cwd))
+                .chain(recap)
+                .collect();
         (!notes.is_empty()).then(|| notes.join("\n\n"))
     }
 
@@ -3682,10 +4680,17 @@ impl Workspace {
     /// new chat: one session is kept warm at a time, for whichever was typed in last).
     fn warm_draft(&mut self, cwd: PathBuf, p: Prefs, cx: &mut Context<Self>) {
         // A thread in a worktree starts its agent there, once the worktree is made.
-        if matches!(p.agent, AgentId::Direct(_)) || p.worktree || self.agent_updating(&p.agent.key()) {
+        if matches!(p.agent, AgentId::Direct(_))
+            || p.worktree
+            || self.agent_updating(&p.agent.key())
+        {
             return;
         }
-        if self.warm.as_ref().is_some_and(|(k, _, _)| *k == self.draft_key_with(&p, &cwd)) {
+        if self
+            .warm
+            .as_ref()
+            .is_some_and(|(k, _, _)| *k == self.draft_key_with(&p, &cwd))
+        {
             return;
         }
         let (mcp_servers, ipc) = self.session_mcp(&p.agent, None);
@@ -3720,7 +4725,10 @@ impl Workspace {
         match scope {
             Scope::Main => self.warm_up(cx),
             Scope::Thread(id) => self.warm_thread(id, cx),
-            Scope::Ide => match (self.ide_chat.active_thread().map(str::to_string), self.ide_root.clone()) {
+            Scope::Ide => match (
+                self.ide_chat.active_thread().map(str::to_string),
+                self.ide_root.clone(),
+            ) {
                 (Some(id), _) => self.warm_thread(&id, cx),
                 // Ask mode starts its session read-only, which a warm one isn't.
                 (None, Some(_)) if self.ide_chat.draft_ask => {}
@@ -3735,16 +4743,28 @@ impl Workspace {
 
     /// Start an existing thread's session ahead of its next message (direct providers have no process to start).
     fn warm_thread(&mut self, id: &str, cx: &mut Context<Self>) {
-        let direct = self.thread(id).is_some_and(|t| matches!(t.agent, AgentId::Direct(_)));
+        let direct = self
+            .thread(id)
+            .is_some_and(|t| matches!(t.agent, AgentId::Direct(_)));
         if !direct {
             self.ensure_session(id, cx);
         }
     }
 
-    pub(crate) fn apply_events(&mut self, id: &str, events: Vec<AgentEvent>, cx: &mut Context<Self>) {
+    pub(crate) fn apply_events(
+        &mut self,
+        id: &str,
+        events: Vec<AgentEvent>,
+        cx: &mut Context<Self>,
+    ) {
         // A finished call may have changed files, and a finished turn ends a span of changes:
         // an open review works its pending files out again.
-        let finished = events.iter().any(|e| matches!(e, AgentEvent::ToolFinished { .. } | AgentEvent::TurnComplete { .. }));
+        let finished = events.iter().any(|e| {
+            matches!(
+                e,
+                AgentEvent::ToolFinished { .. } | AgentEvent::TurnComplete { .. }
+            )
+        });
         let moved = self.reviews.contains_key(id) && finished;
         // Open editors read files an agent may have written again (`agent_edits`).
         if finished {
@@ -3763,7 +4783,9 @@ impl Workspace {
         let events = self.screen_ask(id, events);
         // Background tasks' output is read while it runs (polled): it goes to whatever shows it,
         // and changes nothing else.
-        let (outputs, events): (Vec<AgentEvent>, Vec<AgentEvent>) = events.into_iter().partition(|e| matches!(e, AgentEvent::TaskOutput { .. }));
+        let (outputs, events): (Vec<AgentEvent>, Vec<AgentEvent>) = events
+            .into_iter()
+            .partition(|e| matches!(e, AgentEvent::TaskOutput { .. }));
         if !outputs.is_empty() {
             if let Some(live) = self.live.get_mut(id) {
                 for ev in outputs {
@@ -3814,7 +4836,11 @@ impl Workspace {
         let mut efforts: Option<(String, Vec<Effort>, Option<Effort>)> = None;
         // Tokens the agent reported (by the model it named) and their cost, kept once the batch
         // is through.
-        let mut used: Vec<(Option<String>, trek_core::TokenUsage, Option<trek_core::UsageCost>)> = vec![];
+        let mut used: Vec<(
+            Option<String>,
+            trek_core::TokenUsage,
+            Option<trek_core::UsageCost>,
+        )> = vec![];
         // A turn that failed (true) or was stopped: transcripts keep no turn end for it, but the
         // time it ran counts in Basecamp.
         let mut stopped: Option<(u32, bool)> = None;
@@ -3832,12 +4858,20 @@ impl Workspace {
             let had_agents = live.background_agents().next().is_some();
             live.last_active = Some(cx.background_executor().now());
             // When the turn ending here began, as wall time (`note_branch`).
-            turn_began = live.turn_started.map(|t| now_ms() - t.elapsed().as_millis() as i64);
+            turn_began = live
+                .turn_started
+                .map(|t| now_ms() - t.elapsed().as_millis() as i64);
             let now = cx.background_executor().now();
             for ev in events {
                 // Whatever comes after a reasoning item ends its time.
-                if let (Some(ix), false) = (live.reasoning, matches!(ev, AgentEvent::ReasoningDelta(_))) {
-                    if let Some(span) = live.items.id_at(ix).and_then(|item| live.thought.get_mut(item)) {
+                if let (Some(ix), false) =
+                    (live.reasoning, matches!(ev, AgentEvent::ReasoningDelta(_)))
+                {
+                    if let Some(span) = live
+                        .items
+                        .id_at(ix)
+                        .and_then(|item| live.thought.get_mut(item))
+                    {
                         span.1 = now;
                     }
                 }
@@ -3850,9 +4884,17 @@ impl Workspace {
                     ev => ev,
                 };
                 // Output with no turn open: the agent woke itself (a background sub-agent finished).
-                if matches!(ev, AgentEvent::TextDelta(_) | AgentEvent::ReasoningDelta(_) | AgentEvent::ToolStarted { .. }) && live.turn_started.is_none() {
+                if matches!(
+                    ev,
+                    AgentEvent::TextDelta(_)
+                        | AgentEvent::ReasoningDelta(_)
+                        | AgentEvent::ToolStarted { .. }
+                ) && live.turn_started.is_none()
+                {
                     turn_began = Some(now_ms());
-                    live.quiet_turn = live.stopped_out.is_some_and(|at| at.elapsed() < STOPPED_ECHO);
+                    live.quiet_turn = live
+                        .stopped_out
+                        .is_some_and(|at| at.elapsed() < STOPPED_ECHO);
                     live.self_started = true;
                     live.turn_started = Some(Instant::now());
                     run_state = Some(RunState::Working);
@@ -3870,12 +4912,20 @@ impl Workspace {
                 );
                 // Text after a thought ends the thought, which then gets a row of its own.
                 appended &= match ev {
-                    AgentEvent::TextDelta(_) => live.streaming.is_some() && live.reasoning.is_none(),
+                    AgentEvent::TextDelta(_) => {
+                        live.streaming.is_some() && live.reasoning.is_none()
+                    }
                     AgentEvent::ReasoningDelta(_) => live.reasoning.is_some(),
                     _ => false,
                 };
                 match ev {
-                    AgentEvent::Task { id: tid, description, activity, tool_uses, done } => {
+                    AgentEvent::Task {
+                        id: tid,
+                        description,
+                        activity,
+                        tool_uses,
+                        done,
+                    } => {
                         let known = live.tasks.iter().position(|t| t.id == tid);
                         let ix = match (known, &description) {
                             (Some(ix), _) => Some(ix),
@@ -3913,12 +4963,19 @@ impl Workspace {
                                 Some(true) => ToolStatus::Done,
                                 Some(false) => ToolStatus::Failed,
                             };
-                            if let Some(Item::Tool { status: st, .. }) = live.items.rfind_mut(|i| matches!(i, Item::Tool { id, .. } if *id == tid)) {
+                            if let Some(Item::Tool { status: st, .. }) = live
+                                .items
+                                .rfind_mut(|i| matches!(i, Item::Tool { id, .. } if *id == tid))
+                            {
                                 *st = status;
                             }
                         }
                     }
-                    AgentEvent::TaskStep { task, title, detail } => {
+                    AgentEvent::TaskStep {
+                        task,
+                        title,
+                        detail,
+                    } => {
                         if let Some(t) = live.tasks.iter_mut().find(|t| t.id == task) {
                             t.steps.push((title, detail));
                             if t.steps.len() > SUB_STEPS {
@@ -3933,15 +4990,40 @@ impl Workspace {
                     // Taken out above.
                     AgentEvent::TaskOutput { .. } => {}
                     // One row says it, in place of the error the turn ends with.
-                    AgentEvent::LimitReached { message, resets_at, scope } => {
+                    AgentEvent::LimitReached {
+                        message,
+                        resets_at,
+                        scope,
+                    } => {
                         live.streaming = None;
                         live.reasoning = None;
-                        live.items.push(Item::Limit { text: message.clone(), resets_at, scope: scope.clone() });
-                        live.limit = Some(limits::Hit { message, resets_at, scope, wrapped: false });
+                        live.items.push(Item::Limit {
+                            text: message.clone(),
+                            resets_at,
+                            scope: scope.clone(),
+                        });
+                        live.limit = Some(limits::Hit {
+                            message,
+                            resets_at,
+                            scope,
+                            wrapped: false,
+                        });
                     }
-                    AgentEvent::LimitUsed { scope, percent, resets_at } => windows.push(limits::Window { scope, percent, resets_at }),
+                    AgentEvent::LimitUsed {
+                        scope,
+                        percent,
+                        resets_at,
+                    } => windows.push(limits::Window {
+                        scope,
+                        percent,
+                        resets_at,
+                    }),
                     AgentEvent::Commands(c) => commands = Some(c),
-                    AgentEvent::Efforts { model, efforts: offered, effort } => efforts = Some((model, offered, effort)),
+                    AgentEvent::Efforts {
+                        model,
+                        efforts: offered,
+                        effort,
+                    } => efforts = Some((model, offered, effort)),
                     AgentEvent::Notice(text) => {
                         live.streaming = None;
                         live.items.push(Item::Notice { text });
@@ -3949,7 +5031,11 @@ impl Workspace {
                     AgentEvent::PermissionResolved { request_id } => {
                         live.settle_prompt(&request_id);
                         if live.permissions.is_empty() {
-                            run_state = Some(if live.turn_started.is_some() { RunState::Working } else { RunState::Idle });
+                            run_state = Some(if live.turn_started.is_some() {
+                                RunState::Working
+                            } else {
+                                RunState::Idle
+                            });
                         }
                     }
                     AgentEvent::Started { native_id, model } => {
@@ -3964,18 +5050,28 @@ impl Workspace {
                         }
                     }
                     AgentEvent::TextDelta(t) => {
-                        let ix = match live.streaming {
-                            Some(ix) => ix,
-                            None => {
-                                let ix = live.items.push(Item::Assistant { text: String::new() });
-                                live.streaming = Some(ix);
-                                ix
+                        // A whitespace-only delta carries nothing new to show: it mustn't open a
+                        // blank bubble or cut a reasoning span short (some providers interleave
+                        // empty content chunks between reasoning ones), but it can still join a
+                        // message already streaming.
+                        if !t.trim().is_empty() || live.streaming.is_some() {
+                            let ix = match live.streaming {
+                                Some(ix) => ix,
+                                None => {
+                                    let ix = live.items.push(Item::Assistant {
+                                        text: String::new(),
+                                    });
+                                    live.streaming = Some(ix);
+                                    ix
+                                }
+                            };
+                            if let Some(Item::Assistant { text }) = live.items.get_mut(ix) {
+                                text.push_str(&t);
                             }
-                        };
-                        if let Some(Item::Assistant { text }) = live.items.get_mut(ix) {
-                            text.push_str(&t);
                         }
-                        live.reasoning = None;
+                        if !t.trim().is_empty() {
+                            live.reasoning = None;
+                        }
                     }
                     AgentEvent::TextDone(t) => {
                         match live.streaming.take() {
@@ -3995,7 +5091,9 @@ impl Workspace {
                         let ix = match live.reasoning {
                             Some(ix) => ix,
                             None => {
-                                let ix = live.items.push(Item::Reasoning { text: String::new() });
+                                let ix = live.items.push(Item::Reasoning {
+                                    text: String::new(),
+                                });
                                 live.reasoning = Some(ix);
                                 if let Some(item) = live.items.id_at(ix) {
                                     live.thought.insert(item.to_string(), (now, now));
@@ -4007,35 +5105,39 @@ impl Workspace {
                             text.push_str(&t);
                         }
                     }
-                    AgentEvent::ToolStarted { id: tid, title, detail } => {
+                    AgentEvent::ToolStarted {
+                        id: tid,
+                        title,
+                        detail,
+                    } => {
                         live.streaming = None;
                         live.reasoning = None;
-                        // A call that starts while another is still running ran in parallel with
-                        // it: the thinking timeline draws those together as one fan-out.
-                        let overlap: Vec<String> = live
-                            .items
-                            .iter()
-                            .filter_map(|i| match i {
-                                Item::Tool { id, status: ToolStatus::Running, .. } => Some(id.clone()),
-                                _ => None,
-                            })
-                            .collect();
-                        if !overlap.is_empty() {
-                            live.parallel.insert(tid.clone());
-                            live.parallel.extend(overlap);
-                        }
-                        live.items.push(Item::Tool { id: tid, title, detail, output: String::new(), status: ToolStatus::Running });
+                        live.items.push(Item::Tool {
+                            id: tid,
+                            title,
+                            detail,
+                            output: String::new(),
+                            status: ToolStatus::Running,
+                        });
                         // A sub-agent row waiting for this call goes right after it, before any
                         // text later in the batch opens a new message.
                         live.place_task_rows(false);
                     }
-                    AgentEvent::ToolLines { id: tid, added, removed } => {
+                    AgentEvent::ToolLines {
+                        id: tid,
+                        added,
+                        removed,
+                    } => {
                         let lines = (added > 0 || removed > 0).then_some((added, removed));
                         if let Err(e) = self.store.set_tool_lines(id, &tid, lines) {
                             tracing::warn!("save tool lines: {e}");
                         }
                         // The call's row shows them: followers of the transcript look at it again.
-                        if let Some(ix) = live.items.iter().rposition(|i| matches!(i, Item::Tool { id, .. } if *id == tid)) {
+                        if let Some(ix) = live
+                            .items
+                            .iter()
+                            .rposition(|i| matches!(i, Item::Tool { id, .. } if *id == tid))
+                        {
                             live.items.mark_edited(ix);
                         }
                         match lines {
@@ -4043,45 +5145,91 @@ impl Workspace {
                             None => live.lines.remove(&tid),
                         };
                     }
-                    AgentEvent::ToolFinished { id: tid, output, ok } => {
-                        if let Some(Item::Tool { output: o, status, .. }) = live.items.rfind_mut(|i| matches!(i, Item::Tool { id, .. } if *id == tid)) {
+                    AgentEvent::ToolFinished {
+                        id: tid,
+                        output,
+                        ok,
+                    } => {
+                        if let Some(Item::Tool {
+                            output: o, status, ..
+                        }) = live
+                            .items
+                            .rfind_mut(|i| matches!(i, Item::Tool { id, .. } if *id == tid))
+                        {
                             *o = output;
                             // A background sub-agent's tool call returns at once; it's done when its task is.
                             if !live.tasks.iter().any(|t| t.id == tid && t.done.is_none()) {
-                                *status = if ok { ToolStatus::Done } else { ToolStatus::Failed };
+                                *status = if ok {
+                                    ToolStatus::Done
+                                } else {
+                                    ToolStatus::Failed
+                                };
                             }
                         }
                     }
-                    AgentEvent::PermissionRequest { request_id, title, detail, prompt } => {
+                    AgentEvent::PermissionRequest {
+                        request_id,
+                        title,
+                        detail,
+                        prompt,
+                    } => {
                         notify_text = Some(match &prompt {
-                            Some(trek_agents::Prompt::Questions(_)) => "Needs your approval: a question for you".to_string(),
-                            Some(trek_agents::Prompt::Plan(_)) => "Needs your approval: a plan to review".to_string(),
+                            Some(trek_agents::Prompt::Questions(_)) => {
+                                "Needs your approval: a question for you".to_string()
+                            }
+                            Some(trek_agents::Prompt::Plan(_)) => {
+                                "Needs your approval: a plan to review".to_string()
+                            }
                             None => format!("Needs your approval: {title}"),
                         });
                         let after_turn = live.turn_started.is_none();
-                        live.permissions.push(PendingPermission { request_id, title, detail, prompt, after_turn });
+                        live.permissions.push(PendingPermission {
+                            request_id,
+                            title,
+                            detail,
+                            prompt,
+                            after_turn,
+                        });
                         run_state = Some(RunState::NeedsYou);
                         asked = true;
                     }
-                    AgentEvent::DiffStat { additions, deletions } => diff = Some((additions, deletions)),
+                    AgentEvent::DiffStat {
+                        additions,
+                        deletions,
+                    } => diff = Some((additions, deletions)),
                     AgentEvent::Context { used, window } => live.context = Some((used, window)),
-                    AgentEvent::Usage { model, tokens, cost } => used.push((model, tokens, cost)),
+                    AgentEvent::Usage {
+                        model,
+                        tokens,
+                        cost,
+                    } => used.push((model, tokens, cost)),
                     AgentEvent::Billing(b) => live.billing = Some(b),
                     AgentEvent::TurnComplete { error } => {
                         // Models that hide their reasoning leave empty "Thought" rows behind. Removing
                         // them shifts positions; the rows' ids keep saves and views lined up.
-                        live.items.retain(|i| !matches!(i, Item::Reasoning { text } if text.trim().is_empty()));
+                        live.items.retain(
+                            |i| !matches!(i, Item::Reasoning { text } if text.trim().is_empty()),
+                        );
                         live.streaming = None;
                         live.reasoning = None;
                         live.permissions.clear();
                         // The turn is over, whatever it left running in the background: its answer
                         // is in. What it waits on (its sub-agents) keeps it among the working
                         // (`Workspace::waiting`); a shell, a monitor or a browser left running doesn't.
-                        let took = live.turn_started.take().map(|t| t.elapsed().as_secs() as u32).unwrap_or(0);
+                        let took = live
+                            .turn_started
+                            .take()
+                            .map(|t| t.elapsed().as_secs() as u32)
+                            .unwrap_or(0);
                         live.turn_error = false;
                         live.close_turn(error.is_none());
-                        if error.is_none() && matches!(live.items.last(), Some(Item::Assistant { .. })) {
-                            live.items.push(Item::TurnEnd { at: now_ms(), took_secs: took });
+                        if error.is_none()
+                            && matches!(live.items.last(), Some(Item::Assistant { .. }))
+                        {
+                            live.items.push(Item::TurnEnd {
+                                at: now_ms(),
+                                took_secs: took,
+                            });
                         }
                         if let Some(e) = &error {
                             // Paused at a usage limit isn't failed, but its time on the trail counts.
@@ -4100,7 +5248,9 @@ impl Workspace {
                                 run_state = Some(RunState::Failed);
                                 continue_queue = false;
                             } else {
-                                live.items.push(Item::Notice { text: "Interrupted".into() });
+                                live.items.push(Item::Notice {
+                                    text: "Interrupted".into(),
+                                });
                                 run_state = Some(RunState::Idle);
                                 continue_queue = false;
                                 interrupted = true;
@@ -4127,17 +5277,21 @@ impl Workspace {
                         continue_queue = false;
                         live.commands = None;
                         // What it ran in the background went with it.
-                        agents_lost |= live.turn_started.is_none() && live.background_agents().next().is_some();
+                        agents_lost |= live.turn_started.is_none()
+                            && live.background_agents().next().is_some();
                         live.lose_background();
                         // Nobody is left to answer what the agent was asking.
                         live.permissions.retain(|p| p.after_turn);
-                        live.picks.retain(|(rid, _), _| live.permissions.iter().any(|p| p.request_id == *rid));
+                        live.picks.retain(|(rid, _), _| {
+                            live.permissions.iter().any(|p| p.request_id == *rid)
+                        });
                         // The process ended mid-turn: the turn failed, and ends here like any other
                         // (saved, queued follow-ups handed back, an alert). Unless the error it
                         // reported says why, that it stopped is all there is to say.
                         live.wrap_up = None;
                         if let Some(began) = live.turn_started.take() {
-                            stopped = Some((began.elapsed().as_secs() as u32, live.limit.is_none()));
+                            stopped =
+                                Some((began.elapsed().as_secs() as u32, live.limit.is_none()));
                             live.close_turn(false);
                             live.streaming = None;
                             live.reasoning = None;
@@ -4146,7 +5300,9 @@ impl Workspace {
                                 run_state = Some(RunState::Idle);
                             } else {
                                 if !std::mem::take(&mut live.turn_error) {
-                                    live.items.push(Item::Error { text: "The agent stopped unexpectedly.".into() });
+                                    live.items.push(Item::Error {
+                                        text: "The agent stopped unexpectedly.".into(),
+                                    });
                                 }
                                 run_state.get_or_insert(RunState::Failed);
                             }
@@ -4157,7 +5313,10 @@ impl Workspace {
             }
             live.place_task_rows(false);
             live.revision += 1;
-            agents_gone = had_agents && !exited && live.turn_started.is_none() && live.background_agents().next().is_none();
+            agents_gone = had_agents
+                && !exited
+                && live.turn_started.is_none()
+                && live.background_agents().next().is_none();
         }
         if agents_lost {
             self.background_agents_lost(id, cx);
@@ -4177,7 +5336,10 @@ impl Workspace {
         }
         let mark = self.live.get(id).and_then(|l| l.mark.clone());
         if let (Some(c), Some(t)) = (commands, self.thread(id)) {
-            let key = (t.agent.key(), t.cwd.clone().unwrap_or_else(trek_core::paths::home));
+            let key = (
+                t.agent.key(),
+                t.cwd.clone().unwrap_or_else(trek_core::paths::home),
+            );
             self.agent_commands.insert(key, c);
         }
         if let Some((model, offered, effort)) = efforts {
@@ -4198,18 +5360,29 @@ impl Workspace {
         }
         let viewing = self.on_screen(id);
         // Its turn over, it's read if the user is looking, or if its own handoff took them off it.
-        let seen = viewing || (finished && self.live.get_mut(id).is_some_and(|l| std::mem::take(&mut l.seen_at_turn_end)));
+        let seen = viewing
+            || (finished
+                && self
+                    .live
+                    .get_mut(id)
+                    .is_some_and(|l| std::mem::take(&mut l.seen_at_turn_end)));
         // Streaming text changes nothing on the thread row: skip the database write (this runs
         // up to 60 times a second) unless something actually changed.
         let changed = finished
             || diff.is_some()
             || self.thread(id).is_some_and(|t| {
-                (started && t.reopen.is_some()) || native.as_ref().is_some_and(|n| t.native_id.as_ref() != Some(n)) || run_state.is_some_and(|s| t.run_state != s)
+                (started && t.reopen.is_some())
+                    || native
+                        .as_ref()
+                        .is_some_and(|n| t.native_id.as_ref() != Some(n))
+                    || run_state.is_some_and(|s| t.run_state != s)
             });
         // The agent moved to another session than the thread's (it couldn't cut its own back, or
         // started over): the one left behind isn't this thread's any more, and mustn't come
         // back as an imported thread of its own.
-        let left = native.as_ref().and_then(|n| current_native.clone().filter(|old| old != n));
+        let left = native
+            .as_ref()
+            .and_then(|n| current_native.clone().filter(|old| old != n));
         if let Some(old) = &left {
             if let Err(e) = self.store.retire_session(old, id) {
                 tracing::warn!("retire session {old}: {e}");
@@ -4260,7 +5433,11 @@ impl Workspace {
         // Settings read at launch changed while it was busy: now it isn't, it restarts (and
         // resumes) before anything more goes to it. Unless it has work running in the background:
         // then it's told them instead.
-        if let Some(live) = self.live.get_mut(id).filter(|l| l.relaunch && l.turn_started.is_none()) {
+        if let Some(live) = self
+            .live
+            .get_mut(id)
+            .filter(|l| l.relaunch && l.turn_started.is_none())
+        {
             live.relaunch = false;
             let (free, plan, fast) = (live.free_to_relaunch(), live.plan, live.fast);
             if free {
@@ -4269,7 +5446,11 @@ impl Workspace {
                 }
             } else if let (Some(tx), Some(t)) = (live.commands.clone(), self.thread(id)) {
                 let fast = self.fast_tier(&t.agent, t.model.as_ref(), fast);
-                let _ = tx.try_send(Command::SetModes { plan, fast, effort: t.effort });
+                let _ = tx.try_send(Command::SetModes {
+                    plan,
+                    fast,
+                    effort: t.effort,
+                });
             }
         }
         // Its background work over between turns, an agent update held back for it may start.
@@ -4285,17 +5466,27 @@ impl Workspace {
             // The turn's count waits on its end checkpoint.
             self.forget_turn_changes(id, false, cx);
             self.refresh_git(cx);
-            if let Some(cwd) = self.thread(id).and_then(|t| t.cwd.clone()).filter(|c| Some(c) != self.current_cwd().as_ref()) {
+            if let Some(cwd) = self
+                .thread(id)
+                .and_then(|t| t.cwd.clone())
+                .filter(|c| Some(c) != self.current_cwd().as_ref())
+            {
                 self.refresh_git_at(cwd, cx);
             }
             self.persist_items(id, cx);
             self.search_index_changed(cx);
             self.note_branch(id, turn_began, cx);
-            if self.live.get_mut(id).is_some_and(|l| std::mem::take(&mut l.hold_queue)) {
+            if self
+                .live
+                .get_mut(id)
+                .is_some_and(|l| std::mem::take(&mut l.hold_queue))
+            {
                 continue_queue = false;
             }
             let next = if continue_queue {
-                self.live.get_mut(id).and_then(|l| (!l.queued.is_empty()).then(|| l.queued.remove(0)))
+                self.live
+                    .get_mut(id)
+                    .and_then(|l| (!l.queued.is_empty()).then(|| l.queued.remove(0)))
             } else {
                 None
             };
@@ -4318,10 +5509,24 @@ impl Workspace {
                 // The agent saying that what the user stopped has stopped isn't news either. Nor is
                 // every turn a watcher or a monitor wakes it for: one alert a while is enough,
                 // unless it failed.
-                let (echo, woke) = self.live.get_mut(id).map_or((false, false), |l| (std::mem::take(&mut l.quiet_turn), std::mem::take(&mut l.self_started)));
-                let woke_again = woke && self.live.get(id).and_then(|l| l.woke_alert).is_some_and(|at| at.elapsed() < WOKE_ALERT_GAP);
-                let failed = self.thread(id).is_some_and(|t| t.run_state == RunState::Failed);
-                if let Some(t) = self.thread(id).filter(|_| !interrupted && !paused && !waiting && !echo && (failed || !woke_again)) {
+                let (echo, woke) = self.live.get_mut(id).map_or((false, false), |l| {
+                    (
+                        std::mem::take(&mut l.quiet_turn),
+                        std::mem::take(&mut l.self_started),
+                    )
+                });
+                let woke_again = woke
+                    && self
+                        .live
+                        .get(id)
+                        .and_then(|l| l.woke_alert)
+                        .is_some_and(|at| at.elapsed() < WOKE_ALERT_GAP);
+                let failed = self
+                    .thread(id)
+                    .is_some_and(|t| t.run_state == RunState::Failed);
+                if let Some(t) = self.thread(id).filter(|_| {
+                    !interrupted && !paused && !waiting && !echo && (failed || !woke_again)
+                }) {
                     // A thread an agent started (or handed off to) the user may not have seen
                     // start: it says so, with a way to it.
                     let message = match (failed, lineage::agent_started(t)) {
@@ -4352,14 +5557,23 @@ impl Workspace {
         // A side chat answers in the panel it was asked in, beside its thread; the inbox doesn't
         // list it, so an alert would lead nowhere. A sub-agent's end goes to its parent, not the
         // user; only its requests for approval are theirs.
-        let side_chat = self.thread(id).is_some_and(|t| t.side_of.is_some() || (t.parent_id.is_some() && !asked));
+        let side_chat = self
+            .thread(id)
+            .is_some_and(|t| t.side_of.is_some() || (t.parent_id.is_some() && !asked));
         // Whoever waits on a thread an agent started hears it's finished, or needs the user.
         if finished || asked {
             self.lineage_turn_ended(id, interrupted, cx);
         }
         if let Some(message) = notify_text.filter(|_| !side_chat) {
-            let button = self.thread(id).filter(|t| lineage::agent_started(t)).map(|_| "Open thread");
-            cx.emit(WorkspaceEvent::Attention { message, thread: id.to_string(), button });
+            let button = self
+                .thread(id)
+                .filter(|t| lineage::agent_started(t))
+                .map(|_| "Open thread");
+            cx.emit(WorkspaceEvent::Attention {
+                message,
+                thread: id.to_string(),
+                button,
+            });
         }
         if let Some(first) = live_group {
             // Text, the turn's end or a stop ended it (not a card, which shows it as it is): it
@@ -4372,7 +5586,10 @@ impl Workspace {
         if transcript_only {
             // Only the transcript views redraw; the sidebar, title bar and composer would
             // otherwise redraw with every batch, up to 60 times a second while text streams.
-            cx.emit(WorkspaceEvent::Transcript { id: id.to_string(), appended });
+            cx.emit(WorkspaceEvent::Transcript {
+                id: id.to_string(),
+                appended,
+            });
         } else {
             cx.notify();
         }
@@ -4387,17 +5604,29 @@ impl Workspace {
     /// Show `id`'s live group in the transcript, open (and its call `call` too), rather than in
     /// the working bar: every call can be read there, output and all, while the turn goes on.
     pub fn open_live_group(&mut self, id: &str, call: Option<String>, cx: &mut Context<Self>) {
-        let Some(first) = self.live_group_start(id) else { return };
-        let Some(live) = self.live.get_mut(id) else { return };
+        let Some(first) = self.live_group_start(id) else {
+            return;
+        };
+        let Some(live) = self.live.get_mut(id) else {
+            return;
+        };
         live.opened = Some(crate::activity::Opened { first, call });
-        cx.emit(WorkspaceEvent::Transcript { id: id.to_string(), appended: false });
+        cx.emit(WorkspaceEvent::Transcript {
+            id: id.to_string(),
+            appended: false,
+        });
     }
 
     /// The live group starting at item `first` is over: the working bar folds it away while the
     /// transcript holds it (and what came after) back, then shows it as a summary row.
     fn fold_group(&mut self, id: &str, first: String, cx: &mut Context<Self>) {
-        let Some(live) = self.live.get_mut(id) else { return };
-        live.fold = Some(crate::activity::Fold { first, until: Instant::now() + crate::activity::FOLD });
+        let Some(live) = self.live.get_mut(id) else {
+            return;
+        };
+        live.fold = Some(crate::activity::Fold {
+            first,
+            until: Instant::now() + crate::activity::FOLD,
+        });
         let id = id.to_string();
         live._fold_done = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(crate::activity::FOLD).await;
@@ -4405,20 +5634,34 @@ impl Workspace {
                 if let Some(l) = this.live.get_mut(&id) {
                     l.fold = None;
                 }
-                cx.emit(WorkspaceEvent::Transcript { id, appended: false });
+                cx.emit(WorkspaceEvent::Transcript {
+                    id,
+                    appended: false,
+                });
             });
         }));
     }
 
     /// Put queued follow-ups back into the composer (the thread must be on screen).
     fn restore_queued(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(queued) = self.live.get_mut(id).map(|l| std::mem::take(&mut l.queued)) else { return };
+        let Some(queued) = self.live.get_mut(id).map(|l| std::mem::take(&mut l.queued)) else {
+            return;
+        };
         if queued.is_empty() {
             return;
         }
-        let text = queued.iter().map(|(t, _)| t.as_str()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
+        let text = queued
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
         let images = queued.into_iter().flat_map(|(_, images)| images).collect();
-        cx.emit(WorkspaceEvent::RestoreQueued { thread: id.to_string(), text, images });
+        cx.emit(WorkspaceEvent::RestoreQueued {
+            thread: id.to_string(),
+            text,
+            images,
+        });
     }
 
     /// Follow-ups held for a turn that stopped or failed while `id` was off screen go back to the
@@ -4428,10 +5671,24 @@ impl Workspace {
         if !self.on_screen(id) {
             return;
         }
-        if let Some(left) = self.live.get_mut(id).map(|l| std::mem::take(&mut l.left_over)).filter(|l| !l.is_empty()) {
-            let text = left.iter().map(|(t, _)| t.as_str()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
+        if let Some(left) = self
+            .live
+            .get_mut(id)
+            .map(|l| std::mem::take(&mut l.left_over))
+            .filter(|l| !l.is_empty())
+        {
+            let text = left
+                .iter()
+                .map(|(t, _)| t.as_str())
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n");
             let images = left.into_iter().flat_map(|(_, images)| images).collect();
-            cx.emit(WorkspaceEvent::RestoreQueued { thread: id.to_string(), text, images });
+            cx.emit(WorkspaceEvent::RestoreQueued {
+                thread: id.to_string(),
+                text,
+                images,
+            });
         }
         // While its agent updates too: only messages sent meanwhile are held for that.
         if self.stale_queue(id) && !self.holds_queue(id) {
@@ -4441,15 +5698,33 @@ impl Workspace {
 
     /// `id` has follow-ups queued with no turn of its own, nor its agent's sub-agents, to follow.
     fn stale_queue(&self, id: &str) -> bool {
-        self.live.get(id).is_some_and(|l| !l.queued.is_empty() && l.turn_started.is_none() && l.background_agents().next().is_none())
+        self.live.get(id).is_some_and(|l| {
+            !l.queued.is_empty()
+                && l.turn_started.is_none()
+                && l.background_agents().next().is_none()
+        })
     }
 
     /// Save `id`'s transcript a second from now (longer once a changed row is large, see
     /// `save_delay`), unless a save is on its way already.
     fn persist_soon(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(live) = self.live.get_mut(id).filter(|l| l._save_soon.is_none() && l.items.is_dirty()) else { return };
+        let Some(live) = self
+            .live
+            .get_mut(id)
+            .filter(|l| l._save_soon.is_none() && l.items.is_dirty())
+        else {
+            return;
+        };
         let changes = live.items.changes();
-        let delay = save_delay(changes.changed.iter().chain(&changes.appended).map(|(_, item)| item_bytes(item)).max().unwrap_or(0));
+        let delay = save_delay(
+            changes
+                .changed
+                .iter()
+                .chain(&changes.appended)
+                .map(|(_, item)| item_bytes(item))
+                .max()
+                .unwrap_or(0),
+        );
         let id = id.to_string();
         live._save_soon = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(delay).await;
@@ -4465,7 +5740,11 @@ impl Workspace {
     /// Save every open transcript's unsaved changes (Trek is quitting).
     fn persist_all(&mut self) {
         // Another machine's threads are that machine's to keep.
-        for (id, live) in self.live.iter_mut().filter(|(id, l)| !l.loading && !crate::machines::is_remote(id)) {
+        for (id, live) in self
+            .live
+            .iter_mut()
+            .filter(|(id, l)| !l.loading && !crate::machines::is_remote(id))
+        {
             if let Err(e) = self.store.save_transcript(id, &mut live.items) {
                 tracing::warn!("save transcript {id}: {e}");
             }
@@ -4480,12 +5759,24 @@ impl Workspace {
         if crate::machines::is_remote(id) {
             return;
         }
-        let Some(live) = self.live.get_mut(id).filter(|l| !l.loading) else { return };
+        let Some(live) = self.live.get_mut(id).filter(|l| !l.loading) else {
+            return;
+        };
         let began = std::time::Instant::now();
         let saved = self.store.save_transcript(id, &mut live.items);
         if crate::perf::on() && began.elapsed() >= Duration::from_millis(4) {
-            let largest = live.items.iter().rev().take(4).map(item_bytes).max().unwrap_or(0);
-            tracing::info!("perf: save ms={} largest_recent={largest}", crate::perf::ms(began.elapsed()));
+            let largest = live
+                .items
+                .iter()
+                .rev()
+                .take(4)
+                .map(item_bytes)
+                .max()
+                .unwrap_or(0);
+            tracing::info!(
+                "perf: save ms={} largest_recent={largest}",
+                crate::perf::ms(began.elapsed())
+            );
         }
         match saved {
             Ok(true) => self.index_for_search(cx),
@@ -4494,7 +5785,13 @@ impl Workspace {
         }
     }
 
-    pub fn respond(&mut self, id: &str, request_id: &str, decision: Decision, cx: &mut Context<Self>) {
+    pub fn respond(
+        &mut self,
+        id: &str,
+        request_id: &str,
+        decision: Decision,
+        cx: &mut Context<Self>,
+    ) {
         if crate::machines::is_remote(id) {
             return self.machine_respond(id, request_id, decision, cx);
         }
@@ -4505,7 +5802,10 @@ impl Workspace {
             still_waiting = !live.permissions.is_empty();
             running = live.turn_started.is_some() && live.commands.is_some();
             if let Some(tx) = &live.commands {
-                let _ = tx.try_send(Command::Respond { request_id: request_id.to_string(), decision });
+                let _ = tx.try_send(Command::Respond {
+                    request_id: request_id.to_string(),
+                    decision,
+                });
             }
             live.revision += 1;
         }
@@ -4513,7 +5813,11 @@ impl Workspace {
         // it then leaves the thread idle unless it starts new work, free for reports from its
         // sub-agents that waited.
         if !still_waiting {
-            let state = if running { RunState::Working } else { RunState::Idle };
+            let state = if running {
+                RunState::Working
+            } else {
+                RunState::Idle
+            };
             self.mutate_thread(id, cx, |t| t.run_state = state);
             if !running {
                 self.deliver_wakes(id, cx);
@@ -4525,42 +5829,83 @@ impl Workspace {
     /// Answer the agent's questions from the question card: `(question, chosen labels)`. The
     /// answers go in the transcript as the user's message, as typed ones do (`send_to`); secret
     /// ones never do.
-    pub fn answer(&mut self, id: &str, request_id: &str, answers: Vec<(String, String)>, cx: &mut Context<Self>) {
+    pub fn answer(
+        &mut self,
+        id: &str,
+        request_id: &str,
+        answers: Vec<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
         if crate::machines::is_remote(id) {
-            let answers = answers.into_iter().map(|(question, answer)| trek_remote::QA { question, answer }).collect();
-            return self.machine_answer(id, request_id, trek_remote::AnswerResponse::Questions { answers }, cx);
+            let answers = answers
+                .into_iter()
+                .map(|(question, answer)| trek_remote::QA { question, answer })
+                .collect();
+            return self.machine_answer(
+                id,
+                request_id,
+                trek_remote::AnswerResponse::Questions { answers },
+                cx,
+            );
         }
-        let questions = self.live.get(id).and_then(|l| l.permissions.iter().find(|p| p.request_id == request_id)).and_then(|p| match &p.prompt {
-            Some(trek_agents::Prompt::Questions(q)) => Some(q.clone()),
-            _ => None,
-        });
+        let questions = self
+            .live
+            .get(id)
+            .and_then(|l| l.permissions.iter().find(|p| p.request_id == request_id))
+            .and_then(|p| match &p.prompt {
+                Some(trek_agents::Prompt::Questions(q)) => Some(q.clone()),
+                _ => None,
+            });
         if let (Some(questions), Some(live)) = (questions, self.live.get_mut(id)) {
             let (text, secret) = answers_text(&questions, &answers);
             if !text.is_empty() {
-                live.items.push(Item::User { text, images: vec![], at: Some(now_ms()), resume: None, aside: true });
+                live.items.push(Item::User {
+                    text,
+                    images: vec![],
+                    at: Some(now_ms()),
+                    resume: None,
+                    aside: true,
+                });
             }
             if secret {
-                live.items.push(Item::Notice { text: "Private answer sent".into() });
+                live.items.push(Item::Notice {
+                    text: "Private answer sent".into(),
+                });
             }
         }
         self.send_answers(id, request_id, answers, cx);
         self.persist_items(id, cx);
     }
 
-    fn send_answers(&mut self, id: &str, request_id: &str, answers: Vec<(String, String)>, cx: &mut Context<Self>) {
+    fn send_answers(
+        &mut self,
+        id: &str,
+        request_id: &str,
+        answers: Vec<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
         let (mut still_waiting, mut taken) = (false, false);
         if let Some(live) = self.live.get_mut(id) {
             live.settle_prompt(request_id);
             still_waiting = !live.permissions.is_empty();
             if let Some(tx) = &live.commands {
-                taken = tx.try_send(Command::Answer { request_id: request_id.to_string(), answers }).is_ok();
+                taken = tx
+                    .try_send(Command::Answer {
+                        request_id: request_id.to_string(),
+                        answers,
+                    })
+                    .is_ok();
             }
             live.revision += 1;
         }
         if !still_waiting {
             // The session that asked has gone (it quit, or was restarted): nothing is working on
             // the answer, and the thread mustn't look as if something were.
-            let state = if taken { RunState::Working } else { RunState::Idle };
+            let state = if taken {
+                RunState::Working
+            } else {
+                RunState::Idle
+            };
             self.mutate_thread(id, cx, |t| t.run_state = state);
             if !taken {
                 cx.emit(WorkspaceEvent::Toast { message: "The agent's session had ended before it took the answer. Send a message to carry on.".into(), undo: None });
@@ -4572,22 +5917,50 @@ impl Workspace {
     /// Approve the agent's plan: it leaves plan mode and starts the work.
     pub fn approve_plan(&mut self, id: &str, request_id: &str, cx: &mut Context<Self>) {
         if crate::machines::is_remote(id) {
-            return self.machine_answer(id, request_id, trek_remote::AnswerResponse::Plan { approve: true, feedback: None }, cx);
+            return self.machine_answer(
+                id,
+                request_id,
+                trek_remote::AnswerResponse::Plan {
+                    approve: true,
+                    feedback: None,
+                },
+                cx,
+            );
         }
         // A plan offered after its turn needs a session to take its approval: none starts while
         // the agent's CLI is being updated, so the plan stays offered until it's done.
-        let after_turn = self.live.get(id).is_some_and(|l| l.permissions.iter().any(|p| p.request_id == request_id && p.after_turn));
-        if let Some(agent) = self.thread(id).map(|t| t.agent.clone()).filter(|a| after_turn && self.agent_updating(&a.key())) {
-            let message = format!("{} is updating. Approve the plan once it's done.", agent.display_name());
-            cx.emit(WorkspaceEvent::Toast { message, undo: None });
+        let after_turn = self.live.get(id).is_some_and(|l| {
+            l.permissions
+                .iter()
+                .any(|p| p.request_id == request_id && p.after_turn)
+        });
+        if let Some(agent) = self
+            .thread(id)
+            .map(|t| t.agent.clone())
+            .filter(|a| after_turn && self.agent_updating(&a.key()))
+        {
+            let message = format!(
+                "{} is updating. Approve the plan once it's done.",
+                agent.display_name()
+            );
+            cx.emit(WorkspaceEvent::Toast {
+                message,
+                undo: None,
+            });
             return;
         }
-        let Some(live) = self.live.get_mut(id) else { return };
+        let Some(live) = self.live.get_mut(id) else {
+            return;
+        };
         live.plan = false;
         // Offered after its turn ended (Codex), the plan's approval starts a new turn. If the
         // session that offered it has gone (restarted, or quit), a new one, out of plan mode,
         // takes the approval: the agent still has the plan in the thread's history.
-        if live.permissions.iter().any(|p| p.request_id == request_id && p.after_turn) {
+        if live
+            .permissions
+            .iter()
+            .any(|p| p.request_id == request_id && p.after_turn)
+        {
             self.ensure_session(id, cx);
             if let Some(live) = self.live.get_mut(id).filter(|l| l.commands.is_some()) {
                 live.turn_started = Some(Instant::now());
@@ -4604,7 +5977,12 @@ impl Workspace {
         // A sub-agent the user stops between turns, while it waits on sub-agents of its own, has
         // no turn whose end would report that: it reports now, stopped. (Stopped from above, it
         // ends silently, `stop_task`.)
-        if self.live.get(id).is_some_and(|l| l.turn_started.is_none()) && self.delegations.get(id).is_some_and(|d| d.outcome.is_none() && !d.is_cancelled()) {
+        if self.live.get(id).is_some_and(|l| l.turn_started.is_none())
+            && self
+                .delegations
+                .get(id)
+                .is_some_and(|d| d.outcome.is_none() && !d.is_cancelled())
+        {
             self.task_turn_ended(id, true, cx);
         }
         // Its sub-agents stop with it.
@@ -4612,7 +5990,16 @@ impl Workspace {
         // Between turns, waiting on its agent's own sub-agents: they stop (there's no turn to
         // interrupt them with), and nothing that was due wakes it.
         if self.live.get(id).is_some_and(|l| l.turn_started.is_none()) {
-            let agents: Vec<String> = self.live.get(id).map(|l| l.background_agents().filter(|b| b.task.stoppable).map(|b| b.task.id.clone()).collect()).unwrap_or_default();
+            let agents: Vec<String> = self
+                .live
+                .get(id)
+                .map(|l| {
+                    l.background_agents()
+                        .filter(|b| b.task.stoppable)
+                        .map(|b| b.task.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
             if let Some(live) = self.live.get_mut(id).filter(|_| !agents.is_empty()) {
                 live.stopped_out = Some(Instant::now());
             }
@@ -4621,12 +6008,24 @@ impl Workspace {
             }
             self.forget_wakes(id);
         }
-        let Some(live) = self.live.get_mut(id) else { return };
+        let Some(live) = self.live.get_mut(id) else {
+            return;
+        };
         // A stop never waits behind git work. If the message is still held for its checkpoint,
         // the agent never gets it: the turn ends here.
-        if live.held.iter().any(|c| matches!(c, Command::Prompt { .. })) {
+        if live
+            .held
+            .iter()
+            .any(|c| matches!(c, Command::Prompt { .. }))
+        {
             live.held.retain(|c| !matches!(c, Command::Prompt { .. }));
-            self.apply_events(id, vec![AgentEvent::TurnComplete { error: Some("Interrupted".into()) }], cx);
+            self.apply_events(
+                id,
+                vec![AgentEvent::TurnComplete {
+                    error: Some("Interrupted".into()),
+                }],
+                cx,
+            );
             return;
         }
         if let Some(tx) = &live.commands {
@@ -4639,7 +6038,11 @@ impl Workspace {
             live._stop = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(STOP_GRACE).await;
                 let _ = this.update(cx, |this, cx| {
-                    if this.live.get(&thread).is_some_and(|l| l.turn_started == Some(turn)) {
+                    if this
+                        .live
+                        .get(&thread)
+                        .is_some_and(|l| l.turn_started == Some(turn))
+                    {
                         this.force_stop(&thread, cx);
                     }
                 });
@@ -4653,7 +6056,13 @@ impl Workspace {
     /// next message starts a new one, from where this one stood.
     fn force_stop(&mut self, id: &str, cx: &mut Context<Self>) {
         tracing::warn!("{id}: the agent took no notice of a stop; ending its session");
-        self.apply_events(id, vec![AgentEvent::TurnComplete { error: Some("Interrupted".into()) }], cx);
+        self.apply_events(
+            id,
+            vec![AgentEvent::TurnComplete {
+                error: Some("Interrupted".into()),
+            }],
+            cx,
+        );
         if let Some(live) = self.live.get_mut(id) {
             if let Some(tx) = live.commands.take() {
                 let _ = tx.try_send(Command::Shutdown);
@@ -4677,28 +6086,57 @@ impl Workspace {
         if let Some(f) = self.at_turn_end.take() {
             f();
         }
-        let Some(cwd) = self.thread(id).and_then(|t| t.cwd.clone()).filter(|c| in_repo(Some(c))) else { return };
-        let Some(live) = self.live.get_mut(id) else { return };
+        let Some(cwd) = self
+            .thread(id)
+            .and_then(|t| t.cwd.clone())
+            .filter(|c| in_repo(Some(c)))
+        else {
+            return;
+        };
+        let Some(live) = self.live.get_mut(id) else {
+            return;
+        };
         let items = &live.items;
-        let Some(last) = items.len().checked_sub(1) else { return };
+        let Some(last) = items.len().checked_sub(1) else {
+            return;
+        };
         let end = match items.iter().rposition(trek_core::rewind::ends_turn) {
-            Some(e) if !items[e + 1..].iter().any(|i| matches!(i, Item::User { aside: false, .. })) => e,
+            Some(e)
+                if !items[e + 1..]
+                    .iter()
+                    .any(|i| matches!(i, Item::User { aside: false, .. })) =>
+            {
+                e
+            }
             _ => last,
         };
-        let start = if trek_core::rewind::ends_turn(&items[end]) { trek_core::rewind::turn_start(items, end) } else { trek_core::rewind::turn_start(items, end + 1) };
+        let start = if trek_core::rewind::ends_turn(&items[end]) {
+            trek_core::rewind::turn_start(items, end)
+        } else {
+            trek_core::rewind::turn_start(items, end + 1)
+        };
         // A turn the agent took by itself has no checkpoint to count from.
-        let Some(start) = start.filter(|s| *s < end) else { return };
-        let (Some(first), Some(item)) = (items.id_at(start), items.id_at(end)) else { return };
+        let Some(start) = start.filter(|s| *s < end) else {
+            return;
+        };
+        let (Some(first), Some(item)) = (items.id_at(start), items.id_at(end)) else {
+            return;
+        };
         if live.checkpoint_failed.contains_key(first) || live.checkpointed.contains(item) {
             return;
         }
-        live.git_jobs.push_back(GitJob::Checkpoint { cwd, item: item.to_string() });
+        live.git_jobs.push_back(GitJob::Checkpoint {
+            cwd,
+            item: item.to_string(),
+        });
         self.run_git(id, cx);
     }
 
     /// Send `cmd` to `id`'s agent once the git work queued before it is done.
     fn dispatch(&mut self, id: &str, cmd: Command) {
-        let Some(live) = self.live.get_mut(id) else { return };
+        let Some(live) = self.live.get_mut(id) else {
+            return;
+        };
         if live.git_busy || !live.git_jobs.is_empty() {
             live.held.push(cmd);
         } else if let Some(tx) = &live.commands {
@@ -4721,7 +6159,9 @@ impl Workspace {
     /// Do `id`'s git work one job at a time, off the main thread; what was held for it goes to
     /// the agent once it's all done.
     fn run_git(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(live) = self.live.get_mut(id).filter(|l| !l.git_busy) else { return };
+        let Some(live) = self.live.get_mut(id).filter(|l| !l.git_busy) else {
+            return;
+        };
         let Some(job) = live.git_jobs.pop_front() else {
             // No session to take them (it ended while git worked, its worktree being removed):
             // what's held stays held, for the session that starts next (`attach`).
@@ -4738,7 +6178,12 @@ impl Workspace {
         };
         live.git_busy = true;
         live.git_running = Some(job.clone());
-        let (store, thread, run, guard) = (self.store.clone(), id.to_string(), job.clone(), live.git_guard.clone());
+        let (store, thread, run, guard) = (
+            self.store.clone(),
+            id.to_string(),
+            job.clone(),
+            live.git_guard.clone(),
+        );
         live._git = Some(cx.spawn(async move |this, cx| {
             let t = thread.clone();
             let result = cx
@@ -4755,8 +6200,16 @@ impl Workspace {
         }));
     }
 
-    fn git_done(&mut self, id: &str, job: GitJob, result: anyhow::Result<GitDone>, cx: &mut Context<Self>) {
-        let Some(live) = self.live.get_mut(id) else { return };
+    fn git_done(
+        &mut self,
+        id: &str,
+        job: GitJob,
+        result: anyhow::Result<GitDone>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(live) = self.live.get_mut(id) else {
+            return;
+        };
         live.git_busy = false;
         live.git_running = None;
         // A checkpoint ends a turn's count; restored files move it.
@@ -4764,12 +6217,21 @@ impl Workspace {
         match (job, result) {
             // Taking one may have pruned the oldest.
             (GitJob::Checkpoint { item, .. }, Ok(GitDone::Taken)) => {
-                live.checkpointed = self.store.checkpoints(id).unwrap_or_default().into_iter().map(|c| c.item_id).collect();
+                live.checkpointed = self
+                    .store
+                    .checkpoints(id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|c| c.item_id)
+                    .collect();
                 // Its message left the transcript while it was taken (stopped, then rewound): the
                 // rewind found nothing to drop yet, so it goes now.
                 if live.items.position(&item).is_none() {
                     if let Ok(Some(c)) = self.store.checkpoint(id, &item) {
-                        live.git_jobs.push_back(GitJob::Forget { repo: c.repo, items: vec![item] });
+                        live.git_jobs.push_back(GitJob::Forget {
+                            repo: c.repo,
+                            items: vec![item],
+                        });
                     }
                 }
             }
@@ -4780,12 +6242,19 @@ impl Workspace {
                 live.checkpoint_failed.insert(item, format!("{e:#}"));
                 live.revision += 1;
                 if first {
-                    cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't checkpoint the files: {e:#}"), undo: None });
+                    cx.emit(WorkspaceEvent::Toast {
+                        message: format!("Couldn't checkpoint the files: {e:#}"),
+                        undo: None,
+                    });
                 }
             }
             (GitJob::FindPoint { session, item, .. }, Ok(GitDone::Point(Some(at)))) => {
                 if let Some(pos) = live.items.position(&item) {
-                    if let Some(Item::User { resume: Some(ResumePoint { session: s, after }), .. }) = live.items.get_mut(pos) {
+                    if let Some(Item::User {
+                        resume: Some(ResumePoint { session: s, after }),
+                        ..
+                    }) = live.items.get_mut(pos)
+                    {
                         if *s == session && after.is_none() {
                             *after = Some(at.clone());
                         }
@@ -4795,30 +6264,73 @@ impl Workspace {
                 self.persist_items(id, cx);
             }
             (GitJob::Restore { repo, .. }, result) => {
-                let restored = result.as_ref().ok().and_then(|d| if let GitDone::Restored(r) = d { Some(r) } else { None });
+                let restored = result.as_ref().ok().and_then(|d| {
+                    if let GitDone::Restored(r) = d {
+                        Some(r)
+                    } else {
+                        None
+                    }
+                });
                 let failed = match &result {
                     Err(e) => Some(format!("Couldn't restore the files: {e:#}")),
-                    Ok(_) => restored.and_then(|r| r.failed.first().map(|(path, why)| (r.failed.len(), path, why))).map(|(n, path, why)| {
-                        let what = if path.is_empty() { why.clone() } else { format!("{path}: {why}") };
-                        let more = if n > 1 { format!(" and {} more", n - 1) } else { String::new() };
-                        format!("Couldn't restore {what}{more}")
-                    }),
+                    Ok(_) => restored
+                        .and_then(|r| {
+                            r.failed
+                                .first()
+                                .map(|(path, why)| (r.failed.len(), path, why))
+                        })
+                        .map(|(n, path, why)| {
+                            let what = if path.is_empty() {
+                                why.clone()
+                            } else {
+                                format!("{path}: {why}")
+                            };
+                            let more = if n > 1 {
+                                format!(" and {} more", n - 1)
+                            } else {
+                                String::new()
+                            };
+                            format!("Couldn't restore {what}{more}")
+                        }),
                 };
                 // Restoring went wrong: the checkpoints it would have dropped stay, so the
                 // files can still be had from them.
                 if failed.is_some() {
-                    live.git_jobs.retain(|j| !matches!(j, GitJob::Forget { .. }));
+                    live.git_jobs
+                        .retain(|j| !matches!(j, GitJob::Forget { .. }));
                 }
                 let n = restored.map_or(0, |r| r.restored());
                 let message = match (n, failed) {
                     (0, Some(f)) => Some(f),
-                    (n, Some(f)) => Some(format!("Restored {n} file{} · {f}", if n == 1 { "" } else { "s" })),
+                    (n, Some(f)) => Some(format!(
+                        "Restored {n} file{} · {f}",
+                        if n == 1 { "" } else { "s" }
+                    )),
                     (0, None) => None,
-                    (n, None) => Some(format!("Restored {n} file{}", if n == 1 { "" } else { "s" })),
+                    (n, None) => Some(format!(
+                        "Restored {n} file{}",
+                        if n == 1 { "" } else { "s" }
+                    )),
                 };
                 let undo = restored.and_then(|r| {
-                    let paths = r.changes.iter().filter(|c| !matches!(c.change, trek_core::checkpoint::Change::Nested | trek_core::checkpoint::Change::Kept)).map(|c| c.path.clone()).collect();
-                    Some(UndoAction::Unrestore { thread: id.to_string(), repo: repo.clone(), sha: r.undo.clone()?, paths })
+                    let paths = r
+                        .changes
+                        .iter()
+                        .filter(|c| {
+                            !matches!(
+                                c.change,
+                                trek_core::checkpoint::Change::Nested
+                                    | trek_core::checkpoint::Change::Kept
+                            )
+                        })
+                        .map(|c| c.path.clone())
+                        .collect();
+                    Some(UndoAction::Unrestore {
+                        thread: id.to_string(),
+                        repo: repo.clone(),
+                        sha: r.undo.clone()?,
+                        paths,
+                    })
                 });
                 if restored.is_some_and(|r| r.restored() > 0) {
                     // Open editors and file lists show the files put back.
@@ -4838,7 +6350,9 @@ impl Workspace {
                 }
             }
             (GitJob::ForgetAll { .. }, Ok(_)) => live.checkpointed.clear(),
-            (GitJob::Link { checkpoints, .. }, Ok(_)) => live.checkpointed.extend(checkpoints.into_iter().map(|(item, _)| item)),
+            (GitJob::Link { checkpoints, .. }, Ok(_)) => live
+                .checkpointed
+                .extend(checkpoints.into_iter().map(|(item, _)| item)),
             (_, Err(e)) => tracing::warn!("git work for {id}: {e:#}"),
             _ => {}
         }
@@ -4854,8 +6368,14 @@ impl Workspace {
         match &t.reopen {
             Some(r) => r.point(),
             None => {
-                let after = self.live.get(id).and_then(|l| l.mark.clone()).or_else(|| t.native_at.clone());
-                t.native_id.clone().map(|session| ResumePoint { session, after })
+                let after = self
+                    .live
+                    .get(id)
+                    .and_then(|l| l.mark.clone())
+                    .or_else(|| t.native_at.clone());
+                t.native_id
+                    .clone()
+                    .map(|session| ResumePoint { session, after })
             }
         }
     }
@@ -4870,19 +6390,32 @@ impl Workspace {
     /// transcript, the agent's next session doesn't know them either (`Reopen`), and with
     /// `restore` the files go back to the checkpoint taken as it was sent. Returns the message
     /// (text and images) for the composer; `None` when nothing was done (a turn is running).
-    pub fn rewind(&mut self, id: &str, item: &str, restore: bool, cx: &mut Context<Self>) -> Option<(String, Vec<PathBuf>)> {
+    pub fn rewind(
+        &mut self,
+        id: &str,
+        item: &str,
+        restore: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<(String, Vec<PathBuf>)> {
         if self.machine_refuses(id, cx) {
             return None;
         }
         if self.turn_running(id) {
-            cx.emit(WorkspaceEvent::Toast { message: "Stop the running turn first.".into(), undo: None });
+            cx.emit(WorkspaceEvent::Toast {
+                message: "Stop the running turn first.".into(),
+                undo: None,
+            });
             return None;
         }
         let thread = self.thread(id)?.clone();
         // Putting files back rewrites the whole checkout: not under another thread's agent at work
         // in it.
         if restore && self.store.checkpoint(id, item).ok().flatten().is_some() {
-            if let Some(other) = thread.cwd.as_deref().and_then(|c| self.working_in_checkout(c, id)) {
+            if let Some(other) = thread
+                .cwd
+                .as_deref()
+                .and_then(|c| self.working_in_checkout(c, id))
+            {
                 cx.emit(WorkspaceEvent::Toast {
                     message: format!("“{other}” is working in this folder: restoring files now would change them under it. Wait for it, or rewind without restoring files."),
                     undo: None,
@@ -4894,14 +6427,29 @@ impl Workspace {
         let checkpoints = self.store.checkpoints(id).unwrap_or_default();
         // Only the files the turns taken back changed go back: not the user's edits between
         // them, nor what other threads did meanwhile.
-        let spans = self.live.get(id).and_then(|l| l.items.position(item)).map(|pos| self.turn_spans(id, pos)).unwrap_or_default();
+        let spans = self
+            .live
+            .get(id)
+            .and_then(|l| l.items.position(item))
+            .map(|pos| self.turn_spans(id, pos))
+            .unwrap_or_default();
         // A missing worktree's files can't be put back. The refs of its checkpoints are in the
         // repository the project folder shares with it, so they're dropped from there.
-        let shared = worktree_missing(&thread).then(|| self.project_dir(&thread)).flatten();
+        let shared = worktree_missing(&thread)
+            .then(|| self.project_dir(&thread))
+            .flatten();
         let restore = restore && !worktree_missing(&thread);
         let live = self.live.get_mut(id).filter(|l| l.loaded && !l.loading)?;
         let pos = live.items.position(item)?;
-        let Item::User { text, images, aside: false, .. } = live.items[pos].clone() else { return None };
+        let Item::User {
+            text,
+            images,
+            aside: false,
+            ..
+        } = live.items[pos].clone()
+        else {
+            return None;
+        };
         let removed: HashSet<String> = live.items.ids()[pos..].iter().cloned().collect();
         // The session goes; the next message starts one that knows only what's kept.
         if let Some(tx) = live.commands.take() {
@@ -4920,20 +6468,34 @@ impl Workspace {
             _ => None,
         };
         if reopen == Some(Reopen::Recap) {
-            live.items.push(Item::Notice { text: recap_notice(&thread.agent) });
+            live.items.push(Item::Notice {
+                text: recap_notice(&thread.agent),
+            });
         }
         live.revision += 1;
         if restore {
             if let Some(c) = checkpoints.iter().find(|c| c.item_id == item) {
-                live.git_jobs.push_back(GitJob::Restore { repo: c.repo.clone(), sha: c.sha.clone(), only: RestoreOnly::Turns(spans) });
+                live.git_jobs.push_back(GitJob::Restore {
+                    repo: c.repo.clone(),
+                    sha: c.sha.clone(),
+                    only: RestoreOnly::Turns(spans),
+                });
             }
         }
         // The checkpoints of messages that left the transcript go too.
         let mut gone: HashMap<PathBuf, Vec<String>> = HashMap::new();
-        for c in checkpoints.into_iter().filter(|c| removed.contains(&c.item_id)) {
-            gone.entry(shared.clone().unwrap_or(c.repo)).or_default().push(c.item_id);
+        for c in checkpoints
+            .into_iter()
+            .filter(|c| removed.contains(&c.item_id))
+        {
+            gone.entry(shared.clone().unwrap_or(c.repo))
+                .or_default()
+                .push(c.item_id);
         }
-        live.git_jobs.extend(gone.into_iter().map(|(repo, items)| GitJob::Forget { repo, items }));
+        live.git_jobs.extend(
+            gone.into_iter()
+                .map(|(repo, items)| GitJob::Forget { repo, items }),
+        );
         let mark = live.mark.clone();
         self.forget_turn_changes(id, true, cx);
         self.persist_items(id, cx);
@@ -4963,20 +6525,36 @@ impl Workspace {
     /// Whether `id` can be rewound to just before message `item` now (see `rewind`).
     pub fn can_rewind(&self, id: &str, item: &str) -> bool {
         let live = self.live.get(id).filter(|l| l.loaded && !l.loading);
-        !self.turn_running(id) && live.and_then(|l| l.items.position(item).map(|p| matches!(l.items[p], Item::User { aside: false, .. }))).unwrap_or(false)
+        !self.turn_running(id)
+            && live
+                .and_then(|l| {
+                    l.items
+                        .position(item)
+                        .map(|p| matches!(l.items[p], Item::User { aside: false, .. }))
+                })
+                .unwrap_or(false)
     }
 
     /// Why message `item` of `id` has no file checkpoint to go back to now; `None` when it has one.
     pub fn no_checkpoint(&self, id: &str, item: &str) -> Option<NoCheckpoint> {
         let live = self.live.get(id)?;
         let thread = self.thread(id);
-        NoCheckpoint::now(live, live.items.position(item)?, in_repo(thread.and_then(|t| t.cwd.as_deref())), thread.is_some_and(worktree_missing))
+        NoCheckpoint::now(
+            live,
+            live.items.position(item)?,
+            in_repo(thread.and_then(|t| t.cwd.as_deref())),
+            thread.is_some_and(worktree_missing),
+        )
     }
 
     /// The checkpoint the files can be put back to as they were when message `item` of `id` was
     /// sent. None while the thread's worktree is missing: there's nowhere to put them back, so a
     /// rewind then takes back only the conversation.
-    pub fn restorable_checkpoint(&self, id: &str, item: &str) -> Option<trek_core::store::Checkpoint> {
+    pub fn restorable_checkpoint(
+        &self,
+        id: &str,
+        item: &str,
+    ) -> Option<trek_core::store::Checkpoint> {
         if self.thread(id).is_none_or(worktree_missing) {
             return None;
         }
@@ -4988,7 +6566,13 @@ impl Workspace {
     pub fn rewind_files(&self, id: &str, item: &str) -> Option<RewindFiles> {
         let c = self.restorable_checkpoint(id, item)?;
         let pos = self.live.get(id)?.items.position(item)?;
-        Some(RewindFiles { store: self.store.clone(), thread: id.to_string(), repo: c.repo, sha: c.sha, spans: self.turn_spans(id, pos) })
+        Some(RewindFiles {
+            store: self.store.clone(),
+            thread: id.to_string(),
+            repo: c.repo,
+            sha: c.sha,
+            spans: self.turn_spans(id, pos),
+        })
     }
 
     /// How the agent would pick up `id` if it were rewound to just before message `item`.
@@ -4996,9 +6580,16 @@ impl Workspace {
         let thread = self.thread(id)?;
         let live = self.live.get(id)?;
         let pos = live.items.position(item)?;
-        let Item::User { resume, .. } = &live.items[pos] else { return None };
+        let Item::User { resume, .. } = &live.items[pos] else {
+            return None;
+        };
         let native = trek_agents::resumes_partway(&thread.agent, thread.model.as_deref());
-        trek_core::rewind::reopen_before(&live.items[..pos], resume.as_ref(), thread.native_id.as_deref(), native)
+        trek_core::rewind::reopen_before(
+            &live.items[..pos],
+            resume.as_ref(),
+            thread.native_id.as_deref(),
+            native,
+        )
     }
 
     /// The message that started the turn a `TurnEnd` (by item id) closes.
@@ -5009,17 +6600,32 @@ impl Workspace {
     }
 
     /// Take back the turn a `TurnEnd` closes (see `rewind`).
-    pub fn undo_turn(&mut self, id: &str, end: &str, restore: bool, cx: &mut Context<Self>) -> Option<(String, Vec<PathBuf>)> {
+    pub fn undo_turn(
+        &mut self,
+        id: &str,
+        end: &str,
+        restore: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<(String, Vec<PathBuf>)> {
         let start = self.turn_start_item(id, end)?;
         self.rewind(id, &start, restore, cx)
     }
 
     /// Take back the turn a `TurnEnd` closes and send its message again, with `model` if given.
-    pub fn retry(&mut self, id: &str, end: &str, model: Option<String>, restore: bool, cx: &mut Context<Self>) {
+    pub fn retry(
+        &mut self,
+        id: &str,
+        end: &str,
+        model: Option<String>,
+        restore: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.machine_refuses(id, cx) {
             return;
         }
-        let Some((text, images)) = self.undo_turn(id, end, restore, cx) else { return };
+        let Some((text, images)) = self.undo_turn(id, end, restore, cx) else {
+            return;
+        };
         if let Some(m) = model {
             self.mutate_thread(id, cx, |t| t.model = Some(m));
         }
@@ -5030,7 +6636,15 @@ impl Workspace {
 
     /// Send an edited message in place of message `item`: the conversation is taken back to just
     /// before it (see `rewind`), then the new text goes out. False when nothing was done.
-    pub fn edit_and_resend(&mut self, id: &str, item: &str, text: String, images: Vec<PathBuf>, restore: bool, cx: &mut Context<Self>) -> bool {
+    pub fn edit_and_resend(
+        &mut self,
+        id: &str,
+        item: &str,
+        text: String,
+        images: Vec<PathBuf>,
+        restore: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.machine_refuses(id, cx) {
             return false;
         }
@@ -5046,12 +6660,21 @@ impl Workspace {
     /// the conversation up to `at`; the agent's session is forked too (or, for agents that can't,
     /// the new one gets a recap). The original is left as it is. The fork opens in the main
     /// window. Returns its id.
-    pub fn fork_thread(&mut self, id: &str, at: ForkAt, scope: &Scope, cx: &mut Context<Self>) -> Option<String> {
+    pub fn fork_thread(
+        &mut self,
+        id: &str,
+        at: ForkAt,
+        scope: &Scope,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
         if self.machine_refuses(id, cx) {
             return None;
         }
         if at == ForkAt::End && self.turn_running(id) {
-            cx.emit(WorkspaceEvent::Toast { message: "Wait for the turn to finish, or fork from an earlier message.".into(), undo: None });
+            cx.emit(WorkspaceEvent::Toast {
+                message: "Wait for the turn to finish, or fork from an earlier message.".into(),
+                undo: None,
+            });
             return None;
         }
         self.ensure_loaded(id, cx);
@@ -5060,8 +6683,14 @@ impl Workspace {
             let (id, scope) = (id.to_string(), scope.clone());
             let task = cx.spawn(async move |this, cx| {
                 loop {
-                    cx.background_executor().timer(Duration::from_millis(50)).await;
-                    let Ok(loading) = this.read_with(cx, |ws, _| ws.live.get(&id).is_some_and(|l| l.loading)) else { return };
+                    cx.background_executor()
+                        .timer(Duration::from_millis(50))
+                        .await;
+                    let Ok(loading) =
+                        this.read_with(cx, |ws, _| ws.live.get(&id).is_some_and(|l| l.loading))
+                    else {
+                        return;
+                    };
                     if !loading {
                         break;
                     }
@@ -5073,7 +6702,11 @@ impl Workspace {
         }
         let (fork_id, message) = self.fork_quietly(id, &at, cx)?;
         // The editor's fork opens as a chat tab beside the one it came from.
-        let into = if *scope == Scope::Ide { Scope::Ide } else { Scope::Main };
+        let into = if *scope == Scope::Ide {
+            Scope::Ide
+        } else {
+            Scope::Main
+        };
         match scope {
             Scope::Main => self.navigate(Route::Thread(fork_id.clone()), cx),
             Scope::Thread(_) => self.show_in_main(Route::Thread(fork_id.clone()), cx),
@@ -5082,7 +6715,13 @@ impl Workspace {
         if let Some((text, images)) = message {
             // A main window reopened for the fork can't hear it yet: it takes the message itself.
             if self.main_window.is_some() {
-                cx.emit(WorkspaceEvent::ComposeIn { scope: into, thread: fork_id.clone(), text, images, edit: None });
+                cx.emit(WorkspaceEvent::ComposeIn {
+                    scope: into,
+                    thread: fork_id.clone(),
+                    text,
+                    images,
+                    edit: None,
+                });
             } else {
                 self.pending_compose = Some((fork_id.clone(), text, images));
             }
@@ -5092,7 +6731,12 @@ impl Workspace {
 
     /// `fork_thread` of a loaded thread, without opening the fork anywhere: its id, and for a
     /// fork from before a message, that message (for a composer).
-    pub(crate) fn fork_quietly(&mut self, id: &str, at: &ForkAt, cx: &mut Context<Self>) -> Option<(String, Option<(String, Vec<PathBuf>)>)> {
+    pub(crate) fn fork_quietly(
+        &mut self,
+        id: &str,
+        at: &ForkAt,
+        cx: &mut Context<Self>,
+    ) -> Option<(String, Option<(String, Vec<PathBuf>)>)> {
         let thread = self.thread(id)?.clone();
         let native = trek_agents::resumes_partway(&thread.agent, thread.model.as_deref());
         let live = self.live.get(id)?;
@@ -5100,12 +6744,33 @@ impl Workspace {
         let (cut, point, message) = match at {
             ForkAt::Before(item) => {
                 let pos = items.position(item)?;
-                let Item::User { text, images, resume, .. } = &items[pos] else { return None };
-                (pos, Some(resume.clone()), Some((text.clone(), images.iter().map(PathBuf::from).collect::<Vec<_>>())))
+                let Item::User {
+                    text,
+                    images,
+                    resume,
+                    ..
+                } = &items[pos]
+                else {
+                    return None;
+                };
+                (
+                    pos,
+                    Some(resume.clone()),
+                    Some((
+                        text.clone(),
+                        images.iter().map(PathBuf::from).collect::<Vec<_>>(),
+                    )),
+                )
             }
             ForkAt::After(end) => {
                 let pos = items.position(end)? + 1;
-                let next = items[pos..].iter().find_map(|i| if let Item::User { resume, .. } = i { Some(resume.clone()) } else { None });
+                let next = items[pos..].iter().find_map(|i| {
+                    if let Item::User { resume, .. } = i {
+                        Some(resume.clone())
+                    } else {
+                        None
+                    }
+                });
                 (pos, next, None)
             }
             ForkAt::End => (items.len(), None, None),
@@ -5128,10 +6793,19 @@ impl Workspace {
         // Made in the thread's project, as a new thread in a worktree is (`send`).
         // (A thread in no project's fork is in none: its folder isn't one.)
         let folder = self.draft_folder(&thread);
-        let mut fork = match self.store.create_thread(folder.as_deref(), thread.agent.clone(), thread.model.clone(), thread.effort, thread.hand_holding) {
+        let mut fork = match self.store.create_thread(
+            folder.as_deref(),
+            thread.agent.clone(),
+            thread.model.clone(),
+            thread.effort,
+            thread.hand_holding,
+        ) {
             Ok(t) => t,
             Err(e) => {
-                cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't fork: {e}"), undo: None });
+                cx.emit(WorkspaceEvent::Toast {
+                    message: format!("Couldn't fork: {e}"),
+                    undo: None,
+                });
                 return None;
             }
         };
@@ -5147,16 +6821,25 @@ impl Workspace {
         fork.reopen = reopen.clone();
         let _ = self.store.save_thread(&fork);
         let mut transcript = Transcript::unsaved(kept);
-        let new_ids: HashMap<&str, &str> = kept_ids.iter().map(String::as_str).zip(transcript.ids().iter().map(String::as_str)).collect();
+        let new_ids: HashMap<&str, &str> = kept_ids
+            .iter()
+            .map(String::as_str)
+            .zip(transcript.ids().iter().map(String::as_str))
+            .collect();
         // Its messages keep their checkpoints: the fork can take its files back too.
         let mut links: HashMap<PathBuf, Vec<(String, String)>> = HashMap::new();
         for c in self.store.checkpoints(id).unwrap_or_default() {
             if let Some(new) = new_ids.get(c.item_id.as_str()) {
-                links.entry(c.repo).or_default().push((new.to_string(), c.sha));
+                links
+                    .entry(c.repo)
+                    .or_default()
+                    .push((new.to_string(), c.sha));
             }
         }
         if reopen == Some(Reopen::Recap) {
-            transcript.push(Item::Notice { text: recap_notice(&thread.agent) });
+            transcript.push(Item::Notice {
+                text: recap_notice(&thread.agent),
+            });
         }
         match self.store.save_transcript(&fork.id, &mut transcript) {
             // A long conversation's copy is indexed in the background.
@@ -5175,7 +6858,11 @@ impl Workspace {
         live.lines = kept_lines;
         live.loaded = true;
         live.mark = fork.native_at.clone();
-        live.git_jobs.extend(links.into_iter().map(|(repo, checkpoints)| GitJob::Link { repo, checkpoints }));
+        live.git_jobs.extend(
+            links
+                .into_iter()
+                .map(|(repo, checkpoints)| GitJob::Link { repo, checkpoints }),
+        );
         self.reload(cx);
         self.run_git(&fork_id, cx);
         Some((fork_id, message))
@@ -5199,10 +6886,16 @@ impl Workspace {
         });
         // Named, so a stray ⌘E is noticed (and undone) before the thread leaves sight.
         let message = match self.thread(id) {
-            Some(t) => format!("Settled “{}”", trek_core::orchestrate::preview(&t.title, 48)),
+            Some(t) => format!(
+                "Settled “{}”",
+                trek_core::orchestrate::preview(&t.title, 48)
+            ),
             None => "Settled".into(),
         };
-        cx.emit(WorkspaceEvent::Toast { message, undo: Some(UndoAction::Unsettle(id.into())) });
+        cx.emit(WorkspaceEvent::Toast {
+            message,
+            undo: Some(UndoAction::Unsettle(id.into())),
+        });
     }
 
     /// Back to the inbox, and counted as looked at now: auto-settle (which waits from the last
@@ -5223,10 +6916,20 @@ impl Workspace {
 
     pub fn toggle_pin(&mut self, id: &str, cx: &mut Context<Self>) {
         if crate::machines::is_remote(id) {
-            let action = if self.thread(id).is_some_and(|t| t.pinned_at.is_some()) { trek_remote::ThreadAction::Unpin } else { trek_remote::ThreadAction::Pin };
+            let action = if self.thread(id).is_some_and(|t| t.pinned_at.is_some()) {
+                trek_remote::ThreadAction::Unpin
+            } else {
+                trek_remote::ThreadAction::Pin
+            };
             return self.machine_thread_action(id, action, cx);
         }
-        self.mutate_thread(id, cx, |t| t.pinned_at = if t.pinned_at.is_some() { None } else { Some(now_ms()) });
+        self.mutate_thread(id, cx, |t| {
+            t.pinned_at = if t.pinned_at.is_some() {
+                None
+            } else {
+                Some(now_ms())
+            }
+        });
     }
 
     /// Out of the inbox until then; when it wakes it's back in the inbox, settled or not before.
@@ -5239,7 +6942,10 @@ impl Workspace {
             t.settled_at = None;
             t.branch = None;
         });
-        cx.emit(WorkspaceEvent::Toast { message: format!("Snoozed for {hours} h"), undo: None });
+        cx.emit(WorkspaceEvent::Toast {
+            message: format!("Snoozed for {hours} h"),
+            undo: None,
+        });
     }
 
     /// Wake it now, as if its snooze had just run out: auto-settle gives it the full wait again.
@@ -5280,7 +6986,9 @@ impl Workspace {
                 live.close_turn(false);
                 live.streaming = None;
                 live.reasoning = None;
-                live.items.push(Item::Notice { text: "Interrupted".into() });
+                live.items.push(Item::Notice {
+                    text: "Interrupted".into(),
+                });
                 cut = true;
             }
             if !live.background.is_empty() {
@@ -5306,7 +7014,10 @@ impl Workspace {
         self.chats_moved();
         self.threads.retain(|t| t.archived_at.is_none());
         self.threads_gen += 1;
-        cx.emit(WorkspaceEvent::Toast { message: "Archived".into(), undo: Some(UndoAction::Unarchive(id.into())) });
+        cx.emit(WorkspaceEvent::Toast {
+            message: "Archived".into(),
+            undo: Some(UndoAction::Unarchive(id.into())),
+        });
     }
 
     pub fn rename(&mut self, id: &str, title: String, cx: &mut Context<Self>) {
@@ -5321,7 +7032,9 @@ impl Workspace {
 
     /// Snooze until 9:00 on the morning `days` from now (see `time::morning`).
     pub fn snooze_until_morning(&mut self, id: &str, days: i64, cx: &mut Context<Self>) {
-        let Some(at) = crate::time::morning(&chrono::Local::now(), days) else { return };
+        let Some(at) = crate::time::morning(&chrono::Local::now(), days) else {
+            return;
+        };
         self.snooze_until(id, at.timestamp_millis(), cx);
     }
 
@@ -5332,8 +7045,17 @@ impl Workspace {
             t.settled_at = None;
             t.branch = None;
         });
-        let when = chrono::DateTime::from_timestamp_millis(at).map(|t| t.with_timezone(&chrono::Local).format("%a %-I:%M %p").to_string()).unwrap_or_default();
-        cx.emit(WorkspaceEvent::Toast { message: format!("Snoozed until {when}"), undo: None });
+        let when = chrono::DateTime::from_timestamp_millis(at)
+            .map(|t| {
+                t.with_timezone(&chrono::Local)
+                    .format("%a %-I:%M %p")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        cx.emit(WorkspaceEvent::Toast {
+            message: format!("Snoozed until {when}"),
+            undo: None,
+        });
     }
 
     pub fn set_never_settle(&mut self, id: &str, never: bool, cx: &mut Context<Self>) {
@@ -5346,7 +7068,9 @@ impl Workspace {
         if self.machine_refuses(id, cx) {
             return;
         }
-        let Some(thread) = self.thread(id).cloned() else { return };
+        let Some(thread) = self.thread(id).cloned() else {
+            return;
+        };
         // A sub-agent still at its task: its parent hears it was stopped, rather than wait on it.
         if self.delegations.contains_key(id) {
             self.end_task_now(id, cx);
@@ -5358,12 +7082,21 @@ impl Workspace {
         // were taken in, and the one its folder is in (a checkpoint may be being taken now).
         let mut threads = vec![thread.clone()];
         if thread.source == ThreadSource::Trek {
-            threads.extend(self.threads.iter().filter(|t| t.side_of.as_deref() == Some(id)).cloned());
+            threads.extend(
+                self.threads
+                    .iter()
+                    .filter(|t| t.side_of.as_deref() == Some(id))
+                    .cloned(),
+            );
         }
         // Its sub-agents go too, theirs as well, and those its side chats started.
         let sides: Vec<String> = threads[1..].iter().map(|t| t.id.clone()).collect();
         let mut children = self.drop_children(id, cx);
-        let direct: Vec<String> = children.iter().filter(|c| c.parent_id.as_deref() == Some(id)).map(|c| c.id.clone()).collect();
+        let direct: Vec<String> = children
+            .iter()
+            .filter(|c| c.parent_id.as_deref() == Some(id))
+            .map(|c| c.id.clone())
+            .collect();
         for side in sides {
             children.extend(self.drop_children(&side, cx));
         }
@@ -5373,8 +7106,17 @@ impl Workspace {
         let gone: HashSet<&str> = threads.iter().map(|t| t.id.as_str()).collect();
         let chat_dirs: Vec<PathBuf> = threads
             .iter()
-            .filter_map(|t| t.cwd.clone().filter(|c| trek_core::paths::is_chat_dir(c) && c != &trek_core::paths::chats_dir()))
-            .filter(|c| !self.threads.iter().any(|o| !gone.contains(o.id.as_str()) && o.cwd.as_ref() == Some(c)))
+            .filter_map(|t| {
+                t.cwd.clone().filter(|c| {
+                    trek_core::paths::is_chat_dir(c) && c != &trek_core::paths::chats_dir()
+                })
+            })
+            .filter(|c| {
+                !self
+                    .threads
+                    .iter()
+                    .any(|o| !gone.contains(o.id.as_str()) && o.cwd.as_ref() == Some(c))
+            })
             .collect();
         for dir in chat_dirs.into_iter().filter(|d| d.exists()) {
             if let Err(e) = crate::system::trash(&dir) {
@@ -5385,7 +7127,13 @@ impl Workspace {
         let mut refs: HashSet<(String, PathBuf)> = HashSet::new();
         let mut guards = vec![];
         for t in &threads {
-            refs.extend(self.store.checkpoints(&t.id).unwrap_or_default().into_iter().map(|c| (t.id.clone(), c.repo)));
+            refs.extend(
+                self.store
+                    .checkpoints(&t.id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|c| (t.id.clone(), c.repo)),
+            );
             if let Some(cwd) = t.cwd.as_deref().filter(|c| in_repo(Some(c))) {
                 refs.insert((t.id.clone(), cwd.to_path_buf()));
             }
@@ -5395,7 +7143,9 @@ impl Workspace {
                 refs.insert((t.id.clone(), project));
             }
             if let Some(live) = self.live.remove(&t.id) {
-                live.git_guard.gone.store(true, std::sync::atomic::Ordering::SeqCst);
+                live.git_guard
+                    .gone
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 guards.push(live.git_guard.clone());
             }
         }
@@ -5404,12 +7154,22 @@ impl Workspace {
             cx.background_executor()
                 .spawn(async move {
                     // After the git work under way: what it took goes too.
-                    let _held: Vec<_> = guards.iter().map(|g| g.lock.lock().unwrap_or_else(|e| e.into_inner())).collect();
+                    let _held: Vec<_> = guards
+                        .iter()
+                        .map(|g| g.lock.lock().unwrap_or_else(|e| e.into_inner()))
+                        .collect();
                     for (thread, repo) in refs {
-                        if let Some(Err(e)) = trek_core::checkpoint::Repo::find(&repo).map(|r| r.delete_all(&thread)) {
+                        if let Some(Err(e)) =
+                            trek_core::checkpoint::Repo::find(&repo).map(|r| r.delete_all(&thread))
+                        {
                             tracing::warn!("drop checkpoints of {thread}: {e:#}");
                         }
-                        let items: Vec<String> = store.checkpoints(&thread).unwrap_or_default().into_iter().map(|c| c.item_id).collect();
+                        let items: Vec<String> = store
+                            .checkpoints(&thread)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|c| c.item_id)
+                            .collect();
                         if let Err(e) = store.delete_checkpoints(&thread, &items) {
                             tracing::warn!("drop checkpoints of {thread}: {e:#}");
                         }
@@ -5427,10 +7187,17 @@ impl Workspace {
                 .try_for_each(|c| self.store.delete_thread(c))
                 .and_then(|_| self.store.delete_checkpoints(id, &items).map(|_| ()))
                 .and_then(|_| self.store.clear_items(id))
-                .and_then(|_| self.store.update_thread(id, |t| t.archived_at = Some(now_ms())).map(|_| ()))
+                .and_then(|_| {
+                    self.store
+                        .update_thread(id, |t| t.archived_at = Some(now_ms()))
+                        .map(|_| ())
+                })
         };
         if let Err(e) = result {
-            cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't delete: {e}"), undo: None });
+            cx.emit(WorkspaceEvent::Toast {
+                message: format!("Couldn't delete: {e}"),
+                undo: None,
+            });
         }
         let was_open = self.route == Route::Thread(id.into());
         self.ide_chat.forget(id);
@@ -5460,14 +7227,25 @@ impl Workspace {
                         out.push_str(&format!("\n{}\n", text.trim()));
                     }
                     for path in images {
-                        let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                        let name = std::path::Path::new(&path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
                         // Angle brackets keep paths with spaces in one link.
                         out.push_str(&format!("\n![{name}](<{path}>)\n"));
                     }
                 }
-                Item::Assistant { text } if !text.trim().is_empty() => out.push_str(&format!("\n{}\n", text.trim())),
-                Item::Error { text } => out.push_str(&format!("\n> **Error:** {}\n", text.trim().replace('\n', "\n> "))),
-                Item::Limit { text, .. } => out.push_str(&format!("\n> **Usage limit:** {}\n", text.trim().replace('\n', "\n> "))),
+                Item::Assistant { text } if !text.trim().is_empty() => {
+                    out.push_str(&format!("\n{}\n", text.trim()))
+                }
+                Item::Error { text } => out.push_str(&format!(
+                    "\n> **Error:** {}\n",
+                    text.trim().replace('\n', "\n> ")
+                )),
+                Item::Limit { text, .. } => out.push_str(&format!(
+                    "\n> **Usage limit:** {}\n",
+                    text.trim().replace('\n', "\n> ")
+                )),
                 _ => {}
             }
         }
@@ -5480,7 +7258,9 @@ impl Workspace {
             None => self.store.items(id).unwrap_or_default(),
         };
         let request = items.iter().find_map(|i| match i {
-            Item::User { text, .. } if !text.trim().is_empty() => Some(trek_core::restate::as_written(text).to_string()),
+            Item::User { text, .. } if !text.trim().is_empty() => {
+                Some(trek_core::restate::as_written(text).to_string())
+            }
             _ => None,
         })?;
         let reply = items.iter().find_map(|i| match i {
@@ -5501,13 +7281,21 @@ impl Workspace {
             self.agent_updates.titles.push((id.to_string(), announce));
             return;
         }
-        let Some((request, reply)) = self.title_inputs(id) else { return };
+        let Some((request, reply)) = self.title_inputs(id) else {
+            return;
+        };
         // The mock agent names its own threads: it makes no model calls, titles included.
-        if self.thread(id).is_some_and(|t| matches!(&t.agent, AgentId::Direct(p) if catalog::is_mock(p))) {
+        if self
+            .thread(id)
+            .is_some_and(|t| matches!(&t.agent, AgentId::Direct(p) if catalog::is_mock(p)))
+        {
             self.rename(id, trek_agents::mock::title(&request), cx);
             return;
         }
-        let claude = self.agents.iter().any(|a| a.agent == AgentId::ClaudeCode && a.availability == Availability::Ready);
+        let claude = self
+            .agents
+            .iter()
+            .any(|a| a.agent == AgentId::ClaudeCode && a.availability == Availability::Ready);
         if !claude {
             if announce {
                 self.rename(id, trek_core::import_title(&request), cx);
@@ -5517,7 +7305,13 @@ impl Workspace {
         }
         let (tx, rx) = async_channel::bounded(1);
         trek_core::runtime().spawn(async move {
-            let _ = tx.send(trek_agents::generate_title(&request, &reply).await.map_err(|e| format!("{e:#}"))).await;
+            let _ = tx
+                .send(
+                    trek_agents::generate_title(&request, &reply)
+                        .await
+                        .map_err(|e| format!("{e:#}")),
+                )
+                .await;
         });
         let id = id.to_string();
         // An automatic title doesn't overwrite a name given while it was being written.
@@ -5527,7 +7321,10 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| match result {
                 Ok(_) if !announce && this.thread(&id).map(|t| t.title.clone()) != asked_over => {}
                 Ok(title) => this.rename(&id, title, cx),
-                Err(e) if announce => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't write a title: {e}"), undo: None }),
+                Err(e) if announce => cx.emit(WorkspaceEvent::Toast {
+                    message: format!("Couldn't write a title: {e}"),
+                    undo: None,
+                }),
                 Err(e) => tracing::warn!("auto title: {e}"),
             });
         });
@@ -5544,15 +7341,37 @@ impl Workspace {
         if t.source != ThreadSource::Trek || t.side_of.is_some() || t.parent_id.is_some() {
             return;
         }
-        let Some(live) = self.live.get(id) else { return };
-        let Some(first) = live.items.iter().find_map(|i| if let Item::User { text, .. } = i { Some(text) } else { None }) else { return };
+        let Some(live) = self.live.get(id) else {
+            return;
+        };
+        let Some(first) = live.items.iter().find_map(|i| {
+            if let Item::User { text, .. } = i {
+                Some(text)
+            } else {
+                None
+            }
+        }) else {
+            return;
+        };
         // Only as the first prompt's turn ends (answers to the agent's questions on the way are
         // asides, not prompts), and only if the title is still the automatic one. Counting prompts
         // as well as turn ends: a first turn cut off (Trek quit, the user stopped it) ends with no
         // `TurnEnd`, and a later prompt mustn't name the thread after the first one.
-        let turns = live.items.iter().filter(|i| matches!(i, Item::TurnEnd { .. })).count();
-        let prompts = live.items.iter().filter(|i| matches!(i, Item::User { aside: false, .. })).count();
-        if turns > 1 || prompts > 1 || t.title != trek_core::import_title(first) || first.starts_with('/') {
+        let turns = live
+            .items
+            .iter()
+            .filter(|i| matches!(i, Item::TurnEnd { .. }))
+            .count();
+        let prompts = live
+            .items
+            .iter()
+            .filter(|i| matches!(i, Item::User { aside: false, .. }))
+            .count();
+        if turns > 1
+            || prompts > 1
+            || t.title != trek_core::import_title(first)
+            || first.starts_with('/')
+        {
             return;
         }
         self.regenerate_title(id, false, cx);
@@ -5568,11 +7387,27 @@ impl Workspace {
             }
             // Not under a running turn: the agent's edits since would be lost under it.
             UndoAction::Unrestore { thread, .. } if self.turn_running(&thread) => {
-                cx.emit(WorkspaceEvent::Toast { message: "Stop the running turn first.".into(), undo: None });
+                cx.emit(WorkspaceEvent::Toast {
+                    message: "Stop the running turn first.".into(),
+                    undo: None,
+                });
             }
             // Not for a thread deleted since: its refs are gone.
-            UndoAction::Unrestore { thread, repo, sha, paths } if self.thread(&thread).is_some() => {
-                self.live.entry(thread.clone()).or_default().git_jobs.push_back(GitJob::Restore { repo, sha, only: RestoreOnly::Paths(paths) });
+            UndoAction::Unrestore {
+                thread,
+                repo,
+                sha,
+                paths,
+            } if self.thread(&thread).is_some() => {
+                self.live
+                    .entry(thread.clone())
+                    .or_default()
+                    .git_jobs
+                    .push_back(GitJob::Restore {
+                        repo,
+                        sha,
+                        only: RestoreOnly::Paths(paths),
+                    });
                 self.run_git(&thread, cx);
             }
             UndoAction::Unrestore { .. } => {}
@@ -5587,7 +7422,9 @@ impl Workspace {
             UndoAction::OpenThread(_) => {}
             UndoAction::CancelRestart => {
                 self.restart_countdown = None;
-                if let UpdateStatus::RestartPending { version, staged } = self.updater.status.clone() {
+                if let UpdateStatus::RestartPending { version, staged } =
+                    self.updater.status.clone()
+                {
                     self.updater.status = UpdateStatus::Ready { version, staged };
                     cx.notify();
                 }
@@ -5597,27 +7434,31 @@ impl Workspace {
 
     /// Auto-settle and snooze wake-ups, once a minute.
     fn start_housekeeping(&mut self, cx: &mut Context<Self>) {
-        let task = cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(Duration::from_secs(60)).await;
-            let alive = this.update(cx, |this, cx| {
-                let now = now_ms();
-                this.tidy_inbox(now, cx);
-                // Agent processes idle for a while are shut down (150–250 MB each); they resume on the next message.
-                this.reap_idle_sessions(cx.background_executor().now());
-                if now - this.status_fetched_at > this.usage_every() {
-                    this.refresh_usage(cx);
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(60))
+                    .await;
+                let alive = this.update(cx, |this, cx| {
+                    let now = now_ms();
+                    this.tidy_inbox(now, cx);
+                    // Agent processes idle for a while are shut down (150–250 MB each); they resume on the next message.
+                    this.reap_idle_sessions(cx.background_executor().now());
+                    if now - this.status_fetched_at > this.usage_every() {
+                        this.refresh_usage(cx);
+                    }
+                    if this.watches_devin_usage() {
+                        this.refresh_devin_usage(cx);
+                    }
+                    this.maybe_check_for_updates(cx);
+                    this.maybe_check_agent_updates(cx);
+                    this.maybe_restart_for_update(cx);
+                    this.remind_verification(now, cx);
+                    // No redraw otherwise: the views that show times keep their own clocks.
+                });
+                if alive.is_err() {
+                    break;
                 }
-                if this.watches_devin_usage() {
-                    this.refresh_devin_usage(cx);
-                }
-                this.maybe_check_for_updates(cx);
-                this.maybe_check_agent_updates(cx);
-                this.maybe_restart_for_update(cx);
-                this.remind_verification(now, cx);
-                // No redraw otherwise: the views that show times keep their own clocks.
-            });
-            if alive.is_err() {
-                break;
             }
         });
         self.keep(task);
@@ -5628,11 +7469,20 @@ impl Workspace {
     /// as of `now`.
     pub(crate) fn tidy_inbox(&mut self, now: i64, cx: &mut Context<Self>) {
         let since = std::mem::replace(&mut self.tidied_at, now);
-        if self.threads.iter().any(|t| t.snoozed_until.is_some_and(|u| u > since && u <= now)) {
+        if self
+            .threads
+            .iter()
+            .any(|t| t.snoozed_until.is_some_and(|u| u > since && u <= now))
+        {
             cx.notify();
         }
         let days = self.settings.inbox.auto_settle_days;
-        let due: Vec<String> = self.threads.iter().filter(|t| t.should_auto_settle(now, days)).map(|t| t.id.clone()).collect();
+        let due: Vec<String> = self
+            .threads
+            .iter()
+            .filter(|t| t.should_auto_settle(now, days))
+            .map(|t| t.id.clone())
+            .collect();
         for id in due {
             self.mutate_thread(&id, cx, |t| {
                 t.settled_at = Some(now);
@@ -5647,15 +7497,32 @@ impl Workspace {
     /// once that branch is merged (`settle_merged`). A thread that only read or talked on a
     /// branch isn't tied to it.
     fn note_branch(&mut self, id: &str, began: Option<i64>, cx: &mut Context<Self>) {
-        let Some(began) = began.filter(|_| self.settings.inbox.auto_settle_on_merge) else { return };
-        let Some(cwd) = self.thread(id).filter(|t| t.source == ThreadSource::Trek).and_then(|t| t.cwd.clone()) else { return };
+        let Some(began) = began.filter(|_| self.settings.inbox.auto_settle_on_merge) else {
+            return;
+        };
+        let Some(cwd) = self
+            .thread(id)
+            .filter(|t| t.source == ThreadSource::Trek)
+            .and_then(|t| t.cwd.clone())
+        else {
+            return;
+        };
         let id = id.to_string();
         cx.spawn(async move |this, cx| {
             // Commit times are in whole seconds.
             let since = began.div_euclid(1000);
-            let Some(branch) = cx.background_executor().spawn(async move { trek_core::git::branch_committed_since(&cwd, since) }).await else { return };
+            let Some(branch) = cx
+                .background_executor()
+                .spawn(async move { trek_core::git::branch_committed_since(&cwd, since) })
+                .await
+            else {
+                return;
+            };
             let _ = this.update(cx, |this, cx| {
-                if this.thread(&id).is_some_and(|t| t.branch.as_ref() != Some(&branch)) {
+                if this
+                    .thread(&id)
+                    .is_some_and(|t| t.branch.as_ref() != Some(&branch))
+                {
                     this.mutate_thread(&id, cx, |t| t.branch = Some(branch));
                 }
             });
@@ -5683,13 +7550,29 @@ impl Workspace {
             use trek_core::git::BranchState;
             let checked: Vec<(String, String, BranchState)> = cx
                 .background_executor()
-                .spawn(async move { candidates.into_iter().map(|(id, cwd, branch)| (id, branch.clone(), trek_core::git::branch_state(&cwd, &branch))).collect() })
+                .spawn(async move {
+                    candidates
+                        .into_iter()
+                        .map(|(id, cwd, branch)| {
+                            (
+                                id,
+                                branch.clone(),
+                                trek_core::git::branch_state(&cwd, &branch),
+                            )
+                        })
+                        .collect()
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.checking_merges = false;
                 let now = now_ms();
                 for (id, branch, state) in checked {
-                    let Some(t) = this.thread(&id).filter(|t| t.branch.as_ref() == Some(&branch) && t.settled_at.is_none()) else { continue };
+                    let Some(t) = this
+                        .thread(&id)
+                        .filter(|t| t.branch.as_ref() == Some(&branch) && t.settled_at.is_none())
+                    else {
+                        continue;
+                    };
                     // Merged, or gone: either way there's nothing left to watch for.
                     let settle = state == BranchState::Merged && settles_on_merge(t, now);
                     if state != BranchState::Unmerged {
@@ -5710,18 +7593,35 @@ impl Workspace {
     /// and the pre-warmed draft session after 10. A thread's next message starts its session
     /// again, resuming the agent's conversation. `now` is the executor's clock (a test's own).
     pub(crate) fn reap_idle_sessions(&mut self, now: Instant) {
-        let idle_for = |at: Option<Instant>, limit: u64| at.is_none_or(|t| now.saturating_duration_since(t) > Duration::from_secs(limit * 60));
-        let shown: Vec<String> = self.live.keys().filter(|id| self.on_screen(id)).cloned().collect();
+        let idle_for = |at: Option<Instant>, limit: u64| {
+            at.is_none_or(|t| now.saturating_duration_since(t) > Duration::from_secs(limit * 60))
+        };
+        let shown: Vec<String> = self
+            .live
+            .keys()
+            .filter(|id| self.on_screen(id))
+            .cloned()
+            .collect();
         for (id, live) in self.live.iter_mut() {
             // Not while it runs anything in the background: the session takes that with it.
-            let quiet = live.turn_started.is_none() && live.background.is_empty() && live.permissions.is_empty();
-            if quiet && live.commands.is_some() && idle_for(live.last_active, 15) && !shown.contains(id) {
+            let quiet = live.turn_started.is_none()
+                && live.background.is_empty()
+                && live.permissions.is_empty();
+            if quiet
+                && live.commands.is_some()
+                && idle_for(live.last_active, 15)
+                && !shown.contains(id)
+            {
                 if let Some(tx) = live.commands.take() {
                     let _ = tx.try_send(Command::Shutdown);
                 }
             }
         }
-        if self.warm.as_ref().is_some_and(|(_, _, at)| idle_for(Some(*at), 10)) {
+        if self
+            .warm
+            .as_ref()
+            .is_some_and(|(_, _, at)| idle_for(Some(*at), 10))
+        {
             self.warm = None;
             if let (Some(key), Some(ipc)) = (self.warm_ipc.take(), &self.ipc) {
                 ipc.close_session(&key);
@@ -5761,9 +7661,17 @@ impl Workspace {
                     let _ = self.settings.save();
                 }
                 self.reload(cx);
-                self.navigate(Route::Draft { project: Some(p.path) }, cx);
+                self.navigate(
+                    Route::Draft {
+                        project: Some(p.path),
+                    },
+                    cx,
+                );
             }
-            Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't open folder: {e}"), undo: None }),
+            Err(e) => cx.emit(WorkspaceEvent::Toast {
+                message: format!("Couldn't open folder: {e}"),
+                undo: None,
+            }),
         }
     }
 
@@ -5773,9 +7681,17 @@ impl Workspace {
         if spec.is_empty() {
             return;
         }
-        let name = spec.trim_end_matches(".git").rsplit(['/', ':']).next().unwrap_or("repo").to_string();
+        let name = spec
+            .trim_end_matches(".git")
+            .rsplit(['/', ':'])
+            .next()
+            .unwrap_or("repo")
+            .to_string();
         let dest = trek_core::paths::home().join("Developer").join(&name);
-        cx.emit(WorkspaceEvent::Toast { message: format!("Cloning {spec}…"), undo: None });
+        cx.emit(WorkspaceEvent::Toast {
+            message: format!("Cloning {spec}…"),
+            undo: None,
+        });
         let task = cx.spawn(async move |this, cx| {
             let dest2 = dest.clone();
             let result = cx
@@ -5785,10 +7701,22 @@ impl Workspace {
                     let path = trek_core::detect::login_path();
                     let gh = trek_core::detect::which("gh");
                     let status = if let (Some(gh), false) = (gh, spec.contains("://")) {
-                        trek_core::procs::command(gh).args(["repo", "clone", &spec]).arg(&dest2).env("PATH", path).output()
+                        trek_core::procs::command(gh)
+                            .args(["repo", "clone", &spec])
+                            .arg(&dest2)
+                            .env("PATH", path)
+                            .output()
                     } else {
-                        let url = if spec.contains("://") || spec.starts_with("git@") { spec.clone() } else { format!("https://github.com/{spec}.git") };
-                        trek_core::procs::command("git").args(["clone", &url]).arg(&dest2).env("PATH", path).output()
+                        let url = if spec.contains("://") || spec.starts_with("git@") {
+                            spec.clone()
+                        } else {
+                            format!("https://github.com/{spec}.git")
+                        };
+                        trek_core::procs::command("git")
+                            .args(["clone", &url])
+                            .arg(&dest2)
+                            .env("PATH", path)
+                            .output()
                     };
                     match status {
                         Ok(o) if o.status.success() => Ok(()),
@@ -5799,7 +7727,10 @@ impl Workspace {
                 .await;
             let _ = this.update(cx, |this, cx| match result {
                 Ok(()) => this.add_project(dest, cx),
-                Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Clone failed: {e}"), undo: None }),
+                Err(e) => cx.emit(WorkspaceEvent::Toast {
+                    message: format!("Clone failed: {e}"),
+                    undo: None,
+                }),
             });
         });
         self.keep(task);
@@ -5822,40 +7753,47 @@ impl Workspace {
         });
         let task = cx.spawn(async move |this, cx| {
             if let Ok(agents) = rx.recv().await {
-                let _ = this.update(cx, |this, cx| {
-                    this.agents = agents;
-                    this.forget_keyed_providers();
-                    this.detecting = false;
-                    if this.agents.iter().any(|a| a.agent == AgentId::Codex && a.availability == Availability::Ready) {
-                        this.fetch_codex_models(cx);
-                    }
-                    for p in this.settings.api_providers.clone() {
-                        this.fetch_direct_models(&p, cx);
-                    }
-                    for p in catalog::DIRECT_PROVIDERS {
-                        if !p.local && trek_core::settings::secrets::api_key(p.id).is_some() {
-                            this.fetch_direct_models(p.id, cx);
+                let _ =
+                    this.update(cx, |this, cx| {
+                        this.agents = agents;
+                        this.forget_keyed_providers();
+                        this.detecting = false;
+                        if this.agents.iter().any(|a| {
+                            a.agent == AgentId::Codex && a.availability == Availability::Ready
+                        }) {
+                            this.fetch_codex_models(cx);
                         }
-                    }
-                    // Not again for the agents read since launch (`refresh_usage` at launch).
-                    this.refresh_usage(cx);
-                    // Opened on something that shows Devin's plan before Devin was found.
-                    if matches!(this.route, Route::Basecamp | Route::Settings(SettingsPage::Agents)) || std::env::var_os("TREK_OPEN_USAGE").is_some() {
-                        this.refresh_devin_usage(cx);
-                    }
-                    this.probe_acp_agents(cx);
-                    // Default to an agent that's actually installed.
-                    let ready = this.ready_agents();
-                    for p in [&mut this.draft_prefs, &mut this.ide_chat.draft_prefs] {
-                        if !ready.contains(&p.agent) {
-                            if let Some(a) = ready.first() {
-                                p.agent = a.clone();
-                                p.model = None;
+                        for p in this.settings.api_providers.clone() {
+                            this.fetch_direct_models(&p, cx);
+                        }
+                        for p in catalog::DIRECT_PROVIDERS {
+                            if !p.local && trek_core::settings::secrets::api_key(p.id).is_some() {
+                                this.fetch_direct_models(p.id, cx);
                             }
                         }
-                    }
-                    cx.notify();
-                });
+                        // Not again for the agents read since launch (`refresh_usage` at launch).
+                        this.refresh_usage(cx);
+                        // Opened on something that shows Devin's plan before Devin was found.
+                        if matches!(
+                            this.route,
+                            Route::Basecamp | Route::Settings(SettingsPage::Agents)
+                        ) || std::env::var_os("TREK_OPEN_USAGE").is_some()
+                        {
+                            this.refresh_devin_usage(cx);
+                        }
+                        this.probe_acp_agents(cx);
+                        // Default to an agent that's actually installed.
+                        let ready = this.ready_agents();
+                        for p in [&mut this.draft_prefs, &mut this.ide_chat.draft_prefs] {
+                            if !ready.contains(&p.agent) {
+                                if let Some(a) = ready.first() {
+                                    p.agent = a.clone();
+                                    p.model = None;
+                                }
+                            }
+                        }
+                        cx.notify();
+                    });
             }
         });
         self.keep(task);
@@ -5867,7 +7805,12 @@ impl Workspace {
     }
 
     /// `use_reset_credit`, telling `done` how it went (a phone waits to hear).
-    pub(crate) fn use_reset_credit_then(&mut self, credit_id: String, done: impl FnOnce(Result<(), String>) + 'static, cx: &mut Context<Self>) {
+    pub(crate) fn use_reset_credit_then(
+        &mut self,
+        credit_id: String,
+        done: impl FnOnce(Result<(), String>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
         if !self.reset_credits_in_flight.insert(credit_id.clone()) {
             done(Err("That reset is being used already".into()));
             return;
@@ -5887,7 +7830,10 @@ impl Workspace {
             let _ = tx.send(consume.await).await;
         });
         cx.spawn(async move |this, cx| {
-            let res = rx.recv().await.unwrap_or_else(|_| Err(anyhow::anyhow!("the request was dropped")));
+            let res = rx
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("the request was dropped")));
             let _ = this.update(cx, |this, cx| {
                 this.reset_credits_in_flight.remove(&credit_id);
                 cx.notify();
@@ -5899,9 +7845,15 @@ impl Workspace {
                         }
                         // Re-read now (past the 30-second throttle) so the bars jump to 0%.
                         this.refresh_usage_now(cx);
-                        cx.emit(WorkspaceEvent::Toast { message: "Usage limits reset".into(), undo: None });
+                        cx.emit(WorkspaceEvent::Toast {
+                            message: "Usage limits reset".into(),
+                            undo: None,
+                        });
                     }
-                    Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't use the reset: {e:#}"), undo: None }),
+                    Err(e) => cx.emit(WorkspaceEvent::Toast {
+                        message: format!("Couldn't use the reset: {e:#}"),
+                        undo: None,
+                    }),
                 }
                 done(res.map_err(|e| format!("Couldn't use the reset: {e:#}")));
             });
@@ -5942,7 +7894,11 @@ impl Workspace {
 
     /// Take in what Devin said of its plan and quota. It says nothing of its commands, which
     /// its ACP sessions report per folder and stay as they were.
-    pub(crate) fn apply_devin_status(&mut self, res: anyhow::Result<AgentStatus>, cx: &mut Context<Self>) {
+    pub(crate) fn apply_devin_status(
+        &mut self,
+        res: anyhow::Result<AgentStatus>,
+        cx: &mut Context<Self>,
+    ) {
         let key = devin_agent().key();
         match res {
             Ok(st) => {
@@ -5964,7 +7920,10 @@ impl Workspace {
 
     /// Installed, signed in as far as Trek knows, and not turned off in Settings.
     fn agent_ready(&self, id: &AgentId) -> bool {
-        self.agents.iter().any(|a| a.agent == *id && a.availability == Availability::Ready) && !self.settings.disabled_agents.contains(&id.key())
+        self.agents
+            .iter()
+            .any(|a| a.agent == *id && a.availability == Availability::Ready)
+            && !self.settings.disabled_agents.contains(&id.key())
     }
 
     /// Ask each installed ACP agent for its models and login state. Answered from what the agent
@@ -5982,7 +7941,12 @@ impl Workspace {
 
     /// Authenticate an ACP agent (e.g. Google Antigravity, Devin, Cursor). Runs the agent's
     /// `authenticate` flow (browser OAuth or token exchange), updates `acp_info`, and notifies.
-    pub fn authenticate_acp_agent(&mut self, key: &str, method_id: Option<String>, cx: &mut Context<Self>) {
+    pub fn authenticate_acp_agent(
+        &mut self,
+        key: &str,
+        method_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let key_str = key.to_string();
         self.authenticating_agents.insert(key_str.clone());
         cx.notify();
@@ -5990,7 +7954,9 @@ impl Workspace {
         let p_id = probe_id.clone();
         let (tx, rx) = async_channel::bounded(1);
         trek_core::runtime().spawn(async move {
-            let r = trek_agents::acp_authenticate(&p_id, method_id.as_deref()).await.map_err(|e| format!("{e:#}"));
+            let r = trek_agents::acp_authenticate(&p_id, method_id.as_deref())
+                .await
+                .map_err(|e| format!("{e:#}"));
             let _ = tx.send(r).await;
         });
         let task = cx.spawn(async move |this, cx| {
@@ -6001,7 +7967,10 @@ impl Workspace {
                         Ok(info) => {
                             this.acp_info.insert(key_str.clone(), Ok(info.clone()));
                             cx.emit(WorkspaceEvent::Toast {
-                                message: format!("Signed in to {}", trek_core::catalog::acp_display_name(&probe_id)),
+                                message: format!(
+                                    "Signed in to {}",
+                                    trek_core::catalog::acp_display_name(&probe_id)
+                                ),
                                 undo: None,
                             });
                         }
@@ -6028,7 +7997,13 @@ impl Workspace {
         let ids: Vec<String> = self
             .agents
             .iter()
-            .filter(|a| a.availability == Availability::Ready && matches!(a.agent, AgentId::OpenCode | AgentId::Droid | AgentId::Acp(_)))
+            .filter(|a| {
+                a.availability == Availability::Ready
+                    && matches!(
+                        a.agent,
+                        AgentId::OpenCode | AgentId::Droid | AgentId::Acp(_)
+                    )
+            })
             .map(|a| a.agent.key())
             .filter(|k| !self.settings.disabled_agents.contains(k) && only.is_none_or(|o| o == k))
             .collect();
@@ -6036,7 +8011,9 @@ impl Workspace {
             let (tx, rx) = async_channel::bounded(1);
             let probe_id = id.strip_prefix("acp:").unwrap_or(&id).to_string();
             trek_core::runtime().spawn(async move {
-                let r = trek_agents::acp_probe(&probe_id).await.map_err(|e| format!("{e:#}"));
+                let r = trek_agents::acp_probe(&probe_id)
+                    .await
+                    .map_err(|e| format!("{e:#}"));
                 let _ = tx.send(r).await;
             });
             let task = cx.spawn(async move |this, cx| {
@@ -6056,14 +8033,21 @@ impl Workspace {
     pub fn slash_commands(&self, scope: &Scope, agent: &AgentId) -> Vec<SlashCommand> {
         let mut out: Vec<SlashCommand> = BUILTIN_COMMANDS
             .iter()
-            .map(|(n, d)| SlashCommand { name: n.to_string(), description: d.to_string(), kind: trek_agents::CommandKind::Command })
+            .map(|(n, d)| SlashCommand {
+                name: n.to_string(),
+                description: d.to_string(),
+                kind: trek_agents::CommandKind::Command,
+            })
             .collect();
         let cwd = self.cwd_in(scope).unwrap_or_else(trek_core::paths::home);
         // What the agent offered in this folder; the last status check (made for the main
         // window's folder) only until then.
         let commands = match self.agent_commands.get(&(agent.key(), cwd)) {
             Some(offered) => offered.as_slice(),
-            None => self.agent_status.get(&agent.key()).map_or(&[][..], |st| st.commands.as_slice()),
+            None => self
+                .agent_status
+                .get(&agent.key())
+                .map_or(&[][..], |st| st.commands.as_slice()),
         };
         for c in commands {
             if !out.iter().any(|o| o.name == c.name) {
@@ -6087,7 +8071,9 @@ impl Workspace {
                     .filter(|p| p.prompt.is_none())
                     .filter(|p| match level {
                         HandHolding::FullAccess => true,
-                        HandHolding::AutoAcceptEdits | HandHolding::Auto => matches!(p.title.as_str(), "Edit" | "Write"),
+                        HandHolding::AutoAcceptEdits | HandHolding::Auto => {
+                            matches!(p.title.as_str(), "Edit" | "Write")
+                        }
                         HandHolding::Supervised => false,
                     })
                     .map(|p| p.request_id.clone())
@@ -6100,9 +8086,17 @@ impl Workspace {
     }
 
     /// Change a thread's hand-holding (or the draft's), as the composer menu does.
-    pub fn set_hand_holding(&mut self, id: Option<&str>, level: HandHolding, cx: &mut Context<Self>) -> Result<(), String> {
+    pub fn set_hand_holding(
+        &mut self,
+        id: Option<&str>,
+        level: HandHolding,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         if level == HandHolding::FullAccess && !self.settings.permissions.full_access_unlocked {
-            return Err("Full access is off. Turn on “Allow Full access” in Settings → Permissions first.".into());
+            return Err(
+                "Full access is off. Turn on “Allow Full access” in Settings → Permissions first."
+                    .into(),
+            );
         }
         match id {
             Some(id) if self.route == Route::Thread(id.to_string()) => {
@@ -6124,32 +8118,53 @@ impl Workspace {
     }
 
     /// `/permissions [supervised|edits|auto|full]` — shows or changes the level.
-    fn permissions_command(&mut self, id: Option<&str>, arg: Option<&str>, cx: &mut Context<Self>) -> String {
-        let current = id.and_then(|i| self.thread(i)).map(|t| t.hand_holding).unwrap_or(self.draft_prefs.hand_holding);
+    fn permissions_command(
+        &mut self,
+        id: Option<&str>,
+        arg: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> String {
+        let current = id
+            .and_then(|i| self.thread(i))
+            .map(|t| t.hand_holding)
+            .unwrap_or(self.draft_prefs.hand_holding);
         let level = match arg.map(|a| a.to_lowercase()) {
             None => {
                 return format!(
                     "Hand-holding is **{}**. Switch with `/permissions supervised`, `/permissions edits`, `/permissions auto` or `/permissions full`.",
                     current.label()
-                )
+                );
             }
             Some(a) => match a.as_str() {
                 "supervised" | "ask" | "default" => HandHolding::Supervised,
-                "edits" | "accept-edits" | "auto-accept" | "auto-accept-edits" | "acceptedits" => HandHolding::AutoAcceptEdits,
+                "edits" | "accept-edits" | "auto-accept" | "auto-accept-edits" | "acceptedits" => {
+                    HandHolding::AutoAcceptEdits
+                }
                 "auto" => HandHolding::Auto,
                 "full" | "full-access" | "bypass" | "yolo" => HandHolding::FullAccess,
-                other => return format!("Unknown level “{other}”. Use supervised, edits, auto or full."),
+                other => {
+                    return format!("Unknown level “{other}”. Use supervised, edits, auto or full.");
+                }
             },
         };
         match self.set_hand_holding(id, level, cx) {
-            Ok(()) => format!("Hand-holding set to **{}**. {}", level.label(), level.description()),
+            Ok(()) => format!(
+                "Hand-holding set to **{}**. {}",
+                level.label(),
+                level.description()
+            ),
             Err(e) => e,
         }
     }
 
     /// Answer one of Trek's own commands (`BUILTIN_COMMANDS`, `/clear`) in thread `id`, or in the
     /// draft (`None`). `None` when `text` isn't one Trek answers there: it goes to the agent.
-    fn run_builtin_command(&mut self, id: Option<&str>, text: &str, cx: &mut Context<Self>) -> Option<String> {
+    fn run_builtin_command(
+        &mut self,
+        id: Option<&str>,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
         let cmd = text.strip_prefix('/')?.split_whitespace().next()?;
         let thread = match id {
             Some(id) => Some(self.thread(id)?.clone()),
@@ -6161,7 +8176,10 @@ impl Workspace {
         };
         let (agent, model) = match &thread {
             Some(t) => (t.agent.clone(), t.model.clone()),
-            None => (self.draft_prefs.agent.clone(), self.draft_prefs.model.clone()),
+            None => (
+                self.draft_prefs.agent.clone(),
+                self.draft_prefs.model.clone(),
+            ),
         };
         let live = id.and_then(|id| self.live.get(id));
         match cmd {
@@ -6187,18 +8205,38 @@ impl Workspace {
                 }
                 let Some(st) = self.usage_status(&agent.key()) else {
                     // In a thread the agent may answer it itself; a draft has no agent to ask.
-                    return thread.is_none().then(|| format!("{} hasn't reported its usage yet.", agent.display_name()));
+                    return thread.is_none().then(|| {
+                        format!("{} hasn't reported its usage yet.", agent.display_name())
+                    });
                 };
-                let mut lines = vec![format!("**{}** · {}", agent.display_name(), st.plan.clone().unwrap_or_else(|| "no plan reported".into()))];
+                let mut lines = vec![format!(
+                    "**{}** · {}",
+                    agent.display_name(),
+                    st.plan.clone().unwrap_or_else(|| "no plan reported".into())
+                )];
                 for l in &st.limits {
-                    lines.push(format!("- {}: {:.0}% used{}", l.label, l.percent, l.resets_at.map(|r| format!(", resets {}", crate::time::until(r))).unwrap_or_default()));
+                    lines.push(format!(
+                        "- {}: {:.0}% used{}",
+                        l.label,
+                        l.percent,
+                        l.resets_at
+                            .map(|r| format!(", resets {}", crate::time::until(r)))
+                            .unwrap_or_default()
+                    ));
                 }
                 lines.extend(st.note.clone());
                 Some(lines.join("\n"))
             }
             "context" => match live.and_then(|l| l.context) {
-                Some((used, window)) => Some(format!("{} of {} tokens in context ({:.0}%).", fmt_tokens(used), fmt_tokens(window), used as f64 / window.max(1) as f64 * 100.)),
-                None => thread.is_none().then(|| "Nothing is in context yet: this thread hasn't started.".to_string()),
+                Some((used, window)) => Some(format!(
+                    "{} of {} tokens in context ({:.0}%).",
+                    fmt_tokens(used),
+                    fmt_tokens(window),
+                    used as f64 / window.max(1) as f64 * 100.
+                )),
+                None => thread
+                    .is_none()
+                    .then(|| "Nothing is in context yet: this thread hasn't started.".to_string()),
             },
             "cost" => match &thread {
                 None => Some("Nothing is spent yet: this thread hasn't started.".into()),
@@ -6207,7 +8245,11 @@ impl Workspace {
                     Some(cost_reply(self.billing_of(t).as_ref(), &spend))
                 }
             },
-            "model" => Some(format!("{} · {}", agent.display_name(), model.unwrap_or_else(|| "default model".into()))),
+            "model" => Some(format!(
+                "{} · {}",
+                agent.display_name(),
+                model.unwrap_or_else(|| "default model".into())
+            )),
             _ => None,
         }
     }
@@ -6220,7 +8262,12 @@ impl Workspace {
             let bin = bin.display().to_string();
             let windows = crate::words::is_windows();
             for family in trek_mcp_families(tools.computer_use, tools.simulator, windows) {
-                out.push(McpServer::stdio(format!("trek-{family}"), bin.clone(), vec![family.into()], trek_mcp_env(family, tools.computer_background, windows)));
+                out.push(McpServer::stdio(
+                    format!("trek-{family}"),
+                    bin.clone(),
+                    vec![family.into()],
+                    trek_mcp_env(family, tools.computer_background, windows),
+                ));
             }
             if tools.video {
                 out.push(video_server(&bin));
@@ -6228,10 +8275,25 @@ impl Workspace {
         }
         // Figma's own server in its desktop app: local and without a login, so every agent can
         // have it (one that can't take HTTP servers says so when its session starts).
-        if tools.figma_desktop && !tools.mcp_servers.iter().any(|s| s.enabled && s.name == trek_core::settings::FIGMA_DESKTOP_SERVER) {
-            out.push(McpServer::http(trek_core::settings::FIGMA_DESKTOP_SERVER, trek_core::settings::FIGMA_DESKTOP_URL, vec![]));
+        if tools.figma_desktop
+            && !tools
+                .mcp_servers
+                .iter()
+                .any(|s| s.enabled && s.name == trek_core::settings::FIGMA_DESKTOP_SERVER)
+        {
+            out.push(McpServer::http(
+                trek_core::settings::FIGMA_DESKTOP_SERVER,
+                trek_core::settings::FIGMA_DESKTOP_URL,
+                vec![],
+            ));
         }
-        out.extend(tools.mcp_servers.iter().filter(|s| s.enabled).map(mcp_server_of));
+        out.extend(
+            tools
+                .mcp_servers
+                .iter()
+                .filter(|s| s.enabled)
+                .map(mcp_server_of),
+        );
         out
     }
 
@@ -6244,7 +8306,9 @@ impl Workspace {
         let (tx, rx) = async_channel::bounded(1);
         let pid_clone = pid.clone();
         trek_core::runtime().spawn(async move {
-            let models = trek_agents::direct_provider_models(&pid_clone, None).await.unwrap_or_default();
+            let models = trek_agents::direct_provider_models(&pid_clone, None)
+                .await
+                .unwrap_or_default();
             if !models.is_empty() {
                 trek_agents::cache_direct_models(&pid_clone, &models);
             }
@@ -6271,7 +8335,9 @@ impl Workspace {
         }
         let (tx, rx) = async_channel::bounded(1);
         trek_core::runtime().spawn(async move {
-            let _ = tx.send(trek_agents::codex_models().await.unwrap_or_default()).await;
+            let _ = tx
+                .send(trek_agents::codex_models().await.unwrap_or_default())
+                .await;
         });
         let task = cx.spawn(async move |this, cx| {
             if let Ok(models) = rx.recv().await {
@@ -6293,13 +8359,20 @@ impl Workspace {
         let store = self.store.clone();
         let settings = self.settings.import.clone();
         let task = cx.spawn(async move |this, cx| {
-            let summary = cx.background_executor().spawn(async move { trek_core::import::import_all(&store, &settings) }).await;
+            let summary = cx
+                .background_executor()
+                .spawn(async move { trek_core::import::import_all(&store, &settings) })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.importing = false;
                 this.import_summary = Some(summary);
                 // Projects removed from Trek stay removed: archive anything the import brought back.
                 if let Ok(projects) = this.store.projects() {
-                    for p in projects.iter().filter(|p| this.settings.hidden_projects.contains(&p.path.display().to_string())) {
+                    for p in projects.iter().filter(|p| {
+                        this.settings
+                            .hidden_projects
+                            .contains(&p.path.display().to_string())
+                    }) {
                         let _ = this.store.archive_project_threads(&p.id);
                     }
                 }
@@ -6326,7 +8399,11 @@ impl Workspace {
         let blocker = self.blocked.unwrap_or_else(trek_core::update::blocker);
         #[cfg(not(test))]
         let blocker = trek_core::update::blocker();
-        self.moving_view(crate::updater::describe_update(&self.updater.status, self.settings.updates.auto_check, blocker))
+        self.moving_view(crate::updater::describe_update(
+            &self.updater.status,
+            self.settings.updates.auto_check,
+            blocker,
+        ))
     }
 
     pub fn run_update_action(&mut self, action: UpdateAction, cx: &mut Context<Self>) {
@@ -6354,27 +8431,52 @@ impl Workspace {
         // A dev build (or one macOS runs from a read-only copy) can't replace itself: don't ask.
         // The user asking asks Windows again whether Trek may write where it is.
         #[cfg(test)]
-        let said = self.blocked.inspect(|_| self.checks_asked.push(user_initiated));
+        let said = self
+            .blocked
+            .inspect(|_| self.checks_asked.push(user_initiated));
         #[cfg(not(test))]
         let said: Option<Option<trek_core::update::Blocker>> = None;
-        let blocked = said.unwrap_or_else(|| if user_initiated { trek_core::update::blocker_now() } else { trek_core::update::blocker() });
+        let blocked = said.unwrap_or_else(|| {
+            if user_initiated {
+                trek_core::update::blocker_now()
+            } else {
+                trek_core::update::blocker()
+            }
+        });
         if blocked.is_some() {
             cx.notify();
             return;
         }
-        let Some(ticket) = self.updater.begin_check(self.settings.updates.channel, now_ms()) else { return };
+        let Some(ticket) = self
+            .updater
+            .begin_check(self.settings.updates.channel, now_ms())
+        else {
+            return;
+        };
         cx.notify();
         let urls = trek_core::update::manifest_urls(&self.settings.updates);
         let (tx, rx) = async_channel::bounded(1);
         trek_core::runtime().spawn(async move {
-            let _ = tx.send(trek_core::update::check(&urls).await.map_err(|e| format!("{e:#}"))).await;
+            let _ = tx
+                .send(
+                    trek_core::update::check(&urls)
+                        .await
+                        .map_err(|e| format!("{e:#}")),
+                )
+                .await;
         });
         let task = cx.spawn(async move |this, cx| {
             let Ok(result) = rx.recv().await else { return };
             let _ = this.update(cx, |this, cx| {
                 let auto_download = this.settings.updates.auto_download;
                 let before = this.updater.offer.as_ref().map(|o| o.version.clone());
-                if this.updater.finish_check(ticket, result, user_initiated, auto_download, now_ms()) {
+                if this.updater.finish_check(
+                    ticket,
+                    result,
+                    user_initiated,
+                    auto_download,
+                    now_ms(),
+                ) {
                     this.download_update(cx);
                 }
                 let found = this.updater.offer.as_ref().map(|o| o.version.clone());
@@ -6395,17 +8497,15 @@ impl Workspace {
         trek_core::runtime().spawn(async move {
             let _ = tx.send(trek_core::changelog::fetch(&updates).await).await;
         });
-        let task = cx.spawn(async move |this, cx| {
-            match rx.recv().await {
-                Ok(Ok(releases)) => {
-                    let _ = this.update(cx, |this, cx| {
-                        this.updater.changelog = releases;
-                        cx.notify();
-                    });
-                }
-                Ok(Err(e)) => tracing::info!("release notes: {e:#}"),
-                Err(_) => {}
+        let task = cx.spawn(async move |this, cx| match rx.recv().await {
+            Ok(Ok(releases)) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.updater.changelog = releases;
+                    cx.notify();
+                });
             }
+            Ok(Err(e)) => tracing::info!("release notes: {e:#}"),
+            Err(_) => {}
         });
         self.keep(task);
     }
@@ -6413,10 +8513,14 @@ impl Workspace {
     /// What this version brought, until the user has seen it: only after an update, and only for
     /// a release (a dev build has no notes of its own).
     pub fn whats_new(&self) -> Option<&trek_core::changelog::Release> {
-        if trek_core::update::blocker().is_some() || self.settings.updates.seen_notes == trek_core::VERSION {
+        if trek_core::update::blocker().is_some()
+            || self.settings.updates.seen_notes == trek_core::VERSION
+        {
             return None;
         }
-        self.updater.installed_release().filter(|r| !r.notes.is_empty())
+        self.updater
+            .installed_release()
+            .filter(|r| !r.notes.is_empty())
     }
 
     pub fn mark_whats_new_seen(&mut self, cx: &mut Context<Self>) {
@@ -6429,12 +8533,18 @@ impl Workspace {
 
     /// Release notes for the update on offer: every release since this one.
     pub fn pending_changes(&self) -> Option<crate::updater::Changes> {
-        self.updater.pending_changes(self.settings.updates.channel, trek_core::changelog::github_repo(&self.settings.updates).as_deref())
+        self.updater.pending_changes(
+            self.settings.updates.channel,
+            trek_core::changelog::github_repo(&self.settings.updates).as_deref(),
+        )
     }
 
     /// Re-check about once a day while Trek stays open (housekeeping calls this every minute).
     fn maybe_check_for_updates(&mut self, cx: &mut Context<Self>) {
-        if self.updater.check_due(self.settings.updates.auto_check, now_ms()) {
+        if self
+            .updater
+            .check_due(self.settings.updates.auto_check, now_ms())
+        {
             self.check_for_updates(false, cx);
         }
     }
@@ -6442,7 +8552,14 @@ impl Workspace {
     /// Download, verify and unpack the update the last check found; it's `Ready` once the new
     /// bundle sits staged, so installing is a rename.
     pub fn download_update(&mut self, cx: &mut Context<Self>) {
-        let Some(crate::updater::DownloadJob { update, ticket, cancel }) = self.updater.begin_download() else { return };
+        let Some(crate::updater::DownloadJob {
+            update,
+            ticket,
+            cancel,
+        }) = self.updater.begin_download()
+        else {
+            return;
+        };
         let version = update.version.to_string();
         cx.notify();
         // The error, and whether it may pass (offline) so it's worth retrying within the hour.
@@ -6455,9 +8572,14 @@ impl Workspace {
                 })
                 .await?;
                 let expected = update.version.clone();
-                tokio::task::spawn_blocking(move || trek_core::update::stage(&archive, &expected, &cancel)).await?
+                tokio::task::spawn_blocking(move || {
+                    trek_core::update::stage(&archive, &expected, &cancel)
+                })
+                .await?
             };
-            let result = staged.await.map_err(|e: anyhow::Error| (format!("{e:#}"), trek_core::update::is_transient(&e)));
+            let result = staged.await.map_err(|e: anyhow::Error| {
+                (format!("{e:#}"), trek_core::update::is_transient(&e))
+            });
             let _ = tx.send(result).await;
         });
         let progress_task = cx.spawn(async move |this, cx| {
@@ -6472,12 +8594,19 @@ impl Workspace {
         let task = cx.spawn(async move |this, cx| {
             let Ok(result) = rx.recv().await else { return };
             let _ = this.update(cx, |this, cx| {
-                if let Some(unwanted) = this.updater.finish_download(ticket, version, result, now_ms()) {
-                    cx.background_executor().spawn(async move { trek_core::update::discard(&unwanted) }).detach();
+                if let Some(unwanted) =
+                    this.updater
+                        .finish_download(ticket, version, result, now_ms())
+                {
+                    cx.background_executor()
+                        .spawn(async move { trek_core::update::discard(&unwanted) })
+                        .detach();
                 }
                 // Test hook (docs/RELEASING.md): restart as soon as the update is ready instead of
                 // waiting for a click or for Trek to quit.
-                if matches!(this.updater.status, UpdateStatus::Ready { .. }) && std::env::var_os("TREK_UPDATE_AUTO_RESTART").is_some() {
+                if matches!(this.updater.status, UpdateStatus::Ready { .. })
+                    && std::env::var_os("TREK_UPDATE_AUTO_RESTART").is_some()
+                {
                     this.restart_to_update(cx);
                 }
                 cx.notify();
@@ -6491,7 +8620,9 @@ impl Workspace {
     /// results are ignored, and the staged copy is deleted rather than installed on quit.
     fn drop_update(&mut self, cx: &mut Context<Self>) {
         if let Some(staged) = self.updater.drop_update() {
-            cx.background_executor().spawn(async move { trek_core::update::discard(&staged) }).detach();
+            cx.background_executor()
+                .spawn(async move { trek_core::update::discard(&staged) })
+                .detach();
         }
     }
 
@@ -6499,18 +8630,22 @@ impl Workspace {
     /// background sub-agents don't: they can run for an hour after their turn is over, and the
     /// restart notice says it stops them, as it does shells.
     pub fn work_in_flight(&self) -> bool {
-        let update_due = self.agent_updates.queued_where(|a| self.agent_hold(a) != Some(Hold::Background));
-        self.agent_updates.running() || update_due || self.live.values().any(|l| {
-            (l.commands.is_some() && l.turn_started.is_some())
-                || l.permissions.iter().any(|p| p.after_turn)
-                || l.preparing
-                || l.loading
-                || l.removing
-                || l.git_busy
-                || !l.queued.is_empty()
-                || !l.left_over.is_empty()
-                || !l.held.is_empty()
-        })
+        let update_due = self
+            .agent_updates
+            .queued_where(|a| self.agent_hold(a) != Some(Hold::Background));
+        self.agent_updates.running()
+            || update_due
+            || self.live.values().any(|l| {
+                (l.commands.is_some() && l.turn_started.is_some())
+                    || l.permissions.iter().any(|p| p.after_turn)
+                    || l.preparing
+                    || l.loading
+                    || l.removing
+                    || l.git_busy
+                    || !l.queued.is_empty()
+                    || !l.left_over.is_empty()
+                    || !l.held.is_empty()
+            })
     }
 
     /// Install now unless agent turns are under way (`work_in_flight`); otherwise once they're over.
@@ -6518,7 +8653,10 @@ impl Workspace {
         if let UpdateStatus::Ready { version, staged } = self.updater.status.clone() {
             if self.work_in_flight() {
                 self.updater.status = UpdateStatus::RestartPending { version, staged };
-                cx.emit(WorkspaceEvent::Toast { message: "Trek will restart when your agents finish.".into(), undo: None });
+                cx.emit(WorkspaceEvent::Toast {
+                    message: "Trek will restart when your agents finish.".into(),
+                    undo: None,
+                });
                 cx.notify();
             } else {
                 self.install_update(staged, cx);
@@ -6530,14 +8668,25 @@ impl Workspace {
     /// toast that can call it off.
     fn maybe_restart_for_update(&mut self, cx: &mut Context<Self>) {
         self.maybe_move(cx);
-        if !matches!(self.updater.status, UpdateStatus::RestartPending { .. }) || self.work_in_flight() || self.restart_countdown.is_some() {
+        if !matches!(self.updater.status, UpdateStatus::RestartPending { .. })
+            || self.work_in_flight()
+            || self.restart_countdown.is_some()
+        {
             return;
         }
         // Shells left running don't hold the update back (a dev server can run all day), but the
         // restart ends them: the toast says so while it can still be cancelled.
-        let work: Vec<&str> = self.live.values().filter(|l| l.commands.is_some()).flat_map(|l| l.background.iter().map(|b| b.task.title.as_str())).collect();
+        let work: Vec<&str> = self
+            .live
+            .values()
+            .filter(|l| l.commands.is_some())
+            .flat_map(|l| l.background.iter().map(|b| b.task.title.as_str()))
+            .collect();
         let message = restart_message(RESTART_GRACE.as_secs(), &work);
-        cx.emit(WorkspaceEvent::Toast { message, undo: Some(UndoAction::CancelRestart) });
+        cx.emit(WorkspaceEvent::Toast {
+            message,
+            undo: Some(UndoAction::CancelRestart),
+        });
         self.restart_countdown = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(RESTART_GRACE).await;
             let _ = this.update(cx, |this, cx| {
@@ -6557,7 +8706,8 @@ impl Workspace {
             Ok(installed) => installed,
             Err(e) => {
                 tracing::warn!("update install failed: {e:#}");
-                self.updater.status = UpdateStatus::Failed(format!("Couldn't install the update: {e:#}"));
+                self.updater.status =
+                    UpdateStatus::Failed(format!("Couldn't install the update: {e:#}"));
                 cx.notify();
                 return;
             }
@@ -6568,7 +8718,11 @@ impl Workspace {
             tracing::warn!("relaunch after update failed: {e:#}");
             // On Windows the relaunch is the install (trek-update swaps the folder once Trek has
             // quit): nothing changed, and the next check downloads the update again.
-            let message = if cfg!(windows) { format!("Couldn't install the update: {e:#}") } else { "The update is installed. Quit and reopen Trek to start it.".into() };
+            let message = if cfg!(windows) {
+                format!("Couldn't install the update: {e:#}")
+            } else {
+                "The update is installed. Quit and reopen Trek to start it.".into()
+            };
             self.updater.status = UpdateStatus::Failed(message);
             cx.notify();
             return;
@@ -6579,10 +8733,14 @@ impl Workspace {
 
     /// Quitting with an update ready installs it, so the next launch is the new version.
     fn install_on_quit(&mut self) {
-        if let UpdateStatus::Ready { staged, .. } | UpdateStatus::RestartPending { staged, .. } = &self.updater.status {
+        if let UpdateStatus::Ready { staged, .. } | UpdateStatus::RestartPending { staged, .. } =
+            &self.updater.status
+        {
             // On Windows `install` gets it ready and `swap_on_exit` has trek-update swap it in once
             // Trek has exited.
-            match trek_core::update::install(staged).and_then(|installed| trek_core::update::swap_on_exit(&installed)) {
+            match trek_core::update::install(staged)
+                .and_then(|installed| trek_core::update::swap_on_exit(&installed))
+            {
                 Ok(()) => tracing::info!("update installed on quit"),
                 Err(e) => tracing::warn!("update install on quit failed: {e:#}"),
             }
@@ -6601,7 +8759,10 @@ impl Workspace {
 /// One piece of a thread's git work (blocking). Returns how many files a restore changed.
 fn git_job(store: &Store, thread: &str, job: GitJob) -> anyhow::Result<GitDone> {
     use trek_core::checkpoint::{KEEP, Repo};
-    let repo_at = |path: &std::path::Path| Repo::find(path).ok_or_else(|| anyhow::anyhow!("{} isn't a git repository any more", path.display()));
+    let repo_at = |path: &std::path::Path| {
+        Repo::find(path)
+            .ok_or_else(|| anyhow::anyhow!("{} isn't a git repository any more", path.display()))
+    };
     match job {
         GitJob::Checkpoint { cwd, item } => {
             // Folders outside git get no checkpoints; one with a `.git` that git can't open is
@@ -6618,7 +8779,9 @@ fn git_job(store: &Store, thread: &str, job: GitJob) -> anyhow::Result<GitDone> 
             }
             Ok(GitDone::Taken)
         }
-        GitJob::FindPoint { agent, session, .. } => Ok(GitDone::Point(trek_agents::session_tail(&agent, &session))),
+        GitJob::FindPoint { agent, session, .. } => {
+            Ok(GitDone::Point(trek_agents::session_tail(&agent, &session)))
+        }
         GitJob::Restore { repo, sha, only } => {
             let r = repo_at(&repo)?;
             let only: HashSet<String> = match only {
@@ -6641,7 +8804,11 @@ fn git_job(store: &Store, thread: &str, job: GitJob) -> anyhow::Result<GitDone> 
             if let Some(r) = trek_core::checkpoint::refs_repo(store, thread, &repo) {
                 r.delete_all(thread)?;
             }
-            let items: Vec<String> = store.checkpoints(thread)?.into_iter().map(|c| c.item_id).collect();
+            let items: Vec<String> = store
+                .checkpoints(thread)?
+                .into_iter()
+                .map(|c| c.item_id)
+                .collect();
             store.delete_checkpoints(thread, &items)?;
             Ok(GitDone::Nothing)
         }
@@ -6658,10 +8825,20 @@ fn git_job(store: &Store, thread: &str, job: GitJob) -> anyhow::Result<GitDone> 
 /// Keep only `thread`'s newest `keep` checkpoints, so refs don't pile up in the repo.
 fn prune_checkpoints(store: &Store, thread: &str, keep: usize) -> anyhow::Result<()> {
     let all = store.checkpoints(thread)?;
-    let Some(old) = all.len().checked_sub(keep).filter(|n| *n > 0).map(|n| &all[..n]) else { return Ok(()) };
+    let Some(old) = all
+        .len()
+        .checked_sub(keep)
+        .filter(|n| *n > 0)
+        .map(|n| &all[..n])
+    else {
+        return Ok(());
+    };
     let mut by_repo: HashMap<&std::path::Path, Vec<String>> = HashMap::new();
     for c in old {
-        by_repo.entry(c.repo.as_path()).or_default().push(c.item_id.clone());
+        by_repo
+            .entry(c.repo.as_path())
+            .or_default()
+            .push(c.item_id.clone());
     }
     for (path, items) in by_repo {
         if let Some(r) = trek_core::checkpoint::Repo::find(path) {
@@ -6674,7 +8851,12 @@ fn prune_checkpoints(store: &Store, thread: &str, keep: usize) -> anyhow::Result
 
 /// How a fork of `thread`'s whole conversation (`kept`) picks it up: the agent's session copied
 /// as it stands (`mark`: its latest point), or a recap.
-fn whole_session(thread: &Thread, mark: Option<String>, kept: &[Item], native: bool) -> Option<Reopen> {
+fn whole_session(
+    thread: &Thread,
+    mark: Option<String>,
+    kept: &[Item],
+    native: bool,
+) -> Option<Reopen> {
     if !kept.iter().any(|i| matches!(i, Item::User { .. })) {
         return None;
     }
@@ -6682,27 +8864,51 @@ fn whole_session(thread: &Thread, mark: Option<String>, kept: &[Item], native: b
     let (session, at) = match &thread.reopen {
         Some(Reopen::Native { session, at, .. }) => (Some(session.clone()), at.clone()),
         Some(Reopen::Recap) => (None, None),
-        None => (thread.native_id.clone(), mark.or_else(|| thread.native_at.clone())),
+        None => (
+            thread.native_id.clone(),
+            mark.or_else(|| thread.native_at.clone()),
+        ),
     };
     match session {
-        Some(session) if native => Some(Reopen::Native { session, at, fork: true }),
+        Some(session) if native => Some(Reopen::Native {
+            session,
+            at,
+            fork: true,
+        }),
         _ => Some(Reopen::Recap),
     }
 }
 
 /// The toast before an update restart, naming the background work it will end.
 fn restart_message(secs: u64, work: &[&str]) -> String {
-    let name = |t: &str| t.lines().next().unwrap_or_default().trim().chars().take(60).collect::<String>();
+    let name = |t: &str| {
+        t.lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .chars()
+            .take(60)
+            .collect::<String>()
+    };
     match work {
         [] => format!("Trek restarts to update in {secs} seconds."),
-        [one] => format!("Trek restarts to update in {secs} seconds, stopping {}.", name(one)),
-        _ => format!("Trek restarts to update in {secs} seconds, stopping {} background tasks.", work.len()),
+        [one] => format!(
+            "Trek restarts to update in {secs} seconds, stopping {}.",
+            name(one)
+        ),
+        _ => format!(
+            "Trek restarts to update in {secs} seconds, stopping {} background tasks.",
+            work.len()
+        ),
     }
 }
 
 /// Said in a transcript whose next session starts with a recap.
 fn recap_notice(agent: &AgentId) -> String {
-    format!("{} can't take its own session back to this point, so your next message starts a new session with a recap of the conversation so far.", agent.display_name())
+    format!(
+        "{} can't take its own session back to this point, so your next message starts a new session with a recap of the conversation so far.",
+        agent.display_name()
+    )
 }
 
 /// One round of background indexing: everything waiting in the backfill, then up to 16 imported
@@ -6748,9 +8954,16 @@ fn start_session(config: SessionConfig) -> trek_agents::SessionHandle {
     }
     let (commands, _) = async_channel::unbounded();
     let (tx, events) = async_channel::unbounded();
-    let _ = tx.try_send(AgentEvent::Error(format!("{} isn't started in tests.", config.agent.display_name())));
+    let _ = tx.try_send(AgentEvent::Error(format!(
+        "{} isn't started in tests.",
+        config.agent.display_name()
+    )));
     let _ = tx.try_send(AgentEvent::Exited);
-    trek_agents::SessionHandle { commands, events, log: Default::default() }
+    trek_agents::SessionHandle {
+        commands,
+        events,
+        log: Default::default(),
+    }
 }
 
 /// Lock `dir` for this process (an advisory `flock` on a file in it, released when the process
@@ -6760,13 +8973,29 @@ fn start_session(config: SessionConfig) -> trek_agents::SessionHandle {
 pub(crate) fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
     use std::os::windows::io::AsRawHandle as _;
     use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
-    use windows_sys::Win32::Storage::FileSystem::{LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx};
+    use windows_sys::Win32::Storage::FileSystem::{
+        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+    };
     // Opened with the default sharing: another Trek opens the file too, and its lock is what says no.
-    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("trek.lock"))?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("trek.lock"))?;
     // SAFETY: LockFileEx on a handle this function owns; an all-zero OVERLAPPED locks from offset 0.
     let mut overlapped = unsafe { std::mem::zeroed() };
     // The lock goes when the handle closes, which the system does when the process ends.
-    if unsafe { LockFileEx(file.as_raw_handle(), LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &mut overlapped) } != 0 {
+    if unsafe {
+        LockFileEx(
+            file.as_raw_handle(),
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            1,
+            0,
+            &mut overlapped,
+        )
+    } != 0
+    {
         return Ok(Some(file));
     }
     match std::io::Error::last_os_error() {
@@ -6778,7 +9007,11 @@ pub(crate) fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::
 #[cfg(unix)]
 pub(crate) fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
     use std::os::fd::AsRawFd as _;
-    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("trek.lock"))?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("trek.lock"))?;
     // SAFETY: flock on a descriptor this function owns.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
         return Ok(Some(file));
@@ -6811,7 +9044,10 @@ fn hold_data_folder() -> bool {
             true
         }
         Ok(None) => {
-            tracing::warn!("another Trek is using {}; turns it left open are left to it", trek_core::paths::data_dir().display());
+            tracing::warn!(
+                "another Trek is using {}; turns it left open are left to it",
+                trek_core::paths::data_dir().display()
+            );
             false
         }
         Err(e) => {
@@ -6824,14 +9060,29 @@ fn hold_data_folder() -> bool {
 /// The settings that seed a new thread's composer.
 fn default_prefs_key(s: &Settings) -> (String, Option<String>, Effort, HandHolding) {
     let g = &s.general;
-    (g.default_agent.clone(), g.default_model.clone(), g.default_effort, g.hand_holding)
+    (
+        g.default_agent.clone(),
+        g.default_model.clone(),
+        g.default_effort,
+        g.hand_holding,
+    )
 }
 
 /// How much text an item holds: what a save writes for it, and indexes for search.
 fn item_bytes(item: &Item) -> usize {
     match item {
-        Item::User { text, .. } | Item::Assistant { text } | Item::Reasoning { text } | Item::Notice { text } | Item::Error { text } | Item::Limit { text, .. } => text.len(),
-        Item::Tool { title, detail, output, .. } => title.len() + detail.len() + output.len(),
+        Item::User { text, .. }
+        | Item::Assistant { text }
+        | Item::Reasoning { text }
+        | Item::Notice { text }
+        | Item::Error { text }
+        | Item::Limit { text, .. } => text.len(),
+        Item::Tool {
+            title,
+            detail,
+            output,
+            ..
+        } => title.len() + detail.len() + output.len(),
         Item::TurnEnd { .. } | Item::Handoff { .. } => 0,
     }
 }
@@ -6870,14 +9121,32 @@ pub const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("context", "Show how much of the context window is used"),
     ("cost", "Show this session's estimated cost"),
     ("model", "Show the model this thread uses"),
-    ("permissions", "Show or change how much the agent asks first"),
-    ("permissions supervised", "Ask before every edit and command"),
+    (
+        "permissions",
+        "Show or change how much the agent asks first",
+    ),
+    (
+        "permissions supervised",
+        "Ask before every edit and command",
+    ),
     ("permissions edits", "Apply file edits; ask before commands"),
-    ("permissions auto", "Work on its own; check before risky actions"),
+    (
+        "permissions auto",
+        "Work on its own; check before risky actions",
+    ),
     ("permissions full", "No prompts and no sandbox"),
-    ("consult", "Ask other models first: /consult sol high, opus max: your message"),
-    ("consult arena", "Have other models each design it, judged blind: /consult arena: your message"),
-    ("restate", "Have the agent say back what you asked before it starts: /restate your message, or /restate alone for the thread so far"),
+    (
+        "consult",
+        "Ask other models first: /consult sol high, opus max: your message",
+    ),
+    (
+        "consult arena",
+        "Have other models each design it, judged blind: /consult arena: your message",
+    ),
+    (
+        "restate",
+        "Have the agent say back what you asked before it starts: /restate your message, or /restate alone for the thread so far",
+    ),
 ];
 
 /// The thread `scope` shows: a thread window's own, or whatever thread the main window is on.
@@ -6917,7 +9186,12 @@ fn forget_window<W: PartialEq>(windows: &mut HashMap<String, W>, id: &str, handl
 
 /// `scope`'s view of who's looking: shown in the main window (`in_main`) or its own `window`,
 /// against the frontmost Trek window (`active`, none when another app is in front).
-fn viewing<W: PartialEq + Copy>(in_main: bool, window: Option<W>, main: Option<W>, active: Option<W>) -> bool {
+fn viewing<W: PartialEq + Copy>(
+    in_main: bool,
+    window: Option<W>,
+    main: Option<W>,
+    active: Option<W>,
+) -> bool {
     match active {
         None => in_main || window.is_some(),
         Some(a) => (in_main && main == Some(a)) || window == Some(a),
@@ -6930,15 +9204,31 @@ impl Workspace {
         let own = self.store.usage_of(&[id.to_string()]).unwrap_or_default();
         let subs = self.store.descendants(id).unwrap_or_default();
         let theirs = self.store.usage_of(&subs).unwrap_or_default();
-        let sub_threads = theirs.iter().map(|r| r.thread_id.as_str()).collect::<HashSet<_>>().len();
+        let sub_threads = theirs
+            .iter()
+            .map(|r| r.thread_id.as_str())
+            .collect::<HashSet<_>>()
+            .len();
         // Started to advise (the default), as far as this run knows.
-        let consults = subs.iter().all(|c| self.delegations.get(c).is_none_or(|d| d.mode == trek_core::orchestrate::Mode::Advise));
-        crate::cost::ThreadSpend { own: trek_core::store::UsageRow::spend(&own), subs: trek_core::store::UsageRow::spend(&theirs), sub_threads, consults }
+        let consults = subs.iter().all(|c| {
+            self.delegations
+                .get(c)
+                .is_none_or(|d| d.mode == trek_core::orchestrate::Mode::Advise)
+        });
+        crate::cost::ThreadSpend {
+            own: trek_core::store::UsageRow::spend(&own),
+            subs: trek_core::store::UsageRow::spend(&theirs),
+            sub_threads,
+            consults,
+        }
     }
 
     /// What `id` spent, as the status strip shows it.
     pub fn spend_of(&self, id: &str) -> crate::cost::ThreadSpend {
-        self.live.get(id).and_then(|l| l.spend.clone()).unwrap_or_else(|| self.load_spend(id))
+        self.live
+            .get(id)
+            .and_then(|l| l.spend.clone())
+            .unwrap_or_else(|| self.load_spend(id))
     }
 
     /// How `t`'s tokens are paid for: as its session said, else as its agent's login is (a plan,
@@ -6948,27 +9238,53 @@ impl Workspace {
             return Some(b);
         }
         match &t.agent {
-            AgentId::Direct(p) if catalog::is_mock(p) || catalog::direct_provider(p).is_some_and(|d| d.local) => Some(Billing::Local),
+            AgentId::Direct(p)
+                if catalog::is_mock(p) || catalog::direct_provider(p).is_some_and(|d| d.local) =>
+            {
+                Some(Billing::Local)
+            }
             AgentId::Direct(_) => Some(Billing::Metered),
-            agent => self.agent_status.get(&agent.key()).and_then(|s| s.billing.clone()),
+            agent => self
+                .agent_status
+                .get(&agent.key())
+                .and_then(|s| s.billing.clone()),
         }
     }
 
     /// Keep what a turn of `id` used, priced: by the agent, else from the price table at
     /// today's prices, so later price changes don't rewrite what it cost. The thread's spend,
     /// and its share in the threads above it, follow.
-    fn record_usage(&mut self, id: &str, used: Vec<(Option<String>, trek_core::TokenUsage, Option<trek_core::UsageCost>)>) {
+    fn record_usage(
+        &mut self,
+        id: &str,
+        used: Vec<(
+            Option<String>,
+            trek_core::TokenUsage,
+            Option<trek_core::UsageCost>,
+        )>,
+    ) {
         let at = now_ms();
         let Some(t) = self.thread(id) else { return };
         // Unnamed, it's the thread's model (picked since the session started, maybe), or the one
         // the session said it runs when the thread leaves it to the agent.
-        let fallback = t.model.clone().or_else(|| self.live.get(id).and_then(|l| l.session_model.clone()));
+        let fallback = t
+            .model
+            .clone()
+            .or_else(|| self.live.get(id).and_then(|l| l.session_model.clone()));
         let (agent, parent) = (t.agent.clone(), t.parent_id.clone());
         let mut kept = vec![];
         for (model, tokens, cost) in used {
             let model = model.or_else(|| fallback.clone());
-            let cost = cost.or_else(|| model.as_deref().and_then(|m| trek_core::pricing::estimate(m, &agent, &tokens, at)).map(trek_core::UsageCost::priced));
-            if let Err(e) = self.store.record_usage(id, at, &agent, model.as_deref(), &tokens, cost) {
+            let cost = cost.or_else(|| {
+                model
+                    .as_deref()
+                    .and_then(|m| trek_core::pricing::estimate(m, &agent, &tokens, at))
+                    .map(trek_core::UsageCost::priced)
+            });
+            if let Err(e) = self
+                .store
+                .record_usage(id, at, &agent, model.as_deref(), &tokens, cost)
+            {
                 tracing::warn!("record token usage: {e:#}");
             }
             kept.push((model, tokens, cost));
@@ -7009,10 +9325,17 @@ const DEVIN_STATUS_EVERY: i64 = 10 * 60_000;
 /// The `/cost` answer: the breakdown the status strip's tooltip shows, as text.
 fn cost_reply(billing: Option<&Billing>, spend: &crate::cost::ThreadSpend) -> String {
     match (billing, crate::cost::breakdown(billing, spend)) {
-        (Some(Billing::Local), _) => "This session runs on a local model, so nothing is billed.".into(),
+        (Some(Billing::Local), _) => {
+            "This session runs on a local model, so nothing is billed.".into()
+        }
         (_, Some(b)) => crate::cost::reply(&b),
-        (Some(Billing::Plan(plan)), None) => format!("Nothing used yet. This thread is included in {}.", crate::cost::plan_phrase(plan)),
-        (_, None) => "Nothing used yet: the agent hasn't reported any tokens in this thread.".into(),
+        (Some(Billing::Plan(plan)), None) => format!(
+            "Nothing used yet. This thread is included in {}.",
+            crate::cost::plan_phrase(plan)
+        ),
+        (_, None) => {
+            "Nothing used yet: the agent hasn't reported any tokens in this thread.".into()
+        }
     }
 }
 
@@ -7022,11 +9345,19 @@ pub fn fmt_tokens(n: u64) -> String {
         1_000..=999_999 => format!("{:.0}K", n as f64 / 1_000.),
         1_000_000..=999_999_999 => {
             let m = n as f64 / 1_000_000.;
-            if m.fract() < 0.05 { format!("{m:.0}M") } else { format!("{m:.1}M") }
+            if m.fract() < 0.05 {
+                format!("{m:.0}M")
+            } else {
+                format!("{m:.1}M")
+            }
         }
         _ => {
             let b = n as f64 / 1_000_000_000.;
-            if b.fract() < 0.05 { format!("{b:.0}B") } else { format!("{b:.1}B") }
+            if b.fract() < 0.05 {
+                format!("{b:.0}B")
+            } else {
+                format!("{b:.1}B")
+            }
         }
     }
 }
@@ -7037,21 +9368,41 @@ pub fn trek_mcp_binary() -> Option<PathBuf> {
     let dir = exe.parent()?;
     let name = format!("trek-mcp{}", std::env::consts::EXE_SUFFIX);
     // `../Resources` is inside the macOS app bundle; Windows keeps it beside `trek.exe`.
-    [dir.join(&name), dir.join("../Resources").join(&name)].into_iter().find(|p| p.exists())
+    [dir.join(&name), dir.join("../Resources").join(&name)]
+        .into_iter()
+        .find(|p| p.exists())
 }
 
 /// Which of Trek's own MCP servers a session is given, by the name `trek-mcp` takes. The
 /// simulator's tools drive Xcode's `simctl`, so a Windows agent isn't offered them.
 fn trek_mcp_families(computer_use: bool, simulator: bool, windows: bool) -> Vec<&'static str> {
-    [(computer_use, "computer"), (simulator && !windows, "simulator")].into_iter().filter(|(on, _)| *on).map(|(_, family)| family).collect()
+    [
+        (computer_use, "computer"),
+        (simulator && !windows, "simulator"),
+    ]
+    .into_iter()
+    .filter(|(on, _)| *on)
+    .map(|(_, family)| family)
+    .collect()
 }
 
 /// Trek's video watcher (`trek-mcp video`): it keeps what it watches in Trek's cache, and a call
 /// may take minutes (a download, a transcript), past what agents give a tool by default.
 fn video_server(bin: &str) -> McpServer {
     let dir = trek_core::media::video_cache_dir();
-    let env = vec![(trek_core::media::ENV_VIDEO_DIR.to_string(), dir.display().to_string())];
-    McpServer { tool_timeout_secs: Some(VIDEO_TIMEOUT_SECS), ..McpServer::stdio(trek_core::media::VIDEO_SERVER, bin, vec!["video".into()], env) }
+    let env = vec![(
+        trek_core::media::ENV_VIDEO_DIR.to_string(),
+        dir.display().to_string(),
+    )];
+    McpServer {
+        tool_timeout_secs: Some(VIDEO_TIMEOUT_SECS),
+        ..McpServer::stdio(
+            trek_core::media::VIDEO_SERVER,
+            bin,
+            vec!["video".into()],
+            env,
+        )
+    }
 }
 
 /// How long a `watch_video` call may take.
@@ -7061,7 +9412,10 @@ const VIDEO_TIMEOUT_SECS: u64 = 1800;
 /// background where asked, on a Mac (Windows' works in front).
 fn trek_mcp_env(family: &str, background: bool, windows: bool) -> Vec<(String, String)> {
     if family == "computer" && background && !windows {
-        vec![(trek_ipc::ENV_COMPUTER_MODE.to_string(), trek_ipc::COMPUTER_BACKGROUND.to_string())]
+        vec![(
+            trek_ipc::ENV_COMPUTER_MODE.to_string(),
+            trek_ipc::COMPUTER_BACKGROUND.to_string(),
+        )]
     } else {
         vec![]
     }
@@ -7071,7 +9425,11 @@ fn trek_mcp_env(family: &str, background: bool, windows: bool) -> Vec<(String, S
 /// it was busy, pinned, kept or snoozed, it stays where the user put it. Shared by the merge
 /// watch (`settle_merged`) and the Git tool's "Merge into <base>".
 pub(crate) fn settles_on_merge(t: &Thread, now: i64) -> bool {
-    t.settled_at.is_none() && t.run_state == RunState::Idle && t.pinned_at.is_none() && !t.never_settle && !t.snoozed_until.is_some_and(|u| u > now)
+    t.settled_at.is_none()
+        && t.run_state == RunState::Idle
+        && t.pinned_at.is_none()
+        && !t.never_settle
+        && !t.snoozed_until.is_some_and(|u| u > now)
 }
 
 #[cfg(test)]
@@ -7080,7 +9438,13 @@ mod tests {
     use trek_agents::Question;
 
     fn q(text: &str, secret: bool) -> Question {
-        Question { question: text.into(), header: String::new(), options: vec![("Yes".into(), String::new())], multi: false, secret }
+        Question {
+            question: text.into(),
+            header: String::new(),
+            options: vec![("Yes".into(), String::new())],
+            multi: false,
+            secret,
+        }
     }
 
     #[test]
@@ -7096,21 +9460,52 @@ mod tests {
         assert_eq!(save_delay(320 * 1024), s(5));
         assert_eq!(save_delay(5_000_000), s(5));
         assert_eq!(item_bytes(&Item::Assistant { text: "abc".into() }), 3);
-        assert_eq!(item_bytes(&Item::TurnEnd { at: 0, took_secs: 1 }), 0);
-        let tool = Item::Tool { id: "t".into(), title: "Read".into(), detail: "a.rs".into(), output: "xyz".into(), status: ToolStatus::Done };
+        assert_eq!(
+            item_bytes(&Item::TurnEnd {
+                at: 0,
+                took_secs: 1
+            }),
+            0
+        );
+        let tool = Item::Tool {
+            id: "t".into(),
+            title: "Read".into(),
+            detail: "a.rs".into(),
+            output: "xyz".into(),
+            status: ToolStatus::Done,
+        };
         assert_eq!(item_bytes(&tool), 11);
     }
 
     #[test]
     fn the_simulator_is_handed_to_no_agent_on_windows() {
-        assert_eq!(trek_mcp_families(true, true, false), ["computer", "simulator"]);
+        assert_eq!(
+            trek_mcp_families(true, true, false),
+            ["computer", "simulator"]
+        );
         let background = vec![("TREK_COMPUTER_MODE".to_string(), "background".to_string())];
-        assert_eq!(trek_mcp_env("computer", true, false), background, "a Mac's computer use works in the background");
-        assert_eq!(trek_mcp_env("computer", false, false), vec![], "unless asked to work in front");
-        assert_eq!(trek_mcp_env("computer", true, true), vec![], "Windows' works in front");
+        assert_eq!(
+            trek_mcp_env("computer", true, false),
+            background,
+            "a Mac's computer use works in the background"
+        );
+        assert_eq!(
+            trek_mcp_env("computer", false, false),
+            vec![],
+            "unless asked to work in front"
+        );
+        assert_eq!(
+            trek_mcp_env("computer", true, true),
+            vec![],
+            "Windows' works in front"
+        );
         assert_eq!(trek_mcp_env("simulator", true, false), vec![]);
         assert_eq!(trek_mcp_families(false, true, false), ["simulator"]);
-        assert_eq!(trek_mcp_families(true, true, true), ["computer"], "its switch may still be on in settings that came from a Mac");
+        assert_eq!(
+            trek_mcp_families(true, true, true),
+            ["computer"],
+            "its switch may still be on in settings that came from a Mac"
+        );
         assert!(trek_mcp_families(false, true, true).is_empty());
         assert!(trek_mcp_families(false, false, false).is_empty());
     }
@@ -7124,11 +9519,17 @@ mod tests {
             trek_agents::McpTransport::Stdio { args, env, .. } => {
                 assert_eq!(args, &["video".to_string()]);
                 assert_eq!(env[0].0, "TREK_VIDEO_DIR");
-                assert!(std::path::Path::new(&env[0].1).ends_with("videos"), "{env:?}");
+                assert!(
+                    std::path::Path::new(&env[0].1).ends_with("videos"),
+                    "{env:?}"
+                );
             }
             other => panic!("{other:?}"),
         }
-        assert!(trek_core::settings::Tools::default().video, "on unless turned off");
+        assert!(
+            trek_core::settings::Tools::default().video,
+            "on unless turned off"
+        );
     }
 
     #[test]
@@ -7138,14 +9539,29 @@ mod tests {
         assert!(!windows.contains(&PanelTool::Simulator));
         assert_eq!(windows.len(), PanelTool::ALL.len() - 1);
         // The others keep their order.
-        assert_eq!(windows, PanelTool::ALL.into_iter().filter(|t| *t != PanelTool::Simulator).collect::<Vec<_>>());
+        assert_eq!(
+            windows,
+            PanelTool::ALL
+                .into_iter()
+                .filter(|t| *t != PanelTool::Simulator)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn the_update_toast_names_what_the_restart_stops() {
-        assert_eq!(restart_message(10, &[]), "Trek restarts to update in 10 seconds.");
-        assert_eq!(restart_message(10, &["npm run dev\n# more"]), "Trek restarts to update in 10 seconds, stopping npm run dev.");
-        assert_eq!(restart_message(10, &["npm run dev", "cargo watch"]), "Trek restarts to update in 10 seconds, stopping 2 background tasks.");
+        assert_eq!(
+            restart_message(10, &[]),
+            "Trek restarts to update in 10 seconds."
+        );
+        assert_eq!(
+            restart_message(10, &["npm run dev\n# more"]),
+            "Trek restarts to update in 10 seconds, stopping npm run dev."
+        );
+        assert_eq!(
+            restart_message(10, &["npm run dev", "cargo watch"]),
+            "Trek restarts to update in 10 seconds, stopping 2 background tasks."
+        );
     }
 
     #[test]
@@ -7154,18 +9570,28 @@ mod tests {
         // "Color?" was picked on the card; the typed text answers "Name?", "Size?" stays open.
         let picked = |i: usize| (i == 1).then(|| "Blue".to_string());
         let (answers, secret) = typed_answers(&qs, picked, "Trek");
-        assert_eq!(answers, vec![("Name?".to_string(), "Trek".to_string()), ("Color?".into(), "Blue".into())]);
+        assert_eq!(
+            answers,
+            vec![
+                ("Name?".to_string(), "Trek".to_string()),
+                ("Color?".into(), "Blue".into())
+            ]
+        );
         assert!(!secret);
         // Everything picked: the typed text replaces the last answer.
         let (answers, _) = typed_answers(&qs, |_| Some("Yes".to_string()), "No, large");
-        assert_eq!(answers.last(), Some(&("Size?".to_string(), "No, large".to_string())));
+        assert_eq!(
+            answers.last(),
+            Some(&("Size?".to_string(), "No, large".to_string()))
+        );
         assert_eq!(answers.len(), 3);
     }
 
     #[test]
     fn a_typed_secret_is_flagged() {
         let qs = [q("User?", false), q("Token?", true)];
-        let (answers, secret) = typed_answers(&qs, |i| (i == 0).then(|| "me".to_string()), "s3cr3t");
+        let (answers, secret) =
+            typed_answers(&qs, |i| (i == 0).then(|| "me".to_string()), "s3cr3t");
         assert_eq!(answers[1], ("Token?".to_string(), "s3cr3t".to_string()));
         assert!(secret);
         assert!(!typed_answers(&qs, |_| None, "me").1);
@@ -7174,12 +9600,25 @@ mod tests {
     #[test]
     fn card_answers_read_as_the_users_message_without_secrets() {
         let one = [q("Which database?", false)];
-        assert_eq!(answers_text(&one, &[("Which database?".into(), "SQLite".into())]), ("SQLite".to_string(), false));
-        let db = Question { header: "Database".into(), ..q("Which database?", false) };
+        assert_eq!(
+            answers_text(&one, &[("Which database?".into(), "SQLite".into())]),
+            ("SQLite".to_string(), false)
+        );
+        let db = Question {
+            header: "Database".into(),
+            ..q("Which database?", false)
+        };
         let qs = [db, q("What ships with it?", false), q("Token?", true)];
-        let answers = [("Which database?".to_string(), "Postgres".to_string()), ("What ships with it?".into(), "Migrations, Backups".into()), ("Token?".into(), "s3cr3t".into())];
+        let answers = [
+            ("Which database?".to_string(), "Postgres".to_string()),
+            ("What ships with it?".into(), "Migrations, Backups".into()),
+            ("Token?".into(), "s3cr3t".into()),
+        ];
         let (text, secret) = answers_text(&qs, &answers);
-        assert_eq!(text, "Database: Postgres\nWhat ships with it?: Migrations, Backups");
+        assert_eq!(
+            text,
+            "Database: Postgres\nWhat ships with it?: Migrations, Backups"
+        );
         assert!(secret);
         assert_eq!(answers_text(&qs, &answers[2..]), (String::new(), true));
     }
@@ -7187,16 +9626,37 @@ mod tests {
     #[test]
     fn prompts_offered_after_their_turn_go_when_new_work_starts() {
         let mut live = LiveThread::default();
-        let card = |rid: &str, after_turn| PendingPermission { request_id: rid.into(), title: "Plan".into(), detail: String::new(), prompt: None, after_turn };
+        let card = |rid: &str, after_turn| PendingPermission {
+            request_id: rid.into(),
+            title: "Plan".into(),
+            detail: String::new(),
+            prompt: None,
+            after_turn,
+        };
         live.permissions = vec![card("codex-plan-1", true), card("codex-7", false)];
-        live.picks.insert(("codex-plan-1".into(), 0), vec!["x".into()]);
+        live.picks
+            .insert(("codex-plan-1".into(), 0), vec!["x".into()]);
         live.drop_after_turn();
-        assert_eq!(live.permissions.iter().map(|p| p.request_id.as_str()).collect::<Vec<_>>(), vec!["codex-7"]);
+        assert_eq!(
+            live.permissions
+                .iter()
+                .map(|p| p.request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["codex-7"]
+        );
         assert!(live.picks.is_empty());
     }
 
     fn thread(s: &Store, title: &str) -> Thread {
-        let mut t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
+        let mut t = s
+            .create_thread(
+                None,
+                AgentId::ClaudeCode,
+                None,
+                Effort::High,
+                HandHolding::Auto,
+            )
+            .unwrap();
         t.title = title.into();
         s.save_thread(&t).unwrap();
         t
@@ -7209,7 +9669,9 @@ mod tests {
         let kits = thread(&s, "Kit colours");
         let other = thread(&s, "Unrelated");
         let mut tr = Transcript::default();
-        tr.push(Item::Assistant { text: "the stadium shader tints the kits".into() });
+        tr.push(Item::Assistant {
+            text: "the stadium shader tints the kits".into(),
+        });
         s.save_transcript(&kits.id, &mut tr).unwrap();
 
         let q = "stad light";
@@ -7221,7 +9683,10 @@ mod tests {
         let q = "shader";
         let results = SearchResults::from_hits(q.into(), s.search(q, 50).unwrap());
         assert!(results.matches(q, &kits));
-        assert_eq!(results.content_hit(q, &kits).and_then(|h| h.position), Some(0));
+        assert_eq!(
+            results.content_hit(q, &kits).and_then(|h| h.position),
+            Some(0)
+        );
         assert!(!results.matches(q, &lights));
         // Typed straight into the title: matched before the full-text search answers.
         assert!(SearchResults::default().matches("colo", &kits));
@@ -7229,7 +9694,10 @@ mod tests {
 
     #[test]
     fn results_stand_in_only_for_related_text() {
-        let results = SearchResults { query: "dark".into(), ..Default::default() };
+        let results = SearchResults {
+            query: "dark".into(),
+            ..Default::default()
+        };
         assert!(results.relevant_to("dark t") && results.relevant_to("dar"));
         assert!(!results.relevant_to("light") && !SearchResults::default().relevant_to("dark"));
     }
@@ -7257,14 +9725,26 @@ mod tests {
         // The main window on "a" (the harness's route or the editor's AI side bar).
         let main = Some(Scope::Main);
         assert_eq!(shown_in("a", main.clone(), false, true), Some(Scope::Main));
-        assert_eq!(shown_in("a", Some(Scope::Ide), false, true), Some(Scope::Ide));
+        assert_eq!(
+            shown_in("a", Some(Scope::Ide), false, true),
+            Some(Scope::Ide)
+        );
         // Its own window wins over the main window showing it too.
-        assert_eq!(shown_in("a", main.clone(), true, true), Some(Scope::Thread("a".into())));
-        assert_eq!(shown_in("b", None, true, true), Some(Scope::Thread("b".into())));
+        assert_eq!(
+            shown_in("a", main.clone(), true, true),
+            Some(Scope::Thread("a".into()))
+        );
+        assert_eq!(
+            shown_in("b", None, true, true),
+            Some(Scope::Thread("b".into()))
+        );
         assert_eq!(shown_in("b", None, false, true), None);
         // A closed main window shows nothing, whatever its route says.
         assert_eq!(shown_in("a", main.clone(), false, false), None);
-        assert_eq!(shown_in("a", main, true, false), Some(Scope::Thread("a".into())));
+        assert_eq!(
+            shown_in("a", main, true, false),
+            Some(Scope::Thread("a".into()))
+        );
     }
 
     #[test]
@@ -7283,41 +9763,115 @@ mod tests {
     fn cost_command_answers_per_billing() {
         let plus = Billing::Plan(Some("ChatGPT Plus".into()));
         let none = crate::cost::ThreadSpend::default();
-        assert_eq!(cost_reply(Some(&plus), &none), "Nothing used yet. This thread is included in your ChatGPT Plus plan.");
-        assert_eq!(cost_reply(Some(&Billing::Local), &none), "This session runs on a local model, so nothing is billed.");
+        assert_eq!(
+            cost_reply(Some(&plus), &none),
+            "Nothing used yet. This thread is included in your ChatGPT Plus plan."
+        );
+        assert_eq!(
+            cost_reply(Some(&Billing::Local), &none),
+            "This session runs on a local model, so nothing is billed."
+        );
         let mut spend = crate::cost::ThreadSpend::default();
-        let tokens = trek_core::TokenUsage { input: 1_000, output: 100, ..Default::default() };
-        spend.own.add(&AgentId::ClaudeCode, Some("claude-opus-5-5"), &tokens, Some(trek_core::UsageCost::reported(3.5)), 0);
-        assert!(cost_reply(Some(&Billing::Plan(Some("Claude Max".into()))), &spend).starts_with("≈ $3.50 at API prices\nIncluded in your Claude Max plan."));
-        assert!(cost_reply(Some(&Billing::Metered), &spend).starts_with("$3.50 so far\nBilled per token by your API provider."));
+        let tokens = trek_core::TokenUsage {
+            input: 1_000,
+            output: 100,
+            ..Default::default()
+        };
+        spend.own.add(
+            &AgentId::ClaudeCode,
+            Some("claude-opus-5-5"),
+            &tokens,
+            Some(trek_core::UsageCost::reported(3.5)),
+            0,
+        );
+        assert!(
+            cost_reply(Some(&Billing::Plan(Some("Claude Max".into()))), &spend)
+                .starts_with("≈ $3.50 at API prices\nIncluded in your Claude Max plan.")
+        );
+        assert!(
+            cost_reply(Some(&Billing::Metered), &spend)
+                .starts_with("$3.50 so far\nBilled per token by your API provider.")
+        );
     }
 
     #[test]
     fn messages_without_a_checkpoint_say_why() {
-        let user = |t: &str| Item::User { text: t.into(), images: vec![], at: None, resume: None, aside: false };
+        let user = |t: &str| Item::User {
+            text: t.into(),
+            images: vec![],
+            at: None,
+            resume: None,
+            aside: false,
+        };
         let mut live = LiveThread::default();
-        live.items = Transcript::unsaved(vec![user("a"), Item::Assistant { text: "1".into() }, user("steer"), Item::TurnEnd { at: 1, took_secs: 1 }, user("b"), user("c")]);
+        live.items = Transcript::unsaved(vec![
+            user("a"),
+            Item::Assistant { text: "1".into() },
+            user("steer"),
+            Item::TurnEnd {
+                at: 1,
+                took_secs: 1,
+            },
+            user("b"),
+            user("c"),
+        ]);
         let id = |ix: usize| live.items.id_at(ix).unwrap().to_string();
         live.checkpointed.insert(id(0));
-        live.checkpoint_failed.insert(id(5), "git add took longer than 10s".into());
+        live.checkpoint_failed
+            .insert(id(5), "git add took longer than 10s".into());
         assert_eq!(NoCheckpoint::of(&live, 0, true), None);
-        assert_eq!(NoCheckpoint::of(&live, 2, true), Some(NoCheckpoint::Steered));
-        assert_eq!(NoCheckpoint::of(&live, 4, true), Some(NoCheckpoint::Missing));
-        assert_eq!(NoCheckpoint::of(&live, 4, false), Some(NoCheckpoint::NotGit));
-        assert!(matches!(NoCheckpoint::of(&live, 5, true), Some(NoCheckpoint::Failed(why)) if why.contains("longer")));
-        assert!(NoCheckpoint::Failed("boom".into()).explain().contains("(boom)"));
+        assert_eq!(
+            NoCheckpoint::of(&live, 2, true),
+            Some(NoCheckpoint::Steered)
+        );
+        assert_eq!(
+            NoCheckpoint::of(&live, 4, true),
+            Some(NoCheckpoint::Missing)
+        );
+        assert_eq!(
+            NoCheckpoint::of(&live, 4, false),
+            Some(NoCheckpoint::NotGit)
+        );
+        assert!(
+            matches!(NoCheckpoint::of(&live, 5, true), Some(NoCheckpoint::Failed(why)) if why.contains("longer"))
+        );
+        assert!(
+            NoCheckpoint::Failed("boom".into())
+                .explain()
+                .contains("(boom)")
+        );
         // In a worktree that's gone: checkpoints wait for it; the rest keep their reason.
-        assert_eq!(NoCheckpoint::now(&live, 0, false, true), Some(NoCheckpoint::WorktreeMissing));
-        assert_eq!(NoCheckpoint::now(&live, 2, false, true), Some(NoCheckpoint::Steered));
+        assert_eq!(
+            NoCheckpoint::now(&live, 0, false, true),
+            Some(NoCheckpoint::WorktreeMissing)
+        );
+        assert_eq!(
+            NoCheckpoint::now(&live, 2, false, true),
+            Some(NoCheckpoint::Steered)
+        );
         assert_eq!(NoCheckpoint::now(&live, 0, true, false), None);
-        assert_eq!(NoCheckpoint::now(&live, 4, false, false), Some(NoCheckpoint::NotGit));
+        assert_eq!(
+            NoCheckpoint::now(&live, 4, false, false),
+            Some(NoCheckpoint::NotGit)
+        );
     }
 
     #[test]
     fn only_the_newest_checkpoints_are_kept() {
-        let dir = std::env::temp_dir().join(format!("trek-prune-{}-{}", std::process::id(), now_ms()));
+        let dir =
+            std::env::temp_dir().join(format!("trek-prune-{}-{}", std::process::id(), now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
-        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(&dir).output().unwrap().status.success());
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&dir)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            )
+        };
         git(&["init", "-q"]);
         std::fs::write(dir.join("a.txt"), "a").unwrap();
         let s = Store::in_memory().unwrap();
@@ -7328,16 +9882,28 @@ mod tests {
             s.add_checkpoint(&t.id, item, &repo.top, &sha).unwrap();
         }
         prune_checkpoints(&s, &t.id, 2).unwrap();
-        assert_eq!(s.checkpoints(&t.id).unwrap().into_iter().map(|c| c.item_id).collect::<Vec<_>>(), ["m2", "m3"]);
+        assert_eq!(
+            s.checkpoints(&t.id)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.item_id)
+                .collect::<Vec<_>>(),
+            ["m2", "m3"]
+        );
         assert_eq!(repo.items(&t.id).unwrap(), ["m2", "m3"]);
         prune_checkpoints(&s, &t.id, 2).unwrap();
-        assert_eq!(repo.items(&t.id).unwrap().len(), 2, "nothing past the limit: nothing goes");
+        assert_eq!(
+            repo.items(&t.id).unwrap().len(),
+            2,
+            "nothing past the limit: nothing goes"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn one_process_at_a_time_holds_a_data_folder() {
-        let dir = std::env::temp_dir().join(format!("trek-lock-{}-{}", std::process::id(), now_ms()));
+        let dir =
+            std::env::temp_dir().join(format!("trek-lock-{}-{}", std::process::id(), now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         let first = lock_folder(&dir).unwrap().expect("free");
         // Another holder (flock locks are per open file, so this stands in for a second Trek).

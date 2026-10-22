@@ -2,7 +2,10 @@
 //! Covers OpenCode, Droid and every ACP agent in the catalog. Trek acts as the ACP client:
 //! it answers permission prompts and `fs/*` requests; the agent keeps its own login.
 
-use crate::{AgentEvent, Command, CommandKind, Decision, GroupChild, SessionConfig, SlashCommand, StderrTail, Step, clip, plan_row};
+use crate::{
+    AgentEvent, Command, CommandKind, Decision, GroupChild, SessionConfig, SlashCommand,
+    StderrTail, Step, clip, plan_row,
+};
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -33,20 +36,41 @@ fn launch_spec(agent: &AgentId) -> Result<(PathBuf, Vec<String>, String)> {
         return Ok((trek_test_fixtures::bin("fake-acp"), vec![], "Fake".into()));
     }
     let (binary, args, name, hint): (&str, Vec<&str>, String, &str) = match agent {
-        AgentId::OpenCode => (detect::OPENCODE, vec!["acp"], "OpenCode".into(), trek_core::catalog::agent_setup("opencode").map_or("curl -fsSL https://opencode.ai/install | bash", |s| s.install)),
-        AgentId::Droid => ("droid", vec!["exec", "--output-format", "acp"], "Droid".into(), trek_core::catalog::agent_setup("droid").map_or("curl -fsSL https://app.factory.ai/cli | sh", |s| s.install)),
+        AgentId::OpenCode => (
+            detect::OPENCODE,
+            vec!["acp"],
+            "OpenCode".into(),
+            trek_core::catalog::agent_setup("opencode")
+                .map_or("curl -fsSL https://opencode.ai/install | bash", |s| {
+                    s.install
+                }),
+        ),
+        AgentId::Droid => (
+            "droid",
+            vec!["exec", "--output-format", "acp"],
+            "Droid".into(),
+            trek_core::catalog::agent_setup("droid")
+                .map_or("curl -fsSL https://app.factory.ai/cli | sh", |s| s.install),
+        ),
         AgentId::Acp(id) => match ACP_AGENTS.iter().find(|a| a.id == id) {
             Some(a) => (a.binary, a.args.to_vec(), a.name.into(), a.install_hint),
             // One the user added: its own command, as a path or a name on PATH.
             None => {
-                let a = trek_core::catalog::added_agent(id).ok_or_else(|| anyhow!("Unknown ACP agent: {id}"))?;
-                let path = a.resolve().ok_or_else(|| anyhow!("{} can't start: {}", a.name, a.missing()))?;
+                let a = trek_core::catalog::added_agent(id)
+                    .ok_or_else(|| anyhow!("Unknown ACP agent: {id}"))?;
+                let path = a
+                    .resolve()
+                    .ok_or_else(|| anyhow!("{} can't start: {}", a.name, a.missing()))?;
                 return Ok((path, a.args, a.name));
             }
         },
         other => bail!("{} doesn't speak ACP", other.display_name()),
     };
-    let found = if *agent == AgentId::OpenCode { detect::opencode() } else { detect::which(binary) };
+    let found = if *agent == AgentId::OpenCode {
+        detect::opencode()
+    } else {
+        detect::which(binary)
+    };
     let path = found.with_context(|| format!("{name} isn't installed ({hint})"))?;
     Ok((path, args.into_iter().map(String::from).collect(), name))
 }
@@ -57,7 +81,9 @@ fn launch_env(agent: &AgentId, cwd: &Path) -> Vec<(String, String)> {
     match agent {
         AgentId::OpenCode => crate::opencode::launch_env(cwd),
         // An added agent's own variables, secrets from the Keychain.
-        AgentId::Acp(id) => trek_core::catalog::added_agent(id).map(|a| a.launch_env()).unwrap_or_default(),
+        AgentId::Acp(id) => trek_core::catalog::added_agent(id)
+            .map(|a| a.launch_env())
+            .unwrap_or_default(),
         _ => vec![],
     }
 }
@@ -78,7 +104,12 @@ struct Agent {
 
 impl Agent {
     /// Start `agent`; `resume`: the session it will be asked to reopen.
-    async fn spawn(agent: &AgentId, cwd: &Path, extra: &[String], resume: Option<&str>) -> Result<Agent> {
+    async fn spawn(
+        agent: &AgentId,
+        cwd: &Path,
+        extra: &[String],
+        resume: Option<&str>,
+    ) -> Result<Agent> {
         let (mut bin, mut args, name) = launch_spec(agent)?;
         args.extend(extra.iter().cloned());
         let mut stand_in = false;
@@ -108,11 +139,25 @@ impl Agent {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = crate::spawn_group(&mut command).with_context(|| format!("failed to start {}", bin.display()))?;
+        let mut child = crate::spawn_group(&mut command)
+            .with_context(|| format!("failed to start {}", bin.display()))?;
         let stderr = StderrTail::capture(child.stderr.take().unwrap(), "acp");
-        let rpc = Rpc { stdin: child.stdin.take().unwrap(), next_id: 0 };
+        let rpc = Rpc {
+            stdin: child.stdin.take().unwrap(),
+            next_id: 0,
+        };
         let lines = crate::ProtocolLines::new(BufReader::new(child.stdout.take().unwrap()));
-        Ok(Agent { child, rpc, lines, stderr, name, bin, db_notice: db.notice, _own_db: db.own, stand_in })
+        Ok(Agent {
+            child,
+            rpc,
+            lines,
+            stderr,
+            name,
+            bin,
+            db_notice: db.notice,
+            _own_db: db.own,
+            stand_in,
+        })
     }
 
     /// End the agent: its stdin first, the cue to exit and on Windows the only gentle one (see
@@ -143,7 +188,9 @@ impl Agent {
         let id = self.rpc.request(method, params).await?;
         let wait = async {
             while let Some(line) = self.lines.next_line().await? {
-                let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+                let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
                 if v.get("method").is_none() && v["id"].as_i64() == Some(id) {
                     return Ok(match v.get("error") {
                         Some(e) => Err(e.clone()),
@@ -163,7 +210,11 @@ impl Agent {
         };
         match tokio::time::timeout(timeout, wait).await {
             Ok(r) => r,
-            Err(_) => bail!("{} didn't answer {method} in {}s", self.name, timeout.as_secs()),
+            Err(_) => bail!(
+                "{} didn't answer {method} in {}s",
+                self.name,
+                timeout.as_secs()
+            ),
         }
     }
 
@@ -173,7 +224,10 @@ impl Agent {
             "clientCapabilities": { "fs": { "readTextFile": true, "writeTextFile": true }, "terminal": false },
             "clientInfo": { "name": "trek", "title": "Trek", "version": trek_core::VERSION },
         });
-        match self.call("initialize", params, fs, backlog, Duration::from_secs(30)).await? {
+        match self
+            .call("initialize", params, fs, backlog, Duration::from_secs(30))
+            .await?
+        {
             Ok(r) => Ok(r),
             Err(e) => bail!("{}: {}", self.name, rpc_message(&e)),
         }
@@ -198,18 +252,27 @@ impl Rpc {
     async fn request(&mut self, method: &str, params: Value) -> Result<i64> {
         self.next_id += 1;
         let id = self.next_id;
-        self.send(json!({ "id": id, "method": method, "params": params })).await?;
+        self.send(json!({ "id": id, "method": method, "params": params }))
+            .await?;
         Ok(id)
     }
 
     async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
-        self.send(json!({ "method": method, "params": params })).await
+        self.send(json!({ "method": method, "params": params }))
+            .await
     }
 
-    async fn reply(&mut self, id: Value, reply: std::result::Result<Value, (i64, String)>) -> Result<()> {
+    async fn reply(
+        &mut self,
+        id: Value,
+        reply: std::result::Result<Value, (i64, String)>,
+    ) -> Result<()> {
         match reply {
             Ok(result) => self.send(json!({ "id": id, "result": result })).await,
-            Err((code, message)) => self.send(json!({ "id": id, "error": { "code": code, "message": message } })).await,
+            Err((code, message)) => {
+                self.send(json!({ "id": id, "error": { "code": code, "message": message } }))
+                    .await
+            }
         }
     }
 }
@@ -233,7 +296,10 @@ fn auth_methods(init: &Value) -> Vec<(String, String)> {
         .flatten()
         .filter_map(|m| {
             let id = m["id"].as_str()?.to_string();
-            Some((id.clone(), m["name"].as_str().map(String::from).unwrap_or(id)))
+            Some((
+                id.clone(),
+                m["name"].as_str().map(String::from).unwrap_or(id),
+            ))
         })
         .collect()
 }
@@ -267,7 +333,9 @@ impl FsPolicy {
         }
         match method {
             "fs/read_text_file" => {
-                let text = tokio::fs::read_to_string(&path).await.map_err(|e| (-32002, format!("{}: {e}", path.display())))?;
+                let text = tokio::fs::read_to_string(&path)
+                    .await
+                    .map_err(|e| (-32002, format!("{}: {e}", path.display())))?;
                 let line = p["line"].as_u64().unwrap_or(1).max(1) as usize;
                 let content = match p["limit"].as_u64() {
                     None if line == 1 => text,
@@ -283,16 +351,29 @@ impl FsPolicy {
             }
             "fs/write_text_file" => {
                 if self.read_only {
-                    return Err((-32003, format!("{} can't be changed: this session is read-only", path.display())));
+                    return Err((
+                        -32003,
+                        format!(
+                            "{} can't be changed: this session is read-only",
+                            path.display()
+                        ),
+                    ));
                 }
                 if !self.full_access && !within(&path, &self.cwd) {
-                    return Err((-32003, format!("{} is outside the project folder", path.display())));
+                    return Err((
+                        -32003,
+                        format!("{} is outside the project folder", path.display()),
+                    ));
                 }
                 if let Some(parent) = path.parent() {
-                    tokio::fs::create_dir_all(parent).await.map_err(|e| (-32603, e.to_string()))?;
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| (-32603, e.to_string()))?;
                 }
                 let content = p["content"].as_str().unwrap_or_default();
-                tokio::fs::write(&path, content).await.map_err(|e| (-32603, format!("{}: {e}", path.display())))?;
+                tokio::fs::write(&path, content)
+                    .await
+                    .map_err(|e| (-32603, format!("{}: {e}", path.display())))?;
                 Ok(Value::Null)
             }
             _ => unreachable!(),
@@ -316,7 +397,10 @@ fn resolve(path: &Path) -> PathBuf {
     let mut rest = Vec::new();
     loop {
         if let Ok(real) = base.canonicalize() {
-            return rest.iter().rev().fold(real, |acc: PathBuf, part| acc.join(part));
+            return rest
+                .iter()
+                .rev()
+                .fold(real, |acc: PathBuf, part| acc.join(part));
         }
         match (base.file_name().map(|n| n.to_os_string()), base.parent()) {
             (Some(name), Some(parent)) => {
@@ -350,7 +434,11 @@ fn pick_option(options: &[Value], decision: Decision) -> Option<String> {
         Decision::AllowForSession => &["allow_always", "allow_once"],
         Decision::Deny => &["reject_once", "reject_always"],
     };
-    kinds.iter().find_map(|k| options.iter().find(|o| o["kind"] == *k)).and_then(|o| o["optionId"].as_str()).map(String::from)
+    kinds
+        .iter()
+        .find_map(|k| options.iter().find(|o| o["kind"] == *k))
+        .and_then(|o| o["optionId"].as_str())
+        .map(String::from)
 }
 
 fn permission_outcome(option: Option<String>) -> Value {
@@ -383,16 +471,34 @@ fn tool_detail(tc: &Value, kind: &str) -> String {
     }
     let command = match &input["command"] {
         Value::String(s) => Some(s.clone()),
-        Value::Array(a) => Some(a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" ")),
+        Value::Array(a) => Some(
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
         _ => input["cmd"].as_str().map(String::from),
     };
-    let location = tc["locations"].as_array().and_then(|l| l.first()).and_then(|l| l["path"].as_str()).map(String::from);
+    let location = tc["locations"]
+        .as_array()
+        .and_then(|l| l.first())
+        .and_then(|l| l["path"].as_str())
+        .map(String::from);
     command
         .or(location.filter(|_| kind != "execute"))
         .or_else(|| {
-            ["path", "file_path", "filePath", "filepath", "url", "query", "pattern", "description"]
-                .iter()
-                .find_map(|k| input[*k].as_str().map(String::from))
+            [
+                "path",
+                "file_path",
+                "filePath",
+                "filepath",
+                "url",
+                "query",
+                "pattern",
+                "description",
+            ]
+            .iter()
+            .find_map(|k| input[*k].as_str().map(String::from))
         })
         .filter(|s| !s.is_empty())
         .map(|s| clip(&s, 400))
@@ -402,7 +508,17 @@ fn tool_detail(tc: &Value, kind: &str) -> String {
 /// A to-do tool's list (`rawInput.todos`, as OpenCode's todowrite sends it).
 fn todo_steps(input: &Value) -> Option<Vec<(String, Step)>> {
     let todos = input["todos"].as_array().filter(|t| !t.is_empty())?;
-    Some(todos.iter().map(|t| (t["content"].as_str().unwrap_or_default().to_string(), step(t["status"].as_str()))).collect())
+    Some(
+        todos
+            .iter()
+            .map(|t| {
+                (
+                    t["content"].as_str().unwrap_or_default().to_string(),
+                    step(t["status"].as_str()),
+                )
+            })
+            .collect(),
+    )
 }
 
 fn step(status: Option<&str>) -> Step {
@@ -419,7 +535,9 @@ fn row_title(tool: &Tool) -> String {
     match tool.kind.as_str() {
         _ if tool.todos.is_some() => "Update plan".to_string(),
         _ if tool.agent => "Subagent".to_string(),
-        k @ ("read" | "edit" | "delete" | "move" | "search" | "execute" | "fetch") => kind_title(k).to_string(),
+        k @ ("read" | "edit" | "delete" | "move" | "search" | "execute" | "fetch") => {
+            kind_title(k).to_string()
+        }
         k if tool.title.is_empty() => kind_title(k).to_string(),
         _ => tool.title.clone(),
     }
@@ -427,10 +545,18 @@ fn row_title(tool: &Tool) -> String {
 
 /// Lines the call's diffs add and remove (`content` entries of type `diff`), if it has any.
 fn diff_lines(tc: &Value) -> Option<(u32, u32)> {
-    let diffs: Vec<&Value> = tc["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "diff").collect();
+    let diffs: Vec<&Value> = tc["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["type"] == "diff")
+        .collect();
     (!diffs.is_empty()).then(|| {
         diffs.iter().fold((0, 0), |(a, r), d| {
-            let (a2, r2) = crate::line_changes(d["oldText"].as_str().unwrap_or_default(), d["newText"].as_str().unwrap_or_default());
+            let (a2, r2) = crate::line_changes(
+                d["oldText"].as_str().unwrap_or_default(),
+                d["newText"].as_str().unwrap_or_default(),
+            );
             (a + a2, r + r2)
         })
     })
@@ -445,7 +571,9 @@ fn tool_output(tc: &Value) -> String {
                     parts.push(t.to_string());
                 }
             }
-            Some("diff") => parts.push(format!("Edited {}", c["path"].as_str().unwrap_or_default())),
+            Some("diff") => {
+                parts.push(format!("Edited {}", c["path"].as_str().unwrap_or_default()))
+            }
             _ => {}
         }
     }
@@ -480,7 +608,9 @@ struct Tool {
 /// A call that starts a sub-agent of the agent's own: OpenCode's `task` names the kind of agent
 /// it sends (`subagent_type`) along with what to do; OpenCode 2's `subagent` tool names it `agent`.
 fn is_sub_agent(name: &str, input: &Value) -> bool {
-    input["prompt"].is_string() && (input["subagent_type"].is_string() || (name == "subagent" && input["agent"].is_string()))
+    input["prompt"].is_string()
+        && (input["subagent_type"].is_string()
+            || (name == "subagent" && input["agent"].is_string()))
 }
 
 /// The kind of agent a sub-agent call sends.
@@ -526,9 +656,15 @@ fn ended_empty(error: Option<&str>, produced: bool, interrupted: bool) -> bool {
 /// the general advice.
 fn empty_turn_error(agent: &AgentId, name: &str, model: Option<&str>) -> String {
     match (agent, model) {
-        (AgentId::OpenCode, Some(model)) => format!("{name} ended the turn without a reply. Check that its provider is signed in: `opencode run -m {model} hi` in a terminal should answer."),
-        (AgentId::OpenCode, None) => format!("{name} ended the turn without a reply. Check that its provider is signed in: `opencode run hi` in a terminal should answer."),
-        _ => format!("{name} ended the turn without a reply. Check that {name} is signed in and can answer when run in a terminal."),
+        (AgentId::OpenCode, Some(model)) => format!(
+            "{name} ended the turn without a reply. Check that its provider is signed in: `opencode run -m {model} hi` in a terminal should answer."
+        ),
+        (AgentId::OpenCode, None) => format!(
+            "{name} ended the turn without a reply. Check that its provider is signed in: `opencode run hi` in a terminal should answer."
+        ),
+        _ => format!(
+            "{name} ended the turn without a reply. Check that {name} is signed in and can answer when run in a terminal."
+        ),
     }
 }
 
@@ -579,33 +715,64 @@ impl Turn {
                 if !detail.is_empty() {
                     tool.detail = detail;
                 }
-                let status = u["status"].as_str().unwrap_or(if kind == "tool_call" { "pending" } else { "" });
+                let status = u["status"].as_str().unwrap_or(if kind == "tool_call" {
+                    "pending"
+                } else {
+                    ""
+                });
                 let done = matches!(status, "completed" | "failed");
                 // Hold a bare pending call until its input arrives, so the row has something to show.
-                let start = !tool.started && (done || status == "in_progress" || !tool.detail.is_empty());
+                let start =
+                    !tool.started && (done || status == "in_progress" || !tool.detail.is_empty());
                 if start {
                     tool.started = true;
                     let (title, detail, agent) = (row_title(tool), tool.detail.clone(), tool.agent);
                     self.flush_text(&mut out);
-                    out.push(AgentEvent::ToolStarted { id: id.clone(), title, detail: detail.clone() });
+                    out.push(AgentEvent::ToolStarted {
+                        id: id.clone(),
+                        title,
+                        detail: detail.clone(),
+                    });
                     if agent {
                         // ACP carries nothing of what it does meanwhile: what kind of agent it is.
-                        let activity = sub_agent_kind(&u["rawInput"]).map(|k| format!("The {k} agent is at work"));
-                        out.push(AgentEvent::Task { id: id.clone(), description: Some(detail), activity, tool_uses: None, done: None });
+                        let activity = sub_agent_kind(&u["rawInput"])
+                            .map(|k| format!("The {k} agent is at work"));
+                        out.push(AgentEvent::Task {
+                            id: id.clone(),
+                            description: Some(detail),
+                            activity,
+                            tool_uses: None,
+                            done: None,
+                        });
                     }
                 }
                 if done {
                     if self.tools.get(&id).is_some_and(|t| t.agent) {
-                        out.push(AgentEvent::Task { id: id.clone(), description: None, activity: None, tool_uses: None, done: Some(status == "completed") });
+                        out.push(AgentEvent::Task {
+                            id: id.clone(),
+                            description: None,
+                            activity: None,
+                            tool_uses: None,
+                            done: Some(status == "completed"),
+                        });
                     }
-                    if let Some((added, removed)) = diff_lines(u).filter(|_| status == "completed") {
-                        out.push(AgentEvent::ToolLines { id: id.clone(), added, removed });
+                    if let Some((added, removed)) = diff_lines(u).filter(|_| status == "completed")
+                    {
+                        out.push(AgentEvent::ToolLines {
+                            id: id.clone(),
+                            added,
+                            removed,
+                        });
                     }
                     let output = match self.tools.remove(&id).and_then(|t| t.todos) {
                         Some(steps) if status == "completed" => plan_row(&steps).1,
                         _ => tool_output(u),
                     };
-                    out.push(AgentEvent::ToolFinished { id, output, ok: status == "completed" });
+                    out.push(AgentEvent::ToolFinished {
+                        id,
+                        output,
+                        ok: status == "completed",
+                    });
                 }
             }
             // The agent's plan (ACP `plan` entries), as a checklist row.
@@ -614,7 +781,12 @@ impl Turn {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .map(|e| (e["content"].as_str().unwrap_or_default().to_string(), step(e["status"].as_str())))
+                    .map(|e| {
+                        (
+                            e["content"].as_str().unwrap_or_default().to_string(),
+                            step(e["status"].as_str()),
+                        )
+                    })
                     .collect();
                 if !steps.is_empty() {
                     self.produced = true;
@@ -622,8 +794,16 @@ impl Turn {
                     let id = format!("plan-{}", self.plan_updates);
                     let (detail, output) = plan_row(&steps);
                     self.flush_text(&mut out);
-                    out.push(AgentEvent::ToolStarted { id: id.clone(), title: "Update plan".into(), detail });
-                    out.push(AgentEvent::ToolFinished { id, output, ok: true });
+                    out.push(AgentEvent::ToolStarted {
+                        id: id.clone(),
+                        title: "Update plan".into(),
+                        detail,
+                    });
+                    out.push(AgentEvent::ToolFinished {
+                        id,
+                        output,
+                        ok: true,
+                    });
                 }
             }
             Some("usage_update") => {
@@ -633,7 +813,9 @@ impl Turn {
                     self.cost = Some(c);
                 }
                 // A cancelled turn reports 0 used; the window still holds the conversation.
-                if let (Some(used), Some(window)) = (u["used"].as_u64().filter(|u| *u > 0), u["size"].as_u64()) {
+                if let (Some(used), Some(window)) =
+                    (u["used"].as_u64().filter(|u| *u > 0), u["size"].as_u64())
+                {
                     out.push(AgentEvent::Context { used, window });
                 }
             }
@@ -688,7 +870,8 @@ impl Turn {
         let failed = stop.is_err();
         let added = self.turn_cost();
         let mut tokens = std::mem::take(&mut self.tokens);
-        let produced = std::mem::take(&mut self.produced) || tokens.iter().any(|(_, t, c)| !t.is_empty() || c.is_some());
+        let produced = std::mem::take(&mut self.produced)
+            || tokens.iter().any(|(_, t, c)| !t.is_empty() || c.is_some());
         let interrupted = std::mem::take(&mut self.interrupted);
         // The session's cost goes with the turn's tokens when they're one lot priced by nobody
         // else; a cost with no tokens is reported on its own.
@@ -701,21 +884,39 @@ impl Turn {
         }
         for (model, tokens, cost) in tokens {
             if !tokens.is_empty() || cost.is_some() {
-                out.push(AgentEvent::Usage { model, tokens, cost });
+                out.push(AgentEvent::Usage {
+                    model,
+                    tokens,
+                    cost,
+                });
             }
         }
         let error = match stop {
             Ok("cancelled") => Some("Interrupted".to_string()),
             Ok("refusal") => Some("The agent refused to continue.".to_string()),
             Ok("max_tokens") => Some("The agent hit its output limit.".to_string()),
-            Ok("max_turn_requests") => Some("The agent hit its request limit for this turn.".to_string()),
+            Ok("max_turn_requests") => {
+                Some("The agent hit its request limit for this turn.".to_string())
+            }
             Ok(_) => None,
             Err(msg) => Some(msg),
         };
         // A cost added with no tokens counts as something done too (a priced turn isn't empty).
-        let error = if ended_empty(error.as_deref(), produced || added.is_some_and(|c| c > 0.0), interrupted) { if_empty } else { error };
+        let error = if ended_empty(
+            error.as_deref(),
+            produced || added.is_some_and(|c| c > 0.0),
+            interrupted,
+        ) {
+            if_empty
+        } else {
+            error
+        };
         // ACP has no word for a usage limit: agents pass on their provider's error as it reads.
-        if let Some(limit) = error.as_deref().filter(|_| failed).and_then(|e| crate::Limit::from_text(e, trek_core::store::now_ms())) {
+        if let Some(limit) = error
+            .as_deref()
+            .filter(|_| failed)
+            .and_then(|e| crate::Limit::from_text(e, trek_core::store::now_ms()))
+        {
             out.push(limit.event());
         }
         out.push(AgentEvent::TurnComplete { error });
@@ -724,7 +925,12 @@ impl Turn {
 }
 
 /// Count `used` toward `model`'s tokens in `tokens`, with what it cost if the agent said.
-fn add_usage(tokens: &mut Vec<(Option<String>, TokenUsage, Option<UsageCost>)>, model: Option<String>, used: &TokenUsage, cost: Option<UsageCost>) {
+fn add_usage(
+    tokens: &mut Vec<(Option<String>, TokenUsage, Option<UsageCost>)>,
+    model: Option<String>,
+    used: &TokenUsage,
+    cost: Option<UsageCost>,
+) {
     match tokens.iter_mut().find(|(m, _, _)| *m == model) {
         Some((_, t, c)) => {
             t.add(used);
@@ -743,11 +949,32 @@ fn add_usage(tokens: &mut Vec<(Option<String>, TokenUsage, Option<UsageCost>)>, 
 /// output, unless the agent already counted them there.
 fn prompt_usage(u: &Value) -> Option<TokenUsage> {
     let n = |k: &str| u[k].as_u64().unwrap_or(0);
-    let (input, output, read, written, thoughts) = (n("inputTokens"), n("outputTokens"), n("cachedReadTokens"), n("cachedWriteTokens"), n("thoughtTokens"));
+    let (input, output, read, written, thoughts) = (
+        n("inputTokens"),
+        n("outputTokens"),
+        n("cachedReadTokens"),
+        n("cachedWriteTokens"),
+        n("thoughtTokens"),
+    );
     let total = u["totalTokens"].as_u64();
-    let cache_inside = read + written > 0 && read + written <= input && (total == Some(input + output) || total == Some(input + output + thoughts));
-    let mut t = TokenUsage { input: if cache_inside { input - read - written } else { input }, output, cache_read: read, cache_write: written };
-    let counted = if cache_inside { input + output } else { input + output + read + written };
+    let cache_inside = read + written > 0
+        && read + written <= input
+        && (total == Some(input + output) || total == Some(input + output + thoughts));
+    let mut t = TokenUsage {
+        input: if cache_inside {
+            input - read - written
+        } else {
+            input
+        },
+        output,
+        cache_read: read,
+        cache_write: written,
+    };
+    let counted = if cache_inside {
+        input + output
+    } else {
+        input + output + read + written
+    };
     if total != Some(counted) {
         t.output += thoughts;
     }
@@ -770,7 +997,11 @@ enum PlanSwitch {
     /// `session/set_mode` (ACP `modes`): the plan mode id and the one to go back to.
     Mode { plan: String, off: String },
     /// `session/set_config_option` on a mode select (OpenCode's build/plan).
-    Config { id: String, plan: String, off: String },
+    Config {
+        id: String,
+        plan: String,
+        off: String,
+    },
 }
 
 /// Session controls advertised in a `session/new` or `session/load` result.
@@ -804,7 +1035,13 @@ fn select_options(opt: &Value) -> Vec<(String, String)> {
 /// The effort an agent's level stands for. "default" (the model's own, as OpenCode 2 offers it
 /// beside the levels it names) is Trek's default, medium, unless the agent names a medium too.
 fn effort_level(value: &str, values: &[String]) -> Option<Effort> {
-    Effort::parse(value).or_else(|| (value == "default" && !values.iter().any(|v| Effort::parse(v) == Some(Effort::Medium))).then_some(Effort::Medium))
+    Effort::parse(value).or_else(|| {
+        (value == "default"
+            && !values
+                .iter()
+                .any(|v| Effort::parse(v) == Some(Effort::Medium)))
+        .then_some(Effort::Medium)
+    })
 }
 
 fn sorted_efforts(values: impl Iterator<Item = Effort>) -> Vec<Effort> {
@@ -815,65 +1052,148 @@ fn sorted_efforts(values: impl Iterator<Item = Effort>) -> Vec<Effort> {
 }
 
 fn controls(result: &Value) -> Controls {
-    let config: Vec<&Value> = result["configOptions"].as_array().into_iter().flatten().collect();
-    let by_category = |c: &str| config.iter().find(|o| o["category"] == c || o["id"] == c).copied();
-    let effort_option = by_category("thought_level").or_else(|| by_category("reasoning_effort"));
-    let effort = effort_option.and_then(|o| Some((o["id"].as_str()?.to_string(), select_options(o).into_iter().map(|(v, _)| v).collect::<Vec<_>>())));
-    let effort_current = effort_option.and_then(|o| o["currentValue"].as_str()).map(String::from);
-    let shared_efforts = sorted_efforts(effort.iter().flat_map(|(_, v)| v.iter().filter_map(|s| effort_level(s, v))));
-
-    let (models, current_model, switch) = if let Some(list) = result["models"]["availableModels"].as_array() {
-        let models = list
+    let config: Vec<&Value> = result["configOptions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .collect();
+    let by_category = |c: &str| {
+        config
             .iter()
-            .enumerate()
-            .filter_map(|(i, m)| {
-                let id = m["modelId"].as_str()?.to_string();
-                let own = sorted_efforts(
-                    m["_meta"]["reasoningEfforts"].as_array().into_iter().flatten().filter_map(|e| e["value"].as_str().and_then(Effort::parse)),
-                );
-                Some(ModelInfo {
-                    name: m["name"].as_str().map(String::from).unwrap_or_else(|| id.clone()),
+            .find(|o| o["category"] == c || o["id"] == c)
+            .copied()
+    };
+    let effort_option = by_category("thought_level").or_else(|| by_category("reasoning_effort"));
+    let effort = effort_option.and_then(|o| {
+        Some((
+            o["id"].as_str()?.to_string(),
+            select_options(o)
+                .into_iter()
+                .map(|(v, _)| v)
+                .collect::<Vec<_>>(),
+        ))
+    });
+    let effort_current = effort_option
+        .and_then(|o| o["currentValue"].as_str())
+        .map(String::from);
+    let shared_efforts = sorted_efforts(
+        effort
+            .iter()
+            .flat_map(|(_, v)| v.iter().filter_map(|s| effort_level(s, v))),
+    );
+
+    let (models, current_model, switch) =
+        if let Some(list) = result["models"]["availableModels"].as_array() {
+            let models = list
+                .iter()
+                .enumerate()
+                .filter_map(|(i, m)| {
+                    let id = m["modelId"].as_str()?.to_string();
+                    let own = sorted_efforts(
+                        m["_meta"]["reasoningEfforts"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|e| e["value"].as_str().and_then(Effort::parse)),
+                    );
+                    Some(ModelInfo {
+                        name: m["name"]
+                            .as_str()
+                            .map(String::from)
+                            .unwrap_or_else(|| id.clone()),
+                        id,
+                        efforts: if own.is_empty() {
+                            shared_efforts.clone()
+                        } else {
+                            own
+                        },
+                        tier: i.min(255) as u8,
+                        fast: None,
+                    })
+                })
+                .collect();
+            (
+                models,
+                result["models"]["currentModelId"]
+                    .as_str()
+                    .map(String::from),
+                ModelSwitch::SetModel,
+            )
+        } else if let Some(o) = by_category("model") {
+            let models = select_options(o)
+                .into_iter()
+                .enumerate()
+                .map(|(i, (id, name))| ModelInfo {
                     id,
-                    efforts: if own.is_empty() { shared_efforts.clone() } else { own },
+                    name,
+                    efforts: shared_efforts.clone(),
                     tier: i.min(255) as u8,
                     fast: None,
                 })
-            })
-            .collect();
-        (models, result["models"]["currentModelId"].as_str().map(String::from), ModelSwitch::SetModel)
-    } else if let Some(o) = by_category("model") {
-        let models = select_options(o)
-            .into_iter()
-            .enumerate()
-            .map(|(i, (id, name))| ModelInfo { id, name, efforts: shared_efforts.clone(), tier: i.min(255) as u8, fast: None })
-            .collect();
-        let switch = o["id"].as_str().map(|id| ModelSwitch::Config(id.into())).unwrap_or(ModelSwitch::None);
-        (models, o["currentValue"].as_str().map(String::from), switch)
-    } else {
-        (vec![], None, ModelSwitch::None)
-    };
+                .collect();
+            let switch = o["id"]
+                .as_str()
+                .map(|id| ModelSwitch::Config(id.into()))
+                .unwrap_or(ModelSwitch::None);
+            (models, o["currentValue"].as_str().map(String::from), switch)
+        } else {
+            (vec![], None, ModelSwitch::None)
+        };
 
     let is_plan = |id: &str, name: Option<&str>| {
         let id = id.to_lowercase();
-        id == "plan" || id.ends_with("#plan") || name.is_some_and(|n| n.eq_ignore_ascii_case("plan"))
+        id == "plan"
+            || id.ends_with("#plan")
+            || name.is_some_and(|n| n.eq_ignore_ascii_case("plan"))
     };
-    let modes: Vec<&Value> = result["modes"]["availableModes"].as_array().into_iter().flatten().collect();
-    let (plan_mode, planning) = if let Some(plan) = modes.iter().find(|m| is_plan(m["id"].as_str().unwrap_or_default(), m["name"].as_str())) {
+    let modes: Vec<&Value> = result["modes"]["availableModes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .collect();
+    let (plan_mode, planning) = if let Some(plan) = modes
+        .iter()
+        .find(|m| is_plan(m["id"].as_str().unwrap_or_default(), m["name"].as_str()))
+    {
         let plan = plan["id"].as_str().unwrap_or_default().to_string();
-        let current = result["modes"]["currentModeId"].as_str().unwrap_or_default();
+        let current = result["modes"]["currentModeId"]
+            .as_str()
+            .unwrap_or_default();
         let off = Some(current)
             .filter(|c| !c.is_empty() && *c != plan)
-            .or_else(|| modes.iter().filter_map(|m| m["id"].as_str()).find(|id| *id != plan))
+            .or_else(|| {
+                modes
+                    .iter()
+                    .filter_map(|m| m["id"].as_str())
+                    .find(|id| *id != plan)
+            })
             .unwrap_or_default()
             .to_string();
-        (Some(PlanSwitch::Mode { plan: plan.clone(), off }), current == plan)
+        (
+            Some(PlanSwitch::Mode {
+                plan: plan.clone(),
+                off,
+            }),
+            current == plan,
+        )
     } else if let Some(o) = by_category("mode") {
         let values = select_options(o);
         match values.iter().find(|(v, n)| is_plan(v, Some(n))) {
             Some((plan, _)) => {
-                let off = values.iter().map(|(v, _)| v.clone()).find(|v| v != plan).unwrap_or_default();
+                let off = values
+                    .iter()
+                    .map(|(v, _)| v.clone())
+                    .find(|v| v != plan)
+                    .unwrap_or_default();
                 let id = o["id"].as_str().unwrap_or("mode").to_string();
-                (Some(PlanSwitch::Config { id, plan: plan.clone(), off }), o["currentValue"].as_str() == Some(plan.as_str()))
+                (
+                    Some(PlanSwitch::Config {
+                        id,
+                        plan: plan.clone(),
+                        off,
+                    }),
+                    o["currentValue"].as_str() == Some(plan.as_str()),
+                )
             }
             None => (None, false),
         }
@@ -881,7 +1201,15 @@ fn controls(result: &Value) -> Controls {
         (None, false)
     };
 
-    Controls { models, current_model, switch, effort, effort_current, plan_mode, planning }
+    Controls {
+        models,
+        current_model,
+        switch,
+        effort,
+        effort_current,
+        plan_mode,
+        planning,
+    }
 }
 
 impl Controls {
@@ -901,7 +1229,11 @@ impl Controls {
         // Models listed as a config option share its levels; now they're the current model's.
         if matches!(self.switch, ModelSwitch::Config(_)) {
             let efforts = self.efforts();
-            if let Some(m) = self.models.iter_mut().find(|m| Some(&m.id) == self.current_model.as_ref()) {
+            if let Some(m) = self
+                .models
+                .iter_mut()
+                .find(|m| Some(&m.id) == self.current_model.as_ref())
+            {
                 m.efforts = efforts;
             }
         }
@@ -909,7 +1241,11 @@ impl Controls {
 
     /// The levels the effort option offers now.
     fn efforts(&self) -> Vec<Effort> {
-        sorted_efforts(self.effort.iter().flat_map(|(_, v)| v.iter().filter_map(|s| effort_level(s, v))))
+        sorted_efforts(
+            self.effort
+                .iter()
+                .flat_map(|(_, v)| v.iter().filter_map(|s| effort_level(s, v))),
+        )
     }
 
     /// The session's model, the levels it offers and the one it's on, for the UI. Only for models
@@ -919,31 +1255,48 @@ impl Controls {
             return None;
         }
         let model = self.current_model.clone()?;
-        let values = self.effort.as_ref().map(|(_, v)| v.as_slice()).unwrap_or_default();
-        let effort = self.effort_current.as_deref().and_then(|c| effort_level(c, values));
-        Some(AgentEvent::Efforts { model, efforts: self.efforts(), effort })
+        let values = self
+            .effort
+            .as_ref()
+            .map(|(_, v)| v.as_slice())
+            .unwrap_or_default();
+        let effort = self
+            .effort_current
+            .as_deref()
+            .and_then(|c| effort_level(c, values));
+        Some(AgentEvent::Efforts {
+            model,
+            efforts: self.efforts(),
+            effort,
+        })
     }
 }
 
 /// Request params that turn plan mode on or off.
 fn plan_request(c: &Controls, session_id: &str, on: bool) -> Option<(&'static str, Value)> {
     match c.plan_mode.as_ref()? {
-        PlanSwitch::Mode { plan, off } => {
-            Some(("session/set_mode", json!({ "sessionId": session_id, "modeId": if on { plan } else { off } })))
-        }
-        PlanSwitch::Config { id, plan, off } => {
-            Some(("session/set_config_option", json!({ "sessionId": session_id, "configId": id, "value": if on { plan } else { off } })))
-        }
+        PlanSwitch::Mode { plan, off } => Some((
+            "session/set_mode",
+            json!({ "sessionId": session_id, "modeId": if on { plan } else { off } }),
+        )),
+        PlanSwitch::Config { id, plan, off } => Some((
+            "session/set_config_option",
+            json!({ "sessionId": session_id, "configId": id, "value": if on { plan } else { off } }),
+        )),
     }
 }
 
 /// Request params that switch to `model`, if the agent supports it.
 fn model_request(c: &Controls, session_id: &str, model: &str) -> Option<(&'static str, Value)> {
     match &c.switch {
-        ModelSwitch::SetModel => Some(("session/set_model", json!({ "sessionId": session_id, "modelId": model }))),
-        ModelSwitch::Config(id) => {
-            Some(("session/set_config_option", json!({ "sessionId": session_id, "configId": id, "value": model })))
-        }
+        ModelSwitch::SetModel => Some((
+            "session/set_model",
+            json!({ "sessionId": session_id, "modelId": model }),
+        )),
+        ModelSwitch::Config(id) => Some((
+            "session/set_config_option",
+            json!({ "sessionId": session_id, "configId": id, "value": model }),
+        )),
         ModelSwitch::None => None,
     }
 }
@@ -952,7 +1305,10 @@ fn model_request(c: &Controls, session_id: &str, model: &str) -> Option<(&'stati
 /// the model's "default" where it offers that, else its nearest level.
 fn effort_request(c: &Controls, session_id: &str, effort: Effort) -> Option<(&'static str, Value)> {
     let (id, values) = c.effort.as_ref()?;
-    let levels: Vec<(Effort, &String)> = values.iter().filter_map(|v| effort_level(v, values).map(|e| (e, v))).collect();
+    let levels: Vec<(Effort, &String)> = values
+        .iter()
+        .filter_map(|v| effort_level(v, values).map(|e| (e, v)))
+        .collect();
     let value = match levels.iter().find(|(e, _)| *e == effort) {
         Some((_, v)) => *v,
         None => match values.iter().find(|v| *v == "default") {
@@ -963,12 +1319,16 @@ fn effort_request(c: &Controls, session_id: &str, effort: Effort) -> Option<(&'s
             }
         },
     };
-    Some(("session/set_config_option", json!({ "sessionId": session_id, "configId": id, "value": value })))
+    Some((
+        "session/set_config_option",
+        json!({ "sessionId": session_id, "configId": id, "value": value }),
+    ))
 }
 
 /// `effort_request`, unless the session is on that level already.
 fn effort_change(c: &Controls, session_id: &str, effort: Effort) -> Option<(&'static str, Value)> {
-    effort_request(c, session_id, effort).filter(|(_, p)| p["value"].as_str() != c.effort_current.as_deref())
+    effort_request(c, session_id, effort)
+        .filter(|(_, p)| p["value"].as_str() != c.effort_current.as_deref())
 }
 
 /// The session's efforts, when they aren't what the UI was last told.
@@ -983,7 +1343,10 @@ fn efforts_news(ctl: &Controls, told: &mut Option<AgentEvent>) -> Option<AgentEv
 /// A `config_option_update` for this session: its options as they are now.
 fn config_update<'a>(v: &'a Value, session_id: &str) -> Option<&'a Value> {
     let p = &v["params"];
-    (v["method"] == "session/update" && p["sessionId"] == session_id && p["update"]["sessionUpdate"] == "config_option_update").then(|| &p["update"])
+    (v["method"] == "session/update"
+        && p["sessionId"] == session_id
+        && p["update"]["sessionUpdate"] == "config_option_update")
+        .then(|| &p["update"])
 }
 
 /// Run an ACP session for `config.agent` until shutdown or the agent exits.
@@ -992,15 +1355,29 @@ pub async fn run(
     commands: async_channel::Receiver<Command>,
     events: async_channel::Sender<AgentEvent>,
 ) -> Result<()> {
-    let mut agent = Agent::spawn(&config.agent, &config.cwd, &launch_flags(&config), config.resume.as_deref()).await?;
+    let mut agent = Agent::spawn(
+        &config.agent,
+        &config.cwd,
+        &launch_flags(&config),
+        config.resume.as_deref(),
+    )
+    .await?;
     let mut hand_holding = config.hand_holding;
-    let mut fs = FsPolicy { cwd: config.cwd.clone(), full_access: hand_holding == HandHolding::FullAccess, read_only: config.read_only };
+    let mut fs = FsPolicy {
+        cwd: config.cwd.clone(),
+        full_access: hand_holding == HandHolding::FullAccess,
+        read_only: config.read_only,
+    };
     let mut backlog = Vec::new();
     let init = agent.handshake(&fs, &mut backlog).await?;
     let cwd = config.cwd.display().to_string();
     let (mcp, skipped, left_out) = acp_mcp_servers(&config.mcp_servers, &init);
     if !skipped.is_empty() {
-        tracing::info!("{}: no HTTP MCP support, leaving out {}", agent.name, skipped.join(", "));
+        tracing::info!(
+            "{}: no HTTP MCP support, leaving out {}",
+            agent.name,
+            skipped.join(", ")
+        );
     }
     let skipped_notice = skipped_mcp_notice(&config.agent, &agent.name, &skipped);
     let setup = Duration::from_secs(120);
@@ -1011,7 +1388,10 @@ pub async fn run(
     if let Some(id) = &config.resume {
         if init["agentCapabilities"]["loadSession"] == true {
             let params = json!({ "sessionId": id, "cwd": cwd, "mcpServers": mcp });
-            match agent.call("session/load", params, &fs, &mut backlog, setup).await? {
+            match agent
+                .call("session/load", params, &fs, &mut backlog, setup)
+                .await?
+            {
                 Ok(r) => {
                     drop_replay(&mut backlog);
                     opened = Some((id.clone(), r));
@@ -1027,15 +1407,40 @@ pub async fn run(
     }
     let (session_id, result) = match opened {
         Some(s) => s,
-        None => match agent.call("session/new", json!({ "cwd": cwd, "mcpServers": mcp }), &fs, &mut backlog, setup).await? {
-            Ok(r) => (r["sessionId"].as_str().context("session/new returned no sessionId")?.to_string(), r),
+        None => match agent
+            .call(
+                "session/new",
+                json!({ "cwd": cwd, "mcpServers": mcp }),
+                &fs,
+                &mut backlog,
+                setup,
+            )
+            .await?
+        {
+            Ok(r) => (
+                r["sessionId"]
+                    .as_str()
+                    .context("session/new returned no sessionId")?
+                    .to_string(),
+                r,
+            ),
             Err(e) if is_auth_error(&e) => {
                 let methods = auth_methods(&init);
                 let mut session_opt = None;
                 if let Some((first_method, _)) = methods.first() {
                     let auth_params = json!({ "methodId": first_method });
-                    if let Ok(Ok(_)) = agent.call("authenticate", auth_params, &fs, &mut backlog, setup).await
-                        && let Ok(Ok(r)) = agent.call("session/new", json!({ "cwd": cwd, "mcpServers": mcp }), &fs, &mut backlog, setup).await
+                    if let Ok(Ok(_)) = agent
+                        .call("authenticate", auth_params, &fs, &mut backlog, setup)
+                        .await
+                        && let Ok(Ok(r)) = agent
+                            .call(
+                                "session/new",
+                                json!({ "cwd": cwd, "mcpServers": mcp }),
+                                &fs,
+                                &mut backlog,
+                                setup,
+                            )
+                            .await
                         && let Some(sid) = r["sessionId"].as_str()
                     {
                         session_opt = Some((sid.to_string(), r));
@@ -1081,7 +1486,13 @@ pub async fn run(
     // What this session reports is what the next launch's probe would learn (of the install it
     // probes).
     if !agent.stand_in {
-        ProbeCache::session_opened(&ProbeCache::dir(), &config.agent, &agent.bin, &ctl.models, auth_methods(&init));
+        ProbeCache::session_opened(
+            &ProbeCache::dir(),
+            &config.agent,
+            &agent.bin,
+            &ctl.models,
+            auth_methods(&init),
+        );
     }
     // Into plan mode, or out of it when a resumed session was left there. A read-only session
     // works in plan mode too: the agent's own tools edit files without asking Trek.
@@ -1089,13 +1500,22 @@ pub async fn run(
     let mut planning = ctl.planning;
     if plan != ctl.planning
         && let Some((method, params)) = plan_request(&ctl, &session_id, plan)
-        && agent.call(method, params, &fs, &mut backlog, setup).await?.is_ok()
+        && agent
+            .call(method, params, &fs, &mut backlog, setup)
+            .await?
+            .is_ok()
     {
         planning = plan;
     }
     // Plan mode was asked for and isn't on: prompts are refused rather than run with edits allowed.
-    let no_plan = (plan && !planning).then(|| plan_refusal(&agent.name, ctl.plan_mode.is_some(), config.read_only));
-    events.send(AgentEvent::Started { native_id: session_id.clone(), model: model.clone() }).await?;
+    let no_plan = (plan && !planning)
+        .then(|| plan_refusal(&agent.name, ctl.plan_mode.is_some(), config.read_only));
+    events
+        .send(AgentEvent::Started {
+            native_id: session_id.clone(),
+            model: model.clone(),
+        })
+        .await?;
     let mut told_efforts = None;
     if let Some(ev) = efforts_news(&ctl, &mut told_efforts) {
         events.send(ev).await?;
@@ -1113,10 +1533,26 @@ pub async fn run(
         events.send(crate::lost_session(&agent.name)).await?;
     }
 
-    let turn = Turn { resumed: config.resume.is_some() && !lost, ..Default::default() };
-    let mut s = Live { session_id, turn, perms: HashMap::new(), prompts: vec![], planning, agent: config.agent.clone(), name: agent.name.clone(), model, turn_began: None };
+    let turn = Turn {
+        resumed: config.resume.is_some() && !lost,
+        ..Default::default()
+    };
+    let mut s = Live {
+        session_id,
+        turn,
+        perms: HashMap::new(),
+        prompts: vec![],
+        planning,
+        agent: config.agent.clone(),
+        name: agent.name.clone(),
+        model,
+        turn_began: None,
+    };
     for v in std::mem::take(&mut backlog) {
-        if !s.handle(&v, &mut agent.rpc, &events, &fs, hand_holding).await? {
+        if !s
+            .handle(&v, &mut agent.rpc, &events, &fs, hand_holding)
+            .await?
+        {
             return Ok(());
         }
     }
@@ -1251,9 +1687,15 @@ pub async fn run(
 
 /// Why a prompt isn't sent when plan mode is on but the agent couldn't enter it.
 fn plan_refusal(agent: &str, has_plan_mode: bool, read_only: bool) -> String {
-    let why = if has_plan_mode { "didn't switch to plan mode" } else { "has no plan mode" };
+    let why = if has_plan_mode {
+        "didn't switch to plan mode"
+    } else {
+        "has no plan mode"
+    };
     if read_only {
-        format!("{agent} {why}, so it could change files, and this task is read-only. Ask another agent for advice.")
+        format!(
+            "{agent} {why}, so it could change files, and this task is read-only. Ask another agent for advice."
+        )
     } else {
         format!("{agent} {why}, so it could change files. Turn plan mode off to send this.")
     }
@@ -1263,7 +1705,11 @@ fn plan_refusal(agent: &str, has_plan_mode: bool, read_only: bool) -> String {
 /// state (commands, usage) still counts.
 fn drop_replay(backlog: &mut Vec<Value>) {
     backlog.retain(|v| {
-        v["method"] != "session/update" || matches!(v["params"]["update"]["sessionUpdate"].as_str(), Some("available_commands_update" | "usage_update"))
+        v["method"] != "session/update"
+            || matches!(
+                v["params"]["update"]["sessionUpdate"].as_str(),
+                Some("available_commands_update" | "usage_update")
+            )
     });
 }
 
@@ -1298,13 +1744,21 @@ impl Live {
         hand_holding: HandHolding,
     ) -> Result<bool> {
         let out = match (v["method"].as_str(), v.get("id")) {
-            (Some(method), Some(rpc_id)) => self.request(method, rpc_id.clone(), &v["params"], rpc, fs, hand_holding).await?,
-            (Some("session/update"), None) if v["params"]["sessionId"] == self.session_id.as_str() => {
+            (Some(method), Some(rpc_id)) => {
+                self.request(method, rpc_id.clone(), &v["params"], rpc, fs, hand_holding)
+                    .await?
+            }
+            (Some("session/update"), None)
+                if v["params"]["sessionId"] == self.session_id.as_str() =>
+            {
                 self.turn.update(&v["params"]["update"])
             }
             (Some(_), None) => vec![],
             (None, _) => {
-                if let Some(i) = v["id"].as_i64().and_then(|id| self.prompts.iter().position(|p| *p == id)) {
+                if let Some(i) = v["id"]
+                    .as_i64()
+                    .and_then(|id| self.prompts.iter().position(|p| *p == id))
+                {
                     self.prompts.remove(i);
                     let stop = match v.get("error") {
                         Some(e) => Err(rpc_message(e)),
@@ -1323,21 +1777,36 @@ impl Live {
                             // own history has every step, sub-agents' included, and what each cost
                             // (nothing, for models it has no price for).
                             let id = self.session_id.clone();
-                            let steps = tokio::task::spawn_blocking(move || trek_core::import::opencode::usage_priced(&id, began, i64::MAX)).await.unwrap_or_default();
+                            let steps = tokio::task::spawn_blocking(move || {
+                                trek_core::import::opencode::usage_priced(&id, began, i64::MAX)
+                            })
+                            .await
+                            .unwrap_or_default();
                             if !steps.is_empty() {
                                 self.turn.tokens.clear();
                                 for (_, model, tokens, cost) in steps {
-                                    add_usage(&mut self.turn.tokens, model, &tokens, cost.filter(|c| *c > 0.0).map(UsageCost::reported));
+                                    add_usage(
+                                        &mut self.turn.tokens,
+                                        model,
+                                        &tokens,
+                                        cost.filter(|c| *c > 0.0).map(UsageCost::reported),
+                                    );
                                 }
                             }
                         }
-                        self.turn.if_empty = Some(empty_turn_error(&self.agent, &self.name, self.model.as_deref()));
+                        self.turn.if_empty = Some(empty_turn_error(
+                            &self.agent,
+                            &self.name,
+                            self.model.as_deref(),
+                        ));
                         self.turn.finish(stop)
                     } else {
                         // Others are still open: the turn goes on. A message the agent turned down
                         // didn't reach it, so the user is told.
                         match stop {
-                            Err(e) => vec![AgentEvent::Notice(format!("A message sent during the turn wasn't taken: {e}"))],
+                            Err(e) => vec![AgentEvent::Notice(format!(
+                                "A message sent during the turn wasn't taken: {e}"
+                            ))],
                             Ok(_) => vec![],
                         }
                     }
@@ -1374,13 +1843,23 @@ impl Live {
         self.turn.produced = true;
         match self.turn.permission(p, hand_holding, self.planning) {
             Ask::Answer(option) => {
-                rpc.reply(rpc_id, Ok(permission_outcome(Some(option)))).await?;
+                rpc.reply(rpc_id, Ok(permission_outcome(Some(option))))
+                    .await?;
                 Ok(vec![])
             }
-            Ask::User { title, detail, options } => {
+            Ask::User {
+                title,
+                detail,
+                options,
+            } => {
                 let request_id = format!("acp-{rpc_id}");
                 self.perms.insert(request_id.clone(), (rpc_id, options));
-                Ok(vec![AgentEvent::PermissionRequest { request_id, title, detail, prompt: None }])
+                Ok(vec![AgentEvent::PermissionRequest {
+                    request_id,
+                    title,
+                    detail,
+                    prompt: None,
+                }])
             }
         }
     }
@@ -1391,7 +1870,11 @@ impl Live {
 enum Ask {
     /// The thread's access level covers it: pick this option.
     Answer(String),
-    User { title: String, detail: String, options: Vec<Value> },
+    User {
+        title: String,
+        detail: String,
+        options: Vec<Value>,
+    },
 }
 
 impl Turn {
@@ -1400,7 +1883,11 @@ impl Turn {
     fn permission(&self, p: &Value, hand_holding: HandHolding, planning: bool) -> Ask {
         let tc = &p["toolCall"];
         let known = tc["toolCallId"].as_str().and_then(|id| self.tools.get(id));
-        let kind = tc["kind"].as_str().or(known.map(|t| t.kind.as_str())).unwrap_or("other").to_string();
+        let kind = tc["kind"]
+            .as_str()
+            .or(known.map(|t| t.kind.as_str()))
+            .unwrap_or("other")
+            .to_string();
         let options = p["options"].as_array().cloned().unwrap_or_default();
         let edit = matches!(kind.as_str(), "edit" | "delete" | "move");
         if auto_allow(hand_holding, &kind)
@@ -1409,10 +1896,26 @@ impl Turn {
         {
             return Ask::Answer(option);
         }
-        let title = tc["title"].as_str().filter(|t| !t.is_empty()).map(String::from).or(known.map(|t| t.title.clone())).unwrap_or_default();
-        let title = row_title(&Tool { title, kind: kind.clone(), ..Default::default() });
-        let detail = Some(tool_detail(tc, &kind)).filter(|d| !d.is_empty()).or(known.map(|t| t.detail.clone())).unwrap_or_default();
-        Ask::User { title, detail, options }
+        let title = tc["title"]
+            .as_str()
+            .filter(|t| !t.is_empty())
+            .map(String::from)
+            .or(known.map(|t| t.title.clone()))
+            .unwrap_or_default();
+        let title = row_title(&Tool {
+            title,
+            kind: kind.clone(),
+            ..Default::default()
+        });
+        let detail = Some(tool_detail(tc, &kind))
+            .filter(|d| !d.is_empty())
+            .or(known.map(|t| t.detail.clone()))
+            .unwrap_or_default();
+        Ask::User {
+            title,
+            detail,
+            options,
+        }
     }
 }
 
@@ -1437,19 +1940,43 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
     let mut opened: Option<String> = None;
     let probe = async {
         let mut agent = Agent::spawn(&agent_id, &home, &[], None).await?;
-        let fs = FsPolicy { cwd: home.clone(), full_access: false, read_only: false };
+        let fs = FsPolicy {
+            cwd: home.clone(),
+            full_access: false,
+            read_only: false,
+        };
         let mut backlog = Vec::new();
         let init = agent.handshake(&fs, &mut backlog).await?;
-        let mut info = AcpInfo { auth_methods: auth_methods(&init), ..Default::default() };
+        let mut info = AcpInfo {
+            auth_methods: auth_methods(&init),
+            ..Default::default()
+        };
         let params = json!({ "cwd": home.display().to_string(), "mcpServers": [] });
-        match agent.call("session/new", params.clone(), &fs, &mut backlog, Duration::from_secs(30)).await? {
+        match agent
+            .call(
+                "session/new",
+                params.clone(),
+                &fs,
+                &mut backlog,
+                Duration::from_secs(30),
+            )
+            .await?
+        {
             Ok(r) => {
                 info.models = controls(&r).models;
                 opened = r["sessionId"].as_str().map(String::from);
                 // Deleted through ACP where the agent offers it (OpenCode 2, whose CLI would start
                 // its background server to do it).
                 if let Some(session) = opened.clone().filter(|_| deletes_sessions(&init))
-                    && let Ok(Ok(_)) = agent.call("session/delete", json!({ "sessionId": session }), &fs, &mut backlog, Duration::from_secs(10)).await
+                    && let Ok(Ok(_)) = agent
+                        .call(
+                            "session/delete",
+                            json!({ "sessionId": session }),
+                            &fs,
+                            &mut backlog,
+                            Duration::from_secs(10),
+                        )
+                        .await
                 {
                     opened = None;
                 }
@@ -1458,13 +1985,37 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
                 let mut authenticated = false;
                 if let Some((first_method, _)) = info.auth_methods.first() {
                     let auth_params = json!({ "methodId": first_method });
-                    if let Ok(Ok(_)) = agent.call("authenticate", auth_params, &fs, &mut backlog, Duration::from_secs(5)).await
-                        && let Ok(Ok(r)) = agent.call("session/new", params, &fs, &mut backlog, Duration::from_secs(30)).await
+                    if let Ok(Ok(_)) = agent
+                        .call(
+                            "authenticate",
+                            auth_params,
+                            &fs,
+                            &mut backlog,
+                            Duration::from_secs(5),
+                        )
+                        .await
+                        && let Ok(Ok(r)) = agent
+                            .call(
+                                "session/new",
+                                params,
+                                &fs,
+                                &mut backlog,
+                                Duration::from_secs(30),
+                            )
+                            .await
                     {
                         info.models = controls(&r).models;
                         opened = r["sessionId"].as_str().map(String::from);
                         if let Some(session) = opened.clone().filter(|_| deletes_sessions(&init))
-                            && let Ok(Ok(_)) = agent.call("session/delete", json!({ "sessionId": session }), &fs, &mut backlog, Duration::from_secs(10)).await
+                            && let Ok(Ok(_)) = agent
+                                .call(
+                                    "session/delete",
+                                    json!({ "sessionId": session }),
+                                    &fs,
+                                    &mut backlog,
+                                    Duration::from_secs(10),
+                                )
+                                .await
                         {
                             opened = None;
                         }
@@ -1508,7 +2059,11 @@ pub async fn acp_authenticate(id: &str, method_id: Option<&str>) -> Result<AcpIn
     let mut opened: Option<String> = None;
     let auth_task = async {
         let mut agent = Agent::spawn(&agent_id, &home, &[], None).await?;
-        let fs = FsPolicy { cwd: home.clone(), full_access: false, read_only: false };
+        let fs = FsPolicy {
+            cwd: home.clone(),
+            full_access: false,
+            read_only: false,
+        };
         let mut backlog = Vec::new();
         let init = agent.handshake(&fs, &mut backlog).await?;
         let methods = auth_methods(&init);
@@ -1519,19 +2074,48 @@ pub async fn acp_authenticate(id: &str, method_id: Option<&str>) -> Result<AcpIn
 
         let params = json!({ "methodId": chosen_method });
         // Allow up to 300s (5 minutes) for browser OAuth completion.
-        match agent.call("authenticate", params, &fs, &mut backlog, Duration::from_secs(300)).await? {
-            Ok(_) => {},
+        match agent
+            .call(
+                "authenticate",
+                params,
+                &fs,
+                &mut backlog,
+                Duration::from_secs(300),
+            )
+            .await?
+        {
+            Ok(_) => {}
             Err(e) => bail!("{}: {}", agent.name, rpc_message(&e)),
         }
 
-        let mut info = AcpInfo { auth_methods: methods, ..Default::default() };
+        let mut info = AcpInfo {
+            auth_methods: methods,
+            ..Default::default()
+        };
         let session_params = json!({ "cwd": home.display().to_string(), "mcpServers": [] });
-        match agent.call("session/new", session_params, &fs, &mut backlog, Duration::from_secs(30)).await? {
+        match agent
+            .call(
+                "session/new",
+                session_params,
+                &fs,
+                &mut backlog,
+                Duration::from_secs(30),
+            )
+            .await?
+        {
             Ok(r) => {
                 info.models = controls(&r).models;
                 opened = r["sessionId"].as_str().map(String::from);
                 if let Some(session) = opened.clone().filter(|_| deletes_sessions(&init))
-                    && let Ok(Ok(_)) = agent.call("session/delete", json!({ "sessionId": session }), &fs, &mut backlog, Duration::from_secs(10)).await
+                    && let Ok(Ok(_)) = agent
+                        .call(
+                            "session/delete",
+                            json!({ "sessionId": session }),
+                            &fs,
+                            &mut backlog,
+                            Duration::from_secs(10),
+                        )
+                        .await
                 {
                     opened = None;
                 }
@@ -1571,10 +2155,18 @@ async fn discard_session(agent: &AgentId, session: &str, cwd: &Path) {
     // Held until it's done: the session is in the file this names.
     let db = crate::opencode::db_env(&bin, ProbeCache::stamp(&bin)).await;
     let mut command = trek_core::procs::async_command(bin);
-    command.args(args).arg(session).current_dir(cwd).envs(db.env).env("PATH", detect::login_path());
+    command
+        .args(args)
+        .arg(session)
+        .current_dir(cwd)
+        .envs(db.env)
+        .env("PATH", detect::login_path());
     match crate::output_group(&mut command, None, Duration::from_secs(20)).await {
         Ok(out) if out.status.success() => {}
-        Ok(out) => tracing::warn!("couldn't delete probe session {session}: {}", String::from_utf8_lossy(&out.stderr).trim()),
+        Ok(out) => tracing::warn!(
+            "couldn't delete probe session {session}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
         Err(e) => tracing::warn!("couldn't delete probe session {session}: {e}"),
     }
 }
@@ -1598,7 +2190,17 @@ impl ProbeCache {
     }
 
     fn path(dir: &Path, agent: &AgentId) -> PathBuf {
-        let name: String = agent.key().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+        let name: String = agent
+            .key()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
         dir.join(format!("{name}.json"))
     }
 
@@ -1606,8 +2208,16 @@ impl ProbeCache {
     fn stamp(bin: &Path) -> String {
         let real = bin.canonicalize().unwrap_or_else(|_| bin.to_path_buf());
         let meta = std::fs::metadata(&real).ok();
-        let modified = meta.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
-        format!("{}:{}:{modified}", real.display(), meta.map_or(0, |m| m.len()))
+        let modified = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs());
+        format!(
+            "{}:{}:{modified}",
+            real.display(),
+            meta.map_or(0, |m| m.len())
+        )
     }
 
     fn read(dir: &Path, agent: &AgentId) -> Option<ProbeCache> {
@@ -1616,11 +2226,17 @@ impl ProbeCache {
 
     /// What's known about the agent at `bin`, if it's still the same binary.
     fn load(dir: &Path, agent: &AgentId, bin: &Path) -> Option<AcpInfo> {
-        Self::read(dir, agent).filter(|c| c.binary == Self::stamp(bin)).map(|c| c.info)
+        Self::read(dir, agent)
+            .filter(|c| c.binary == Self::stamp(bin))
+            .map(|c| c.info)
     }
 
     fn store(dir: &Path, agent: &AgentId, bin: &Path, info: &AcpInfo) {
-        ProbeCache { binary: Self::stamp(bin), info: info.clone() }.write(dir, agent);
+        ProbeCache {
+            binary: Self::stamp(bin),
+            info: info.clone(),
+        }
+        .write(dir, agent);
     }
 
     /// Written whole, then moved into place: a probe and a session may write at once.
@@ -1638,9 +2254,24 @@ impl ProbeCache {
 
     /// A session opened: its model list is the agent's current one. Agents that list no models
     /// over ACP (Copilot) keep the list found another way.
-    fn session_opened(dir: &Path, agent: &AgentId, bin: &Path, models: &[ModelInfo], auth_methods: Vec<(String, String)>) {
+    fn session_opened(
+        dir: &Path,
+        agent: &AgentId,
+        bin: &Path,
+        models: &[ModelInfo],
+        auth_methods: Vec<(String, String)>,
+    ) {
         if !models.is_empty() {
-            Self::store(dir, agent, bin, &AcpInfo { models: models.to_vec(), auth_methods, needs_auth: false });
+            Self::store(
+                dir,
+                agent,
+                bin,
+                &AcpInfo {
+                    models: models.to_vec(),
+                    auth_methods,
+                    needs_auth: false,
+                },
+            );
         }
     }
 
@@ -1675,8 +2306,12 @@ mod tests {
         match tokio::time::timeout(Duration::from_secs(20), h.events.recv()).await {
             Ok(event) => event.expect("agent exited"),
             Err(_) => {
-                let log = std::fs::read_to_string(dir.join("acp-log.jsonl")).unwrap_or_else(|e| format!("(no log: {e})"));
-                panic!("agent stalled: no event in 20s; its log in {}:\n{log}", dir.display())
+                let log = std::fs::read_to_string(dir.join("acp-log.jsonl"))
+                    .unwrap_or_else(|e| format!("(no log: {e})"));
+                panic!(
+                    "agent stalled: no event in 20s; its log in {}:\n{log}",
+                    dir.display()
+                )
             }
         }
     }
@@ -1714,16 +2349,43 @@ mod tests {
                 }
             };
             for text in ["what did I ask?", "and now?"] {
-                h.commands.send(Command::Prompt { text: text.into(), images: vec![] }).await.unwrap();
+                h.commands
+                    .send(Command::Prompt {
+                        text: text.into(),
+                        images: vec![],
+                    })
+                    .await
+                    .unwrap();
                 assert_eq!(turn().await, None);
             }
             h.commands.send(Command::Shutdown).await.unwrap();
         });
-        let log: Vec<Value> = std::fs::read_to_string(dir.join("acp-log.jsonl")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let log: Vec<Value> = std::fs::read_to_string(dir.join("acp-log.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
         let methods: Vec<&str> = log.iter().filter_map(|m| m["method"].as_str()).collect();
-        assert_eq!(methods, ["initialize", "session/new", "session/prompt", "session/prompt"]);
-        let prompts: Vec<&str> = log.iter().filter(|m| m["method"] == "session/prompt").map(|m| m["params"]["prompt"][0]["text"].as_str().unwrap()).collect();
-        assert!(prompts[0].contains("<recap>\nUser: remember APPLE\n\nAssistant: OK\n</recap>") && prompts[0].ends_with("what did I ask?"), "{}", prompts[0]);
+        assert_eq!(
+            methods,
+            [
+                "initialize",
+                "session/new",
+                "session/prompt",
+                "session/prompt"
+            ]
+        );
+        let prompts: Vec<&str> = log
+            .iter()
+            .filter(|m| m["method"] == "session/prompt")
+            .map(|m| m["params"]["prompt"][0]["text"].as_str().unwrap())
+            .collect();
+        assert!(
+            prompts[0].contains("<recap>\nUser: remember APPLE\n\nAssistant: OK\n</recap>")
+                && prompts[0].ends_with("what did I ask?"),
+            "{}",
+            prompts[0]
+        );
         assert_eq!(prompts[1], "and now?", "only the first message carries it");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1737,22 +2399,50 @@ mod tests {
             name: "Local agent".into(),
             command: fake.display().to_string(),
             args: vec!["--acp".into()],
-            env: vec![EnvVar { name: "LOCAL_AGENT_MODE".into(), value: "quiet".into(), secret: false }],
+            env: vec![EnvVar {
+                name: "LOCAL_AGENT_MODE".into(),
+                value: "quiet".into(),
+                secret: false,
+            }],
             ..Default::default()
         };
         let shell = if cfg!(windows) { "cmd" } else { "sh" };
-        let on_path = AddedAgent { id: "on-path".into(), name: "On PATH".into(), command: shell.into(), ..Default::default() };
-        let gone = AddedAgent { id: "gone".into(), name: "Gone".into(), command: "trek-no-such-agent".into(), ..Default::default() };
+        let on_path = AddedAgent {
+            id: "on-path".into(),
+            name: "On PATH".into(),
+            command: shell.into(),
+            ..Default::default()
+        };
+        let gone = AddedAgent {
+            id: "gone".into(),
+            name: "Gone".into(),
+            command: "trek-no-such-agent".into(),
+            ..Default::default()
+        };
         trek_core::catalog::set_added_agents(&[local, on_path, gone]);
         let agent = AgentId::Acp("local-agent".into());
         let (bin, args, name) = launch_spec(&agent).unwrap();
-        assert_eq!((bin, args, name.as_str()), (fake, vec!["--acp".to_string()], "Local agent"));
-        assert_eq!(launch_env(&agent, Path::new("/")), [("LOCAL_AGENT_MODE".to_string(), "quiet".to_string())]);
+        assert_eq!(
+            (bin, args, name.as_str()),
+            (fake, vec!["--acp".to_string()], "Local agent")
+        );
+        assert_eq!(
+            launch_env(&agent, Path::new("/")),
+            [("LOCAL_AGENT_MODE".to_string(), "quiet".to_string())]
+        );
         assert_eq!(agent.display_name(), "Local agent");
         let found = launch_spec(&AgentId::Acp("on-path".into())).unwrap().0;
-        assert!(found.file_stem().is_some_and(|s| s == shell), "a name is looked up on PATH");
-        let err = launch_spec(&AgentId::Acp("gone".into())).unwrap_err().to_string();
-        assert!(err.contains("trek-no-such-agent isn't on your PATH"), "{err}");
+        assert!(
+            found.file_stem().is_some_and(|s| s == shell),
+            "a name is looked up on PATH"
+        );
+        let err = launch_spec(&AgentId::Acp("gone".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("trek-no-such-agent isn't on your PATH"),
+            "{err}"
+        );
         assert!(launch_spec(&AgentId::Acp("never-added".into())).is_err());
 
         // And it runs a turn like any ACP agent.
@@ -1778,7 +2468,13 @@ mod tests {
         };
         let h = crate::start(config);
         trek_core::runtime().block_on(async {
-            h.commands.send(Command::Prompt { text: "hello".into(), images: vec![] }).await.unwrap();
+            h.commands
+                .send(Command::Prompt {
+                    text: "hello".into(),
+                    images: vec![],
+                })
+                .await
+                .unwrap();
             loop {
                 match next_event(&h, &dir).await {
                     AgentEvent::TurnComplete { error, .. } => break assert_eq!(error, None),
@@ -1819,7 +2515,13 @@ mod tests {
             let mut seen = vec![];
             // The second message is turned down at once, while the first is still running.
             for text in ["hold", "refuse"] {
-                h.commands.send(Command::Prompt { text: text.into(), images: vec![] }).await.unwrap();
+                h.commands
+                    .send(Command::Prompt {
+                        text: text.into(),
+                        images: vec![],
+                    })
+                    .await
+                    .unwrap();
             }
             loop {
                 let ev = next_event(&h, &dir).await;
@@ -1832,10 +2534,25 @@ mod tests {
             h.commands.send(Command::Shutdown).await.unwrap();
             seen
         });
-        let notices: Vec<&String> = seen.iter().filter_map(|e| if let AgentEvent::Notice(n) = e { Some(n) } else { None }).collect();
-        assert!(matches!(&notices[..], [n] if n.contains("a prompt is already running")), "{seen:?}");
+        let notices: Vec<&String> = seen
+            .iter()
+            .filter_map(|e| {
+                if let AgentEvent::Notice(n) = e {
+                    Some(n)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            matches!(&notices[..], [n] if n.contains("a prompt is already running")),
+            "{seen:?}"
+        );
         // The held prompt is answered with nothing said, so the turn that ends with it says so.
-        assert!(matches!(seen.last(), Some(AgentEvent::TurnComplete { error: Some(e) }) if e.contains("ended the turn without a reply")), "the turn ends with the first prompt: {seen:?}");
+        assert!(
+            matches!(seen.last(), Some(AgentEvent::TurnComplete { error: Some(e) }) if e.contains("ended the turn without a reply")),
+            "the turn ends with the first prompt: {seen:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1866,7 +2583,12 @@ mod tests {
             read_dirs: vec![],
         };
         let h = crate::start(config);
-        let efforts = |model: &str, efforts: &[Effort], effort: Option<Effort>| AgentEvent::Efforts { model: model.into(), efforts: efforts.to_vec(), effort };
+        let efforts =
+            |model: &str, efforts: &[Effort], effort: Option<Effort>| AgentEvent::Efforts {
+                model: model.into(),
+                efforts: efforts.to_vec(),
+                effort,
+            };
         let told = trek_core::runtime().block_on(async {
             let next = async || loop {
                 match next_event(&h, &dir).await {
@@ -1877,8 +2599,19 @@ mod tests {
             };
             // Started on its model, at the effort asked for: the levels are that model's.
             let mut told = vec![next().await];
-            for (model, effort) in [("b", Effort::High), ("b", Effort::Low), ("c", Effort::Low), ("a", Effort::Max)] {
-                h.commands.send(Command::SetModel { model: model.into(), effort }).await.unwrap();
+            for (model, effort) in [
+                ("b", Effort::High),
+                ("b", Effort::Low),
+                ("c", Effort::Low),
+                ("a", Effort::Max),
+            ] {
+                h.commands
+                    .send(Command::SetModel {
+                        model: model.into(),
+                        effort,
+                    })
+                    .await
+                    .unwrap();
                 told.push(next().await);
             }
             h.commands.send(Command::Shutdown).await.unwrap();
@@ -1887,7 +2620,11 @@ mod tests {
         assert_eq!(
             told,
             vec![
-                efforts("a", &[Effort::Low, Effort::Medium, Effort::High], Some(Effort::High)),
+                efforts(
+                    "a",
+                    &[Effort::Low, Effort::Medium, Effort::High],
+                    Some(Effort::High)
+                ),
                 // Kept where the new model has it.
                 efforts("b", &[Effort::Medium, Effort::High], Some(Effort::High)),
                 // Not there: the model's default.
@@ -1895,23 +2632,54 @@ mod tests {
                 // No levels at all.
                 efforts("c", &[], None),
                 // No default either: the nearest.
-                efforts("a", &[Effort::Low, Effort::Medium, Effort::High], Some(Effort::High)),
+                efforts(
+                    "a",
+                    &[Effort::Low, Effort::Medium, Effort::High],
+                    Some(Effort::High)
+                ),
             ]
         );
-        let log: Vec<Value> = std::fs::read_to_string(dir.join("acp-log.jsonl")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let log: Vec<Value> = std::fs::read_to_string(dir.join("acp-log.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
         let sets: Vec<String> = log
             .iter()
             .filter(|m| m["method"] == "session/set_config_option")
-            .map(|m| format!("{}={}", m["params"]["configId"].as_str().unwrap(), m["params"]["value"].as_str().unwrap()))
+            .map(|m| {
+                format!(
+                    "{}={}",
+                    m["params"]["configId"].as_str().unwrap(),
+                    m["params"]["value"].as_str().unwrap()
+                )
+            })
             .collect();
         // B starts on its default, so going back to it at Low needs no effort change.
-        assert_eq!(sets, ["model=a", "effort=high", "model=b", "effort=high", "model=b", "model=c", "model=a", "effort=high"]);
+        assert_eq!(
+            sets,
+            [
+                "model=a",
+                "effort=high",
+                "model=b",
+                "effort=high",
+                "model=b",
+                "model=c",
+                "model=a",
+                "effort=high"
+            ]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Run one fake-agent session with `servers` (resuming `resume` if given), the agent taking
     /// remote MCP servers when `http`; returns what the agent was sent and the session's events.
-    fn mcp_session(tag: &str, servers: Vec<crate::McpServer>, http: bool, resume: Option<&str>) -> (Vec<Value>, Vec<AgentEvent>) {
+    fn mcp_session(
+        tag: &str,
+        servers: Vec<crate::McpServer>,
+        http: bool,
+        resume: Option<&str>,
+    ) -> (Vec<Value>, Vec<AgentEvent>) {
         let dir = std::env::temp_dir().join(format!("trek-acp-mcp-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1939,9 +2707,19 @@ mod tests {
         let h = crate::start(config);
         let seen = trek_core::runtime().block_on(async {
             let mut seen = vec![];
-            h.commands.send(Command::Prompt { text: "hi".into(), images: vec![] }).await.unwrap();
+            h.commands
+                .send(Command::Prompt {
+                    text: "hi".into(),
+                    images: vec![],
+                })
+                .await
+                .unwrap();
             loop {
-                let Ok(Ok(ev)) = tokio::time::timeout(Duration::from_secs(20), h.events.recv()).await else { break };
+                let Ok(Ok(ev)) =
+                    tokio::time::timeout(Duration::from_secs(20), h.events.recv()).await
+                else {
+                    break;
+                };
                 let done = matches!(ev, AgentEvent::TurnComplete { .. } | AgentEvent::Exited);
                 seen.push(ev);
                 if done {
@@ -1951,20 +2729,35 @@ mod tests {
             let _ = h.commands.send(Command::Shutdown).await;
             seen
         });
-        let log = std::fs::read_to_string(dir.join("acp-log.jsonl")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let log = std::fs::read_to_string(dir.join("acp-log.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
         let _ = std::fs::remove_dir_all(&dir);
         (log, seen)
     }
 
     fn sent_mcp<'a>(log: &'a [Value], method: &str) -> &'a Value {
-        &log.iter().find(|m| m["method"] == method).unwrap_or_else(|| panic!("no {method}: {log:?}"))["params"]["mcpServers"]
+        &log.iter()
+            .find(|m| m["method"] == method)
+            .unwrap_or_else(|| panic!("no {method}: {log:?}"))["params"]["mcpServers"]
     }
 
     fn trek_servers() -> Vec<crate::McpServer> {
         vec![
-            crate::McpServer::stdio("trek-computer", "/Applications/Trek.app/Contents/MacOS/trek-mcp", vec!["computer".into()], vec![("TREK_SOCKET".into(), "/tmp/s".into())]),
+            crate::McpServer::stdio(
+                "trek-computer",
+                "/Applications/Trek.app/Contents/MacOS/trek-mcp",
+                vec!["computer".into()],
+                vec![("TREK_SOCKET".into(), "/tmp/s".into())],
+            ),
             crate::McpServer::http("figma-desktop", "http://127.0.0.1:3845/mcp", vec![]),
-            crate::McpServer::http("linear", "https://mcp.linear.app/mcp", vec![("Authorization".into(), "Bearer t".into())]),
+            crate::McpServer::http(
+                "linear",
+                "https://mcp.linear.app/mcp",
+                vec![("Authorization".into(), "Bearer t".into())],
+            ),
         ]
     }
 
@@ -1973,49 +2766,108 @@ mod tests {
         // An agent that takes only stdio servers (the default): the remote ones are left out,
         // and the user is told once.
         let (log, seen) = mcp_session("stdio", trek_servers(), false, None);
-        assert!(!seen.iter().any(|e| matches!(e, AgentEvent::Error(_))), "the fake agent accepted the servers: {seen:?}");
+        assert!(
+            !seen.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "the fake agent accepted the servers: {seen:?}"
+        );
         assert_eq!(
             *sent_mcp(&log, "session/new"),
             json!([{"name":"trek-computer","command":"/Applications/Trek.app/Contents/MacOS/trek-mcp","args":["computer"],"env":[{"name":"TREK_SOCKET","value":"/tmp/s"}]}])
         );
-        let notices: Vec<&String> = seen.iter().filter_map(|e| if let AgentEvent::Notice(n) = e { Some(n) } else { None }).collect();
-        assert!(matches!(&notices[..], [n] if n.contains("figma-desktop, linear")), "{seen:?}");
+        let notices: Vec<&String> = seen
+            .iter()
+            .filter_map(|e| {
+                if let AgentEvent::Notice(n) = e {
+                    Some(n)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            matches!(&notices[..], [n] if n.contains("figma-desktop, linear")),
+            "{seen:?}"
+        );
         let (_, again) = mcp_session("stdio-again", trek_servers(), false, None);
-        assert!(!again.iter().any(|e| matches!(e, AgentEvent::Notice(_))), "told once, not every session: {again:?}");
+        assert!(
+            !again.iter().any(|e| matches!(e, AgentEvent::Notice(_))),
+            "told once, not every session: {again:?}"
+        );
 
         // One that said `mcpCapabilities.http`: every server, the remote ones typed.
         let (log, seen) = mcp_session("http", trek_servers(), true, None);
-        assert!(!seen.iter().any(|e| matches!(e, AgentEvent::Error(_) | AgentEvent::Notice(_))), "{seen:?}");
+        assert!(
+            !seen
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error(_) | AgentEvent::Notice(_))),
+            "{seen:?}"
+        );
         let sent = sent_mcp(&log, "session/new");
         assert_eq!(sent.as_array().map(Vec::len), Some(3));
-        assert_eq!(sent[1], json!({"type":"http","name":"figma-desktop","url":"http://127.0.0.1:3845/mcp","headers":[]}));
-        assert_eq!(sent[2], json!({"type":"http","name":"linear","url":"https://mcp.linear.app/mcp","headers":[{"name":"Authorization","value":"Bearer t"}]}));
+        assert_eq!(
+            sent[1],
+            json!({"type":"http","name":"figma-desktop","url":"http://127.0.0.1:3845/mcp","headers":[]})
+        );
+        assert_eq!(
+            sent[2],
+            json!({"type":"http","name":"linear","url":"https://mcp.linear.app/mcp","headers":[{"name":"Authorization","value":"Bearer t"}]})
+        );
 
         // A resumed session sends the same on session/load.
         let (log, seen) = mcp_session("load", trek_servers(), true, Some("fake-9"));
-        assert!(!seen.iter().any(|e| matches!(e, AgentEvent::Error(_))), "{seen:?}");
-        assert_eq!(sent_mcp(&log, "session/load").as_array().map(Vec::len), Some(3));
-        assert!(!log.iter().any(|m| m["method"] == "session/new"), "it was loaded, not started over");
+        assert!(
+            !seen.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "{seen:?}"
+        );
+        assert_eq!(
+            sent_mcp(&log, "session/load").as_array().map(Vec::len),
+            Some(3)
+        );
+        assert!(
+            !log.iter().any(|m| m["method"] == "session/new"),
+            "it was loaded, not started over"
+        );
     }
 
     #[test]
     fn a_batch_script_server_goes_to_acp_agents_through_cmd_on_windows_only() {
-        let npx = |args: &[&str]| crate::McpServer::stdio("fs", "npx", args.iter().map(|a| a.to_string()).collect(), vec![("K".into(), "v".into())]);
+        let npx = |args: &[&str]| {
+            crate::McpServer::stdio(
+                "fs",
+                "npx",
+                args.iter().map(|a| a.to_string()).collect(),
+                vec![("K".into(), "v".into())],
+            )
+        };
         let found = |name: &str| (name == "npx").then(|| PathBuf::from("C:\\n\\npx.cmd"));
         let init = json!({});
         // macOS and Linux: as the user wrote it, whatever the lookup finds (compared as values).
         let servers = [npx(&["-y", "srv"])];
         let (out, skipped, left_out) = acp_mcp_servers_with(&servers, &init, false, found);
-        assert_eq!(out, json!([{"name":"fs","command":"npx","args":["-y","srv"],"env":[{"name":"K","value":"v"}]}]));
+        assert_eq!(
+            out,
+            json!([{"name":"fs","command":"npx","args":["-y","srv"],"env":[{"name":"K","value":"v"}]}])
+        );
         assert!(skipped.is_empty() && left_out.is_empty());
         // Windows: `npx` is `npx.cmd`, which cmd.exe starts; the env goes along as it was.
         let (out, _, left_out) = acp_mcp_servers_with(&[npx(&["-y", "srv"])], &init, true, found);
-        assert_eq!(out, json!([{"name":"fs","command":"cmd","args":["/c","npx","-y","srv"],"env":[{"name":"K","value":"v"}]}]));
+        assert_eq!(
+            out,
+            json!([{"name":"fs","command":"cmd","args":["/c","npx","-y","srv"],"env":[{"name":"K","value":"v"}]}])
+        );
         assert!(left_out.is_empty());
         // A real program, or a name nothing is found for, is left alone.
-        let exe = crate::McpServer::stdio("trek", "C:\\Trek\\trek-mcp.exe", vec!["computer".into()], vec![]);
+        let exe = crate::McpServer::stdio(
+            "trek",
+            "C:\\Trek\\trek-mcp.exe",
+            vec!["computer".into()],
+            vec![],
+        );
         let (out, _, left_out) = acp_mcp_servers_with(&[exe, npx(&[])], &init, true, |_| None);
-        assert_eq!(out[0], json!({"name":"trek","command":"C:\\Trek\\trek-mcp.exe","args":["computer"],"env":[]}));
+        assert_eq!(
+            out[0],
+            json!({"name":"trek","command":"C:\\Trek\\trek-mcp.exe","args":["computer"],"env":[]})
+        );
         assert_eq!(out[1]["command"], "npx");
         assert!(left_out.is_empty());
         // One cmd.exe would misread is left out with a notice, and the others still go; the
@@ -2027,8 +2879,14 @@ mod tests {
         assert_eq!(out.as_array().map(Vec::len), Some(1));
         assert_eq!(out[0]["command"], "cmd");
         assert_eq!(skipped, ["linear"]);
-        let [notice] = &left_out[..] else { panic!("{left_out:?}") };
-        assert!(notice.starts_with("MCP server risky wasn't started: npx.cmd is a batch script") && notice.contains("argument 1"), "{notice}");
+        let [notice] = &left_out[..] else {
+            panic!("{left_out:?}")
+        };
+        assert!(
+            notice.starts_with("MCP server risky wasn't started: npx.cmd is a batch script")
+                && notice.contains("argument 1"),
+            "{notice}"
+        );
     }
 
     #[test]
@@ -2051,15 +2909,36 @@ mod tests {
                 .unwrap();
             std::io::Write::write_all(&mut child.stdin.take().unwrap(), input.as_bytes()).unwrap();
             let out = child.wait_with_output().unwrap();
-            serde_json::from_str(String::from_utf8_lossy(&out.stdout).lines().last().unwrap()).unwrap()
+            serde_json::from_str(String::from_utf8_lossy(&out.stdout).lines().last().unwrap())
+                .unwrap()
         };
         let servers = trek_servers();
-        let refused = |r: &Value, why: &str| r["error"]["message"].as_str().is_some_and(|m| m.contains(why));
-        assert!(refused(&ask(crate::mcp_servers_json_with(&servers[..1], crate::BatchHandOff::CmdWrapper, false, |_| None).0), "must be an array"));
-        let (http, ..) = acp_mcp_servers(&servers[1..2], &json!({"agentCapabilities":{"mcpCapabilities":{"http":true}}}));
+        let refused = |r: &Value, why: &str| {
+            r["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains(why))
+        };
+        assert!(refused(
+            &ask(crate::mcp_servers_json_with(
+                &servers[..1],
+                crate::BatchHandOff::CmdWrapper,
+                false,
+                |_| None
+            )
+            .0),
+            "must be an array"
+        ));
+        let (http, ..) = acp_mcp_servers(
+            &servers[1..2],
+            &json!({"agentCapabilities":{"mcpCapabilities":{"http":true}}}),
+        );
         assert!(refused(&ask(http), "http isn't supported"));
         let (stdio, skipped, _) = acp_mcp_servers(&servers, &json!({}));
-        assert_eq!(skipped, ["figma-desktop", "linear"], "HTTP is off unless the agent says");
+        assert_eq!(
+            skipped,
+            ["figma-desktop", "linear"],
+            "HTTP is off unless the agent says"
+        );
         assert_eq!(ask(stdio)["result"]["sessionId"], "fake-1");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2067,16 +2946,26 @@ mod tests {
     #[test]
     fn maps_message_and_thought_chunks() {
         let mut t = Turn::default();
-        let a = t.update(&(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"po"}})));
-        let b = t.update(&(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ng"}})));
+        let a = t.update(
+            &(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"po"}})),
+        );
+        let b = t.update(
+            &(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ng"}})),
+        );
         let c = t.update(&(json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"hmm"}})));
         assert_eq!(a, vec![AgentEvent::TextDelta("po".into())]);
         assert_eq!(b, vec![AgentEvent::TextDelta("ng".into())]);
         assert_eq!(c, vec![AgentEvent::ReasoningDelta("hmm".into())]);
-        assert!(t.update(&json!({"sessionUpdate":"plan","entries":[]})).is_empty());
+        assert!(
+            t.update(&json!({"sessionUpdate":"plan","entries":[]}))
+                .is_empty()
+        );
         assert_eq!(
             t.finish(Ok("end_turn")),
-            vec![AgentEvent::TextDone("pong".into()), AgentEvent::TurnComplete { error: None }]
+            vec![
+                AgentEvent::TextDone("pong".into()),
+                AgentEvent::TurnComplete { error: None }
+            ]
         );
     }
 
@@ -2088,7 +2977,14 @@ mod tests {
             "sessionUpdate":"tool_call_update","toolCallId":"e1","status":"completed",
             "content":[{"type":"diff","path":"/p/a.rs","oldText":"a\nb\n","newText":"a\nB\nc\n"},{"type":"diff","path":"/p/n.rs","oldText":null,"newText":"x\n"}]
         }));
-        assert_eq!(ev[0], AgentEvent::ToolLines { id: "e1".into(), added: 3, removed: 1 });
+        assert_eq!(
+            ev[0],
+            AgentEvent::ToolLines {
+                id: "e1".into(),
+                added: 3,
+                removed: 1
+            }
+        );
         assert!(matches!(&ev[1], AgentEvent::ToolFinished { ok: true, .. }));
     }
 
@@ -2103,21 +2999,44 @@ mod tests {
         assert_eq!(
             ev,
             vec![
-                AgentEvent::ToolStarted { id: "k1".into(), title: "Subagent".into(), detail: "Map the routes".into() },
-                AgentEvent::Task { id: "k1".into(), description: Some("Map the routes".into()), activity: Some("The explore agent is at work".into()), tool_uses: None, done: None },
+                AgentEvent::ToolStarted {
+                    id: "k1".into(),
+                    title: "Subagent".into(),
+                    detail: "Map the routes".into()
+                },
+                AgentEvent::Task {
+                    id: "k1".into(),
+                    description: Some("Map the routes".into()),
+                    activity: Some("The explore agent is at work".into()),
+                    tool_uses: None,
+                    done: None
+                },
             ]
         );
         let ev = t.update(&json!({"sessionUpdate":"tool_call_update","toolCallId":"k1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"Three routes."}}]}));
         assert_eq!(
             ev,
             vec![
-                AgentEvent::Task { id: "k1".into(), description: None, activity: None, tool_uses: None, done: Some(true) },
-                AgentEvent::ToolFinished { id: "k1".into(), output: "Three routes.".into(), ok: true },
+                AgentEvent::Task {
+                    id: "k1".into(),
+                    description: None,
+                    activity: None,
+                    tool_uses: None,
+                    done: Some(true)
+                },
+                AgentEvent::ToolFinished {
+                    id: "k1".into(),
+                    output: "Three routes.".into(),
+                    ok: true
+                },
             ]
         );
         // Another "think" call is just that.
         let ev = t.update(&json!({"sessionUpdate":"tool_call","toolCallId":"k2","title":"sequential","kind":"think","status":"in_progress","rawInput":{"thought":"hm"}}));
-        assert!(!ev.iter().any(|e| matches!(e, AgentEvent::Task { .. })), "{ev:?}");
+        assert!(
+            !ev.iter().any(|e| matches!(e, AgentEvent::Task { .. })),
+            "{ev:?}"
+        );
     }
 
     #[test]
@@ -2132,14 +3051,25 @@ mod tests {
             ev,
             vec![
                 AgentEvent::TextDone("Looking.".into()),
-                AgentEvent::ToolStarted { id: "t1".into(), title: "Read".into(), detail: "/p/src/main.rs".into() },
+                AgentEvent::ToolStarted {
+                    id: "t1".into(),
+                    title: "Read".into(),
+                    detail: "/p/src/main.rs".into()
+                },
             ]
         );
         let ev = t.update(&json!({
             "sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed",
             "content":[{"type":"content","content":{"type":"text","text":"fn main() {}"}}]
         }));
-        assert_eq!(ev, vec![AgentEvent::ToolFinished { id: "t1".into(), output: "fn main() {}".into(), ok: true }]);
+        assert_eq!(
+            ev,
+            vec![AgentEvent::ToolFinished {
+                id: "t1".into(),
+                output: "fn main() {}".into(),
+                ok: true
+            }]
+        );
     }
 
     #[test]
@@ -2147,9 +3077,23 @@ mod tests {
         let mut t = Turn::default();
         assert!(t.update(&json!({"sessionUpdate":"tool_call","toolCallId":"b","title":"bash","kind":"execute","status":"pending","rawInput":{}})).is_empty());
         let ev = t.update(&json!({"sessionUpdate":"tool_call_update","toolCallId":"b","status":"in_progress","rawInput":{"command":"ls -la"}}));
-        assert_eq!(ev, vec![AgentEvent::ToolStarted { id: "b".into(), title: "Run command".into(), detail: "ls -la".into() }]);
+        assert_eq!(
+            ev,
+            vec![AgentEvent::ToolStarted {
+                id: "b".into(),
+                title: "Run command".into(),
+                detail: "ls -la".into()
+            }]
+        );
         let ev = t.update(&json!({"sessionUpdate":"tool_call_update","toolCallId":"b","status":"failed","rawOutput":{"output":"boom"}}));
-        assert_eq!(ev, vec![AgentEvent::ToolFinished { id: "b".into(), output: "boom".into(), ok: false }]);
+        assert_eq!(
+            ev,
+            vec![AgentEvent::ToolFinished {
+                id: "b".into(),
+                output: "boom".into(),
+                ok: false
+            }]
+        );
     }
 
     #[test]
@@ -2161,7 +3105,10 @@ mod tests {
         assert_eq!(err(Ok("end_turn")), None);
         assert_eq!(err(Ok("cancelled")).as_deref(), Some("Interrupted"));
         assert!(err(Ok("refusal")).is_some());
-        assert_eq!(err(Err("rate limited".into())).as_deref(), Some("rate limited"));
+        assert_eq!(
+            err(Err("rate limited".into())).as_deref(),
+            Some("rate limited")
+        );
     }
 
     #[test]
@@ -2170,22 +3117,39 @@ mod tests {
         assert!(ended_empty(None, false, false));
         assert!(!ended_empty(None, true, false), "something was shown");
         assert!(!ended_empty(None, false, true), "the user cut it short");
-        assert!(!ended_empty(Some("rate limited"), false, false), "an error already says why");
+        assert!(
+            !ended_empty(Some("rate limited"), false, false),
+            "an error already says why"
+        );
     }
 
     #[test]
     fn an_empty_turn_fails_in_the_agents_name() {
-        let opencode = empty_turn_error(&AgentId::OpenCode, "OpenCode", Some("opencode/big-pickle"));
-        assert_eq!(opencode, "OpenCode ended the turn without a reply. Check that its provider is signed in: `opencode run -m opencode/big-pickle hi` in a terminal should answer.");
-        assert!(empty_turn_error(&AgentId::OpenCode, "OpenCode", None).contains("`opencode run hi`"));
+        let opencode =
+            empty_turn_error(&AgentId::OpenCode, "OpenCode", Some("opencode/big-pickle"));
+        assert_eq!(
+            opencode,
+            "OpenCode ended the turn without a reply. Check that its provider is signed in: `opencode run -m opencode/big-pickle hi` in a terminal should answer."
+        );
+        assert!(
+            empty_turn_error(&AgentId::OpenCode, "OpenCode", None).contains("`opencode run hi`")
+        );
         let other = empty_turn_error(&AgentId::Acp("goose".into()), "Goose", Some("x"));
-        assert_eq!(other, "Goose ended the turn without a reply. Check that Goose is signed in and can answer when run in a terminal.");
+        assert_eq!(
+            other,
+            "Goose ended the turn without a reply. Check that Goose is signed in and can answer when run in a terminal."
+        );
     }
 
     #[test]
     fn a_turn_with_nothing_in_it_ends_with_the_error_and_one_with_something_does_not() {
         let said = Some("X ended the turn without a reply.".to_string());
-        let ends = |t: &mut Turn, stop| match { t.if_empty = said.clone(); t.finish(stop) }.pop() {
+        let ends = |t: &mut Turn, stop| match {
+            t.if_empty = said.clone();
+            t.finish(stop)
+        }
+        .pop()
+        {
             Some(AgentEvent::TurnComplete { error }) => error,
             other => panic!("{other:?}"),
         };
@@ -2206,37 +3170,87 @@ mod tests {
         }
         // Empty message chunks, unknown updates and a plan with no steps are not output.
         let mut t = Turn::default();
-        for update in [json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":""}}), json!({"sessionUpdate":"plan","entries":[]}), json!({"sessionUpdate":"available_commands_update","availableCommands":[]})] {
+        for update in [
+            json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":""}}),
+            json!({"sessionUpdate":"plan","entries":[]}),
+            json!({"sessionUpdate":"available_commands_update","availableCommands":[]}),
+        ] {
             t.update(&update);
         }
         assert_eq!(ends(&mut t, Ok("end_turn")), said);
         // Tokens used, an approval asked for, or the user's interrupt: none of them fail it.
-        let mut t = Turn { tokens: vec![(None, TokenUsage { input: 5, ..Default::default() }, None)], ..Default::default() };
+        let mut t = Turn {
+            tokens: vec![(
+                None,
+                TokenUsage {
+                    input: 5,
+                    ..Default::default()
+                },
+                None,
+            )],
+            ..Default::default()
+        };
         assert_eq!(ends(&mut t, Ok("end_turn")), None);
-        let mut t = Turn { produced: true, ..Default::default() };
+        let mut t = Turn {
+            produced: true,
+            ..Default::default()
+        };
         assert_eq!(ends(&mut t, Ok("end_turn")), None);
-        let mut t = Turn { interrupted: true, ..Default::default() };
+        let mut t = Turn {
+            interrupted: true,
+            ..Default::default()
+        };
         assert_eq!(ends(&mut t, Ok("end_turn")), None);
-        assert_eq!(ends(&mut Turn::default(), Ok("cancelled")).as_deref(), Some("Interrupted"));
-        assert_eq!(ends(&mut Turn::default(), Err("boom".into())).as_deref(), Some("boom"));
+        assert_eq!(
+            ends(&mut Turn::default(), Ok("cancelled")).as_deref(),
+            Some("Interrupted")
+        );
+        assert_eq!(
+            ends(&mut Turn::default(), Err("boom".into())).as_deref(),
+            Some("boom")
+        );
         // The next turn starts clean.
         let mut t = Turn::default();
-        t.update(&json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}));
+        t.update(
+            &json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}),
+        );
         ends(&mut t, Ok("end_turn"));
         assert_eq!(ends(&mut t, Ok("end_turn")), said);
         // `finish` alone (no error to give) is unchanged.
-        assert_eq!(Turn::default().finish(Ok("end_turn")), vec![AgentEvent::TurnComplete { error: None }]);
+        assert_eq!(
+            Turn::default().finish(Ok("end_turn")),
+            vec![AgentEvent::TurnComplete { error: None }]
+        );
     }
 
     #[test]
     fn a_provider_limit_is_reported_before_the_turn_ends() {
         // As `rpc_message` reads an agent's JSON-RPC error that passes its provider's 429 on.
-        let e = rpc_message(&json!({"code":-32603,"message":"Internal error","data":{"message":"Rate limit reached for requests. Please try again in 20s."}}));
+        let e = rpc_message(
+            &json!({"code":-32603,"message":"Internal error","data":{"message":"Rate limit reached for requests. Please try again in 20s."}}),
+        );
         let ev = Turn::default().finish(Err(e.clone()));
-        let [AgentEvent::LimitReached { message, resets_at: Some(at), scope }, AgentEvent::TurnComplete { error: Some(err), .. }] = &ev[..] else { panic!("{ev:?}") };
+        let [
+            AgentEvent::LimitReached {
+                message,
+                resets_at: Some(at),
+                scope,
+            },
+            AgentEvent::TurnComplete {
+                error: Some(err), ..
+            },
+        ] = &ev[..]
+        else {
+            panic!("{ev:?}")
+        };
         assert_eq!((message, err, scope), (&e, &e, &crate::LimitScope::Other));
         assert!((*at - trek_core::store::now_ms() - 20_000).abs() < 5_000);
-        assert_eq!(Turn::default().finish(Err("Internal error: model not found".into())).len(), 1);
+        assert_eq!(
+            Turn::default()
+                .finish(Err("Internal error: model not found".into()))
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -2246,23 +3260,50 @@ mod tests {
             json!({"optionId":"always","name":"Always","kind":"allow_always"}),
             json!({"optionId":"no","name":"Reject","kind":"reject_once"}),
         ];
-        assert_eq!(pick_option(&options, Decision::Allow).as_deref(), Some("once"));
-        assert_eq!(pick_option(&options, Decision::AllowForSession).as_deref(), Some("always"));
+        assert_eq!(
+            pick_option(&options, Decision::Allow).as_deref(),
+            Some("once")
+        );
+        assert_eq!(
+            pick_option(&options, Decision::AllowForSession).as_deref(),
+            Some("always")
+        );
         assert_eq!(pick_option(&options, Decision::Deny).as_deref(), Some("no"));
-        let only_once = vec![json!({"optionId":"ok","kind":"allow_once"}), json!({"optionId":"never","kind":"reject_always"})];
-        assert_eq!(pick_option(&only_once, Decision::AllowForSession).as_deref(), Some("ok"));
-        assert_eq!(pick_option(&only_once, Decision::Deny).as_deref(), Some("never"));
+        let only_once = vec![
+            json!({"optionId":"ok","kind":"allow_once"}),
+            json!({"optionId":"never","kind":"reject_always"}),
+        ];
+        assert_eq!(
+            pick_option(&only_once, Decision::AllowForSession).as_deref(),
+            Some("ok")
+        );
+        assert_eq!(
+            pick_option(&only_once, Decision::Deny).as_deref(),
+            Some("never")
+        );
         assert_eq!(pick_option(&[], Decision::Allow), None);
         // Refusing is left to `cancelled`: a "no" never becomes a yes, nor a yes a no.
-        let allow_only = vec![json!({"optionId":"yes","kind":"allow_once"}), json!({"optionId":"always","kind":"allow_always"})];
+        let allow_only = vec![
+            json!({"optionId":"yes","kind":"allow_once"}),
+            json!({"optionId":"always","kind":"allow_always"}),
+        ];
         assert_eq!(pick_option(&allow_only, Decision::Deny), None);
         let reject_only = vec![json!({"optionId":"no","kind":"reject_once"})];
         assert_eq!(pick_option(&reject_only, Decision::Allow), None);
         assert_eq!(pick_option(&reject_only, Decision::AllowForSession), None);
         let t = Turn::default();
         let ask = json!({"toolCall":{"toolCallId":"c1","kind":"edit","title":"Edit a.txt"},"options":reject_only});
-        assert!(matches!(t.permission(&ask, HandHolding::FullAccess, false), Ask::User { .. }), "nothing to allow it with: the user decides");
-        assert_eq!(permission_outcome(None), json!({"outcome":{"outcome":"cancelled"}}));
+        assert!(
+            matches!(
+                t.permission(&ask, HandHolding::FullAccess, false),
+                Ask::User { .. }
+            ),
+            "nothing to allow it with: the user decides"
+        );
+        assert_eq!(
+            permission_outcome(None),
+            json!({"outcome":{"outcome":"cancelled"}})
+        );
     }
 
     #[test]
@@ -2289,7 +3330,13 @@ mod tests {
         assert_eq!(c.switch, ModelSwitch::SetModel);
         assert_eq!(c.current_model.as_deref(), Some("b"));
         assert_eq!(c.models[0].efforts, vec![Effort::Low, Effort::High]);
-        assert_eq!(c.plan_mode, Some(PlanSwitch::Mode { plan: "plan".into(), off: "build".into() }));
+        assert_eq!(
+            c.plan_mode,
+            Some(PlanSwitch::Mode {
+                plan: "plan".into(),
+                off: "build".into()
+            })
+        );
         assert!(!c.planning);
 
         let config = json!({"sessionId":"s","configOptions":[
@@ -2302,13 +3349,19 @@ mod tests {
         ]});
         let c = controls(&config);
         assert_eq!(c.switch, ModelSwitch::Config("model".into()));
-        assert_eq!(c.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["x/1", "y/2"]);
+        assert_eq!(
+            c.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["x/1", "y/2"]
+        );
         let (method, params) = model_request(&c, "s", "y/2").unwrap();
         assert_eq!(method, "session/set_config_option");
         assert_eq!(params["value"], "y/2");
         let (_, params) = effort_request(&c, "s", Effort::High).unwrap();
         assert!(params["value"] == "medium" || params["value"] == "max");
-        assert_eq!(effort_request(&c, "s", Effort::Low).unwrap().1["value"], "medium");
+        assert_eq!(
+            effort_request(&c, "s", Effort::Low).unwrap().1["value"],
+            "medium"
+        );
     }
 
     #[test]
@@ -2322,11 +3375,18 @@ mod tests {
 
     /// Recorded ACP traffic (OpenCode 1.18.34, opencode/mimo-v2.6-flash-free), one message per line.
     fn fixture(text: &str) -> Vec<Value> {
-        text.lines().filter(|l| !l.trim().is_empty()).map(|l| serde_json::from_str(l).unwrap()).collect()
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
     }
 
     fn updates(t: &mut Turn, lines: &[Value]) -> Vec<AgentEvent> {
-        lines.iter().filter(|v| v["method"] == "session/update").flat_map(|v| t.update(&v["params"]["update"])).collect()
+        lines
+            .iter()
+            .filter(|v| v["method"] == "session/update")
+            .flat_map(|v| t.update(&v["params"]["update"]))
+            .collect()
     }
 
     #[test]
@@ -2334,12 +3394,32 @@ mod tests {
         let lines = fixture(include_str!("../fixtures/opencode-turn.jsonl"));
         let mut t = Turn::default();
         let ev = updates(&mut t, &lines);
-        assert_eq!(ev[0], AgentEvent::Commands(vec![
-            SlashCommand { name: "init".into(), description: "guided AGENTS.md setup".into(), kind: CommandKind::Command },
-            SlashCommand { name: "review".into(), description: "review changes [commit|branch|pr], defaults to uncommitted".into(), kind: CommandKind::Command },
-        ]));
-        let rows: Vec<(&str, &str)> =
-            ev.iter().filter_map(|e| if let AgentEvent::ToolStarted { title, detail, .. } = e { Some((title.as_str(), detail.as_str())) } else { None }).collect();
+        assert_eq!(
+            ev[0],
+            AgentEvent::Commands(vec![
+                SlashCommand {
+                    name: "init".into(),
+                    description: "guided AGENTS.md setup".into(),
+                    kind: CommandKind::Command
+                },
+                SlashCommand {
+                    name: "review".into(),
+                    description: "review changes [commit|branch|pr], defaults to uncommitted"
+                        .into(),
+                    kind: CommandKind::Command
+                },
+            ])
+        );
+        let rows: Vec<(&str, &str)> = ev
+            .iter()
+            .filter_map(|e| {
+                if let AgentEvent::ToolStarted { title, detail, .. } = e {
+                    Some((title.as_str(), detail.as_str()))
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(
             rows,
             vec![
@@ -2350,22 +3430,63 @@ mod tests {
                 ("Update plan", "All 2 steps done"),
             ]
         );
-        assert!(ev.contains(&AgentEvent::ToolFinished { id: "call_a47ac35a1bd64360a32c5a34".into(), output: "→ Read notes\n○ Edit notes".into(), ok: true }));
-        assert!(ev.contains(&AgentEvent::ToolFinished { id: "call_339ea6bf075f4a0286098c91".into(), output: "Edit applied successfully.\nEdited /private/tmp/trek-agents-e2e/notes.txt".into(), ok: true }));
-        assert_eq!(ev.last(), Some(&AgentEvent::Context { used: 12761, window: 200000 }));
-        assert_eq!(t.finish(Ok("end_turn")), vec![AgentEvent::TextDone("done".into()), AgentEvent::TurnComplete { error: None }]);
+        assert!(ev.contains(&AgentEvent::ToolFinished {
+            id: "call_a47ac35a1bd64360a32c5a34".into(),
+            output: "→ Read notes\n○ Edit notes".into(),
+            ok: true
+        }));
+        assert!(ev.contains(&AgentEvent::ToolFinished {
+            id: "call_339ea6bf075f4a0286098c91".into(),
+            output:
+                "Edit applied successfully.\nEdited /private/tmp/trek-agents-e2e/notes.txt".into(),
+            ok: true
+        }));
+        assert_eq!(
+            ev.last(),
+            Some(&AgentEvent::Context {
+                used: 12761,
+                window: 200000
+            })
+        );
+        assert_eq!(
+            t.finish(Ok("end_turn")),
+            vec![
+                AgentEvent::TextDone("done".into()),
+                AgentEvent::TurnComplete { error: None }
+            ]
+        );
 
         // The edit prompt reads like the row it belongs to.
-        let ask = lines.iter().find(|v| v["method"] == "session/request_permission").unwrap();
+        let ask = lines
+            .iter()
+            .find(|v| v["method"] == "session/request_permission")
+            .unwrap();
         let mut t = Turn::default();
         let upto = lines.iter().position(|v| v == ask).unwrap();
         updates(&mut t, &lines[..upto]);
-        let Ask::User { title, detail, .. } = t.permission(&ask["params"], HandHolding::Supervised, false) else { panic!() };
-        assert_eq!((title.as_str(), detail.as_str()), ("Edit", "/private/tmp/trek-agents-e2e/notes.txt"));
-        assert_eq!(t.permission(&ask["params"], HandHolding::AutoAcceptEdits, false), Ask::Answer("once".into()));
+        let Ask::User { title, detail, .. } =
+            t.permission(&ask["params"], HandHolding::Supervised, false)
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (title.as_str(), detail.as_str()),
+            ("Edit", "/private/tmp/trek-agents-e2e/notes.txt")
+        );
+        assert_eq!(
+            t.permission(&ask["params"], HandHolding::AutoAcceptEdits, false),
+            Ask::Answer("once".into())
+        );
         // In plan mode an edit is never approved on the user's behalf, whatever the level.
-        for level in [HandHolding::AutoAcceptEdits, HandHolding::Auto, HandHolding::FullAccess] {
-            assert!(matches!(t.permission(&ask["params"], level, true), Ask::User { .. }), "{level:?}");
+        for level in [
+            HandHolding::AutoAcceptEdits,
+            HandHolding::Auto,
+            HandHolding::FullAccess,
+        ] {
+            assert!(
+                matches!(t.permission(&ask["params"], level, true), Ask::User { .. }),
+                "{level:?}"
+            );
         }
     }
 
@@ -2377,17 +3498,49 @@ mod tests {
         assert!(t.update(&lines[0]["params"]["update"]).is_empty());
         assert_eq!(
             t.update(&lines[1]["params"]["update"]),
-            vec![AgentEvent::ToolStarted { id: "call_66c3b2d0ebfa47829d8d907f".into(), title: "Run command".into(), detail: "touch oc1.txt".into() }]
+            vec![AgentEvent::ToolStarted {
+                id: "call_66c3b2d0ebfa47829d8d907f".into(),
+                title: "Run command".into(),
+                detail: "touch oc1.txt".into()
+            }]
         );
         let ask = &lines[2]["params"];
-        let Ask::User { title, detail, options } = t.permission(ask, HandHolding::Supervised, false) else { panic!() };
-        assert_eq!((title.as_str(), detail.as_str()), ("Run command", "touch oc1.txt"));
-        assert_eq!(pick_option(&options, Decision::Deny).as_deref(), Some("reject"));
-        assert_eq!(pick_option(&options, Decision::AllowForSession).as_deref(), Some("always"));
-        assert!(matches!(t.permission(ask, HandHolding::Auto, false), Ask::User { .. }), "Auto still asks before commands");
-        assert_eq!(t.permission(ask, HandHolding::FullAccess, false), Ask::Answer("once".into()));
+        let Ask::User {
+            title,
+            detail,
+            options,
+        } = t.permission(ask, HandHolding::Supervised, false)
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (title.as_str(), detail.as_str()),
+            ("Run command", "touch oc1.txt")
+        );
+        assert_eq!(
+            pick_option(&options, Decision::Deny).as_deref(),
+            Some("reject")
+        );
+        assert_eq!(
+            pick_option(&options, Decision::AllowForSession).as_deref(),
+            Some("always")
+        );
+        assert!(
+            matches!(
+                t.permission(ask, HandHolding::Auto, false),
+                Ask::User { .. }
+            ),
+            "Auto still asks before commands"
+        );
+        assert_eq!(
+            t.permission(ask, HandHolding::FullAccess, false),
+            Ask::Answer("once".into())
+        );
         // Plan mode keeps commands (OpenCode's plan agent may run them); only edits always ask.
-        assert_eq!(t.permission(ask, HandHolding::FullAccess, true), Ask::Answer("once".into()));
+        assert_eq!(
+            t.permission(ask, HandHolding::FullAccess, true),
+            Ask::Answer("once".into())
+        );
         assert_eq!(
             t.update(&lines[3]["params"]["update"]),
             vec![AgentEvent::ToolFinished {
@@ -2402,21 +3555,50 @@ mod tests {
     fn opencode_2_offers_its_efforts_beside_models_and_plan() {
         // Recorded `session/new` (OpenCode 2.0.26): an effort select beside model and mode, with
         // "default" (the model's own) and the levels the model names.
-        let c = controls(&serde_json::from_str(include_str!("../fixtures/opencode2-session-new.json")).unwrap());
+        let c = controls(
+            &serde_json::from_str(include_str!("../fixtures/opencode2-session-new.json")).unwrap(),
+        );
         assert_eq!(c.switch, ModelSwitch::Config("model".into()));
-        assert!(c.models.iter().any(|m| m.id == "opencode/mimo-v2.6-flash-free"));
-        assert_eq!(c.effort, Some(("effort".into(), vec!["high".into(), "default".into()])));
-        assert_eq!(c.models[0].efforts, vec![Effort::Medium, Effort::High], "default stands for medium");
+        assert!(
+            c.models
+                .iter()
+                .any(|m| m.id == "opencode/mimo-v2.6-flash-free")
+        );
+        assert_eq!(
+            c.effort,
+            Some(("effort".into(), vec!["high".into(), "default".into()]))
+        );
+        assert_eq!(
+            c.models[0].efforts,
+            vec![Effort::Medium, Effort::High],
+            "default stands for medium"
+        );
         let value = |e| effort_request(&c, "s", e).unwrap().1["value"].clone();
-        assert_eq!((value(Effort::Medium), value(Effort::High)), (json!("default"), json!("high")));
+        assert_eq!(
+            (value(Effort::Medium), value(Effort::High)),
+            (json!("default"), json!("high"))
+        );
         // A level the model hasn't: its default.
-        assert_eq!((value(Effort::Low), value(Effort::Max)), (json!("default"), json!("default")));
+        assert_eq!(
+            (value(Effort::Low), value(Effort::Max)),
+            (json!("default"), json!("default"))
+        );
         // Already there: nothing to send.
         assert_eq!(effort_change(&c, "s", Effort::Medium), None);
         assert!(effort_change(&c, "s", Effort::High).is_some());
-        assert_eq!(c.plan_mode, Some(PlanSwitch::Config { id: "mode".into(), plan: "plan".into(), off: "build".into() }));
+        assert_eq!(
+            c.plan_mode,
+            Some(PlanSwitch::Config {
+                id: "mode".into(),
+                plan: "plan".into(),
+                off: "build".into()
+            })
+        );
         // A named medium is that, and "default" isn't a level then.
-        assert_eq!(effort_level("default", &["medium".into(), "default".into()]), None);
+        assert_eq!(
+            effort_level("default", &["medium".into(), "default".into()]),
+            None
+        );
     }
 
     #[test]
@@ -2424,18 +3606,56 @@ mod tests {
         // Recorded (OpenCode 2.0.26, with the ask rules Trek gives it): `bash` is `shell` now, and
         // still asks.
         let lines = fixture(include_str!("../fixtures/opencode2-turn.jsonl"));
-        let ask = lines.iter().position(|v| v["method"] == "session/request_permission").unwrap();
+        let ask = lines
+            .iter()
+            .position(|v| v["method"] == "session/request_permission")
+            .unwrap();
         let mut t = Turn::default();
         let ev = updates(&mut t, &lines[..ask]);
-        assert!(ev.contains(&AgentEvent::ToolStarted { id: "call_a63808222f7c4f9cb300824b".into(), title: "Run command".into(), detail: "ls".into() }), "{ev:?}");
-        let Ask::User { title, detail, .. } = t.permission(&lines[ask]["params"], HandHolding::Supervised, false) else { panic!() };
+        assert!(
+            ev.contains(&AgentEvent::ToolStarted {
+                id: "call_a63808222f7c4f9cb300824b".into(),
+                title: "Run command".into(),
+                detail: "ls".into()
+            }),
+            "{ev:?}"
+        );
+        let Ask::User { title, detail, .. } =
+            t.permission(&lines[ask]["params"], HandHolding::Supervised, false)
+        else {
+            panic!()
+        };
         assert_eq!((title.as_str(), detail.as_str()), ("Run command", "ls"));
-        assert_eq!(t.permission(&lines[ask]["params"], HandHolding::FullAccess, false), Ask::Answer("once".into()));
+        assert_eq!(
+            t.permission(&lines[ask]["params"], HandHolding::FullAccess, false),
+            Ask::Answer("once".into())
+        );
         let ev = updates(&mut t, &lines[ask + 1..]);
-        assert!(ev.contains(&AgentEvent::ToolFinished { id: "call_a63808222f7c4f9cb300824b".into(), output: "notes.txt\n".into(), ok: true }), "{ev:?}");
-        assert_eq!(t.finish(Ok("end_turn")), vec![AgentEvent::TextDone("1".into()), AgentEvent::TurnComplete { error: None }]);
+        assert!(
+            ev.contains(&AgentEvent::ToolFinished {
+                id: "call_a63808222f7c4f9cb300824b".into(),
+                output: "notes.txt\n".into(),
+                ok: true
+            }),
+            "{ev:?}"
+        );
+        assert_eq!(
+            t.finish(Ok("end_turn")),
+            vec![
+                AgentEvent::TextDone("1".into()),
+                AgentEvent::TurnComplete { error: None }
+            ]
+        );
         let used = prompt_usage(&lines.last().unwrap()["result"]["usage"]).unwrap();
-        assert_eq!(used, TokenUsage { input: 135, output: 22 + 34, cache_read: 9728, cache_write: 0 });
+        assert_eq!(
+            used,
+            TokenUsage {
+                input: 135,
+                output: 22 + 34,
+                cache_read: 9728,
+                cache_write: 0
+            }
+        );
     }
 
     #[test]
@@ -2445,10 +3665,22 @@ mod tests {
         assert!(t.update(&json!({"sessionUpdate":"tool_call","toolCallId":"k1","name":"subagent","title":"subagent","kind":"other","status":"pending","rawInput":{}})).is_empty());
         let input = json!({"agent":"explore","description":"Map the routes","prompt":"List every HTTP route."});
         let ev = t.update(&json!({"sessionUpdate":"tool_call_update","toolCallId":"k1","status":"in_progress","title":"Map the routes","rawInput":input}));
-        assert!(ev.contains(&AgentEvent::Task { id: "k1".into(), description: Some("Map the routes".into()), activity: Some("The explore agent is at work".into()), tool_uses: None, done: None }), "{ev:?}");
+        assert!(
+            ev.contains(&AgentEvent::Task {
+                id: "k1".into(),
+                description: Some("Map the routes".into()),
+                activity: Some("The explore agent is at work".into()),
+                tool_uses: None,
+                done: None
+            }),
+            "{ev:?}"
+        );
         // Another tool's `agent` and `prompt` don't make it one.
         let ev = t.update(&json!({"sessionUpdate":"tool_call","toolCallId":"k2","name":"skill","title":"skill","status":"in_progress","rawInput":{"agent":"x","prompt":"y"}}));
-        assert!(!ev.iter().any(|e| matches!(e, AgentEvent::Task { .. })), "{ev:?}");
+        assert!(
+            !ev.iter().any(|e| matches!(e, AgentEvent::Task { .. })),
+            "{ev:?}"
+        );
     }
 
     #[test]
@@ -2460,12 +3692,27 @@ mod tests {
 
     #[test]
     fn opencode_plan_mode_is_a_config_option() {
-        let c = controls(&serde_json::from_str(include_str!("../fixtures/opencode-session-new.json")).unwrap());
+        let c = controls(
+            &serde_json::from_str(include_str!("../fixtures/opencode-session-new.json")).unwrap(),
+        );
         assert_eq!(c.switch, ModelSwitch::Config("model".into()));
         assert_eq!(c.current_model.as_deref(), Some("opencode/big-pickle"));
-        assert_eq!(c.plan_mode, Some(PlanSwitch::Config { id: "mode".into(), plan: "plan".into(), off: "build".into() }));
+        assert_eq!(
+            c.plan_mode,
+            Some(PlanSwitch::Config {
+                id: "mode".into(),
+                plan: "plan".into(),
+                off: "build".into()
+            })
+        );
         assert!(!c.planning);
-        assert_eq!(plan_request(&c, "s", true), Some(("session/set_config_option", json!({"sessionId":"s","configId":"mode","value":"plan"}))));
+        assert_eq!(
+            plan_request(&c, "s", true),
+            Some((
+                "session/set_config_option",
+                json!({"sessionId":"s","configId":"mode","value":"plan"})
+            ))
+        );
         assert_eq!(plan_request(&c, "s", false).unwrap().1["value"], "build");
     }
 
@@ -2478,41 +3725,102 @@ mod tests {
         assert_eq!(
             ev,
             vec![
-                AgentEvent::ToolStarted { id: "plan-1".into(), title: "Update plan".into(), detail: "Write".into() },
-                AgentEvent::ToolFinished { id: "plan-1".into(), output: "✓ Read\n→ Write".into(), ok: true },
+                AgentEvent::ToolStarted {
+                    id: "plan-1".into(),
+                    title: "Update plan".into(),
+                    detail: "Write".into()
+                },
+                AgentEvent::ToolFinished {
+                    id: "plan-1".into(),
+                    output: "✓ Read\n→ Write".into(),
+                    ok: true
+                },
             ]
         );
         // `cost` is the session's running total: each turn is charged the difference.
         t.begin();
         t.update(&json!({"sessionUpdate":"usage_update","used":10,"size":100,"cost":{"amount":0.5,"currency":"USD"}}));
-        assert!(t.update(&json!({"sessionUpdate":"usage_update","used":0,"size":100})).is_empty());
+        assert!(
+            t.update(&json!({"sessionUpdate":"usage_update","used":0,"size":100}))
+                .is_empty()
+        );
         t.update(&json!({"sessionUpdate":"usage_update","used":20,"size":100,"cost":{"amount":0.75,"currency":"USD"}}));
-        t.tokens.push((None, TokenUsage { input: 10, ..Default::default() }, None));
+        t.tokens.push((
+            None,
+            TokenUsage {
+                input: 10,
+                ..Default::default()
+            },
+            None,
+        ));
         assert_eq!(
             t.finish(Ok("end_turn")),
-            vec![AgentEvent::Usage { model: None, tokens: TokenUsage { input: 10, ..Default::default() }, cost: Some(UsageCost::reported(0.75)) }, AgentEvent::TurnComplete { error: None }]
+            vec![
+                AgentEvent::Usage {
+                    model: None,
+                    tokens: TokenUsage {
+                        input: 10,
+                        ..Default::default()
+                    },
+                    cost: Some(UsageCost::reported(0.75))
+                },
+                AgentEvent::TurnComplete { error: None }
+            ]
         );
         // A turn without a new report adds nothing; one with a report and no tokens, its cost.
         t.begin();
-        assert_eq!(t.finish(Ok("end_turn")), vec![AgentEvent::TurnComplete { error: None }]);
+        assert_eq!(
+            t.finish(Ok("end_turn")),
+            vec![AgentEvent::TurnComplete { error: None }]
+        );
         t.begin();
         t.update(&json!({"sessionUpdate":"usage_update","used":20,"size":100,"cost":{"amount":1.0,"currency":"USD"}}));
-        assert_eq!(t.finish(Ok("end_turn")), vec![AgentEvent::Usage { model: None, tokens: TokenUsage::default(), cost: Some(UsageCost::reported(0.25)) }, AgentEvent::TurnComplete { error: None }]);
+        assert_eq!(
+            t.finish(Ok("end_turn")),
+            vec![
+                AgentEvent::Usage {
+                    model: None,
+                    tokens: TokenUsage::default(),
+                    cost: Some(UsageCost::reported(0.25))
+                },
+                AgentEvent::TurnComplete { error: None }
+            ]
+        );
         // A loaded session's first report carries its earlier turns: unless it came before the
         // turn, the turn's share can't be told, and its tokens are priced from the table instead.
-        let mut loaded = Turn { resumed: true, ..Default::default() };
+        let mut loaded = Turn {
+            resumed: true,
+            ..Default::default()
+        };
         loaded.begin();
         loaded.update(&json!({"sessionUpdate":"usage_update","used":20,"size":100,"cost":{"amount":3.0,"currency":"USD"}}));
-        loaded.tokens.push((None, TokenUsage { input: 10, ..Default::default() }, None));
-        assert!(matches!(&loaded.finish(Ok("end_turn"))[0], AgentEvent::Usage { cost: None, .. }));
+        loaded.tokens.push((
+            None,
+            TokenUsage {
+                input: 10,
+                ..Default::default()
+            },
+            None,
+        ));
+        assert!(matches!(
+            &loaded.finish(Ok("end_turn"))[0],
+            AgentEvent::Usage { cost: None, .. }
+        ));
         loaded.begin();
         loaded.update(&json!({"sessionUpdate":"usage_update","used":20,"size":100,"cost":{"amount":3.5,"currency":"USD"}}));
-        assert!(matches!(&loaded.finish(Ok("end_turn"))[0], AgentEvent::Usage { cost: Some(c), .. } if *c == UsageCost::reported(0.5)));
-        let mut told = Turn { resumed: true, ..Default::default() };
+        assert!(
+            matches!(&loaded.finish(Ok("end_turn"))[0], AgentEvent::Usage { cost: Some(c), .. } if *c == UsageCost::reported(0.5))
+        );
+        let mut told = Turn {
+            resumed: true,
+            ..Default::default()
+        };
         told.update(&json!({"sessionUpdate":"usage_update","used":20,"size":100,"cost":{"amount":3.0,"currency":"USD"}}));
         told.begin();
         told.update(&json!({"sessionUpdate":"usage_update","used":20,"size":100,"cost":{"amount":3.2,"currency":"USD"}}));
-        assert!(matches!(&told.finish(Ok("end_turn"))[0], AgentEvent::Usage { cost: Some(c), .. } if (c.usd - 0.2).abs() < 1e-12));
+        assert!(
+            matches!(&told.finish(Ok("end_turn"))[0], AgentEvent::Usage { cost: Some(c), .. } if (c.usd - 0.2).abs() < 1e-12)
+        );
     }
 
     #[test]
@@ -2542,7 +3850,10 @@ mod tests {
         drop_replay(&mut backlog);
         assert_eq!(backlog, vec![commands, usage]);
         let c = controls(&lines[3]["result"]);
-        assert_eq!(c.current_model.as_deref(), Some("opencode/mimo-v2.6-flash-free"));
+        assert_eq!(
+            c.current_model.as_deref(),
+            Some("opencode/mimo-v2.6-flash-free")
+        );
         assert!(!c.planning);
     }
 
@@ -2552,21 +3863,42 @@ mod tests {
         let loaded = json!({"modes":{"currentModeId":"plan","availableModes":[{"id":"agent","name":"Agent"},{"id":"plan","name":"Plan"},{"id":"autopilot","name":"Autopilot"}]}});
         let c = controls(&loaded);
         assert!(c.planning);
-        assert_eq!(c.plan_mode, Some(PlanSwitch::Mode { plan: "plan".into(), off: "agent".into() }));
-        assert_eq!(plan_request(&c, "s", false), Some(("session/set_mode", json!({"sessionId":"s","modeId":"agent"}))));
+        assert_eq!(
+            c.plan_mode,
+            Some(PlanSwitch::Mode {
+                plan: "plan".into(),
+                off: "agent".into()
+            })
+        );
+        assert_eq!(
+            plan_request(&c, "s", false),
+            Some((
+                "session/set_mode",
+                json!({"sessionId":"s","modeId":"agent"})
+            ))
+        );
         // Copilot's mode ids are URLs.
         let copilot = json!({"modes":{"currentModeId":"https://agentclientprotocol.com/protocol/session-modes#agent","availableModes":[
             {"id":"https://agentclientprotocol.com/protocol/session-modes#agent","name":"Agent"},{"id":"https://agentclientprotocol.com/protocol/session-modes#plan","name":"Plan"}]}});
         let c = controls(&copilot);
         assert!(!c.planning);
-        assert_eq!(plan_request(&c, "s", true).unwrap().1["modeId"], "https://agentclientprotocol.com/protocol/session-modes#plan");
+        assert_eq!(
+            plan_request(&c, "s", true).unwrap().1["modeId"],
+            "https://agentclientprotocol.com/protocol/session-modes#plan"
+        );
     }
 
     #[test]
     fn plan_mode_that_cant_be_had_is_refused() {
-        assert_eq!(plan_refusal("Grok", false, false), "Grok has no plan mode, so it could change files. Turn plan mode off to send this.");
+        assert_eq!(
+            plan_refusal("Grok", false, false),
+            "Grok has no plan mode, so it could change files. Turn plan mode off to send this."
+        );
         assert!(plan_refusal("Devin", true, false).starts_with("Devin didn't switch to plan mode"));
-        assert!(plan_refusal("Grok", false, true).ends_with("this task is read-only. Ask another agent for advice."));
+        assert!(
+            plan_refusal("Grok", false, true)
+                .ends_with("this task is read-only. Ask another agent for advice.")
+        );
         assert_eq!(controls(&json!({"sessionId":"s"})).plan_mode, None);
     }
 
@@ -2577,13 +3909,30 @@ mod tests {
         let file = dir.join("a.txt");
         let write = json!({ "path": file.display().to_string(), "content": "x" });
         trek_core::runtime().block_on(async {
-            let ro = FsPolicy { cwd: dir.clone(), full_access: true, read_only: true };
+            let ro = FsPolicy {
+                cwd: dir.clone(),
+                full_access: true,
+                read_only: true,
+            };
             let err = ro.handle("fs/write_text_file", &write).await.unwrap_err();
             assert!(err.1.contains("read-only"), "{err:?}");
             assert!(!file.exists());
-            let rw = FsPolicy { cwd: dir.clone(), full_access: false, read_only: false };
+            let rw = FsPolicy {
+                cwd: dir.clone(),
+                full_access: false,
+                read_only: false,
+            };
             assert!(rw.handle("fs/write_text_file", &write).await.is_ok());
-            assert_eq!(ro.handle("fs/read_text_file", &json!({ "path": file.display().to_string() })).await.unwrap()["content"], "x", "reading is fine");
+            assert_eq!(
+                ro.handle(
+                    "fs/read_text_file",
+                    &json!({ "path": file.display().to_string() })
+                )
+                .await
+                .unwrap()["content"],
+                "x",
+                "reading is fine"
+            );
         });
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2597,16 +3946,32 @@ mod tests {
         std::fs::write(&bin, "v1").unwrap();
         let agent = AgentId::Acp("grok".into());
         assert_eq!(ProbeCache::load(&dir, &agent, &bin), None);
-        let model = |id: &str| ModelInfo { id: id.into(), name: id.into(), efforts: vec![], tier: 0, fast: None };
-        let info = AcpInfo { models: vec![model("a")], auth_methods: vec![("login".into(), "Log in".into())], needs_auth: false };
+        let model = |id: &str| ModelInfo {
+            id: id.into(),
+            name: id.into(),
+            efforts: vec![],
+            tier: 0,
+            fast: None,
+        };
+        let info = AcpInfo {
+            models: vec![model("a")],
+            auth_methods: vec![("login".into(), "Log in".into())],
+            needs_auth: false,
+        };
         ProbeCache::store(&dir, &agent, &bin, &info);
         assert!(dir.join("acp_grok.json").exists());
         assert_eq!(ProbeCache::load(&dir, &agent, &bin), Some(info.clone()));
         // A session's list replaces it; one with no models (Copilot) leaves it alone.
         ProbeCache::session_opened(&dir, &agent, &bin, &[model("b")], vec![]);
-        assert_eq!(ProbeCache::load(&dir, &agent, &bin).unwrap().models, vec![model("b")]);
+        assert_eq!(
+            ProbeCache::load(&dir, &agent, &bin).unwrap().models,
+            vec![model("b")]
+        );
         ProbeCache::session_opened(&dir, &agent, &bin, &[], vec![]);
-        assert_eq!(ProbeCache::load(&dir, &agent, &bin).unwrap().models, vec![model("b")]);
+        assert_eq!(
+            ProbeCache::load(&dir, &agent, &bin).unwrap().models,
+            vec![model("b")]
+        );
         // Turned away for want of a sign-in: still cached, but marked so the probe runs again.
         ProbeCache::signed_out(&dir, &agent);
         assert!(ProbeCache::load(&dir, &agent, &bin).unwrap().needs_auth);
@@ -2618,28 +3983,61 @@ mod tests {
 
     #[test]
     fn auth_errors_are_recognised() {
-        assert!(is_auth_error(&json!({"code":-32000,"message":"Authentication required"})));
-        assert!(!is_auth_error(&json!({"code":-32603,"message":"Internal error"})));
+        assert!(is_auth_error(
+            &json!({"code":-32000,"message":"Authentication required"})
+        ));
+        assert!(!is_auth_error(
+            &json!({"code":-32603,"message":"Internal error"})
+        ));
     }
 
     #[test]
     fn prompt_responses_report_the_turns_tokens() {
         // As OpenCode answers `session/prompt`: its message's tokens, reasoning apart.
         let u = json!({"totalTokens":12663,"inputTokens":12618,"outputTokens":2,"thoughtTokens":3,"cachedReadTokens":40,"cachedWriteTokens":0});
-        assert_eq!(prompt_usage(&u), Some(TokenUsage { input: 12618, output: 5, cache_read: 40, cache_write: 0 }));
+        assert_eq!(
+            prompt_usage(&u),
+            Some(TokenUsage {
+                input: 12618,
+                output: 5,
+                cache_read: 40,
+                cache_write: 0
+            })
+        );
         // Thoughts already inside the output count: the parts add up without them.
-        let inside = json!({"totalTokens":120,"inputTokens":100,"outputTokens":20,"thoughtTokens":5});
+        let inside =
+            json!({"totalTokens":120,"inputTokens":100,"outputTokens":20,"thoughtTokens":5});
         assert_eq!(prompt_usage(&inside).map(|t| t.output), Some(20));
         assert_eq!(prompt_usage(&Value::Null), None);
-        let mut t = Turn { tokens: vec![(None, prompt_usage(&u).unwrap(), None)], ..Default::default() };
+        let mut t = Turn {
+            tokens: vec![(None, prompt_usage(&u).unwrap(), None)],
+            ..Default::default()
+        };
         let ev = t.finish(Ok("end_turn"));
-        assert!(matches!(&ev[..], [AgentEvent::Usage { model: None, tokens, cost: None }, AgentEvent::TurnComplete { .. }] if tokens.total() == 12663));
+        assert!(
+            matches!(&ev[..], [AgentEvent::Usage { model: None, tokens, cost: None }, AgentEvent::TurnComplete { .. }] if tokens.total() == 12663)
+        );
         // Devin (CLI 3000.11.3) counts its cache writes inside the input, as OpenAI does: here
         // on gpt-5-6-luna-medium, 10,837 of the 10,840 input tokens were written to the cache.
         let devin = json!({"totalTokens":10845,"inputTokens":10840,"outputTokens":5,"cachedWriteTokens":10837});
-        assert_eq!(prompt_usage(&devin), Some(TokenUsage { input: 3, output: 5, cache_read: 0, cache_write: 10837 }));
+        assert_eq!(
+            prompt_usage(&devin),
+            Some(TokenUsage {
+                input: 3,
+                output: 5,
+                cache_read: 0,
+                cache_write: 10837
+            })
+        );
         let swe = json!({"totalTokens":11882,"inputTokens":11842,"outputTokens":40});
-        assert_eq!(prompt_usage(&swe), Some(TokenUsage { input: 11842, output: 40, ..Default::default() }));
+        assert_eq!(
+            prompt_usage(&swe),
+            Some(TokenUsage {
+                input: 11842,
+                output: 40,
+                ..Default::default()
+            })
+        );
     }
 }
 
@@ -2651,8 +4049,13 @@ mod tests {
 /// On Windows a command that is a batch script (`npx`, really `npx.cmd`) goes as `cmd /c`, as for
 /// Claude Code: agents start servers with Node's `spawn`, which won't run one. The user's own
 /// settings are never changed, only what's sent.
-fn acp_mcp_servers<'a>(servers: &'a [crate::McpServer], init: &Value) -> (Value, Vec<&'a str>, Vec<String>) {
-    acp_mcp_servers_with(servers, init, cfg!(windows), |name| detect::which_in(detect::login_path(), name))
+fn acp_mcp_servers<'a>(
+    servers: &'a [crate::McpServer],
+    init: &Value,
+) -> (Value, Vec<&'a str>, Vec<String>) {
+    acp_mcp_servers_with(servers, init, cfg!(windows), |name| {
+        detect::which_in(detect::login_path(), name)
+    })
 }
 
 /// `acp_mcp_servers` with the platform and the lookup of a command name as arguments, so both
@@ -2663,21 +4066,33 @@ fn acp_mcp_servers_with<'a>(
     windows: bool,
     resolve: impl Fn(&str) -> Option<PathBuf>,
 ) -> (Value, Vec<&'a str>, Vec<String>) {
-    let pairs = |p: &[(String, String)]| p.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect::<Vec<_>>();
+    let pairs = |p: &[(String, String)]| {
+        p.iter()
+            .map(|(k, v)| json!({ "name": k, "value": v }))
+            .collect::<Vec<_>>()
+    };
     let http = init["agentCapabilities"]["mcpCapabilities"]["http"] == true;
     let mut skipped = vec![];
     let mut left_out = vec![];
     let mut out = vec![];
     for m in servers {
         match &m.transport {
-            crate::McpTransport::Stdio { command, args, env } => match crate::agent_stdio_command(crate::BatchHandOff::CmdWrapper, command, args, windows, &resolve) {
+            crate::McpTransport::Stdio { command, args, env } => match crate::agent_stdio_command(
+                crate::BatchHandOff::CmdWrapper,
+                command,
+                args,
+                windows,
+                &resolve,
+            ) {
                 Ok(handed) => {
                     let (command, args) = handed.unwrap_or_else(|| (command.clone(), args.clone()));
                     out.push(json!({ "name": m.name, "command": command, "args": args, "env": pairs(env) }));
                 }
                 Err(problem) => left_out.push(crate::mcp_left_out_notice(&m.name, &problem)),
             },
-            crate::McpTransport::Http { url, headers } if http => out.push(json!({ "type": "http", "name": m.name, "url": url, "headers": pairs(headers) })),
+            crate::McpTransport::Http { url, headers } if http => out.push(
+                json!({ "type": "http", "name": m.name, "url": url, "headers": pairs(headers) }),
+            ),
             crate::McpTransport::Http { .. } => skipped.push(m.name.as_str()),
         }
     }
@@ -2687,14 +4102,27 @@ fn acp_mcp_servers_with<'a>(
 /// What the user is told about remote MCP servers `agent` couldn't be given: once per agent and
 /// server each time Trek runs, not at every session. `None` when there's nothing new to say.
 fn skipped_mcp_notice(agent: &AgentId, name: &str, skipped: &[&str]) -> Option<String> {
-    static TOLD: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::LazyLock::new(Default::default);
-    let mut told = TOLD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let new: Vec<&str> = skipped.iter().copied().filter(|s| told.insert(format!("{}/{s}", agent.key()))).collect();
+    static TOLD: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(Default::default);
+    let mut told = TOLD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let new: Vec<&str> = skipped
+        .iter()
+        .copied()
+        .filter(|s| told.insert(format!("{}/{s}", agent.key())))
+        .collect();
     if new.is_empty() {
         return None;
     }
-    let (list, them) = if new.len() == 1 { (new[0].to_string(), "it") } else { (new.join(", "), "them") };
-    Some(format!("{name} can't connect to remote MCP servers, so this session runs without {list}. Claude Code and Codex can use {them}."))
+    let (list, them) = if new.len() == 1 {
+        (new[0].to_string(), "it")
+    } else {
+        (new.join(", "), "them")
+    };
+    Some(format!(
+        "{name} can't connect to remote MCP servers, so this session runs without {list}. Claude Code and Codex can use {them}."
+    ))
 }
 
 /// Agents that take their model on the command line rather than over ACP.
@@ -2720,9 +4148,13 @@ fn launch_flags(config: &SessionConfig) -> Vec<String> {
 
 /// Copilot doesn't list models over ACP; its `help config` does.
 async fn copilot_models() -> Vec<ModelInfo> {
-    let Some(bin) = detect::which("copilot") else { return vec![] };
+    let Some(bin) = detect::which("copilot") else {
+        return vec![];
+    };
     let mut command = trek_core::procs::async_command(bin);
-    command.args(["help", "config"]).env("PATH", detect::login_path());
+    command
+        .args(["help", "config"])
+        .env("PATH", detect::login_path());
     let Ok(out) = crate::output_group(&mut command, None, Duration::from_secs(20)).await else {
         return vec![];
     };
@@ -2731,15 +4163,31 @@ async fn copilot_models() -> Vec<ModelInfo> {
 
 fn parse_copilot_models(help: &str) -> Vec<ModelInfo> {
     let mut in_model = false;
-    let mut out = vec![ModelInfo { id: "auto".into(), name: "Auto".into(), efforts: vec![], tier: 0, fast: None }];
+    let mut out = vec![ModelInfo {
+        id: "auto".into(),
+        name: "Auto".into(),
+        efforts: vec![],
+        tier: 0,
+        fast: None,
+    }];
     for line in help.lines() {
         if line.trim_start().starts_with("`model`:") {
             in_model = true;
             continue;
         }
         if in_model {
-            match line.trim().strip_prefix("- \"").and_then(|l| l.strip_suffix('"')) {
-                Some(id) => out.push(ModelInfo { id: id.to_string(), name: pretty_model(id), efforts: vec![], tier: 1, fast: None }),
+            match line
+                .trim()
+                .strip_prefix("- \"")
+                .and_then(|l| l.strip_suffix('"'))
+            {
+                Some(id) => out.push(ModelInfo {
+                    id: id.to_string(),
+                    name: pretty_model(id),
+                    efforts: vec![],
+                    tier: 1,
+                    fast: None,
+                }),
                 None if line.trim().is_empty() || line.trim_start().starts_with('-') => {}
                 None => break,
             }
@@ -2765,7 +4213,9 @@ fn pretty_model(id: &str) -> String {
             }
             p => {
                 let mut c = p.chars();
-                c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+                c.next()
+                    .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                    .unwrap_or_default()
             }
         };
         parts.push(w);
@@ -2781,6 +4231,9 @@ mod copilot_tests {
     fn parses_copilot_model_list() {
         let help = "  `model`: AI model to use\n    - \"claude-opus-4.8-fast\"\n    - \"gpt-5.3-codex\"\n\n  `contextTier`: x";
         let m = parse_copilot_models(help);
-        assert_eq!(m.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), vec!["Auto", "Claude Opus 4.8 Fast", "GPT-5.3 Codex"]);
+        assert_eq!(
+            m.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["Auto", "Claude Opus 4.8 Fast", "GPT-5.3 Codex"]
+        );
     }
 }

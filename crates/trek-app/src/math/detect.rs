@@ -63,11 +63,21 @@ impl Region {
     /// The TeX between the delimiters, in `source` (the text the region was found in). Lines
     /// of a formula inside a block quote lose their `>`.
     pub fn tex(&self, source: &str) -> String {
-        let Some(text) = source.get(self.range.clone()) else { return String::new() };
+        let Some(text) = source.get(self.range.clone()) else {
+            return String::new();
+        };
         let inner = text.strip_prefix(self.delim.open()).unwrap_or(text);
-        let inner = if self.closed { inner.strip_suffix(self.delim.close()).unwrap_or(inner) } else { inner };
+        let inner = if self.closed {
+            inner.strip_suffix(self.delim.close()).unwrap_or(inner)
+        } else {
+            inner
+        };
         let line_start = source[..self.range.start].rfind('\n').map_or(0, |i| i + 1);
-        if !source[line_start..self.range.start].trim_start().starts_with('>') || !inner.contains('\n') {
+        if !source[line_start..self.range.start]
+            .trim_start()
+            .starts_with('>')
+            || !inner.contains('\n')
+        {
             return inner.to_string();
         }
         inner
@@ -119,7 +129,11 @@ pub fn mask(source: &str) -> Option<String> {
 pub fn whole(text: &str) -> Option<Region> {
     let found = regions(text);
     match found.as_slice() {
-        [region] if region.range == (0..text.len()) || (!region.closed && region.range.start == 0) => Some(region.clone()),
+        [region]
+            if region.range == (0..text.len()) || (!region.closed && region.range.start == 0) =>
+        {
+            Some(region.clone())
+        }
         _ => None,
     }
 }
@@ -169,7 +183,11 @@ pub fn regions(source: &str) -> Vec<Region> {
                 i = code_span_end(b, i, run, next_fence).unwrap_or(i + run);
             }
             b'$' => {
-                let delim = if b.get(i + 1) == Some(&b'$') { Delim::Dollars } else { Delim::Dollar };
+                let delim = if b.get(i + 1) == Some(&b'$') {
+                    Delim::Dollars
+                } else {
+                    Delim::Dollar
+                };
                 match closing(source, i, delim, next_fence) {
                     Some(region) => {
                         i = region.range.end;
@@ -216,18 +234,23 @@ fn code_span_end(b: &[u8], i: usize, run: usize, limit: usize) -> Option<usize> 
 fn blank_line_after(b: &[u8], nl: usize) -> bool {
     let rest = &b[nl + 1..];
     let line = rest.split(|&c| c == b'\n').next().unwrap_or(&[]);
-    line.iter().all(|c| matches!(c, b' ' | b'\t' | b'\r' | b'>'))
+    line.iter()
+        .all(|c| matches!(c, b' ' | b'\t' | b'\r' | b'>'))
 }
 
 /// A line that starts a list item or heading: inline math can't run into one.
 fn starts_block(line: &[u8]) -> bool {
     let line = line.trim_ascii_start();
-    let line = line.strip_prefix(b">").map_or(line, |l| l.trim_ascii_start());
+    let line = line
+        .strip_prefix(b">")
+        .map_or(line, |l| l.trim_ascii_start());
     match line {
         [b'-' | b'*' | b'+', b' ', ..] | [b'#', ..] => true,
         _ => {
             let digits = line.iter().take_while(|c| c.is_ascii_digit()).count();
-            digits > 0 && matches!(line.get(digits), Some(b'.' | b')')) && matches!(line.get(digits + 1), Some(b' '))
+            digits > 0
+                && matches!(line.get(digits), Some(b'.' | b')'))
+                && matches!(line.get(digits + 1), Some(b' '))
         }
     }
 }
@@ -261,7 +284,11 @@ fn closing(source: &str, i: usize, delim: Delim, limit: usize) -> Option<Region>
                     if source[start..j].trim().is_empty() {
                         return None;
                     }
-                    return Some(Region { range: i..j + 2, delim, closed: true });
+                    return Some(Region {
+                        range: i..j + 2,
+                        delim,
+                        closed: true,
+                    });
                 }
                 j += 1 + b.get(j + 1).map_or(0, |_| char_len(source, j + 1));
             }
@@ -271,20 +298,29 @@ fn closing(source: &str, i: usize, delim: Delim, limit: usize) -> Option<Region>
                         if source[start..j].trim().is_empty() {
                             return None;
                         }
-                        return Some(Region { range: i..j + 2, delim, closed: true });
+                        return Some(Region {
+                            range: i..j + 2,
+                            delim,
+                            closed: true,
+                        });
                     }
                     j += 1;
                     continue;
                 }
                 // A single dollar closes, or it was never math.
-                return dollar_closes(b, start, j).then(|| Region { range: i..j + 1, delim, closed: true });
+                return dollar_closes(b, start, j).then(|| Region {
+                    range: i..j + 1,
+                    delim,
+                    closed: true,
+                });
             }
             b'\n' => {
                 if blank_line_after(b, j) {
                     // A paragraph can't hold a formula past its end; if this is the end of the
                     // text, the formula is still being written.
                     let rest_blank = b[j..].iter().all(u8::is_ascii_whitespace);
-                    return (rest_blank && delim != Delim::Dollar && limit == b.len()).then(|| open_region(source, i, delim));
+                    return (rest_blank && delim != Delim::Dollar && limit == b.len())
+                        .then(|| open_region(source, i, delim));
                 }
                 if inline {
                     let line = b[j + 1..].split(|&c| c == b'\n').next().unwrap_or(&[]);
@@ -303,7 +339,11 @@ fn closing(source: &str, i: usize, delim: Delim, limit: usize) -> Option<Region>
 /// The formula `delim` opened at `i` and hasn't closed, to the end of the text.
 fn open_region(source: &str, i: usize, delim: Delim) -> Region {
     let end = source.trim_end().len().max(i + delim.open().len());
-    Region { range: i..end, delim, closed: false }
+    Region {
+        range: i..end,
+        delim,
+        closed: false,
+    }
 }
 
 /// The `$` at `j` closes the one before `start`: something between, no space before it, and no
@@ -319,7 +359,9 @@ fn dollar_closes(b: &[u8], start: usize, j: usize) -> bool {
     }
     match b.get(j + 1) {
         Some(c) if c.is_ascii_digit() => false,
-        Some(c) if c.is_ascii_alphabetic() || *c == b'_' => before.is_ascii_alphanumeric() || matches!(before, b'}' | b')' | b']' | b'\''),
+        Some(c) if c.is_ascii_alphabetic() || *c == b'_' => {
+            before.is_ascii_alphanumeric() || matches!(before, b'}' | b')' | b']' | b'\'')
+        }
         _ => true,
     }
 }
@@ -401,8 +443,14 @@ mod tests {
     fn finds_the_four_delimiters() {
         assert_eq!(found(r"Euler: $e^{i\pi}+1=0$."), [r"$e^{i\pi}+1=0$"]);
         assert_eq!(found(r"so \(a^2+b^2=c^2\) holds"), [r"\(a^2+b^2=c^2\)"]);
-        assert_eq!(found("$$\n\\int_0^1 x\\,dx\n$$"), ["$$\n\\int_0^1 x\\,dx\n$$"]);
-        assert_eq!(found("rule, \\[ P(\\theta=1\\mid T=+) \\approx \\boxed{0.0162}. \\]"), ["\\[ P(\\theta=1\\mid T=+) \\approx \\boxed{0.0162}. \\]"]);
+        assert_eq!(
+            found("$$\n\\int_0^1 x\\,dx\n$$"),
+            ["$$\n\\int_0^1 x\\,dx\n$$"]
+        );
+        assert_eq!(
+            found("rule, \\[ P(\\theta=1\\mid T=+) \\approx \\boxed{0.0162}. \\]"),
+            ["\\[ P(\\theta=1\\mid T=+) \\approx \\boxed{0.0162}. \\]"]
+        );
         let r = regions(r"x \[a\] y $b$")[0].clone();
         assert!(r.delim.display() && r.closed);
         assert!(!regions(r"x $b$")[0].delim.display());
@@ -410,14 +458,25 @@ mod tests {
 
     #[test]
     fn display_math_spans_lines_but_not_paragraphs() {
-        assert_eq!(found("\\[\na = b \\\\\nc = d\n\\]"), ["\\[\na = b \\\\\nc = d\n\\]"]);
+        assert_eq!(
+            found("\\[\na = b \\\\\nc = d\n\\]"),
+            ["\\[\na = b \\\\\nc = d\n\\]"]
+        );
         assert!(found("\\[\na = b\n\nc = d\n\\]").is_empty());
         assert!(found("$$\na\n\nb\n$$ c\n\nmore").is_empty());
     }
 
     #[test]
     fn money_is_not_math() {
-        for s in ["It costs $5 and $10.", "between $1,000 and $2,000", "$5-$10 range", "Pay $5, then $6 more", "I have $3", "$ 5 and 6 $", "US$5 vs US$6"] {
+        for s in [
+            "It costs $5 and $10.",
+            "between $1,000 and $2,000",
+            "$5-$10 range",
+            "Pay $5, then $6 more",
+            "I have $3",
+            "$ 5 and 6 $",
+            "US$5 vs US$6",
+        ] {
             assert!(found(s).is_empty(), "{s}: {:?}", found(s));
         }
         // An escaped dollar is a dollar.
@@ -427,7 +486,13 @@ mod tests {
 
     #[test]
     fn shell_is_not_math() {
-        for s in ["echo $HOME and $PATH", "export PATH=$HOME/bin:$PATH", "run $(pwd) and $(date)", "use ${HOME} or ${PATH}", "cost: $FOO, $BAR"] {
+        for s in [
+            "echo $HOME and $PATH",
+            "export PATH=$HOME/bin:$PATH",
+            "run $(pwd) and $(date)",
+            "use ${HOME} or ${PATH}",
+            "cost: $FOO, $BAR",
+        ] {
             assert!(found(s).is_empty(), "{s}: {:?}", found(s));
         }
         // But `$n$th` is math.
@@ -458,10 +523,18 @@ mod tests {
 
     #[test]
     fn unclosed_math_at_the_end_is_still_being_written() {
-        for (s, start) in [("By Bayes, \\[ P(\\theta", 10), ("$$\n\\frac{a}", 0), ("so \\(x^", 3), ("a\n\n$$", 3)] {
+        for (s, start) in [
+            ("By Bayes, \\[ P(\\theta", 10),
+            ("$$\n\\frac{a}", 0),
+            ("so \\(x^", 3),
+            ("a\n\n$$", 3),
+        ] {
             let r = regions(s);
             assert_eq!(r.len(), 1, "{s}");
-            assert!(!r[0].closed && r[0].range.start == start && r[0].range.end == s.len(), "{s}: {r:?}");
+            assert!(
+                !r[0].closed && r[0].range.start == start && r[0].range.end == s.len(),
+                "{s}: {r:?}"
+            );
         }
         // Single dollars never are; neither is an opener a paragraph break left behind.
         assert!(regions("costs $5").is_empty());
@@ -474,7 +547,18 @@ mod tests {
     #[test]
     fn neighbouring_formulas_are_each_found() {
         let s = r"- Inline: \(e^{i\pi} + 1 = 0\), $\sqrt{2} \approx 1.4142$, $x_{n+1} = x_n - \frac{f(x_n)}{f'(x_n)}$, and $\hat\theta$, $\bar{x}$, $\vec{v}$, $\alpha \le \beta \ne \gamma$.";
-        assert_eq!(found(s), [r"\(e^{i\pi} + 1 = 0\)", r"$\sqrt{2} \approx 1.4142$", r"$x_{n+1} = x_n - \frac{f(x_n)}{f'(x_n)}$", r"$\hat\theta$", r"$\bar{x}$", r"$\vec{v}$", r"$\alpha \le \beta \ne \gamma$"]);
+        assert_eq!(
+            found(s),
+            [
+                r"\(e^{i\pi} + 1 = 0\)",
+                r"$\sqrt{2} \approx 1.4142$",
+                r"$x_{n+1} = x_n - \frac{f(x_n)}{f'(x_n)}$",
+                r"$\hat\theta$",
+                r"$\bar{x}$",
+                r"$\vec{v}$",
+                r"$\alpha \le \beta \ne \gamma$"
+            ]
+        );
     }
 
     #[test]
@@ -496,7 +580,8 @@ mod tests {
 
     #[test]
     fn the_mask_keeps_length_and_hides_only_math() {
-        let s = "Price $5. By Bayes, \\[ P(\\theta=1\\mid T=+) \\] and `\\(c\\)` and \\(x_1\\) — ü $α$";
+        let s =
+            "Price $5. By Bayes, \\[ P(\\theta=1\\mid T=+) \\] and `\\(c\\)` and \\(x_1\\) — ü $α$";
         let m = mask(s).unwrap();
         assert_eq!(m.len(), s.len());
         assert!(m.starts_with("Price $5. By Bayes, $\u{1}"));
@@ -517,7 +602,10 @@ mod tests {
 
     #[test]
     fn never_panics_on_odd_text() {
-        let pieces = ["$", "$$", "\\", "(", ")", "[", "]", "\\(", "\\[", "\\)", "\\]", "`", "```", "\n", "\n\n", " ", "x", "é", "日本", "5", "> ", "- ", "{", "}", "~~~", "\\$", "\r\n"];
+        let pieces = [
+            "$", "$$", "\\", "(", ")", "[", "]", "\\(", "\\[", "\\)", "\\]", "`", "```", "\n",
+            "\n\n", " ", "x", "é", "日本", "5", "> ", "- ", "{", "}", "~~~", "\\$", "\r\n",
+        ];
         let mut seed = 0x2545_f491_4f6c_dd1du64;
         for _ in 0..4000 {
             let mut s = String::new();
@@ -534,7 +622,12 @@ mod tests {
             }
             let found = regions(&s);
             for r in &found {
-                assert!(r.range.end <= s.len() && s.is_char_boundary(r.range.start) && s.is_char_boundary(r.range.end), "{s:?}");
+                assert!(
+                    r.range.end <= s.len()
+                        && s.is_char_boundary(r.range.start)
+                        && s.is_char_boundary(r.range.end),
+                    "{s:?}"
+                );
                 let _ = r.tex(&s);
             }
             if let Some(m) = mask(&s) {

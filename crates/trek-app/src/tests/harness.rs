@@ -11,8 +11,9 @@ use crate::workspace::{GlobalWorkspace, Route, Workspace};
 use gpui_kit::component::ThemeRegistry;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, ForegroundExecutor, PlatformTextSystem, TestAppContext, TestDispatcher, Window, WindowBounds, WindowOptions,
-    point, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, ForegroundExecutor,
+    PlatformTextSystem, TestAppContext, TestDispatcher, Window, WindowBounds, WindowOptions, point,
+    px, size,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,7 +26,10 @@ use trek_core::{AgentId, HandHolding, RunState};
 /// The fonts the app registers at startup (`fonts::register`), for the tests' text system: the
 /// theme names them, and GPUI can't lay out a line in a family it hasn't got.
 fn add_fonts() {
-    TEXT.get().expect("text system").add_fonts(crate::fonts::files()).expect("Trek's fonts register");
+    TEXT.get()
+        .expect("text system")
+        .add_fonts(crate::fonts::files())
+        .expect("Trek's fonts register");
 }
 
 /// CoreText, so text lays out as in the app. `MacPlatform` must be made on the main thread and
@@ -51,7 +55,8 @@ fn load_text_system() {
 #[cfg(windows)]
 #[ctor::ctor(unsafe)]
 fn load_text_system() {
-    let platform = gpui_windows::WindowsPlatform::new(false).expect("DirectWrite text system for the UI tests");
+    let platform = gpui_windows::WindowsPlatform::new(false)
+        .expect("DirectWrite text system for the UI tests");
     let _ = TEXT.set(gpui_kit::Platform::text_system(&platform));
     add_fonts();
     // Lives for the whole process, as on macOS: it owns the message window the text system's devices belong to.
@@ -77,7 +82,10 @@ fn isolate_process() {
     // shell would otherwise find the real `.claude`, `.codex`, `AppData\Roaming` and the rest.
     #[cfg(windows)]
     {
-        let (roaming, local) = (home.join("AppData").join("Roaming"), home.join("AppData").join("Local"));
+        let (roaming, local) = (
+            home.join("AppData").join("Roaming"),
+            home.join("AppData").join("Local"),
+        );
         let _ = std::fs::create_dir_all(&roaming);
         let _ = std::fs::create_dir_all(&local);
         // SAFETY: as above.
@@ -101,8 +109,12 @@ fn process_exists(pid: i32) -> bool {
 /// handle someone still holds is "gone" too: its files are no longer in use.)
 #[cfg(windows)]
 fn process_exists(pid: i32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError, STILL_ACTIVE};
-    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, GetLastError, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
     // SAFETY: plain calls; the handle is closed before returning.
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
@@ -125,7 +137,13 @@ pub fn data_dir() -> &'static PathBuf {
         let tmp = std::env::temp_dir();
         for entry in std::fs::read_dir(&tmp).into_iter().flatten().flatten() {
             let name = entry.file_name();
-            let Some(pid) = name.to_str().and_then(|n| n.strip_prefix(PREFIX)).and_then(|p| p.parse::<i32>().ok()) else { continue };
+            let Some(pid) = name
+                .to_str()
+                .and_then(|n| n.strip_prefix(PREFIX))
+                .and_then(|p| p.parse::<i32>().ok())
+            else {
+                continue;
+            };
             if !process_exists(pid) {
                 let _ = std::fs::remove_dir_all(entry.path());
             }
@@ -143,10 +161,17 @@ pub fn data_dir() -> &'static PathBuf {
 pub fn run(test: impl AsyncFnOnce(&mut TestAppContext)) {
     // A data folder of the test's own (settings above all): the tests run side by side.
     static N: AtomicUsize = AtomicUsize::new(0);
-    trek_core::paths::isolate_thread(data_dir().join("tests").join(N.fetch_add(1, Ordering::Relaxed).to_string()));
+    trek_core::paths::isolate_thread(
+        data_dir()
+            .join("tests")
+            .join(N.fetch_add(1, Ordering::Relaxed).to_string()),
+    );
     let dispatcher = TestDispatcher::new(0);
     let exec = Arc::new(dispatcher.clone());
-    let text = TEXT.get().cloned().unwrap_or_else(|| Arc::new(gpui_kit::NoopTextSystem::new()));
+    let text = TEXT
+        .get()
+        .cloned()
+        .unwrap_or_else(|| Arc::new(gpui_kit::NoopTextSystem::new()));
     let mut cx = TestAppContext::build_with_text_system(dispatcher.clone(), None, text);
     cx.executor().allow_parking();
     ForegroundExecutor::new(exec.clone()).block_test(test(&mut cx));
@@ -179,7 +204,11 @@ pub fn mock() -> AgentId {
 
 /// What the updater says when the install goes ahead and can't: no app bundle runs here (macOS), or
 /// the staged update the tests name isn't there (Windows checks that before anything else).
-pub const INSTALL_BLOCKED: &str = if cfg!(windows) { "the downloaded update is gone" } else { "not running from an app bundle" };
+pub const INSTALL_BLOCKED: &str = if cfg!(windows) {
+    "the downloaded update is gone"
+} else {
+    "not running from an app bundle"
+};
 
 /// How long a test waits, in real time, for work that runs off the main thread (git, the mock
 /// agent, file reads) before it calls it lost. It is only ever spent when something is wrong, so
@@ -191,7 +220,8 @@ pub const REAL_TIME_LIMIT: Duration = Duration::from_secs(60);
 /// separators throughout: a path joined as `root.join("a/b")` mixes them on Windows, and so isn't
 /// the string the app builds from its own components.
 pub fn join(root: &std::path::Path, rel: &str) -> PathBuf {
-    rel.split('/').fold(root.to_path_buf(), |path, part| path.join(part))
+    rel.split('/')
+        .fold(root.to_path_buf(), |path, part| path.join(part))
 }
 
 /// `path` with symlinks resolved, as git and the app write it (no `\\?\` prefix on Windows).
@@ -202,7 +232,9 @@ pub fn canonical(path: &std::path::Path) -> PathBuf {
 /// A fresh, empty folder to use as a project.
 pub fn new_project(name: &str) -> PathBuf {
     static N: AtomicUsize = AtomicUsize::new(0);
-    let dir = data_dir().join("projects").join(format!("{name}-{}", N.fetch_add(1, Ordering::Relaxed)));
+    let dir = data_dir()
+        .join("projects")
+        .join(format!("{name}-{}", N.fetch_add(1, Ordering::Relaxed)));
     std::fs::create_dir_all(&dir).expect("project dir");
     dir
 }
@@ -227,17 +259,33 @@ pub fn open_with(cx: &mut TestAppContext, tweak: impl FnOnce(&mut Settings)) -> 
     let store = Store::in_memory().expect("store");
     store.ensure_project(&project).expect("project");
     let (ws, root, window) = launch(cx, store, settings);
-    let trek = Trek { ws, root, window, project };
+    let trek = Trek {
+        ws,
+        root,
+        window,
+        project,
+    };
     // Navigating focuses the composer, as at launch.
     let project = trek.project.clone();
-    trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project) }, cx));
+    trek.update(cx, |ws, cx| {
+        ws.navigate(
+            Route::Draft {
+                project: Some(project),
+            },
+            cx,
+        )
+    });
     trek.render(cx);
     trek
 }
 
 /// Trek's main window over `store` and `settings`, on whatever route they lead to (onboarding on
 /// a first run).
-pub fn launch(cx: &mut TestAppContext, store: Store, settings: Settings) -> (Entity<Workspace>, Entity<TrekWindow>, AnyWindowHandle) {
+pub fn launch(
+    cx: &mut TestAppContext,
+    store: Store,
+    settings: Settings,
+) -> (Entity<Workspace>, Entity<TrekWindow>, AnyWindowHandle) {
     cx.update(|cx| {
         gpui_kit::init(cx);
         crate::toast::init(cx);
@@ -255,17 +303,28 @@ pub fn launch(cx: &mut TestAppContext, store: Store, settings: Settings) -> (Ent
     });
     cx.update(|cx| cx.set_global(GlobalWorkspace(ws.clone())));
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds { origin: point(px(0.), px(0.)), size: size(px(1280.), px(820.)) })),
+        window_bounds: Some(WindowBounds::Windowed(Bounds {
+            origin: point(px(0.), px(0.)),
+            size: size(px(1280.), px(820.)),
+        })),
         ..Default::default()
     };
     let (window, root) = cx
-        .update(|cx| gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| TrekWindow::new(ws.clone(), window, cx))))
+        .update(|cx| {
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| TrekWindow::new(ws.clone(), window, cx))
+            })
+        })
         .expect("open window");
     (ws, root, window)
 }
 
 impl Trek {
-    pub fn update<R>(&self, cx: &mut TestAppContext, f: impl FnOnce(&mut Workspace, &mut Context<Workspace>) -> R) -> R {
+    pub fn update<R>(
+        &self,
+        cx: &mut TestAppContext,
+        f: impl FnOnce(&mut Workspace, &mut Context<Workspace>) -> R,
+    ) -> R {
         let r = self.ws.update(cx, f);
         cx.run_until_parked();
         r
@@ -275,8 +334,13 @@ impl Trek {
         self.ws.read_with(cx, f)
     }
 
-    pub fn window<R>(&self, cx: &mut TestAppContext, f: impl FnOnce(&mut Window, &mut App) -> R) -> R {
-        cx.update_window(self.window, |_, window, cx| f(window, cx)).expect("window")
+    pub fn window<R>(
+        &self,
+        cx: &mut TestAppContext,
+        f: impl FnOnce(&mut Window, &mut App) -> R,
+    ) -> R {
+        cx.update_window(self.window, |_, window, cx| f(window, cx))
+            .expect("window")
     }
 
     /// A full frame, as after a window refresh (cached views re-render too).
@@ -326,21 +390,40 @@ impl Trek {
     pub fn visible(&self, cx: &mut TestAppContext, id: impl Into<gpui_kit::ElementId>) -> bool {
         let id = id.into();
         cx.run_until_parked();
-        self.window(cx, |window, _| window.try_find(id).is_some_and(|e| e.visible()))
+        self.window(cx, |window, _| {
+            window.try_find(id).is_some_and(|e| e.visible())
+        })
     }
 
     /// Where `id` was drawn in the last frame, if it was.
-    pub fn bounds(&self, cx: &mut TestAppContext, id: impl Into<gpui_kit::ElementId>) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
+    pub fn bounds(
+        &self,
+        cx: &mut TestAppContext,
+        id: impl Into<gpui_kit::ElementId>,
+    ) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
         let id = id.into();
         cx.run_until_parked();
-        self.window(cx, |window, _| window.try_find(id).filter(|e| e.visible()).map(|e| e.bounds()))
+        self.window(cx, |window, _| {
+            window
+                .try_find(id)
+                .filter(|e| e.visible())
+                .map(|e| e.bounds())
+        })
     }
 
     /// `visible`, in another of Trek's windows (a thread window).
-    pub fn visible_in(&self, cx: &mut TestAppContext, window: AnyWindowHandle, id: impl Into<gpui_kit::ElementId>) -> bool {
+    pub fn visible_in(
+        &self,
+        cx: &mut TestAppContext,
+        window: AnyWindowHandle,
+        id: impl Into<gpui_kit::ElementId>,
+    ) -> bool {
         let id = id.into();
         cx.run_until_parked();
-        cx.update_window(window, |_, window, _| window.try_find(id).is_some_and(|e| e.visible())).expect("window")
+        cx.update_window(window, |_, window, _| {
+            window.try_find(id).is_some_and(|e| e.visible())
+        })
+        .expect("window")
     }
 
     /// Open `id` in a window of its own; returns that window.
@@ -348,7 +431,8 @@ impl Trek {
         let ws = self.ws.clone();
         cx.update(|cx| crate::thread_window::open(ws, id, cx));
         cx.run_until_parked();
-        self.read(cx, |ws, _| ws.thread_windows.get(id).copied()).expect("a window of its own")
+        self.read(cx, |ws, _| ws.thread_windows.get(id).copied())
+            .expect("a window of its own")
     }
 
     pub fn thread_view(&self, cx: &TestAppContext) -> Entity<crate::thread_view::ThreadView> {
@@ -365,7 +449,9 @@ impl Trek {
     pub fn drawn_markdown(&self, cx: &mut TestAppContext) -> Vec<(usize, String)> {
         use gpui_kit::component::text::SelectionFormat;
         cx.run_until_parked();
-        let docs = self.thread_view(cx).read_with(cx, |v, cx| v.markdown_documents(cx));
+        let docs = self
+            .thread_view(cx)
+            .read_with(cx, |v, cx| v.markdown_documents(cx));
         docs.into_iter()
             .map(|(ix, doc)| {
                 // Select-all copies the source in Source format.
@@ -385,7 +471,16 @@ impl Trek {
     /// A thread in the project with no session, on screen. Feed it with `Workspace::apply_events`.
     pub fn quiet_thread(&self, cx: &mut TestAppContext) -> String {
         self.update(cx, |ws, cx| {
-            let t = ws.store.create_thread(Some(&self.project), mock(), None, trek_core::Effort::Medium, HandHolding::Auto).expect("thread");
+            let t = ws
+                .store
+                .create_thread(
+                    Some(&self.project),
+                    mock(),
+                    None,
+                    trek_core::Effort::Medium,
+                    HandHolding::Auto,
+                )
+                .expect("thread");
             ws.reload(cx);
             ws.navigate(Route::Thread(t.id.clone()), cx);
             t.id
@@ -413,7 +508,13 @@ impl Trek {
 
     /// The pending request on `id` (an approval, question or plan).
     pub fn request(&self, cx: &TestAppContext, id: &str) -> String {
-        self.read(cx, |ws, _| ws.live.get(id).and_then(|l| l.permissions.first()).map(|p| p.request_id.clone()).expect("a pending request"))
+        self.read(cx, |ws, _| {
+            ws.live
+                .get(id)
+                .and_then(|l| l.permissions.first())
+                .map(|p| p.request_id.clone())
+                .expect("a pending request")
+        })
     }
 
     /// Index of the first transcript item matching `f`.
@@ -430,31 +531,67 @@ impl Trek {
     }
 
     pub fn items(&self, cx: &TestAppContext, id: &str) -> Vec<Item> {
-        self.read(cx, |ws, _| ws.live.get(id).map(|l| l.items.to_vec()).unwrap_or_default())
+        self.read(cx, |ws, _| {
+            ws.live
+                .get(id)
+                .map(|l| l.items.to_vec())
+                .unwrap_or_default()
+        })
     }
 
     pub fn run_state(&self, cx: &TestAppContext, id: &str) -> RunState {
-        self.read(cx, |ws, _| ws.thread(id).map(|t| t.run_state).expect("thread"))
+        self.read(cx, |ws, _| {
+            ws.thread(id).map(|t| t.run_state).expect("thread")
+        })
     }
 
     /// Everything the agent said in `id`, joined.
     pub fn answers(&self, cx: &TestAppContext, id: &str) -> String {
-        self.items(cx, id).into_iter().filter_map(|i| if let Item::Assistant { text } = i { Some(text) } else { None }).collect::<Vec<_>>().join("\n")
+        self.items(cx, id)
+            .into_iter()
+            .filter_map(|i| {
+                if let Item::Assistant { text } = i {
+                    Some(text)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Wait (in real time; the agent runs on other threads) until `until` holds.
-    pub async fn wait(&self, cx: &mut TestAppContext, what: &str, until: impl Fn(&Workspace) -> bool) {
+    pub async fn wait(
+        &self,
+        cx: &mut TestAppContext,
+        what: &str,
+        until: impl Fn(&Workspace) -> bool,
+    ) {
         self.wait_up_to(cx, what, REAL_TIME_LIMIT, until).await;
     }
 
     /// `wait`, for work that is slow by design (a test that makes git crawl) and gets a longer
     /// limit than the usual 20 s.
-    pub async fn wait_up_to(&self, cx: &mut TestAppContext, what: &str, limit: Duration, until: impl Fn(&Workspace) -> bool) {
-        self.wait_explained(cx, what, limit, until, |_| String::new()).await;
+    pub async fn wait_up_to(
+        &self,
+        cx: &mut TestAppContext,
+        what: &str,
+        limit: Duration,
+        until: impl Fn(&Workspace) -> bool,
+    ) {
+        self.wait_explained(cx, what, limit, until, |_| String::new())
+            .await;
     }
 
     /// `wait_up_to`, whose failure also says what `explain` finds in the workspace then.
-    pub async fn wait_explained(&self, cx: &mut TestAppContext, what: &str, limit: Duration, until: impl Fn(&Workspace) -> bool, explain: impl Fn(&Workspace) -> String) {
+    pub async fn wait_explained(
+        &self,
+        cx: &mut TestAppContext,
+        what: &str,
+        limit: Duration,
+        until: impl Fn(&Workspace) -> bool,
+        explain: impl Fn(&Workspace) -> String,
+    ) {
         let deadline = Instant::now() + limit;
         loop {
             cx.run_until_parked();
@@ -462,7 +599,10 @@ impl Trek {
                 return;
             }
             if Instant::now() >= deadline {
-                panic!("timed out waiting for {what}: {}", self.ws.read_with(cx, |ws, _| explain(ws)));
+                panic!(
+                    "timed out waiting for {what}: {}",
+                    self.ws.read_with(cx, |ws, _| explain(ws))
+                );
             }
             cx.background_executor.timer(Duration::from_millis(5)).await;
         }
@@ -472,7 +612,8 @@ impl Trek {
     pub async fn wait_done(&self, cx: &mut TestAppContext, id: &str, state: RunState) {
         let id = id.to_string();
         self.wait(cx, &format!("thread to be {state:?}"), |ws| {
-            ws.thread(&id).is_some_and(|t| t.run_state == state) && ws.live.get(&id).is_some_and(|l| l.turn_started.is_none())
+            ws.thread(&id).is_some_and(|t| t.run_state == state)
+                && ws.live.get(&id).is_some_and(|l| l.turn_started.is_none())
         })
         .await;
     }
@@ -480,7 +621,11 @@ impl Trek {
     /// Wait until `id` needs the user (an approval, a question or a plan is on screen).
     pub async fn wait_needs_you(&self, cx: &mut TestAppContext, id: &str) {
         let id = id.to_string();
-        self.wait(cx, "the agent to ask", |ws| ws.thread(&id).is_some_and(|t| t.run_state == RunState::NeedsYou)).await;
+        self.wait(cx, "the agent to ask", |ws| {
+            ws.thread(&id)
+                .is_some_and(|t| t.run_state == RunState::NeedsYou)
+        })
+        .await;
     }
 
     /// Type `text` in the composer and press Return. Returns the thread it went to.
@@ -494,12 +639,20 @@ impl Trek {
 /// The working bar's header split at its trail word: what follows it ("4s · 2 agents out"), or
 /// `None` when it doesn't start with one ("Breaking trail… 4s").
 pub fn trail_word(header: &str) -> Option<&str> {
-    crate::mascot::WORDS.iter().find_map(|w| header.strip_prefix(*w)?.strip_prefix('…')).map(str::trim_start)
+    crate::mascot::WORDS
+        .iter()
+        .find_map(|w| header.strip_prefix(*w)?.strip_prefix('…'))
+        .map(str::trim_start)
 }
 
 /// Store `items` as `thread`'s transcript, as if it had been saved there.
 pub fn store_items(store: &Store, thread: &str, items: Vec<Item>) {
-    store.save_transcript(thread, &mut trek_core::transcript::Transcript::unsaved(items)).expect("items");
+    store
+        .save_transcript(
+            thread,
+            &mut trek_core::transcript::Transcript::unsaved(items),
+        )
+        .expect("items");
 }
 
 /// A realistic transcript of `turns` turns: a question, a couple of tool calls, a markdown answer
@@ -507,16 +660,39 @@ pub fn store_items(store: &Store, thread: &str, items: Vec<Item>) {
 pub fn transcript(turns: usize) -> Vec<Item> {
     let mut items = Vec::with_capacity(turns * 6);
     for i in 0..turns {
-        items.push(Item::User { text: format!("Step {i}: tighten the error handling in the request parser and add a test."), images: vec![], at: Some(1_759_400_000_000 + i as i64 * 60_000), resume: None, aside: false });
-        items.push(Item::Tool { id: format!("t{i}a"), title: "Read".into(), detail: "src/parser.rs".into(), output: "pub fn parse(input: &str) -> Result<Request> { … }".into(), status: trek_core::store::ToolStatus::Done });
-        items.push(Item::Tool { id: format!("t{i}b"), title: "Edit".into(), detail: "src/parser.rs".into(), output: "Applied 1 edit".into(), status: trek_core::store::ToolStatus::Done });
+        items.push(Item::User {
+            text: format!(
+                "Step {i}: tighten the error handling in the request parser and add a test."
+            ),
+            images: vec![],
+            at: Some(1_759_400_000_000 + i as i64 * 60_000),
+            resume: None,
+            aside: false,
+        });
+        items.push(Item::Tool {
+            id: format!("t{i}a"),
+            title: "Read".into(),
+            detail: "src/parser.rs".into(),
+            output: "pub fn parse(input: &str) -> Result<Request> { … }".into(),
+            status: trek_core::store::ToolStatus::Done,
+        });
+        items.push(Item::Tool {
+            id: format!("t{i}b"),
+            title: "Edit".into(),
+            detail: "src/parser.rs".into(),
+            output: "Applied 1 edit".into(),
+            status: trek_core::store::ToolStatus::Done,
+        });
         items.push(Item::Assistant {
             text: format!(
                 "### Step {i}\n\nThe parser in `src/parser.rs` now returns **typed errors** instead of panicking:\n\n- `ParseError::Truncated` when the body ends early\n- `ParseError::BadHeader` for malformed headers, with the line number\n- a regression test in `tests/parser.rs`\n\n```rust\nmatch parse(input) {{\n    Ok(req) => handle(req),\n    Err(ParseError::Truncated) => reply(400, \"truncated body\"),\n    Err(e) => reply(400, &e.to_string()),\n}}\n```\n\nAll {} tests pass.",
                 40 + i
             ),
         });
-        items.push(Item::TurnEnd { at: 1_759_400_000_000 + i as i64 * 60_000 + 30_000, took_secs: 30 });
+        items.push(Item::TurnEnd {
+            at: 1_759_400_000_000 + i as i64 * 60_000 + 30_000,
+            took_secs: 30,
+        });
     }
     items
 }
@@ -529,10 +705,22 @@ pub fn populate(store: &Store, settled: usize) {
     let now = now_ms();
     for i in 0..(settled + 15) {
         let cwd = &projects[i % projects.len()];
-        let mut t = store.create_thread(Some(cwd), mock(), None, trek_core::Effort::Medium, HandHolding::Auto).expect("thread");
+        let mut t = store
+            .create_thread(
+                Some(cwd),
+                mock(),
+                None,
+                trek_core::Effort::Medium,
+                HandHolding::Auto,
+            )
+            .expect("thread");
         t.title = format!("Thread {i}: fix the flaky integration test in the payments service");
         t.updated_at = now - i as i64 * 3_600_000;
-        t.last_seen_at = if i % 3 == 0 { t.updated_at - 1 } else { t.updated_at };
+        t.last_seen_at = if i % 3 == 0 {
+            t.updated_at - 1
+        } else {
+            t.updated_at
+        };
         match i {
             0..12 => {}
             12 => t.pinned_at = Some(now),

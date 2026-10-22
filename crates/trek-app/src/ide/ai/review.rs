@@ -10,7 +10,12 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 /// The bar for `thread`, when it has changes pending.
-pub fn pending_bar(ws: &Entity<Workspace>, thread: &str, line: Hsla, cx: &App) -> Option<AnyElement> {
+pub fn pending_bar(
+    ws: &Entity<Workspace>,
+    thread: &str,
+    line: Hsla,
+    cx: &App,
+) -> Option<AnyElement> {
     let w = ws.read(cx);
     let review = w.review(thread).filter(|r| !r.pending.is_empty())?;
     let busy = w.turn_running(thread);
@@ -33,10 +38,14 @@ pub fn pending_bar(ws: &Entity<Workspace>, thread: &str, line: Hsla, cx: &App) -
             .items_center()
             .rounded(px(5.))
             .cursor_pointer()
-            .hover(|s| s.bg(theme.foreground.opacity(0.06)).text_color(theme.foreground))
+            .hover(|s| {
+                s.bg(theme.foreground.opacity(0.06))
+                    .text_color(theme.foreground)
+            })
     };
     let (ws_review, ws_undo, ws_keep) = (ws.clone(), ws.clone(), ws.clone());
-    let (id_review, id_undo, id_keep) = (thread.to_string(), thread.to_string(), thread.to_string());
+    let (id_review, id_undo, id_keep) =
+        (thread.to_string(), thread.to_string(), thread.to_string());
     Some(
         h_flex()
             .id("ai-pending")
@@ -57,7 +66,11 @@ pub fn pending_bar(ws: &Entity<Workspace>, thread: &str, line: Hsla, cx: &App) -
                     .min_w_0()
                     .gap(px(5.))
                     .child(div().text_color(ember).child("✦"))
-                    .child(div().text_color(theme.foreground.opacity(0.85)).child(format!("{n} file{}", if n == 1 { "" } else { "s" })))
+                    .child(
+                        div()
+                            .text_color(theme.foreground.opacity(0.85))
+                            .child(format!("{n} file{}", if n == 1 { "" } else { "s" })),
+                    )
                     .when(added > 0 || removed > 0, |el| {
                         el.child(crate::line_breakdown::hover(
                             "ai-pending-lines",
@@ -65,22 +78,56 @@ pub fn pending_bar(ws: &Entity<Workspace>, thread: &str, line: Hsla, cx: &App) -
                                 .gap(px(5.))
                                 .font_family(theme.mono_font_family.clone())
                                 .text_size(px(11.))
-                                .when(added > 0, |el| el.child(div().text_color(palette::emerald(cx)).child(format!("+{added}"))))
-                                .when(removed > 0, |el| el.child(div().text_color(palette::red(cx)).child(format!("−{removed}")))),
+                                .when(added > 0, |el| {
+                                    el.child(
+                                        div()
+                                            .text_color(palette::emerald(cx))
+                                            .child(format!("+{added}")),
+                                    )
+                                })
+                                .when(removed > 0, |el| {
+                                    el.child(
+                                        div()
+                                            .text_color(palette::red(cx))
+                                            .child(format!("−{removed}")),
+                                    )
+                                }),
                             trek_core::file_kind::LineBreakdown::of_changes(&review.pending),
                         ))
                     }),
             )
-            .when(git, |el| el.child(link("ai-review").child("Review").on_click(move |_, _, cx| ws_review.update(cx, |ws, cx| ws.open_review(&id_review, cx)))))
+            .when(git, |el| {
+                el.child(link("ai-review").child("Review").on_click(move |_, _, cx| {
+                    ws_review.update(cx, |ws, cx| ws.open_review(&id_review, cx))
+                }))
+            })
             .when(git, |el| {
                 el.child(
                     link("ai-undo-all")
                         .when(busy, |el| el.opacity(0.45).cursor_default())
-                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared(if busy { "Stop the running turn to undo" } else { "Undo all (⌘⇧⌫, twice)" })).build(window, cx))
+                        .tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared(
+                                if busy {
+                                    "Stop the running turn to undo"
+                                } else {
+                                    "Undo all (⌘⇧⌫, twice)"
+                                },
+                            ))
+                            .build(window, cx)
+                        })
                         .when(armed, |el| el.text_color(palette::red(cx)))
-                        .child(if armed { "Undo all? Again to confirm" } else { "Undo all" })
-                        .child(kbd(crate::keys::hint(crate::keys::Id::UndoAllOrStop), muted.opacity(0.7)))
-                        .on_click(move |_, _, cx| ws_undo.update(cx, |ws, cx| ws.undo_files(&id_undo, None, cx))),
+                        .child(if armed {
+                            "Undo all? Again to confirm"
+                        } else {
+                            "Undo all"
+                        })
+                        .child(kbd(
+                            crate::keys::hint(crate::keys::Id::UndoAllOrStop),
+                            muted.opacity(0.7),
+                        ))
+                        .on_click(move |_, _, cx| {
+                            ws_undo.update(cx, |ws, cx| ws.undo_files(&id_undo, None, cx))
+                        }),
                 )
             })
             .child(
@@ -98,8 +145,13 @@ pub fn pending_bar(ws: &Entity<Workspace>, thread: &str, line: Hsla, cx: &App) -
                     .text_color(gpui_kit::white())
                     .hover(|s| s.opacity(0.9))
                     .child("Keep all")
-                    .child(kbd(crate::keys::localize("⌘↵").into_owned(), gpui_kit::white().opacity(0.75)))
-                    .on_click(move |_, _, cx| ws_keep.update(cx, |ws, cx| ws.keep_files(&id_keep, None, cx))),
+                    .child(kbd(
+                        crate::keys::localize("⌘↵").into_owned(),
+                        gpui_kit::white().opacity(0.75),
+                    ))
+                    .on_click(move |_, _, cx| {
+                        ws_keep.update(cx, |ws, cx| ws.keep_files(&id_keep, None, cx))
+                    }),
             )
             .into_any_element(),
     )

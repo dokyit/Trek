@@ -71,35 +71,74 @@ const ROW_STEP: f32 = 32.;
 /// drew over the card at `p`. Rows covered the whole way across are cut from the top and bottom
 /// (to the pixel); a cover anywhere else in what's left makes it `covered`.
 pub fn analyze(visible: Bounds<Pixels>, open: impl Fn(Point<Pixels>) -> bool) -> Coverage {
-    let (w, h) = (f32::from(visible.size.width), f32::from(visible.size.height));
+    let (w, h) = (
+        f32::from(visible.size.width),
+        f32::from(visible.size.height),
+    );
     if w < 1. || h < 1. {
-        return Coverage { clip: None, covered: false };
+        return Coverage {
+            clip: None,
+            covered: false,
+        };
     }
     let (left, top) = (f32::from(visible.origin.x), f32::from(visible.origin.y));
     let columns = COLUMNS.min((w / 24.).ceil().max(2.) as usize);
-    let xs: Vec<f32> = (0..columns).map(|i| left + 0.5 + (w - 1.) * i as f32 / (columns - 1) as f32).collect();
+    let xs: Vec<f32> = (0..columns)
+        .map(|i| left + 0.5 + (w - 1.) * i as f32 / (columns - 1) as f32)
+        .collect();
     let shut = |y: f32| xs.iter().all(|x| !open(point(px(*x), px(y))));
     let rows = ((h / ROW_STEP).ceil() as usize).max(1);
-    let ys: Vec<f32> = (0..=rows).map(|i| (top + 0.5 + (h - 1.) * i as f32 / rows as f32).min(top + h - 0.5)).collect();
-    let Some(first) = ys.iter().position(|y| !shut(*y)) else { return Coverage { clip: None, covered: false } };
+    let ys: Vec<f32> = (0..=rows)
+        .map(|i| (top + 0.5 + (h - 1.) * i as f32 / rows as f32).min(top + h - 0.5))
+        .collect();
+    let Some(first) = ys.iter().position(|y| !shut(*y)) else {
+        return Coverage {
+            clip: None,
+            covered: false,
+        };
+    };
     let last = ys.iter().rposition(|y| !shut(*y)).unwrap_or(first);
     // The exact edge between a shut row and an open one, to the pixel.
     let edge = |mut shut_y: f32, mut open_y: f32| {
         while (open_y - shut_y).abs() > 1. {
             let mid = (open_y + shut_y) / 2.;
-            if shut(mid) { shut_y = mid } else { open_y = mid }
+            if shut(mid) {
+                shut_y = mid
+            } else {
+                open_y = mid
+            }
         }
         open_y
     };
-    let clip_top = if first == 0 { top } else { (edge(ys[first - 1], ys[first]) - 0.5).floor() };
-    let clip_bottom = if last == ys.len() - 1 { top + h } else { (edge(ys[last + 1], ys[last]) + 0.5).ceil() };
+    let clip_top = if first == 0 {
+        top
+    } else {
+        (edge(ys[first - 1], ys[first]) - 0.5).floor()
+    };
+    let clip_bottom = if last == ys.len() - 1 {
+        top + h
+    } else {
+        (edge(ys[last + 1], ys[last]) + 0.5).ceil()
+    };
     let clip_top = clip_top.max(top);
     let clip_bottom = clip_bottom.min(top + h);
     if clip_bottom - clip_top < 1. {
-        return Coverage { clip: None, covered: false };
+        return Coverage {
+            clip: None,
+            covered: false,
+        };
     }
-    let covered = ys.iter().filter(|y| **y > clip_top && **y < clip_bottom).any(|y| xs.iter().any(|x| !open(point(px(*x), px(*y)))));
-    Coverage { clip: Some(Bounds::from_corners(point(visible.origin.x, px(clip_top)), point(visible.origin.x + visible.size.width, px(clip_bottom)))), covered }
+    let covered = ys
+        .iter()
+        .filter(|y| **y > clip_top && **y < clip_bottom)
+        .any(|y| xs.iter().any(|x| !open(point(px(*x), px(*y)))));
+    Coverage {
+        clip: Some(Bounds::from_corners(
+            point(visible.origin.x, px(clip_top)),
+            point(visible.origin.x + visible.size.width, px(clip_bottom)),
+        )),
+        covered,
+    }
 }
 
 /// How far `body` is from `viewport` up or down (0 when they overlap).
@@ -122,7 +161,13 @@ mod tests {
     #[test]
     fn nothing_over_it_shows_it_all() {
         let v = rect(100., 200., 600., 400.);
-        assert_eq!(analyze(v, |_| true), Coverage { clip: Some(v), covered: false });
+        assert_eq!(
+            analyze(v, |_| true),
+            Coverage {
+                clip: Some(v),
+                covered: false
+            }
+        );
     }
 
     #[test]
@@ -137,7 +182,10 @@ mod tests {
         assert_eq!(clip.size.width, px(600.));
         // And one across its head (a header that overlaps the transcript).
         let c = analyze(v, |p| f32::from(p.y) >= 233.);
-        assert!((f32::from(c.clip.unwrap().top()) - 233.).abs() <= 1., "{c:?}");
+        assert!(
+            (f32::from(c.clip.unwrap().top()) - 233.).abs() <= 1.,
+            "{c:?}"
+        );
     }
 
     #[test]
@@ -146,14 +194,22 @@ mod tests {
         let menu = rect(300., 300., 200., 160.);
         let c = analyze(v, |p| !menu.contains(&p));
         assert!(c.covered);
-        assert_eq!(c.clip, Some(v), "nothing is cut: the snapshot stands in for the whole card");
+        assert_eq!(
+            c.clip,
+            Some(v),
+            "nothing is cut: the snapshot stands in for the whole card"
+        );
     }
 
     #[test]
     fn covered_all_over_shows_nothing() {
         let v = rect(100., 200., 600., 400.);
         assert_eq!(analyze(v, |_| false).clip, None);
-        assert_eq!(analyze(rect(0., 0., 0., 10.), |_| true).clip, None, "nothing visible");
+        assert_eq!(
+            analyze(rect(0., 0., 0., 10.), |_| true).clip,
+            None,
+            "nothing visible"
+        );
     }
 
     #[test]

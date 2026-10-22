@@ -28,7 +28,15 @@ const BUILT_IN: [(&str, &[&str]); 4] = [
 
 /// Every agent OpenCode ships; the hidden ones (compaction, title, summary) deny all tools and
 /// must stay that way.
-const NATIVE: [&str; 7] = ["build", "plan", "general", "explore", "compaction", "title", "summary"];
+const NATIVE: [&str; 7] = [
+    "build",
+    "plan",
+    "general",
+    "explore",
+    "compaction",
+    "title",
+    "summary",
+];
 
 /// What the user's own OpenCode config already decides.
 #[derive(Debug, Default, PartialEq)]
@@ -47,8 +55,12 @@ fn glob(pattern: &str, name: &str) -> bool {
     match pattern.split_once('*') {
         None => pattern == name,
         Some((head, rest)) => {
-            let Some(tail) = name.strip_prefix(head) else { return false };
-            (0..=tail.len()).filter(|i| tail.is_char_boundary(*i)).any(|i| glob(rest, &tail[i..]))
+            let Some(tail) = name.strip_prefix(head) else {
+                return false;
+            };
+            (0..=tail.len())
+                .filter(|i| tail.is_char_boundary(*i))
+                .any(|i| glob(rest, &tail[i..]))
         }
     }
 }
@@ -85,7 +97,11 @@ fn set_in(section: &Value) -> BTreeSet<&'static str> {
             _ => out.extend(GATED),
         }
     }
-    for k in section["tools"].as_object().into_iter().flat_map(|t| t.keys()) {
+    for k in section["tools"]
+        .as_object()
+        .into_iter()
+        .flat_map(|t| t.keys())
+    {
         out.extend(gated(k));
     }
     out
@@ -94,8 +110,15 @@ fn set_in(section: &Value) -> BTreeSet<&'static str> {
 impl UserRules {
     fn add_config(&mut self, c: &Value) {
         self.global.extend(set_in(c));
-        for (name, agent) in ["agent", "agents", "mode"].iter().filter_map(|k| c[*k].as_object()).flatten() {
-            self.agents.entry(name.clone()).or_default().extend(set_in(agent));
+        for (name, agent) in ["agent", "agents", "mode"]
+            .iter()
+            .filter_map(|k| c[*k].as_object())
+            .flatten()
+        {
+            self.agents
+                .entry(name.clone())
+                .or_default()
+                .extend(set_in(agent));
             self.custom.insert(name.clone());
         }
     }
@@ -114,7 +137,11 @@ impl UserRules {
             .map(|n| n.trim().trim_matches(['"', '\'']).to_string())
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| name.to_string());
-        if front.iter().any(|l| ["permission:", "permissions:", "tools:"].iter().any(|k| l.starts_with(k))) {
+        if front.iter().any(|l| {
+            ["permission:", "permissions:", "tools:"]
+                .iter()
+                .any(|k| l.starts_with(k))
+        }) {
             self.agents.entry(name.clone()).or_default().extend(GATED);
         }
         self.custom.insert(name);
@@ -124,7 +151,9 @@ impl UserRules {
     fn add_config_text(&mut self, text: &str) {
         match parse_jsonc(text) {
             Some(c) => self.add_config(&c),
-            None if text.contains("permission") || text.contains("tools") => self.global.extend(GATED),
+            None if text.contains("permission") || text.contains("tools") => {
+                self.global.extend(GATED)
+            }
             None => {}
         }
     }
@@ -132,7 +161,11 @@ impl UserRules {
 
 /// `{"agent": {name: {"permission": {gated: "ask"}}}}` for what the user left unset, if anything.
 pub(crate) fn ask_rules(user: &UserRules) -> Option<Value> {
-    let custom = user.custom.iter().filter(|n| !NATIVE.contains(&n.as_str())).map(|n| (n.as_str(), &GATED[..]));
+    let custom = user
+        .custom
+        .iter()
+        .filter(|n| !NATIVE.contains(&n.as_str()))
+        .map(|n| (n.as_str(), &GATED[..]));
     let mut agents = Map::new();
     for (name, keys) in BUILT_IN.into_iter().chain(custom) {
         let theirs = user.agents.get(name);
@@ -215,10 +248,19 @@ fn strip_leading_comments(mut s: &str) -> &str {
 
 /// Where OpenCode looks for config, for a session in `cwd`: JSON files, then the folders whose
 /// `agent(s)/` and `mode(s)/` hold Markdown agents.
-fn config_sources(cwd: &Path, env: &dyn Fn(&str) -> Option<String>) -> (Vec<PathBuf>, Vec<PathBuf>) {
+fn config_sources(
+    cwd: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let home = trek_core::paths::home();
-    let global = env("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".config")).join("opencode");
-    let mut files: Vec<PathBuf> = ["config.json", "opencode.json", "opencode.jsonc"].iter().map(|f| global.join(f)).collect();
+    let global = env("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"))
+        .join("opencode");
+    let mut files: Vec<PathBuf> = ["config.json", "opencode.json", "opencode.jsonc"]
+        .iter()
+        .map(|f| global.join(f))
+        .collect();
     let mut dirs = vec![global];
     files.extend(env("OPENCODE_CONFIG").map(PathBuf::from));
     if env("OPENCODE_DISABLE_PROJECT_CONFIG").is_none() {
@@ -231,18 +273,33 @@ fn config_sources(cwd: &Path, env: &dyn Fn(&str) -> Option<String>) -> (Vec<Path
             }
         }
         for dir in up.into_iter().rev() {
-            files.extend(["opencode.json", "opencode.jsonc"].iter().map(|f| dir.join(f)));
+            files.extend(
+                ["opencode.json", "opencode.jsonc"]
+                    .iter()
+                    .map(|f| dir.join(f)),
+            );
             dirs.push(dir.join(".opencode"));
         }
     }
     dirs.push(home.join(".opencode"));
     let config_dir = env("OPENCODE_CONFIG_DIR").map(PathBuf::from);
     dirs.extend(config_dir.clone());
-    for dir in dirs.iter().filter(|d| d.ends_with(".opencode") || Some(*d) == config_dir.as_ref()) {
-        files.extend(["opencode.json", "opencode.jsonc"].iter().map(|f| dir.join(f)));
+    for dir in dirs
+        .iter()
+        .filter(|d| d.ends_with(".opencode") || Some(*d) == config_dir.as_ref())
+    {
+        files.extend(
+            ["opencode.json", "opencode.jsonc"]
+                .iter()
+                .map(|f| dir.join(f)),
+        );
     }
     let managed = managed_dir(env);
-    files.extend(["opencode.json", "opencode.jsonc"].iter().map(|f| managed.join(f)));
+    files.extend(
+        ["opencode.json", "opencode.jsonc"]
+            .iter()
+            .map(|f| managed.join(f)),
+    );
     (files, dirs)
 }
 
@@ -252,7 +309,10 @@ fn config_sources(cwd: &Path, env: &dyn Fn(&str) -> Option<String>) -> (Vec<Path
 /// home folder, not from `%APPDATA%`.
 fn managed_dir(env: &dyn Fn(&str) -> Option<String>) -> PathBuf {
     if cfg!(windows) {
-        env("ProgramData").filter(|p| !p.is_empty()).map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from).join("opencode")
+        env("ProgramData")
+            .filter(|p| !p.is_empty())
+            .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from)
+            .join("opencode")
     } else {
         PathBuf::from("/Library/Application Support/opencode")
     }
@@ -261,7 +321,12 @@ fn managed_dir(env: &dyn Fn(&str) -> Option<String>) -> PathBuf {
 /// Markdown agents under `dir`: `(name, text)`.
 fn agent_files(dir: &Path) -> Vec<(String, String)> {
     let mut out = vec![];
-    for (sub, deep) in [("agent", true), ("agents", true), ("mode", false), ("modes", false)] {
+    for (sub, deep) in [
+        ("agent", true),
+        ("agents", true),
+        ("mode", false),
+        ("modes", false),
+    ] {
         let root = dir.join(sub);
         let mut stack = vec![root.clone()];
         while let Some(d) = stack.pop() {
@@ -272,7 +337,8 @@ fn agent_files(dir: &Path) -> Vec<(String, String)> {
                         stack.push(path);
                     }
                 } else if path.extension().is_some_and(|e| e == "md")
-                    && let (Ok(text), Ok(rel)) = (std::fs::read_to_string(&path), path.strip_prefix(&root))
+                    && let (Ok(text), Ok(rel)) =
+                        (std::fs::read_to_string(&path), path.strip_prefix(&root))
                 {
                     out.push((rel.with_extension("").to_string_lossy().to_string(), text));
                 }
@@ -308,7 +374,9 @@ fn user_rules(cwd: &Path, env: &dyn Fn(&str) -> Option<String>) -> UserRules {
 /// user set themselves is kept, with Trek's rules added to it.
 pub(crate) fn launch_env(cwd: &Path) -> Vec<(String, String)> {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-    let Some(mut rules) = ask_rules(&user_rules(cwd, &env)) else { return vec![] };
+    let Some(mut rules) = ask_rules(&user_rules(cwd, &env)) else {
+        return vec![];
+    };
     if let Some(theirs) = env("OPENCODE_CONFIG_CONTENT") {
         match parse_jsonc(&theirs).map(|t| merge_rules(t, &rules)) {
             Some(Some(merged)) => rules = merged,
@@ -321,10 +389,20 @@ pub(crate) fn launch_env(cwd: &Path) -> Vec<(String, String)> {
 
 /// `theirs` with Trek's agent rules added (they only name permissions `theirs` leaves unset).
 fn merge_rules(mut theirs: Value, ours: &Value) -> Option<Value> {
-    let agents = theirs.as_object_mut()?.entry("agent").or_insert_with(|| json!({})).as_object_mut()?;
+    let agents = theirs
+        .as_object_mut()?
+        .entry("agent")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()?;
     for (name, rules) in ours["agent"].as_object().into_iter().flatten() {
-        let agent = agents.entry(name.clone()).or_insert_with(|| json!({})).as_object_mut()?;
-        let permission = agent.entry("permission").or_insert_with(|| json!({})).as_object_mut()?;
+        let agent = agents
+            .entry(name.clone())
+            .or_insert_with(|| json!({}))
+            .as_object_mut()?;
+        let permission = agent
+            .entry("permission")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()?;
         for (k, v) in rules["permission"].as_object().into_iter().flatten() {
             permission.insert(k.clone(), v.clone());
         }
@@ -339,20 +417,34 @@ const MADE_BY_2: &str = "Database is not empty and has no session table";
 /// `opencode --version` is 1.x's: `1.18.35`. OpenCode 2 says `2.0.26`, or `opencode2
 /// v0.0.0-beta-19296` from a preview build.
 fn is_1x_version(version: &str) -> bool {
-    version.split_whitespace().last().map(|v| v.trim_start_matches('v')).is_some_and(|v| v.starts_with("1."))
+    version
+        .split_whitespace()
+        .last()
+        .map(|v| v.trim_start_matches('v'))
+        .is_some_and(|v| v.starts_with("1."))
 }
 
 /// Whether the OpenCode at `bin` (`stamp`: which install it is) is 1.x. Asked once per install.
 async fn is_1x(bin: &Path, stamp: String) -> bool {
     static SEEN: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec::new());
-    let seen = |s: &String| SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|(k, _)| k == s).map(|(_, v)| *v);
+    let seen = |s: &String| {
+        SEEN.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|(k, _)| k == s)
+            .map(|(_, v)| *v)
+    };
     if let Some(v) = seen(&stamp) {
         return v;
     }
     // Not cached when it didn't answer: it's asked again next time.
-    let Some(version) = trek_core::detect::version_of(bin).await else { return false };
+    let Some(version) = trek_core::detect::version_of(bin).await else {
+        return false;
+    };
     let v = is_1x_version(&version);
-    SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((stamp, v));
+    SEEN.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((stamp, v));
     v
 }
 
@@ -363,7 +455,11 @@ const OPENCODE_2: &str = "opencode2";
 /// only OpenCode 2 has, so it's resumed with OpenCode 2 when that's installed beside it.
 pub(crate) async fn bin_for(bin: &Path, id: &str) -> Option<PathBuf> {
     let id = id.to_string();
-    if !is_1x(bin, crate::acp::stamp(bin)).await || !tokio::task::spawn_blocking(move || trek_core::import::opencode::only_2_opens(&id)).await.unwrap_or(false) {
+    if !is_1x(bin, crate::acp::stamp(bin)).await
+        || !tokio::task::spawn_blocking(move || trek_core::import::opencode::only_2_opens(&id))
+            .await
+            .unwrap_or(false)
+    {
         return None;
     }
     let other = trek_core::detect::which(OPENCODE_2)?;
@@ -408,13 +504,20 @@ pub(crate) async fn db_env(bin: &Path, stamp: String) -> DbEnv {
     }
     let dir = trek_core::import::opencode::data_dir();
     match prepare(bin, &stamp, &dir).await {
-        Ok(notice) => DbEnv { notice, ..DbEnv::default() },
+        Ok(notice) => DbEnv {
+            notice,
+            ..DbEnv::default()
+        },
         Err(why) => {
             // Said once a run, not in every session.
             static TOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
             let tell = !TOLD.swap(true, std::sync::atomic::Ordering::SeqCst);
             let own = share::own_db(&dir).display().to_string();
-            DbEnv { env: vec![("OPENCODE_DB".to_string(), own)], notice: tell.then(|| refused_notice(&why)), own: Some(OwnInUse::new()) }
+            DbEnv {
+                env: vec![("OPENCODE_DB".to_string(), own)],
+                notice: tell.then(|| refused_notice(&why)),
+                own: Some(OwnInUse::new()),
+            }
         }
     }
 }
@@ -422,11 +525,19 @@ pub(crate) async fn db_env(bin: &Path, stamp: String) -> DbEnv {
 /// Make the OpenCode history 1.x opens, when 2.0 made it: run as Trek finds its agents, so
 /// `opencode` 1.x works in a terminal too, not only once Trek has started it.
 pub async fn share_history() {
-    let Some(bin) = trek_core::detect::which(trek_core::detect::OPENCODE) else { return };
+    let Some(bin) = trek_core::detect::which(trek_core::detect::OPENCODE) else {
+        return;
+    };
     if std::env::var_os("OPENCODE_DB").is_some() || !is_1x(&bin, crate::acp::stamp(&bin)).await {
         return;
     }
-    match prepare(&bin, &crate::acp::stamp(&bin), &trek_core::import::opencode::data_dir()).await {
+    match prepare(
+        &bin,
+        &crate::acp::stamp(&bin),
+        &trek_core::import::opencode::data_dir(),
+    )
+    .await
+    {
         Ok(Some(done)) => tracing::info!("opencode: {done}"),
         Ok(None) => {}
         Err(why) => tracing::info!("opencode: 1.x keeps opencode-1x.db: {why}"),
@@ -448,7 +559,8 @@ async fn prepare(bin: &Path, stamp: &str, dir: &Path) -> Result<Option<String>, 
         share::State::Opens => {
             // Sessions 1.x kept on its own before move in, unless it's still writing there. Not
             // tried again in this run once it failed (each try makes a copy of the database).
-            static FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            static FAILED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
             if in_use || FAILED.load(std::sync::atomic::Ordering::SeqCst) {
                 return Ok(None);
             }
@@ -457,7 +569,9 @@ async fn prepare(bin: &Path, stamp: &str, dir: &Path) -> Result<Option<String>, 
                 Ok(Ok(None)) => Ok(None),
                 Ok(Err(e)) => {
                     FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
-                    tracing::warn!("opencode: couldn't move opencode-1x.db's sessions into opencode.db: {e}");
+                    tracing::warn!(
+                        "opencode: couldn't move opencode-1x.db's sessions into opencode.db: {e}"
+                    );
                     Ok(None)
                 }
                 Err(e) => {
@@ -468,16 +582,28 @@ async fn prepare(bin: &Path, stamp: &str, dir: &Path) -> Result<Option<String>, 
         }
         share::State::Made2 => {
             let key = format!("{stamp}:{}", dir.display());
-            if let Some((_, why)) = REFUSED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|(k, _)| *k == key) {
+            if let Some((_, why)) = REFUSED
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .find(|(k, _)| *k == key)
+            {
                 return Err(why.clone());
             }
             let refuse = |why: String| {
-                REFUSED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((key.clone(), why.clone()));
+                REFUSED
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push((key.clone(), why.clone()));
                 why
             };
-            let scratch = scratch_schema(bin).await.map_err(|e| refuse(format!("OpenCode 1.x didn't show its tables: {e:#}")))?;
+            let scratch = scratch_schema(bin)
+                .await
+                .map_err(|e| refuse(format!("OpenCode 1.x didn't show its tables: {e:#}")))?;
             let db = scratch.db.clone();
-            let done = tokio::task::spawn_blocking(move || share::share(&at, &db, !in_use)).await.map_err(|e| e.to_string())?;
+            let done = tokio::task::spawn_blocking(move || share::share(&at, &db, !in_use))
+                .await
+                .map_err(|e| e.to_string())?;
             drop(scratch);
             match done {
                 Ok(Some(c)) => Ok(Some(shared_notice(&c))),
@@ -511,20 +637,48 @@ async fn scratch_schema(bin: &Path) -> anyhow::Result<Scratch> {
     let dir = std::env::temp_dir().join(format!("trek-opencode-1x-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir)?;
-    let scratch = Scratch { db: dir.join("opencode.db"), dir };
+    let scratch = Scratch {
+        db: dir.join("opencode.db"),
+        dir,
+    };
     let mut command = trek_core::procs::async_command(bin);
-    command.args(["session", "list", "--pure"]).current_dir(&scratch.dir).env("PATH", trek_core::detect::login_path());
-    for var in ["OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT"] {
+    command
+        .args(["session", "list", "--pure"])
+        .current_dir(&scratch.dir)
+        .env("PATH", trek_core::detect::login_path());
+    for var in [
+        "OPENCODE_CONFIG",
+        "OPENCODE_CONFIG_DIR",
+        "OPENCODE_CONFIG_CONTENT",
+    ] {
         command.env_remove(var);
     }
-    for (var, sub) in [("HOME", "home"), ("XDG_DATA_HOME", "data"), ("XDG_CONFIG_HOME", "config"), ("XDG_CACHE_HOME", "cache"), ("XDG_STATE_HOME", "state")] {
+    for (var, sub) in [
+        ("HOME", "home"),
+        ("XDG_DATA_HOME", "data"),
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_CACHE_HOME", "cache"),
+        ("XDG_STATE_HOME", "state"),
+    ] {
         command.env(var, scratch.dir.join(sub));
     }
-    command.env("OPENCODE_DB", &scratch.db).env("OPENCODE_DISABLE_MODELS_FETCH", "1").env("OPENCODE_DISABLE_AUTOUPDATE", "1");
-    let out = crate::output_group(&mut command, None, std::time::Duration::from_secs(30)).await.context("opencode session list")?;
+    command
+        .env("OPENCODE_DB", &scratch.db)
+        .env("OPENCODE_DISABLE_MODELS_FETCH", "1")
+        .env("OPENCODE_DISABLE_AUTOUPDATE", "1");
+    let out = crate::output_group(&mut command, None, std::time::Duration::from_secs(30))
+        .await
+        .context("opencode session list")?;
     if !out.status.success() || !scratch.db.is_file() {
         let err = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("opencode session list: {}", err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no database").trim());
+        anyhow::bail!(
+            "opencode session list: {}",
+            err.lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("no database")
+                .trim()
+        );
     }
     Ok(scratch)
 }
@@ -536,7 +690,10 @@ fn shared_notice(c: &share::Changed) -> String {
         c.backup.display()
     );
     if c.merged > 0 {
-        s.push_str(&format!(" {} 1.x kept in opencode-1x.db moved in.", sessions(c.merged)));
+        s.push_str(&format!(
+            " {} 1.x kept in opencode-1x.db moved in.",
+            sessions(c.merged)
+        ));
     }
     s
 }
@@ -550,7 +707,11 @@ fn merged_notice(c: &share::Changed) -> String {
 }
 
 fn sessions(n: usize) -> String {
-    if n == 1 { "The session".into() } else { format!("The {n} sessions") }
+    if n == 1 {
+        "The session".into()
+    } else {
+        format!("The {n} sessions")
+    }
 }
 
 fn refused_notice(why: &str) -> String {
@@ -588,7 +749,10 @@ mod tests {
     /// `OPENCODE_DB` (as 1.18.35 does, from the recorded schema), and only in a home of its own.
     #[cfg(unix)]
     fn fake_1x(dir: &Path) -> PathBuf {
-        let schema = concat!(env!("CARGO_MANIFEST_DIR"), "/../trek-core/fixtures/opencode-1x-empty.sql");
+        let schema = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../trek-core/fixtures/opencode-1x-empty.sql"
+        );
         let bin = dir.join("opencode");
         let script = format!(
             "#!/bin/sh\n\
@@ -608,14 +772,26 @@ mod tests {
     #[cfg(unix)]
     fn sqlite(path: &Path, sql: &str) {
         use std::io::Write as _;
-        let mut child = std::process::Command::new("/usr/bin/sqlite3").arg(path).stdin(std::process::Stdio::piped()).spawn().unwrap();
-        child.stdin.take().unwrap().write_all(sql.as_bytes()).unwrap();
+        let mut child = std::process::Command::new("/usr/bin/sqlite3")
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(sql.as_bytes())
+            .unwrap();
         assert!(child.wait().unwrap().success());
     }
 
     #[cfg(unix)]
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("trek-agents-opencode-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "trek-agents-opencode-{name}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("data")).unwrap();
         dir
@@ -627,15 +803,29 @@ mod tests {
         let dir = temp_dir("share");
         let bin = fake_1x(&dir);
         let data = dir.join("data");
-        let made_by_2 = concat!(env!("CARGO_MANIFEST_DIR"), "/../trek-core/fixtures/opencode-2-fresh.sql");
-        sqlite(&data.join("opencode.db"), &std::fs::read_to_string(made_by_2).unwrap());
+        let made_by_2 = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../trek-core/fixtures/opencode-2-fresh.sql"
+        );
+        sqlite(
+            &data.join("opencode.db"),
+            &std::fs::read_to_string(made_by_2).unwrap(),
+        );
         let told = prepare(&bin, "fake", &data).await.unwrap().unwrap();
-        assert!(told.starts_with("OpenCode 1.x and 2 now keep their sessions in one opencode.db") && told.contains("opencode.db.backup-"), "{told}");
+        assert!(
+            told.starts_with("OpenCode 1.x and 2 now keep their sessions in one opencode.db")
+                && told.contains("opencode.db.backup-"),
+            "{told}"
+        );
         assert_eq!(share::state(&data), share::State::Opens);
         // Done: 1.x opens it as it is from now on.
         assert_eq!(prepare(&bin, "fake", &data).await, Ok(None));
         // The schema was made, and cleared away, outside the user's folders.
-        let left: Vec<_> = std::fs::read_dir(&data).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).filter(|n| !n.starts_with("opencode.db")).collect();
+        let left: Vec<_> = std::fs::read_dir(&data)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.starts_with("opencode.db"))
+            .collect();
         assert!(left.is_empty(), "{left:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -647,10 +837,20 @@ mod tests {
         let bin = fake_1x(&dir);
         let data = dir.join("data");
         // Not 1.x's tables, and no journal: not something to add to.
-        sqlite(&data.join("opencode.db"), "CREATE TABLE session_v2 (id TEXT PRIMARY KEY);");
+        sqlite(
+            &data.join("opencode.db"),
+            "CREATE TABLE session_v2 (id TEXT PRIMARY KEY);",
+        );
         let why = prepare(&bin, "fake-refused", &data).await.unwrap_err();
-        assert_eq!(why, "opencode.db has no migration journal, so it isn't one OpenCode made");
-        assert!(refused_notice(&why).starts_with("OpenCode 1.x keeps its sessions in opencode-1x.db: Trek couldn't add"));
+        assert_eq!(
+            why,
+            "opencode.db has no migration journal, so it isn't one OpenCode made"
+        );
+        assert!(
+            refused_notice(&why).starts_with(
+                "OpenCode 1.x keeps its sessions in opencode-1x.db: Trek couldn't add"
+            )
+        );
         // Not asked again in this run.
         std::fs::remove_file(&bin).unwrap();
         assert_eq!(prepare(&bin, "fake-refused", &data).await.unwrap_err(), why);
@@ -662,7 +862,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "runs the real OpenCode 1.x on TREK_OPENCODE_DATA"]
     async fn share_with_the_real_opencode() {
-        let data = PathBuf::from(std::env::var_os("TREK_OPENCODE_DATA").expect("TREK_OPENCODE_DATA"));
+        let data =
+            PathBuf::from(std::env::var_os("TREK_OPENCODE_DATA").expect("TREK_OPENCODE_DATA"));
         let bin = trek_core::detect::which(trek_core::detect::OPENCODE).expect("opencode");
         let done = prepare(&bin, &crate::acp::stamp(&bin), &data).await;
         println!("{done:?}");
@@ -672,15 +873,28 @@ mod tests {
 
     #[test]
     fn a_refused_database_is_explained() {
-        let stderr = ["\u{1b}[91mError: \u{1b}[0mUnexpected error".to_string(), String::new(), MADE_BY_2.to_string()];
+        let stderr = [
+            "\u{1b}[91mError: \u{1b}[0mUnexpected error".to_string(),
+            String::new(),
+            MADE_BY_2.to_string(),
+        ];
         let why = exit_reason(&stderr).unwrap();
-        assert!(why.starts_with("OpenCode 1.x can't open the history OpenCode 2 started") && why.contains("OPENCODE_DB"), "{why}");
+        assert!(
+            why.starts_with("OpenCode 1.x can't open the history OpenCode 2 started")
+                && why.contains("OPENCODE_DB"),
+            "{why}"
+        );
         assert_eq!(exit_reason(&["Error: something else".to_string()]), None);
     }
 
     /// Sorted: key order depends on serde_json's `preserve_order`, which other crates may turn on.
     fn agent_names(rules: &Value) -> Vec<String> {
-        let mut names: Vec<String> = rules["agent"].as_object().unwrap().keys().cloned().collect();
+        let mut names: Vec<String> = rules["agent"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
         names.sort();
         names
     }
@@ -752,17 +966,33 @@ mod tests {
             }}))
         );
         // A rule for every action, or one Trek can't read, sets everything.
-        assert_eq!(ask_rules(&rules(&[r#"{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}"#])), None);
-        assert_eq!(ask_rules(&rules(&[r#"{"permissions":[{"resource":"*","effect":"allow"}]}"#])), None);
+        assert_eq!(
+            ask_rules(&rules(&[
+                r#"{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}"#
+            ])),
+            None
+        );
+        assert_eq!(
+            ask_rules(&rules(&[
+                r#"{"permissions":[{"resource":"*","effect":"allow"}]}"#
+            ])),
+            None
+        );
         let mut md = UserRules::default();
-        md.add_agent_file("reviewer", "---\nmode: subagent\npermissions:\n  - action: edit\n---\n");
+        md.add_agent_file(
+            "reviewer",
+            "---\nmode: subagent\npermissions:\n  - action: edit\n---\n",
+        );
         assert_eq!(md.agents["reviewer"], BTreeSet::from(GATED));
     }
 
     #[test]
     fn agent_files_and_unreadable_configs_count_as_set() {
         let mut r = UserRules::default();
-        r.add_agent_file("build", "---\ndescription: mine\npermission:\n  bash: deny\n---\nYou build.");
+        r.add_agent_file(
+            "build",
+            "---\ndescription: mine\npermission:\n  bash: deny\n---\nYou build.",
+        );
         r.add_agent_file("plan", "---\ndescription: no rules\n---\nYou plan.");
         assert_eq!(r.agents["build"], BTreeSet::from(GATED));
         assert!(!r.agents.contains_key("plan"));
@@ -773,22 +1003,39 @@ mod tests {
     #[test]
     fn markdown_agents_without_rules_ask_too() {
         let mut r = UserRules::default();
-        r.add_agent_file("review", "---\ndescription: reviews\nmode: subagent\n---\nYou review.");
+        r.add_agent_file(
+            "review",
+            "---\ndescription: reviews\nmode: subagent\n---\nYou review.",
+        );
         r.add_agent_file("docs/writer", "---\nname: \"scribe\"\n---\nYou write.");
         r.add_agent_file("strict", "---\ntools:\n  bash: false\n---\n");
         r.add_agent_file("title", "---\nmodel: m\n---\n");
         r.add_agent_file("notes", "Just a prompt, no front matter.");
         let rules = ask_rules(&r).unwrap();
         // OpenCode's hidden agents stay as they are; "strict" set its own rules.
-        assert_eq!(agent_names(&rules), vec!["build", "explore", "general", "notes", "plan", "review", "scribe"]);
-        assert_eq!(rules["agent"]["scribe"]["permission"], json!({"edit":"ask","bash":"ask","webfetch":"ask"}));
+        assert_eq!(
+            agent_names(&rules),
+            vec![
+                "build", "explore", "general", "notes", "plan", "review", "scribe"
+            ]
+        );
+        assert_eq!(
+            rules["agent"]["scribe"]["permission"],
+            json!({"edit":"ask","bash":"ask","webfetch":"ask"})
+        );
     }
 
     #[test]
     fn jsonc_comments_and_trailing_commas() {
-        let v = parse_jsonc("{\n  // a\n  \"a\": \"x // not a comment\", /* b */\n  \"b\": [1, 2,],\n}").unwrap();
+        let v = parse_jsonc(
+            "{\n  // a\n  \"a\": \"x // not a comment\", /* b */\n  \"b\": [1, 2,],\n}",
+        )
+        .unwrap();
         assert_eq!(v, json!({"a":"x // not a comment","b":[1,2]}));
-        assert_eq!(parse_jsonc(r#"{"s":"q\"uote,]"}"#).unwrap(), json!({"s":"q\"uote,]"}));
+        assert_eq!(
+            parse_jsonc(r#"{"s":"q\"uote,]"}"#).unwrap(),
+            json!({"s":"q\"uote,]"})
+        );
     }
 
     #[test]
@@ -807,15 +1054,26 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::create_dir_all(root.join(".opencode/agent")).unwrap();
-        std::fs::write(root.join("opencode.jsonc"), r#"{"permission":{"bash":"deny"}}"#).unwrap();
-        std::fs::write(root.join(".opencode/agent/general.md"), "---\ntools:\n  write: false\n---\n").unwrap();
+        std::fs::write(
+            root.join("opencode.jsonc"),
+            r#"{"permission":{"bash":"deny"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".opencode/agent/general.md"),
+            "---\ntools:\n  write: false\n---\n",
+        )
+        .unwrap();
         let none = |_: &str| None;
         let r = user_rules(&sub, &none);
         assert!(r.global.contains("bash"));
         assert_eq!(r.agents.get("general"), Some(&BTreeSet::from(GATED)));
         let (files, _) = config_sources(&sub, &none);
         assert!(files.contains(&root.join("app/opencode.json")));
-        assert!(!files.contains(&root.parent().unwrap().join("opencode.json")), "stops at the repository root");
+        assert!(
+            !files.contains(&root.parent().unwrap().join("opencode.json")),
+            "stops at the repository root"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -825,11 +1083,23 @@ mod tests {
         let unset = |_: &str| None;
         let blank = |_: &str| Some(String::new());
         if cfg!(windows) {
-            assert_eq!(managed_dir(&set), PathBuf::from(r"D:\Data").join("opencode"));
-            assert_eq!(managed_dir(&unset), PathBuf::from(r"C:\ProgramData\opencode"));
-            assert_eq!(managed_dir(&blank), PathBuf::from(r"C:\ProgramData\opencode"));
+            assert_eq!(
+                managed_dir(&set),
+                PathBuf::from(r"D:\Data").join("opencode")
+            );
+            assert_eq!(
+                managed_dir(&unset),
+                PathBuf::from(r"C:\ProgramData\opencode")
+            );
+            assert_eq!(
+                managed_dir(&blank),
+                PathBuf::from(r"C:\ProgramData\opencode")
+            );
         } else {
-            assert_eq!(managed_dir(&set), PathBuf::from("/Library/Application Support/opencode"));
+            assert_eq!(
+                managed_dir(&set),
+                PathBuf::from("/Library/Application Support/opencode")
+            );
         }
         let (files, _) = config_sources(Path::new("/Users/me/app"), &unset);
         assert!(files.contains(&managed_dir(&unset).join("opencode.json")));
@@ -839,16 +1109,29 @@ mod tests {
 
     #[test]
     fn inline_config_the_user_set_is_kept() {
-        let ours = ask_rules(&rules(&[r#"{"agent":{"build":{"permission":{"bash":"deny"}}}}"#])).unwrap();
-        let merged = merge_rules(json!({"model":"m","agent":{"build":{"permission":{"bash":"deny"}}}}), &ours).unwrap();
+        let ours = ask_rules(&rules(&[
+            r#"{"agent":{"build":{"permission":{"bash":"deny"}}}}"#,
+        ]))
+        .unwrap();
+        let merged = merge_rules(
+            json!({"model":"m","agent":{"build":{"permission":{"bash":"deny"}}}}),
+            &ours,
+        )
+        .unwrap();
         assert_eq!(merged["model"], "m");
-        assert_eq!(merged["agent"]["build"]["permission"], json!({"bash":"deny","edit":"ask","webfetch":"ask"}));
+        assert_eq!(
+            merged["agent"]["build"]["permission"],
+            json!({"bash":"deny","edit":"ask","webfetch":"ask"})
+        );
         assert_eq!(merge_rules(json!({"agent":"odd"}), &ours), None);
     }
 
     #[test]
     fn hidden_agents_are_never_loosened() {
         let r = rules(&[r#"{"agent":{"title":{"model":"m"},"review":{}}}"#]);
-        assert_eq!(agent_names(&ask_rules(&r).unwrap()), vec!["build", "explore", "general", "plan", "review"]);
+        assert_eq!(
+            agent_names(&ask_rules(&r).unwrap()),
+            vec!["build", "explore", "general", "plan", "review"]
+        );
     }
 }

@@ -28,9 +28,15 @@ pub fn run() -> i32 {
         }
         Some("cat") => {
             let rest: Vec<String> = args.collect();
-            let flag = |name: &str| rest.iter().position(|a| a == name).and_then(|i| rest.get(i + 1));
+            let flag = |name: &str| {
+                rest.iter()
+                    .position(|a| a == name)
+                    .and_then(|i| rest.get(i + 1))
+            };
             if let Some(secs) = flag("--delay") {
-                std::thread::sleep(std::time::Duration::from_secs_f64(secs.parse().unwrap_or(0.0)));
+                std::thread::sleep(std::time::Duration::from_secs_f64(
+                    secs.parse().unwrap_or(0.0),
+                ));
             }
             let mut buf = Vec::new();
             std::io::stdin().lock().read_to_end(&mut buf).unwrap();
@@ -90,13 +96,19 @@ pub fn run() -> i32 {
             0
         }
         Some("serve") => match args.next() {
-            Some(dir) => crate::serve::run(dir.into(), args.next().and_then(|p| p.parse().ok()).unwrap_or(0)),
+            Some(dir) => crate::serve::run(
+                dir.into(),
+                args.next().and_then(|p| p.parse().ok()).unwrap_or(0),
+            ),
             None => {
                 eprintln!("fixture serve <dir> [<port>]");
                 2
             }
         },
-        Some("minisign-keygen") => match args.next().map(|d| crate::minisign::keygen(std::path::Path::new(&d))) {
+        Some("minisign-keygen") => match args
+            .next()
+            .map(|d| crate::minisign::keygen(std::path::Path::new(&d)))
+        {
             Some(Ok(line)) => {
                 println!("{line}");
                 0
@@ -125,7 +137,9 @@ pub fn run() -> i32 {
             }
         }
         other => {
-            eprintln!("fixture: expected sleep, cat, ready-then-eof, echo, print, stderr, exit, upper, fail, fake-acp, fake-mcp, serve, minisign-keygen or minisign-sign, not {other:?}");
+            eprintln!(
+                "fixture: expected sleep, cat, ready-then-eof, echo, print, stderr, exit, upper, fail, fake-acp, fake-mcp, serve, minisign-keygen or minisign-sign, not {other:?}"
+            );
             2
         }
     }

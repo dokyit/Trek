@@ -16,15 +16,24 @@ fn skill_lifecycle() {
     let md = skills::create("Trail Notes", "Write trail notes.", SkillHome::Codex).unwrap();
     assert!(md.ends_with(".codex/skills/trail-notes/SKILL.md"));
     let found = skills::discover(None);
-    let s = found.iter().find(|s| s.name == "trail-notes").expect("discovered");
+    let s = found
+        .iter()
+        .find(|s| s.name == "trail-notes")
+        .expect("discovered");
     assert_eq!((s.source.clone(), s.enabled), (SkillSource::Codex, true));
     let moved = skills::set_enabled(s, false).unwrap();
     assert!(!agents.join(".codex/skills/trail-notes").exists() && moved.exists());
-    let off = skills::discover(None).into_iter().find(|s| s.name == "trail-notes").unwrap();
+    let off = skills::discover(None)
+        .into_iter()
+        .find(|s| s.name == "trail-notes")
+        .unwrap();
     assert!(!off.enabled);
     assert_eq!(off.source, SkillSource::Codex);
     skills::set_enabled(&off, true).unwrap();
-    let back = skills::discover(None).into_iter().find(|s| s.name == "trail-notes").unwrap();
+    let back = skills::discover(None)
+        .into_iter()
+        .find(|s| s.name == "trail-notes")
+        .unwrap();
     assert!(back.enabled && agents.join(".codex/skills/trail-notes/SKILL.md").exists());
     assert!(!back.dir.join(".trek-origin").exists());
     // (Trash isn't exercised here: it would land in the real user's Trash.)

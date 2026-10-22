@@ -65,9 +65,16 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Plan, String> {
             plan.relaunch = Some(args.by_ref().collect());
             break;
         }
-        let value = args.next().ok_or_else(|| format!("{} needs a value", flag.to_string_lossy()))?;
+        let value = args
+            .next()
+            .ok_or_else(|| format!("{} needs a value", flag.to_string_lossy()))?;
         match flag.to_str() {
-            Some("--pid") => plan.pid = value.to_str().and_then(|v| v.parse().ok()).ok_or_else(|| "--pid takes a process id".to_string())?,
+            Some("--pid") => {
+                plan.pid = value
+                    .to_str()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or_else(|| "--pid takes a process id".to_string())?
+            }
             Some("--install") => plan.install = value.into(),
             Some("--staged") => plan.staged = Some(value.into()),
             Some("--from") => plan.from = version_tag(&value),
@@ -84,7 +91,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Plan, String> {
 
 /// A version as it goes into a folder name: semver's characters only.
 fn version_tag(v: &std::ffi::OsStr) -> String {
-    v.to_string_lossy().chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+')).collect()
+    v.to_string_lossy()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+        .collect()
 }
 
 /// Do what `plan` says; the process's exit code. `log` gets a line for each step.
@@ -94,10 +104,24 @@ pub fn run(plan: &Plan, log: &mut dyn FnMut(&str)) -> i32 {
 
 /// `run`, giving Trek `wait` to exit.
 pub fn run_waiting(plan: &Plan, wait: Duration, log: &mut dyn FnMut(&str)) -> i32 {
-    log(&format!("Trek {} in {} (pid {}) → {}", plan.from, plan.install.display(), plan.pid, if plan.to.is_empty() { "a restart" } else { &plan.to }));
+    log(&format!(
+        "Trek {} in {} (pid {}) → {}",
+        plan.from,
+        plan.install.display(),
+        plan.pid,
+        if plan.to.is_empty() {
+            "a restart"
+        } else {
+            &plan.to
+        }
+    ));
     if !wait_for_exit(plan.pid, wait) {
         // Trek is running still, so is not started again; the next start says what happened.
-        fail(plan, "Trek was still running after a minute; nothing was changed", log);
+        fail(
+            plan,
+            "Trek was still running after a minute; nothing was changed",
+            log,
+        );
         return 1;
     }
     let Some(staged) = &plan.staged else {
@@ -117,7 +141,10 @@ pub fn run_waiting(plan: &Plan, wait: Duration, log: &mut dyn FnMut(&str)) -> i3
             return 1;
         }
     };
-    log(&format!("installed; the previous version is in {}", old.display()));
+    log(&format!(
+        "installed; the previous version is in {}",
+        old.display()
+    ));
     let Some(args) = &plan.relaunch else { return 0 };
     let Err(e) = start_and_watch(&plan.install, args) else {
         log("the new version started");
@@ -141,8 +168,15 @@ pub fn run_waiting(plan: &Plan, wait: Duration, log: &mut dyn FnMut(&str)) -> i3
 fn fail(plan: &Plan, why: &str, log: &mut dyn FnMut(&str)) {
     log(why);
     if let Some(updates) = &plan.updates {
-        let to = if plan.to.is_empty() { "the new version".to_string() } else { format!("Trek {}", plan.to) };
-        let _ = std::fs::write(updates.join("install-failed"), format!("{to} didn't install: {why}.\n"));
+        let to = if plan.to.is_empty() {
+            "the new version".to_string()
+        } else {
+            format!("Trek {}", plan.to)
+        };
+        let _ = std::fs::write(
+            updates.join("install-failed"),
+            format!("{to} didn't install: {why}.\n"),
+        );
     }
 }
 
@@ -158,7 +192,13 @@ pub fn swap(install: &Path, staged: &Path, from: &str, to: &str) -> Result<PathB
 
 /// `swap`, with `bring` for moving the staged folder next to the install.
 #[doc(hidden)]
-pub fn swap_with(install: &Path, staged: &Path, from: &str, to: &str, bring: &dyn Fn(&Path, &Path) -> std::io::Result<()>) -> Result<PathBuf, String> {
+pub fn swap_with(
+    install: &Path,
+    staged: &Path,
+    from: &str,
+    to: &str,
+    bring: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<PathBuf, String> {
     swap_guarded(install, staged, from, to, bring, &guarded_folders)
 }
 
@@ -177,7 +217,11 @@ pub fn swap_guarded(
         return Err("the folders to swap must be full paths; nothing was changed".into());
     }
     if within(staged, install) || within(install, staged) {
-        return Err(format!("{} and {} are one inside the other; nothing was changed", install.display(), staged.display()));
+        return Err(format!(
+            "{} and {} are one inside the other; nothing was changed",
+            install.display(),
+            staged.display()
+        ));
     }
     own_folder(staged).map_err(|e| format!("the update isn't Trek's own folder: {e}"))?;
     own_folder(install)?;
@@ -187,8 +231,13 @@ pub fn swap_guarded(
         other => other,
     }
     .map_err(|e| match e.kind() {
-        std::io::ErrorKind::PermissionDenied => refused_next_to(install, &e, guarded_folder_of(install, &guarded())),
-        _ => format!("couldn't get the update next to {} ({e}); nothing was changed", install.display()),
+        std::io::ErrorKind::PermissionDenied => {
+            refused_next_to(install, &e, guarded_folder_of(install, &guarded()))
+        }
+        _ => format!(
+            "couldn't get the update next to {} ({e}); nothing was changed",
+            install.display()
+        ),
     })?;
     let old = free_name(install, &format!("old-{from}"));
     if let Err(e) = rename_patiently(install, &old) {
@@ -196,7 +245,10 @@ pub fn swap_guarded(
         if !staged.exists() {
             let _ = rename_patiently(&incoming, staged);
         }
-        return Err(format!("couldn't move {} aside ({e}); nothing was changed", install.display()));
+        return Err(format!(
+            "couldn't move {} aside ({e}); nothing was changed",
+            install.display()
+        ));
     }
     let problem = match rename_patiently(&incoming, install) {
         Ok(()) if install.join("trek.exe").is_file() => return Ok(old),
@@ -227,8 +279,14 @@ pub fn refused_next_to(install: &Path, e: &std::io::Error, guarded: Option<&str>
 }
 
 /// The guarded folder (by name) that `install` is in, if any.
-pub fn guarded_folder_of(install: &Path, guarded: &[(&'static str, PathBuf)]) -> Option<&'static str> {
-    guarded.iter().find(|(_, folder)| within(install, folder)).map(|&(name, _)| name)
+pub fn guarded_folder_of(
+    install: &Path,
+    guarded: &[(&'static str, PathBuf)],
+) -> Option<&'static str> {
+    guarded
+        .iter()
+        .find(|(_, folder)| within(install, folder))
+        .map(|&(name, _)| name)
 }
 
 /// The folders ransomware protection guards by default, by name: Documents, Desktop, Pictures,
@@ -236,7 +294,10 @@ pub fn guarded_folder_of(install: &Path, guarded: &[(&'static str, PathBuf)]) ->
 /// and in OneDrive either way. trek-core's `update::guarded_folders` is the same list.
 #[cfg(windows)]
 pub fn guarded_folders() -> Vec<(&'static str, PathBuf)> {
-    use windows_sys::Win32::UI::Shell::{FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Favorites, FOLDERID_Music, FOLDERID_Pictures, FOLDERID_Videos};
+    use windows_sys::Win32::UI::Shell::{
+        FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Favorites, FOLDERID_Music,
+        FOLDERID_Pictures, FOLDERID_Videos,
+    };
     let known = [
         ("Documents", FOLDERID_Documents),
         ("Desktop", FOLDERID_Desktop),
@@ -248,7 +309,12 @@ pub fn guarded_folders() -> Vec<(&'static str, PathBuf)> {
     let onedrive: Vec<PathBuf> = std::env::var_os("USERPROFILE")
         .map(|p| PathBuf::from(p).join("OneDrive"))
         .into_iter()
-        .chain(["OneDrive", "OneDriveConsumer", "OneDriveCommercial"].into_iter().filter_map(std::env::var_os).map(PathBuf::from))
+        .chain(
+            ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"]
+                .into_iter()
+                .filter_map(std::env::var_os)
+                .map(PathBuf::from),
+        )
         .collect();
     let mut places = vec![];
     for (name, id) in known {
@@ -274,7 +340,8 @@ fn known_folder(id: &windows_sys::core::GUID) -> Option<PathBuf> {
     // SAFETY: a valid folder id and out pointer; on success `path` is a NUL-terminated string the
     // shell allocated, read up to its NUL, and freed (as it must be, whatever the result) once.
     unsafe {
-        let found = SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut path) == 0 && !path.is_null();
+        let found =
+            SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut path) == 0 && !path.is_null();
         let result = found.then(|| {
             let len = (0..).take_while(|&i| *path.add(i) != 0).count();
             PathBuf::from(OsString::from_wide(std::slice::from_raw_parts(path, len)))
@@ -290,12 +357,21 @@ fn known_folder(id: &windows_sys::core::GUID) -> Option<PathBuf> {
 /// would leave no Trek at all.
 pub fn restore(install: &Path, old: &Path, to: &str) -> Result<(), String> {
     if !old.join("trek.exe").is_file() {
-        return Err(format!("the previous version isn't in {} any more; {} was left as it is", old.display(), install.display()));
+        return Err(format!(
+            "the previous version isn't in {} any more; {} was left as it is",
+            old.display(),
+            install.display()
+        ));
     }
     let mut aside = None;
     if install.exists() {
         let failed = free_name(install, &format!("old-failed-{to}"));
-        rename_patiently(install, &failed).map_err(|e| format!("couldn't move the failed update aside ({e}); the previous version is in {}", old.display()))?;
+        rename_patiently(install, &failed).map_err(|e| {
+            format!(
+                "couldn't move the failed update aside ({e}); the previous version is in {}",
+                old.display()
+            )
+        })?;
         aside = Some(failed);
     }
     match rename_patiently(old, install) {
@@ -305,14 +381,21 @@ pub fn restore(install: &Path, old: &Path, to: &str) -> Result<(), String> {
             if let Some(failed) = aside {
                 let _ = rename_patiently(&failed, install);
             }
-            Err(format!("couldn't put the previous version back ({e}); it is in {}", old.display()))
+            Err(format!(
+                "couldn't put the previous version back ({e}); it is in {}",
+                old.display()
+            ))
         }
     }
 }
 
 /// `path` is `folder` or inside it, as Windows compares paths (whatever the case).
 fn within(path: &Path, folder: &Path) -> bool {
-    let parts = |p: &Path| -> Vec<String> { p.components().map(|c| c.as_os_str().to_string_lossy().to_lowercase()).collect() };
+    let parts = |p: &Path| -> Vec<String> {
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .collect()
+    };
     let (path, folder) = (parts(path), parts(folder));
     !folder.is_empty() && path.starts_with(&folder)
 }
@@ -321,17 +404,31 @@ fn within(path: &Path, folder: &Path) -> bool {
 /// itself, not a link to one (a rename would replace the link and leave the folder behind it).
 pub fn own_folder(install: &Path) -> Result<(), String> {
     if std::fs::symlink_metadata(install).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err(format!("{} is a link to a folder, so it isn't replaced; nothing was changed", install.display()));
+        return Err(format!(
+            "{} is a link to a folder, so it isn't replaced; nothing was changed",
+            install.display()
+        ));
     }
     if !install.join("trek.exe").is_file() {
-        return Err(format!("{} has no trek.exe; nothing was changed", install.display()));
+        return Err(format!(
+            "{} has no trek.exe; nothing was changed",
+            install.display()
+        ));
     }
-    let entries = std::fs::read_dir(install).map_err(|e| format!("couldn't read {} ({e}); nothing was changed", install.display()))?;
+    let entries = std::fs::read_dir(install).map_err(|e| {
+        format!(
+            "couldn't read {} ({e}); nothing was changed",
+            install.display()
+        )
+    })?;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_lowercase();
         let file = entry.file_type().is_ok_and(|t| t.is_file());
         if !(file && (TREK_FILES.contains(&name.as_str()) || name.starts_with(PROBE_PREFIX))) {
-            return Err(format!("{} holds more than Trek ({name}), so it isn't replaced; nothing was changed", install.display()));
+            return Err(format!(
+                "{} holds more than Trek ({name}), so it isn't replaced; nothing was changed",
+                install.display()
+            ));
         }
     }
     Ok(())
@@ -339,17 +436,32 @@ pub fn own_folder(install: &Path) -> Result<(), String> {
 
 /// `<install>.<tag>` next to the install, or `<install>.<tag>-2`, … if that's taken.
 fn free_name(install: &Path, tag: &str) -> PathBuf {
-    let name = install.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Trek".into());
+    let name = install
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Trek".into());
     let tag = tag.trim_end_matches('-');
     let at = |suffix: String| install.with_file_name(format!("{name}.{tag}{suffix}"));
-    (1..1000).map(|n| at(if n == 1 { String::new() } else { format!("-{n}") })).find(|p| !p.exists()).unwrap_or_else(|| at(format!("-{}", std::process::id())))
+    (1..1000)
+        .map(|n| {
+            at(if n == 1 {
+                String::new()
+            } else {
+                format!("-{n}")
+            })
+        })
+        .find(|p| !p.exists())
+        .unwrap_or_else(|| at(format!("-{}", std::process::id())))
 }
 
 /// Rename a folder, trying again for a while if something holds a file in it. Never onto
 /// something that exists (a rename on Unix would replace an empty folder).
 pub fn rename_patiently(from: &Path, to: &Path) -> std::io::Result<()> {
     if to.exists() {
-        return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{} exists", to.display())));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{} exists", to.display()),
+        ));
     }
     let mut tries = 1;
     loop {
@@ -381,10 +493,16 @@ pub fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
         } else if kind.is_file() {
             let copied = std::fs::copy(entry.path(), &dest)?;
             if copied != entry.metadata()?.len() || std::fs::metadata(&dest)?.len() != copied {
-                return Err(std::io::Error::other(format!("{} was copied only in part", entry.path().display())));
+                return Err(std::io::Error::other(format!(
+                    "{} was copied only in part",
+                    entry.path().display()
+                )));
             }
         } else {
-            return Err(std::io::Error::other(format!("{} is a link", entry.path().display())));
+            return Err(std::io::Error::other(format!(
+                "{} is a link",
+                entry.path().display()
+            )));
         }
     }
     Ok(())
@@ -396,7 +514,8 @@ fn command(install: &Path, args: &[OsString]) -> Command {
     let mut cmd = Command::new(install.join("trek.exe")); // spawn: ok
     // Not the install itself: a process working in a folder keeps it from being renamed, and
     // the next update renames it.
-    cmd.args(args).current_dir(install.parent().unwrap_or(install));
+    cmd.args(args)
+        .current_dir(install.parent().unwrap_or(install));
     cmd
 }
 
@@ -408,7 +527,10 @@ fn start(install: &Path, args: &[OsString], log: &mut dyn FnMut(&str)) -> i32 {
             0
         }
         Err(e) => {
-            log(&format!("couldn't start {} ({e})", install.join("trek.exe").display()));
+            log(&format!(
+                "couldn't start {} ({e})",
+                install.join("trek.exe").display()
+            ));
             1
         }
     }
@@ -418,11 +540,15 @@ fn start(install: &Path, args: &[OsString], log: &mut dyn FnMut(&str)) -> i32 {
 /// error straight away is a failed update. (One that exits cleanly handed over to a Trek that
 /// was already running.)
 fn start_and_watch(install: &Path, args: &[OsString]) -> Result<(), String> {
-    let mut child = command(install, args).spawn().map_err(|e| format!("it couldn't be started: {e}"))?;
+    let mut child = command(install, args)
+        .spawn()
+        .map_err(|e| format!("it couldn't be started: {e}"))?;
     let until = Instant::now() + WATCH_START;
     while Instant::now() < until {
         match child.try_wait() {
-            Ok(Some(status)) if !status.success() => return Err(format!("it exited with {status}")),
+            Ok(Some(status)) if !status.success() => {
+                return Err(format!("it exited with {status}"));
+            }
             Ok(Some(_)) => return Ok(()),
             _ => std::thread::sleep(Duration::from_millis(100)),
         }
@@ -435,14 +561,17 @@ fn start_and_watch(install: &Path, args: &[OsString]) -> Result<(), String> {
 #[cfg(windows)]
 pub fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
     // SAFETY: plain calls; the handle is checked before use and closed after.
     unsafe {
         let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
         if h.is_null() {
             return true;
         }
-        let waited = WaitForSingleObject(h, timeout.as_millis().min(u128::from(u32::MAX - 1)) as u32);
+        let waited =
+            WaitForSingleObject(h, timeout.as_millis().min(u128::from(u32::MAX - 1)) as u32);
         CloseHandle(h);
         waited == WAIT_OBJECT_0
     }
@@ -459,7 +588,12 @@ pub fn wait_for_exit(_pid: u32, _timeout: Duration) -> bool {
 pub fn log_file() -> PathBuf {
     let dir = match std::env::var_os("TREK_DATA_DIR").filter(|d| !d.is_empty()) {
         Some(data) => PathBuf::from(data).join("logs"),
-        None => std::env::var_os("LOCALAPPDATA").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(std::env::temp_dir).join("Trek").join("logs"),
+        None => std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(std::env::temp_dir)
+            .join("Trek")
+            .join("logs"),
     };
     dir.join("update.log")
 }
@@ -469,14 +603,21 @@ pub fn append_log(file: &Path, line: &str) {
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+    {
         let _ = writeln!(f, "{}  {line}", utc_now());
     }
 }
 
 /// `YYYY-MM-DD HH:MM:SS` in UTC, without a date library.
 fn utc_now() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let (days, rest) = ((secs / 86_400) as i64, secs % 86_400);
     // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
     let z = days + 719_468;
@@ -488,14 +629,22 @@ fn utc_now() -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}", rest / 3600, rest / 60 % 60, rest % 60)
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        rest / 3600,
+        rest / 60 % 60,
+        rest % 60
+    )
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn version_tags_keep_semver_characters_only() {
-        assert_eq!(super::version_tag("0.4.1-nightly.20261002+x".as_ref()), "0.4.1-nightly.20261002+x");
+        assert_eq!(
+            super::version_tag("0.4.1-nightly.20261002+x".as_ref()),
+            "0.4.1-nightly.20261002+x"
+        );
         assert_eq!(super::version_tag(r"..\..\evil".as_ref()), "....evil");
     }
 

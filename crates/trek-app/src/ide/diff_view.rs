@@ -39,7 +39,11 @@ pub enum DiffSource {
     Review { thread: String },
     /// One file in git: the working tree against the index, or (`staged`) the index against
     /// HEAD. A file git doesn't track yet shows as all added.
-    Git { top: PathBuf, rel: String, staged: bool },
+    Git {
+        top: PathBuf,
+        rel: String,
+        staged: bool,
+    },
 }
 
 /// One file's diff, as read.
@@ -72,11 +76,27 @@ enum Row {
     /// Room between one file and the next.
     Space,
     File(usize),
-    Hunk { file: usize, hunk: usize, head: SharedString },
-    Line { kind: Kind, old: Option<u32>, new: Option<u32>, text: SharedString },
-    Pair { left: Option<Side>, right: Option<Side> },
+    Hunk {
+        file: usize,
+        hunk: usize,
+        head: SharedString,
+    },
+    Line {
+        kind: Kind,
+        old: Option<u32>,
+        new: Option<u32>,
+        text: SharedString,
+    },
+    Pair {
+        left: Option<Side>,
+        right: Option<Side>,
+    },
     /// `lines` unchanged lines from new line `at` (1-based), folded.
-    Fold { file: usize, at: u32, lines: u32 },
+    Fold {
+        file: usize,
+        at: u32,
+        lines: u32,
+    },
     Note(SharedString),
 }
 
@@ -93,7 +113,11 @@ fn shown(text: &str) -> SharedString {
 fn hunk_rows(file: usize, ix: usize, hunk: &Hunk, split: bool, out: &mut Vec<Row>) {
     let mut lines = hunk.body.split_inclusive('\n');
     let head = lines.next().unwrap_or_default();
-    out.push(Row::Hunk { file, hunk: ix, head: shown(head) });
+    out.push(Row::Hunk {
+        file,
+        hunk: ix,
+        head: shown(head),
+    });
     let (mut old, mut new) = (hunk.old_start.max(1), hunk.new_start.max(1));
     if hunk.old_count == 0 {
         old = hunk.old_start + 1;
@@ -107,7 +131,10 @@ fn hunk_rows(file: usize, ix: usize, hunk: &Hunk, split: bool, out: &mut Vec<Row
         let n = dels.len().max(adds.len());
         let (mut d, mut a) = (dels.drain(..), adds.drain(..));
         for _ in 0..n {
-            out.push(Row::Pair { left: d.next(), right: a.next() });
+            out.push(Row::Pair {
+                left: d.next(),
+                right: a.next(),
+            });
         }
     };
     for line in lines {
@@ -117,7 +144,12 @@ fn hunk_rows(file: usize, ix: usize, hunk: &Hunk, split: bool, out: &mut Vec<Row
                 if split {
                     adds.push((new, Kind::Add, shown(text)));
                 } else {
-                    out.push(Row::Line { kind: Kind::Add, old: None, new: Some(new), text: shown(text) });
+                    out.push(Row::Line {
+                        kind: Kind::Add,
+                        old: None,
+                        new: Some(new),
+                        text: shown(text),
+                    });
                 }
                 new += 1;
             }
@@ -128,7 +160,12 @@ fn hunk_rows(file: usize, ix: usize, hunk: &Hunk, split: bool, out: &mut Vec<Row
                     }
                     dels.push((old, Kind::Del, shown(text)));
                 } else {
-                    out.push(Row::Line { kind: Kind::Del, old: Some(old), new: None, text: shown(text) });
+                    out.push(Row::Line {
+                        kind: Kind::Del,
+                        old: Some(old),
+                        new: None,
+                        text: shown(text),
+                    });
                 }
                 old += 1;
             }
@@ -140,9 +177,17 @@ fn hunk_rows(file: usize, ix: usize, hunk: &Hunk, split: bool, out: &mut Vec<Row
                 flush(&mut dels, &mut adds, out);
                 let text = shown(text);
                 if split {
-                    out.push(Row::Pair { left: Some((old, Kind::Ctx, text.clone())), right: Some((new, Kind::Ctx, text)) });
+                    out.push(Row::Pair {
+                        left: Some((old, Kind::Ctx, text.clone())),
+                        right: Some((new, Kind::Ctx, text)),
+                    });
                 } else {
-                    out.push(Row::Line { kind: Kind::Ctx, old: Some(old), new: Some(new), text });
+                    out.push(Row::Line {
+                        kind: Kind::Ctx,
+                        old: Some(old),
+                        new: Some(new),
+                        text,
+                    });
                 }
                 old += 1;
                 new += 1;
@@ -155,18 +200,43 @@ fn hunk_rows(file: usize, ix: usize, hunk: &Hunk, split: bool, out: &mut Vec<Row
 /// Where hunk `h` starts and ends on each side: (first old, first new, old after, new after),
 /// 1-based. An empty side starts just after the line its `@@` names.
 fn span(h: &Hunk) -> (u32, u32, u32, u32) {
-    let first_old = if h.old_count == 0 { h.old_start + 1 } else { h.old_start };
-    let first_new = if h.new_count == 0 { h.new_start + 1 } else { h.new_start };
-    (first_old, first_new, first_old + h.old_count, first_new + h.new_count)
+    let first_old = if h.old_count == 0 {
+        h.old_start + 1
+    } else {
+        h.old_start
+    };
+    let first_new = if h.new_count == 0 {
+        h.new_start + 1
+    } else {
+        h.new_start
+    };
+    (
+        first_old,
+        first_new,
+        first_old + h.old_count,
+        first_new + h.new_count,
+    )
 }
 
 /// Every file's rows: its header, then (unless collapsed) its hunks with the unchanged
 /// stretches between them folded, or opened where `opened` says (file, first new line).
-fn build_rows(files: &[DiffFile], collapsed: &HashSet<String>, opened: &HashSet<(String, u32)>, split: bool) -> Vec<Row> {
+fn build_rows(
+    files: &[DiffFile],
+    collapsed: &HashSet<String>,
+    opened: &HashSet<(String, u32)>,
+    split: bool,
+) -> Vec<Row> {
     let mut out = vec![];
     for (f, file) in files.iter().enumerate() {
         if out.len() >= MAX_ROWS {
-            out.push(Row::Note(format!("{} more file{} not shown", files.len() - f, if files.len() - f == 1 { "" } else { "s" }).into()));
+            out.push(Row::Note(
+                format!(
+                    "{} more file{} not shown",
+                    files.len() - f,
+                    if files.len() - f == 1 { "" } else { "s" }
+                )
+                .into(),
+            ));
             break;
         }
         if f > 0 {
@@ -194,19 +264,44 @@ fn build_rows(files: &[DiffFile], collapsed: &HashSet<String>, opened: &HashSet<
             let lines = to_new - from_new;
             if opened.contains(&(file.rel.clone(), from_new)) && !file.new_lines.is_empty() {
                 for n in from_new..to_new {
-                    let text = file.new_lines.get(n as usize - 1).map(|s| shown(s)).unwrap_or_default();
+                    let text = file
+                        .new_lines
+                        .get(n as usize - 1)
+                        .map(|s| shown(s))
+                        .unwrap_or_default();
                     let old = (n as i64 + offset).max(1) as u32;
-                    out.push(if split { Row::Pair { left: Some((old, Kind::Ctx, text.clone())), right: Some((n, Kind::Ctx, text)) } } else { Row::Line { kind: Kind::Ctx, old: Some(old), new: Some(n), text } });
+                    out.push(if split {
+                        Row::Pair {
+                            left: Some((old, Kind::Ctx, text.clone())),
+                            right: Some((n, Kind::Ctx, text)),
+                        }
+                    } else {
+                        Row::Line {
+                            kind: Kind::Ctx,
+                            old: Some(old),
+                            new: Some(n),
+                            text,
+                        }
+                    });
                 }
             } else {
-                out.push(Row::Fold { file: f, at: from_new, lines });
+                out.push(Row::Fold {
+                    file: f,
+                    at: from_new,
+                    lines,
+                });
             }
         };
         for (h, hunk) in file.diff.hunks.iter().enumerate() {
             let (first_old, first_new, old_after, new_after) = span(hunk);
             // Lines before it that didn't change (none to show for a file that's all new or gone).
             if file.status == 'M' {
-                gap(&mut out, new_next, first_new, first_old as i64 - first_new as i64);
+                gap(
+                    &mut out,
+                    new_next,
+                    first_new,
+                    first_old as i64 - first_new as i64,
+                );
             }
             hunk_rows(f, h, hunk, split, &mut out);
             old_next = old_after;
@@ -216,7 +311,12 @@ fn build_rows(files: &[DiffFile], collapsed: &HashSet<String>, opened: &HashSet<
             }
         }
         if file.status == 'M' && total >= new_next {
-            gap(&mut out, new_next, total + 1, old_next as i64 - new_next as i64);
+            gap(
+                &mut out,
+                new_next,
+                total + 1,
+                old_next as i64 - new_next as i64,
+            );
         }
     }
     out
@@ -224,7 +324,9 @@ fn build_rows(files: &[DiffFile], collapsed: &HashSet<String>, opened: &HashSet<
 
 /// The text of a file on the new side, as lines: `None` when it's binary or too large.
 fn read_lines(bytes: Option<Vec<u8>>) -> Result<Vec<String>, &'static str> {
-    let Some(bytes) = bytes else { return Ok(vec![]) };
+    let Some(bytes) = bytes else {
+        return Ok(vec![]);
+    };
     if bytes.len() as u64 > READ_LIMIT {
         return Err("Too large to show");
     }
@@ -265,13 +367,26 @@ fn file(rel: &str, diff: FileDiff, new_side: Option<Vec<u8>>) -> DiffFile {
     if binary {
         note = Some("Binary file".into());
     }
-    let (added, removed) = diff.hunks.iter().map(Hunk::counts).fold((0, 0), |(a, r), (da, dr)| (a + da, r + dr));
-    DiffFile { rel: rel.to_string(), status, diff, new_lines: Arc::new(lines), note, added, removed }
+    let (added, removed) = diff
+        .hunks
+        .iter()
+        .map(Hunk::counts)
+        .fold((0, 0), |(a, r), (da, dr)| (a + da, r + dr));
+    DiffFile {
+        rel: rel.to_string(),
+        status,
+        diff,
+        new_lines: Arc::new(lines),
+        note,
+        added,
+        removed,
+    }
 }
 
 /// A file git doesn't track yet, as a diff that adds every line.
 fn untracked(rel: &str, bytes: Option<Vec<u8>>) -> DiffFile {
-    let header = format!("diff --git a/{rel} b/{rel}\nnew file mode 100644\n--- /dev/null\n+++ b/{rel}\n");
+    let header =
+        format!("diff --git a/{rel} b/{rel}\nnew file mode 100644\n--- /dev/null\n+++ b/{rel}\n");
     match read_lines(bytes) {
         Ok(lines) => {
             let n = lines.len() as u32;
@@ -281,16 +396,46 @@ fn untracked(rel: &str, bytes: Option<Vec<u8>>) -> DiffFile {
                 body.push_str(l);
                 body.push('\n');
             }
-            let hunks = if n == 0 { vec![] } else { vec![Hunk { old_start: 0, old_count: 0, new_start: 1, new_count: n, body }] };
-            DiffFile { rel: rel.to_string(), status: 'A', diff: FileDiff { header, hunks }, new_lines: Arc::new(lines), note: None, added: n, removed: 0 }
+            let hunks = if n == 0 {
+                vec![]
+            } else {
+                vec![Hunk {
+                    old_start: 0,
+                    old_count: 0,
+                    new_start: 1,
+                    new_count: n,
+                    body,
+                }]
+            };
+            DiffFile {
+                rel: rel.to_string(),
+                status: 'A',
+                diff: FileDiff { header, hunks },
+                new_lines: Arc::new(lines),
+                note: None,
+                added: n,
+                removed: 0,
+            }
         }
-        Err(why) => DiffFile { rel: rel.to_string(), status: 'A', diff: FileDiff { header, hunks: vec![] }, new_lines: Arc::new(vec![]), note: Some(why.into()), added: 0, removed: 0 },
+        Err(why) => DiffFile {
+            rel: rel.to_string(),
+            status: 'A',
+            diff: FileDiff {
+                header,
+                hunks: vec![],
+            },
+            new_lines: Arc::new(vec![]),
+            note: Some(why.into()),
+            added: 0,
+            removed: 0,
+        },
     }
 }
 
 /// A Review's pending files against its baseline, cut into hunks as Keep and Undo take them.
 fn load_review(top: &Path, base: &str, files: &[String]) -> Result<Vec<DiffFile>, String> {
-    let repo = trek_core::checkpoint::Repo::find(top).ok_or_else(|| format!("{} isn't a git repository any more", top.display()))?;
+    let repo = trek_core::checkpoint::Repo::find(top)
+        .ok_or_else(|| format!("{} isn't a git repository any more", top.display()))?;
     files
         .iter()
         .filter_map(|rel| match repo.file_diff(base, rel) {
@@ -320,7 +465,12 @@ fn load_git(top: &Path, rel: &str, staged: bool) -> Result<Vec<DiffFile>, String
     }
     let diff = FileDiff::parse(&out);
     let new_side = if staged {
-        super::git::command(top).args(["show", &format!(":{rel}")]).output().ok().filter(|o| o.status.success()).map(|o| o.stdout)
+        super::git::command(top)
+            .args(["show", &format!(":{rel}")])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| o.stdout)
     } else {
         read_disk(&top.join(rel))
     };
@@ -350,11 +500,18 @@ pub struct DiffView {
 }
 
 impl DiffView {
-    pub fn new(workspace: Entity<Workspace>, workbench: WeakEntity<IdeWorkbench>, source: DiffSource, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: Entity<Workspace>,
+        workbench: WeakEntity<IdeWorkbench>,
+        source: DiffSource,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subscriptions = vec![
             cx.observe(&workspace, |this, _, cx| this.maybe_reload(cx)),
             cx.subscribe(&workspace, |this, _, event: &WorkspaceEvent, cx| {
-                if let (WorkspaceEvent::ReviewChanged { id }, DiffSource::Review { thread }) = (event, &this.source) {
+                if let (WorkspaceEvent::ReviewChanged { id }, DiffSource::Review { thread }) =
+                    (event, &this.source)
+                {
                     if id == thread {
                         this.reload(cx);
                     }
@@ -388,13 +545,29 @@ impl DiffView {
         match &self.source {
             // Named by its chat: two chats' reviews can be open at once.
             DiffSource::Review { thread } => {
-                let title = self.workspace.read(cx).thread(thread).map(|t| t.title.clone()).unwrap_or_default();
-                let title = if title.chars().count() > 28 { format!("{}…", title.chars().take(27).collect::<String>()) } else { title };
-                if title.is_empty() { "Review".into() } else { format!("Review · {title}") }
+                let title = self
+                    .workspace
+                    .read(cx)
+                    .thread(thread)
+                    .map(|t| t.title.clone())
+                    .unwrap_or_default();
+                let title = if title.chars().count() > 28 {
+                    format!("{}…", title.chars().take(27).collect::<String>())
+                } else {
+                    title
+                };
+                if title.is_empty() {
+                    "Review".into()
+                } else {
+                    format!("Review · {title}")
+                }
             }
             DiffSource::Git { rel, staged, .. } => {
                 let name = rel.rsplit('/').next().unwrap_or(rel);
-                format!("{name} ({})", if *staged { "Index" } else { "Working Tree" })
+                format!(
+                    "{name} ({})",
+                    if *staged { "Index" } else { "Working Tree" }
+                )
             }
         }
     }
@@ -403,11 +576,21 @@ impl DiffView {
     /// baseline, or (for git) files changing on disk.
     fn signature(&self, cx: &App) -> String {
         let ws = self.workspace.read(cx);
-        let epoch = format!("{}:{}:{}", ws.files_epoch, ws.agent_edits, ws.turns_finished);
+        let epoch = format!(
+            "{}:{}:{}",
+            ws.files_epoch, ws.agent_edits, ws.turns_finished
+        );
         match &self.source {
             DiffSource::Review { thread } => {
-                let base = ws.review_base(thread).map(|(t, b)| format!("{}@{b}", t.display())).unwrap_or_default();
-                let files: Vec<String> = ws.pending_files(thread).iter().map(|f| format!("{}+{}-{}", f.path, f.added, f.removed)).collect();
+                let base = ws
+                    .review_base(thread)
+                    .map(|(t, b)| format!("{}@{b}", t.display()))
+                    .unwrap_or_default();
+                let files: Vec<String> = ws
+                    .pending_files(thread)
+                    .iter()
+                    .map(|f| format!("{}+{}-{}", f.path, f.added, f.removed))
+                    .collect();
                 format!("{base}|{}|{epoch}", files.join(","))
             }
             DiffSource::Git { .. } => epoch,
@@ -429,9 +612,15 @@ impl DiffView {
         let job: Box<dyn FnOnce() -> Result<Vec<DiffFile>, String> + Send> = match &self.source {
             DiffSource::Review { thread } => {
                 let ws = self.workspace.read(cx);
-                let files: Vec<String> = ws.pending_files(thread).iter().map(|f| f.path.clone()).collect();
+                let files: Vec<String> = ws
+                    .pending_files(thread)
+                    .iter()
+                    .map(|f| f.path.clone())
+                    .collect();
                 match ws.review_base(thread) {
-                    Some((top, base)) if !files.is_empty() => Box::new(move || load_review(&top, &base, &files)),
+                    Some((top, base)) if !files.is_empty() => {
+                        Box::new(move || load_review(&top, &base, &files))
+                    }
                     _ => Box::new(|| Ok(vec![])),
                 }
             }
@@ -462,7 +651,12 @@ impl DiffView {
     }
 
     fn rebuild(&mut self, cx: &mut Context<Self>) {
-        self.rows = std::rc::Rc::new(build_rows(&self.files, &self.collapsed, &self.opened, self.split));
+        self.rows = std::rc::Rc::new(build_rows(
+            &self.files,
+            &self.collapsed,
+            &self.opened,
+            self.split,
+        ));
         cx.notify();
     }
 
@@ -489,16 +683,30 @@ impl DiffView {
 
     /// The previous or next hunk's head, at the top.
     fn step(&mut self, by: isize, cx: &mut Context<Self>) {
-        let heads: Vec<usize> = self.rows.iter().enumerate().filter(|(_, r)| matches!(r, Row::Hunk { .. })).map(|(i, _)| i).collect();
+        let heads: Vec<usize> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r, Row::Hunk { .. }))
+            .map(|(i, _)| i)
+            .collect();
         if heads.is_empty() {
             return;
         }
         // The row at the top: every row is `ROW` tall (a jump still on its way counts as made).
         let top = {
             let state = self.scroll.0.borrow();
-            state.deferred_scroll_to_item.as_ref().map(|d| d.item_index).unwrap_or_else(|| (-state.base_handle.offset().y.as_f32() / ROW).max(0.) as usize)
+            state
+                .deferred_scroll_to_item
+                .as_ref()
+                .map(|d| d.item_index)
+                .unwrap_or_else(|| (-state.base_handle.offset().y.as_f32() / ROW).max(0.) as usize)
         };
-        let next = if by > 0 { heads.iter().find(|h| **h > top).or(heads.last()) } else { heads.iter().rev().find(|h| **h < top).or(heads.first()) };
+        let next = if by > 0 {
+            heads.iter().find(|h| **h > top).or(heads.last())
+        } else {
+            heads.iter().rev().find(|h| **h < top).or(heads.first())
+        };
         if let Some(ix) = next {
             self.scroll.scroll_to_item(*ix, ScrollStrategy::Top);
             cx.notify();
@@ -507,8 +715,15 @@ impl DiffView {
 
     /// The review's thread, while this is a Review whose file `rel` is still pending.
     fn pending(&self, rel: &str, cx: &App) -> Option<String> {
-        let DiffSource::Review { thread } = &self.source else { return None };
-        self.workspace.read(cx).pending_files(thread).iter().any(|f| f.path == rel).then(|| thread.clone())
+        let DiffSource::Review { thread } = &self.source else {
+            return None;
+        };
+        self.workspace
+            .read(cx)
+            .pending_files(thread)
+            .iter()
+            .any(|f| f.path == rel)
+            .then(|| thread.clone())
     }
 
     /// The file's editor tab has edits not saved: an undo (to the file on disk) would miss them.
@@ -520,44 +735,88 @@ impl DiffView {
             return false;
         };
         let path = top.join(rel);
-        self.workbench.upgrade().is_some_and(|wb| wb.read(cx).tabs.iter().filter_map(|t| t.editor()).any(|e| e.read(cx).path == path && e.read(cx).dirty))
+        self.workbench.upgrade().is_some_and(|wb| {
+            wb.read(cx)
+                .tabs
+                .iter()
+                .filter_map(|t| t.editor())
+                .any(|e| e.read(cx).path == path && e.read(cx).dirty)
+        })
     }
 
     fn refuse_dirty(&self, rel: &str, cx: &mut Context<Self>) -> bool {
         if !self.dirty_editor(rel, cx) {
             return false;
         }
-        let message = format!("Save or drop your edits to {} first: the undo works on the file as saved.", rel.rsplit('/').next().unwrap_or(rel));
-        self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message, undo: None }));
+        let message = format!(
+            "Save or drop your edits to {} first: the undo works on the file as saved.",
+            rel.rsplit('/').next().unwrap_or(rel)
+        );
+        self.workspace.update(cx, |_, cx| {
+            cx.emit(WorkspaceEvent::Toast {
+                message,
+                undo: None,
+            })
+        });
         true
     }
 
     /// Keep or undo hunk `hunk` of file `file` (a Review's).
-    pub(crate) fn act_on_hunk(&mut self, file: usize, hunk: usize, keep: bool, cx: &mut Context<Self>) {
-        let Some(f) = self.files.get(file) else { return };
+    pub(crate) fn act_on_hunk(
+        &mut self,
+        file: usize,
+        hunk: usize,
+        keep: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(f) = self.files.get(file) else {
+            return;
+        };
         let (rel, patch) = (f.rel.clone(), f.diff.patch(hunk));
-        let (Some(thread), Some(patch)) = (self.pending(&rel, cx), patch) else { return };
+        let (Some(thread), Some(patch)) = (self.pending(&rel, cx), patch) else {
+            return;
+        };
         if !keep && self.refuse_dirty(&rel, cx) {
             return;
         }
-        self.workspace.update(cx, |ws, cx| if keep { ws.keep_hunk(&thread, &rel, patch, cx) } else { ws.undo_hunk(&thread, &rel, patch, cx) });
+        self.workspace.update(cx, |ws, cx| {
+            if keep {
+                ws.keep_hunk(&thread, &rel, patch, cx)
+            } else {
+                ws.undo_hunk(&thread, &rel, patch, cx)
+            }
+        });
     }
 
     /// Keep or undo file `file` whole (a Review's).
     pub(crate) fn act_on_file(&mut self, file: usize, keep: bool, cx: &mut Context<Self>) {
-        let Some(rel) = self.files.get(file).map(|f| f.rel.clone()) else { return };
-        let Some(thread) = self.pending(&rel, cx) else { return };
+        let Some(rel) = self.files.get(file).map(|f| f.rel.clone()) else {
+            return;
+        };
+        let Some(thread) = self.pending(&rel, cx) else {
+            return;
+        };
         if !keep && self.refuse_dirty(&rel, cx) {
             return;
         }
-        self.workspace.update(cx, |ws, cx| if keep { ws.keep_files(&thread, Some(vec![rel]), cx) } else { ws.undo_files(&thread, Some(vec![rel]), cx) });
+        self.workspace.update(cx, |ws, cx| {
+            if keep {
+                ws.keep_files(&thread, Some(vec![rel]), cx)
+            } else {
+                ws.undo_files(&thread, Some(vec![rel]), cx)
+            }
+        });
     }
 
     /// Open file `file` in the editor, on its first change.
     fn open_file(&mut self, file: usize, cx: &mut Context<Self>) {
-        let Some(f) = self.files.get(file) else { return };
+        let Some(f) = self.files.get(file) else {
+            return;
+        };
         let top = match &self.source {
-            DiffSource::Review { thread } => self.workspace.read(cx).review_base(thread).map(|(t, _)| t),
+            DiffSource::Review { thread } => {
+                self.workspace.read(cx).review_base(thread).map(|(t, _)| t)
+            }
             DiffSource::Git { top, .. } => Some(top.clone()),
         };
         let Some(top) = top else { return };
@@ -566,28 +825,66 @@ impl DiffView {
         if f.status == 'D' {
             return;
         }
-        self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::OpenEditor { path, line, preview: false }));
+        self.workspace.update(cx, |_, cx| {
+            cx.emit(WorkspaceEvent::OpenEditor {
+                path,
+                line,
+                preview: false,
+            })
+        });
     }
 
     /// The whole diff as one patch, in a plain text tab (to copy or save).
     fn open_patch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text: String = self.files.iter().map(|f| format!("{}{}", f.diff.header, f.diff.hunks.iter().map(|h| h.body.as_str()).collect::<String>())).collect();
+        let text: String = self
+            .files
+            .iter()
+            .map(|f| {
+                format!(
+                    "{}{}",
+                    f.diff.header,
+                    f.diff
+                        .hunks
+                        .iter()
+                        .map(|h| h.body.as_str())
+                        .collect::<String>()
+                )
+            })
+            .collect();
         let title = format!("{} · Patch", self.title(cx));
         if let Some(wb) = self.workbench.upgrade() {
-            window.defer(cx, move |window, cx| wb.update(cx, |wb, cx| wb.open_diff(title, text, window, cx)));
+            window.defer(cx, move |window, cx| {
+                wb.update(cx, |wb, cx| wb.open_diff(title, text, window, cx))
+            });
         }
     }
 
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let (added, removed) = self.files.iter().fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
+        let (added, removed) = self
+            .files
+            .iter()
+            .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
         let n = self.files.len();
         let review = match &self.source {
-            DiffSource::Review { thread } => Some((thread.clone(), self.workspace.read(cx).turn_running(thread))),
+            DiffSource::Review { thread } => {
+                Some((thread.clone(), self.workspace.read(cx).turn_running(thread)))
+            }
             DiffSource::Git { .. } => None,
         };
         let ember = palette::ember(cx);
-        let link = |id: &'static str| h_flex().id(id).test_support().flex_none().h(px(22.)).px(px(7.)).gap(px(4.)).items_center().rounded(px(5.)).cursor_pointer();
+        let link = |id: &'static str| {
+            h_flex()
+                .id(id)
+                .test_support()
+                .flex_none()
+                .h(px(22.))
+                .px(px(7.))
+                .gap(px(4.))
+                .items_center()
+                .rounded(px(5.))
+                .cursor_pointer()
+        };
         let split = self.split;
         h_flex()
             .id("diff-toolbar")
@@ -601,7 +898,11 @@ impl DiffView {
             .text_size(px(12.))
             .text_color(theme.muted_foreground)
             .child(Icon::new(crate::assets::Lucide::FileDiff).size(px(13.)))
-            .child(div().text_color(theme.foreground.opacity(0.85)).child(format!("{n} file{}", if n == 1 { "" } else { "s" })))
+            .child(
+                div()
+                    .text_color(theme.foreground.opacity(0.85))
+                    .child(format!("{n} file{}", if n == 1 { "" } else { "s" })),
+            )
             .when(added > 0 || removed > 0, |el| {
                 el.child(crate::line_breakdown::hover(
                     "diff-lines",
@@ -609,29 +910,74 @@ impl DiffView {
                         .gap(px(6.))
                         .font_family(theme.mono_font_family.clone())
                         .text_size(px(11.5))
-                        .when(added > 0, |el| el.child(div().text_color(palette::emerald(cx)).child(format!("+{added}"))))
-                        .when(removed > 0, |el| el.child(div().text_color(palette::red(cx)).child(format!("−{removed}")))),
-                    trek_core::file_kind::LineBreakdown::of(self.files.iter().map(|f| (f.rel.as_str(), f.added, f.removed))),
+                        .when(added > 0, |el| {
+                            el.child(
+                                div()
+                                    .text_color(palette::emerald(cx))
+                                    .child(format!("+{added}")),
+                            )
+                        })
+                        .when(removed > 0, |el| {
+                            el.child(
+                                div()
+                                    .text_color(palette::red(cx))
+                                    .child(format!("−{removed}")),
+                            )
+                        }),
+                    trek_core::file_kind::LineBreakdown::of(
+                        self.files
+                            .iter()
+                            .map(|f| (f.rel.as_str(), f.added, f.removed)),
+                    ),
                 ))
             })
-            .when(self.loading, |el| el.child(Spinner::new().xsmall().color(theme.muted_foreground)))
+            .when(self.loading, |el| {
+                el.child(Spinner::new().xsmall().color(theme.muted_foreground))
+            })
             .child(div().flex_1())
-            .child(crate::ui::icon_button("diff-prev", IconName::ArrowUp, "Previous change").on_click(cx.listener(|this, _, _, cx| this.step(-1, cx))))
-            .child(crate::ui::icon_button("diff-next", IconName::ArrowDown, "Next change").on_click(cx.listener(|this, _, _, cx| this.step(1, cx))))
             .child(
-                crate::ui::icon_button("diff-split", if split { crate::assets::Lucide::Rows2 } else { crate::assets::Lucide::Columns2 }, if split { "Inline" } else { "Side by side" })
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_split(!split, cx))),
+                crate::ui::icon_button("diff-prev", IconName::ArrowUp, "Previous change")
+                    .on_click(cx.listener(|this, _, _, cx| this.step(-1, cx))),
             )
-            .child(crate::ui::icon_button("diff-patch", IconName::FileText, "Open as patch").on_click(cx.listener(|this, _, window, cx| this.open_patch(window, cx))))
+            .child(
+                crate::ui::icon_button("diff-next", IconName::ArrowDown, "Next change")
+                    .on_click(cx.listener(|this, _, _, cx| this.step(1, cx))),
+            )
+            .child(
+                crate::ui::icon_button(
+                    "diff-split",
+                    if split {
+                        crate::assets::Lucide::Rows2
+                    } else {
+                        crate::assets::Lucide::Columns2
+                    },
+                    if split { "Inline" } else { "Side by side" },
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.set_split(!split, cx))),
+            )
+            .child(
+                crate::ui::icon_button("diff-patch", IconName::FileText, "Open as patch")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_patch(window, cx))),
+            )
             .when_some(review.filter(|_| n > 0), |el, (thread, busy)| {
-                let (ws1, ws2, t1, t2) = (self.workspace.clone(), self.workspace.clone(), thread.clone(), thread);
+                let (ws1, ws2, t1, t2) = (
+                    self.workspace.clone(),
+                    self.workspace.clone(),
+                    thread.clone(),
+                    thread,
+                );
                 el.child(div().w(px(1.)).h(px(14.)).mx(px(2.)).bg(theme.border))
                     .child(
                         link("diff-undo-all")
-                            .hover(|s| s.bg(theme.foreground.opacity(0.07)).text_color(theme.foreground))
+                            .hover(|s| {
+                                s.bg(theme.foreground.opacity(0.07))
+                                    .text_color(theme.foreground)
+                            })
                             .when(busy, |el| el.opacity(0.45).cursor_default())
                             .child("Undo all")
-                            .on_click(move |_, _, cx| ws1.update(cx, |ws, cx| ws.undo_files(&t1, None, cx))),
+                            .on_click(move |_, _, cx| {
+                                ws1.update(cx, |ws, cx| ws.undo_files(&t1, None, cx))
+                            }),
                     )
                     .child(
                         link("diff-keep-all")
@@ -639,13 +985,20 @@ impl DiffView {
                             .text_color(gpui_kit::white())
                             .hover(|s| s.opacity(0.9))
                             .child("Keep all")
-                            .on_click(move |_, _, cx| ws2.update(cx, |ws, cx| ws.keep_files(&t2, None, cx))),
+                            .on_click(move |_, _, cx| {
+                                ws2.update(cx, |ws, cx| ws.keep_files(&t2, None, cx))
+                            }),
                     )
             })
     }
 
     /// Rows `range`, drawn.
-    fn render_rows(&mut self, range: std::ops::Range<usize>, _: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_rows(
+        &mut self,
+        range: std::ops::Range<usize>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let mono = theme.mono_font_family.clone();
@@ -655,7 +1008,15 @@ impl DiffView {
             DiffSource::Review { thread } => self.workspace.read(cx).turn_running(thread),
             DiffSource::Git { .. } => false,
         };
-        let number = |n: Option<u32>| div().w(px(42.)).flex_none().pr(px(8.)).text_right().text_color(muted.opacity(0.7)).child(n.map(|n| n.to_string()).unwrap_or_default());
+        let number = |n: Option<u32>| {
+            div()
+                .w(px(42.))
+                .flex_none()
+                .pr(px(8.))
+                .text_right()
+                .text_color(muted.opacity(0.7))
+                .child(n.map(|n| n.to_string()).unwrap_or_default())
+        };
         let tint = |kind: Kind| match kind {
             Kind::Add => Some(green),
             Kind::Del => Some(red),
@@ -674,18 +1035,36 @@ impl DiffView {
                 .font_family(theme.font_family.clone())
                 .text_size(px(11.))
                 .text_color(muted)
-                .hover(|s| s.bg(theme.foreground.opacity(0.08)).text_color(theme.foreground))
+                .hover(|s| {
+                    s.bg(theme.foreground.opacity(0.08))
+                        .text_color(theme.foreground)
+                })
                 .child(label)
         };
         range
             .filter_map(|ix| rows.get(ix).map(|r| (ix, r.clone())))
             .map(|(ix, row)| {
-                let base = h_flex().id(("diff-row", ix)).w_full().h(px(ROW)).items_center().whitespace_nowrap().font_family(mono.clone()).text_size(px(12.));
+                let base = h_flex()
+                    .id(("diff-row", ix))
+                    .w_full()
+                    .h(px(ROW))
+                    .items_center()
+                    .whitespace_nowrap()
+                    .font_family(mono.clone())
+                    .text_size(px(12.));
                 match row {
                     Row::Space => base.into_any_element(),
-                    Row::Note(text) => base.pl(px(108.)).text_color(muted).italic().font_family(theme.font_family.clone()).child(text).into_any_element(),
+                    Row::Note(text) => base
+                        .pl(px(108.))
+                        .text_color(muted)
+                        .italic()
+                        .font_family(theme.font_family.clone())
+                        .child(text)
+                        .into_any_element(),
                     Row::File(f) => {
-                        let Some(file) = self.files.get(f) else { return base.into_any_element() };
+                        let Some(file) = self.files.get(f) else {
+                            return base.into_any_element();
+                        };
                         let (dir, name) = match file.rel.rsplit_once('/') {
                             Some((d, n)) => (format!("{d}/"), n.to_string()),
                             None => (String::new(), file.rel.clone()),
@@ -708,34 +1087,94 @@ impl DiffView {
                             .border_color(theme.border.opacity(0.7))
                             .font_family(theme.font_family.clone())
                             .cursor_pointer()
-                            .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.)).text_color(muted))
+                            .child(
+                                Icon::new(if open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .size(px(12.))
+                                .text_color(muted),
+                            )
                             .child(crate::file_icon::badge(&name, px(13.), cx))
-                            .child(div().text_color(theme.foreground).font_weight(FontWeight::MEDIUM).child(name))
-                            .when(!dir.is_empty(), |el| el.child(div().text_size(px(11.5)).text_color(muted).child(dir)))
-                            .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(color).child(file.status.to_string()))
-                            .when(file.added > 0, |el| el.child(div().font_family(mono.clone()).text_size(px(11.5)).text_color(green).child(format!("+{}", file.added))))
-                            .when(file.removed > 0, |el| el.child(div().font_family(mono.clone()).text_size(px(11.5)).text_color(red).child(format!("−{}", file.removed))))
-                            .child(div().w(px(12.)))
-                            .when(file.status != 'D', |el| el.child(small(("diff-open-file", f).into(), "Open File").on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.open_file(f, cx);
-                            }))))
-                            .when(pending, |el| {
-                                el.child(small(("diff-undo-file", f).into(), "Undo file").when(busy, |el| el.opacity(0.45)).on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.act_on_file(f, false, cx);
-                                })))
-                                .child(small(("diff-keep-file", f).into(), "Keep file").text_color(ember).on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.act_on_file(f, true, cx);
-                                })))
+                            .child(
+                                div()
+                                    .text_color(theme.foreground)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(name),
+                            )
+                            .when(!dir.is_empty(), |el| {
+                                el.child(div().text_size(px(11.5)).text_color(muted).child(dir))
                             })
-                            .on_click(cx.listener(move |this, _, _, cx| this.toggle_file(rel.clone(), cx)))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(color)
+                                    .child(file.status.to_string()),
+                            )
+                            .when(file.added > 0, |el| {
+                                el.child(
+                                    div()
+                                        .font_family(mono.clone())
+                                        .text_size(px(11.5))
+                                        .text_color(green)
+                                        .child(format!("+{}", file.added)),
+                                )
+                            })
+                            .when(file.removed > 0, |el| {
+                                el.child(
+                                    div()
+                                        .font_family(mono.clone())
+                                        .text_size(px(11.5))
+                                        .text_color(red)
+                                        .child(format!("−{}", file.removed)),
+                                )
+                            })
+                            .child(div().w(px(12.)))
+                            .when(file.status != 'D', |el| {
+                                el.child(small(("diff-open-file", f).into(), "Open File").on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.open_file(f, cx);
+                                    }),
+                                ))
+                            })
+                            .when(pending, |el| {
+                                el.child(
+                                    small(("diff-undo-file", f).into(), "Undo file")
+                                        .when(busy, |el| el.opacity(0.45))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.act_on_file(f, false, cx);
+                                        })),
+                                )
+                                .child(
+                                    small(("diff-keep-file", f).into(), "Keep file")
+                                        .text_color(ember)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.act_on_file(f, true, cx);
+                                        })),
+                                )
+                            })
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.toggle_file(rel.clone(), cx)
+                                }),
+                            )
                             .into_any_element()
                     }
                     Row::Hunk { file, hunk, head } => {
-                        let pending = self.files.get(file).and_then(|f| self.pending(&f.rel, cx)).is_some();
-                        let n = self.files.get(file).map_or(0, |f| f.diff.hunks.iter().take(hunk).count());
+                        let pending = self
+                            .files
+                            .get(file)
+                            .and_then(|f| self.pending(&f.rel, cx))
+                            .is_some();
+                        let n = self
+                            .files
+                            .get(file)
+                            .map_or(0, |f| f.diff.hunks.iter().take(hunk).count());
                         let key = file * 10_000 + n;
                         base.id(("diff-hunk", key))
                             .bg(theme.info.opacity(0.07))
@@ -745,22 +1184,64 @@ impl DiffView {
                             .child(head)
                             .when(pending, |el| {
                                 el.child(div().w(px(10.)))
-                                    .child(small(("diff-undo-hunk", key).into(), "Undo").when(busy, |el| el.opacity(0.45)).on_click(cx.listener(move |this, _, _, cx| this.act_on_hunk(file, hunk, false, cx))))
-                                    .child(small(("diff-keep-hunk", key).into(), "Keep").text_color(ember).on_click(cx.listener(move |this, _, _, cx| this.act_on_hunk(file, hunk, true, cx))))
+                                    .child(
+                                        small(("diff-undo-hunk", key).into(), "Undo")
+                                            .when(busy, |el| el.opacity(0.45))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.act_on_hunk(file, hunk, false, cx)
+                                            })),
+                                    )
+                                    .child(
+                                        small(("diff-keep-hunk", key).into(), "Keep")
+                                            .text_color(ember)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.act_on_hunk(file, hunk, true, cx)
+                                            })),
+                                    )
                             })
                             .into_any_element()
                     }
-                    Row::Line { kind, old, new, text } => {
+                    Row::Line {
+                        kind,
+                        old,
+                        new,
+                        text,
+                    } => {
                         let color = tint(kind);
                         base.when_some(color, |el, c| el.bg(c.opacity(0.11)))
-                            .child(number(old).when_some(color.filter(|_| kind == Kind::Del), |el, c| el.bg(c.opacity(0.10))))
-                            .child(number(new).when_some(color.filter(|_| kind == Kind::Add), |el, c| el.bg(c.opacity(0.10))))
-                            .child(div().w(px(16.)).flex_none().text_color(color.unwrap_or(muted)).child(match kind {
-                                Kind::Add => "+",
-                                Kind::Del => "−",
-                                Kind::Ctx => "",
-                            }))
-                            .child(div().pr(px(16.)).text_color(theme.foreground.opacity(if kind == Kind::Ctx { 0.8 } else { 0.95 })).child(text))
+                            .child(
+                                number(old)
+                                    .when_some(color.filter(|_| kind == Kind::Del), |el, c| {
+                                        el.bg(c.opacity(0.10))
+                                    }),
+                            )
+                            .child(
+                                number(new)
+                                    .when_some(color.filter(|_| kind == Kind::Add), |el, c| {
+                                        el.bg(c.opacity(0.10))
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .w(px(16.))
+                                    .flex_none()
+                                    .text_color(color.unwrap_or(muted))
+                                    .child(match kind {
+                                        Kind::Add => "+",
+                                        Kind::Del => "−",
+                                        Kind::Ctx => "",
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .pr(px(16.))
+                                    .text_color(theme.foreground.opacity(if kind == Kind::Ctx {
+                                        0.8
+                                    } else {
+                                        0.95
+                                    }))
+                                    .child(text),
+                            )
                             .into_any_element()
                     }
                     Row::Pair { left, right } => {
@@ -773,19 +1254,35 @@ impl DiffView {
                                 .overflow_hidden()
                                 .when(side.is_none(), |el| el.bg(theme.foreground.opacity(0.03)))
                                 .when_some(color, |el, c| el.bg(c.opacity(0.11)))
-                                .when(del, |el| el.border_r_1().border_color(theme.border.opacity(0.6)))
+                                .when(del, |el| {
+                                    el.border_r_1().border_color(theme.border.opacity(0.6))
+                                })
                                 .children(side.map(|(n, k, text)| {
                                     h_flex()
                                         .child(number(Some(n)))
-                                        .child(div().w(px(14.)).flex_none().text_color(color.unwrap_or(muted)).child(match k {
-                                            Kind::Add => "+",
-                                            Kind::Del => "−",
-                                            Kind::Ctx => "",
-                                        }))
-                                        .child(div().text_color(theme.foreground.opacity(if k == Kind::Ctx { 0.8 } else { 0.95 })).child(text))
+                                        .child(
+                                            div()
+                                                .w(px(14.))
+                                                .flex_none()
+                                                .text_color(color.unwrap_or(muted))
+                                                .child(match k {
+                                                    Kind::Add => "+",
+                                                    Kind::Del => "−",
+                                                    Kind::Ctx => "",
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_color(theme.foreground.opacity(
+                                                    if k == Kind::Ctx { 0.8 } else { 0.95 },
+                                                ))
+                                                .child(text),
+                                        )
                                 }))
                         };
-                        base.child(half(left, true)).child(half(right, false)).into_any_element()
+                        base.child(half(left, true))
+                            .child(half(right, false))
+                            .into_any_element()
                     }
                     Row::Fold { file, at, lines } => base
                         .id(("diff-fold", ix))
@@ -797,9 +1294,15 @@ impl DiffView {
                         .font_family(theme.font_family.clone())
                         .text_size(px(11.5))
                         .text_color(muted)
-                        .hover(|s| s.text_color(theme.foreground).bg(theme.foreground.opacity(0.05)))
+                        .hover(|s| {
+                            s.text_color(theme.foreground)
+                                .bg(theme.foreground.opacity(0.05))
+                        })
                         .child(Icon::new(crate::assets::Lucide::ChevronsUpDown).size(px(12.)))
-                        .child(format!("{lines} unchanged line{}", if lines == 1 { "" } else { "s" }))
+                        .child(format!(
+                            "{lines} unchanged line{}",
+                            if lines == 1 { "" } else { "s" }
+                        ))
                         .on_click(cx.listener(move |this, _, _, cx| this.open_fold(file, at, cx)))
                         .into_any_element(),
                 }
@@ -821,7 +1324,9 @@ impl Render for DiffView {
             crate::panels::empty(format!("Couldn't read the changes: {e}"), cx).into_any_element()
         } else if self.files.is_empty() && !self.loading {
             let text = match &self.source {
-                DiffSource::Review { .. } => "Nothing left to review: every change was kept or undone.",
+                DiffSource::Review { .. } => {
+                    "Nothing left to review: every change was kept or undone."
+                }
                 DiffSource::Git { .. } => "No changes.",
             };
             crate::panels::empty(text, cx).into_any_element()
@@ -834,7 +1339,9 @@ impl Render for DiffView {
                         .iter()
                         .enumerate()
                         .map(|(i, r)| match r {
-                            Row::Line { text, .. } | Row::Hunk { head: text, .. } => (i, text.len() + 20),
+                            Row::Line { text, .. } | Row::Hunk { head: text, .. } => {
+                                (i, text.len() + 20)
+                            }
                             Row::File(_) => (i, 90),
                             _ => (i, 0),
                         })
@@ -842,10 +1349,17 @@ impl Render for DiffView {
                         .map(|(i, _)| i)
                 })
                 .flatten();
-            let list = uniform_list("diff-rows", self.rows.len(), cx.processor(|this, range, window, cx| this.render_rows(range, window, cx)))
-                .size_full()
-                .track_scroll(&self.scroll)
-                .when(!self.split, |l| l.with_width_from_item(widest).with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained));
+            let list = uniform_list(
+                "diff-rows",
+                self.rows.len(),
+                cx.processor(|this, range, window, cx| this.render_rows(range, window, cx)),
+            )
+            .size_full()
+            .track_scroll(&self.scroll)
+            .when(!self.split, |l| {
+                l.with_width_from_item(widest)
+                    .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+            });
             div()
                 .id("diff-body")
                 .size_full()
@@ -871,16 +1385,36 @@ impl DiffView {
     /// The rows as text: "file M a.rs +1 −1", "hunk @@ -1,2 +1,2 @@", "+ 2 new", "- 2 old",
     /// "  3 3 same", "fold 4 at 5", "pair 2 old | 2 new", "note …", "space".
     pub(crate) fn describe(&self) -> Vec<String> {
-        let side = |s: &Option<Side>| s.as_ref().map(|(n, _, t)| format!("{n} {t}")).unwrap_or_default();
+        let side = |s: &Option<Side>| {
+            s.as_ref()
+                .map(|(n, _, t)| format!("{n} {t}"))
+                .unwrap_or_default()
+        };
         self.rows
             .iter()
             .map(|r| match r {
                 Row::Space => "space".to_string(),
-                Row::File(f) => self.files.get(*f).map(|f| format!("file {} {} +{} −{}", f.status, f.rel, f.added, f.removed)).unwrap_or_default(),
+                Row::File(f) => self
+                    .files
+                    .get(*f)
+                    .map(|f| format!("file {} {} +{} −{}", f.status, f.rel, f.added, f.removed))
+                    .unwrap_or_default(),
                 Row::Hunk { head, .. } => format!("hunk {head}"),
-                Row::Line { kind: Kind::Add, new, text, .. } => format!("+ {} {text}", new.unwrap_or(0)),
-                Row::Line { kind: Kind::Del, old, text, .. } => format!("- {} {text}", old.unwrap_or(0)),
-                Row::Line { old, new, text, .. } => format!("  {} {} {text}", old.unwrap_or(0), new.unwrap_or(0)),
+                Row::Line {
+                    kind: Kind::Add,
+                    new,
+                    text,
+                    ..
+                } => format!("+ {} {text}", new.unwrap_or(0)),
+                Row::Line {
+                    kind: Kind::Del,
+                    old,
+                    text,
+                    ..
+                } => format!("- {} {text}", old.unwrap_or(0)),
+                Row::Line { old, new, text, .. } => {
+                    format!("  {} {} {text}", old.unwrap_or(0), new.unwrap_or(0))
+                }
                 Row::Pair { left, right } => format!("pair {} | {}", side(left), side(right)),
                 Row::Fold { at, lines, .. } => format!("fold {lines} at {at}"),
                 Row::Note(t) => format!("note {t}"),
@@ -914,9 +1448,18 @@ mod tests {
             .map(|r| match r {
                 Row::File(_) => "file".into(),
                 Row::Hunk { head, .. } => format!("hunk {head}"),
-                Row::Line { kind, old, new, text } => format!("{kind:?} {old:?} {new:?} {text}"),
+                Row::Line {
+                    kind,
+                    old,
+                    new,
+                    text,
+                } => format!("{kind:?} {old:?} {new:?} {text}"),
                 Row::Fold { at, lines, .. } => format!("fold {lines}@{at}"),
-                Row::Pair { left, right } => format!("pair {:?} | {:?}", left.as_ref().map(|s| s.0), right.as_ref().map(|s| s.0)),
+                Row::Pair { left, right } => format!(
+                    "pair {:?} | {:?}",
+                    left.as_ref().map(|s| s.0),
+                    right.as_ref().map(|s| s.0)
+                ),
                 Row::Note(t) => format!("note {t}"),
                 Row::Space => "space".into(),
             })
@@ -925,14 +1468,30 @@ mod tests {
 
     #[test]
     fn hunks_get_line_numbers_and_the_stretches_between_fold() {
-        let new: String = (1..=20).map(|n| if n == 2 { "two!\n".to_string() } else { format!("{n}\n") }).collect();
+        let new: String = (1..=20)
+            .map(|n| {
+                if n == 2 {
+                    "two!\n".to_string()
+                } else {
+                    format!("{n}\n")
+                }
+            })
+            .collect();
         let patch = "diff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n 1\n-2\n+two!\n 3\n";
         let f = modified("f", patch, &new);
         assert_eq!((f.status, f.added, f.removed), ('M', 1, 1));
         let rows = build_rows(&[f.clone()], &HashSet::new(), &HashSet::new(), false);
         assert_eq!(
             text(&rows),
-            vec!["file", "hunk @@ -1,3 +1,3 @@", "Ctx Some(1) Some(1) 1", "Del Some(2) None 2", "Add None Some(2) two!", "Ctx Some(3) Some(3) 3", "fold 17@4"]
+            vec![
+                "file",
+                "hunk @@ -1,3 +1,3 @@",
+                "Ctx Some(1) Some(1) 1",
+                "Del Some(2) None 2",
+                "Add None Some(2) two!",
+                "Ctx Some(3) Some(3) 3",
+                "fold 17@4"
+            ]
         );
         // Opened, the stretch shows with both sides' numbers.
         let opened: HashSet<(String, u32)> = [("f".to_string(), 4)].into();
@@ -952,21 +1511,43 @@ mod tests {
         let patch = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,4 @@\n 1\n+2\n+3\n 4\n@@ -20,3 +22,3 @@\n 22\n-x\n+23\n 24\n";
         let f = modified("f", patch, &new);
         let rows = build_rows(&[f.clone()], &HashSet::new(), &HashSet::new(), false);
-        assert!(text(&rows).contains(&"fold 17@5".to_string()), "{:?}", text(&rows));
+        assert!(
+            text(&rows).contains(&"fold 17@5".to_string()),
+            "{:?}",
+            text(&rows)
+        );
         let opened: HashSet<(String, u32)> = [("f".to_string(), 5)].into();
         let rows = build_rows(&[f], &HashSet::new(), &opened, false);
-        assert!(text(&rows).contains(&"Ctx Some(3) Some(5) 5".to_string()), "{:?}", text(&rows));
+        assert!(
+            text(&rows).contains(&"Ctx Some(3) Some(5) 5".to_string()),
+            "{:?}",
+            text(&rows)
+        );
     }
 
     #[test]
     fn new_files_show_every_line_and_binaries_say_so() {
         let f = untracked("n.txt", Some(b"a\nb\n".to_vec()));
         assert_eq!((f.status, f.added), ('A', 2));
-        assert_eq!(text(&build_rows(&[f], &HashSet::new(), &HashSet::new(), false)), vec!["file", "hunk @@ -0,0 +1,2 @@", "Add None Some(1) a", "Add None Some(2) b"]);
+        assert_eq!(
+            text(&build_rows(&[f], &HashSet::new(), &HashSet::new(), false)),
+            vec![
+                "file",
+                "hunk @@ -0,0 +1,2 @@",
+                "Add None Some(1) a",
+                "Add None Some(2) b"
+            ]
+        );
         let bin = untracked("x.bin", Some(vec![0, 1, 2]));
-        assert_eq!(text(&build_rows(&[bin], &HashSet::new(), &HashSet::new(), false)), vec!["file", "note Binary file"]);
+        assert_eq!(
+            text(&build_rows(&[bin], &HashSet::new(), &HashSet::new(), false)),
+            vec!["file", "note Binary file"]
+        );
         // A collapsed file is its header alone.
         let f = untracked("n.txt", Some(b"a\n".to_vec()));
-        assert_eq!(build_rows(&[f], &["n.txt".to_string()].into(), &HashSet::new(), false).len(), 1);
+        assert_eq!(
+            build_rows(&[f], &["n.txt".to_string()].into(), &HashSet::new(), false).len(),
+            1
+        );
     }
 }

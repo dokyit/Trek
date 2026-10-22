@@ -21,23 +21,65 @@ fn the_main_window_opens_where_it_was_left() {
         cx.executor().advance_clock(Duration::from_secs(1));
         cx.run_until_parked();
         let saved = load(&dir).expect("saved");
-        assert_eq!((saved.width, saved.height, saved.maximized), (1000., 700., false));
+        assert_eq!(
+            (saved.width, saved.height, saved.maximized),
+            (1000., 700., false)
+        );
 
-        let min = size(px(crate::window_place::MAIN_MIN_WIDTH_PX), px(crate::window_place::MAIN_MIN_HEIGHT_PX));
+        let min = size(
+            px(crate::window_place::MAIN_MIN_WIDTH_PX),
+            px(crate::window_place::MAIN_MIN_HEIGHT_PX),
+        );
         let (display, bounds) = cx.update(|cx| initial(size(px(1280.), px(820.)), min, true, cx));
-        assert_eq!(display, cx.update(|cx| cx.displays().first().map(|d| d.id())), "on the display it was on");
-        assert_eq!(bounds, WindowBounds::Windowed(gpui_kit::Bounds::new(gpui_kit::point(px(saved.x), px(saved.y)), size(px(1000.), px(700.)))));
+        assert_eq!(
+            display,
+            cx.update(|cx| cx.displays().first().map(|d| d.id())),
+            "on the display it was on"
+        );
+        assert_eq!(
+            bounds,
+            WindowBounds::Windowed(gpui_kit::Bounds::new(
+                gpui_kit::point(px(saved.x), px(saved.y)),
+                size(px(1000.), px(700.))
+            ))
+        );
 
         // Maximized comes back maximized, except in a launch in the background, which mustn't
         // come to the front (maximizing does on Windows).
-        std::fs::write(dir.join("window.json"), serde_json::to_vec(&Placement { maximized: true, ..saved.clone() }).unwrap()).unwrap();
-        assert!(matches!(cx.update(|cx| initial(size(px(1280.), px(820.)), min, true, cx)).1, WindowBounds::Maximized(_)));
-        assert!(matches!(cx.update(|cx| initial(size(px(1280.), px(820.)), min, false, cx)).1, WindowBounds::Windowed(_)));
+        std::fs::write(
+            dir.join("window.json"),
+            serde_json::to_vec(&Placement {
+                maximized: true,
+                ..saved.clone()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            cx.update(|cx| initial(size(px(1280.), px(820.)), min, true, cx))
+                .1,
+            WindowBounds::Maximized(_)
+        ));
+        assert!(matches!(
+            cx.update(|cx| initial(size(px(1280.), px(820.)), min, false, cx))
+                .1,
+            WindowBounds::Windowed(_)
+        ));
 
         // Off every display (one since unplugged, or far off this one's edge): centred, as at first.
-        for gone in [Placement { display: "unplugged".into(), ..saved.clone() }, Placement { x: 50_000., ..saved.clone() }] {
+        for gone in [
+            Placement {
+                display: "unplugged".into(),
+                ..saved.clone()
+            },
+            Placement {
+                x: 50_000.,
+                ..saved.clone()
+            },
+        ] {
             std::fs::write(dir.join("window.json"), serde_json::to_vec(&gone).unwrap()).unwrap();
-            let (display, bounds) = cx.update(|cx| initial(size(px(1280.), px(820.)), min, true, cx));
+            let (display, bounds) =
+                cx.update(|cx| initial(size(px(1280.), px(820.)), min, true, cx));
             assert_eq!(display, None);
             assert_eq!(bounds.get_bounds().size, size(px(1280.), px(820.)));
         }
@@ -57,16 +99,33 @@ fn another_launch_s_arguments_open_on_the_main_thread_and_are_answered() {
 
         let (done, answer) = async_channel::bounded(1);
         // What isn't a link or something that exists is left alone (and doesn't stop the rest).
-        let args = ["trek://ask?path=%2Fx&line=1".to_string(), "https://example.com/".into(), "relative.rs".into(), file.display().to_string()];
-        let open = Open { args: args.into(), background: false };
+        let args = [
+            "trek://ask?path=%2Fx&line=1".to_string(),
+            "https://example.com/".into(),
+            "relative.rs".into(),
+            file.display().to_string(),
+        ];
+        let open = Open {
+            args: args.into(),
+            background: false,
+        };
         tx.try_send(Forwarded { open, done }).unwrap();
         cx.run_until_parked();
-        assert_eq!(answer.try_recv(), Ok(Ok(())), "answered once the main thread took them");
+        assert_eq!(
+            answer.try_recv(),
+            Ok(Ok(())),
+            "answered once the main thread took them"
+        );
         // The link goes where macOS's `on_open_urls` sends links; the file opens in the editor.
-        assert_eq!(heard.try_recv().as_deref(), Ok("trek://ask?path=%2Fx&line=1"));
+        assert_eq!(
+            heard.try_recv().as_deref(),
+            Ok("trek://ask?path=%2Fx&line=1")
+        );
         assert!(heard.try_recv().is_err());
         trek.render(cx);
-        assert!(matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Editor { path } if path == file));
+        assert!(
+            matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Editor { path } if path == file)
+        );
     });
 }
 
@@ -83,27 +142,50 @@ fn a_folder_argument_opens_as_a_project() {
         let own = vec![first.display().to_string()];
         cx.update(|cx| crate::single_instance::hear(Some(rx), own, ws, links, cx));
         cx.run_until_parked();
-        let is_project = |trek: &super::harness::Trek, cx: &gpui_kit::TestAppContext, p: &std::path::Path| {
-            trek.read(cx, |ws, _| ws.settings.user_projects.contains(&p.display().to_string()))
-        };
+        let is_project =
+            |trek: &super::harness::Trek, cx: &gpui_kit::TestAppContext, p: &std::path::Path| {
+                trek.read(cx, |ws, _| {
+                    ws.settings.user_projects.contains(&p.display().to_string())
+                })
+            };
         assert!(is_project(&trek, cx, &first), "its own argument");
-        assert!(matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(p) } if p == first));
+        assert!(
+            matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(p) } if p == first)
+        );
 
         let (done, answer) = async_channel::bounded(1);
-        tx.try_send(Forwarded { open: Open { args: vec![second.display().to_string()], background: false }, done }).unwrap();
+        tx.try_send(Forwarded {
+            open: Open {
+                args: vec![second.display().to_string()],
+                background: false,
+            },
+            done,
+        })
+        .unwrap();
         cx.run_until_parked();
         assert_eq!(answer.try_recv(), Ok(Ok(())));
         assert!(is_project(&trek, cx, &second), "a forwarded one");
-        assert!(matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(p) } if p == second));
+        assert!(
+            matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(p) } if p == second)
+        );
         assert!(heard.try_recv().is_err(), "no link went anywhere");
 
         // One that isn't there is no project.
         let gone = second.join("gone");
         let (done, _answer) = async_channel::bounded(1);
-        tx.try_send(Forwarded { open: Open { args: vec![gone.display().to_string()], background: false }, done }).unwrap();
+        tx.try_send(Forwarded {
+            open: Open {
+                args: vec![gone.display().to_string()],
+                background: false,
+            },
+            done,
+        })
+        .unwrap();
         cx.run_until_parked();
         assert!(!is_project(&trek, cx, &gone));
-        assert!(matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(p) } if p == second));
+        assert!(
+            matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(p) } if p == second)
+        );
     });
 }
 
@@ -120,22 +202,50 @@ fn a_forwarded_ask_link_drafts_a_thread_in_the_files_project() {
         cx.update(|cx| crate::single_instance::hear(Some(rx), vec![], ws, links, cx));
         trek.update(cx, |ws, cx| ws.hear_deep_links(links_rx, cx));
         // Somewhere else first, so arriving at the project is the link's doing.
-        trek.update(cx, |ws, cx| ws.navigate(Route::Settings(crate::workspace::SettingsPage::General), cx));
+        trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Settings(crate::workspace::SettingsPage::General), cx)
+        });
 
         let file = trek.project.join("lib.rs");
         std::fs::write(&file, "let x = 1;\n").unwrap();
         // Percent-encoded as `URLSearchParams` writes a Windows path.
-        let enc = |s: &str| s.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect::<String>();
-        let url = format!("trek://ask?path={}&line=3&end=5&selection={}", enc(&file.display().to_string()), enc("let x = 1;"));
+        let enc = |s: &str| {
+            s.bytes()
+                .map(|b| {
+                    if b.is_ascii_alphanumeric() {
+                        (b as char).to_string()
+                    } else {
+                        format!("%{b:02X}")
+                    }
+                })
+                .collect::<String>()
+        };
+        let url = format!(
+            "trek://ask?path={}&line=3&end=5&selection={}",
+            enc(&file.display().to_string()),
+            enc("let x = 1;")
+        );
         let (done, answer) = async_channel::bounded(1);
-        tx.try_send(Forwarded { open: Open { args: vec![url], background: false }, done }).unwrap();
+        tx.try_send(Forwarded {
+            open: Open {
+                args: vec![url],
+                background: false,
+            },
+            done,
+        })
+        .unwrap();
         cx.run_until_parked();
         assert_eq!(answer.try_recv(), Ok(Ok(())));
         trek.render(cx);
         let project = trek.project.clone();
-        assert!(matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(p) } if p == project));
+        assert!(
+            matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Draft { project: Some(p) } if p == project)
+        );
         let text = trek.composer_text(cx);
-        assert!(text.contains("`lib.rsL3-L5`") && text.contains("let x = 1;"), "{text:?}");
+        assert!(
+            text.contains("`lib.rsL3-L5`") && text.contains("let x = 1;"),
+            "{text:?}"
+        );
     });
 }
 
@@ -147,11 +257,21 @@ fn a_launch_s_own_arguments_open_once_the_window_is_up() {
         std::fs::write(&file, "\n").unwrap();
         let (links, heard) = async_channel::unbounded();
         let ws = trek.ws.clone();
-        cx.update(|cx| crate::single_instance::hear(None, vec!["trek://edit?path=%2Fy".into(), file.display().to_string()], ws, links, cx));
+        cx.update(|cx| {
+            crate::single_instance::hear(
+                None,
+                vec!["trek://edit?path=%2Fy".into(), file.display().to_string()],
+                ws,
+                links,
+                cx,
+            )
+        });
         cx.run_until_parked();
         assert_eq!(heard.try_recv().as_deref(), Ok("trek://edit?path=%2Fy"));
         trek.render(cx);
-        assert!(matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Editor { path } if path == file));
+        assert!(
+            matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Editor { path } if path == file)
+        );
     });
 }
 
@@ -169,11 +289,23 @@ fn a_window_moved_to_another_scale_lays_out_on_whole_device_pixels() {
             trek.render(cx);
             assert_eq!(trek.window(cx, |window, _| window.scale_factor()), scale);
             let pill = trek.bounds(cx, "command-center").expect("the command pill");
-            for (what, v) in [("top", pill.origin.y), ("left", pill.origin.x), ("height", pill.size.height), ("width", pill.size.width)] {
+            for (what, v) in [
+                ("top", pill.origin.y),
+                ("left", pill.origin.x),
+                ("height", pill.size.height),
+                ("width", pill.size.width),
+            ] {
                 let device = v.as_f32() * scale;
-                assert!((device - device.round()).abs() < 0.01, "at {scale}: the pill's {what} is {device} device pixels");
+                assert!(
+                    (device - device.round()).abs() < 0.01,
+                    "at {scale}: the pill's {what} is {device} device pixels"
+                );
             }
-            assert!((pill.size.height.as_f32() - 26.).abs() <= 1. / scale + 0.01, "at {scale}: still about 26pt tall ({:?})", pill.size.height);
+            assert!(
+                (pill.size.height.as_f32() - 26.).abs() <= 1. / scale + 0.01,
+                "at {scale}: still about 26pt tall ({:?})",
+                pill.size.height
+            );
         }
     });
 }

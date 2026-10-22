@@ -52,8 +52,15 @@ fn answers_and_reasoning_render_as_markdown_in_both_themes() {
         trek.render(cx);
         assert!(trek.visible(cx, ("reasoning", thought)));
         let docs = trek.drawn_markdown(cx);
-        assert!(docs.iter().any(|(ix, text)| *ix == thought && text == THOUGHT), "{docs:?}");
-        assert!(docs.iter().any(|(ix, text)| *ix == answer && text == ANSWER));
+        assert!(
+            docs.iter()
+                .any(|(ix, text)| *ix == thought && text == THOUGHT),
+            "{docs:?}"
+        );
+        assert!(
+            docs.iter()
+                .any(|(ix, text)| *ix == answer && text == ANSWER)
+        );
         // In Paper too.
         cx.update(|cx| crate::apply_theme(ThemeChoice::Paper, None, cx));
         trek.render(cx);
@@ -67,26 +74,49 @@ fn a_project_has_one_colour_wherever_its_folders_show() {
         let trek = open(cx);
         let id = answered(&trek, cx);
         let project = trek.project.clone();
-        let name = trek.read(cx, |ws, _| ws.projects.iter().find(|p| p.path == project).map(|p| p.name.clone())).expect("project");
+        let name = trek
+            .read(cx, |ws, _| {
+                ws.projects
+                    .iter()
+                    .find(|p| p.path == project)
+                    .map(|p| p.name.clone())
+            })
+            .expect("project");
         let tints = |trek: &Trek, cx: &mut TestAppContext| {
             trek.read(cx, |ws, cx| {
                 let t = ws.thread(&id).expect("thread");
-                (ws.thread_project_tint(t, cx), ws.current_project_tint(cx), ws.project_tint_at(&project, cx))
+                (
+                    ws.thread_project_tint(t, cx),
+                    ws.current_project_tint(cx),
+                    ws.project_tint_at(&project, cx),
+                )
             })
         };
         // From the name until one's chosen: the badge's ink, the same for the thread, the
         // screen it's on and the folder.
-        let dark = |cx: &mut TestAppContext| cx.read(|cx| gpui_kit::component::ActiveTheme::theme(cx).mode.is_dark());
+        let dark = |cx: &mut TestAppContext| {
+            cx.read(|cx| gpui_kit::component::ActiveTheme::theme(cx).mode.is_dark())
+        };
         let auto = crate::ui::project_ink(crate::ui::project_hue(&name, None), dark(cx));
         assert_eq!(tints(&trek, cx), (Some(auto), Some(auto), Some(auto)));
 
         // Chosen in the project's settings: a swatch per colour, and every place follows.
-        let pid = trek.read(cx, |ws, _| ws.projects.iter().find(|p| p.path == project).map(|p| p.id.clone())).expect("project");
+        let pid = trek
+            .read(cx, |ws, _| {
+                ws.projects
+                    .iter()
+                    .find(|p| p.path == project)
+                    .map(|p| p.id.clone())
+            })
+            .expect("project");
         trek.update(cx, |ws, cx| ws.open_project_settings(Some(pid), cx));
         trek.render(cx);
         assert!(trek.visible(cx, "project-color-auto"));
         trek.click(cx, "project-color-212");
-        assert_eq!(trek.read(cx, |ws, _| ws.project_look(&project).color), Some(212));
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.project_look(&project).color),
+            Some(212)
+        );
         trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
         trek.render(cx);
         let blue = crate::ui::project_ink(212. / 360., dark(cx));
@@ -98,13 +128,28 @@ fn a_project_has_one_colour_wherever_its_folders_show() {
         assert_eq!(tints(&trek, cx).0, Some(paper));
         assert!(trek.visible(cx, "path-src/"));
         // Automatic again: back to the name's.
-        trek.update(cx, |ws, cx| ws.update_project_prefs(&project, |p| p.color = None, cx));
+        trek.update(cx, |ws, cx| {
+            ws.update_project_prefs(&project, |p| p.color = None, cx)
+        });
         let named = crate::ui::project_ink(crate::ui::project_hue(&name, None), false);
         assert_eq!(tints(&trek, cx).0, Some(named));
         // A draft in the project (its folder chip in the composer) shows it too.
-        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(project.clone()) }, cx));
+        trek.update(cx, |ws, cx| {
+            ws.navigate(
+                Route::Draft {
+                    project: Some(project.clone()),
+                },
+                cx,
+            )
+        });
         assert_eq!(tints(&trek, cx).1, Some(named));
-        assert!(trek.read(cx, |ws, _| !ws.settings.projects.contains_key(&project.display().to_string())), "nothing left to keep");
+        assert!(
+            trek.read(cx, |ws, _| !ws
+                .settings
+                .projects
+                .contains_key(&project.display().to_string())),
+            "nothing left to keep"
+        );
     });
 }
 
@@ -113,20 +158,41 @@ fn a_side_chat_at_work_says_a_trail_word() {
     run(async |cx| {
         let trek = open(cx);
         let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
-        trek.window(cx, |window, cx| panel.update(cx, |p, cx| p.open_tool(PanelTool::SideChat, window, cx)));
+        trek.window(cx, |window, cx| {
+            panel.update(cx, |p, cx| p.open_tool(PanelTool::SideChat, window, cx))
+        });
         trek.click(cx, "side-input");
         trek.type_live(cx, "mock:long 8s");
         trek.press_live(cx, "enter");
-        let side = |ws: &crate::workspace::Workspace| ws.threads.iter().find(|t| t.side_of.is_some()).map(|t| t.id.clone());
-        trek.wait(cx, "the side chat to start", |ws| side(ws).is_some_and(|id| ws.live.get(&id).is_some_and(|l| l.turn_started.is_some()))).await;
+        let side = |ws: &crate::workspace::Workspace| {
+            ws.threads
+                .iter()
+                .find(|t| t.side_of.is_some())
+                .map(|t| t.id.clone())
+        };
+        trek.wait(cx, "the side chat to start", |ws| {
+            side(ws).is_some_and(|id| ws.live.get(&id).is_some_and(|l| l.turn_started.is_some()))
+        })
+        .await;
         trek.render(cx);
-        assert!(trek.visible(cx, "side-working"), "a trail word while it works");
+        assert!(
+            trek.visible(cx, "side-working"),
+            "a trail word while it works"
+        );
         let id = trek.read(cx, |ws, _| side(ws)).unwrap();
-        trek.wait(cx, "the side chat to finish", |ws| !ws.turn_running(&id)).await;
+        trek.wait(cx, "the side chat to finish", |ws| !ws.turn_running(&id))
+            .await;
         trek.render(cx);
         assert!(!trek.visible(cx, "side-working"));
         // Its answer reads as the transcript's do (Trek's markdown, path chips).
-        let answer = trek.read(cx, |ws, _| ws.live[&id].items.iter().position(|i| matches!(i, Item::Assistant { text } if !text.is_empty()))).expect("an answer");
+        let answer = trek
+            .read(cx, |ws, _| {
+                ws.live[&id]
+                    .items
+                    .iter()
+                    .position(|i| matches!(i, Item::Assistant { text } if !text.is_empty()))
+            })
+            .expect("an answer");
         assert!(trek.visible(cx, ("side-answer", answer)));
     });
 }
@@ -137,11 +203,22 @@ fn long_answers(trek: &Trek, cx: &mut TestAppContext) -> (String, usize) {
     let para = "Startup lives in main.rs. It does three things, in order: it parses the flags, it loads the settings, and then it opens the window. The settings file is read once and watched for changes, so editing it while Trek runs applies the new values without a restart. ".repeat(3);
     for n in 0..6 {
         let text = format!("Answer {n}. {para}");
-        let events = vec![AgentEvent::TextDelta(text.clone()), AgentEvent::TextDone(text), AgentEvent::TurnComplete { error: None }];
+        let events = vec![
+            AgentEvent::TextDelta(text.clone()),
+            AgentEvent::TextDone(text),
+            AgentEvent::TurnComplete { error: None },
+        ];
         trek.update(cx, |ws, cx| ws.apply_events(&id, events, cx));
     }
     trek.render(cx);
-    let last = trek.read(cx, |ws, _| ws.live[&id].items.iter().rposition(|i| matches!(i, Item::Assistant { .. }))).unwrap();
+    let last = trek
+        .read(cx, |ws, _| {
+            ws.live[&id]
+                .items
+                .iter()
+                .rposition(|i| matches!(i, Item::Assistant { .. }))
+        })
+        .unwrap();
     (id, last)
 }
 
@@ -158,7 +235,11 @@ fn prose_uses_the_whole_column_and_the_column_grows_with_the_window() {
         let text = trek.bounds(cx, ("answer-text", last)).expect("the answer");
         assert!((text.size.width - column).abs() < px(1.), "{text:?}");
         let composer = trek.bounds(cx, "send").expect("composer");
-        assert!(composer.right() <= text.right() + px(16.) && composer.right() >= text.right() - px(16.), "{composer:?} vs {text:?}");
+        assert!(
+            composer.right() <= text.right() + px(16.)
+                && composer.right() >= text.right() - px(16.),
+            "{composer:?} vs {text:?}"
+        );
         // A larger text size widens it in step.
         trek.update(cx, |ws, cx| {
             ws.settings.appearance.transcript_font_size = 17.5;
@@ -166,7 +247,10 @@ fn prose_uses_the_whole_column_and_the_column_grows_with_the_window() {
         });
         trek.render(cx);
         let wider = trek.bounds(cx, ("answer-text", last)).expect("the answer");
-        assert!((wider.size.width - px(17.5 * crate::md::COLUMN)).abs() < px(1.), "{wider:?}");
+        assert!(
+            (wider.size.width - px(17.5 * crate::md::COLUMN)).abs() < px(1.),
+            "{wider:?}"
+        );
         // A small window: the column takes what's left, with room at the sides.
         cx.simulate_window_resize(trek.window, gpui_kit::size(px(900.), px(800.)));
         trek.render(cx);
@@ -175,7 +259,10 @@ fn prose_uses_the_whole_column_and_the_column_grows_with_the_window() {
         let view = trek.bounds(cx, ("answer", last)).expect("the row");
         // (The row itself sits in the scroller's own inset.)
         let (left, right) = (narrow.left() - view.left(), view.right() - narrow.right());
-        assert!(left >= px(20.) && (left - right).abs() < px(1.), "{narrow:?} in {view:?}");
+        assert!(
+            left >= px(20.) && (left - right).abs() < px(1.),
+            "{narrow:?} in {view:?}"
+        );
     });
 }
 
@@ -187,23 +274,33 @@ fn the_last_line_clears_the_composer_and_jump_to_latest_sits_below_the_text() {
         // At the live edge: the last answer ends clear above the composer, and no jump button.
         let text = trek.bounds(cx, ("answer-text", last)).expect("the answer");
         let composer = trek.bounds(cx, "send").expect("composer");
-        assert!(text.bottom() < composer.top() - px(40.), "{text:?} vs {composer:?}");
+        assert!(
+            text.bottom() < composer.top() - px(40.),
+            "{text:?} vs {composer:?}"
+        );
         assert!(!trek.visible(cx, "jump-to-latest"));
         // Scrolled up a little: the band shows in the room under the transcript's last row (the
         // turn's footer), where it had ended, not over it.
         let view = trek.thread_view(cx);
-        let end = cx.read(|cx| view.read(cx).tail.get()).expect("the transcript's end is on screen");
+        let end = cx
+            .read(|cx| view.read(cx).tail.get())
+            .expect("the transcript's end is on screen");
         let row = trek.bounds(cx, ("answer", last)).expect("the row");
         let wheel = gpui_kit::ScrollWheelEvent {
             position: gpui_kit::point(row.center().x, row.top() + px(10.)),
             delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(1.))),
             ..Default::default()
         };
-        trek.window(cx, |window, cx| _ = window.dispatch_event(gpui_kit::InputEvent::to_platform_input(wheel), cx));
+        trek.window(cx, |window, cx| {
+            _ = window.dispatch_event(gpui_kit::InputEvent::to_platform_input(wheel), cx)
+        });
         trek.render(cx);
         assert!(trek.visible(cx, "jump-to-latest"), "a little way up");
         let band = trek.bounds(cx, "transcript-foot").expect("the band");
-        assert!(end <= band.top() + px(0.5), "the last row ended at {end:?}, over {band:?}");
+        assert!(
+            end <= band.top() + px(0.5),
+            "the last row ended at {end:?}, over {band:?}"
+        );
         // Scrolled up: the button shows in the band at the transcript's foot, under every line
         // still drawn above it.
         let view = trek.thread_view(cx);
@@ -213,8 +310,15 @@ fn the_last_line_clears_the_composer_and_jump_to_latest_sits_below_the_text() {
         // It sits in the band's solid part, under the fade the text above melts into: no line
         // runs behind it.
         let band = trek.bounds(cx, "transcript-foot").expect("the band");
-        assert!(jump.top() >= band.top() + px(crate::thread_view::JUMP_FADE) && jump.bottom() <= band.bottom(), "{jump:?} in {band:?}");
-        assert!(jump.bottom() <= composer.top() - px(16.), "in the transcript, above the working bar and composer");
+        assert!(
+            jump.top() >= band.top() + px(crate::thread_view::JUMP_FADE)
+                && jump.bottom() <= band.bottom(),
+            "{jump:?} in {band:?}"
+        );
+        assert!(
+            jump.bottom() <= composer.top() - px(16.),
+            "in the transcript, above the working bar and composer"
+        );
         // Back down.
         trek.click(cx, "jump-to-latest");
         trek.render(cx);
@@ -238,8 +342,15 @@ fn a_thread_window_redraws_its_folders_in_a_new_colour() {
         // hash, and a fixed pick (135) is already the colour of "project-912" and a few others.
         let name = project.file_name().unwrap().to_string_lossy().into_owned();
         let now = (crate::ui::project_hue(&name, None) * 360.).round() as u16;
-        trek.update(cx, |ws, cx| ws.update_project_prefs(&project, |p| p.color = Some((now + 180) % 360), cx));
+        trek.update(cx, |ws, cx| {
+            ws.update_project_prefs(&project, |p| p.color = Some((now + 180) % 360), cx)
+        });
         cx.run_until_parked();
-        assert!(super::take_renders().get("ThreadView").is_some_and(|n| *n > 0), "its transcript redrew for the colour");
+        assert!(
+            super::take_renders()
+                .get("ThreadView")
+                .is_some_and(|n| *n > 0),
+            "its transcript redrew for the colour"
+        );
     });
 }

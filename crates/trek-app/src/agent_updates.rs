@@ -24,8 +24,15 @@ pub enum Job {
     Queued,
     Running,
     /// `from`: the version it was at.
-    Updated { from: Option<String>, to: String, output: String },
-    Failed { summary: String, output: String },
+    Updated {
+        from: Option<String>,
+        to: String,
+        output: String,
+    },
+    Failed {
+        summary: String,
+        output: String,
+    },
 }
 
 /// What runs an update.
@@ -56,13 +63,24 @@ impl Runner {
     /// goes in one script, so Windows asks once (`run_elevated`); anything else is one update.
     /// The outcomes are in `vs`' order.
     pub async fn run_all(&self, vs: Vec<AgentVersion>) -> Vec<Outcome> {
-        let elevated = vs.iter().all(|v| v.command.as_ref().is_some_and(|c| c.elevated));
+        let elevated = vs
+            .iter()
+            .all(|v| v.command.as_ref().is_some_and(|c| c.elevated));
         match self {
-            Runner::Real if vs.len() > 1 && elevated => trek_core::agent_update::run_elevated(&vs).await,
+            Runner::Real if vs.len() > 1 && elevated => {
+                trek_core::agent_update::run_elevated(&vs).await
+            }
             #[cfg(test)]
             Runner::Recorded(runs) => {
-                runs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(vs.iter().map(|v| v.id.clone()).collect());
-                vs.iter().map(|v| Outcome::Updated { version: v.latest.clone().unwrap_or_default(), output: String::new() }).collect()
+                runs.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(vs.iter().map(|v| v.id.clone()).collect());
+                vs.iter()
+                    .map(|v| Outcome::Updated {
+                        version: v.latest.clone().unwrap_or_default(),
+                        output: String::new(),
+                    })
+                    .collect()
             }
             _ => {
                 let mut outcomes = Vec::with_capacity(vs.len());
@@ -89,10 +107,21 @@ impl Runner {
             #[cfg(test)]
             Runner::Gated(gate) => {
                 let _ = gate.recv().await;
-                Outcome::Updated { version: v.latest.clone().unwrap_or_default(), output: String::new() }
+                Outcome::Updated {
+                    version: v.latest.clone().unwrap_or_default(),
+                    output: String::new(),
+                }
             }
             #[cfg(test)]
-            Runner::Recorded(_) => Box::pin(self.run_all(vec![v])).await.pop().unwrap_or(Outcome::Failed { summary: String::new(), output: String::new() }),
+            Runner::Recorded(_) => {
+                Box::pin(self.run_all(vec![v]))
+                    .await
+                    .pop()
+                    .unwrap_or(Outcome::Failed {
+                        summary: String::new(),
+                        output: String::new(),
+                    })
+            }
         }
     }
 }
@@ -126,7 +155,9 @@ pub struct AgentUpdates {
 
 /// The ways `TREK_AGENT_UPDATES` sets the feature up for design review and end-to-end checks.
 fn mode() -> Option<String> {
-    std::env::var("TREK_AGENT_UPDATES").ok().map(|v| v.trim().to_string())
+    std::env::var("TREK_AGENT_UPDATES")
+        .ok()
+        .map(|v| v.trim().to_string())
 }
 
 impl AgentUpdates {
@@ -144,12 +175,30 @@ impl AgentUpdates {
             if cfg!(windows) {
                 found.push(mock_admin_row());
             }
-            return Self { found, checked_at: trek_core::store::now_ms(), runner: Runner::Mock, mock: true, output_open: open_output(), ..Default::default() };
+            return Self {
+                found,
+                checked_at: trek_core::store::now_ms(),
+                runner: Runner::Mock,
+                mock: true,
+                output_open: open_output(),
+                ..Default::default()
+            };
         }
         let snapshot = trek_core::agent_update::Snapshot::load();
-        let runner = if mode.as_deref() == Some("dry-run") { Runner::DryRun } else { Runner::Real };
+        let runner = if mode.as_deref() == Some("dry-run") {
+            Runner::DryRun
+        } else {
+            Runner::Real
+        };
         let stale = !snapshot.agents.is_empty();
-        Self { found: snapshot.agents, checked_at: snapshot.checked_at, runner, stale, output_open: open_output(), ..Default::default() }
+        Self {
+            found: snapshot.agents,
+            checked_at: snapshot.checked_at,
+            runner,
+            stale,
+            output_open: open_output(),
+            ..Default::default()
+        }
     }
 
     /// A pretend run (dry run or the made-up agents): nothing it reports was installed.
@@ -166,7 +215,10 @@ impl AgentUpdates {
 
     /// A background check is due: on, none running, and the last one 12 hours ago or more.
     pub fn due(&self, enabled: bool, now: i64) -> bool {
-        enabled && !self.checking && !self.mock && (self.checked_at == 0 || now - self.checked_at >= CHECK_EVERY_MS)
+        enabled
+            && !self.checking
+            && !self.mock
+            && (self.checked_at == 0 || now - self.checked_at >= CHECK_EVERY_MS)
     }
 
     pub fn job(&self, id: &str) -> Option<&Job> {
@@ -175,33 +227,55 @@ impl AgentUpdates {
 
     /// The agent (`AgentId::key()`) row `id` belongs to.
     pub fn agent_of(&self, id: &str) -> Option<&str> {
-        self.found.iter().find(|v| v.id == id).map(|v| v.agent.as_str())
+        self.found
+            .iter()
+            .find(|v| v.id == id)
+            .map(|v| v.agent.as_str())
     }
 
     /// The rows the updates card lists: those with an update out, and those whose update is
     /// under way or just finished (so how it went stays readable).
     pub fn listed(&self) -> Vec<&AgentVersion> {
-        self.found.iter().filter(|v| v.update_available() || self.jobs.contains_key(&v.id)).collect()
+        self.found
+            .iter()
+            .filter(|v| v.update_available() || self.jobs.contains_key(&v.id))
+            .collect()
     }
 
     /// Updates out that haven't been installed: the sidebar badge's count.
     pub fn pending(&self) -> usize {
-        self.found.iter().filter(|v| v.update_available() && !matches!(self.jobs.get(&v.id), Some(Job::Updated { .. }))).count()
+        self.found
+            .iter()
+            .filter(|v| {
+                v.update_available() && !matches!(self.jobs.get(&v.id), Some(Job::Updated { .. }))
+            })
+            .count()
     }
 
     /// The rows an "Update all" would update.
     pub fn updatable(&self) -> Vec<String> {
         self.found
             .iter()
-            .filter(|v| v.update_available() && matches!(self.jobs.get(&v.id), None | Some(Job::Failed { .. })))
+            .filter(|v| {
+                v.update_available()
+                    && matches!(self.jobs.get(&v.id), None | Some(Job::Failed { .. }))
+            })
             .map(|v| v.id.clone())
             .collect()
     }
 
     /// Ask for row `id`'s update; `false` when there's none to install, or it's already asked for.
     pub fn request(&mut self, id: &str) -> bool {
-        let ready = self.found.iter().any(|v| v.id == id && v.update_available());
-        if !ready || matches!(self.jobs.get(id), Some(Job::Queued | Job::Running | Job::Updated { .. })) {
+        let ready = self
+            .found
+            .iter()
+            .any(|v| v.id == id && v.update_available());
+        if !ready
+            || matches!(
+                self.jobs.get(id),
+                Some(Job::Queued | Job::Running | Job::Updated { .. })
+            )
+        {
             return false;
         }
         self.jobs.insert(id.to_string(), Job::Queued);
@@ -213,7 +287,12 @@ impl AgentUpdates {
     /// Queued updates whose row a check no longer lists (the agent was uninstalled): there's
     /// nothing left to update.
     pub fn drop_orphans(&mut self) {
-        let gone: Vec<String> = self.jobs.iter().filter(|(id, j)| **j == Job::Queued && self.agent_of(id).is_none()).map(|(id, _)| id.clone()).collect();
+        let gone: Vec<String> = self
+            .jobs
+            .iter()
+            .filter(|(id, j)| **j == Job::Queued && self.agent_of(id).is_none())
+            .map(|(id, _)| id.clone())
+            .collect();
         for id in gone {
             self.jobs.remove(&id);
             self.order.retain(|a| *a != id);
@@ -228,8 +307,15 @@ impl AgentUpdates {
         if self.running() || self.stale {
             return None;
         }
-        let ready = |id: &&String| self.jobs.get(*id) == Some(&Job::Queued) && !self.agent_of(id).is_some_and(&busy);
-        if let Some(id) = self.order.iter().filter(ready).find(|id| !self.elevated(id)) {
+        let ready = |id: &&String| {
+            self.jobs.get(*id) == Some(&Job::Queued) && !self.agent_of(id).is_some_and(&busy)
+        };
+        if let Some(id) = self
+            .order
+            .iter()
+            .filter(ready)
+            .find(|id| !self.elevated(id))
+        {
             return Some(vec![id.clone()]);
         }
         let batch: Vec<String> = self.order.iter().filter(ready).cloned().collect();
@@ -238,7 +324,9 @@ impl AgentUpdates {
 
     /// Row `id`'s update runs as an administrator: Windows asks to allow it.
     pub fn elevated(&self, id: &str) -> bool {
-        self.found.iter().any(|v| v.id == id && v.command.as_ref().is_some_and(|c| c.elevated))
+        self.found
+            .iter()
+            .any(|v| v.id == id && v.command.as_ref().is_some_and(|c| c.elevated))
     }
 
     pub fn start(&mut self, id: &str) -> Option<AgentVersion> {
@@ -254,7 +342,11 @@ impl AgentUpdates {
             Outcome::Updated { version, output } => {
                 let v = self.found.iter_mut().find(|v| v.id == id);
                 let from = v.and_then(|v| v.installed.replace(version.clone()));
-                Job::Updated { from, to: version, output }
+                Job::Updated {
+                    from,
+                    to: version,
+                    output,
+                }
             }
             Outcome::Failed { summary, output } => Job::Failed { summary, output },
         };
@@ -267,7 +359,9 @@ impl AgentUpdates {
 
     /// Some update is asked for whose agent (given by key) passes `f`.
     pub fn queued_where(&self, f: impl Fn(&str) -> bool) -> bool {
-        self.jobs.iter().any(|(id, j)| *j == Job::Queued && self.agent_of(id).is_some_and(&f))
+        self.jobs
+            .iter()
+            .any(|(id, j)| *j == Job::Queued && self.agent_of(id).is_some_and(&f))
     }
 
     pub fn running(&self) -> bool {
@@ -277,7 +371,9 @@ impl AgentUpdates {
     /// One of `agent`'s CLIs (or its adapter) is being replaced right now: none of its sessions
     /// may start, and no message goes to it, until that's done.
     pub fn updating(&self, agent: &str) -> bool {
-        self.jobs.iter().any(|(id, j)| *j == Job::Running && self.agent_of(id) == Some(agent))
+        self.jobs
+            .iter()
+            .any(|(id, j)| *j == Job::Running && self.agent_of(id) == Some(agent))
     }
 
     /// A check came back with `fresh`. Feeds it couldn't reach keep what the last check found;
@@ -286,7 +382,11 @@ impl AgentUpdates {
         trek_core::agent_update::carry_over(&mut fresh, &self.found);
         // An update under way outlives the check: its row keeps the versions it started from,
         // even when the check missed it (its binary is briefly gone while it's replaced).
-        for old in self.found.iter().filter(|o| matches!(self.jobs.get(&o.id), Some(Job::Running))) {
+        for old in self
+            .found
+            .iter()
+            .filter(|o| matches!(self.jobs.get(&o.id), Some(Job::Running)))
+        {
             match fresh.iter_mut().find(|v| v.id == old.id) {
                 Some(v) => *v = old.clone(),
                 None => fresh.push(old.clone()),
@@ -309,7 +409,11 @@ impl AgentUpdates {
     /// What the last check couldn't compare, for Settings: "Couldn't check Codex and Grok:
     /// offline, or the release feed didn't answer." `None` when every agent was compared.
     pub fn unchecked_note(&self) -> Option<String> {
-        let missed: Vec<&AgentVersion> = self.found.iter().filter(|v| !v.compared() && !self.jobs.contains_key(&v.id)).collect();
+        let missed: Vec<&AgentVersion> = self
+            .found
+            .iter()
+            .filter(|v| !v.compared() && !self.jobs.contains_key(&v.id))
+            .collect();
         let names: Vec<&str> = missed.iter().map(|v| v.name.as_str()).collect();
         let names = match names.as_slice() {
             [] => return None,
@@ -319,8 +423,15 @@ impl AgentUpdates {
         // One reason for all of them reads as one ("offline"); several are each the row's own.
         let first = missed.iter().find_map(|v| v.error.as_deref());
         let reason = match first {
-            Some(e) if missed.iter().all(|v| v.error.as_deref() == Some(e)) => format!(": {}.", lower_first(e.trim_end_matches('.'))),
-            _ if missed.iter().all(|v| v.installed.is_none()) => if missed.len() == 1 { ": it didn't say its version." } else { ": they didn't say their versions." }.into(),
+            Some(e) if missed.iter().all(|v| v.error.as_deref() == Some(e)) => {
+                format!(": {}.", lower_first(e.trim_end_matches('.')))
+            }
+            _ if missed.iter().all(|v| v.installed.is_none()) => if missed.len() == 1 {
+                ": it didn't say its version."
+            } else {
+                ": they didn't say their versions."
+            }
+            .into(),
             _ => ".".into(),
         };
         Some(format!("Couldn't check {names}{reason}"))
@@ -330,14 +441,18 @@ impl AgentUpdates {
 /// `TREK_OPEN_AGENT_UPDATES=<row>` (rather than `1`) opens that row's output once it has one,
 /// for design review of a failure.
 fn open_output() -> Option<String> {
-    std::env::var("TREK_OPEN_AGENT_UPDATES").ok().filter(|v| !v.is_empty() && v != "1")
+    std::env::var("TREK_OPEN_AGENT_UPDATES")
+        .ok()
+        .filter(|v| !v.is_empty() && v != "1")
 }
 
 fn lower_first(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
         // "Offline, or …" reads on after a colon; a URL or a name ("Its vendor …") too.
-        Some(f) if c.clone().next().is_some_and(|n| n.is_lowercase()) => f.to_lowercase().chain(c).collect(),
+        Some(f) if c.clone().next().is_some_and(|n| n.is_lowercase()) => {
+            f.to_lowercase().chain(c).collect()
+        }
         _ => s.to_string(),
     }
 }
@@ -353,7 +468,10 @@ pub fn mock_agent_row() -> AgentVersion {
         installed: Some("1.0.0".into()),
         latest: Some("1.1.0".into()),
         install: trek_core::agent_update::Install::Native,
-        command: Some(trek_core::agent_update::UpdateCommand::new("/usr/local/bin/mock", &["update"])),
+        command: Some(trek_core::agent_update::UpdateCommand::new(
+            "/usr/local/bin/mock",
+            &["update"],
+        )),
         error: None,
     }
 }
@@ -368,15 +486,25 @@ pub fn mock_admin_row() -> AgentVersion {
         binary: r"C:\ProgramData\chocolatey\bin\droid.exe".into(),
         installed: Some("0.233.0".into()),
         latest: Some("0.237.0".into()),
-        install: trek_core::agent_update::Install::Chocolatey { package: "droid".into() },
-        command: Some(trek_core::agent_update::UpdateCommand::new("choco", &["upgrade", "droid", "-y"]).as_admin()),
+        install: trek_core::agent_update::Install::Chocolatey {
+            package: "droid".into(),
+        },
+        command: Some(
+            trek_core::agent_update::UpdateCommand::new("choco", &["upgrade", "droid", "-y"])
+                .as_admin(),
+        ),
         error: None,
     }
 }
 
 /// What a row says under its name, and whether it's a failure: how it's installed (and that
 /// Windows will ask, for an update run as an administrator), or how its update goes.
-pub fn detail(v: &AgentVersion, job: Option<&Job>, hold: Option<Hold>, stale: bool) -> (String, bool) {
+pub fn detail(
+    v: &AgentVersion,
+    job: Option<&Job>,
+    hold: Option<Hold>,
+    stale: bool,
+) -> (String, bool) {
     let agent = AgentId::from_key(&v.agent);
     let shown = v.command.as_ref().map(|c| c.shown()).unwrap_or_default();
     let admin = v.command.as_ref().is_some_and(|c| c.elevated);
@@ -388,8 +516,13 @@ pub fn detail(v: &AgentVersion, job: Option<&Job>, hold: Option<Hold>, stale: bo
         None if admin => format!("{via} · Windows will ask to allow it"),
         None => via,
         Some(Job::Queued) if stale => "Checks what's installed first".into(),
-        Some(Job::Queued) if hold == Some(Hold::Turn) => format!("Waits for {}'s turn to end", agent.display_name()),
-        Some(Job::Queued) if hold == Some(Hold::Background) => format!("Waits for {}'s background tasks to end", agent.display_name()),
+        Some(Job::Queued) if hold == Some(Hold::Turn) => {
+            format!("Waits for {}'s turn to end", agent.display_name())
+        }
+        Some(Job::Queued) if hold == Some(Hold::Background) => format!(
+            "Waits for {}'s background tasks to end",
+            agent.display_name()
+        ),
         Some(Job::Queued) => "Next, after the update under way".into(),
         Some(Job::Running) if admin => format!("Running {shown} as an administrator"),
         Some(Job::Running) => format!("Running {shown}"),
@@ -407,41 +540,86 @@ pub const WHY: &str = "New models often need the latest version.";
 pub fn rows(ws: &Entity<Workspace>, cx: &App) -> Vec<AnyElement> {
     let w = ws.read(cx);
     let u = &w.agent_updates;
-    u.listed().into_iter().map(|v| row(ws, v, u.job(&v.id), w.agent_hold(&v.agent), u.stale, u.output_open.as_deref() == Some(v.id.as_str()), cx)).collect()
+    u.listed()
+        .into_iter()
+        .map(|v| {
+            row(
+                ws,
+                v,
+                u.job(&v.id),
+                w.agent_hold(&v.agent),
+                u.stale,
+                u.output_open.as_deref() == Some(v.id.as_str()),
+                cx,
+            )
+        })
+        .collect()
 }
 
-fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, hold: Option<Hold>, stale: bool, open: bool, cx: &App) -> AnyElement {
+fn row(
+    ws: &Entity<Workspace>,
+    v: &AgentVersion,
+    job: Option<&Job>,
+    hold: Option<Hold>,
+    stale: bool,
+    open: bool,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let agent = AgentId::from_key(&v.agent);
     let key = v.id.clone();
     let shown = v.command.as_ref().map(|c| c.shown()).unwrap_or_default();
     let versions = match job {
-        Some(Job::Updated { from: Some(from), to, .. }) => format!("{from} → {to}"),
+        Some(Job::Updated {
+            from: Some(from),
+            to,
+            ..
+        }) => format!("{from} → {to}"),
         Some(Job::Updated { to, .. }) => to.clone(),
-        _ => format!("{} → {}", v.installed.as_deref().unwrap_or("?"), v.latest.as_deref().unwrap_or("?")),
+        _ => format!(
+            "{} → {}",
+            v.installed.as_deref().unwrap_or("?"),
+            v.latest.as_deref().unwrap_or("?")
+        ),
     };
     // What the row says under the name.
     let admin = v.command.as_ref().is_some_and(|c| c.elevated);
     let (detail, failed) = detail(v, job, hold, stale);
-    let tone = if failed { crate::palette::red(cx) } else { muted };
+    let tone = if failed {
+        crate::palette::red(cx)
+    } else {
+        muted
+    };
     let output = match job {
-        Some(Job::Updated { output, .. } | Job::Failed { output, .. }) if !output.trim().is_empty() => Some(output.clone()),
+        Some(Job::Updated { output, .. } | Job::Failed { output, .. })
+            if !output.trim().is_empty() =>
+        {
+            Some(output.clone())
+        }
         _ => None,
     };
     let update = {
         let (ws, key) = (ws.clone(), key.clone());
-        move |_: &ClickEvent, _: &mut Window, cx: &mut App| ws.update(cx, |ws, cx| ws.update_agent(&key, cx))
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            ws.update(cx, |ws, cx| ws.update_agent(&key, cx))
+        }
     };
-    let runs = if admin { format!("Runs {shown} as an administrator") } else { format!("Runs {shown}") };
+    let runs = if admin {
+        format!("Runs {shown} as an administrator")
+    } else {
+        format!("Runs {shown}")
+    };
     let control = match job {
-        None | Some(Job::Failed { .. }) => Button::new(SharedString::from(format!("agent-update-{key}")))
-            .small()
-            .outline()
-            .label(if job.is_some() { "Retry" } else { "Update" })
-            .tooltip(SharedString::from(runs))
-            .on_click(update)
-            .into_any_element(),
+        None | Some(Job::Failed { .. }) => {
+            Button::new(SharedString::from(format!("agent-update-{key}")))
+                .small()
+                .outline()
+                .label(if job.is_some() { "Retry" } else { "Update" })
+                .tooltip(SharedString::from(runs))
+                .on_click(update)
+                .into_any_element()
+        }
         Some(Job::Running) => h_flex()
             .id(SharedString::from(format!("agent-updating-{key}")))
             .test_support()
@@ -465,7 +643,11 @@ fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, hold: Option
             .text_size(px(12.5))
             .text_color(muted)
             .child(Icon::new(crate::assets::Lucide::Clock).xsmall())
-            .child(if hold.is_some() && !stale { "Waiting" } else { "Queued" })
+            .child(if hold.is_some() && !stale {
+                "Waiting"
+            } else {
+                "Queued"
+            })
             .into_any_element(),
         Some(Job::Updated { .. }) => h_flex()
             .id(SharedString::from(format!("agent-updated-{key}")))
@@ -474,7 +656,11 @@ fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, hold: Option
             .px(px(4.))
             .gap(px(5.))
             .text_size(px(12.5))
-            .child(Icon::new(IconName::Check).xsmall().text_color(crate::palette::emerald(cx)))
+            .child(
+                Icon::new(IconName::Check)
+                    .xsmall()
+                    .text_color(crate::palette::emerald(cx)),
+            )
             .child("Updated")
             .into_any_element(),
     };
@@ -491,7 +677,11 @@ fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, hold: Option
             .on_click(move |_, _, cx| {
                 ws.update(cx, |ws, cx| {
                     let u = &mut ws.agent_updates;
-                    u.output_open = if u.output_open.as_deref() == Some(key.as_str()) { None } else { Some(key.clone()) };
+                    u.output_open = if u.output_open.as_deref() == Some(key.as_str()) {
+                        None
+                    } else {
+                        Some(key.clone())
+                    };
                     cx.notify();
                 })
             })
@@ -507,9 +697,30 @@ fn row(ws: &Entity<Workspace>, v: &AgentVersion, job: Option<&Job>, hold: Option
                 .w_full()
                 .gap(px(12.))
                 .child(crate::ui::agent_logo(&agent, px(20.), cx))
-                .child(div().flex_1().min_w_0().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).truncate().child(v.name.clone()))
-                .child(div().flex_none().font_family(theme.mono_font_family.clone()).text_size(px(12.)).text_color(muted).child(versions))
-                .child(h_flex().flex_none().min_w(px(86.)).justify_end().child(control)),
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(13.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .truncate()
+                        .child(v.name.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .font_family(theme.mono_font_family.clone())
+                        .text_size(px(12.))
+                        .text_color(muted)
+                        .child(versions),
+                )
+                .child(
+                    h_flex()
+                        .flex_none()
+                        .min_w(px(86.))
+                        .justify_end()
+                        .child(control),
+                ),
         )
         // Under the name, the width of the row: how it's installed, or how its update goes.
         .child(
@@ -565,7 +776,11 @@ pub fn update_all(ws: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
 pub fn card(ws: &Entity<Workspace>, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let u = &ws.read(cx).agent_updates;
-    let title = if u.pending() > 0 { "Agent updates available" } else { "Agent updates" };
+    let title = if u.pending() > 0 {
+        "Agent updates available"
+    } else {
+        "Agent updates"
+    };
     let line = theme.foreground.opacity(0.07);
     crate::ui::menu_surface(cx)
         .id("agent-updates-card")
@@ -578,10 +793,28 @@ pub fn card(ws: &Entity<Workspace>, cx: &App) -> AnyElement {
                 .pt(px(14.))
                 .pb(px(10.))
                 .gap(px(8.))
-                .child(div().flex_1().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).child(title))
-                .when(u.checking, |el| el.child(Spinner::new().xsmall().color(theme.muted_foreground))),
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(13.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(title),
+                )
+                .when(u.checking, |el| {
+                    el.child(Spinner::new().xsmall().color(theme.muted_foreground))
+                }),
         )
-        .child(v_flex().px(px(16.)).border_t_1().border_color(line).children(rows(ws, cx).into_iter().enumerate().map(|(i, r)| div().when(i > 0, |el| el.border_t_1().border_color(line)).child(r))))
+        .child(
+            v_flex()
+                .px(px(16.))
+                .border_t_1()
+                .border_color(line)
+                .children(rows(ws, cx).into_iter().enumerate().map(|(i, r)| {
+                    div()
+                        .when(i > 0, |el| el.border_t_1().border_color(line))
+                        .child(r)
+                })),
+        )
         .child(
             h_flex()
                 .px(px(16.))
@@ -589,7 +822,13 @@ pub fn card(ws: &Entity<Workspace>, cx: &App) -> AnyElement {
                 .gap(px(12.))
                 .border_t_1()
                 .border_color(line)
-                .child(div().flex_1().text_size(px(12.5)).text_color(theme.muted_foreground).child(WHY))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(12.5))
+                        .text_color(theme.muted_foreground)
+                        .child(WHY),
+                )
                 .children(update_all(ws, cx)),
         )
         .into_any_element()
@@ -607,10 +846,15 @@ mod tests {
     // Not `super::*`: the gpui glob import brings its own `test` attribute.
     use super::{AgentUpdates, Job, badge, detail, mock_admin_row};
     use crate::workspace::Hold;
-    use trek_core::agent_update::{AgentVersion, CHECK_EVERY_MS, Install, Outcome, UpdateCommand, mock_versions};
+    use trek_core::agent_update::{
+        AgentVersion, CHECK_EVERY_MS, Install, Outcome, UpdateCommand, mock_versions,
+    };
 
     fn updates() -> AgentUpdates {
-        AgentUpdates { found: mock_versions(), ..Default::default() }
+        AgentUpdates {
+            found: mock_versions(),
+            ..Default::default()
+        }
     }
 
     /// What `next` gives to start: these rows, together.
@@ -620,7 +864,12 @@ mod tests {
 
     /// A row like `of`, as `id`, upgraded as an administrator.
     fn admin(of: &AgentVersion, id: &str) -> AgentVersion {
-        AgentVersion { id: id.into(), command: Some(UpdateCommand::new("choco", &["upgrade", id, "-y"]).as_admin()), install: Install::Chocolatey { package: id.into() }, ..of.clone() }
+        AgentVersion {
+            id: id.into(),
+            command: Some(UpdateCommand::new("choco", &["upgrade", id, "-y"]).as_admin()),
+            install: Install::Chocolatey { package: id.into() },
+            ..of.clone()
+        }
     }
 
     #[test]
@@ -630,7 +879,10 @@ mod tests {
         u.found.insert(0, admin(&codex, "codex-choco"));
         u.found.push(admin(&codex, "codex-scoop"));
         // None is left to the user: Update all asks for every row.
-        assert_eq!(u.updatable(), ["codex-choco", "codex", "opencode", "pi", "codex-scoop"]);
+        assert_eq!(
+            u.updatable(),
+            ["codex-choco", "codex", "opencode", "pi", "codex-scoop"]
+        );
         for id in u.updatable() {
             assert!(u.request(&id));
         }
@@ -640,46 +892,98 @@ mod tests {
             assert_eq!(u.next(|_| false), batch(&[id]));
             u.start(id);
             assert_eq!(u.next(|_| false), None, "one at a time");
-            u.finish(id, Outcome::Updated { version: "9.9.9".into(), output: String::new() });
+            u.finish(
+                id,
+                Outcome::Updated {
+                    version: "9.9.9".into(),
+                    output: String::new(),
+                },
+            );
         }
         // Then those Windows asks for, all at once: one prompt.
         assert_eq!(u.next(|_| false), batch(&["codex-choco", "codex-scoop"]));
         // One that's busy waits for a batch of its own; another can still go now.
-        let mut u2 = AgentUpdates { found: vec![admin(&codex, "a"), AgentVersion { agent: "opencode".into(), ..admin(&codex, "b") }], ..Default::default() };
+        let mut u2 = AgentUpdates {
+            found: vec![
+                admin(&codex, "a"),
+                AgentVersion {
+                    agent: "opencode".into(),
+                    ..admin(&codex, "b")
+                },
+            ],
+            ..Default::default()
+        };
         assert!(u2.request("a") && u2.request("b"));
         assert_eq!(u2.next(|agent| agent == "codex"), batch(&["b"]));
         // A non-elevated update waiting on a turn doesn't hold the batch back.
         let mut u3 = updates();
         u3.found.push(admin(&u3.found[1].clone(), "opencode-choco"));
         assert!(u3.request("codex") && u3.request("opencode-choco"));
-        assert_eq!(u3.next(|agent| agent == "codex"), batch(&["opencode-choco"]));
+        assert_eq!(
+            u3.next(|agent| agent == "codex"),
+            batch(&["opencode-choco"])
+        );
     }
 
     #[test]
     fn a_row_says_windows_will_ask_and_never_what_to_copy() {
         let row = mock_admin_row();
-        assert_eq!(detail(&row, None, None, false), ("Via Chocolatey · Windows will ask to allow it".to_string(), false));
-        assert_eq!(detail(&row, Some(&Job::Running), None, false).0, "Running choco upgrade droid -y as an administrator");
+        assert_eq!(
+            detail(&row, None, None, false),
+            (
+                "Via Chocolatey · Windows will ask to allow it".to_string(),
+                false
+            )
+        );
+        assert_eq!(
+            detail(&row, Some(&Job::Running), None, false).0,
+            "Running choco upgrade droid -y as an administrator"
+        );
         // A prompt turned down and one nobody answered are each said as they are, on the row.
         for (summary, said) in [
-            (trek_core::agent_update::DECLINED, "Windows didn't allow it (the prompt was cancelled)."),
-            (trek_core::agent_update::UNANSWERED, "Windows's prompt went unanswered for two minutes. Try Update again when you're at the computer."),
+            (
+                trek_core::agent_update::DECLINED,
+                "Windows didn't allow it (the prompt was cancelled).",
+            ),
+            (
+                trek_core::agent_update::UNANSWERED,
+                "Windows's prompt went unanswered for two minutes. Try Update again when you're at the computer.",
+            ),
         ] {
-            let failed = Job::Failed { summary: summary.into(), output: String::new() };
-            assert_eq!(detail(&row, Some(&failed), None, false), (said.to_string(), true));
+            let failed = Job::Failed {
+                summary: summary.into(),
+                output: String::new(),
+            };
+            assert_eq!(
+                detail(&row, Some(&failed), None, false),
+                (said.to_string(), true)
+            );
         }
         // The others read as before.
         let codex = &mock_versions()[0];
-        assert_eq!(detail(codex, None, None, false), ("Via npm".to_string(), false));
-        assert_eq!(detail(codex, Some(&Job::Running), None, false).0, "Running npm install -g @openai/codex@latest");
-        assert_eq!(detail(codex, Some(&Job::Queued), Some(Hold::Turn), false).0, "Waits for Codex's turn to end");
+        assert_eq!(
+            detail(codex, None, None, false),
+            ("Via npm".to_string(), false)
+        );
+        assert_eq!(
+            detail(codex, Some(&Job::Running), None, false).0,
+            "Running npm install -g @openai/codex@latest"
+        );
+        assert_eq!(
+            detail(codex, Some(&Job::Queued), Some(Hold::Turn), false).0,
+            "Waits for Codex's turn to end"
+        );
     }
 
     #[test]
     fn updates_wait_for_the_agents_turns_and_run_one_at_a_time() {
         let mut u = updates();
         assert_eq!(u.pending(), 3);
-        assert_eq!(u.updatable(), ["codex", "opencode", "pi"], "rows go by their CLI");
+        assert_eq!(
+            u.updatable(),
+            ["codex", "opencode", "pi"],
+            "rows go by their CLI"
+        );
         for a in u.updatable() {
             assert!(u.request(&a));
         }
@@ -692,13 +996,40 @@ mod tests {
         assert!(u.updating("opencode"));
         assert!(!u.updating("codex"));
         assert_eq!(u.next(busy), None, "one at a time");
-        u.finish("opencode", Outcome::Updated { version: "1.18.34".into(), output: String::new() });
-        assert_eq!(u.job("opencode"), Some(&Job::Updated { from: Some("1.18.32".into()), to: "1.18.34".into(), output: String::new() }));
+        u.finish(
+            "opencode",
+            Outcome::Updated {
+                version: "1.18.34".into(),
+                output: String::new(),
+            },
+        );
+        assert_eq!(
+            u.job("opencode"),
+            Some(&Job::Updated {
+                from: Some("1.18.32".into()),
+                to: "1.18.34".into(),
+                output: String::new()
+            })
+        );
         assert_eq!(u.pending(), 2);
-        assert_eq!(u.found.iter().find(|v| v.agent == "opencode").unwrap().installed.as_deref(), Some("1.18.34"));
+        assert_eq!(
+            u.found
+                .iter()
+                .find(|v| v.agent == "opencode")
+                .unwrap()
+                .installed
+                .as_deref(),
+            Some("1.18.34")
+        );
         assert_eq!(u.next(busy), batch(&["pi"]));
         u.start("pi");
-        u.finish("pi", Outcome::Failed { summary: "npm stopped with code 1.".into(), output: "EACCES".into() });
+        u.finish(
+            "pi",
+            Outcome::Failed {
+                summary: "npm stopped with code 1.".into(),
+                output: "EACCES".into(),
+            },
+        );
         // Codex still busy: it waits; once its turn ends, it's next.
         assert_eq!(u.next(busy), None);
         assert!(u.queued());
@@ -717,7 +1048,13 @@ mod tests {
         u.request("codex");
         u.request("opencode");
         u.start("opencode");
-        u.finish("opencode", Outcome::Updated { version: "1.18.34".into(), output: String::new() });
+        u.finish(
+            "opencode",
+            Outcome::Updated {
+                version: "1.18.34".into(),
+                output: String::new(),
+            },
+        );
         u.request("pi");
         u.start("pi");
         let mut fresh = mock_versions();
@@ -726,7 +1063,11 @@ mod tests {
         u.checked(fresh, 1);
         assert_eq!(u.job("codex"), Some(&Job::Queued));
         assert_eq!(u.job("pi"), Some(&Job::Running));
-        assert_eq!(u.found[2].installed.as_deref(), Some("0.99.2"), "its row stays as it started");
+        assert_eq!(
+            u.found[2].installed.as_deref(),
+            Some("0.99.2"),
+            "its row stays as it started"
+        );
         assert_eq!(u.job("opencode"), None);
         assert!(!u.found[1].update_available());
     }
@@ -737,32 +1078,54 @@ mod tests {
         u.request("codex");
         u.start("codex");
         u.request("pi");
-        let fresh: Vec<_> = mock_versions().into_iter().filter(|v| v.id == "opencode").collect();
+        let fresh: Vec<_> = mock_versions()
+            .into_iter()
+            .filter(|v| v.id == "opencode")
+            .collect();
         u.checked(fresh, 1);
         assert_eq!(u.job("codex"), Some(&Job::Running));
-        assert!(u.found.iter().any(|v| v.id == "codex"), "its row is kept for it to finish on");
+        assert!(
+            u.found.iter().any(|v| v.id == "codex"),
+            "its row is kept for it to finish on"
+        );
         assert_eq!(u.job("pi"), None, "gone from this Mac: nothing to update");
         assert!(!u.queued());
-        u.finish("codex", Outcome::Updated { version: "0.160.0".into(), output: String::new() });
+        u.finish(
+            "codex",
+            Outcome::Updated {
+                version: "0.160.0".into(),
+                output: String::new(),
+            },
+        );
         assert!(!u.running());
     }
 
     #[test]
     fn a_cached_find_waits_for_this_launchs_check_and_runs_on_what_it_finds() {
         // An earlier launch's: Codex was an npm install then, OpenCode had an update out.
-        let mut u = AgentUpdates { stale: true, ..updates() };
+        let mut u = AgentUpdates {
+            stale: true,
+            ..updates()
+        };
         assert!(u.request("codex") && u.request("opencode"));
         assert_eq!(u.next(|_| false), None, "nothing starts on the cache");
         // Meanwhile Codex moved to its own installer, and OpenCode was updated by hand.
         let mut fresh = mock_versions();
         fresh[0].install = Install::Native;
-        fresh[0].command = Some(UpdateCommand::new("/Users/me/.codex/bin/codex", &["update"]));
+        fresh[0].command = Some(UpdateCommand::new(
+            "/Users/me/.codex/bin/codex",
+            &["update"],
+        ));
         fresh[1].installed = Some("1.18.34".into());
         u.checked(fresh, 1);
         assert!(!u.stale);
         assert_eq!(u.job("opencode"), None, "nothing left to install");
         assert_eq!(u.next(|_| false), batch(&["codex"]));
-        assert_eq!(u.start("codex").unwrap().command.unwrap().shown(), "codex update", "the command of the install that's there now");
+        assert_eq!(
+            u.start("codex").unwrap().command.unwrap().shown(),
+            "codex update",
+            "the command of the install that's there now"
+        );
     }
 
     #[test]
@@ -774,22 +1137,40 @@ mod tests {
             v.latest = None;
             v.error = Some(offline.into());
         }
-        assert_eq!(u.unchecked_note().as_deref(), Some("Couldn't check Codex, OpenCode and Pi: offline, or the release feed didn't answer."));
-        u.found[1].error = Some("https://formulae.brew.sh/api/formula/opencode.json answered 500".into());
-        assert_eq!(u.unchecked_note().as_deref(), Some("Couldn't check Codex, OpenCode and Pi."));
+        assert_eq!(
+            u.unchecked_note().as_deref(),
+            Some(
+                "Couldn't check Codex, OpenCode and Pi: offline, or the release feed didn't answer."
+            )
+        );
+        u.found[1].error =
+            Some("https://formulae.brew.sh/api/formula/opencode.json answered 500".into());
+        assert_eq!(
+            u.unchecked_note().as_deref(),
+            Some("Couldn't check Codex, OpenCode and Pi.")
+        );
         let mut u = updates();
         u.found[0].installed = None;
-        assert_eq!(u.unchecked_note().as_deref(), Some("Couldn't check Codex: it didn't say its version."));
+        assert_eq!(
+            u.unchecked_note().as_deref(),
+            Some("Couldn't check Codex: it didn't say its version.")
+        );
     }
 
     #[test]
     fn checks_come_every_twelve_hours_when_on() {
-        let u = AgentUpdates { checked_at: 1_000, ..Default::default() };
+        let u = AgentUpdates {
+            checked_at: 1_000,
+            ..Default::default()
+        };
         assert!(!u.due(true, 1_000 + CHECK_EVERY_MS - 1));
         assert!(u.due(true, 1_000 + CHECK_EVERY_MS));
         assert!(!u.due(false, 1_000 + CHECK_EVERY_MS));
         assert!(AgentUpdates::default().due(true, 5), "never checked");
-        let checking = AgentUpdates { checking: true, ..Default::default() };
+        let checking = AgentUpdates {
+            checking: true,
+            ..Default::default()
+        };
         assert!(!checking.due(true, i64::MAX));
     }
 
@@ -797,9 +1178,17 @@ mod tests {
     fn with_checks_off_only_updates_asked_for_badge() {
         let mut u = updates();
         assert_eq!(badge(&u, true), Some((3, false)));
-        assert_eq!(badge(&u, false), None, "the last check's finds aren't fresh");
+        assert_eq!(
+            badge(&u, false),
+            None,
+            "the last check's finds aren't fresh"
+        );
         u.request("codex");
-        assert_eq!(badge(&u, false), Some((0, false)), "asked for: it shows until it's done");
+        assert_eq!(
+            badge(&u, false),
+            Some((0, false)),
+            "asked for: it shows until it's done"
+        );
         u.start("codex");
         assert_eq!(badge(&u, false), Some((0, true)));
         assert_eq!(badge(&u, true), Some((3, true)));

@@ -56,7 +56,15 @@ pub fn forget() {
 pub fn build_number() -> u32 {
     use std::sync::OnceLock;
     static BUILD: OnceLock<u32> = OnceLock::new();
-    *BUILD.get_or_init(|| read_string(windows_sys::Win32::System::Registry::HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "CurrentBuild").and_then(|b| b.parse().ok()).unwrap_or(0))
+    *BUILD.get_or_init(|| {
+        read_string(
+            windows_sys::Win32::System::Registry::HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+            "CurrentBuild",
+        )
+        .and_then(|b| b.parse().ok())
+        .unwrap_or(0)
+    })
 }
 
 /// The Transparency effects switch (Settings › Personalization › Colors). Windows keeps no value
@@ -64,17 +72,34 @@ pub fn build_number() -> u32 {
 #[cfg(windows)]
 fn transparency_enabled() -> bool {
     use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
-    let key: Vec<u16> = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize".encode_utf16().chain([0]).collect();
+    let key: Vec<u16> = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+        .encode_utf16()
+        .chain([0])
+        .collect();
     let name: Vec<u16> = "EnableTransparency".encode_utf16().chain([0]).collect();
     let mut value = 0u32;
     let mut size = std::mem::size_of::<u32>() as u32;
     // SAFETY: both names end in a NUL; `value` is the 4 bytes `size` says, written on success.
-    let status = unsafe { RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), RRF_RT_REG_DWORD, std::ptr::null_mut(), (&mut value as *mut u32).cast(), &mut size) };
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut value as *mut u32).cast(),
+            &mut size,
+        )
+    };
     status != 0 || value != 0
 }
 
 #[cfg(windows)]
-fn read_string(root: windows_sys::Win32::System::Registry::HKEY, key: &str, name: &str) -> Option<String> {
+fn read_string(
+    root: windows_sys::Win32::System::Registry::HKEY,
+    key: &str,
+    name: &str,
+) -> Option<String> {
     use windows_sys::Win32::System::Registry::{RRF_RT_REG_SZ, RegGetValueW};
     let key: Vec<u16> = key.encode_utf16().chain([0]).collect();
     let name: Vec<u16> = name.encode_utf16().chain([0]).collect();
@@ -82,7 +107,17 @@ fn read_string(root: windows_sys::Win32::System::Registry::HKEY, key: &str, name
     let mut size = std::mem::size_of_val(&buf) as u32;
     // SAFETY: both names end in a NUL; `buf` is `size` bytes long, and `size` is how many are
     // written (the terminator included) on success.
-    let status = unsafe { RegGetValueW(root, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut size) };
+    let status = unsafe {
+        RegGetValueW(
+            root,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr().cast(),
+            &mut size,
+        )
+    };
     if status != 0 {
         return None;
     }
@@ -94,11 +129,20 @@ fn read_string(root: windows_sys::Win32::System::Registry::HKEY, key: &str, name
 /// which is the Windows ask for reduced motion. Not asking is "don't reduce".
 #[cfg(windows)]
 pub fn reduce_motion() -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
+    };
     let mut on = 1i32;
     // SAFETY: SPI_GETCLIENTAREAANIMATION writes one BOOL through `pvParam` and ignores `uiParam`;
     // `on` is a BOOL's size and outlives the call.
-    let read = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&mut on as *mut i32).cast(), 0) };
+    let read = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            (&mut on as *mut i32).cast(),
+            0,
+        )
+    };
     read != 0 && reduces_motion(on != 0)
 }
 
@@ -112,7 +156,12 @@ pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     #[link(name = "dwmapi")]
     unsafe extern "system" {
-        fn DwmSetWindowAttribute(hwnd: *mut core::ffi::c_void, attribute: u32, value: *const core::ffi::c_void, size: u32) -> i32;
+        fn DwmSetWindowAttribute(
+            hwnd: *mut core::ffi::c_void,
+            attribute: u32,
+            value: *const core::ffi::c_void,
+            size: u32,
+        ) -> i32;
     }
     /// `DWMWA_USE_IMMERSIVE_DARK_MODE`.
     const USE_IMMERSIVE_DARK_MODE: u32 = 20;
@@ -120,14 +169,25 @@ pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
     const SYSTEMBACKDROP_TYPE: u32 = 38;
     const BACKDROP_NONE: i32 = 1;
     const BACKDROP_MICA_ALT: i32 = 4;
-    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
-    let RawWindowHandle::Win32(win32) = handle.as_raw() else { return };
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
     let hwnd = win32.hwnd.get() as *mut core::ffi::c_void;
     let set = |attribute: u32, value: i32| {
         // SAFETY: `hwnd` is the live window GPUI created for this `window`, on its own thread;
         // both attributes take a 4-byte value, which `value` is and outlives the call. Windows
         // before 11 22H2 refuse the backdrop one, which is the answer wanted there.
-        unsafe { DwmSetWindowAttribute(hwnd, attribute, (&value as *const i32).cast(), std::mem::size_of::<i32>() as u32) };
+        unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                attribute,
+                (&value as *const i32).cast(),
+                std::mem::size_of::<i32>() as u32,
+            )
+        };
     };
     set(USE_IMMERSIVE_DARK_MODE, dark as i32);
     if glass {
@@ -160,7 +220,11 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_reads_work_on_this_machine() {
-        assert!(build_number() >= 19041, "a Windows 10 or 11 build number, got {}", build_number());
+        assert!(
+            build_number() >= 19041,
+            "a Windows 10 or 11 build number, got {}",
+            build_number()
+        );
         let _ = (reduce_motion(), glass_now());
         forget();
     }

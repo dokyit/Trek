@@ -64,7 +64,11 @@ fn prompt_owner() -> Option<isize> {
     let hwnd = owner as *mut std::ffi::c_void;
     let mut process = 0u32;
     // SAFETY: both only ask about a handle, which may be one no window has any more.
-    let ours = unsafe { IsWindow(hwnd) != 0 && GetWindowThreadProcessId(hwnd, &mut process) != 0 && process == GetCurrentProcessId() };
+    let ours = unsafe {
+        IsWindow(hwnd) != 0
+            && GetWindowThreadProcessId(hwnd, &mut process) != 0
+            && process == GetCurrentProcessId()
+    };
     ours.then_some(owner)
 }
 
@@ -98,17 +102,27 @@ pub fn script(dir: &Path, steps: &[Step]) -> Result<String, String> {
         // Lines after this one are read as UTF-8 (a path with an accent), and .NET programs
         // (Chocolatey) write their output in it. By its full path: a bare name is looked up in the
         // current folder first.
-        format!("{} 65001 >nul", quote(&system32().join("chcp.com").to_string_lossy(), false, true)?),
+        format!(
+            "{} 65001 >nul",
+            quote(&system32().join("chcp.com").to_string_lossy(), false, true)?
+        ),
         "setlocal DisableDelayedExpansion".to_string(),
         "set \"NO_COLOR=1\"".to_string(),
     ];
     for (i, step) in steps.iter().enumerate() {
         let called = is_batch(&step.program);
         let program = quote(&step.program.to_string_lossy(), called, true)?;
-        let args = step.args.iter().map(|a| quote(a, called, false)).collect::<Result<Vec<_>, _>>()?;
+        let args = step
+            .args
+            .iter()
+            .map(|a| quote(a, called, false))
+            .collect::<Result<Vec<_>, _>>()?;
         lines.push("setlocal".into());
         // PATH entries that can't be put in quotes are left out, not the PATH.
-        let path: Vec<String> = std::env::split_paths(&step.path).filter_map(|p| set_value(&p.to_string_lossy()).ok()).filter(|p| !p.is_empty()).collect();
+        let path: Vec<String> = std::env::split_paths(&step.path)
+            .filter_map(|p| set_value(&p.to_string_lossy()).ok())
+            .filter(|p| !p.is_empty())
+            .collect();
         lines.push(format!("set \"PATH={}\"", fit_path(path).join(";")));
         for (name, value) in &step.env {
             if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
@@ -116,17 +130,27 @@ pub fn script(dir: &Path, steps: &[Step]) -> Result<String, String> {
             }
             lines.push(format!("set \"{name}={}\"", set_value(value)?));
         }
-        let run = std::iter::once(program).chain(args).collect::<Vec<_>>().join(" ");
+        let run = std::iter::once(program)
+            .chain(args)
+            .collect::<Vec<_>>()
+            .join(" ");
         let out = output_file(dir, i).display().to_string();
         let code = code_file(dir, i).display().to_string();
-        lines.push(format!("{}{run} <nul >\"{out}\" 2>&1", if called { "call " } else { "" }));
+        lines.push(format!(
+            "{}{run} <nul >\"{out}\" 2>&1",
+            if called { "call " } else { "" }
+        ));
         // Redirection first: `echo 0>file` would read the `0` as a handle.
         lines.push(format!(">\"{code}\" echo %ERRORLEVEL%"));
         lines.push("endlocal".into());
     }
     lines.push("exit /b 0".into());
     if let Some(long) = lines.iter().find(|l| l.len() > MAX_LINE) {
-        return Err(format!("a line of the script is {} characters long, more than cmd.exe reads ({}…)", long.len(), long.chars().take(60).collect::<String>()));
+        return Err(format!(
+            "a line of the script is {} characters long, more than cmd.exe reads ({}…)",
+            long.len(),
+            long.chars().take(60).collect::<String>()
+        ));
     }
     Ok(lines.join("\r\n") + "\r\n")
 }
@@ -136,8 +160,14 @@ pub fn script(dir: &Path, steps: &[Step]) -> Result<String, String> {
 /// the others dropped until it fits, never Windows' own folders, which its programs need.
 fn fit_path(entries: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
-    let mut entries: Vec<String> = entries.into_iter().filter(|e| seen.insert(e.trim_end_matches('\\').to_lowercase())).collect();
-    let windows = system32().parent().map(|p| p.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let mut entries: Vec<String> = entries
+        .into_iter()
+        .filter(|e| seen.insert(e.trim_end_matches('\\').to_lowercase()))
+        .collect();
+    let windows = system32()
+        .parent()
+        .map(|p| p.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
     let system = |e: &String| !windows.is_empty() && e.to_lowercase().starts_with(&windows);
     while entries.iter().map(|e| e.len() + 1).sum::<usize>() > PATH_LIMIT {
         match entries.iter().rposition(|e| !system(e)) {
@@ -155,19 +185,30 @@ fn fit_path(entries: Vec<String>) -> Vec<String> {
 /// mapped drives, nor `\\?\` and `\\.\`), without a character that quotes can't hold.
 fn folder_fit_for_cmd(dir: &Path) -> Result<(), String> {
     let text = dir.to_string_lossy();
-    if let Some(c) = text.chars().find(|c| matches!(c, '"' | '%' | '^' | '\r' | '\n' | '\0')) {
-        return Err(format!("its folder ({text}) has a {c:?} in its path, which cmd.exe can't be given safely"));
+    if let Some(c) = text
+        .chars()
+        .find(|c| matches!(c, '"' | '%' | '^' | '\r' | '\n' | '\0'))
+    {
+        return Err(format!(
+            "its folder ({text}) has a {c:?} in its path, which cmd.exe can't be given safely"
+        ));
     }
     let bytes = text.as_bytes();
-    if !(bytes.len() > 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\') {
-        return Err(format!("its folder ({text}) isn't on a local drive, which an administrator's process can't be relied on to reach"));
+    if !(bytes.len() > 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\')
+    {
+        return Err(format!(
+            "its folder ({text}) isn't on a local drive, which an administrator's process can't be relied on to reach"
+        ));
     }
     Ok(())
 }
 
 /// `System32`, where cmd.exe and the programs its script uses are.
 fn system32() -> PathBuf {
-    cmd_exe().parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32"))
+    cmd_exe()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32"))
 }
 
 /// One run's folder, Trek's alone (see the module's note): made new under a name that can't be
@@ -183,7 +224,8 @@ impl Run {
     /// A folder of its own under `parent`.
     pub fn create(parent: &Path) -> Result<Run, String> {
         folder_fit_for_cmd(parent)?;
-        std::fs::create_dir_all(parent).map_err(|e| format!("couldn't make {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("couldn't make {}: {e}", parent.display()))?;
         let dir = parent.join(format!("elevated-{}", uuid::Uuid::new_v4().simple()));
         // `create_dir`, not `create_dir_all`: a folder that exists already isn't ours.
         std::fs::create_dir(&dir).map_err(|e| format!("couldn't make {}: {e}", dir.display()))?;
@@ -202,15 +244,23 @@ impl Run {
     /// then read the script back: it is what was written, and stays so.
     pub fn seal(&mut self, text: &str, steps: usize) -> Result<PathBuf, String> {
         let script = self.script_path();
-        let oops = |what: &str, p: &Path, e: std::io::Error| format!("couldn't {what} {}: {e}", p.display());
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&script).map_err(|e| oops("write", &script, e))?;
-        file.write_all(text.as_bytes()).map_err(|e| oops("write", &script, e))?;
+        let oops = |what: &str, p: &Path, e: std::io::Error| {
+            format!("couldn't {what} {}: {e}", p.display())
+        };
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&script)
+            .map_err(|e| oops("write", &script, e))?;
+        file.write_all(text.as_bytes())
+            .map_err(|e| oops("write", &script, e))?;
         drop(file);
         // Held for reading, with other programs allowed to read it but nothing else: not to write
         // it, nor to delete or rename it. cmd.exe reads it by name as it goes.
         let mut held = open_held(&script, false).map_err(|e| oops("hold", &script, e))?;
         let mut back = Vec::new();
-        held.read_to_end(&mut back).map_err(|e| oops("read back", &script, e))?;
+        held.read_to_end(&mut back)
+            .map_err(|e| oops("read back", &script, e))?;
         if back != text.as_bytes() {
             return Err(format!("{} isn't what Trek wrote to it", script.display()));
         }
@@ -219,7 +269,8 @@ impl Run {
         // place), and held, so they stay these.
         for step in 0..steps {
             for path in [output_file(&self.dir, step), code_file(&self.dir, step)] {
-                self.held.push(open_held(&path, true).map_err(|e| oops("make", &path, e))?);
+                self.held
+                    .push(open_held(&path, true).map_err(|e| oops("make", &path, e))?);
             }
         }
         Ok(script)
@@ -246,7 +297,11 @@ fn open_held(path: &Path, create: bool) -> std::io::Result<std::fs::File> {
     const GENERIC_READ: u32 = 0x8000_0000;
     let mut options = std::fs::OpenOptions::new();
     if create {
-        options.write(true).create_new(true).access_mode(GENERIC_READ).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        options
+            .write(true)
+            .create_new(true)
+            .access_mode(GENERIC_READ)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
     } else {
         options.read(true).share_mode(FILE_SHARE_READ);
     }
@@ -256,22 +311,36 @@ fn open_held(path: &Path, create: bool) -> std::io::Result<std::fs::File> {
 #[cfg(not(windows))]
 fn open_held(path: &Path, create: bool) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
-    if create { options.write(true).create_new(true) } else { options.read(true) }.open(path)
+    if create {
+        options.write(true).create_new(true)
+    } else {
+        options.read(true)
+    }
+    .open(path)
 }
 
 /// A `.cmd` or `.bat`: cmd.exe runs it through `call`, or the script would end with it.
 fn is_batch(program: &Path) -> bool {
-    program.extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
+    program
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
 }
 
 /// `token` in double quotes for a line of the script; `called` for a line run through `call`.
 /// `program` for the program itself, which may end with `\` (it never ends a folder).
 pub fn quote(token: &str, called: bool, program: bool) -> Result<String, String> {
-    if let Some(c) = token.chars().find(|c| matches!(c, '"' | '\r' | '\n' | '\0') || (called && *c == '^')) {
-        return Err(format!("{token:?} has a {c:?}, which can't be passed safely through cmd.exe"));
+    if let Some(c) = token
+        .chars()
+        .find(|c| matches!(c, '"' | '\r' | '\n' | '\0') || (called && *c == '^'))
+    {
+        return Err(format!(
+            "{token:?} has a {c:?}, which can't be passed safely through cmd.exe"
+        ));
     }
     if !program && token.ends_with('\\') {
-        return Err(format!("{token:?} ends with \\, which can't be passed safely through cmd.exe"));
+        return Err(format!(
+            "{token:?} ends with \\, which can't be passed safely through cmd.exe"
+        ));
     }
     let percent = if called { "%%%%" } else { "%%" };
     Ok(format!("\"{}\"", token.replace('%', percent)))
@@ -279,8 +348,13 @@ pub fn quote(token: &str, called: bool, program: bool) -> Result<String, String>
 
 /// `value` for `set "NAME=value"`: a `%` doubled; refused with a `"` or a line break.
 fn set_value(value: &str) -> Result<String, String> {
-    if let Some(c) = value.chars().find(|c| matches!(c, '"' | '\r' | '\n' | '\0')) {
-        return Err(format!("{value:?} has a {c:?}, which can't be set safely in cmd.exe"));
+    if let Some(c) = value
+        .chars()
+        .find(|c| matches!(c, '"' | '\r' | '\n' | '\0'))
+    {
+        return Err(format!(
+            "{value:?} has a {c:?}, which can't be set safely in cmd.exe"
+        ));
     }
     Ok(value.replace('%', "%%"))
 }
@@ -294,7 +368,10 @@ pub fn command_line(script: &Path) -> String {
 
 /// cmd.exe, by its full path: the elevated process isn't to find another on a PATH.
 pub fn cmd_exe() -> PathBuf {
-    let root = std::env::var_os("SystemRoot").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
     root.join(r"System32\cmd.exe")
 }
 
@@ -307,7 +384,9 @@ pub enum Failure {
     /// same error as a "No".
     Unanswered,
     /// It ran longer than it may; `ended` when Trek could end it.
-    TimedOut { ended: bool },
+    TimedOut {
+        ended: bool,
+    },
     Other(String),
 }
 
@@ -320,7 +399,11 @@ pub type Launch = fn(&Path, Duration) -> Result<u32, Failure>;
 /// The elapsed time is the only signal Windows gives: `ShellExecuteExW` fails with
 /// `ERROR_CANCELLED` for both, and says nothing about the secure desktop it was shown on.
 pub fn refused(after: Duration) -> Failure {
-    if after >= UNANSWERED_AFTER { Failure::Unanswered } else { Failure::Cancelled }
+    if after >= UNANSWERED_AFTER {
+        Failure::Unanswered
+    } else {
+        Failure::Cancelled
+    }
 }
 
 /// A "not allowed" this late is the prompt giving up, not someone's "No": under the two minutes
@@ -334,11 +417,22 @@ pub fn run_as_admin(script: &Path, timeout: Duration) -> Result<u32, Failure> {
     use std::os::windows::ffi::OsStrExt as _;
     use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
     use windows_sys::Win32::Foundation::{ERROR_CANCELLED, WAIT_OBJECT_0, WAIT_TIMEOUT};
-    use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize};
-    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, GetProcessId, WaitForSingleObject};
-    use windows_sys::Win32::UI::Shell::{SEE_MASK_NO_CONSOLE, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+    use windows_sys::Win32::System::Com::{
+        COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, GetProcessId, WaitForSingleObject,
+    };
+    use windows_sys::Win32::UI::Shell::{
+        SEE_MASK_NO_CONSOLE, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+        ShellExecuteExW,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
-    let wide = |s: &std::ffi::OsStr| s.encode_wide().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let wide = |s: &std::ffi::OsStr| {
+        s.encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>()
+    };
     let verb = wide("runas".as_ref());
     let file = wide(cmd_exe().as_os_str());
     let params = wide(command_line(script).as_ref());
@@ -365,7 +459,10 @@ pub fn run_as_admin(script: &Path, timeout: Duration) -> Result<u32, Failure> {
     // SAFETY: plain calls; the strings `info` points to outlive the call.
     let asked = std::time::Instant::now();
     let (ok, error) = unsafe {
-        let com = CoInitializeEx(std::ptr::null(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32);
+        let com = CoInitializeEx(
+            std::ptr::null(),
+            (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+        );
         let ok = ShellExecuteExW(&mut info) != 0;
         let error = std::io::Error::last_os_error();
         if com >= 0 {
@@ -410,7 +507,9 @@ pub fn run_as_admin(script: &Path, timeout: Duration) -> Result<u32, Failure> {
 
 #[cfg(not(windows))]
 pub fn run_as_admin(_script: &Path, _timeout: Duration) -> Result<u32, Failure> {
-    Err(Failure::Other("only Windows runs commands as an administrator this way".into()))
+    Err(Failure::Other(
+        "only Windows runs commands as an administrator this way".into(),
+    ))
 }
 
 /// For tests: the script run as it is, not elevated, through the same cmd.exe command line.
@@ -418,11 +517,17 @@ pub fn run_as_admin(_script: &Path, _timeout: Duration) -> Result<u32, Failure> 
 pub fn run_plain(script: &Path, timeout: Duration) -> Result<u32, Failure> {
     use std::os::windows::process::CommandExt as _;
     let mut command = crate::procs::command(cmd_exe());
-    command.raw_arg(command_line(script)).current_dir(system32()).stdin(std::process::Stdio::null());
+    command
+        .raw_arg(command_line(script))
+        .current_dir(system32())
+        .stdin(std::process::Stdio::null());
     let mut child = command.spawn().map_err(|e| Failure::Other(e.to_string()))?;
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        if let Some(status) = child.try_wait().map_err(|e| Failure::Other(e.to_string()))? {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| Failure::Other(e.to_string()))?
+        {
             return Ok(status.code().unwrap_or(1) as u32);
         }
         if std::time::Instant::now() > deadline {
@@ -440,10 +545,16 @@ mod tests {
     #[test]
     fn a_not_allowed_is_told_from_the_prompt_giving_up_by_how_long_it_took() {
         for secs in [0, 4, 30, 99] {
-            assert!(matches!(refused(Duration::from_secs(secs)), Failure::Cancelled), "{secs} s");
+            assert!(
+                matches!(refused(Duration::from_secs(secs)), Failure::Cancelled),
+                "{secs} s"
+            );
         }
         for secs in [100, 122, 600] {
-            assert!(matches!(refused(Duration::from_secs(secs)), Failure::Unanswered), "{secs} s");
+            assert!(
+                matches!(refused(Duration::from_secs(secs)), Failure::Unanswered),
+                "{secs} s"
+            );
         }
     }
 
@@ -453,11 +564,28 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn the_prompt_is_owned_by_the_latest_main_window_and_only_a_window_of_trek() {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, GetShellWindow, HWND_MESSAGE};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, GetShellWindow, HWND_MESSAGE,
+        };
         // The only test that stores a window (the others never ask Windows for a prompt).
         let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
         // SAFETY: a predefined class, a message-only window of this thread, destroyed below.
-        let make = || unsafe { CreateWindowExW(0, class.as_ptr(), std::ptr::null(), 0, 0, 0, 0, 0, HWND_MESSAGE, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null()) } as isize;
+        let make = || unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        } as isize;
         let (first, second) = (make(), make());
         assert!(first != 0 && second != 0 && first != second);
         set_owner_window(0);
@@ -482,22 +610,43 @@ mod tests {
     #[test]
     fn what_cant_be_quoted_for_cmd_is_refused() {
         assert_eq!(quote("upgrade", false, false).unwrap(), "\"upgrade\"");
-        assert_eq!(quote("a&b|c<d>e(f)g h!", false, false).unwrap(), "\"a&b|c<d>e(f)g h!\"");
+        assert_eq!(
+            quote("a&b|c<d>e(f)g h!", false, false).unwrap(),
+            "\"a&b|c<d>e(f)g h!\""
+        );
         assert_eq!(quote("100%", false, false).unwrap(), "\"100%%\"");
-        assert_eq!(quote("100%", true, false).unwrap(), "\"100%%%%\"", "twice for a `call`");
+        assert_eq!(
+            quote("100%", true, false).unwrap(),
+            "\"100%%%%\"",
+            "twice for a `call`"
+        );
         assert_eq!(quote("^x", false, false).unwrap(), "\"^x\"");
-        assert!(quote("^x", true, false).is_err(), "`call` doubles carets, even quoted");
+        assert!(
+            quote("^x", true, false).is_err(),
+            "`call` doubles carets, even quoted"
+        );
         for bad in ["a\"b", "a\nb", "a\rb", "a\0b"] {
             assert!(quote(bad, false, false).is_err(), "{bad:?}");
             assert!(quote(bad, true, true).is_err(), "{bad:?}");
         }
-        assert!(quote(r"C:\dir\", false, false).is_err(), "an exe would read `\\\"` as a quote");
+        assert!(
+            quote(r"C:\dir\", false, false).is_err(),
+            "an exe would read `\\\"` as a quote"
+        );
         assert!(quote(r"C:\dir\x.exe", false, true).is_ok());
         // A folder that can't be quoted refuses the script, as does a step.
-        let step = |args: &[&str]| Step { program: r"C:\ProgramData\chocolatey\bin\choco.exe".into(), args: args.iter().map(|a| a.to_string()).collect(), env: vec![], path: String::new() };
+        let step = |args: &[&str]| Step {
+            program: r"C:\ProgramData\chocolatey\bin\choco.exe".into(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+            env: vec![],
+            path: String::new(),
+        };
         assert!(script(Path::new(r"C:\Users\100%\tmp"), &[step(&["upgrade"])]).is_err());
         assert!(script(Path::new(r"C:\tmp"), &[step(&["a\"b"])]).is_err());
-        let env = Step { env: vec![("A B".into(), "x".into())], ..step(&[]) };
+        let env = Step {
+            env: vec![("A B".into(), "x".into())],
+            ..step(&[])
+        };
         assert!(script(Path::new(r"C:\tmp"), &[env]).is_err());
     }
 
@@ -506,21 +655,47 @@ mod tests {
     fn the_script_runs_each_step_into_files_of_its_own() {
         let path = "C:\\Windows;C:\\a\"b;C:\\x%y".to_string();
         let steps = [
-            Step { program: r"C:\ProgramData\chocolatey\bin\choco.exe".into(), args: vec!["upgrade".into(), "opencode".into(), "-y".into()], env: vec![], path: path.clone() },
-            Step { program: r"C:\ProgramData\scoop\shims\scoop.cmd".into(), args: vec!["update".into(), "opencode".into(), "-g".into()], env: vec![("K".into(), "50%".into())], path },
+            Step {
+                program: r"C:\ProgramData\chocolatey\bin\choco.exe".into(),
+                args: vec!["upgrade".into(), "opencode".into(), "-y".into()],
+                env: vec![],
+                path: path.clone(),
+            },
+            Step {
+                program: r"C:\ProgramData\scoop\shims\scoop.cmd".into(),
+                args: vec!["update".into(), "opencode".into(), "-g".into()],
+                env: vec![("K".into(), "50%".into())],
+                path,
+            },
         ];
         let text = script(Path::new(r"C:\Trek data\tmp\run 1"), &steps).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         // `chcp` by its full path: a bare name is looked up in the current folder first.
         let chcp = format!("\"{}\" 65001 >nul", system32().join("chcp.com").display());
-        assert_eq!(&lines[..6], ["@echo off", chcp.as_str(), "setlocal DisableDelayedExpansion", r#"set "NO_COLOR=1""#, "setlocal", r#"set "PATH=C:\Windows;C:\ab;C:\x%%y""#]);
+        assert_eq!(
+            &lines[..6],
+            [
+                "@echo off",
+                chcp.as_str(),
+                "setlocal DisableDelayedExpansion",
+                r#"set "NO_COLOR=1""#,
+                "setlocal",
+                r#"set "PATH=C:\Windows;C:\ab;C:\x%%y""#
+            ]
+        );
         // A PATH's quotes group (`C:\a"b` is `C:\ab`, as Windows reads it); its `%` is doubled.
         assert!(lines.contains(&r#""C:\ProgramData\chocolatey\bin\choco.exe" "upgrade" "opencode" "-y" <nul >"C:\Trek data\tmp\run 1\0.out" 2>&1"#), "{text}");
-        assert!(lines.contains(&r#">"C:\Trek data\tmp\run 1\0.code" echo %ERRORLEVEL%"#), "{text}");
+        assert!(
+            lines.contains(&r#">"C:\Trek data\tmp\run 1\0.code" echo %ERRORLEVEL%"#),
+            "{text}"
+        );
         assert!(lines.contains(&r#"call "C:\ProgramData\scoop\shims\scoop.cmd" "update" "opencode" "-g" <nul >"C:\Trek data\tmp\run 1\1.out" 2>&1"#), "{text}");
         assert!(lines.contains(&r#"set "K=50%%""#), "{text}");
         assert!(text.ends_with("exit /b 0\r\n"));
-        assert_eq!(command_line(Path::new(r"C:\Trek data\tmp\run 1\run.cmd")), r#"/d /v:off /s /c ""C:\Trek data\tmp\run 1\run.cmd"""#);
+        assert_eq!(
+            command_line(Path::new(r"C:\Trek data\tmp\run 1\run.cmd")),
+            r#"/d /v:off /s /c ""C:\Trek data\tmp\run 1\run.cmd"""#
+        );
     }
 
     /// The script, run (not elevated: the same script and cmd.exe line as the elevated run) with
@@ -545,11 +720,18 @@ mod tests {
         let step = |program: &PathBuf, a: &[&str], env: &[(&str, &str)]| Step {
             program: program.clone(),
             args: args(a),
-            env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             path: std::env::var("PATH").unwrap(),
         };
         let steps = [
-            step(&exe, &["echo", "a&b", "100%", "%PATH%", "x!y", "(x86)", "|", ">"], &[]),
+            step(
+                &exe,
+                &["echo", "a&b", "100%", "%PATH%", "x!y", "(x86)", "|", ">"],
+                &[],
+            ),
             step(&cmd, &["a&b c", "100%", "%PATH%"], &[]),
             step(&exe, &["exit", "-1978335189"], &[]),
             step(&env, &[], &[("K", "it's 50% & more")]),
@@ -557,12 +739,34 @@ mod tests {
             // More of what cmd.exe makes something of: carets, doubled and variable-looking
             // percents, `&&` and `||`, a stray parenthesis, a redirection to a file, a tilde
             // modifier, delayed expansion's `!`, non-ASCII, a UNC-looking path.
-            step(&exe, &["echo", "^&", "%%", "%%PATH%%", "%~dp0", "&&", "||", ")", "2>nul", ">out.txt", "!PATH!", "!", "ünï", r"\\server\share", "a b"], &[]),
+            step(
+                &exe,
+                &[
+                    "echo",
+                    "^&",
+                    "%%",
+                    "%%PATH%%",
+                    "%~dp0",
+                    "&&",
+                    "||",
+                    ")",
+                    "2>nul",
+                    ">out.txt",
+                    "!PATH!",
+                    "!",
+                    "ünï",
+                    r"\\server\share",
+                    "a b",
+                ],
+                &[],
+            ),
             step(&cmd, &["x&calc", "%1", "!x!"], &[]),
         ];
         // The run's folder is odd too: parentheses, an ampersand, an accent, a bang.
         let mut run = Run::create(&root.join("tmp (x86) & é!")).unwrap();
-        let file = run.seal(&script(run.dir(), &steps).unwrap(), steps.len()).unwrap();
+        let file = run
+            .seal(&script(run.dir(), &steps).unwrap(), steps.len())
+            .unwrap();
         assert_eq!(run_plain(&file, Duration::from_secs(60)).unwrap(), 0);
         let dir = run.dir().to_path_buf();
         let read = |f: PathBuf| std::fs::read_to_string(f).unwrap().trim_end().to_string();
@@ -572,10 +776,20 @@ mod tests {
         assert_eq!(codes, ["0", "3", "-1978335189", "0", "0", "0", "3"]);
         // A variable is set for its step, and only that one.
         assert_eq!(read(output_file(&dir, 3)), "\"it's 50% & more\"");
-        assert_eq!(read(output_file(&dir, 4)), "\"\"", "unset in a batch file: empty");
-        assert_eq!(read(output_file(&dir, 5)), r"^& %% %%PATH%% %~dp0 && || ) 2>nul >out.txt !PATH! ! ünï \\server\share a b");
+        assert_eq!(
+            read(output_file(&dir, 4)),
+            "\"\"",
+            "unset in a batch file: empty"
+        );
+        assert_eq!(
+            read(output_file(&dir, 5)),
+            r"^& %% %%PATH%% %~dp0 && || ) 2>nul >out.txt !PATH! ! ünï \\server\share a b"
+        );
         assert_eq!(read(output_file(&dir, 6)), r#"["x&calc"]["%1"]["!x!"]"#);
-        assert!(!dir.join("out.txt").exists() && !system32().join("out.txt").exists(), "a `>` in an argument redirects nothing");
+        assert!(
+            !dir.join("out.txt").exists() && !system32().join("out.txt").exists(),
+            "a `>` in an argument redirects nothing"
+        );
         drop(run);
         assert!(!dir.exists(), "the folder goes with the run");
         let _ = std::fs::remove_dir_all(&root);
@@ -591,34 +805,80 @@ mod tests {
         let exe = root.join("tool.exe");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::copy(trek_test_fixtures::bin("fixture"), &exe).unwrap();
-        let steps = [Step { program: exe, args: vec!["echo".into(), "sealed".into()], env: vec![], path: std::env::var("PATH").unwrap() }];
-        let (mut a, b) = (Run::create(&root.join("tmp")).unwrap(), Run::create(&root.join("tmp")).unwrap());
+        let steps = [Step {
+            program: exe,
+            args: vec!["echo".into(), "sealed".into()],
+            env: vec![],
+            path: std::env::var("PATH").unwrap(),
+        }];
+        let (mut a, b) = (
+            Run::create(&root.join("tmp")).unwrap(),
+            Run::create(&root.join("tmp")).unwrap(),
+        );
         // A name no one could guess, and a folder of its own: two runs share nothing.
         let name = |r: &Run| r.dir().file_name().unwrap().to_string_lossy().into_owned();
-        assert!(name(&a).starts_with("elevated-") && name(&a).len() >= "elevated-".len() + 32, "{}", name(&a));
+        assert!(
+            name(&a).starts_with("elevated-") && name(&a).len() >= "elevated-".len() + 32,
+            "{}",
+            name(&a)
+        );
         assert_ne!(a.dir(), b.dir());
         drop(b);
         let text = script(a.dir(), &steps).unwrap();
         let file = a.seal(&text, steps.len()).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
         // Nothing can change the script between Trek's check and cmd.exe's reading...
-        assert!(std::fs::OpenOptions::new().write(true).open(&file).is_err(), "no writing to it");
-        assert!(std::fs::write(&file, "calc\r\n").is_err(), "no rewriting it");
+        assert!(
+            std::fs::OpenOptions::new().write(true).open(&file).is_err(),
+            "no writing to it"
+        );
+        assert!(
+            std::fs::write(&file, "calc\r\n").is_err(),
+            "no rewriting it"
+        );
         assert!(std::fs::remove_file(&file).is_err(), "no deleting it");
-        assert!(std::fs::rename(&file, a.dir().join("other.cmd")).is_err(), "no renaming it away");
+        assert!(
+            std::fs::rename(&file, a.dir().join("other.cmd")).is_err(),
+            "no renaming it away"
+        );
         // ...nor put another in its place, nor its output files: a link or a hard link there would
         // have an administrator's script write wherever it pointed.
         for held in [output_file(a.dir(), 0), code_file(a.dir(), 0)] {
             assert!(std::fs::remove_file(&held).is_err(), "{}", held.display());
-            assert!(std::fs::rename(&held, a.dir().join("moved")).is_err(), "{}", held.display());
-            assert!(std::fs::OpenOptions::new().create_new(true).write(true).open(&held).is_err(), "{}", held.display());
+            assert!(
+                std::fs::rename(&held, a.dir().join("moved")).is_err(),
+                "{}",
+                held.display()
+            );
+            assert!(
+                std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&held)
+                    .is_err(),
+                "{}",
+                held.display()
+            );
         }
         // The folder itself can't be moved from under it.
-        assert!(std::fs::rename(a.dir(), root.join("elsewhere")).is_err(), "no renaming the folder");
+        assert!(
+            std::fs::rename(a.dir(), root.join("elsewhere")).is_err(),
+            "no renaming the folder"
+        );
         // And cmd.exe reads and writes what is held all the same.
         assert_eq!(run_plain(&file, Duration::from_secs(60)).unwrap(), 0);
-        assert_eq!(std::fs::read_to_string(output_file(a.dir(), 0)).unwrap().trim_end(), "sealed");
-        assert_eq!(std::fs::read_to_string(code_file(a.dir(), 0)).unwrap().trim(), "0");
+        assert_eq!(
+            std::fs::read_to_string(output_file(a.dir(), 0))
+                .unwrap()
+                .trim_end(),
+            "sealed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(code_file(a.dir(), 0))
+                .unwrap()
+                .trim(),
+            "0"
+        );
         let dir = a.dir().to_path_buf();
         drop(a);
         assert!(!dir.exists());
@@ -627,12 +887,36 @@ mod tests {
 
     #[test]
     fn a_folder_cmd_cant_be_given_or_the_elevated_process_cant_reach_is_refused() {
-        let step = Step { program: r"C:\ProgramData\chocolatey\bin\choco.exe".into(), args: vec!["upgrade".into()], env: vec![], path: String::new() };
-        for bad in [r"\\server\share\tmp", r"\\?\C:\tmp", r"\\.\C:\tmp", r"tmp", r"C:tmp", r"C:\", r"C:\a^b", r"C:\a%b", "C:\\a\"b"] {
-            assert!(script(Path::new(bad), std::slice::from_ref(&step)).is_err(), "{bad}");
+        let step = Step {
+            program: r"C:\ProgramData\chocolatey\bin\choco.exe".into(),
+            args: vec!["upgrade".into()],
+            env: vec![],
+            path: String::new(),
+        };
+        for bad in [
+            r"\\server\share\tmp",
+            r"\\?\C:\tmp",
+            r"\\.\C:\tmp",
+            r"tmp",
+            r"C:tmp",
+            r"C:\",
+            r"C:\a^b",
+            r"C:\a%b",
+            "C:\\a\"b",
+        ] {
+            assert!(
+                script(Path::new(bad), std::slice::from_ref(&step)).is_err(),
+                "{bad}"
+            );
             assert!(Run::create(Path::new(bad)).is_err(), "{bad}");
         }
-        assert!(script(Path::new(r"D:\Users\é & (x86)\tmp"), std::slice::from_ref(&step)).is_ok());
+        assert!(
+            script(
+                Path::new(r"D:\Users\é & (x86)\tmp"),
+                std::slice::from_ref(&step)
+            )
+            .is_ok()
+        );
     }
 
     // Windows only: `script` splits the step's PATH as this platform does, and on macOS that
@@ -640,31 +924,108 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_line_longer_than_cmd_reads_is_refused_and_a_long_path_is_split() {
-        let path = |n: usize| (0..n).map(|i| format!(r"C:\Tools\folder number {i}")).collect::<Vec<_>>().join(";");
-        let step = |args: Vec<String>, path: String| Step { program: r"C:\ProgramData\chocolatey\bin\choco.exe".into(), args, env: vec![], path };
+        let path = |n: usize| {
+            (0..n)
+                .map(|i| format!(r"C:\Tools\folder number {i}"))
+                .collect::<Vec<_>>()
+                .join(";")
+        };
+        let step = |args: Vec<String>, path: String| Step {
+            program: r"C:\ProgramData\chocolatey\bin\choco.exe".into(),
+            args,
+            env: vec![],
+            path,
+        };
         // An argument of 9000 characters is more than a line holds: refused, not cut.
-        let long = script(Path::new(r"C:\tmp"), &[step(vec!["x".repeat(9000)], String::new())]);
+        let long = script(
+            Path::new(r"C:\tmp"),
+            &[step(vec!["x".repeat(9000)], String::new())],
+        );
         assert!(long.is_err_and(|e| e.contains("more than cmd.exe reads")));
-        assert!(script(Path::new(r"C:\tmp"), &[step(vec!["x".repeat(3000)], String::new())]).is_ok());
+        assert!(
+            script(
+                Path::new(r"C:\tmp"),
+                &[step(vec!["x".repeat(3000)], String::new())]
+            )
+            .is_ok()
+        );
         // A PATH too long for a line (cmd.exe cuts one at 8191 characters, and a variable built up
         // over several lines at the same place) is cut by Trek instead: each folder once, and the
         // last of the others dropped until it fits; Windows' own folders stay.
         let windows = system32();
-        let long_path = [path(900), windows.display().to_string(), r"C:\Tools\folder number 1".into(), windows.parent().unwrap().display().to_string().to_uppercase()].join(";");
+        let long_path = [
+            path(900),
+            windows.display().to_string(),
+            r"C:\Tools\folder number 1".into(),
+            windows
+                .parent()
+                .unwrap()
+                .display()
+                .to_string()
+                .to_uppercase(),
+        ]
+        .join(";");
         let text = script(Path::new(r"C:\tmp"), &[step(vec![], long_path)]).unwrap();
-        let sets: Vec<&str> = text.lines().filter(|l| l.starts_with("set \"PATH=")).collect();
+        let sets: Vec<&str> = text
+            .lines()
+            .filter(|l| l.starts_with("set \"PATH="))
+            .collect();
         assert_eq!(sets.len(), 1, "one line");
         assert!(text.lines().all(|l| l.len() <= MAX_LINE));
-        let entries: Vec<&str> = sets[0].trim_start_matches("set \"PATH=").trim_end_matches('"').split(';').collect();
-        assert_eq!(entries[0], r"C:\Tools\folder number 0", "the first stay, in order");
+        let entries: Vec<&str> = sets[0]
+            .trim_start_matches("set \"PATH=")
+            .trim_end_matches('"')
+            .split(';')
+            .collect();
+        assert_eq!(
+            entries[0], r"C:\Tools\folder number 0",
+            "the first stay, in order"
+        );
         assert_eq!(entries[1], r"C:\Tools\folder number 1");
-        assert!(entries.len() < 900 && entries.len() > 100, "{}", entries.len());
-        assert_eq!(entries.iter().filter(|e| **e == r"C:\Tools\folder number 1").count(), 1, "once");
-        assert_eq!(entries[entries.len() - 2..], [windows.display().to_string(), windows.parent().unwrap().display().to_string().to_uppercase()], "Windows' own are kept");
+        assert!(
+            entries.len() < 900 && entries.len() > 100,
+            "{}",
+            entries.len()
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| **e == r"C:\Tools\folder number 1")
+                .count(),
+            1,
+            "once"
+        );
+        assert_eq!(
+            entries[entries.len() - 2..],
+            [
+                windows.display().to_string(),
+                windows
+                    .parent()
+                    .unwrap()
+                    .display()
+                    .to_string()
+                    .to_uppercase()
+            ],
+            "Windows' own are kept"
+        );
         // A short one is as it was, `!` and `^` and all.
-        let short = script(Path::new(r"C:\tmp"), &[step(vec![], r"C:\Tools\hey!;C:\Tools\a^b;C:\Tools\other\".into())]).unwrap();
-        assert!(short.contains(r#"set "PATH=C:\Tools\hey!;C:\Tools\a^b;C:\Tools\other\""#), "{short}");
-        assert_eq!(fit_path(vec![r"C:\a".into(), r"c:\A\".into(), r"C:\b".into()]), [r"C:\a", r"C:\b"], "a folder twice, by case or a trailing backslash");
+        let short = script(
+            Path::new(r"C:\tmp"),
+            &[step(
+                vec![],
+                r"C:\Tools\hey!;C:\Tools\a^b;C:\Tools\other\".into(),
+            )],
+        )
+        .unwrap();
+        assert!(
+            short.contains(r#"set "PATH=C:\Tools\hey!;C:\Tools\a^b;C:\Tools\other\""#),
+            "{short}"
+        );
+        assert_eq!(
+            fit_path(vec![r"C:\a".into(), r"c:\A\".into(), r"C:\b".into()]),
+            [r"C:\a", r"C:\b"],
+            "a folder twice, by case or a trailing backslash"
+        );
     }
 
     /// The longest PATH Trek sets, as cmd.exe makes of it: whole.
@@ -677,18 +1038,38 @@ mod tests {
         // `set PATH` prints it without the line limit that `echo %PATH%` would meet.
         let show = root.join("show.cmd");
         std::fs::write(&show, "@echo off\r\nset PATH\r\n").unwrap();
-        let path = (0..900).map(|i| format!(r"C:\Tools\folder number {i} (x86)")).collect::<Vec<_>>().join(";");
-        let steps = [Step { program: show, args: vec![], env: vec![], path: path.clone() }];
+        let path = (0..900)
+            .map(|i| format!(r"C:\Tools\folder number {i} (x86)"))
+            .collect::<Vec<_>>()
+            .join(";");
+        let steps = [Step {
+            program: show,
+            args: vec![],
+            env: vec![],
+            path: path.clone(),
+        }];
         // What Trek fits to a line (about 7500 characters), and no less.
         let path = fit_path(path.split(';').map(String::from).collect()).join(";");
-        assert!(path.len() > 7000 && path.len() <= PATH_LIMIT, "{}", path.len());
+        assert!(
+            path.len() > 7000 && path.len() <= PATH_LIMIT,
+            "{}",
+            path.len()
+        );
         let mut run = Run::create(&root.join("tmp")).unwrap();
         let file = run.seal(&script(run.dir(), &steps).unwrap(), 1).unwrap();
         assert_eq!(run_plain(&file, Duration::from_secs(60)).unwrap(), 0);
         let out = std::fs::read_to_string(output_file(run.dir(), 0)).unwrap();
         // (Named as the environment already had it: `Path`.)
-        let got = out.lines().find(|l| l.get(..5).is_some_and(|n| n.eq_ignore_ascii_case("path="))).unwrap_or_default();
-        assert_eq!((got.len() - 5, got[5..].get(..200)), (path.len(), path.get(..200)), "{}", &got[got.len().saturating_sub(200)..]);
+        let got = out
+            .lines()
+            .find(|l| l.get(..5).is_some_and(|n| n.eq_ignore_ascii_case("path=")))
+            .unwrap_or_default();
+        assert_eq!(
+            (got.len() - 5, got[5..].get(..200)),
+            (path.len(), path.get(..200)),
+            "{}",
+            &got[got.len().saturating_sub(200)..]
+        );
         assert_eq!(&got[5..], path);
         drop(run);
         let _ = std::fs::remove_dir_all(&root);

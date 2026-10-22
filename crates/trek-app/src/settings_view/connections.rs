@@ -28,34 +28,54 @@ pub(super) enum FigmaLink {
 /// (`integrations::agent_mcp_servers`) and Claude Code's plugins (Figma's plugin brings the
 /// server with it). A server counts if it's named `figma` (what Connect adds) or `figma-…`,
 /// except a desktop one. `installed` says whether an agent's CLI is on this Mac.
-pub(super) fn figma_links(agent_mcp: &[(&'static str, Vec<String>)], plugins: &[String], installed: impl Fn(&AgentId) -> bool) -> Vec<(AgentId, FigmaLink)> {
+pub(super) fn figma_links(
+    agent_mcp: &[(&'static str, Vec<String>)],
+    plugins: &[String],
+    installed: impl Fn(&AgentId) -> bool,
+) -> Vec<(AgentId, FigmaLink)> {
     let remote = |n: &String| {
         let n = n.to_ascii_lowercase();
-        (n == "figma" || n.starts_with("figma-") || n.starts_with("figma_")) && !n.contains("desktop") && !n.contains("dev-mode")
+        (n == "figma" || n.starts_with("figma-") || n.starts_with("figma_"))
+            && !n.contains("desktop")
+            && !n.contains("dev-mode")
     };
-    [(AgentId::ClaudeCode, "Claude Code"), (AgentId::Codex, "Codex")]
-        .into_iter()
-        .map(|(agent, label)| {
-            let listed = agent_mcp.iter().any(|(a, names)| *a == label && names.iter().any(remote));
-            let plugin = agent == AgentId::ClaudeCode && plugins.iter().any(|p| p.split('@').next().is_some_and(|n| n.eq_ignore_ascii_case("figma")));
-            let link = if listed || plugin {
-                FigmaLink::Connected
-            } else if installed(&agent) {
-                FigmaLink::NotConnected
-            } else {
-                FigmaLink::NotInstalled
-            };
-            (agent, link)
-        })
-        .collect()
+    [
+        (AgentId::ClaudeCode, "Claude Code"),
+        (AgentId::Codex, "Codex"),
+    ]
+    .into_iter()
+    .map(|(agent, label)| {
+        let listed = agent_mcp
+            .iter()
+            .any(|(a, names)| *a == label && names.iter().any(remote));
+        let plugin = agent == AgentId::ClaudeCode
+            && plugins.iter().any(|p| {
+                p.split('@')
+                    .next()
+                    .is_some_and(|n| n.eq_ignore_ascii_case("figma"))
+            });
+        let link = if listed || plugin {
+            FigmaLink::Connected
+        } else if installed(&agent) {
+            FigmaLink::NotConnected
+        } else {
+            FigmaLink::NotInstalled
+        };
+        (agent, link)
+    })
+    .collect()
 }
 
 /// What Connect runs in Trek's terminal for `agent`: the agent's own command to add Figma's
 /// remote server (the sign-in is the agent's, in its own way).
 pub(super) fn connect_command(agent: &AgentId) -> Option<String> {
     match agent {
-        AgentId::ClaudeCode => Some(format!("claude mcp add --scope user --transport http figma {FIGMA_REMOTE_URL}")),
-        AgentId::Codex => Some(format!("codex mcp add figma --url {FIGMA_REMOTE_URL} && codex mcp login figma")),
+        AgentId::ClaudeCode => Some(format!(
+            "claude mcp add --scope user --transport http figma {FIGMA_REMOTE_URL}"
+        )),
+        AgentId::Codex => Some(format!(
+            "codex mcp add figma --url {FIGMA_REMOTE_URL} && codex mcp login figma"
+        )),
         _ => None,
     }
 }
@@ -106,14 +126,32 @@ impl SettingsView {
     pub(super) fn connections(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let s = self.workspace.read(cx).settings.clone();
         let muted = cx.theme().muted_foreground;
-        let theme = if cx.theme().mode.is_dark() { "dark" } else { "light" };
-        let figma_logo = img(SharedString::from(format!("logos/{theme}/figma.png"))).size(px(18.)).flex_none();
-        let titled = |logo: AnyElement, text: &'static str| h_flex().gap(px(10.)).child(logo).child(div().text_size(px(13.5)).font_medium().child(text));
+        let theme = if cx.theme().mode.is_dark() {
+            "dark"
+        } else {
+            "light"
+        };
+        let figma_logo = img(SharedString::from(format!("logos/{theme}/figma.png")))
+            .size(px(18.))
+            .flex_none();
+        let titled = |logo: AnyElement, text: &'static str| {
+            h_flex()
+                .gap(px(10.))
+                .child(logo)
+                .child(div().text_size(px(13.5)).font_medium().child(text))
+        };
 
         let running = self.figma_desktop.value;
         let checking = self.figma_desktop.loading();
         let (desktop_text, desktop_status): (&str, AnyElement) = match running {
-            None => ("Looking for the Figma desktop app…", div().text_size(px(12.5)).text_color(muted).child("Checking…").into_any_element()),
+            None => (
+                "Looking for the Figma desktop app…",
+                div()
+                    .text_size(px(12.5))
+                    .text_color(muted)
+                    .child("Checking…")
+                    .into_any_element(),
+            ),
             Some(true) => (
                 "Agents given its server can read the design open in Figma: frames, variables and components.",
                 Self::status_dot(palette::emerald(cx), "Running"),
@@ -134,20 +172,38 @@ impl SettingsView {
             ),
         };
         let mut rows = vec![
-            Self::row(titled(figma_logo.into_any_element(), "Figma desktop app"), desktop_text, div().id("figma-desktop-status").test_support().child(desktop_status), cx),
+            Self::row(
+                titled(figma_logo.into_any_element(), "Figma desktop app"),
+                desktop_text,
+                div()
+                    .id("figma-desktop-status")
+                    .test_support()
+                    .child(desktop_status),
+                cx,
+            ),
             Self::row(
                 "Give agents the Figma desktop server",
-                format!("Every new session gets it as {FIGMA_DESKTOP_SERVER}, whichever agent runs it. Needs a Dev or Full seat."),
-                self.switch("figma-desktop", s.tools.figma_desktop, |s, v| s.tools.figma_desktop = v),
+                format!(
+                    "Every new session gets it as {FIGMA_DESKTOP_SERVER}, whichever agent runs it. Needs a Dev or Full seat."
+                ),
+                self.switch("figma-desktop", s.tools.figma_desktop, |s, v| {
+                    s.tools.figma_desktop = v
+                }),
                 cx,
             ),
         ];
 
         let links = self.tools.value.as_ref().map(|p| p.figma.clone());
         for agent in [AgentId::ClaudeCode, AgentId::Codex] {
-            let link = links.as_ref().and_then(|l| l.iter().find(|(a, _)| *a == agent).map(|(_, l)| *l));
+            let link = links
+                .as_ref()
+                .and_then(|l| l.iter().find(|(a, _)| *a == agent).map(|(_, l)| *l));
             let claude = agent == AgentId::ClaudeCode;
-            let (name, title) = if claude { ("Claude Code", "Figma through Claude Code") } else { ("Codex", "Figma through Codex") };
+            let (name, title) = if claude {
+                ("Claude Code", "Figma through Claude Code")
+            } else {
+                ("Codex", "Figma through Codex")
+            };
             let description = match link {
                 None => "Reading its setup…".to_string(),
                 Some(FigmaLink::Connected) => format!("Figma's remote server, signed in with your Figma account in {name}."),
@@ -185,7 +241,15 @@ impl SettingsView {
                     })))
                     .into_any_element(),
             };
-            rows.push(Self::row(titled(ui::agent_logo(&agent, px(18.), cx), title), description, div().id(SharedString::from(format!("figma-{key}"))).test_support().child(control), cx));
+            rows.push(Self::row(
+                titled(ui::agent_logo(&agent, px(18.), cx), title),
+                description,
+                div()
+                    .id(SharedString::from(format!("figma-{key}")))
+                    .test_support()
+                    .child(control),
+                cx,
+            ));
         }
         vec![
             // The page's first section: no room above it for one before.
@@ -211,18 +275,46 @@ mod tests {
     #[test]
     fn figma_counts_as_connected_by_its_server_or_claudes_plugin() {
         let installed = |_: &AgentId| true;
-        let mcp = vec![("Claude Code", vec!["github".to_string(), "Figma".to_string()]), ("Codex", vec!["figma-desktop".to_string()])];
-        assert_eq!(figma_links(&mcp, &[], installed), [(AgentId::ClaudeCode, FigmaLink::Connected), (AgentId::Codex, FigmaLink::NotConnected)]);
+        let mcp = vec![
+            (
+                "Claude Code",
+                vec!["github".to_string(), "Figma".to_string()],
+            ),
+            ("Codex", vec!["figma-desktop".to_string()]),
+        ];
+        assert_eq!(
+            figma_links(&mcp, &[], installed),
+            [
+                (AgentId::ClaudeCode, FigmaLink::Connected),
+                (AgentId::Codex, FigmaLink::NotConnected)
+            ]
+        );
         let none = vec![("Claude Code", vec![]), ("Codex", vec![])];
         let plugin = ["figma@claude-plugins-official".to_string()];
-        assert_eq!(figma_links(&none, &plugin, installed)[0].1, FigmaLink::Connected, "Figma's plugin brings the server");
-        assert_eq!(figma_links(&none, &[], |a| *a == AgentId::Codex), [(AgentId::ClaudeCode, FigmaLink::NotInstalled), (AgentId::Codex, FigmaLink::NotConnected)]);
+        assert_eq!(
+            figma_links(&none, &plugin, installed)[0].1,
+            FigmaLink::Connected,
+            "Figma's plugin brings the server"
+        );
+        assert_eq!(
+            figma_links(&none, &[], |a| *a == AgentId::Codex),
+            [
+                (AgentId::ClaudeCode, FigmaLink::NotInstalled),
+                (AgentId::Codex, FigmaLink::NotConnected)
+            ]
+        );
     }
 
     #[test]
     fn connect_uses_each_agents_own_command() {
-        assert_eq!(connect_command(&AgentId::ClaudeCode).as_deref(), Some("claude mcp add --scope user --transport http figma https://mcp.figma.com/mcp"));
-        assert_eq!(connect_command(&AgentId::Codex).as_deref(), Some("codex mcp add figma --url https://mcp.figma.com/mcp && codex mcp login figma"));
+        assert_eq!(
+            connect_command(&AgentId::ClaudeCode).as_deref(),
+            Some("claude mcp add --scope user --transport http figma https://mcp.figma.com/mcp")
+        );
+        assert_eq!(
+            connect_command(&AgentId::Codex).as_deref(),
+            Some("codex mcp add figma --url https://mcp.figma.com/mcp && codex mcp login figma")
+        );
         assert_eq!(connect_command(&AgentId::OpenCode), None);
     }
 }

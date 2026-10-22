@@ -35,13 +35,25 @@ impl Output {
         match self.status {
             Some(code) if msg.is_empty() => format!("exit status {code}"),
             Some(_) => msg.to_string(),
-            None => format!("timed out or killed{}", if msg.is_empty() { String::new() } else { format!(": {msg}") }),
+            None => format!(
+                "timed out or killed{}",
+                if msg.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {msg}")
+                }
+            ),
         }
     }
 }
 
 /// Run `program args…`, optionally feeding `stdin`, killing it after `timeout`.
-pub fn run(program: &str, args: &[&str], stdin: Option<&str>, timeout: Duration) -> Result<Output, String> {
+pub fn run(
+    program: &str,
+    args: &[&str],
+    stdin: Option<&str>,
+    timeout: Duration,
+) -> Result<Output, String> {
     let mut command = Command::new(program); // spawn: ok
     // On Windows nothing here runs today (these helpers serve the macOS tools), but if one does,
     // no console window. (trek-mcp can't use `trek_core::procs`: it doesn't depend on trek-core.)
@@ -52,7 +64,11 @@ pub fn run(program: &str, args: &[&str], stdin: Option<&str>, timeout: Duration)
     }
     let mut child = command
         .args(args)
-        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -92,11 +108,20 @@ pub fn run(program: &str, args: &[&str], stdin: Option<&str>, timeout: Duration)
     };
     let stdout = String::from_utf8_lossy(&out_thread.join().unwrap_or_default()).into_owned();
     let stderr = String::from_utf8_lossy(&err_thread.join().unwrap_or_default()).into_owned();
-    Ok(Output { status, stdout, stderr })
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 /// Run and require success, returning stdout.
-pub fn run_ok(program: &str, args: &[&str], stdin: Option<&str>, timeout: Duration) -> Result<String, String> {
+pub fn run_ok(
+    program: &str,
+    args: &[&str],
+    stdin: Option<&str>,
+    timeout: Duration,
+) -> Result<String, String> {
     let out = run(program, args, stdin, timeout)?;
     if out.success() {
         Ok(out.stdout)
@@ -153,9 +178,14 @@ pub fn sips_fit(path: &str, max_side: u32) -> Result<(), String> {
 
 /// Read a PNG file and return (base64, width, height).
 pub fn load_png(path: &Path) -> Result<(String, u32, u32), String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
     let (w, h) = png_size(&bytes).ok_or_else(|| "Screenshot is not a valid PNG".to_string())?;
-    Ok((base64::engine::general_purpose::STANDARD.encode(&bytes), w, h))
+    Ok((
+        base64::engine::general_purpose::STANDARD.encode(&bytes),
+        w,
+        h,
+    ))
 }
 
 /// Find an executable by name on PATH plus common install dirs.
@@ -168,25 +198,38 @@ pub fn find_executable(name: &str, extra_dirs: &[&str]) -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("HOME") {
         dirs.push(Path::new(&home).join(".local/bin"));
     }
-    dirs.into_iter().map(|d| d.join(name)).find(|p| is_executable(p))
+    dirs.into_iter()
+        .map(|d| d.join(name))
+        .find(|p| is_executable(p))
 }
 
 /// Find an executable by name (`.exe` added) on PATH plus `extra_dirs` and winget's links folder.
 #[cfg(windows)]
 pub fn find_executable(name: &str, extra_dirs: &[&str]) -> Option<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
     dirs.extend(extra_dirs.iter().map(PathBuf::from));
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        dirs.push(Path::new(&local).join("Microsoft").join("WinGet").join("Links"));
+        dirs.push(
+            Path::new(&local)
+                .join("Microsoft")
+                .join("WinGet")
+                .join("Links"),
+        );
     }
     let file = format!("{name}.exe");
-    dirs.into_iter().map(|d| d.join(&file)).find(|p| p.is_file())
+    dirs.into_iter()
+        .map(|d| d.join(&file))
+        .find(|p| p.is_file())
 }
 
 #[cfg(unix)]
 fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    std::fs::metadata(p)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 /// Format a float compactly: 1.0 → "1", 1.6333 → "1.633".
@@ -220,7 +263,13 @@ mod tests {
     fn run_captures_and_times_out() {
         let fixture = trek_test_fixtures::bin("fixture");
         let fixture = fixture.to_str().unwrap();
-        let out = run(fixture, &["cat", "--stderr", "err"], Some("hello"), Duration::from_secs(5)).unwrap();
+        let out = run(
+            fixture,
+            &["cat", "--stderr", "err"],
+            Some("hello"),
+            Duration::from_secs(5),
+        )
+        .unwrap();
         assert!(out.success());
         assert_eq!(out.stdout, "hello");
         assert_eq!(out.stderr.trim(), "err");

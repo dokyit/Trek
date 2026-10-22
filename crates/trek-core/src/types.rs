@@ -36,7 +36,9 @@ impl HandHolding {
     pub fn description(self) -> &'static str {
         match self {
             HandHolding::Supervised => "Asks before every edit and command.",
-            HandHolding::AutoAcceptEdits => "Applies file edits automatically. Asks before running commands.",
+            HandHolding::AutoAcceptEdits => {
+                "Applies file edits automatically. Asks before running commands."
+            }
             HandHolding::Auto => "Works on its own. Checks with you before risky actions.",
             HandHolding::FullAccess => "No prompts and no sandbox. Only for trusted work.",
         }
@@ -64,7 +66,9 @@ impl HandHolding {
 }
 
 /// Reasoning effort on one internal scale, clamped per model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
     Off,
@@ -113,7 +117,9 @@ impl Effort {
     }
 
     pub fn parse(s: &str) -> Option<Effort> {
-        Effort::ALL.into_iter().find(|e| e.as_str().eq_ignore_ascii_case(s))
+        Effort::ALL
+            .into_iter()
+            .find(|e| e.as_str().eq_ignore_ascii_case(s))
     }
 
     /// Nearest value in `supported` (which must be non-empty and sorted).
@@ -266,11 +272,17 @@ pub struct UsageCost {
 
 impl UsageCost {
     pub fn reported(usd: f64) -> Self {
-        Self { usd, reported: true }
+        Self {
+            usd,
+            reported: true,
+        }
     }
 
     pub fn priced(usd: f64) -> Self {
-        Self { usd, reported: false }
+        Self {
+            usd,
+            reported: false,
+        }
     }
 }
 
@@ -293,7 +305,11 @@ impl TokenUsage {
     /// What was used since `earlier`, a lower running total of the same session. A total that
     /// went down started over (a new session, a `/clear`): all of it is new.
     pub fn since(&self, earlier: &TokenUsage) -> TokenUsage {
-        if self.input < earlier.input || self.output < earlier.output || self.cache_read < earlier.cache_read || self.cache_write < earlier.cache_write {
+        if self.input < earlier.input
+            || self.output < earlier.output
+            || self.cache_read < earlier.cache_read
+            || self.cache_write < earlier.cache_write
+        {
             return *self;
         }
         TokenUsage {
@@ -319,9 +335,27 @@ mod tests {
 
     #[test]
     fn token_usage_since_an_earlier_total() {
-        let a = TokenUsage { input: 10, output: 5, cache_read: 100, cache_write: 20 };
-        let b = TokenUsage { input: 15, output: 9, cache_read: 160, cache_write: 20 };
-        assert_eq!(b.since(&a), TokenUsage { input: 5, output: 4, cache_read: 60, cache_write: 0 });
+        let a = TokenUsage {
+            input: 10,
+            output: 5,
+            cache_read: 100,
+            cache_write: 20,
+        };
+        let b = TokenUsage {
+            input: 15,
+            output: 9,
+            cache_read: 160,
+            cache_write: 20,
+        };
+        assert_eq!(
+            b.since(&a),
+            TokenUsage {
+                input: 5,
+                output: 4,
+                cache_read: 60,
+                cache_write: 0
+            }
+        );
         assert_eq!(b.since(&a).total(), 69);
         // A total that went down started over.
         assert_eq!(a.since(&b), a);

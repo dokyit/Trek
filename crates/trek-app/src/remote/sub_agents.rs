@@ -14,7 +14,11 @@ use trek_remote as tr;
 impl Workspace {
     /// The rows phones get besides `listed`: every sub-agent under a listed thread (theirs too),
     /// then the threads phones have open that neither list holds.
-    pub(super) fn remote_unlisted(&self, listed: &[tr::ThreadSummary], now: i64) -> Vec<tr::ThreadSummary> {
+    pub(super) fn remote_unlisted(
+        &self,
+        listed: &[tr::ThreadSummary],
+        now: i64,
+    ) -> Vec<tr::ThreadSummary> {
         let mut kids: HashMap<&str, Vec<&Thread>> = HashMap::new();
         for t in self.threads.iter().filter(|t| t.own_section(now).is_some()) {
             if let Some(parent) = t.parent_id.as_deref() {
@@ -33,7 +37,11 @@ impl Workspace {
                 }
             }
         }
-        let open: Vec<&String> = self.remote.as_ref().map(|r| r.watched.keys().collect()).unwrap_or_default();
+        let open: Vec<&String> = self
+            .remote
+            .as_ref()
+            .map(|r| r.watched.keys().collect())
+            .unwrap_or_default();
         for id in open {
             if listed.contains(id.as_str()) || seen.contains(id.as_str()) {
                 continue;
@@ -52,13 +60,23 @@ impl Workspace {
         if row.needs.is_some() {
             return;
         }
-        let Some(kid) = self.waiting_sub_agent(&t.id) else { return };
-        let kind = match self.live.get(&kid.id).and_then(|l| l.permissions.first()).map(|p| &p.prompt) {
+        let Some(kid) = self.waiting_sub_agent(&t.id) else {
+            return;
+        };
+        let kind = match self
+            .live
+            .get(&kid.id)
+            .and_then(|l| l.permissions.first())
+            .map(|p| &p.prompt)
+        {
             Some(Some(trek_agents::Prompt::Questions(_))) => tr::NeedsKind::Question,
             Some(Some(trek_agents::Prompt::Plan(_))) => tr::NeedsKind::Plan,
             _ => tr::NeedsKind::Approval,
         };
-        row.needs = Some(tr::Needs { kind, text: "Sub-agent needs you".into() });
+        row.needs = Some(tr::Needs {
+            kind,
+            text: "Sub-agent needs you".into(),
+        });
         row.needs_thread = Some(kid.id.clone());
         if matches!(row.section, tr::Section::Working | tr::Section::Snoozed) {
             row.section = tr::Section::Inbox;
@@ -86,9 +104,18 @@ impl Workspace {
 /// Send the unlisted rows that changed. A row that's no longer among them is forgotten (it's
 /// listed now, or no phone has it open), or, when its thread is gone (`existing` doesn't hold it),
 /// removed from phones.
-pub(super) fn send_unlisted(remote: &mut Remote, rows: Vec<tr::ThreadSummary>, existing: &HashSet<String>) {
+pub(super) fn send_unlisted(
+    remote: &mut Remote,
+    rows: Vec<tr::ThreadSummary>,
+    existing: &HashSet<String>,
+) {
     let ids: HashSet<String> = rows.iter().map(|r| r.id.clone()).collect();
-    let gone: Vec<String> = remote.unlisted.keys().filter(|id| !ids.contains(*id)).cloned().collect();
+    let gone: Vec<String> = remote
+        .unlisted
+        .keys()
+        .filter(|id| !ids.contains(*id))
+        .cloned()
+        .collect();
     for id in gone {
         remote.unlisted.remove(&id);
         if !existing.contains(&id) && !remote.sent.contains_key(&id) {

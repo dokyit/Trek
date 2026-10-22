@@ -45,7 +45,10 @@ fn alt_shift_e_switches_to_the_editor_on_windows() {
         let trek = open(cx);
         assert!(!trek.read(cx, |ws, _| ws.ide()));
         trek.press(cx, "ctrl-alt-e");
-        assert!(!trek.read(cx, |ws, _| ws.ide()), "Ctrl+Alt+E is AltGr's, not Trek's");
+        assert!(
+            !trek.read(cx, |ws, _| ws.ide()),
+            "Ctrl+Alt+E is AltGr's, not Trek's"
+        );
         trek.press(cx, "alt-shift-e");
         assert!(trek.read(cx, |ws, _| ws.ide()));
     });
@@ -63,12 +66,17 @@ fn windows_has_no_hide_or_minimize_keys() {
 fn the_shortcuts_page_shows_the_tables_rows() {
     run(async |cx| {
         let trek = open(cx);
-        trek.update(cx, |ws, cx| ws.navigate(Route::Settings(SettingsPage::Shortcuts), cx));
+        trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Settings(SettingsPage::Shortcuts), cx)
+        });
         trek.render(cx);
         let groups = keys::shortcut_groups(keys::is_mac(), false);
         assert_eq!(groups[0].0, "Threads");
         for (label, _) in &groups[0].1 {
-            assert!(trek.visible(cx, SharedString::from(format!("shortcut-{label}"))), "{label}");
+            assert!(
+                trek.visible(cx, SharedString::from(format!("shortcut-{label}"))),
+                "{label}"
+            );
         }
     });
 }

@@ -22,14 +22,19 @@ use trek_core::settings::USAGE_SHOWN_MAX;
 /// answering on the channel. Claude Code's and Codex's own report (`claude_status`,
 /// `codex_status`, or `claude_commands`, `codex_commands` without the usage) by default; tests
 /// answer for any agent.
-pub type UsageFetch = Rc<dyn Fn(&AgentId, &Path, bool) -> async_channel::Receiver<Result<AgentStatus, String>>>;
+pub type UsageFetch =
+    Rc<dyn Fn(&AgentId, &Path, bool) -> async_channel::Receiver<Result<AgentStatus, String>>>;
 
 /// The shortest time between two reads of one agent's usage, unless one is asked for (`/usage`,
 /// a limit hit with no reset known).
 const READ_EVERY_MS: i64 = 30_000;
 
 /// Claude Code's or Codex's own report, with its usage or without, read on Trek's tokio runtime.
-pub(crate) fn read_agent(agent: &AgentId, cwd: &Path, with_usage: bool) -> async_channel::Receiver<Result<AgentStatus, String>> {
+pub(crate) fn read_agent(
+    agent: &AgentId,
+    cwd: &Path,
+    with_usage: bool,
+) -> async_channel::Receiver<Result<AgentStatus, String>> {
     let (tx, rx) = async_channel::bounded(1);
     let (agent, cwd) = (agent.clone(), cwd.to_path_buf());
     trek_core::runtime().spawn(async move {
@@ -59,7 +64,12 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub(super) fn of(status: &AgentStatus, read_at: i64) -> Snapshot {
-        Snapshot { read_at, plan: status.plan.clone(), limits: status.limits.clone(), note: status.note.clone() }
+        Snapshot {
+            read_at,
+            plan: status.plan.clone(),
+            limits: status.limits.clone(),
+            note: status.note.clone(),
+        }
     }
 }
 
@@ -69,7 +79,10 @@ fn snapshots_file() -> PathBuf {
 
 /// The snapshots kept last time (none when there's no file, or it can't be read).
 pub(crate) fn load_snapshots() -> HashMap<String, Snapshot> {
-    std::fs::read(snapshots_file()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    std::fs::read(snapshots_file())
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
 }
 
 /// One provider's row on the Usage card, as it's drawn.
@@ -95,7 +108,12 @@ impl Workspace {
     /// Claude Code and Codex first. Agents turned off in Settings aren't offered.
     pub fn usage_providers(&self) -> Vec<AgentId> {
         let mut out = self.ready_agents();
-        let mut known: Vec<&String> = self.agent_status.keys().chain(self.usage_cached.keys()).chain(self.usage_today.keys()).collect();
+        let mut known: Vec<&String> = self
+            .agent_status
+            .keys()
+            .chain(self.usage_cached.keys())
+            .chain(self.usage_today.keys())
+            .collect();
         let rank = |k: &str| match k {
             "claude-code" => 0,
             "codex" => 1,
@@ -124,7 +142,9 @@ impl Workspace {
 
     /// What `key`'s agent said this run, if that included its usage.
     pub(crate) fn usage_status(&self, key: &str) -> Option<&AgentStatus> {
-        self.agent_status.get(key).filter(|_| !self.usage_unread.contains(key))
+        self.agent_status
+            .get(key)
+            .filter(|_| !self.usage_unread.contains(key))
     }
 
     /// The providers the Usage card shows: the ones picked (`Settings::usage`), else the first
@@ -132,8 +152,16 @@ impl Workspace {
     pub fn usage_shown(&self) -> Vec<AgentId> {
         let all = self.usage_providers();
         match &self.settings.usage.shown {
-            Some(keys) => all.into_iter().filter(|a| keys.contains(&a.key())).take(USAGE_SHOWN_MAX).collect(),
-            None => all.into_iter().filter(|a| self.has_usage(a)).take(USAGE_SHOWN_MAX).collect(),
+            Some(keys) => all
+                .into_iter()
+                .filter(|a| keys.contains(&a.key()))
+                .take(USAGE_SHOWN_MAX)
+                .collect(),
+            None => all
+                .into_iter()
+                .filter(|a| self.has_usage(a))
+                .take(USAGE_SHOWN_MAX)
+                .collect(),
         }
     }
 
@@ -204,13 +232,37 @@ impl Workspace {
                             .limits
                             .iter()
                             .map(|l| match l.resets_at {
-                                Some(at) if at <= now => UsageLimit { percent: 0., resets_at: None, ..l.clone() },
+                                Some(at) if at <= now => UsageLimit {
+                                    percent: 0.,
+                                    resets_at: None,
+                                    ..l.clone()
+                                },
                                 _ => l.clone(),
                             })
                             .collect();
-                        UsageRow { no_limits: s.limits.is_empty(), plan: s.plan.clone(), limits, error: None, note: s.note.clone(), resets: vec![], as_of: Some(s.read_at), today, agent }
+                        UsageRow {
+                            no_limits: s.limits.is_empty(),
+                            plan: s.plan.clone(),
+                            limits,
+                            error: None,
+                            note: s.note.clone(),
+                            resets: vec![],
+                            as_of: Some(s.read_at),
+                            today,
+                            agent,
+                        }
                     }
-                    None => UsageRow { agent, plan: None, limits: vec![], no_limits: false, error: None, note: None, resets: vec![], as_of: None, today },
+                    None => UsageRow {
+                        agent,
+                        plan: None,
+                        limits: vec![],
+                        no_limits: false,
+                        error: None,
+                        note: None,
+                        resets: vec![],
+                        as_of: None,
+                        today,
+                    },
                 }
             })
             .collect()
@@ -245,7 +297,11 @@ impl Workspace {
     fn read_usage(&mut self, force: bool, commands: bool, cx: &mut Context<Self>) {
         let mut agents = vec![AgentId::ClaudeCode, AgentId::Codex];
         if self.usage_fetch.is_some() {
-            let more: Vec<AgentId> = self.usage_providers().into_iter().filter(|a| !agents.contains(a) && *a != devin_agent()).collect();
+            let more: Vec<AgentId> = self
+                .usage_providers()
+                .into_iter()
+                .filter(|a| !agents.contains(a) && *a != devin_agent())
+                .collect();
             agents.extend(more);
         }
         let shown = self.usage_shown();
@@ -266,7 +322,13 @@ impl Workspace {
 
     /// Read `agent`'s account, commands and models, and its usage if `with_usage`. Without it,
     /// once a run unless `force` is set.
-    fn read_status(&mut self, agent: AgentId, with_usage: bool, force: bool, cx: &mut Context<Self>) {
+    fn read_status(
+        &mut self,
+        agent: AgentId,
+        with_usage: bool,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
         let key = agent.key();
         let fetch: UsageFetch = match &self.usage_fetch {
             Some(f) => f.clone(),
@@ -274,7 +336,11 @@ impl Workspace {
             None => Rc::new(read_agent),
         };
         let fresh = match with_usage {
-            true => self.usage_inflight.contains(&key) || self.now() - self.usage_fetched.get(&key).copied().unwrap_or(0) < READ_EVERY_MS,
+            true => {
+                self.usage_inflight.contains(&key)
+                    || self.now() - self.usage_fetched.get(&key).copied().unwrap_or(0)
+                        < READ_EVERY_MS
+            }
             false => self.commands_read.contains(&key),
         };
         if !self.usage_readable(&agent) || (!force && fresh) {
@@ -284,7 +350,12 @@ impl Workspace {
         // agent is found (at launch), the ones that answered last time are asked straight away.
         let ready = match &self.usage_fetch {
             Some(_) => self.ready_agents().contains(&agent),
-            None => self.agent_ready(&agent) || (self.agents.is_empty() && self.usage_cached.contains_key(&key) && !self.settings.disabled_agents.contains(&key)),
+            None => {
+                self.agent_ready(&agent)
+                    || (self.agents.is_empty()
+                        && self.usage_cached.contains_key(&key)
+                        && !self.settings.disabled_agents.contains(&key))
+            }
         };
         if !ready || self.agent_updating(&key) {
             return;
@@ -297,8 +368,13 @@ impl Workspace {
         let folder = self.current_cwd().unwrap_or_else(trek_core::paths::home);
         let rx = fetch(&agent, &folder, with_usage);
         let task = cx.spawn(async move |this, cx| {
-            let res = rx.recv().await.unwrap_or_else(|_| Err("the read was dropped".into()));
-            let _ = this.update(cx, |this, cx| this.status_read(agent, folder, with_usage, res, cx));
+            let res = rx
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err("the read was dropped".into()));
+            let _ = this.update(cx, |this, cx| {
+                this.status_read(agent, folder, with_usage, res, cx)
+            });
         });
         self.keep(task);
         cx.notify();
@@ -307,7 +383,14 @@ impl Workspace {
     /// `agent` said what its usage is (or failed to): the card, the limits Trek keeps to and the
     /// commands follow, and what it said is kept for the next launch. Read without its usage,
     /// only its account, commands and models follow: any usage read before stays as it was.
-    fn status_read(&mut self, agent: AgentId, folder: PathBuf, with_usage: bool, res: Result<AgentStatus, String>, cx: &mut Context<Self>) {
+    fn status_read(
+        &mut self,
+        agent: AgentId,
+        folder: PathBuf,
+        with_usage: bool,
+        res: Result<AgentStatus, String>,
+        cx: &mut Context<Self>,
+    ) {
         let key = agent.key();
         let now = self.now();
         let had_usage = self.usage_status(&key).is_some();
@@ -317,12 +400,18 @@ impl Workspace {
                     self.codex_models = st.models.clone();
                 }
                 // Its commands include the folder's own (project commands, skills).
-                self.agent_commands.insert((key.clone(), folder), st.commands.clone());
+                self.agent_commands
+                    .insert((key.clone(), folder), st.commands.clone());
                 if with_usage {
                     self.keep_snapshot(&key, Snapshot::of(&st, now), cx);
                     self.agent_status.insert(key.clone(), st);
                 } else if let Some(old) = self.agent_status.get_mut(&key).filter(|_| had_usage) {
-                    *old = AgentStatus { limits: std::mem::take(&mut old.limits), resets: std::mem::take(&mut old.resets), note: old.note.take(), ..st };
+                    *old = AgentStatus {
+                        limits: std::mem::take(&mut old.limits),
+                        resets: std::mem::take(&mut old.resets),
+                        note: old.note.take(),
+                        ..st
+                    };
                 } else {
                     self.agent_status.insert(key.clone(), st);
                 }
@@ -357,7 +446,10 @@ impl Workspace {
             return;
         }
         self.usage_cached.insert(key.to_string(), snapshot);
-        let (path, data) = (snapshots_file(), serde_json::to_vec(&self.usage_cached).unwrap_or_default());
+        let (path, data) = (
+            snapshots_file(),
+            serde_json::to_vec(&self.usage_cached).unwrap_or_default(),
+        );
         cx.background_executor()
             .spawn(async move {
                 if let Err(e) = std::fs::write(&path, data) {

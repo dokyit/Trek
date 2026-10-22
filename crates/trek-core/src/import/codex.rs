@@ -1,11 +1,12 @@
 //! Codex threads: index in `~/.codex/state_5.sqlite`, transcripts in rollout JSONL files.
 
+use super::UsageEntry;
 use super::{
-    Evidence, ImportedThread, Transcript, classify, clip, codex_attachments, codex_request, copies_message, is_injected, is_temp_dir, recorded_path,
-    is_title_request, legacy_title_from, ms_from_rfc3339, source_title, strip_block, title_from, user_text,
+    Evidence, ImportedThread, Transcript, classify, clip, codex_attachments, codex_request,
+    copies_message, is_injected, is_temp_dir, is_title_request, legacy_title_from, ms_from_rfc3339,
+    recorded_path, source_title, strip_block, title_from, user_text,
 };
 use crate::store::{Item, ResumePoint, ToolStatus};
-use super::UsageEntry;
 use crate::types::{Effort, ThreadSource, TokenUsage};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
@@ -22,7 +23,11 @@ pub fn codex_home() -> PathBuf {
 /// [`codex_home`] for a given home folder. An isolated process (a test, a capture run) never
 /// follows `CODEX_HOME` out of its throwaway home to the user's real folder.
 pub fn codex_home_for(home: &Path) -> PathBuf {
-    let env = if crate::paths::isolated() { None } else { std::env::var_os("CODEX_HOME") };
+    let env = if crate::paths::isolated() {
+        None
+    } else {
+        std::env::var_os("CODEX_HOME")
+    };
     resolve_codex_home(env.as_deref(), home)
 }
 
@@ -43,18 +48,26 @@ fn db() -> Option<Connection> {
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
-            let n = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let n = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
             n.starts_with("state_") && n.ends_with(".sqlite")
         })
         .collect();
     candidates.sort();
     let path = candidates.pop()?;
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()
+    Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()
 }
 
 /// Threads updated since `min_updated`, and the ones in `held` (already in Trek) whatever their age.
 pub fn scan(min_updated: i64, held: &HashSet<String>) -> Vec<ImportedThread> {
-    db().map(|conn| scan_conn(&conn, min_updated, held)).unwrap_or_default()
+    db().map(|conn| scan_conn(&conn, min_updated, held))
+        .unwrap_or_default()
 }
 
 struct Row {
@@ -81,9 +94,19 @@ fn scan_conn(conn: &Connection, min_updated: i64, held: &HashSet<String>) -> Vec
         .prepare("SELECT name FROM pragma_table_info('threads')")
         .and_then(|mut st| st.query_map([], |r| r.get::<_, String>(0))?.collect())
         .unwrap_or_default();
-    let col = |name: &str, fallback: &str| if columns.contains(name) { name.to_string() } else { fallback.to_string() };
+    let col = |name: &str, fallback: &str| {
+        if columns.contains(name) {
+            name.to_string()
+        } else {
+            fallback.to_string()
+        }
+    };
     let ms = |name: &str| {
-        if columns.contains(&format!("{name}_ms")) { format!("COALESCE({name}_ms, {name} * 1000)") } else { format!("{name} * 1000") }
+        if columns.contains(&format!("{name}_ms")) {
+            format!("COALESCE({name}_ms, {name} * 1000)")
+        } else {
+            format!("{name} * 1000")
+        }
     };
     let sql = format!(
         "SELECT id, cwd, title, {first}, {model}, {effort}, git_branch, {created}, {updated}, source, {originator}, {thread_source}, {name}, {role}, rollout_path
@@ -98,7 +121,9 @@ fn scan_conn(conn: &Connection, min_updated: i64, held: &HashSet<String>) -> Vec
         name = col("name", "NULL"),
         role = col("agent_role", "NULL"),
     );
-    let Ok(mut st) = conn.prepare(&sql) else { return vec![] };
+    let Ok(mut st) = conn.prepare(&sql) else {
+        return vec![];
+    };
     let held = serde_json::to_string(held).unwrap_or_else(|_| "[]".into());
     let rows = st.query_map(rusqlite::params![min_updated, held], |r| {
         Ok(Row {
@@ -120,21 +145,27 @@ fn scan_conn(conn: &Connection, min_updated: i64, held: &HashSet<String>) -> Vec
         })
     });
     match rows {
-        Ok(rows) => rows.filter_map(Result::ok).map(|row| thread_from(&row)).collect(),
+        Ok(rows) => rows
+            .filter_map(Result::ok)
+            .map(|row| thread_from(&row))
+            .collect(),
         Err(_) => vec![],
     }
 }
 
 /// Clients that are Codex's own interactive UIs (terminal, desktop app, IDE extension).
 fn is_interactive(source: &str, originator: &str) -> bool {
-    source == "cli" || ["Codex Desktop", "codex_vscode", "codex-tui", "codex_cli_rs"].contains(&originator)
+    source == "cli"
+        || ["Codex Desktop", "codex_vscode", "codex-tui", "codex_cli_rs"].contains(&originator)
 }
 
 /// The client that started a rollout, from its first (`session_meta`) line.
 fn rollout_originator(path: &Path) -> Option<String> {
     let line = super::jsonl_lines(BufReader::new(std::fs::File::open(path).ok()?)).next()?;
     let v: Value = serde_json::from_str(&line).ok()?;
-    (v["type"] == "session_meta").then(|| v["payload"]["originator"].as_str().map(String::from)).flatten()
+    (v["type"] == "session_meta")
+        .then(|| v["payload"]["originator"].as_str().map(String::from))
+        .flatten()
 }
 
 fn thread_from(row: &Row) -> ImportedThread {
@@ -149,8 +180,12 @@ fn thread_from(row: &Row) -> ImportedThread {
     // `codex exec` from a script or another agent; the Codex SDK drives exec for app conversations.
     let cli_run = row.source == "exec" && !originator.starts_with("codex_sdk");
     // Counting prompts means reading the rollout: only when it decides a rule.
-    let count_matters = cli_run || first.is_some_and(is_title_request) || (cwd.as_deref().is_some_and(is_temp_dir) && !interactive);
-    let prompts = count_matters.then(|| count_prompts(Path::new(&row.rollout))).flatten();
+    let count_matters = cli_run
+        || first.is_some_and(is_title_request)
+        || (cwd.as_deref().is_some_and(is_temp_dir) && !interactive);
+    let prompts = count_matters
+        .then(|| count_prompts(Path::new(&row.rollout)))
+        .flatten();
     let skip = classify(&Evidence {
         cwd: cwd.as_deref(),
         scripted: !interactive,
@@ -158,7 +193,9 @@ fn thread_from(row: &Row) -> ImportedThread {
         first_message: first,
         // It used tokens: the model answered.
         replied: true,
-        subagent: !row.agent_role.is_empty() || row.thread_source == "subagent" || row.source.contains("subagent"),
+        subagent: !row.agent_role.is_empty()
+            || row.thread_source == "subagent"
+            || row.source.contains("subagent"),
         untouched_fork: false,
         trek: originator == "trek",
         cli_run,
@@ -203,9 +240,15 @@ fn count_prompts(path: &Path) -> Option<usize> {
         if !line.contains("\"role\":\"user\"") {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         let p = &v["payload"];
-        if v["type"] == "response_item" && p["type"] == "message" && p["role"] == "user" && user_text(&message_text(&p["content"])).is_some() {
+        if v["type"] == "response_item"
+            && p["type"] == "message"
+            && p["role"] == "user"
+            && user_text(&message_text(&p["content"])).is_some()
+        {
             n += 1;
             if n > 1 {
                 break;
@@ -219,16 +262,23 @@ fn count_prompts(path: &Path) -> Option<usize> {
 pub(crate) fn session_ids() -> Option<HashSet<String>> {
     let conn = db()?;
     let mut st = conn.prepare("SELECT id FROM threads").ok()?;
-    st.query_map([], |r| r.get::<_, String>(0)).ok()?.collect::<rusqlite::Result<_>>().ok()
+    st.query_map([], |r| r.get::<_, String>(0))
+        .ok()?
+        .collect::<rusqlite::Result<_>>()
+        .ok()
 }
 
 pub(super) fn rollout_path(id: &str) -> Option<PathBuf> {
     let conn = db()?;
-    conn.query_row("SELECT rollout_path FROM threads WHERE id = ?1", [id], |r| r.get::<_, String>(0))
-        .optional()
-        .ok()
-        .flatten()
-        .map(PathBuf::from)
+    conn.query_row(
+        "SELECT rollout_path FROM threads WHERE id = ?1",
+        [id],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .map(PathBuf::from)
 }
 
 /// Joined text blocks, skipping injected context blocks (environment, instructions) and the
@@ -245,7 +295,10 @@ fn message_text(content: &Value) -> String {
             }
             let t = strip_block(t, "in-app-browser-context");
             let t = t.trim();
-            t.strip_prefix("## My request:").unwrap_or(t).trim().to_string()
+            t.strip_prefix("## My request:")
+                .unwrap_or(t)
+                .trim()
+                .to_string()
         })
         .filter(|t| !is_injected(t))
         .collect::<Vec<_>>()
@@ -260,13 +313,25 @@ fn sent_message(text: &str) -> (String, Vec<String>) {
         return (text.to_string(), vec![]);
     }
     let image = |path: &str| {
-        let ext = Path::new(path).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let ext = Path::new(path)
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
         ["png", "jpg", "jpeg", "gif", "webp", "heic"].contains(&ext.as_str())
     };
-    let images: Vec<String> = files.iter().map(|(_, p)| *p).filter(|p| image(p) && Path::new(p).is_file()).map(String::from).collect();
+    let images: Vec<String> = files
+        .iter()
+        .map(|(_, p)| *p)
+        .filter(|p| image(p) && Path::new(p).is_file())
+        .map(String::from)
+        .collect();
     let request = codex_request(text);
     let request = if request.trim().is_empty() && images.is_empty() {
-        files.iter().map(|(name, _)| name.trim_matches('"')).collect::<Vec<_>>().join("\n")
+        files
+            .iter()
+            .map(|(name, _)| name.trim_matches('"'))
+            .collect::<Vec<_>>()
+            .join("\n")
     } else {
         request
     };
@@ -276,16 +341,26 @@ fn sent_message(text: &str) -> (String, Vec<String>) {
 /// The user's answers to questions the agent asked (`request_user_input`), one per line.
 fn question_reply(text: &str) -> Option<String> {
     let body = text.strip_prefix("<send_user_message_question_reply>")?;
-    let body = body.split("</send_user_message_question_reply>").next()?.trim();
+    let body = body
+        .split("</send_user_message_question_reply>")
+        .next()?
+        .trim();
     let answers: Vec<Value> = serde_json::from_str(body).ok()?;
-    let lines: Vec<&str> = answers.iter().filter_map(|a| a["answer"].as_str()).filter(|a| !a.trim().is_empty()).collect();
+    let lines: Vec<&str> = answers
+        .iter()
+        .filter_map(|a| a["answer"].as_str())
+        .filter(|a| !a.trim().is_empty())
+        .collect();
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 /// The turn a rollout line says ended (finished or stopped), if it says one did.
 fn ended_turn(v: &Value) -> Option<&str> {
     let p = &v["payload"];
-    (v["type"] == "event_msg" && matches!(p["type"].as_str(), Some("task_complete" | "turn_aborted"))).then(|| p["turn_id"].as_str()).flatten()
+    (v["type"] == "event_msg"
+        && matches!(p["type"].as_str(), Some("task_complete" | "turn_aborted")))
+    .then(|| p["turn_id"].as_str())
+    .flatten()
 }
 
 /// The last turn of thread `id` that ended: where a message sent now goes after.
@@ -297,7 +372,11 @@ fn last_turn_in(path: &Path) -> Option<String> {
     let file = std::fs::File::open(path).ok()?;
     let mut last = None;
     for line in super::jsonl_lines(BufReader::new(file)).filter(|l| l.contains("\"turn_id\"")) {
-        if let Some(turn) = serde_json::from_str::<Value>(&line).ok().as_ref().and_then(ended_turn) {
+        if let Some(turn) = serde_json::from_str::<Value>(&line)
+            .ok()
+            .as_ref()
+            .and_then(ended_turn)
+        {
             last = Some(turn.to_string());
         }
     }
@@ -313,20 +392,29 @@ pub fn tokens(v: &Value) -> TokenUsage {
     let input = n("input_tokens", "inputTokens");
     let cached = n("cached_input_tokens", "cachedInputTokens").min(input);
     let written = n("cache_write_input_tokens", "cacheWriteInputTokens").min(input - cached);
-    TokenUsage { input: input - cached - written, output: n("output_tokens", "outputTokens"), cache_read: cached, cache_write: written }
+    TokenUsage {
+        input: input - cached - written,
+        output: n("output_tokens", "outputTokens"),
+        cache_read: cached,
+        cache_write: written,
+    }
 }
 
 /// Tokens thread `id` used between `from` and `to` (unix ms), per model request, from its
 /// rollout. Read from the start of the file: run it off the main thread.
 pub fn usage(id: &str, from: i64, to: i64) -> Vec<UsageEntry> {
-    rollout_path(id).map(|p| usage_in(&p, from, to)).unwrap_or_default()
+    rollout_path(id)
+        .map(|p| usage_in(&p, from, to))
+        .unwrap_or_default()
 }
 
 /// Each `token_count` event carries the thread's running total; what a request used is how far
 /// the total moved (the same count is sometimes written twice). The first one in the file has
 /// nothing before it: its `last_token_usage` is the request's own.
 pub(super) fn usage_in(path: &Path, from: i64, to: i64) -> Vec<UsageEntry> {
-    let Ok(file) = std::fs::File::open(path) else { return vec![] };
+    let Ok(file) = std::fs::File::open(path) else {
+        return vec![];
+    };
     let mut out = Vec::new();
     let mut total: Option<TokenUsage> = None;
     let mut model: Option<String> = None;
@@ -334,7 +422,9 @@ pub(super) fn usage_in(path: &Path, from: i64, to: i64) -> Vec<UsageEntry> {
         if !line.contains("\"token_count\"") && !line.contains("\"turn_context\"") {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         let p = &v["payload"];
         if v["type"] == "turn_context" {
             model = p["model"].as_str().map(String::from).or(model);
@@ -370,7 +460,12 @@ pub(super) fn load_rollout(path: &Path, id: &str) -> anyhow::Result<Vec<Item>> {
     let mut t = Transcript::default();
     // The last turn that ended: where the thread can be cut back to drop the next message's turn.
     let mut last_turn: Option<String> = None;
-    let point = |after: &Option<String>| Some(ResumePoint { session: id.to_string(), after: after.clone() });
+    let point = |after: &Option<String>| {
+        Some(ResumePoint {
+            session: id.to_string(),
+            after: after.clone(),
+        })
+    };
     // A goal the user set from the goal bar rather than in a message, until its turn starts.
     let mut goal: Option<(String, Option<i64>)> = None;
     // The goal shown for the current turn: typed as "/goal …", the message itself is recorded
@@ -380,7 +475,9 @@ pub(super) fn load_rollout(path: &Path, id: &str) -> anyhow::Result<Vec<Item>> {
     // message now steers it rather than starting another.
     let (mut running, mut has_message) = (false, false);
     for line in super::jsonl_lines(reader) {
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         let at = v["timestamp"].as_str().and_then(ms_from_rfc3339);
         let p = &v["payload"];
         if v["type"] == "event_msg" {
@@ -405,7 +502,10 @@ pub(super) fn load_rollout(path: &Path, id: &str) -> anyhow::Result<Vec<Item>> {
                     let g = &p["goal"];
                     // Progress and pauses update the same goal; a new one starts unused.
                     if g["tokensUsed"].as_i64() == Some(0) && g["createdAt"] == g["updatedAt"] {
-                        goal = g["objective"].as_str().filter(|o| !o.trim().is_empty()).map(|o| (format!("/goal {}", o.trim()), at));
+                        goal = g["objective"]
+                            .as_str()
+                            .filter(|o| !o.trim().is_empty())
+                            .map(|o| (format!("/goal {}", o.trim()), at));
                     }
                 }
                 _ => {}
@@ -420,7 +520,10 @@ pub(super) fn load_rollout(path: &Path, id: &str) -> anyhow::Result<Vec<Item>> {
                 let text = message_text(&p["content"]);
                 match p["role"].as_str() {
                     Some("user") => {
-                        let first = p["content"][0]["text"].as_str().unwrap_or_default().trim_start();
+                        let first = p["content"][0]["text"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .trim_start();
                         if let Some(answers) = question_reply(first) {
                             t.answer(answers, at);
                         } else if first.starts_with("<codex_internal_context source=\"goal\"") {
@@ -470,10 +573,18 @@ pub(super) fn load_rollout(path: &Path, id: &str) -> anyhow::Result<Vec<Item>> {
             }
             Some("function_call") | Some("custom_tool_call") => {
                 let name = p["name"].as_str().unwrap_or("tool").to_string();
-                let input = p["arguments"].as_str().or(p["input"].as_str()).unwrap_or_default();
+                let input = p["arguments"]
+                    .as_str()
+                    .or(p["input"].as_str())
+                    .unwrap_or_default();
                 let detail = serde_json::from_str::<Value>(input)
                     .ok()
-                    .and_then(|a| a["cmd"].as_str().or(a["command"].as_str()).map(String::from))
+                    .and_then(|a| {
+                        a["cmd"]
+                            .as_str()
+                            .or(a["command"].as_str())
+                            .map(String::from)
+                    })
                     .unwrap_or_else(|| clip(input, 300));
                 let title = match name.as_str() {
                     "exec_command" | "shell" => "Ran command".to_string(),
@@ -495,8 +606,11 @@ pub(super) fn load_rollout(path: &Path, id: &str) -> anyhow::Result<Vec<Item>> {
                     Value::String(s) => s.clone(),
                     other => other.to_string(),
                 };
-                if let Some(Item::Tool { output, .. }) =
-                    t.items.iter_mut().rev().find(|i| matches!(i, Item::Tool { id: tid, .. } if tid == id))
+                if let Some(Item::Tool { output, .. }) = t
+                    .items
+                    .iter_mut()
+                    .rev()
+                    .find(|i| matches!(i, Item::Tool { id: tid, .. } if tid == id))
                 {
                     *output = clip(&out, 4000);
                 }
@@ -525,8 +639,16 @@ mod tests {
     }
 
     fn said(role: &str, text: &str, at: &str) -> String {
-        let block = if role == "user" { "input_text" } else { "output_text" };
-        line("response_item", json!({ "type": "message", "role": role, "content": [{ "type": block, "text": text }] }), at)
+        let block = if role == "user" {
+            "input_text"
+        } else {
+            "output_text"
+        };
+        line(
+            "response_item",
+            json!({ "type": "message", "role": role, "content": [{ "type": block, "text": text }] }),
+            at,
+        )
     }
 
     struct Fixture {
@@ -538,22 +660,55 @@ mod tests {
         fn new() -> Fixture {
             let conn = Connection::open_in_memory().unwrap();
             conn.execute_batch(SCHEMA).unwrap();
-            Fixture { dir: Scratch::new(), conn }
+            Fixture {
+                dir: Scratch::new(),
+                conn,
+            }
         }
 
         /// A thread row and its rollout with the given user prompts (each answered).
         fn thread(&self, id: &str, cols: &[(&str, &str)], prompts: &[&str]) {
-            let mut lines = vec![said("user", "<environment_context>\n  <cwd>/x</cwd>\n</environment_context>", "2026-09-06T22:15:24Z")];
+            let mut lines = vec![said(
+                "user",
+                "<environment_context>\n  <cwd>/x</cwd>\n</environment_context>",
+                "2026-09-06T22:15:24Z",
+            )];
             for p in prompts {
                 lines.push(said("user", p, "2026-09-06T22:15:25Z"));
                 lines.push(said("assistant", "done", "2026-09-06T22:15:30Z"));
-                lines.push(line("event_msg", json!({ "type": "task_complete" }), "2026-09-06T22:15:31Z"));
+                lines.push(line(
+                    "event_msg",
+                    json!({ "type": "task_complete" }),
+                    "2026-09-06T22:15:31Z",
+                ));
             }
-            let rollout = self.dir.write(&format!("rollout-{id}.jsonl"), &lines.join("\n"));
-            let mut names = vec!["id", "rollout_path", "created_at", "updated_at", "source", "cwd", "title", "tokens_used", "first_user_message"];
+            let rollout = self
+                .dir
+                .write(&format!("rollout-{id}.jsonl"), &lines.join("\n"));
+            let mut names = vec![
+                "id",
+                "rollout_path",
+                "created_at",
+                "updated_at",
+                "source",
+                "cwd",
+                "title",
+                "tokens_used",
+                "first_user_message",
+            ];
             let rollout = rollout.display().to_string();
             let first = prompts.first().copied().unwrap_or_default();
-            let mut values = vec![id, rollout.as_str(), "1", "2", "vscode", "/Users/me/app", first, "1000", first];
+            let mut values = vec![
+                id,
+                rollout.as_str(),
+                "1",
+                "2",
+                "vscode",
+                "/Users/me/app",
+                first,
+                "1000",
+                first,
+            ];
             for (k, v) in cols {
                 match names.iter().position(|n| n == k) {
                     Some(i) => values[i] = v,
@@ -565,7 +720,10 @@ mod tests {
             }
             let marks = vec!["?"; values.len()].join(",");
             self.conn
-                .execute(&format!("INSERT INTO threads ({}) VALUES ({marks})", names.join(",")), rusqlite::params_from_iter(values))
+                .execute(
+                    &format!("INSERT INTO threads ({}) VALUES ({marks})", names.join(",")),
+                    rusqlite::params_from_iter(values),
+                )
                 .unwrap();
         }
 
@@ -576,48 +734,143 @@ mod tests {
         }
 
         fn get(&self, id: &str) -> ImportedThread {
-            self.scan().into_iter().find(|t| t.native_id == id).expect(id)
+            self.scan()
+                .into_iter()
+                .find(|t| t.native_id == id)
+                .expect(id)
         }
     }
 
     #[test]
     fn titles_use_the_thread_name_then_the_request() {
         let f = Fixture::new();
-        f.thread("named", &[("name", "Optimize WiFi coverage")], &["/goal make my WiFi coverage the best it can possibly be"]);
+        f.thread(
+            "named",
+            &[("name", "Optimize WiFi coverage")],
+            &["/goal make my WiFi coverage the best it can possibly be"],
+        );
         f.thread("copied", &[], &["# Files mentioned by the user:\n\n## shot.png: /var/folders/x/shot.png\n\n## My request:\nwhy does it crash on launch?"]);
-        f.thread("titled", &[("title", "Review workflow skills")], &["Look through my usage from all time"]);
-        f.thread("goal", &[], &["/goal make my WiFi coverage the best it can possibly be"]);
+        f.thread(
+            "titled",
+            &[("title", "Review workflow skills")],
+            &["Look through my usage from all time"],
+        );
+        f.thread(
+            "goal",
+            &[],
+            &["/goal make my WiFi coverage the best it can possibly be"],
+        );
         // Until Codex names a thread, its name is the first message cut mid-word.
         let request = "I've gotten Players accept contract to work(playing role and contract), I also have both reports";
-        f.thread("cut", &[("name", "I've gotten Players accept contract to work(playing role an…")], &[request]);
+        f.thread(
+            "cut",
+            &[(
+                "name",
+                "I've gotten Players accept contract to work(playing role an…",
+            )],
+            &[request],
+        );
         let attached = "# Files mentioned by the user:\n\n## shot.png: /var/folders/x/shot.png\n\n## My request:\nI really don't like two things, how codex is called and the icon";
-        f.thread("cut-attached", &[("name", "I really don't like two things, how codex is called and t…")], &[attached]);
+        f.thread(
+            "cut-attached",
+            &[(
+                "name",
+                "I really don't like two things, how codex is called and t…",
+            )],
+            &[attached],
+        );
         assert_eq!(f.get("named").title, "Optimize WiFi coverage");
-        assert_eq!(f.get("cut").title, "I've gotten Players accept contract to work(playing role…");
-        assert_eq!(f.get("cut-attached").title, "I really don't like two things, how codex is called and the…");
+        assert_eq!(
+            f.get("cut").title,
+            "I've gotten Players accept contract to work(playing role…"
+        );
+        assert_eq!(
+            f.get("cut-attached").title,
+            "I really don't like two things, how codex is called and the…"
+        );
         assert_eq!(f.get("copied").title, "why does it crash on launch?");
         assert_eq!(f.get("titled").title, "Review workflow skills");
-        assert_eq!(f.get("goal").title, "make my WiFi coverage the best it can possibly be");
+        assert_eq!(
+            f.get("goal").title,
+            "make my WiFi coverage the best it can possibly be"
+        );
         // Earlier versions used the stored title as it was.
-        assert_eq!(f.get("copied").legacy_title.as_deref().map(|t| t.lines().next().unwrap()), Some("# Files mentioned by the user:"));
+        assert_eq!(
+            f.get("copied")
+                .legacy_title
+                .as_deref()
+                .map(|t| t.lines().next().unwrap()),
+            Some("# Files mentioned by the user:")
+        );
     }
 
     #[test]
     fn helper_threads_are_recognised() {
         let f = Fixture::new();
         f.thread("conversation", &[], &["fix the build", "and the tests"]);
-        f.thread("subagent", &[("source", r#"{"subagent":{"thread_spawn":{"parent_thread_id":"p"}}}"#), ("thread_source", "subagent")], &["map the code"]);
+        f.thread(
+            "subagent",
+            &[
+                (
+                    "source",
+                    r#"{"subagent":{"thread_spawn":{"parent_thread_id":"p"}}}"#,
+                ),
+                ("thread_source", "subagent"),
+            ],
+            &["map the code"],
+        );
         f.thread("role", &[("agent_role", "code_mapper")], &["map the code"]);
-        f.thread("trek", &[("originator", "trek")], &["Reply with just the word: pong"]);
-        f.thread("exec", &[("source", "exec"), ("originator", "Codex Desktop")], &["Return exactly OK without tools."]);
+        f.thread(
+            "trek",
+            &[("originator", "trek")],
+            &["Reply with just the word: pong"],
+        );
+        f.thread(
+            "exec",
+            &[("source", "exec"), ("originator", "Codex Desktop")],
+            &["Return exactly OK without tools."],
+        );
         // Codex 0.155+ sends the instruction file as a message of its own; it isn't a prompt.
         let instructions = "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nBe brief.\n</INSTRUCTIONS>";
-        f.thread("exec-new", &[("source", "exec"), ("first_user_message", "Return exactly OVERRIDE_OK without tools.")], &[instructions, "Return exactly OVERRIDE_OK without tools."]);
-        f.thread("exec-resumed", &[("source", "exec")], &["audit the config", "now fix it"]);
-        f.thread("sdk", &[("source", "exec"), ("originator", "codex_sdk_ts")], &["build the settings page"]);
-        f.thread("tmp", &[("cwd", "/private/tmp/fm26-workflow-ab/new"), ("originator", "t3code_desktop")], &["diagnose", "and fix"]);
-        f.thread("tmp-tui", &[("cwd", "/tmp/scratch"), ("source", "cli")], &["try this", "and that"]);
-        let skips: Vec<(String, Option<Skip>)> = f.scan().into_iter().map(|t| (t.native_id, t.skip)).collect();
+        f.thread(
+            "exec-new",
+            &[
+                ("source", "exec"),
+                (
+                    "first_user_message",
+                    "Return exactly OVERRIDE_OK without tools.",
+                ),
+            ],
+            &[instructions, "Return exactly OVERRIDE_OK without tools."],
+        );
+        f.thread(
+            "exec-resumed",
+            &[("source", "exec")],
+            &["audit the config", "now fix it"],
+        );
+        f.thread(
+            "sdk",
+            &[("source", "exec"), ("originator", "codex_sdk_ts")],
+            &["build the settings page"],
+        );
+        f.thread(
+            "tmp",
+            &[
+                ("cwd", "/private/tmp/fm26-workflow-ab/new"),
+                ("originator", "t3code_desktop"),
+            ],
+            &["diagnose", "and fix"],
+        );
+        f.thread(
+            "tmp-tui",
+            &[("cwd", "/tmp/scratch"), ("source", "cli")],
+            &["try this", "and that"],
+        );
+        let skips: Vec<(String, Option<Skip>)> = f
+            .scan()
+            .into_iter()
+            .map(|t| (t.native_id, t.skip))
+            .collect();
         assert_eq!(
             skips,
             vec![
@@ -640,13 +893,27 @@ mod tests {
         let f = Fixture::new();
         let prompts = ["try this", "and that"];
         // Codex on Windows records the folder as `\\?\C:\…`; Trek's projects are `C:\…`.
-        f.thread("verbatim", &[("cwd", r"\\?\C:\Users\me\code\app")], &prompts);
+        f.thread(
+            "verbatim",
+            &[("cwd", r"\\?\C:\Users\me\code\app")],
+            &prompts,
+        );
         f.thread("unc", &[("cwd", r"\\?\UNC\nas\share\app")], &prompts);
         f.thread("plain", &[("cwd", r"C:\Users\me\code\app")], &prompts);
         f.thread("mac", &[("cwd", "/Users/me/code/app")], &prompts);
         // Both spellings of a temp folder are still found.
-        f.thread("temp", &[("cwd", r"\\?\C:\Users\me\AppData\Local\Temp\run"), ("source", "exec")], &prompts);
-        assert_eq!(f.get("verbatim").cwd, Some(PathBuf::from(r"C:\Users\me\code\app")));
+        f.thread(
+            "temp",
+            &[
+                ("cwd", r"\\?\C:\Users\me\AppData\Local\Temp\run"),
+                ("source", "exec"),
+            ],
+            &prompts,
+        );
+        assert_eq!(
+            f.get("verbatim").cwd,
+            Some(PathBuf::from(r"C:\Users\me\code\app"))
+        );
         assert_eq!(f.get("unc").cwd, Some(PathBuf::from(r"\\nas\share\app")));
         assert_eq!(f.get("plain").cwd, f.get("verbatim").cwd);
         assert_eq!(f.get("mac").cwd, Some(PathBuf::from("/Users/me/code/app")));
@@ -663,7 +930,11 @@ mod tests {
         // Codex Desktop left the index's column empty; its rollout says who started it.
         let path = f.dir.0.join("rollout-desktop.jsonl");
         let body = std::fs::read_to_string(&path).unwrap();
-        let meta = line("session_meta", json!({ "id": "desktop", "originator": "Codex Desktop" }), "2026-09-06T22:15:24Z");
+        let meta = line(
+            "session_meta",
+            json!({ "id": "desktop", "originator": "Codex Desktop" }),
+            "2026-09-06T22:15:24Z",
+        );
         std::fs::write(&path, format!("{meta}\n{body}")).unwrap();
         assert_eq!(f.get("desktop").skip, None);
         assert_eq!(f.get("unknown").skip, Some(Skip::TempDir));
@@ -690,7 +961,9 @@ mod tests {
         let shown: Vec<String> = items
             .iter()
             .map(|i| match i {
-                Item::User { text, aside, .. } => format!("user{}: {text}", if *aside { " (steer)" } else { "" }),
+                Item::User { text, aside, .. } => {
+                    format!("user{}: {text}", if *aside { " (steer)" } else { "" })
+                }
                 Item::Assistant { text } => format!("agent: {text}"),
                 Item::TurnEnd { took_secs, .. } => format!("took {took_secs}s"),
                 _ => "other".into(),
@@ -723,7 +996,10 @@ mod tests {
             .unwrap();
         f.thread("old", &[], &["fix the build"]);
         let t = f.get("old");
-        assert_eq!((t.title.as_str(), t.created_at, t.skip), ("fix the build", 1000, None));
+        assert_eq!(
+            (t.title.as_str(), t.created_at, t.skip),
+            ("fix the build", 1000, None)
+        );
     }
 
     #[test]
@@ -731,7 +1007,10 @@ mod tests {
         let f = Fixture::new();
         f.thread("old", &[], &["fix the build"]);
         assert!(scan_conn(&f.conn, i64::MAX, &HashSet::new()).is_empty());
-        assert_eq!(scan_conn(&f.conn, i64::MAX, &HashSet::from(["old".to_string()])).len(), 1);
+        assert_eq!(
+            scan_conn(&f.conn, i64::MAX, &HashSet::from(["old".to_string()])).len(),
+            1
+        );
     }
 
     #[test]
@@ -741,14 +1020,31 @@ mod tests {
         let started = |at: &str| event(json!({ "type": "task_started" }), at);
         let complete = |at: &str| event(json!({ "type": "task_complete" }), at);
         let goal = |objective: &str, tokens: i64, at: &str| {
-            event(json!({ "type": "thread_goal_updated", "goal": { "objective": objective, "status": "active", "tokensUsed": tokens, "createdAt": 100, "updatedAt": if tokens == 0 { 100 } else { 200 } } }), at)
+            event(
+                json!({ "type": "thread_goal_updated", "goal": { "objective": objective, "status": "active", "tokensUsed": tokens, "createdAt": 100, "updatedAt": if tokens == 0 { 100 } else { 200 } } }),
+                at,
+            )
         };
-        let nudge = |at: &str| said("user", "<codex_internal_context source=\"goal\">\nContinue working toward the active thread goal.\n</codex_internal_context>", at);
+        let nudge = |at: &str| {
+            said(
+                "user",
+                "<codex_internal_context source=\"goal\">\nContinue working toward the active thread goal.\n</codex_internal_context>",
+                at,
+            )
+        };
         let lines = [
-            said("user", "# AGENTS.md instructions\n\n<INSTRUCTIONS>be brief</INSTRUCTIONS>", "2026-08-20T08:00:00Z"),
+            said(
+                "user",
+                "# AGENTS.md instructions\n\n<INSTRUCTIONS>be brief</INSTRUCTIONS>",
+                "2026-08-20T08:00:00Z",
+            ),
             started("2026-08-20T08:02:00Z"),
             said("user", "fix the staff editor", "2026-08-20T08:02:00Z"),
-            said("user", "<send_user_message_question_reply>\n[{\"question\":\"Which build?\",\"answer\":\"The release one\"}]\n</send_user_message_question_reply>", "2026-08-20T08:03:00Z"),
+            said(
+                "user",
+                "<send_user_message_question_reply>\n[{\"question\":\"Which build?\",\"answer\":\"The release one\"}]\n</send_user_message_question_reply>",
+                "2026-08-20T08:03:00Z",
+            ),
             said("assistant", "Fixed.", "2026-08-20T09:05:00Z"),
             complete("2026-08-20T09:05:01Z"),
             // A goal set from the goal bar, no message: its own turn.
@@ -764,7 +1060,11 @@ mod tests {
             said("assistant", "Goal complete.", "2026-08-21T00:37:34Z"),
             complete("2026-08-21T00:37:34Z"),
             started("2026-08-21T01:00:00Z"),
-            said("user", "\n<in-app-browser-context source=\"ambient-ui-state\">\n- Current URL: https://kits.dev/\n</in-app-browser-context>\n\n## My request:\nadd these kits", "2026-08-21T01:00:00Z"),
+            said(
+                "user",
+                "\n<in-app-browser-context source=\"ambient-ui-state\">\n- Current URL: https://kits.dev/\n</in-app-browser-context>\n\n## My request:\nadd these kits",
+                "2026-08-21T01:00:00Z",
+            ),
             said("assistant", "Added.", "2026-08-21T01:01:00Z"),
             complete("2026-08-21T01:01:00Z"),
         ];
@@ -796,7 +1096,9 @@ mod tests {
                 "took 60s",
             ]
         );
-        assert!(matches!(&items[4], Item::User { at, .. } if *at == ms_from_rfc3339("2026-08-20T09:20:56Z")));
+        assert!(
+            matches!(&items[4], Item::User { at, .. } if *at == ms_from_rfc3339("2026-08-20T09:20:56Z"))
+        );
     }
 
     #[test]
@@ -808,27 +1110,62 @@ mod tests {
         let lines = [
             // "/goal …" typed in the composer: the goal starts its turn, and the message is recorded
             // once the turn is under way.
-            event(json!({ "type": "thread_goal_updated", "goal": { "objective": "make my WiFi the best it can be", "tokensUsed": 0, "createdAt": 1, "updatedAt": 1 } }), "2026-08-17T02:01:56Z"),
+            event(
+                json!({ "type": "thread_goal_updated", "goal": { "objective": "make my WiFi the best it can be", "tokensUsed": 0, "createdAt": 1, "updatedAt": 1 } }),
+                "2026-08-17T02:01:56Z",
+            ),
             event(json!({ "type": "task_started" }), "2026-08-17T02:01:56Z"),
-            said("user", "<codex_internal_context source=\"goal\">\nContinue working toward the active thread goal.\n</codex_internal_context>", "2026-08-17T02:01:56Z"),
-            said("assistant", "I'll inventory the access points first.", "2026-08-17T02:02:00Z"),
-            said("user", "/goal make my WiFi the best it can be\n", "2026-08-17T02:02:00Z"),
+            said(
+                "user",
+                "<codex_internal_context source=\"goal\">\nContinue working toward the active thread goal.\n</codex_internal_context>",
+                "2026-08-17T02:01:56Z",
+            ),
+            said(
+                "assistant",
+                "I'll inventory the access points first.",
+                "2026-08-17T02:02:00Z",
+            ),
+            said(
+                "user",
+                "/goal make my WiFi the best it can be\n",
+                "2026-08-17T02:02:00Z",
+            ),
             said("assistant", "Scanning.", "2026-08-17T02:06:00Z"),
             event(json!({ "type": "task_complete" }), "2026-08-17T02:06:00Z"),
             // Screenshots and files listed above the request; one screenshot is gone from disk.
-            said("user", &format!("\n# Files mentioned by the user:\n\n## shot.png: {shot}\n\n## gone.png: /var/folders/x/T/gone.png\n\n## Editor.app: /Users/me/Editor.app\n\n## My request:\nthe header is misaligned\n"), "2026-08-17T03:00:00Z"),
+            said(
+                "user",
+                &format!(
+                    "\n# Files mentioned by the user:\n\n## shot.png: {shot}\n\n## gone.png: /var/folders/x/T/gone.png\n\n## Editor.app: /Users/me/Editor.app\n\n## My request:\nthe header is misaligned\n"
+                ),
+                "2026-08-17T03:00:00Z",
+            ),
             said("assistant", "Fixed.", "2026-08-17T03:01:00Z"),
             event(json!({ "type": "task_complete" }), "2026-08-17T03:01:00Z"),
             // Nothing typed, nothing left to show: the files' names.
-            said("user", "# Files pasted by the user:\n\n## \"--- Translated Report ---\": /Users/me/.codex/attachments/a/pasted-text.txt\n\n## My request:\n", "2026-08-17T04:00:00Z"),
-            said("assistant", "That's a crash in the loader.", "2026-08-17T04:00:30Z"),
+            said(
+                "user",
+                "# Files pasted by the user:\n\n## \"--- Translated Report ---\": /Users/me/.codex/attachments/a/pasted-text.txt\n\n## My request:\n",
+                "2026-08-17T04:00:00Z",
+            ),
+            said(
+                "assistant",
+                "That's a crash in the loader.",
+                "2026-08-17T04:00:30Z",
+            ),
             event(json!({ "type": "task_complete" }), "2026-08-17T04:00:30Z"),
         ];
         let path = dir.write("rollout.jsonl", &lines.join("\n"));
         let users: Vec<(String, Vec<String>)> = load_rollout(&path, "t")
             .unwrap()
             .into_iter()
-            .filter_map(|i| if let Item::User { text, images, .. } = i { Some((text, images)) } else { None })
+            .filter_map(|i| {
+                if let Item::User { text, images, .. } = i {
+                    Some((text, images))
+                } else {
+                    None
+                }
+            })
             .collect();
         assert_eq!(
             users,
@@ -844,26 +1181,82 @@ mod tests {
     fn transcripts_carry_times_and_turn_footers() {
         let dir = Scratch::new();
         let lines = [
-            said("user", "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>be brief</INSTRUCTIONS>", "2026-09-06T22:15:24.000Z"),
-            said("user", "<environment_context><cwd>/repo</cwd></environment_context>", "2026-09-06T22:15:24.000Z"),
+            said(
+                "user",
+                "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>be brief</INSTRUCTIONS>",
+                "2026-09-06T22:15:24.000Z",
+            ),
+            said(
+                "user",
+                "<environment_context><cwd>/repo</cwd></environment_context>",
+                "2026-09-06T22:15:24.000Z",
+            ),
             said("user", "reset eduroam", "2026-09-06T22:15:24.832Z"),
-            line("response_item", json!({ "type": "function_call", "name": "exec_command", "call_id": "c1", "arguments": "{\"cmd\":\"ls\"}" }), "2026-09-06T22:15:30Z"),
-            line("response_item", json!({ "type": "function_call_output", "call_id": "c1", "output": "a b" }), "2026-09-06T22:15:31Z"),
-            said("assistant", "Done: forget the network.", "2026-09-06T22:16:29.090Z"),
-            line("event_msg", json!({ "type": "task_complete", "turn_id": "turn-1" }), "2026-09-06T22:16:29.201Z"),
+            line(
+                "response_item",
+                json!({ "type": "function_call", "name": "exec_command", "call_id": "c1", "arguments": "{\"cmd\":\"ls\"}" }),
+                "2026-09-06T22:15:30Z",
+            ),
+            line(
+                "response_item",
+                json!({ "type": "function_call_output", "call_id": "c1", "output": "a b" }),
+                "2026-09-06T22:15:31Z",
+            ),
+            said(
+                "assistant",
+                "Done: forget the network.",
+                "2026-09-06T22:16:29.090Z",
+            ),
+            line(
+                "event_msg",
+                json!({ "type": "task_complete", "turn_id": "turn-1" }),
+                "2026-09-06T22:16:29.201Z",
+            ),
             said("user", "do it for me", "2026-09-06T22:17:08Z"),
             said("assistant", "Working on it", "2026-09-06T22:17:11Z"),
-            line("event_msg", json!({ "type": "turn_aborted" }), "2026-09-06T22:17:20Z"),
-            said("user", "<turn_aborted>The user interrupted the previous turn.</turn_aborted>", "2026-09-06T22:17:30Z"),
+            line(
+                "event_msg",
+                json!({ "type": "turn_aborted" }),
+                "2026-09-06T22:17:20Z",
+            ),
+            said(
+                "user",
+                "<turn_aborted>The user interrupted the previous turn.</turn_aborted>",
+                "2026-09-06T22:17:30Z",
+            ),
         ];
         let path = dir.write("rollout.jsonl", &lines.join("\n"));
         let items = load_rollout(&path, "t").unwrap();
-        let resume = |after: Option<&str>| Some(ResumePoint { session: "t".into(), after: after.map(String::from) });
-        assert_eq!(items[0], Item::User { text: "reset eduroam".into(), images: vec![], at: ms_from_rfc3339("2026-09-06T22:15:24.832Z"), resume: resume(None), aside: false });
-        assert!(matches!(&items[1], Item::Tool { title, detail, output, .. } if title == "Ran command" && detail == "ls" && output == "a b"));
-        assert_eq!(items[3], Item::TurnEnd { at: ms_from_rfc3339("2026-09-06T22:16:29.201Z").unwrap(), took_secs: 64 });
+        let resume = |after: Option<&str>| {
+            Some(ResumePoint {
+                session: "t".into(),
+                after: after.map(String::from),
+            })
+        };
+        assert_eq!(
+            items[0],
+            Item::User {
+                text: "reset eduroam".into(),
+                images: vec![],
+                at: ms_from_rfc3339("2026-09-06T22:15:24.832Z"),
+                resume: resume(None),
+                aside: false
+            }
+        );
+        assert!(
+            matches!(&items[1], Item::Tool { title, detail, output, .. } if title == "Ran command" && detail == "ls" && output == "a b")
+        );
+        assert_eq!(
+            items[3],
+            Item::TurnEnd {
+                at: ms_from_rfc3339("2026-09-06T22:16:29.201Z").unwrap(),
+                took_secs: 64
+            }
+        );
         // The second message drops the turn after the first one ended.
-        assert!(matches!(&items[4], Item::User { text, resume: r, .. } if text == "do it for me" && *r == resume(Some("turn-1"))));
+        assert!(
+            matches!(&items[4], Item::User { text, resume: r, .. } if text == "do it for me" && *r == resume(Some("turn-1")))
+        );
         assert_eq!(items.len(), 6, "the aborted turn has no footer: {items:?}");
         // A message sent now drops nothing: it goes after the last turn that said it ended.
         assert_eq!(last_turn_in(&path).as_deref(), Some("turn-1"));
@@ -878,7 +1271,13 @@ mod tests {
         bytes.extend_from_slice(said("user", "second", "2026-09-06T22:16:24Z").as_bytes());
         std::fs::write(&path, bytes).unwrap();
         let items = load_rollout(&path, "t").unwrap();
-        let texts: Vec<_> = items.iter().filter_map(|i| match i { Item::User { text, .. } => Some(text.as_str()), _ => None }).collect();
+        let texts: Vec<_> = items
+            .iter()
+            .filter_map(|i| match i {
+                Item::User { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(texts, ["first", "second"]);
     }
 
@@ -887,28 +1286,78 @@ mod tests {
         let dir = Scratch::new();
         let count = |total: (u64, u64, u64), last: (u64, u64, u64), at: &str| {
             let u = |(input, cached, output): (u64, u64, u64)| json!({ "input_tokens": input, "cached_input_tokens": cached, "cache_write_input_tokens": 0, "output_tokens": output, "reasoning_output_tokens": 0, "total_tokens": input + output });
-            line("event_msg", json!({ "type": "token_count", "info": { "total_token_usage": u(total), "last_token_usage": u(last), "model_context_window": 258400 }, "rate_limits": { "primary": { "used_percent": 1.0 } } }), at)
+            line(
+                "event_msg",
+                json!({ "type": "token_count", "info": { "total_token_usage": u(total), "last_token_usage": u(last), "model_context_window": 258400 }, "rate_limits": { "primary": { "used_percent": 1.0 } } }),
+                at,
+            )
         };
         let body = [
-            line("turn_context", json!({ "model": "gpt-6-astra", "cwd": "/x" }), "2026-10-02T20:36:30.000Z"),
+            line(
+                "turn_context",
+                json!({ "model": "gpt-6-astra", "cwd": "/x" }),
+                "2026-10-02T20:36:30.000Z",
+            ),
             // From a real rollout: the totals add up request by request.
-            count((18915, 7168, 129), (18915, 7168, 129), "2026-10-02T20:36:40.361Z"),
-            count((46776, 25856, 315), (27861, 18688, 186), "2026-10-03T00:00:49.320Z"),
+            count(
+                (18915, 7168, 129),
+                (18915, 7168, 129),
+                "2026-10-02T20:36:40.361Z",
+            ),
+            count(
+                (46776, 25856, 315),
+                (27861, 18688, 186),
+                "2026-10-03T00:00:49.320Z",
+            ),
             // The same count written twice adds nothing.
-            count((46776, 25856, 315), (27861, 18688, 186), "2026-10-03T00:00:49.400Z"),
-            line("event_msg", json!({ "type": "token_count", "info": null, "rate_limits": {} }), "2026-10-03T00:00:50.000Z"),
-            line("turn_context", json!({ "model": "gpt-5.6-luna" }), "2026-10-03T00:01:00.000Z"),
-            count((85381, 53504, 702), (38605, 27648, 387), "2026-10-03T00:01:02.704Z"),
+            count(
+                (46776, 25856, 315),
+                (27861, 18688, 186),
+                "2026-10-03T00:00:49.400Z",
+            ),
+            line(
+                "event_msg",
+                json!({ "type": "token_count", "info": null, "rate_limits": {} }),
+                "2026-10-03T00:00:50.000Z",
+            ),
+            line(
+                "turn_context",
+                json!({ "model": "gpt-5.6-luna" }),
+                "2026-10-03T00:01:00.000Z",
+            ),
+            count(
+                (85381, 53504, 702),
+                (38605, 27648, 387),
+                "2026-10-03T00:01:02.704Z",
+            ),
         ]
         .join("\n");
         let path = dir.write("rollout.jsonl", &body);
         let from = ms_from_rfc3339("2026-10-03T00:00:00Z").unwrap();
         let got = usage_in(&path, from, from + 86_400_000);
         assert_eq!(
-            got.iter().map(|(_, m, t)| (m.as_deref().unwrap(), *t)).collect::<Vec<_>>(),
+            got.iter()
+                .map(|(_, m, t)| (m.as_deref().unwrap(), *t))
+                .collect::<Vec<_>>(),
             [
-                ("gpt-6-astra", TokenUsage { input: 27861 - 18688, output: 186, cache_read: 18688, cache_write: 0 }),
-                ("gpt-5.6-luna", TokenUsage { input: 38605 - 27648, output: 387, cache_read: 27648, cache_write: 0 }),
+                (
+                    "gpt-6-astra",
+                    TokenUsage {
+                        input: 27861 - 18688,
+                        output: 186,
+                        cache_read: 18688,
+                        cache_write: 0
+                    }
+                ),
+                (
+                    "gpt-5.6-luna",
+                    TokenUsage {
+                        input: 38605 - 27648,
+                        output: 387,
+                        cache_read: 27648,
+                        cache_write: 0
+                    }
+                ),
             ]
         );
         // The first count in a file is its request's own.
@@ -916,10 +1365,26 @@ mod tests {
         assert_eq!(all[0].2.total(), 18915 + 129);
         // The app server's camelCase shape reads the same.
         let camel = json!({ "inputTokens": 90000, "cachedInputTokens": 5000, "outputTokens": 900, "reasoningOutputTokens": 400, "totalTokens": 90900 });
-        assert_eq!(tokens(&camel), TokenUsage { input: 85000, output: 900, cache_read: 5000, cache_write: 0 });
+        assert_eq!(
+            tokens(&camel),
+            TokenUsage {
+                input: 85000,
+                output: 900,
+                cache_read: 5000,
+                cache_write: 0
+            }
+        );
         // Cache writes are part of the input too (GPT-5.6 and later price them apart).
         let written = json!({ "input_tokens": 20000, "cached_input_tokens": 4000, "cache_write_input_tokens": 12000, "output_tokens": 50, "reasoning_output_tokens": 20, "total_tokens": 20050 });
-        assert_eq!(tokens(&written), TokenUsage { input: 4000, output: 50, cache_read: 4000, cache_write: 12000 });
+        assert_eq!(
+            tokens(&written),
+            TokenUsage {
+                input: 4000,
+                output: 50,
+                cache_read: 4000,
+                cache_write: 12000
+            }
+        );
     }
 
     #[test]
@@ -929,13 +1394,25 @@ mod tests {
         assert_eq!(resolve_codex_home(None, home), home.join(".codex"));
         assert_eq!(resolve_codex_home(Some(os("")), home), home.join(".codex"));
         // Codex resolves a relative one against the working folder, which Trek's isn't stable.
-        assert_eq!(resolve_codex_home(Some(os("codex-data")), home), home.join(".codex"));
+        assert_eq!(
+            resolve_codex_home(Some(os("codex-data")), home),
+            home.join(".codex")
+        );
         #[cfg(windows)]
         {
-            assert_eq!(resolve_codex_home(Some(os(r"D:\agents\codex")), Path::new(r"C:\Users\me")), PathBuf::from(r"D:\agents\codex"));
-            assert_eq!(resolve_codex_home(None, Path::new(r"C:\Users\me")), PathBuf::from(r"C:\Users\me\.codex"));
+            assert_eq!(
+                resolve_codex_home(Some(os(r"D:\agents\codex")), Path::new(r"C:\Users\me")),
+                PathBuf::from(r"D:\agents\codex")
+            );
+            assert_eq!(
+                resolve_codex_home(None, Path::new(r"C:\Users\me")),
+                PathBuf::from(r"C:\Users\me\.codex")
+            );
         }
         #[cfg(not(windows))]
-        assert_eq!(resolve_codex_home(Some(os("/data/codex")), home), PathBuf::from("/data/codex"));
+        assert_eq!(
+            resolve_codex_home(Some(os("/data/codex")), home),
+            PathBuf::from("/data/codex")
+        );
     }
 }

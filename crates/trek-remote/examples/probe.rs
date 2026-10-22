@@ -20,8 +20,12 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
-use tokio_rustls::rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use tokio_rustls::rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
+use tokio_rustls::rustls::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
+use tokio_rustls::rustls::crypto::{
+    CryptoProvider, verify_tls12_signature, verify_tls13_signature,
+};
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use tokio_rustls::rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use tokio_tungstenite::tungstenite::Message;
@@ -33,47 +37,111 @@ struct Pinned {
 }
 
 impl ServerCertVerifier for Pinned {
-    fn verify_server_cert(&self, cert: &CertificateDer<'_>, _: &[CertificateDer<'_>], _: &ServerName<'_>, _: &[u8], _: UnixTime) -> Result<ServerCertVerified, tokio_rustls::rustls::Error> {
+    fn verify_server_cert(
+        &self,
+        cert: &CertificateDer<'_>,
+        _: &[CertificateDer<'_>],
+        _: &ServerName<'_>,
+        _: &[u8],
+        _: UnixTime,
+    ) -> Result<ServerCertVerified, tokio_rustls::rustls::Error> {
         if trek_remote::tls::fingerprint(cert) == self.fingerprint {
             Ok(ServerCertVerified::assertion())
         } else {
-            Err(tokio_rustls::rustls::Error::General("not the paired Mac".into()))
+            Err(tokio_rustls::rustls::Error::General(
+                "not the paired Mac".into(),
+            ))
         }
     }
-    fn verify_tls12_signature(&self, m: &[u8], c: &CertificateDer<'_>, d: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+    fn verify_tls12_signature(
+        &self,
+        m: &[u8],
+        c: &CertificateDer<'_>,
+        d: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
         verify_tls12_signature(m, c, d, &self.provider.signature_verification_algorithms)
     }
-    fn verify_tls13_signature(&self, m: &[u8], c: &CertificateDer<'_>, d: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+    fn verify_tls13_signature(
+        &self,
+        m: &[u8],
+        c: &CertificateDer<'_>,
+        d: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
         verify_tls13_signature(m, c, d, &self.provider.signature_verification_algorithms)
     }
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.provider.signature_verification_algorithms.supported_schemes()
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
 fn param(url: &str, key: &str) -> Option<String> {
     let query = url.split_once('?')?.1;
-    query.split('&').find_map(|kv| kv.strip_prefix(&format!("{key}="))).map(|v| v.replace("%3A", ":").replace("%2D", "-"))
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix(&format!("{key}=")))
+        .map(|v| v.replace("%3A", ":").replace("%2D", "-"))
 }
 
 fn short(v: &Value) -> String {
     let s = v.to_string();
-    if s.len() > 220 { format!("{}…", &s[..220]) } else { s }
+    if s.len() > 220 {
+        format!("{}…", &s[..220])
+    } else {
+        s
+    }
 }
 
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let url = args.first().expect("pass the trek://pair link").clone();
-    let send_text = args.iter().position(|a| a == "--send").and_then(|i| args.get(i + 1)).cloned();
-    let thread = args.iter().position(|a| a == "--thread").and_then(|i| args.get(i + 1)).cloned();
-    let answer = args.iter().position(|a| a == "--answer").and_then(|i| args.get(i + 1)).cloned();
-    let effort = args.iter().position(|a| a == "--effort").and_then(|i| args.get(i + 1)).cloned();
-    let limit: Option<u32> = args.iter().position(|a| a == "--limit").and_then(|i| args.get(i + 1)).map(|n| n.parse().expect("--limit takes a number"));
-    let mut before = args.iter().position(|a| a == "--before").and_then(|i| args.get(i + 1)).cloned();
-    let requests: Vec<Value> = args.windows(2).filter(|w| w[0] == "--request").map(|w| serde_json::from_str(&w[1]).expect("--request takes JSON")).collect();
-    assert!(send_text.is_none() || thread.is_some(), "--send needs --thread <id>");
-    let secs: u64 = args.iter().position(|a| a == "--secs").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(15);
+    let send_text = args
+        .iter()
+        .position(|a| a == "--send")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+    let thread = args
+        .iter()
+        .position(|a| a == "--thread")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+    let answer = args
+        .iter()
+        .position(|a| a == "--answer")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+    let effort = args
+        .iter()
+        .position(|a| a == "--effort")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+    let limit: Option<u32> = args
+        .iter()
+        .position(|a| a == "--limit")
+        .and_then(|i| args.get(i + 1))
+        .map(|n| n.parse().expect("--limit takes a number"));
+    let mut before = args
+        .iter()
+        .position(|a| a == "--before")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+    let requests: Vec<Value> = args
+        .windows(2)
+        .filter(|w| w[0] == "--request")
+        .map(|w| serde_json::from_str(&w[1]).expect("--request takes JSON"))
+        .collect();
+    assert!(
+        send_text.is_none() || thread.is_some(),
+        "--send needs --thread <id>"
+    );
+    let secs: u64 = args
+        .iter()
+        .position(|a| a == "--secs")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(15);
     let host = param(&url, "host").expect("host=");
     let code = param(&url, "code").expect("code=");
     let fp = param(&url, "fp").expect("fp= (the Mac speaks TLS)");
@@ -83,11 +151,19 @@ async fn main() {
         .with_safe_default_protocol_versions()
         .unwrap()
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(Pinned { fingerprint: fp, provider }))
+        .with_custom_certificate_verifier(Arc::new(Pinned {
+            fingerprint: fp,
+            provider,
+        }))
         .with_no_client_auth();
     let tcp = TcpStream::connect(&host).await.expect("connect");
-    let tls = TlsConnector::from(Arc::new(config)).connect(ServerName::try_from("trek.local").unwrap(), tcp).await.expect("TLS (pinned)");
-    let (mut ws, _) = tokio_tungstenite::client_async(format!("wss://{host}/"), tls).await.expect("websocket");
+    let tls = TlsConnector::from(Arc::new(config))
+        .connect(ServerName::try_from("trek.local").unwrap(), tcp)
+        .await
+        .expect("TLS (pinned)");
+    let (mut ws, _) = tokio_tungstenite::client_async(format!("wss://{host}/"), tls)
+        .await
+        .expect("websocket");
     println!("connected to {host} over pinned TLS");
 
     let send = |v: Value| Message::text(v.to_string());
@@ -103,9 +179,21 @@ async fn main() {
         match v["type"].as_str() {
             Some("snapshot") => {
                 let threads = v["threads"].as_array().cloned().unwrap_or_default();
-                println!("snapshot: {} threads, {} projects, {} agents", threads.len(), v["projects"].as_array().map_or(0, |a| a.len()), v["agents"].as_array().map_or(0, |a| a.len()));
+                println!(
+                    "snapshot: {} threads, {} projects, {} agents",
+                    threads.len(),
+                    v["projects"].as_array().map_or(0, |a| a.len()),
+                    v["agents"].as_array().map_or(0, |a| a.len())
+                );
                 for t in threads.iter().take(12) {
-                    println!("  {} [{}] {} · {} · {}", t["id"].as_str().unwrap_or(""), t["section"].as_str().unwrap_or(""), t["title"].as_str().unwrap_or(""), t["project"]["name"].as_str().unwrap_or(""), t["run_state"].as_str().unwrap_or(""));
+                    println!(
+                        "  {} [{}] {} · {} · {}",
+                        t["id"].as_str().unwrap_or(""),
+                        t["section"].as_str().unwrap_or(""),
+                        t["title"].as_str().unwrap_or(""),
+                        t["project"]["name"].as_str().unwrap_or(""),
+                        t["run_state"].as_str().unwrap_or("")
+                    );
                 }
                 if !asked {
                     asked = true;
@@ -124,25 +212,53 @@ async fn main() {
                     }
                     ws.send(send(sub)).await.unwrap();
                     if let Some(e) = &effort {
-                        ws.send(send(json!({"type": "set_prefs", "id": "5", "thread_id": id, "effort": e}))).await.unwrap();
+                        ws.send(send(
+                            json!({"type": "set_prefs", "id": "5", "thread_id": id, "effort": e}),
+                        ))
+                        .await
+                        .unwrap();
                     }
                     if let Some(text) = &send_text {
-                        ws.send(send(json!({"type": "send", "id": "3", "thread_id": id, "text": text}))).await.unwrap();
+                        ws.send(send(
+                            json!({"type": "send", "id": "3", "thread_id": id, "text": text}),
+                        ))
+                        .await
+                        .unwrap();
                     }
                 }
             }
-            Some("item") if v["item"]["kind"] == "approval" && v["item"]["state"] == "pending" && answer.is_some() => {
-                println!("approval asked: {} {}", v["item"]["title"], v["item"]["detail"]);
+            Some("item")
+                if v["item"]["kind"] == "approval"
+                    && v["item"]["state"] == "pending"
+                    && answer.is_some() =>
+            {
+                println!(
+                    "approval asked: {} {}",
+                    v["item"]["title"], v["item"]["detail"]
+                );
                 let decision = answer.clone().unwrap();
                 let reply = json!({"type": "answer", "id": "4", "thread_id": v["thread_id"], "request_id": v["item"]["request_id"], "response": {"kind": "approval", "decision": decision}});
                 ws.send(send(reply)).await.unwrap();
                 println!("answered: {decision}");
             }
-            _ if v["re"].as_str().is_some_and(|re| re.starts_with('q')) => println!("< {}", serde_json::to_string_pretty(&v).unwrap()),
+            _ if v["re"].as_str().is_some_and(|re| re.starts_with('q')) => {
+                println!("< {}", serde_json::to_string_pretty(&v).unwrap())
+            }
             Some("transcript") => {
                 let items = v["items"].as_array().cloned().unwrap_or_default();
-                let kinds: Vec<&str> = items.iter().map(|i| i["kind"].as_str().unwrap_or("?")).collect();
-                println!("transcript of {}: {} items, seq {}, more: {}, {:?} after asking ({} bytes)", v["thread_id"], items.len(), v["seq"], v["more"].as_bool().unwrap_or(false), asked_at.elapsed(), text.len());
+                let kinds: Vec<&str> = items
+                    .iter()
+                    .map(|i| i["kind"].as_str().unwrap_or("?"))
+                    .collect();
+                println!(
+                    "transcript of {}: {} items, seq {}, more: {}, {:?} after asking ({} bytes)",
+                    v["thread_id"],
+                    items.len(),
+                    v["seq"],
+                    v["more"].as_bool().unwrap_or(false),
+                    asked_at.elapsed(),
+                    text.len()
+                );
                 if items.len() <= 40 {
                     println!("  {}", kinds.join(", "));
                 }
@@ -150,7 +266,10 @@ async fn main() {
                     println!("  changes: {}", short(changes));
                 }
                 if before.as_deref() == Some("first") {
-                    before = items.first().and_then(|i| i["id"].as_str()).map(str::to_string);
+                    before = items
+                        .first()
+                        .and_then(|i| i["id"].as_str())
+                        .map(str::to_string);
                 }
                 if let (Some(b), Some(id)) = (&before, &thread) {
                     asked_at = std::time::Instant::now();
@@ -160,10 +279,21 @@ async fn main() {
             Some("transcript_page") => {
                 let items = v["items"].as_array().cloned().unwrap_or_default();
                 pages += 1;
-                let (first, last) = (items.first().map(|i| i["id"].to_string()), items.last().map(|i| i["id"].to_string()));
-                println!("page {pages}: {} items ({} … {}), more: {}, {:?}", items.len(), first.unwrap_or_default(), last.unwrap_or_default(), v["more"], asked_at.elapsed());
+                let (first, last) = (
+                    items.first().map(|i| i["id"].to_string()),
+                    items.last().map(|i| i["id"].to_string()),
+                );
+                println!(
+                    "page {pages}: {} items ({} … {}), more: {}, {:?}",
+                    items.len(),
+                    first.unwrap_or_default(),
+                    last.unwrap_or_default(),
+                    v["more"],
+                    asked_at.elapsed()
+                );
                 if v["more"] == true
-                    && let (Some(b), Some(id)) = (items.first().and_then(|i| i["id"].as_str()), &thread)
+                    && let (Some(b), Some(id)) =
+                        (items.first().and_then(|i| i["id"].as_str()), &thread)
                 {
                     asked_at = std::time::Instant::now();
                     ws.send(send(json!({"type": "transcript_before", "id": "page", "thread_id": id, "before": b, "limit": limit.unwrap_or(100)}))).await.unwrap();

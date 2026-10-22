@@ -10,19 +10,31 @@ fn value(s: &str) -> Value {
 /// Parse `line` as a client message, re-serialize it and compare with the original JSON.
 fn client_round_trip(line: &str) -> ClientEnvelope {
     let env: ClientEnvelope = serde_json::from_str(line).unwrap_or_else(|e| panic!("{line}: {e}"));
-    assert_eq!(serde_json::to_value(&env).unwrap(), value(line), "client round trip of {line}");
+    assert_eq!(
+        serde_json::to_value(&env).unwrap(),
+        value(line),
+        "client round trip of {line}"
+    );
     env
 }
 
 fn server_round_trip(line: &str) -> ServerEnvelope {
     let env: ServerEnvelope = serde_json::from_str(line).unwrap_or_else(|e| panic!("{line}: {e}"));
-    assert_eq!(serde_json::to_value(&env).unwrap(), value(line), "server round trip of {line}");
+    assert_eq!(
+        serde_json::to_value(&env).unwrap(),
+        value(line),
+        "server round trip of {line}"
+    );
     env
 }
 
 fn item_round_trip(line: &str) -> Item {
     let item: Item = serde_json::from_str(line).unwrap_or_else(|e| panic!("{line}: {e}"));
-    assert_eq!(serde_json::to_value(&item).unwrap(), value(line), "item round trip of {line}");
+    assert_eq!(
+        serde_json::to_value(&item).unwrap(),
+        value(line),
+        "item round trip of {line}"
+    );
     item
 }
 
@@ -45,7 +57,9 @@ fn spec_handshake_messages() {
     let hello = client_round_trip(
         r#"{"type":"hello","id":"1","protocol":1,"device_id":"6F1C…","token":"q3t…","app_version":"0.1.0"}"#,
     );
-    assert!(matches!(hello.msg, ClientMessage::Hello { protocol: 1, ref token, .. } if token == "q3t…"));
+    assert!(
+        matches!(hello.msg, ClientMessage::Hello { protocol: 1, ref token, .. } if token == "q3t…")
+    );
 
     let paired = server_round_trip(
         r#"{"type":"paired","re":"1","protocol":1,"token":"q3t…","host":{"id":"7f3c…","name":"Tobias's MacBook Pro","version":"0.3.2"}}"#,
@@ -75,7 +89,9 @@ const SPEC_SNAPSHOT: &str = r#"{"type":"snapshot",
 #[test]
 fn spec_snapshot() {
     let env = server_round_trip(SPEC_SNAPSHOT);
-    let ServerMessage::Snapshot(snapshot) = env.msg else { panic!("not a snapshot") };
+    let ServerMessage::Snapshot(snapshot) = env.msg else {
+        panic!("not a snapshot")
+    };
     let t = &snapshot.threads[0];
     assert_eq!(t.run_state, RunState::NeedsYou);
     assert_eq!(t.section, Section::Inbox);
@@ -85,7 +101,8 @@ fn spec_snapshot() {
     assert!(snapshot.projects[0].is_repo);
 
     // The thread on its own, as a `thread` upsert.
-    let thread_line = json!({"type": "thread", "thread": value(SPEC_SNAPSHOT)["threads"][0].clone()}).to_string();
+    let thread_line =
+        json!({"type": "thread", "thread": value(SPEC_SNAPSHOT)["threads"][0].clone()}).to_string();
     server_round_trip(&thread_line);
     server_round_trip(r#"{"type":"thread_removed","thread_id":"01J…"}"#);
 }
@@ -95,12 +112,26 @@ fn thread_summary_serializes_like_the_spec() {
     let thread = ThreadSummary {
         id: "01J".into(),
         title: "Fix the flaky auth test".into(),
-        project: ProjectRef { id: "p1".into(), name: "trek-api".into(), hue: 212, monogram: "TA".into(), icon: None },
-        agent: AgentRef { key: "claude-code".into(), name: "Claude Code".into(), logo: None, icon: None },
+        project: ProjectRef {
+            id: "p1".into(),
+            name: "trek-api".into(),
+            hue: 212,
+            monogram: "TA".into(),
+            icon: None,
+        },
+        agent: AgentRef {
+            key: "claude-code".into(),
+            name: "Claude Code".into(),
+            logo: None,
+            icon: None,
+        },
         model: Some("claude-opus-5-5".into()),
         model_label: Some("Opus 5.5".into()),
         run_state: RunState::NeedsYou,
-        needs: Some(Needs { kind: NeedsKind::Approval, text: "Run `cargo test -p auth`".into() }),
+        needs: Some(Needs {
+            kind: NeedsKind::Approval,
+            text: "Run `cargo test -p auth`".into(),
+        }),
         section: Section::Inbox,
         unseen: true,
         pinned: false,
@@ -118,7 +149,10 @@ fn thread_summary_serializes_like_the_spec() {
     };
     let v = serde_json::to_value(&thread).unwrap();
     assert_eq!(v["run_state"], "needs-you");
-    assert_eq!(v["needs"], json!({"kind": "approval", "text": "Run `cargo test -p auth`"}));
+    assert_eq!(
+        v["needs"],
+        json!({"kind": "approval", "text": "Run `cargo test -p auth`"})
+    );
     assert_eq!(v["section"], "inbox");
     assert_eq!(v["working_since"], Value::Null);
     assert_eq!(v["activity"], Value::Null);
@@ -163,15 +197,41 @@ fn thread_summary_serializes_like_the_spec() {
 
 #[test]
 fn spec_transcript_messages() {
-    let sub = client_round_trip(r#"{"type":"subscribe","id":"7","thread_id":"01J…","after_seq":null}"#);
-    assert_eq!(sub.msg, ClientMessage::Subscribe { thread_id: "01J…".into(), after_seq: None, limit: None });
-    let sub: ClientEnvelope = serde_json::from_str(r#"{"type":"subscribe","thread_id":"t","after_seq":5}"#).unwrap();
-    assert_eq!(sub.msg, ClientMessage::Subscribe { thread_id: "t".into(), after_seq: Some(5), limit: None });
-    let sub: ClientEnvelope = serde_json::from_str(r#"{"type":"subscribe","thread_id":"t"}"#).unwrap();
-    assert_eq!(sub.msg, ClientMessage::Subscribe { thread_id: "t".into(), after_seq: None, limit: None });
+    let sub =
+        client_round_trip(r#"{"type":"subscribe","id":"7","thread_id":"01J…","after_seq":null}"#);
+    assert_eq!(
+        sub.msg,
+        ClientMessage::Subscribe {
+            thread_id: "01J…".into(),
+            after_seq: None,
+            limit: None
+        }
+    );
+    let sub: ClientEnvelope =
+        serde_json::from_str(r#"{"type":"subscribe","thread_id":"t","after_seq":5}"#).unwrap();
+    assert_eq!(
+        sub.msg,
+        ClientMessage::Subscribe {
+            thread_id: "t".into(),
+            after_seq: Some(5),
+            limit: None
+        }
+    );
+    let sub: ClientEnvelope =
+        serde_json::from_str(r#"{"type":"subscribe","thread_id":"t"}"#).unwrap();
+    assert_eq!(
+        sub.msg,
+        ClientMessage::Subscribe {
+            thread_id: "t".into(),
+            after_seq: None,
+            limit: None
+        }
+    );
     client_round_trip(r#"{"type":"unsubscribe","thread_id":"01J…"}"#);
 
-    server_round_trip(r#"{"type":"transcript","re":"7","thread_id":"01J…","reset":true,"seq":118,"items":[]}"#);
+    server_round_trip(
+        r#"{"type":"transcript","re":"7","thread_id":"01J…","reset":true,"seq":118,"items":[]}"#,
+    );
     server_round_trip(
         r#"{"type":"transcript","re":"7","thread_id":"01J…","reset":false,"seq":2,"items":[{"id":"a1","seq":1,"at":1791020000000,"kind":"user","text":"hi","images":0}]}"#,
     );
@@ -183,34 +243,108 @@ fn spec_transcript_messages() {
 
 #[test]
 fn long_transcripts_and_turn_actions() {
-    let sub = client_round_trip(r#"{"type":"subscribe","id":"7","thread_id":"t","after_seq":null,"limit":200}"#);
-    assert_eq!(sub.msg, ClientMessage::Subscribe { thread_id: "t".into(), after_seq: None, limit: Some(200) });
-    server_round_trip(r#"{"type":"transcript","re":"7","thread_id":"t","reset":true,"seq":118,"items":[],"more":true}"#);
+    let sub = client_round_trip(
+        r#"{"type":"subscribe","id":"7","thread_id":"t","after_seq":null,"limit":200}"#,
+    );
+    assert_eq!(
+        sub.msg,
+        ClientMessage::Subscribe {
+            thread_id: "t".into(),
+            after_seq: None,
+            limit: Some(200)
+        }
+    );
+    server_round_trip(
+        r#"{"type":"transcript","re":"7","thread_id":"t","reset":true,"seq":118,"items":[],"more":true}"#,
+    );
     // `more` is left out when false, and missing reads as false.
-    let t = server_round_trip(r#"{"type":"transcript","thread_id":"t","reset":true,"seq":1,"items":[]}"#);
-    assert!(matches!(t.msg, ServerMessage::Transcript { more: false, .. }));
+    let t = server_round_trip(
+        r#"{"type":"transcript","thread_id":"t","reset":true,"seq":1,"items":[]}"#,
+    );
+    assert!(matches!(
+        t.msg,
+        ServerMessage::Transcript { more: false, .. }
+    ));
 
-    let before = client_round_trip(r#"{"type":"transcript_before","id":"8","thread_id":"t","before":"i340","limit":200}"#);
-    assert_eq!(before.msg, ClientMessage::TranscriptBefore { thread_id: "t".into(), before: "i340".into(), limit: 200 });
-    assert!(before.msg.is_query(), "a read: it doesn't wait behind actions");
+    let before = client_round_trip(
+        r#"{"type":"transcript_before","id":"8","thread_id":"t","before":"i340","limit":200}"#,
+    );
+    assert_eq!(
+        before.msg,
+        ClientMessage::TranscriptBefore {
+            thread_id: "t".into(),
+            before: "i340".into(),
+            limit: 200
+        }
+    );
+    assert!(
+        before.msg.is_query(),
+        "a read: it doesn't wait behind actions"
+    );
     server_round_trip(
         r#"{"type":"transcript_page","re":"8","thread_id":"t","items":[{"id":"i139","seq":4,"at":null,"kind":"notice","text":"Interrupted"}],"more":true}"#,
     );
-    server_round_trip(r#"{"type":"transcript_page","re":"8","thread_id":"t","items":[],"more":false}"#);
+    server_round_trip(
+        r#"{"type":"transcript_page","re":"8","thread_id":"t","items":[],"more":false}"#,
+    );
 
-    let undo = client_round_trip(r#"{"type":"turn_action","id":"9","thread_id":"t","item_id":"i12","action":"undo","restore_files":true}"#);
-    assert_eq!(undo.msg, ClientMessage::TurnAction(TurnActionRequest { thread_id: "t".into(), item_id: "i12".into(), action: TurnAction::Undo, model: None, restore_files: true }));
-    client_round_trip(r#"{"type":"turn_action","thread_id":"t","item_id":"i12","action":"retry","model":"gpt-6","restore_files":false}"#);
+    let undo = client_round_trip(
+        r#"{"type":"turn_action","id":"9","thread_id":"t","item_id":"i12","action":"undo","restore_files":true}"#,
+    );
+    assert_eq!(
+        undo.msg,
+        ClientMessage::TurnAction(TurnActionRequest {
+            thread_id: "t".into(),
+            item_id: "i12".into(),
+            action: TurnAction::Undo,
+            model: None,
+            restore_files: true
+        })
+    );
+    client_round_trip(
+        r#"{"type":"turn_action","thread_id":"t","item_id":"i12","action":"retry","model":"gpt-6","restore_files":false}"#,
+    );
     // Files are restored unless asked not to.
-    let fork: ClientEnvelope = serde_json::from_str(r#"{"type":"turn_action","thread_id":"t","item_id":"i3","action":"fork"}"#).unwrap();
-    assert!(matches!(fork.msg, ClientMessage::TurnAction(TurnActionRequest { action: TurnAction::Fork, restore_files: true, .. })));
+    let fork: ClientEnvelope = serde_json::from_str(
+        r#"{"type":"turn_action","thread_id":"t","item_id":"i3","action":"fork"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        fork.msg,
+        ClientMessage::TurnAction(TurnActionRequest {
+            action: TurnAction::Fork,
+            restore_files: true,
+            ..
+        })
+    ));
     for action in ["undo", "retry", "fork", "rewind"] {
-        let line = format!(r#"{{"type":"turn_action","thread_id":"t","item_id":"i1","action":"{action}"}}"#);
-        assert_eq!(serde_json::from_str::<ClientEnvelope>(&line).unwrap().msg.kind(), "turn_action");
+        let line = format!(
+            r#"{{"type":"turn_action","thread_id":"t","item_id":"i1","action":"{action}"}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ClientEnvelope>(&line)
+                .unwrap()
+                .msg
+                .kind(),
+            "turn_action"
+        );
     }
-    assert!(serde_json::from_str::<ClientEnvelope>(r#"{"type":"turn_action","thread_id":"t","item_id":"i1","action":"redo"}"#).is_err());
+    assert!(
+        serde_json::from_str::<ClientEnvelope>(
+            r#"{"type":"turn_action","thread_id":"t","item_id":"i1","action":"redo"}"#
+        )
+        .is_err()
+    );
     let ack = server_round_trip(r#"{"type":"ack","re":"9","text":"Fix the parser"}"#);
-    assert_eq!(ack.msg, ServerMessage::Ack { thread_id: None, open: None, text: Some("Fix the parser".into()), project_id: None });
+    assert_eq!(
+        ack.msg,
+        ServerMessage::Ack {
+            thread_id: None,
+            open: None,
+            text: Some("Fix the parser".into()),
+            project_id: None
+        }
+    );
     server_round_trip(r#"{"type":"ack","re":"10","thread_id":"t-fork","text":"Fix the parser"}"#);
 }
 
@@ -233,7 +367,10 @@ const SPEC_ITEMS: &[&str] = &[
 
 #[test]
 fn spec_items_round_trip() {
-    let items: Vec<Item> = SPEC_ITEMS.iter().map(|line| item_round_trip(line)).collect();
+    let items: Vec<Item> = SPEC_ITEMS
+        .iter()
+        .map(|line| item_round_trip(line))
+        .collect();
     let kinds: Vec<&str> = items.iter().map(|i| i.body.kind()).collect();
     assert_eq!(
         kinds,
@@ -254,10 +391,33 @@ fn spec_items_round_trip() {
             "handoff"
         ]
     );
-    assert!(matches!(items[3].body, ItemBody::Tool { tool: ToolKind::Edit, added: Some(12), removed: Some(3), .. }));
-    assert!(matches!(items[4].body, ItemBody::Tool { tool: ToolKind::Command, status: ToolStatus::Running, .. }));
+    assert!(matches!(
+        items[3].body,
+        ItemBody::Tool {
+            tool: ToolKind::Edit,
+            added: Some(12),
+            removed: Some(3),
+            ..
+        }
+    ));
+    assert!(matches!(
+        items[4].body,
+        ItemBody::Tool {
+            tool: ToolKind::Command,
+            status: ToolStatus::Running,
+            ..
+        }
+    ));
     assert_eq!(items[0].at, Some(1_791_020_000_000));
-    let ItemBody::Question { questions, state, answers, .. } = &items[7].body else { panic!() };
+    let ItemBody::Question {
+        questions,
+        state,
+        answers,
+        ..
+    } = &items[7].body
+    else {
+        panic!()
+    };
     assert_eq!(questions[0].options[1].label, "Both");
     assert_eq!(*state, QuestionState::Pending);
     assert_eq!(*answers, None);
@@ -265,7 +425,12 @@ fn spec_items_round_trip() {
 
 #[test]
 fn every_item_state_round_trips() {
-    let mk = |body: ItemBody| Item { id: "x".into(), seq: 3, at: Some(1), body };
+    let mk = |body: ItemBody| Item {
+        id: "x".into(),
+        seq: 3,
+        at: Some(1),
+        body,
+    };
     let mut bodies = Vec::new();
     for state in [
         ApprovalState::Pending,
@@ -274,9 +439,18 @@ fn every_item_state_round_trips() {
         ApprovalState::Denied,
         ApprovalState::Resolved,
     ] {
-        bodies.push(ItemBody::Approval { request_id: "r".into(), title: "Run".into(), detail: "ls".into(), state });
+        bodies.push(ItemBody::Approval {
+            request_id: "r".into(),
+            title: "Run".into(),
+            detail: "ls".into(),
+            state,
+        });
     }
-    for state in [QuestionState::Pending, QuestionState::Answered, QuestionState::Resolved] {
+    for state in [
+        QuestionState::Pending,
+        QuestionState::Answered,
+        QuestionState::Resolved,
+    ] {
         bodies.push(ItemBody::Question {
             request_id: "r".into(),
             questions: vec![Question {
@@ -287,16 +461,39 @@ fn every_item_state_round_trips() {
                 secret: true,
             }],
             state,
-            answers: Some(vec![QA { question: "Q?".into(), answer: "A".into() }]),
+            answers: Some(vec![QA {
+                question: "Q?".into(),
+                answer: "A".into(),
+            }]),
         });
     }
-    for state in [PlanState::Pending, PlanState::Approved, PlanState::Rejected, PlanState::Resolved] {
-        bodies.push(ItemBody::Plan { request_id: "r".into(), markdown: "1.".into(), state });
+    for state in [
+        PlanState::Pending,
+        PlanState::Approved,
+        PlanState::Rejected,
+        PlanState::Resolved,
+    ] {
+        bodies.push(ItemBody::Plan {
+            request_id: "r".into(),
+            markdown: "1.".into(),
+            state,
+        });
     }
-    for status in [ToolStatus::Running, ToolStatus::Done, ToolStatus::Failed, ToolStatus::Denied] {
-        for tool in
-            [ToolKind::Command, ToolKind::Read, ToolKind::Edit, ToolKind::Search, ToolKind::Web, ToolKind::Agent, ToolKind::Other]
-        {
+    for status in [
+        ToolStatus::Running,
+        ToolStatus::Done,
+        ToolStatus::Failed,
+        ToolStatus::Denied,
+    ] {
+        for tool in [
+            ToolKind::Command,
+            ToolKind::Read,
+            ToolKind::Edit,
+            ToolKind::Search,
+            ToolKind::Web,
+            ToolKind::Agent,
+            ToolKind::Other,
+        ] {
             bodies.push(ItemBody::Tool {
                 call_id: "c".into(),
                 tool,
@@ -309,15 +506,28 @@ fn every_item_state_round_trips() {
             });
         }
     }
-    bodies.push(ItemBody::User { text: "u".into(), images: 2, aside: false });
-    bodies.push(ItemBody::Assistant { text: "a".into(), streaming: true });
-    bodies.push(ItemBody::Limit { text: "l".into(), resets_at: None });
+    bodies.push(ItemBody::User {
+        text: "u".into(),
+        images: 2,
+        aside: false,
+    });
+    bodies.push(ItemBody::Assistant {
+        text: "a".into(),
+        streaming: true,
+    });
+    bodies.push(ItemBody::Limit {
+        text: "l".into(),
+        resets_at: None,
+    });
     for body in bodies {
         let item = mk(body);
         let json = serde_json::to_string(&item).unwrap();
         let back: Item = serde_json::from_str(&json).unwrap();
         assert_eq!(back, item, "{json}");
-        let msg = ServerEnvelope::push(ServerMessage::Item { thread_id: "t".into(), item });
+        let msg = ServerEnvelope::push(ServerMessage::Item {
+            thread_id: "t".into(),
+            item,
+        });
         let back: ServerEnvelope = serde_json::from_str(&msg.to_json()).unwrap();
         assert_eq!(back, msg);
     }
@@ -336,14 +546,25 @@ fn every_item_state_round_trips() {
 fn items_tolerate_missing_optional_fields() {
     let item: Item = serde_json::from_str(r#"{"id":"a","seq":1,"kind":"tool","call_id":"c","tool":"read","title":"Read","status":"done","future_field":1}"#).unwrap();
     assert_eq!(item.at, None);
-    assert!(matches!(item.body, ItemBody::Tool { added: None, removed: None, ref output, .. } if output.is_empty()));
-    let item: Item = serde_json::from_str(r#"{"id":"a","seq":1,"kind":"limit","text":"x"}"#).unwrap();
-    assert!(matches!(item.body, ItemBody::Limit { resets_at: None, .. }));
+    assert!(
+        matches!(item.body, ItemBody::Tool { added: None, removed: None, ref output, .. } if output.is_empty())
+    );
+    let item: Item =
+        serde_json::from_str(r#"{"id":"a","seq":1,"kind":"limit","text":"x"}"#).unwrap();
+    assert!(matches!(
+        item.body,
+        ItemBody::Limit {
+            resets_at: None,
+            ..
+        }
+    ));
 }
 
 #[test]
 fn settings_actions_and_photos() {
-    let p = client_round_trip(r#"{"type":"set_prefs","id":"1","thread_id":"t","model":"gpt-6","effort":"high","access":"auto-accept-edits","plan":true}"#);
+    let p = client_round_trip(
+        r#"{"type":"set_prefs","id":"1","thread_id":"t","model":"gpt-6","effort":"high","access":"auto-accept-edits","plan":true}"#,
+    );
     assert_eq!(
         p.msg,
         ClientMessage::SetPrefs(PrefsRequest {
@@ -355,14 +576,42 @@ fn settings_actions_and_photos() {
             plan: Some(true),
         })
     );
-    let a = client_round_trip(r#"{"type":"thread_action","id":"2","thread_id":"t","action":{"kind":"rename","title":"Login limits"}}"#);
-    assert_eq!(a.msg, ClientMessage::ThreadAction(ThreadActionRequest { thread_id: "t".into(), action: ThreadAction::Rename { title: "Login limits".into() } }));
-    let pin: ClientEnvelope = serde_json::from_str(r#"{"type":"thread_action","thread_id":"t","action":{"kind":"pin"}}"#).unwrap();
-    assert!(matches!(pin.msg, ClientMessage::ThreadAction(ThreadActionRequest { action: ThreadAction::Pin, .. })));
+    let a = client_round_trip(
+        r#"{"type":"thread_action","id":"2","thread_id":"t","action":{"kind":"rename","title":"Login limits"}}"#,
+    );
+    assert_eq!(
+        a.msg,
+        ClientMessage::ThreadAction(ThreadActionRequest {
+            thread_id: "t".into(),
+            action: ThreadAction::Rename {
+                title: "Login limits".into()
+            }
+        })
+    );
+    let pin: ClientEnvelope =
+        serde_json::from_str(r#"{"type":"thread_action","thread_id":"t","action":{"kind":"pin"}}"#)
+            .unwrap();
+    assert!(matches!(
+        pin.msg,
+        ClientMessage::ThreadAction(ThreadActionRequest {
+            action: ThreadAction::Pin,
+            ..
+        })
+    ));
     let photo: ClientEnvelope = serde_json::from_str(r#"{"type":"send","thread_id":"t","text":"see","images":[{"mime":"image/png","data":"iVBORw0KGgo="}]}"#).unwrap();
-    let ClientMessage::Send(req) = photo.msg else { panic!() };
+    let ClientMessage::Send(req) = photo.msg else {
+        panic!()
+    };
     assert_eq!(req.images[0].decode().unwrap().1, "png");
-    assert!(ImageUpload { mime: "image/png".into(), data: "aGVsbG8=".into() }.decode().is_err(), "not a picture");
+    assert!(
+        ImageUpload {
+            mime: "image/png".into(),
+            data: "aGVsbG8=".into()
+        }
+        .decode()
+        .is_err(),
+        "not a picture"
+    );
     // Older Macs' rows and snapshots, without the new fields, still read.
     let s: Snapshot = serde_json::from_str(r#"{"threads":[],"projects":[],"agents":[{"key":"codex","name":"Codex","models":[{"id":"gpt-6","label":"GPT-6"}]}]}"#).unwrap();
     assert!(!s.full_access && s.agents[0].models[0].efforts.is_empty());
@@ -370,7 +619,9 @@ fn settings_actions_and_photos() {
 
 #[test]
 fn spec_actions() {
-    let send = client_round_trip(r#"{"type":"send","id":"9","thread_id":"01J…","text":"Also add a regression test","mode":"steer"}"#);
+    let send = client_round_trip(
+        r#"{"type":"send","id":"9","thread_id":"01J…","text":"Also add a regression test","mode":"steer"}"#,
+    );
     assert_eq!(
         send.msg,
         ClientMessage::Send(SendRequest {
@@ -380,30 +631,63 @@ fn spec_actions() {
             images: vec![],
         })
     );
-    let queued: ClientEnvelope = serde_json::from_str(r#"{"type":"send","thread_id":"t","text":"x","mode":"queue"}"#).unwrap();
-    assert!(matches!(queued.msg, ClientMessage::Send(SendRequest { mode: Some(SendMode::Queue), .. })));
-    let bare: ClientEnvelope = serde_json::from_str(r#"{"type":"send","thread_id":"t","text":"x"}"#).unwrap();
-    assert!(matches!(bare.msg, ClientMessage::Send(SendRequest { mode: None, .. })));
+    let queued: ClientEnvelope =
+        serde_json::from_str(r#"{"type":"send","thread_id":"t","text":"x","mode":"queue"}"#)
+            .unwrap();
+    assert!(matches!(
+        queued.msg,
+        ClientMessage::Send(SendRequest {
+            mode: Some(SendMode::Queue),
+            ..
+        })
+    ));
+    let bare: ClientEnvelope =
+        serde_json::from_str(r#"{"type":"send","thread_id":"t","text":"x"}"#).unwrap();
+    assert!(matches!(
+        bare.msg,
+        ClientMessage::Send(SendRequest { mode: None, .. })
+    ));
 
     let new = client_round_trip(
         r#"{"type":"new_thread","id":"10","project_id":"p1","agent":"codex","model":"gpt-6","text":"Add rate limiting to /login","worktree":true}"#,
     );
-    assert!(matches!(new.msg, ClientMessage::NewThread(NewThreadRequest { worktree: true, .. })));
-    let new: ClientEnvelope =
-        serde_json::from_str(r#"{"type":"new_thread","project_id":"p1","agent":"codex","model":null,"text":"x"}"#).unwrap();
-    assert!(matches!(new.msg, ClientMessage::NewThread(NewThreadRequest { model: None, worktree: false, .. })));
+    assert!(matches!(
+        new.msg,
+        ClientMessage::NewThread(NewThreadRequest { worktree: true, .. })
+    ));
+    let new: ClientEnvelope = serde_json::from_str(
+        r#"{"type":"new_thread","project_id":"p1","agent":"codex","model":null,"text":"x"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        new.msg,
+        ClientMessage::NewThread(NewThreadRequest {
+            model: None,
+            worktree: false,
+            ..
+        })
+    ));
 
     let a = client_round_trip(
         r#"{"type":"answer","id":"11","thread_id":"01J…","request_id":"r1","response":{"kind":"approval","decision":"allow"}}"#,
     );
     assert!(matches!(
         a.msg,
-        ClientMessage::Answer(AnswerRequest { response: AnswerResponse::Approval { decision: Decision::Allow }, .. })
+        ClientMessage::Answer(AnswerRequest {
+            response: AnswerResponse::Approval {
+                decision: Decision::Allow
+            },
+            ..
+        })
     ));
     let q = client_round_trip(
         r#"{"type":"answer","id":"12","thread_id":"01J…","request_id":"r2","response":{"kind":"questions","answers":[{"question":"Fix only the test, or the session code too?","answer":"Both"}]}}"#,
     );
-    let ClientMessage::Answer(AnswerRequest { response: AnswerResponse::Questions { answers }, .. }) = q.msg else {
+    let ClientMessage::Answer(AnswerRequest {
+        response: AnswerResponse::Questions { answers },
+        ..
+    }) = q.msg
+    else {
         panic!()
     };
     assert_eq!(answers[0].answer, "Both");
@@ -412,39 +696,83 @@ fn spec_actions() {
     );
     assert!(matches!(
         p.msg,
-        ClientMessage::Answer(AnswerRequest { response: AnswerResponse::Plan { approve: false, feedback: Some(_) }, .. })
+        ClientMessage::Answer(AnswerRequest {
+            response: AnswerResponse::Plan {
+                approve: false,
+                feedback: Some(_)
+            },
+            ..
+        })
     ));
     for decision in ["allow", "allow_for_session", "deny"] {
         let d: Decision = serde_json::from_value(json!(decision)).unwrap();
         assert_eq!(serde_json::to_value(d).unwrap(), decision);
     }
     let plan: AnswerResponse = serde_json::from_str(r#"{"kind":"plan","approve":true}"#).unwrap();
-    assert_eq!(plan, AnswerResponse::Plan { approve: true, feedback: None });
+    assert_eq!(
+        plan,
+        AnswerResponse::Plan {
+            approve: true,
+            feedback: None
+        }
+    );
 
     client_round_trip(r#"{"type":"interrupt","id":"14","thread_id":"01J…"}"#);
     client_round_trip(r#"{"type":"mark_seen","thread_id":"01J…"}"#);
     let ping = client_round_trip(r#"{"type":"ping","id":"15"}"#);
     assert_eq!(ping.msg, ClientMessage::Ping);
-    let ping: ClientEnvelope = serde_json::from_str(r#"{"type":"ping","id":"15","extra":{"a":1}}"#).unwrap();
+    let ping: ClientEnvelope =
+        serde_json::from_str(r#"{"type":"ping","id":"15","extra":{"a":1}}"#).unwrap();
     assert_eq!(ping.msg, ClientMessage::Ping);
 
     server_round_trip(r#"{"type":"ack","re":"9"}"#);
     let ack = server_round_trip(r#"{"type":"ack","re":"10","thread_id":"01J…"}"#);
-    assert_eq!(ack.msg, ServerMessage::Ack { thread_id: Some("01J…".into()), open: None, text: None, project_id: None });
+    assert_eq!(
+        ack.msg,
+        ServerMessage::Ack {
+            thread_id: Some("01J…".into()),
+            open: None,
+            text: None,
+            project_id: None
+        }
+    );
     server_round_trip(r#"{"type":"pong","re":"15"}"#);
-    let err = server_round_trip(r#"{"type":"error","re":"9","code":"not_found","message":"No thread 01J…"}"#);
-    assert_eq!(err.msg, ServerMessage::Error { code: ErrorCode::NotFound, message: "No thread 01J…".into() });
+    let err = server_round_trip(
+        r#"{"type":"error","re":"9","code":"not_found","message":"No thread 01J…"}"#,
+    );
+    assert_eq!(
+        err.msg,
+        ServerMessage::Error {
+            code: ErrorCode::NotFound,
+            message: "No thread 01J…".into()
+        }
+    );
 }
 
 #[test]
 fn exact_server_json() {
-    assert_eq!(ServerEnvelope::reply(Some("15".into()), ServerMessage::Pong).to_json(), r#"{"type":"pong","re":"15"}"#);
     assert_eq!(
-        ServerEnvelope::reply(Some("9".into()), ServerMessage::Ack { thread_id: None, open: None, text: None, project_id: None }).to_json(),
+        ServerEnvelope::reply(Some("15".into()), ServerMessage::Pong).to_json(),
+        r#"{"type":"pong","re":"15"}"#
+    );
+    assert_eq!(
+        ServerEnvelope::reply(
+            Some("9".into()),
+            ServerMessage::Ack {
+                thread_id: None,
+                open: None,
+                text: None,
+                project_id: None
+            }
+        )
+        .to_json(),
         r#"{"type":"ack","re":"9"}"#
     );
     assert_eq!(
-        ServerEnvelope::push(ServerMessage::ThreadRemoved { thread_id: "t".into() }).to_json(),
+        ServerEnvelope::push(ServerMessage::ThreadRemoved {
+            thread_id: "t".into()
+        })
+        .to_json(),
         r#"{"type":"thread_removed","thread_id":"t"}"#
     );
 }
@@ -519,7 +847,10 @@ fn project_hues() {
     assert_eq!(project_hue("anything", Some(212)), 212);
     assert_eq!(project_hue("anything", Some(400)), 40);
     // djb2-xor over the name's bytes, mod 360 (the desktop's derivation).
-    let expected = ("trek-api".bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32) % 360) as u16;
+    let expected = ("trek-api"
+        .bytes()
+        .fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32)
+        % 360) as u16;
     assert_eq!(project_hue("trek-api", None), expected);
     assert_eq!(project_hue("", None), (5381 % 360) as u16);
     for name in ["a", "trek", "some long project name"] {
@@ -553,13 +884,34 @@ fn thread_details_ride_on_the_row_and_older_rows_still_read() {
         "git":{"changed":5,"ahead":1,"behind":2,"default_branch":"main"}}"#;
     let t: ThreadSummary = serde_json::from_str(row).unwrap();
     assert_eq!(serde_json::to_value(&t).unwrap(), value(row));
-    assert_eq!(t.context, Some(ContextUse { used: 171_000, window: 200_000, percent: 85 }));
-    assert_eq!((t.sub_agents[1].state, t.sub_agents[1].since), (SubAgentState::NeedsYou, None));
+    assert_eq!(
+        t.context,
+        Some(ContextUse {
+            used: 171_000,
+            window: 200_000,
+            percent: 85
+        })
+    );
+    assert_eq!(
+        (t.sub_agents[1].state, t.sub_agents[1].since),
+        (SubAgentState::NeedsYou, None)
+    );
     assert_eq!(t.cost.unwrap().billing, Some(Billing::Plan));
     // Without them: nothing extra on the wire.
-    let plain = ThreadSummary { id: "t".into(), ..Default::default() };
+    let plain = ThreadSummary {
+        id: "t".into(),
+        ..Default::default()
+    };
     let v = serde_json::to_value(&plain).unwrap();
-    for key in ["effort_label", "context", "cost", "sub_agents", "background", "base", "git"] {
+    for key in [
+        "effort_label",
+        "context",
+        "cost",
+        "sub_agents",
+        "background",
+        "base",
+        "git",
+    ] {
         assert!(v.get(key).is_none(), "{key} should be skipped when empty");
     }
     assert!(v["agent"].get("logo").is_none());
@@ -570,19 +922,57 @@ fn links_between_threads() {
     let item = item_round_trip(
         r#"{"id":"i7","seq":12,"at":null,"kind":"thread_link","link":"started","thread_id":"t2","title":"Fix the cache","agent":{"key":"codex","name":"Codex","logo":"codex"},"state":"needs_approval","open":true}"#,
     );
-    let ItemBody::ThreadLink { link, thread_id, state, open, .. } = &item.body else { panic!("{:?}", item.body) };
-    assert_eq!((*link, thread_id.as_str(), *state, *open), (ThreadLinkKind::Started, "t2", Some(LinkedThreadState::NeedsApproval), true));
+    let ItemBody::ThreadLink {
+        link,
+        thread_id,
+        state,
+        open,
+        ..
+    } = &item.body
+    else {
+        panic!("{:?}", item.body)
+    };
+    assert_eq!(
+        (*link, thread_id.as_str(), *state, *open),
+        (
+            ThreadLinkKind::Started,
+            "t2",
+            Some(LinkedThreadState::NeedsApproval),
+            true
+        )
+    );
     assert_eq!(item.body.kind(), "thread_link");
     // Where a thread came from: no state, and one archived since doesn't open.
-    let item = item_round_trip(r#"{"id":"i0","seq":1,"at":null,"kind":"thread_link","link":"continued_from","thread_id":"t1","title":"Old work","open":false}"#);
-    assert!(matches!(item.body, ItemBody::ThreadLink { link: ThreadLinkKind::ContinuedFrom, state: None, agent: None, open: false, .. }));
+    let item = item_round_trip(
+        r#"{"id":"i0","seq":1,"at":null,"kind":"thread_link","link":"continued_from","thread_id":"t1","title":"Old work","open":false}"#,
+    );
+    assert!(matches!(
+        item.body,
+        ItemBody::ThreadLink {
+            link: ThreadLinkKind::ContinuedFrom,
+            state: None,
+            agent: None,
+            open: false,
+            ..
+        }
+    ));
     let item: Item = serde_json::from_str(r#"{"id":"i0","seq":1,"kind":"thread_link","link":"started_by","thread_id":"t1","title":"x"}"#).unwrap();
-    assert!(matches!(item.body, ItemBody::ThreadLink { open: true, .. }), "open unless it says otherwise");
+    assert!(
+        matches!(item.body, ItemBody::ThreadLink { open: true, .. }),
+        "open unless it says otherwise"
+    );
 
     // Rows say where an agent-started thread came from, and leave it out when it didn't.
-    let row = ThreadSummary { id: "t2".into(), started_by: Some("t1".into()), ..Default::default() };
+    let row = ThreadSummary {
+        id: "t2".into(),
+        started_by: Some("t1".into()),
+        ..Default::default()
+    };
     let v = serde_json::to_value(&row).unwrap();
-    assert_eq!((&v["started_by"], v.get("continued_from")), (&json!("t1"), None));
+    assert_eq!(
+        (&v["started_by"], v.get("continued_from")),
+        (&json!("t1"), None)
+    );
     let back: ThreadSummary = serde_json::from_value(v).unwrap();
     assert_eq!(back, row);
 }
@@ -596,10 +986,23 @@ fn notes_pictures() {
         let env = client_round_trip(line);
         assert_eq!(env.msg.kind(), value(line)["type"].as_str().unwrap());
     }
-    assert!(client_round_trip(r#"{"type":"note_asset","note_id":"n","path":"attachments/a.png"}"#).msg.is_query());
-    assert!(!client_round_trip(r#"{"type":"add_note_image","note_id":"n","data":""}"#).msg.is_query(), "it writes");
-    server_round_trip(r#"{"type":"note_asset","re":"1","note_id":"0192abc","path":"attachments/3f2a.png","mime":"image/jpeg","data":"/9j/","width":960,"height":540}"#);
-    server_round_trip(r#"{"type":"note_image","re":"2","note_id":"0192abc","path":"attachments/3f2a.jpg","markdown":"![Whiteboard](attachments/3f2a.jpg)"}"#);
+    assert!(
+        client_round_trip(r#"{"type":"note_asset","note_id":"n","path":"attachments/a.png"}"#)
+            .msg
+            .is_query()
+    );
+    assert!(
+        !client_round_trip(r#"{"type":"add_note_image","note_id":"n","data":""}"#)
+            .msg
+            .is_query(),
+        "it writes"
+    );
+    server_round_trip(
+        r#"{"type":"note_asset","re":"1","note_id":"0192abc","path":"attachments/3f2a.png","mime":"image/jpeg","data":"/9j/","width":960,"height":540}"#,
+    );
+    server_round_trip(
+        r#"{"type":"note_image","re":"2","note_id":"0192abc","path":"attachments/3f2a.jpg","markdown":"![Whiteboard](attachments/3f2a.jpg)"}"#,
+    );
 }
 
 #[test]
@@ -608,11 +1011,26 @@ fn notes_files_in_pieces() {
     let env = client_round_trip(line);
     assert_eq!(env.msg.kind(), "note_file");
     assert!(env.msg.is_query());
-    let ClientMessage::NoteFile(req) = serde_json::from_str::<ClientEnvelope>(r#"{"type":"note_file","path":"attachments/a.mp4"}"#).unwrap().msg else { panic!() };
-    assert_eq!((req.offset, req.length), (0, None), "from the start, a whole piece");
+    let ClientMessage::NoteFile(req) = serde_json::from_str::<ClientEnvelope>(
+        r#"{"type":"note_file","path":"attachments/a.mp4"}"#,
+    )
+    .unwrap()
+    .msg
+    else {
+        panic!()
+    };
+    assert_eq!(
+        (req.offset, req.length),
+        (0, None),
+        "from the start, a whole piece"
+    );
     let reply = r#"{"type":"note_file_chunk","re":"3","path":"attachments/9c1e.pdf","offset":1048576,"total":2500000,"bytes_b64":"JVBERg==","mime":"application/pdf"}"#;
     server_round_trip(reply);
-    let ServerMessage::NoteFileChunk(c) = serde_json::from_str::<ServerEnvelope>(reply).unwrap().msg else { panic!() };
+    let ServerMessage::NoteFileChunk(c) =
+        serde_json::from_str::<ServerEnvelope>(reply).unwrap().msg
+    else {
+        panic!()
+    };
     assert_eq!(c.bytes().unwrap(), b"%PDF");
 }
 
@@ -625,11 +1043,26 @@ fn a_turn_s_changed_files() {
             {"path":"docs/img/docker.png","status":"deleted","added":0,"removed":0,"binary":true},
             {"path":"src/new.rs","status":"added","added":12,"removed":0}],"added":47,"removed":56}"#,
     );
-    let ItemBody::Changes { files, added, removed } = item.body else { panic!("{:?}", item.body) };
+    let ItemBody::Changes {
+        files,
+        added,
+        removed,
+    } = item.body
+    else {
+        panic!("{:?}", item.body)
+    };
     assert_eq!((files.len(), added, removed), (4, 47, 56));
     assert_eq!(files[1].from.as_deref(), Some("docs/getting-started.md"));
     assert!(files[2].binary && files[2].status == FileStatus::Deleted);
-    assert_eq!(ItemBody::Changes { files: vec![], added: 0, removed: 0 }.kind(), "changes");
+    assert_eq!(
+        ItemBody::Changes {
+            files: vec![],
+            added: 0,
+            removed: 0
+        }
+        .kind(),
+        "changes"
+    );
 }
 
 #[test]
@@ -660,11 +1093,31 @@ fn the_newer_requests() {
     }
     // Defaults: today's recap; a removal that loses nothing.
     let b: ClientEnvelope = serde_json::from_str(r#"{"type":"basecamp"}"#).unwrap();
-    assert_eq!(b.msg, ClientMessage::Basecamp { range: BasecampRange::Today });
-    let r: ClientEnvelope = serde_json::from_str(r#"{"type":"worktree_remove","thread_id":"t"}"#).unwrap();
-    assert_eq!(r.msg, ClientMessage::WorktreeRemove(WorktreeRemoveRequest { thread_id: "t".into(), delete_branch: false, force: false }));
-    let d: ClientEnvelope = serde_json::from_str(r#"{"type":"git_diff","thread_id":"t","path":"a"}"#).unwrap();
-    assert_eq!(d.msg, ClientMessage::GitDiff(GitDiffRequest { target: GitTarget::thread("t"), path: "a".into() }));
+    assert_eq!(
+        b.msg,
+        ClientMessage::Basecamp {
+            range: BasecampRange::Today
+        }
+    );
+    let r: ClientEnvelope =
+        serde_json::from_str(r#"{"type":"worktree_remove","thread_id":"t"}"#).unwrap();
+    assert_eq!(
+        r.msg,
+        ClientMessage::WorktreeRemove(WorktreeRemoveRequest {
+            thread_id: "t".into(),
+            delete_branch: false,
+            force: false
+        })
+    );
+    let d: ClientEnvelope =
+        serde_json::from_str(r#"{"type":"git_diff","thread_id":"t","path":"a"}"#).unwrap();
+    assert_eq!(
+        d.msg,
+        ClientMessage::GitDiff(GitDiffRequest {
+            target: GitTarget::thread("t"),
+            path: "a".into()
+        })
+    );
     assert!(d.msg.is_query() && !r.msg.is_query());
 }
 
@@ -708,12 +1161,16 @@ fn a_basecamp_recap() {
         "tiles":[{"kind":"tokens","label":"You used","figure":"182K tokens","note":"≈ $1.28 at API prices today","sparkline":[0.0,0.5,1.0]},
                  {"kind":"plan_left","label":"Left on Claude Max","figure":"36%","note":"Weekly limit · resets in 4d","agent":{"key":"claude-code","name":"Claude Code"},"percent":36.0,"resets_at":1791030000000}]}"#;
     let env = server_round_trip(line);
-    let ServerMessage::Basecamp(b) = env.msg else { panic!() };
+    let ServerMessage::Basecamp(b) = env.msg else {
+        panic!()
+    };
     assert_eq!(b.profile.unwrap().summit, Some(1));
     assert_eq!(b.tiles[1].kind, TileKind::PlanLeft);
     assert!(!b.empty);
     // An older Mac's: none of `basecamp_v2`.
-    assert!(b.totals.is_none() && b.chart.is_none() && b.projects.is_empty() && !b.review[0].needs_you);
+    assert!(
+        b.totals.is_none() && b.chart.is_none() && b.projects.is_empty() && !b.review[0].needs_you
+    );
 }
 
 #[test]
@@ -729,12 +1186,27 @@ fn basecamp_as_the_mac_draws_it_now() {
                     {"label":"No project","threads":1,"turns":4,"tokens":32000,"tokens_label":"32K","cost":"—","failed":0}],
         "models":[{"label":"GPT-6","agent":{"key":"codex","name":"Codex"},"threads":4,"turns":20,"tokens":182000,"tokens_label":"182K","cost":"$1.28","failed":1}]}"#;
     let env = server_round_trip(line);
-    let ServerMessage::Basecamp(b) = env.msg else { panic!() };
-    assert_eq!((b.review[0].needs_you, b.review[1].needs_you), (true, false));
+    let ServerMessage::Basecamp(b) = env.msg else {
+        panic!()
+    };
+    assert_eq!(
+        (b.review[0].needs_you, b.review[1].needs_you),
+        (true, false)
+    );
     assert_eq!(b.totals.unwrap().cost, "$1.28");
     let chart = b.chart.unwrap();
-    assert_eq!((chart.step.as_str(), chart.bars[1].turns, chart.ticks[0].bar), ("hour", 4, 0));
-    assert_eq!((b.projects.len(), b.projects[1].project.is_none(), b.projects[1].failed), (2, true, 0));
+    assert_eq!(
+        (chart.step.as_str(), chart.bars[1].turns, chart.ticks[0].bar),
+        ("hour", 4, 0)
+    );
+    assert_eq!(
+        (
+            b.projects.len(),
+            b.projects[1].project.is_none(),
+            b.projects[1].failed
+        ),
+        (2, true, 0)
+    );
     assert_eq!(b.models[0].agent.as_ref().unwrap().key, "codex");
     // Old fields the Mac now leaves empty still read.
     assert!(b.narrative.is_empty() && b.tiles.is_empty());
@@ -742,16 +1214,32 @@ fn basecamp_as_the_mac_draws_it_now() {
 
 #[test]
 fn ntfy_links_for_a_topic() {
-    assert_eq!(ntfy_links("https://ntfy.sh", "trek-abc"), (Some("https://ntfy.sh/trek-abc".into()), Some("ntfy://ntfy.sh/trek-abc".into())));
-    assert_eq!(ntfy_links("http://pi.local:8080/", "t"), (Some("http://pi.local:8080/t".into()), Some("ntfy://pi.local:8080/t?secure=false".into())));
+    assert_eq!(
+        ntfy_links("https://ntfy.sh", "trek-abc"),
+        (
+            Some("https://ntfy.sh/trek-abc".into()),
+            Some("ntfy://ntfy.sh/trek-abc".into())
+        )
+    );
+    assert_eq!(
+        ntfy_links("http://pi.local:8080/", "t"),
+        (
+            Some("http://pi.local:8080/t".into()),
+            Some("ntfy://pi.local:8080/t?secure=false".into())
+        )
+    );
     assert_eq!(ntfy_links("https://ntfy.sh", ""), (None, None));
 }
 
 #[test]
 fn features_sub_agents_the_thread_menu_and_search() {
     // The Mac's list of what it serves; an older Mac's welcome (none) still reads.
-    let welcome = server_round_trip(r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents"]}"#);
-    assert!(matches!(welcome.msg, ServerMessage::Welcome { ref features, .. } if features == &["search", "sub_agents"]));
+    let welcome = server_round_trip(
+        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents"]}"#,
+    );
+    assert!(
+        matches!(welcome.msg, ServerMessage::Welcome { ref features, .. } if features == &["search", "sub_agents"])
+    );
     let old: ServerEnvelope = serde_json::from_str(r#"{"type":"paired","re":"1","protocol":1,"token":"t","host":{"id":"h","name":"Mac","version":"0.3.2"}}"#).unwrap();
     assert!(matches!(old.msg, ServerMessage::Paired { ref features, .. } if features.is_empty()));
 
@@ -769,8 +1257,19 @@ fn features_sub_agents_the_thread_menu_and_search() {
     ] {
         client_round_trip(line);
     }
-    let snooze = client_round_trip(r#"{"type":"thread_action","thread_id":"t","action":{"kind":"snooze","preset":"next_week"}}"#);
-    assert!(matches!(snooze.msg, ClientMessage::ThreadAction(ThreadActionRequest { action: ThreadAction::Snooze { until: None, preset: Some(SnoozePreset::NextWeek) }, .. })));
+    let snooze = client_round_trip(
+        r#"{"type":"thread_action","thread_id":"t","action":{"kind":"snooze","preset":"next_week"}}"#,
+    );
+    assert!(matches!(
+        snooze.msg,
+        ClientMessage::ThreadAction(ThreadActionRequest {
+            action: ThreadAction::Snooze {
+                until: None,
+                preset: Some(SnoozePreset::NextWeek)
+            },
+            ..
+        })
+    ));
     let search = client_round_trip(r#"{"type":"search","query":"race"}"#);
     assert!(search.msg.is_query());
     assert_eq!(search.msg.kind(), "search");
@@ -779,28 +1278,55 @@ fn features_sub_agents_the_thread_menu_and_search() {
     let row = server_round_trip(
         r#"{"type":"unlisted","thread":{"id":"kid","title":"Benchmark it","project":{"id":"p","name":"trek","hue":24,"monogram":"TR"},"agent":{"key":"codex","name":"Codex"},"model":null,"model_label":null,"run_state":"needs-you","needs":{"kind":"approval","text":"Run cargo bench"},"section":"inbox","unseen":false,"pinned":false,"branch":null,"worktree":false,"activity":null,"working_since":null,"updated_at":5,"additions":0,"deletions":0,"parent_id":"t"}}"#,
     );
-    assert!(matches!(row.msg, ServerMessage::Unlisted { ref thread } if thread.parent_id.as_deref() == Some("t")));
+    assert!(
+        matches!(row.msg, ServerMessage::Unlisted { ref thread } if thread.parent_id.as_deref() == Some("t"))
+    );
     let parent = ThreadSummary {
         id: "t".into(),
-        needs: Some(Needs { kind: NeedsKind::Approval, text: "Sub-agent needs you".into() }),
+        needs: Some(Needs {
+            kind: NeedsKind::Approval,
+            text: "Sub-agent needs you".into(),
+        }),
         needs_thread: Some("kid".into()),
         snoozed_until: Some(9),
-        sub_agents: vec![SubAgent { agent: AgentRef::new("codex", "Codex", None), model: Some("Sol".into()), title: "Benchmark it".into(), state: SubAgentState::NeedsYou, since: None, thread_id: Some("kid".into()) }],
+        sub_agents: vec![SubAgent {
+            agent: AgentRef::new("codex", "Codex", None),
+            model: Some("Sol".into()),
+            title: "Benchmark it".into(),
+            state: SubAgentState::NeedsYou,
+            since: None,
+            thread_id: Some("kid".into()),
+        }],
         ..Default::default()
     };
     let v = serde_json::to_value(&parent).unwrap();
-    assert_eq!((&v["needs_thread"], &v["snoozed_until"], &v["sub_agents"][0]["thread_id"]), (&json!("kid"), &json!(9), &json!("kid")));
-    assert_eq!(v.get("parent_id"), None, "left out when there's nothing to say");
+    assert_eq!(
+        (
+            &v["needs_thread"],
+            &v["snoozed_until"],
+            &v["sub_agents"][0]["thread_id"]
+        ),
+        (&json!("kid"), &json!(9), &json!("kid"))
+    );
+    assert_eq!(
+        v.get("parent_id"),
+        None,
+        "left out when there's nothing to say"
+    );
     let back: ThreadSummary = serde_json::from_value(v).unwrap();
     assert_eq!(back, parent);
     // An older Mac's snapshot (no unlisted rows) still reads.
-    let snapshot: ServerEnvelope = serde_json::from_str(r#"{"type":"snapshot","threads":[],"projects":[],"agents":[]}"#).unwrap();
+    let snapshot: ServerEnvelope =
+        serde_json::from_str(r#"{"type":"snapshot","threads":[],"projects":[],"agents":[]}"#)
+            .unwrap();
     assert!(matches!(snapshot.msg, ServerMessage::Snapshot(ref s) if s.unlisted.is_empty()));
 
     let results = server_round_trip(
         r#"{"type":"search_results","re":"8","query":"race","results":[{"thread":{"id":"t","title":"Fix the race","project":{"id":"p","name":"trek","hue":24,"monogram":"TR"},"agent":{"key":"codex","name":"Codex"},"model":null,"model_label":null,"run_state":"idle","needs":null,"section":"settled","unseen":false,"pinned":false,"branch":null,"worktree":false,"activity":null,"working_since":null,"updated_at":5,"additions":0,"deletions":0},"snippet":"two refreshes race","ranges":[[14,18]]}]}"#,
     );
-    assert!(matches!(results.msg, ServerMessage::SearchResults(ref r) if r.results[0].ranges == [[14, 18]]));
+    assert!(
+        matches!(results.msg, ServerMessage::SearchResults(ref r) if r.results[0].ranges == [[14, 18]])
+    );
 }
 
 #[test]
@@ -819,8 +1345,20 @@ fn parity_requests_and_replies() {
         let env = client_round_trip(line);
         assert_eq!(env.msg.kind(), value(line)["type"].as_str().unwrap());
     }
-    let reads: Vec<bool> = requests.iter().map(|l| serde_json::from_str::<ClientEnvelope>(l).unwrap().msg.is_query()).collect();
-    assert_eq!(reads, [false, false, false, true, true, false, true, true], "only reads may overtake");
+    let reads: Vec<bool> = requests
+        .iter()
+        .map(|l| {
+            serde_json::from_str::<ClientEnvelope>(l)
+                .unwrap()
+                .msg
+                .is_query()
+        })
+        .collect();
+    assert_eq!(
+        reads,
+        [false, false, false, true, true, false, true, true],
+        "only reads may overtake"
+    );
 
     let replies = [
         r#"{"type":"attachment","re":"4","thread_id":"t","item_id":"i12","index":0,"mime":"image/jpeg","data":"/9j/","width":480,"height":160}"#,
@@ -837,7 +1375,9 @@ fn parity_requests_and_replies() {
         server_round_trip(line);
     }
     let welcome: ServerEnvelope = serde_json::from_str(replies[5]).unwrap();
-    let ServerMessage::Welcome { features, .. } = welcome.msg else { panic!() };
+    let ServerMessage::Welcome { features, .. } = welcome.msg else {
+        panic!()
+    };
     assert_eq!(features, feature::ALL, "a Mac that does them all says so");
 }
 
@@ -852,20 +1392,46 @@ fn parity_fields_ride_on_rows_and_older_ones_still_read() {
     let t: ThreadSummary = serde_json::from_str(row).unwrap();
     assert_eq!(t.project.icon.as_deref(), Some("9c1e"));
     assert_eq!(t.agent.icon.as_deref(), Some("0f3a"));
-    assert_eq!(t.cost.as_ref().unwrap().cached.as_deref(), Some("92% cached"));
+    assert_eq!(
+        t.cost.as_ref().unwrap().cached.as_deref(),
+        Some("92% cached")
+    );
     assert_eq!((t.queued[1].images, t.queued[2].reset), (2, true));
-    assert_eq!(t.background_tasks[1].kind, BackgroundKind::Other, "a kind this phone doesn't know");
+    assert_eq!(
+        t.background_tasks[1].kind,
+        BackgroundKind::Other,
+        "a kind this phone doesn't know"
+    );
 
     // Nothing new on the wire when there's nothing to say: older phones read what they did.
-    let plain = serde_json::to_value(ThreadSummary { id: "t".into(), ..Default::default() }).unwrap();
+    let plain = serde_json::to_value(ThreadSummary {
+        id: "t".into(),
+        ..Default::default()
+    })
+    .unwrap();
     for key in ["queued", "background_tasks"] {
-        assert!(plain.get(key).is_none(), "{key} should be skipped when empty");
+        assert!(
+            plain.get(key).is_none(),
+            "{key} should be skipped when empty"
+        );
     }
     assert!(plain["project"].get("icon").is_none() && plain["agent"].get("icon").is_none());
-    let user = item_round_trip(r#"{"id":"i3","seq":4,"at":null,"kind":"user","text":"/model sonnet","images":0,"aside":true}"#);
+    let user = item_round_trip(
+        r#"{"id":"i3","seq":4,"at":null,"kind":"user","text":"/model sonnet","images":0,"aside":true}"#,
+    );
     assert!(matches!(user.body, ItemBody::User { aside: true, .. }));
-    let old = item_round_trip(r#"{"id":"i2","seq":3,"at":null,"kind":"user","text":"hi","images":0}"#);
-    assert!(matches!(old.body, ItemBody::User { aside: false, .. }), "an older Mac's message is a prompt");
-    let welcome: ServerEnvelope = serde_json::from_str(r#"{"type":"welcome","protocol":1,"host":{"id":"h","name":"Mac","version":"0.3"}}"#).unwrap();
-    assert!(matches!(welcome.msg, ServerMessage::Welcome { ref features, .. } if features.is_empty()), "an older Mac lists nothing");
+    let old =
+        item_round_trip(r#"{"id":"i2","seq":3,"at":null,"kind":"user","text":"hi","images":0}"#);
+    assert!(
+        matches!(old.body, ItemBody::User { aside: false, .. }),
+        "an older Mac's message is a prompt"
+    );
+    let welcome: ServerEnvelope = serde_json::from_str(
+        r#"{"type":"welcome","protocol":1,"host":{"id":"h","name":"Mac","version":"0.3"}}"#,
+    )
+    .unwrap();
+    assert!(
+        matches!(welcome.msg, ServerMessage::Welcome { ref features, .. } if features.is_empty()),
+        "an older Mac lists nothing"
+    );
 }

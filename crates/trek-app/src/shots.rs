@@ -67,7 +67,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
-    let Some(dir) = std::env::var_os("TREK_SHOT_DIR").map(PathBuf::from) else { return };
+    let Some(dir) = std::env::var_os("TREK_SHOT_DIR").map(PathBuf::from) else {
+        return;
+    };
     #[cfg(target_os = "macos")]
     if let Some(mtm) = objc2::MainThreadMarker::new() {
         objc2_app_kit::NSApplication::sharedApplication(mtm)
@@ -80,21 +82,35 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     cx.spawn(async move |cx| {
         let mut recording: Option<Recording> = None;
         loop {
-            cx.background_executor().timer(Duration::from_millis(300)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(300))
+                .await;
             let cmd = dir.join("cmd");
-            let Ok(text) = std::fs::read_to_string(&cmd) else { continue };
+            let Ok(text) = std::fs::read_to_string(&cmd) else {
+                continue;
+            };
             let _ = std::fs::remove_file(&cmd);
-            let Some(workspace) = workspace.upgrade() else { break };
+            let Some(workspace) = workspace.upgrade() else {
+                break;
+            };
             let mut errors = Vec::new();
-            for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+            for line in text
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            {
                 let (verb, arg) = line.split_once(' ').unwrap_or((line, ""));
                 let result = match verb {
                     "wait" => wait(&workspace, arg, cx).await,
                     "shot" => shot(&workspace, &dir, arg, cx).await,
                     "browser" => browser(&workspace, &dir, arg, cx).await,
                     "artifacts" => artifacts(&workspace, &dir, cx).await,
-                    "editor" if arg.starts_with("snap ") => editor_snap(&workspace, &dir, arg["snap ".len()..].trim(), cx).await,
-                    "hittest" | "realclick" | "realmove" | "realleave" => hittest(&workspace, &dir, verb, arg, cx).await,
+                    "editor" if arg.starts_with("snap ") => {
+                        editor_snap(&workspace, &dir, arg["snap ".len()..].trim(), cx).await
+                    }
+                    "hittest" | "realclick" | "realmove" | "realleave" => {
+                        hittest(&workspace, &dir, verb, arg, cx).await
+                    }
                     "legacy-pointer" => cx.update(|cx| match arg {
                         "on" | "off" => {
                             crate::chrome::LEGACY_POINTER.store(arg == "on", Ordering::Relaxed);
@@ -113,7 +129,14 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
                     errors.push(format!("err {line}: {e:#}"));
                 }
             }
-            let _ = std::fs::write(dir.join("done"), if errors.is_empty() { "ok".to_string() } else { errors.join("\n") });
+            let _ = std::fs::write(
+                dir.join("done"),
+                if errors.is_empty() {
+                    "ok".to_string()
+                } else {
+                    errors.join("\n")
+                },
+            );
         }
     })
     .detach();
@@ -130,30 +153,55 @@ struct Recording {
 /// `permission`/`question`/`plan` until such a request is showing (for cards on film).
 async fn wait(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
     let mut it = arg.split_whitespace();
-    let Some(kind) = it.next() else { anyhow::bail!("wait needs <ms> or idle|permission|question|plan [cap ms]") };
+    let Some(kind) = it.next() else {
+        anyhow::bail!("wait needs <ms> or idle|permission|question|plan [cap ms]")
+    };
     if let Ok(ms) = kind.parse::<u64>() {
-        cx.background_executor().timer(Duration::from_millis(ms)).await;
+        cx.background_executor()
+            .timer(Duration::from_millis(ms))
+            .await;
         return Ok(());
     }
     if !matches!(kind, "idle" | "permission" | "question" | "plan") {
-        anyhow::bail!("wait: unknown condition {kind:?} (idle|permission|question|plan or milliseconds)");
+        anyhow::bail!(
+            "wait: unknown condition {kind:?} (idle|permission|question|plan or milliseconds)"
+        );
     }
     let cap = match it.next() {
-        Some(v) => v.parse::<u64>().map_err(|_| anyhow::anyhow!("wait {kind}: bad cap {v:?}"))?,
+        Some(v) => v
+            .parse::<u64>()
+            .map_err(|_| anyhow::anyhow!("wait {kind}: bad cap {v:?}"))?,
         None => 60_000,
     };
     let deadline = Instant::now() + Duration::from_millis(cap);
     // A turn needs a beat to register as started after `send`; without it `wait idle` could pass
     // before the session had a chance to begin.
-    cx.background_executor().timer(Duration::from_millis(250)).await;
+    cx.background_executor()
+        .timer(Duration::from_millis(250))
+        .await;
     loop {
         let hit = cx.update(|cx| {
             let ws = ws.read(cx);
             match kind {
                 "idle" => ws.live.values().all(|l| l.turn_started.is_none()),
-                "permission" => ws.live.values().any(|l| l.permissions.iter().any(|p| p.prompt.is_none())),
-                "question" => ws.live.values().any(|l| l.permissions.iter().any(|p| p.prompt.as_ref().is_some_and(|p| matches!(p, trek_agents::Prompt::Questions(_))))),
-                _ => ws.live.values().any(|l| l.permissions.iter().any(|p| p.prompt.as_ref().is_some_and(|p| matches!(p, trek_agents::Prompt::Plan(_))))),
+                "permission" => ws
+                    .live
+                    .values()
+                    .any(|l| l.permissions.iter().any(|p| p.prompt.is_none())),
+                "question" => ws.live.values().any(|l| {
+                    l.permissions.iter().any(|p| {
+                        p.prompt
+                            .as_ref()
+                            .is_some_and(|p| matches!(p, trek_agents::Prompt::Questions(_)))
+                    })
+                }),
+                _ => ws.live.values().any(|l| {
+                    l.permissions.iter().any(|p| {
+                        p.prompt
+                            .as_ref()
+                            .is_some_and(|p| matches!(p, trek_agents::Prompt::Plan(_)))
+                    })
+                }),
             }
         });
         if hit {
@@ -162,7 +210,9 @@ async fn wait(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
         if Instant::now() >= deadline {
             anyhow::bail!("wait {kind}: still not met after {cap} ms");
         }
-        cx.background_executor().timer(Duration::from_millis(150)).await;
+        cx.background_executor()
+            .timer(Duration::from_millis(150))
+            .await;
     }
 }
 
@@ -175,7 +225,14 @@ static POINTER_SCRIPTED: AtomicBool = AtomicBool::new(false);
 /// Basecamp bar's tooltip that way), and a capture shouldn't depend on where the mouse is.
 fn park_pointer(window: &mut Window, cx: &mut App) {
     if !POINTER_SCRIPTED.load(Ordering::Relaxed) {
-        window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position: point(px(-100.), px(-100.)), pressed_button: None, modifiers: Default::default() }), cx);
+        window.dispatch_event(
+            PlatformInput::MouseMove(MouseMoveEvent {
+                position: point(px(-100.), px(-100.)),
+                pressed_button: None,
+                modifiers: Default::default(),
+            }),
+            cx,
+        );
     }
 }
 
@@ -183,26 +240,40 @@ fn park_pointer(window: &mut Window, cx: &mut App) {
 /// going (the composer's branch chip): a process spawn costs a hundred milliseconds on Windows,
 /// so they can land after those few frames.
 async fn settle(ws: &Entity<Workspace>, cx: &mut AsyncApp) {
-    cx.background_executor().timer(Duration::from_millis(400)).await;
+    cx.background_executor()
+        .timer(Duration::from_millis(400))
+        .await;
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut waited = false;
     while cx.update(|cx| ws.read(cx).git_inflight) > 0 && Instant::now() < deadline {
-        cx.background_executor().timer(Duration::from_millis(50)).await;
+        cx.background_executor()
+            .timer(Duration::from_millis(50))
+            .await;
         waited = true;
     }
     if waited {
-        cx.background_executor().timer(Duration::from_millis(200)).await;
+        cx.background_executor()
+            .timer(Duration::from_millis(200))
+            .await;
     }
 }
 
-async fn shot(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
+async fn shot(
+    ws: &Entity<Workspace>,
+    dir: &Path,
+    arg: &str,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<()> {
     if arg.is_empty() {
         anyhow::bail!("shot needs a name");
     }
     settle(ws, cx).await;
     let path = dir.join(format!("{arg}.png"));
     let image = cx.update(|cx| -> anyhow::Result<image::RgbaImage> {
-        let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        let main = ws
+            .read(cx)
+            .main_window
+            .ok_or_else(|| anyhow::anyhow!("no main window"))?;
         main.update(cx, |_, window, cx| {
             park_pointer(window, cx);
             window.render_to_image()
@@ -230,67 +301,127 @@ async fn shot(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) 
 /// release a mouse delivers (to this window's own handle, never the desktop) — but only where the
 /// answer is `HTCLIENT`: elsewhere a real press is a window drag, and it says so.
 #[cfg(windows)]
-async fn hittest(ws: &Entity<Workspace>, dir: &Path, verb: &str, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
+async fn hittest(
+    ws: &Entity<Workspace>,
+    dir: &Path,
+    verb: &str,
+    arg: &str,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<()> {
     use gpui_kit::test::TestWindowExt as _;
     use std::io::Write as _;
     let mut words: Vec<&str> = arg.split_whitespace().collect();
     // `HTCAPTION` expects the handle (and the press to go through to its move); `HTCAPTION:swallowed`
     // the handle with the window taking the press for something of its own (a dropdown's).
-    let expected = words.last().filter(|w| w.starts_with("HT")).map(|w| w.to_string());
+    let expected = words
+        .last()
+        .filter(|w| w.starts_with("HT"))
+        .map(|w| w.to_string());
     if expected.is_some() {
         words.pop();
     }
-    let (expect, swallowed) = match expected.as_deref().map(|e| e.split_once(':').unwrap_or((e, ""))) {
+    let (expect, swallowed) = match expected
+        .as_deref()
+        .map(|e| e.split_once(':').unwrap_or((e, "")))
+    {
         Some((code, flag)) => (Some(code.to_string()), flag == "swallowed"),
         None => (None, false),
     };
-    let main = cx.update(|cx| ws.read(cx).main_window).ok_or_else(|| anyhow::anyhow!("no main window"))?;
+    let main = cx
+        .update(|cx| ws.read(cx).main_window)
+        .ok_or_else(|| anyhow::anyhow!("no main window"))?;
     if verb == "realleave" {
-        let hwnd = main.update(cx, |_, window, _| crate::winsys::hwnd_of(window))?.ok_or_else(|| anyhow::anyhow!("realleave: no window handle"))?;
+        let hwnd = main
+            .update(cx, |_, window, _| crate::winsys::hwnd_of(window))?
+            .ok_or_else(|| anyhow::anyhow!("realleave: no window handle"))?;
         // The real cursor isn't where a script can put it: the window is told where it is.
         crate::chrome::SCRIPTED_CURSOR_AWAY.store(true, Ordering::Relaxed);
         crate::winsys::mouse_leave(hwnd);
-        writeln!(std::fs::OpenOptions::new().create(true).append(true).open(dir.join("hittest.txt"))?, "realleave: Windows told the window the pointer left it")?;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("hittest.txt"))?,
+            "realleave: Windows told the window the pointer left it"
+        )?;
         cx.update(|cx| cx.refresh_windows());
         return Ok(());
     }
     // The window is only asked inside an update; the question itself is sent outside of one, as the
     // window's procedure updates it to answer.
-    let (hwnd, at, x, y) = main.update(cx, |_, window, cx| -> anyhow::Result<(isize, Point<Pixels>, i32, i32)> {
-        POINTER_SCRIPTED.store(true, Ordering::Relaxed);
-        window.render_frame(cx);
-        let at = match words.as_slice() {
-            [x, y] if x.parse::<f32>().is_ok() && y.parse::<f32>().is_ok() => {
-                let (x, y): (f32, f32) = (x.parse()?, y.parse()?);
-                point(px(if x < 0. { f32::from(window.viewport_size().width) + x } else { x }), px(y))
+    let (hwnd, at, x, y) = main.update(
+        cx,
+        |_, window, cx| -> anyhow::Result<(isize, Point<Pixels>, i32, i32)> {
+            POINTER_SCRIPTED.store(true, Ordering::Relaxed);
+            window.render_frame(cx);
+            let at = match words.as_slice() {
+                [x, y] if x.parse::<f32>().is_ok() && y.parse::<f32>().is_ok() => {
+                    let (x, y): (f32, f32) = (x.parse()?, y.parse()?);
+                    point(
+                        px(if x < 0. {
+                            f32::from(window.viewport_size().width) + x
+                        } else {
+                            x
+                        }),
+                        px(y),
+                    )
+                }
+                [id] => {
+                    // `card-*` is the one element whose id starts so (a row's id has its thread's in it).
+                    let named = |s: &gpui_kit::test::ElementSnapshot| match (
+                        id.strip_suffix('*'),
+                        s.path().last(),
+                    ) {
+                        (Some(prefix), Some(last)) => id_text(last).starts_with(prefix),
+                        (None, last) => last == Some(&element_id(id)),
+                        _ => false,
+                    };
+                    let found: Vec<_> = gpui_kit::base::test_support::snapshots(window)
+                        .into_iter()
+                        .filter(|s| named(s) && s.visible())
+                        .collect();
+                    let [one] = found.as_slice() else {
+                        anyhow::bail!("{verb}: {} elements on screen are {id}", found.len())
+                    };
+                    let b = one.bounds();
+                    b.origin + point(b.size.width / 2., b.size.height / 2.)
+                }
+                _ => anyhow::bail!(
+                    "{verb} <element id>|<x> <y>{}",
+                    if verb == "hittest" {
+                        " [HTCLIENT|HTCAPTION|…]"
+                    } else {
+                        ""
+                    }
+                ),
+            };
+            // The pointer is there first, as a real one is before it asks: what the window answers comes from what it last saw under the pointer.
+            if verb != "realmove" {
+                window.simulate_mouse_move(at, cx);
             }
-            [id] => {
-                // `card-*` is the one element whose id starts so (a row's id has its thread's in it).
-                let named = |s: &gpui_kit::test::ElementSnapshot| match (id.strip_suffix('*'), s.path().last()) {
-                    (Some(prefix), Some(last)) => id_text(last).starts_with(prefix),
-                    (None, last) => last == Some(&element_id(id)),
-                    _ => false,
-                };
-                let found: Vec<_> = gpui_kit::base::test_support::snapshots(window).into_iter().filter(|s| named(s) && s.visible()).collect();
-                let [one] = found.as_slice() else { anyhow::bail!("{verb}: {} elements on screen are {id}", found.len()) };
-                let b = one.bounds();
-                b.origin + point(b.size.width / 2., b.size.height / 2.)
-            }
-            _ => anyhow::bail!("{verb} <element id>|<x> <y>{}", if verb == "hittest" { " [HTCLIENT|HTCAPTION|…]" } else { "" }),
-        };
-        // The pointer is there first, as a real one is before it asks: what the window answers comes from what it last saw under the pointer.
-        if verb != "realmove" {
-            window.simulate_mouse_move(at, cx);
-        }
-        let hwnd = crate::winsys::hwnd_of(window).ok_or_else(|| anyhow::anyhow!("{verb}: no window handle"))?;
-        let scale = window.scale_factor();
-        Ok((hwnd, at, (f32::from(at.x) * scale).round() as i32, (f32::from(at.y) * scale).round() as i32))
-    })??;
+            let hwnd = crate::winsys::hwnd_of(window)
+                .ok_or_else(|| anyhow::anyhow!("{verb}: no window handle"))?;
+            let scale = window.scale_factor();
+            Ok((
+                hwnd,
+                at,
+                (f32::from(at.x) * scale).round() as i32,
+                (f32::from(at.y) * scale).round() as i32,
+            ))
+        },
+    )??;
     if verb == "realmove" {
         // Only the move: the pointer is left there, in the window.
         crate::chrome::SCRIPTED_CURSOR_AWAY.store(false, Ordering::Relaxed);
         crate::winsys::client_move(hwnd, x, y);
-        writeln!(std::fs::OpenOptions::new().create(true).append(true).open(dir.join("hittest.txt"))?, "realmove {} @ {x},{y}", words.join(" "))?;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("hittest.txt"))?,
+            "realmove {} @ {x},{y}",
+            words.join(" ")
+        )?;
         cx.update(|cx| cx.refresh_windows());
         return Ok(());
     }
@@ -300,78 +431,181 @@ async fn hittest(ws: &Entity<Workspace>, dir: &Path, verb: &str, arg: &str, cx: 
     // maximises) only if nothing in the window swallows it first: Windows hands the press to the
     // window before its own handling, and a window that answers it takes it for its own.
     let through = if answer == "HTCAPTION" {
-        let press = |click_count| MouseDownEvent { button: MouseButton::Left, position: at, modifiers: Modifiers::default(), click_count, first_mouse: false };
+        let press = |click_count| MouseDownEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: Modifiers::default(),
+            click_count,
+            first_mouse: false,
+        };
         let passed = main.update(cx, |_, window, cx| {
-            let first = window.dispatch_event(PlatformInput::MouseDown(press(1)), cx).propagate;
-            let second = window.dispatch_event(PlatformInput::MouseDown(press(2)), cx).propagate;
+            let first = window
+                .dispatch_event(PlatformInput::MouseDown(press(1)), cx)
+                .propagate;
+            let second = window
+                .dispatch_event(PlatformInput::MouseDown(press(2)), cx)
+                .propagate;
             // Let go off the window: where it was pressed, the release would be a click on whatever
             // is there (in the beta's title bar, a button).
-            window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: point(px(-100.), px(-100.)), modifiers: Modifiers::default(), click_count: 2 }), cx);
+            window.dispatch_event(
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: point(px(-100.), px(-100.)),
+                    modifiers: Modifiers::default(),
+                    click_count: 2,
+                }),
+                cx,
+            );
             first && second
         })?;
         Some(passed)
     } else {
         None
     };
-    let mut log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("hittest.txt"))?;
-    writeln!(log, "{verb} {} @ {x},{y} -> {answer}{}", words.join(" "), through.map(|p| if p { " (a press goes through to the window's move and maximize)" } else { " (a press is swallowed in the window)" }).unwrap_or_default())?;
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("hittest.txt"))?;
+    writeln!(
+        log,
+        "{verb} {} @ {x},{y} -> {answer}{}",
+        words.join(" "),
+        through
+            .map(|p| if p {
+                " (a press goes through to the window's move and maximize)"
+            } else {
+                " (a press is swallowed in the window)"
+            })
+            .unwrap_or_default()
+    )?;
     if let Some(expect) = expect.filter(|e| e != answer) {
-        anyhow::bail!("{verb} {}: the window answers {answer}, not {expect}", words.join(" "));
+        anyhow::bail!(
+            "{verb} {}: the window answers {answer}, not {expect}",
+            words.join(" ")
+        );
     }
-    anyhow::ensure!(swallowed || through != Some(false), "{verb} {}: the window's handle, but something in the window swallows a press there", words.join(" "));
-    anyhow::ensure!(!swallowed || through == Some(false), "{verb} {}: expected the press swallowed, and it goes through", words.join(" "));
+    anyhow::ensure!(
+        swallowed || through != Some(false),
+        "{verb} {}: the window's handle, but something in the window swallows a press there",
+        words.join(" ")
+    );
+    anyhow::ensure!(
+        !swallowed || through == Some(false),
+        "{verb} {}: expected the press swallowed, and it goes through",
+        words.join(" ")
+    );
     if verb == "realclick" {
-        anyhow::ensure!(answer == "HTCLIENT", "realclick {}: the window answers {answer}, so a real press there is a window drag, not a click", words.join(" "));
+        anyhow::ensure!(
+            answer == "HTCLIENT",
+            "realclick {}: the window answers {answer}, so a real press there is a window drag, not a click",
+            words.join(" ")
+        );
         // A press on a window behind first asks whether to activate it and let the press through.
         let activation = crate::winsys::mouse_activate(hwnd, hit);
         writeln!(log, "  a press with the window behind: {activation}")?;
-        anyhow::ensure!(activation == "MA_ACTIVATE", "realclick {}: a first click on the window behind answers {activation}, so it would be lost or the window left behind", words.join(" "));
+        anyhow::ensure!(
+            activation == "MA_ACTIVATE",
+            "realclick {}: a first click on the window behind answers {activation}, so it would be lost or the window left behind",
+            words.join(" ")
+        );
         crate::chrome::SCRIPTED_CURSOR_AWAY.store(false, Ordering::Relaxed);
         let [moved, pressed, released] = crate::winsys::client_click(hwnd, x, y);
-        writeln!(log, "  the window took {} ms to take the move, {} ms the press, {} ms the release", moved.as_millis(), pressed.as_millis(), released.as_millis())?;
+        writeln!(
+            log,
+            "  the window took {} ms to take the move, {} ms the press, {} ms the release",
+            moved.as_millis(),
+            pressed.as_millis(),
+            released.as_millis()
+        )?;
         cx.update(|cx| cx.refresh_windows());
     }
     Ok(())
 }
 
 #[cfg(not(windows))]
-async fn hittest(_: &Entity<Workspace>, _: &Path, verb: &str, _: &str, _: &mut AsyncApp) -> anyhow::Result<()> {
+async fn hittest(
+    _: &Entity<Workspace>,
+    _: &Path,
+    verb: &str,
+    _: &str,
+    _: &mut AsyncApp,
+) -> anyhow::Result<()> {
     anyhow::bail!("{verb}: Windows only (macOS has no WM_NCHITTEST)")
 }
 
 /// `editor snap <name>`: the editor's preview in front (a PDF, a video), its web view as WebView2
 /// draws it on Windows, or cropped out of a capture of the window on a Mac (Screen Recording
 /// needed), to `<name>.png` (a native view: `shot` doesn't show it).
-async fn editor_snap(ws: &Entity<Workspace>, dir: &Path, name: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
+async fn editor_snap(
+    ws: &Entity<Workspace>,
+    dir: &Path,
+    name: &str,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<()> {
     anyhow::ensure!(!name.is_empty(), "editor snap needs a name");
     #[cfg(windows)]
     {
-        let main = cx.update(|cx| ws.read(cx).main_window).ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        let main = cx
+            .update(|cx| ws.read(cx).main_window)
+            .ok_or_else(|| anyhow::anyhow!("no main window"))?;
         let png = main.update(cx, |root, _, cx| {
-            let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
+            let view = root
+                .downcast::<gpui_kit::component::Root>()
+                .ok()
+                .map(|r| r.read(cx).view().clone());
             let trek = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok())?;
-            let web = trek.read(cx).ide.read(cx).active_preview()?.read(cx).web_view()?;
+            let web = trek
+                .read(cx)
+                .ide
+                .read(cx)
+                .active_preview()?
+                .read(cx)
+                .web_view()?;
             Some(crate::panels::browser::capture_png(web.read(cx).raw()))
         })?;
-        let png = png.ok_or_else(|| anyhow::anyhow!("editor snap: no web view in front (open a PDF or a video)"))?;
-        let bytes = png.recv().await.map_err(|_| anyhow::anyhow!("editor snap: the view closed"))?.map_err(|e| anyhow::anyhow!("editor snap: {e}"))?;
+        let png = png.ok_or_else(|| {
+            anyhow::anyhow!("editor snap: no web view in front (open a PDF or a video)")
+        })?;
+        let bytes = png
+            .recv()
+            .await
+            .map_err(|_| anyhow::anyhow!("editor snap: the view closed"))?
+            .map_err(|e| anyhow::anyhow!("editor snap: {e}"))?;
         std::fs::write(dir.join(format!("{name}.png")), bytes)?;
         Ok(())
     }
     #[cfg(not(windows))]
     {
-        let main = cx.update(|cx| ws.read(cx).main_window).ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        let main = cx
+            .update(|cx| ws.read(cx).main_window)
+            .ok_or_else(|| anyhow::anyhow!("no main window"))?;
         // A beat for the last command's layout to reach the native view.
-        cx.background_executor().timer(Duration::from_millis(400)).await;
+        cx.background_executor()
+            .timer(Duration::from_millis(400))
+            .await;
         let capture = main.update(cx, |root, window, cx| {
-            let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
+            let view = root
+                .downcast::<gpui_kit::component::Root>()
+                .ok()
+                .map(|r| r.read(cx).view().clone());
             let trek = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok())?;
-            let web = trek.read(cx).ide.read(cx).active_preview()?.read(cx).web_view()?;
+            let web = trek
+                .read(cx)
+                .ide
+                .read(cx)
+                .active_preview()?
+                .read(cx)
+                .web_view()?;
             crate::panels::browser::view_capture(web.read(cx), window)
         })?;
-        let capture = capture.ok_or_else(|| anyhow::anyhow!("editor snap: no web view in front (open a PDF or a video)"))?;
+        let capture = capture.ok_or_else(|| {
+            anyhow::anyhow!("editor snap: no web view in front (open a PDF or a video)")
+        })?;
         let dest = dir.join(format!("{name}.png"));
-        cx.background_executor().spawn(async move { capture(&dest) }).await.map_err(|e| anyhow::anyhow!("editor snap: {e}"))
+        cx.background_executor()
+            .spawn(async move { capture(&dest) })
+            .await
+            .map_err(|e| anyhow::anyhow!("editor snap: {e}"))
     }
 }
 
@@ -381,8 +615,12 @@ async fn editor_snap(ws: &Entity<Workspace>, dir: &Path, name: &str, cx: &mut As
 /// are native, so `shot` doesn't show them).
 async fn artifacts(ws: &Entity<Workspace>, dir: &Path, cx: &mut AsyncApp) -> anyhow::Result<()> {
     // A beat for the last command's layout to reach the native views.
-    cx.background_executor().timer(Duration::from_millis(400)).await;
-    let main = cx.update(|cx| ws.read(cx).main_window).ok_or_else(|| anyhow::anyhow!("no main window"))?;
+    cx.background_executor()
+        .timer(Duration::from_millis(400))
+        .await;
+    let main = cx
+        .update(|cx| ws.read(cx).main_window)
+        .ok_or_else(|| anyhow::anyhow!("no main window"))?;
     let state = main.update(cx, |_, window, cx| {
         let rect = |b: Bounds<Pixels>| serde_json::json!({ "x": f32::from(b.origin.x), "y": f32::from(b.origin.y), "w": f32::from(b.size.width), "h": f32::from(b.size.height) });
         let cards: Vec<serde_json::Value> = crate::artifact::placements(window, cx)
@@ -404,32 +642,58 @@ async fn artifacts(ws: &Entity<Workspace>, dir: &Path, cx: &mut AsyncApp) -> any
             .collect();
         serde_json::json!({ "window": rect(window.bounds()), "scale": window.scale_factor(), "artifacts": cards })
     })?;
-    std::fs::write(dir.join("artifacts.json"), serde_json::to_string_pretty(&state)?)?;
+    std::fs::write(
+        dir.join("artifacts.json"),
+        serde_json::to_string_pretty(&state)?,
+    )?;
     Ok(())
 }
 
-async fn browser(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
+async fn browser(
+    ws: &Entity<Workspace>,
+    dir: &Path,
+    arg: &str,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<()> {
     let (cmd, rest) = arg.split_once(' ').unwrap_or((arg, ""));
-    let main = cx.update(|cx| ws.read(cx).main_window).ok_or_else(|| anyhow::anyhow!("no main window"))?;
+    let main = cx
+        .update(|cx| ws.read(cx).main_window)
+        .ok_or_else(|| anyhow::anyhow!("no main window"))?;
     let panel = main.update(cx, |root, _, cx| {
-        let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
-        view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok()).and_then(|trek| trek.read(cx).right_panel.read(cx).browser())
+        let view = root
+            .downcast::<gpui_kit::component::Root>()
+            .ok()
+            .map(|r| r.read(cx).view().clone());
+        view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok())
+            .and_then(|trek| trek.read(cx).right_panel.read(cx).browser())
     })?;
-    let panel = panel.ok_or_else(|| anyhow::anyhow!("browser: the Browser tool isn't open (tools browser)"))?;
+    let panel = panel
+        .ok_or_else(|| anyhow::anyhow!("browser: the Browser tool isn't open (tools browser)"))?;
     match cmd {
         "state" => {
             // A beat for the last command's layout to reach the native view.
-            cx.background_executor().timer(Duration::from_millis(400)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(400))
+                .await;
             let state = main.update(cx, |_, window, cx| panel.read(cx).shots_state(window, cx))?;
-            std::fs::write(dir.join("browser.json"), serde_json::to_string_pretty(&state)?)?;
+            std::fs::write(
+                dir.join("browser.json"),
+                serde_json::to_string_pretty(&state)?,
+            )?;
             Ok(())
         }
         "snap" => {
             anyhow::ensure!(!rest.is_empty(), "browser snap needs a name");
             #[cfg(windows)]
             {
-                let png = cx.update(|cx| panel.read(cx).shots_capture(cx)).ok_or_else(|| anyhow::anyhow!("browser snap: no page"))?;
-                let bytes = png.recv().await.map_err(|_| anyhow::anyhow!("browser snap: the page closed"))?.map_err(|e| anyhow::anyhow!("browser snap: {e}"))?;
+                let png = cx
+                    .update(|cx| panel.read(cx).shots_capture(cx))
+                    .ok_or_else(|| anyhow::anyhow!("browser snap: no page"))?;
+                let bytes = png
+                    .recv()
+                    .await
+                    .map_err(|_| anyhow::anyhow!("browser snap: the page closed"))?
+                    .map_err(|e| anyhow::anyhow!("browser snap: {e}"))?;
                 std::fs::write(dir.join(format!("{rest}.png")), bytes)?;
                 Ok(())
             }
@@ -444,7 +708,13 @@ async fn browser(ws: &Entity<Workspace>, dir: &Path, arg: &str, cx: &mut AsyncAp
     }
 }
 
-async fn record(ws: &Entity<Workspace>, dir: &Path, arg: &str, slot: &mut Option<Recording>, cx: &mut AsyncApp) -> anyhow::Result<()> {
+async fn record(
+    ws: &Entity<Workspace>,
+    dir: &Path,
+    arg: &str,
+    slot: &mut Option<Recording>,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<()> {
     let mut it = arg.split_whitespace();
     match it.next() {
         Some("wait") => match slot.take() {
@@ -466,7 +736,9 @@ async fn record(ws: &Entity<Workspace>, dir: &Path, arg: &str, slot: &mut Option
         },
         Some(name) => {
             if slot.is_some() {
-                anyhow::bail!("record {name}: already recording (record wait or record stop first)");
+                anyhow::bail!(
+                    "record {name}: already recording (record wait or record stop first)"
+                );
             }
             let ms = it
                 .next()
@@ -475,11 +747,23 @@ async fn record(ws: &Entity<Workspace>, dir: &Path, arg: &str, slot: &mut Option
                 .map_err(|_| anyhow::anyhow!("record {name}: bad duration"))?
                 .ok_or_else(|| anyhow::anyhow!("record {name}: needs <ms>"))?;
             let fps = match it.next() {
-                Some(v) => v.parse::<u32>().map_err(|_| anyhow::anyhow!("record {name}: bad fps {v:?}"))?,
+                Some(v) => v
+                    .parse::<u32>()
+                    .map_err(|_| anyhow::anyhow!("record {name}: bad fps {v:?}"))?,
                 None => 15,
             };
-            anyhow::ensure!(fps > 0 && fps <= 60, "record {name}: fps {fps} out of range 1–60");
-            *slot = Some(start_recording(ws.clone(), dir.to_path_buf(), name.to_string(), ms, fps, cx));
+            anyhow::ensure!(
+                fps > 0 && fps <= 60,
+                "record {name}: fps {fps} out of range 1–60"
+            );
+            *slot = Some(start_recording(
+                ws.clone(),
+                dir.to_path_buf(),
+                name.to_string(),
+                ms,
+                fps,
+                cx,
+            ));
             Ok(())
         }
         None => anyhow::bail!("record needs <name> <ms> [fps] | stop | wait"),
@@ -491,7 +775,14 @@ async fn record(ws: &Entity<Workspace>, dir: &Path, arg: &str, slot: &mut Option
 /// duration, so a frame that took long still plays for as long as it was on screen — dropped
 /// frames don't speed the clip up. Runs beside the command loop: the `send`/`route`/`wait` lines
 /// after `record` are what gets filmed.
-fn start_recording(ws: Entity<Workspace>, dir: PathBuf, name: String, ms: u64, fps: u32, cx: &mut AsyncApp) -> Recording {
+fn start_recording(
+    ws: Entity<Workspace>,
+    dir: PathBuf,
+    name: String,
+    ms: u64,
+    fps: u32,
+    cx: &mut AsyncApp,
+) -> Recording {
     let frames_dir = dir.join(format!("{name}.frames"));
     let concat_path = dir.join(format!("{name}.ffconcat"));
     let stop = Arc::new(AtomicBool::new(false));
@@ -504,7 +795,10 @@ fn start_recording(ws: Entity<Workspace>, dir: PathBuf, name: String, ms: u64, f
         let mut index: u32 = 0;
         while started.elapsed() < Duration::from_millis(ms) && !flag.load(Ordering::Relaxed) {
             let image = cx.update(|cx| -> anyhow::Result<image::RgbaImage> {
-                let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
+                let main = ws
+                    .read(cx)
+                    .main_window
+                    .ok_or_else(|| anyhow::anyhow!("no main window"))?;
                 main.update(cx, |_, window, cx| {
                     park_pointer(window, cx);
                     window.render_to_image()
@@ -513,11 +807,15 @@ fn start_recording(ws: Entity<Workspace>, dir: PathBuf, name: String, ms: u64, f
             times.push(started.elapsed().as_secs_f64());
             let path = frames_dir.join(format!("f{index:05}.png"));
             index += 1;
-            cx.background_executor().spawn(async move { save(image, &path) }).await?;
+            cx.background_executor()
+                .spawn(async move { save(image, &path) })
+                .await?;
             let spent = started.elapsed().as_secs_f64() - times.last().copied().unwrap_or(0.);
             let left = interval.as_secs_f64() - spent;
             if left > 0. {
-                cx.background_executor().timer(Duration::from_secs_f64(left)).await;
+                cx.background_executor()
+                    .timer(Duration::from_secs_f64(left))
+                    .await;
             }
         }
         if let Some(parent) = concat_path.parent() {
@@ -525,8 +823,14 @@ fn start_recording(ws: Entity<Workspace>, dir: PathBuf, name: String, ms: u64, f
         }
         let mut concat = String::from("ffconcat version 1.0\n");
         for (i, &t) in times.iter().enumerate() {
-            let till = times.get(i + 1).copied().unwrap_or(t + interval.as_secs_f64());
-            concat.push_str(&format!("file '{name}.frames/f{i:05}.png'\nduration {:.4}\n", till - t));
+            let till = times
+                .get(i + 1)
+                .copied()
+                .unwrap_or(t + interval.as_secs_f64());
+            concat.push_str(&format!(
+                "file '{name}.frames/f{i:05}.png'\nduration {:.4}\n",
+                till - t
+            ));
         }
         std::fs::write(&concat_path, concat)?;
         Ok(times.len() as u32)
@@ -535,16 +839,23 @@ fn start_recording(ws: Entity<Workspace>, dir: PathBuf, name: String, ms: u64, f
 }
 
 /// What `perf type` types, over and over: words and spaces, as prose is typed.
-const TYPED: &str = "the quick brown fox jumps over the lazy dog while the agent reads the build log ";
+const TYPED: &str =
+    "the quick brown fox jumps over the lazy dog while the agent reads the build log ";
 
 /// `perf frames|scroll|type|mark …` (see the header): input dispatched as events, never real OS
 /// input, and each step waits for the frame that shows it.
 async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
     use crate::perf::{BUDGET, ms, summarize};
     anyhow::ensure!(crate::perf::on(), "perf: launch with TREK_PERF=1");
-    let main = cx.update(|cx| ws.read(cx).main_window).ok_or_else(|| anyhow::anyhow!("no main window"))?;
+    let main = cx
+        .update(|cx| ws.read(cx).main_window)
+        .ok_or_else(|| anyhow::anyhow!("no main window"))?;
     let args: Vec<&str> = arg.split_whitespace().collect();
-    let num = |i: usize, what: &str| -> anyhow::Result<u64> { args.get(i).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("perf: {arg:?}: bad or missing {what}")) };
+    let num = |i: usize, what: &str| -> anyhow::Result<u64> {
+        args.get(i)
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| anyhow::anyhow!("perf: {arg:?}: bad or missing {what}"))
+    };
     let frame_pairs = |frames: &[crate::perf::Frame]| {
         let took: Vec<Duration> = frames.iter().map(crate::perf::Frame::took).collect();
         let s = summarize(&took, BUDGET);
@@ -565,39 +876,63 @@ async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
                     let mut lags = vec![];
                     while !stop.load(Ordering::Relaxed) {
                         let asked = Instant::now();
-                        cx.background_executor().timer(Duration::from_millis(5)).await;
+                        cx.background_executor()
+                            .timer(Duration::from_millis(5))
+                            .await;
                         lags.push(asked.elapsed().saturating_sub(Duration::from_millis(5)));
                     }
                     lags
                 })
             };
-            cx.background_executor().timer(Duration::from_millis(span)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(span))
+                .await;
             stop.store(true, Ordering::Relaxed);
             let lags = sampler.await;
             let frames = crate::perf::take_recorded();
-            tracing::info!("perf: frames label={label} ms={span} {} {}", frame_pairs(&frames), summarize(&lags, BUDGET).pairs("lag_"));
+            tracing::info!(
+                "perf: frames label={label} ms={span} {} {}",
+                frame_pairs(&frames),
+                summarize(&lags, BUDGET).pairs("lag_")
+            );
         }
         Some("scroll") => {
-            let id = *args.get(1).ok_or_else(|| anyhow::anyhow!("perf scroll <element id> <px> <steps> <label>"))?;
-            let dy: f32 = args.get(2).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("perf scroll: bad or missing <px>"))?;
+            let id = *args
+                .get(1)
+                .ok_or_else(|| anyhow::anyhow!("perf scroll <element id> <px> <steps> <label>"))?;
+            let dy: f32 = args
+                .get(2)
+                .and_then(|v| v.parse().ok())
+                .ok_or_else(|| anyhow::anyhow!("perf scroll: bad or missing <px>"))?;
             let steps = num(3, "<steps>")?;
             let label = args.get(4).unwrap_or(&"scroll");
             // The pointer goes over the element once, as a hand on a wheel stays put: over the
             // middle of what's on screen of it (a tall row's own middle can be off the window).
-            let position = main.update(cx, |_, window, cx| -> anyhow::Result<Point<Pixels>> {
-                pointer(window, "hover", id, cx)?;
-                let id = element_id(id);
-                let found = gpui_kit::base::test_support::snapshots(window).into_iter().find(|s| s.path().last() == Some(&id));
-                let bounds = found.ok_or_else(|| anyhow::anyhow!("perf scroll: {id:?} went away"))?.bounds();
-                Ok(bounds.intersect(&Bounds::new(point(px(0.), px(0.)), window.viewport_size())).center())
-            })??;
+            let position =
+                main.update(cx, |_, window, cx| -> anyhow::Result<Point<Pixels>> {
+                    pointer(window, "hover", id, cx)?;
+                    let id = element_id(id);
+                    let found = gpui_kit::base::test_support::snapshots(window)
+                        .into_iter()
+                        .find(|s| s.path().last() == Some(&id));
+                    let bounds = found
+                        .ok_or_else(|| anyhow::anyhow!("perf scroll: {id:?} went away"))?
+                        .bounds();
+                    Ok(bounds
+                        .intersect(&Bounds::new(point(px(0.), px(0.)), window.viewport_size()))
+                        .center())
+                })??;
             crate::perf::record();
             let (mut latency, mut unpainted) = (vec![], 0);
             for _ in 0..steps {
                 let began = Instant::now();
                 let (tx, rx) = crate::perf::next_frame();
                 main.update(cx, |_, window, cx| {
-                    let event = ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.), px(-dy))), ..Default::default() };
+                    let event = ScrollWheelEvent {
+                        position,
+                        delta: ScrollDelta::Pixels(point(px(0.), px(-dy))),
+                        ..Default::default()
+                    };
                     window.dispatch_event(event.to_platform_input(), cx);
                 })?;
                 match painted_within(tx, rx, Duration::from_millis(500), cx).await {
@@ -612,7 +947,11 @@ async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
             }
             let frames = crate::perf::take_recorded();
             let l = summarize(&latency, BUDGET);
-            tracing::info!("perf: scroll label={label} steps={steps} unpainted={unpainted} {} {}", frame_pairs(&frames), l.pairs("latency_"));
+            tracing::info!(
+                "perf: scroll label={label} steps={steps} unpainted={unpainted} {} {}",
+                frame_pairs(&frames),
+                l.pairs("latency_")
+            );
         }
         Some("type") => {
             let count = num(1, "<count>")? as usize;
@@ -623,9 +962,20 @@ async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
                 let began = Instant::now();
                 let (tx, rx) = crate::perf::next_frame();
                 let typed = main.update(cx, |_, window, cx| {
-                    window.focused(cx).is_some() && window.dispatch_keystroke(Keystroke { modifiers: Modifiers::default(), key: String::new(), key_char: Some(c.to_string()) }, cx)
+                    window.focused(cx).is_some()
+                        && window.dispatch_keystroke(
+                            Keystroke {
+                                modifiers: Modifiers::default(),
+                                key: String::new(),
+                                key_char: Some(c.to_string()),
+                            },
+                            cx,
+                        )
                 })?;
-                anyhow::ensure!(typed, "perf type: nothing has the keyboard (focus a field first)");
+                anyhow::ensure!(
+                    typed,
+                    "perf type: nothing has the keyboard (focus a field first)"
+                );
                 match painted_within(tx, rx, Duration::from_millis(500), cx).await {
                     Some(f) => latency.push(f.painted.saturating_duration_since(began)),
                     None => unpainted += 1,
@@ -633,20 +983,34 @@ async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
                 // About 20 keys a second, a fast typist's pace.
                 let spent = began.elapsed();
                 if spent < Duration::from_millis(50) {
-                    cx.background_executor().timer(Duration::from_millis(50) - spent).await;
+                    cx.background_executor()
+                        .timer(Duration::from_millis(50) - spent)
+                        .await;
                 }
             }
             let frames = crate::perf::take_recorded();
             let l = summarize(&latency, BUDGET);
-            tracing::info!("perf: type label={label} keys={count} unpainted={unpainted} {} {} latency_mean={}", frame_pairs(&frames), l.pairs("latency_"), ms(latency.iter().sum::<Duration>() / latency.len().max(1) as u32));
+            tracing::info!(
+                "perf: type label={label} keys={count} unpainted={unpainted} {} {} latency_mean={}",
+                frame_pairs(&frames),
+                l.pairs("latency_"),
+                ms(latency.iter().sum::<Duration>() / latency.len().max(1) as u32)
+            );
         }
-        _ => anyhow::bail!("perf frames <ms> <label> | scroll <element id> <px> <steps> <label> | type <count> <label> | mark <label>"),
+        _ => anyhow::bail!(
+            "perf frames <ms> <label> | scroll <element id> <px> <steps> <label> | type <count> <label> | mark <label>"
+        ),
     }
     Ok(())
 }
 
 /// The frame `perf::next_frame` was armed for, or `None` after `limit`.
-async fn painted_within(tx: async_channel::Sender<Option<crate::perf::Frame>>, rx: async_channel::Receiver<Option<crate::perf::Frame>>, limit: Duration, cx: &mut AsyncApp) -> Option<crate::perf::Frame> {
+async fn painted_within(
+    tx: async_channel::Sender<Option<crate::perf::Frame>>,
+    rx: async_channel::Receiver<Option<crate::perf::Frame>>,
+    limit: Duration,
+    cx: &mut AsyncApp,
+) -> Option<crate::perf::Frame> {
     let executor = cx.background_executor().clone();
     let timeout = cx.background_executor().spawn(async move {
         executor.timer(limit).await;
@@ -689,12 +1053,27 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         anyhow::ensure!(!arg.is_empty(), "toast [undo|error] <message>");
         let (kind, rest) = arg.split_once(' ').unwrap_or((arg, ""));
         match kind {
-            "undo" => ws.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::Toast { message: rest.into(), undo: Some(crate::workspace::UndoAction::Unsettle(String::new())) })),
+            "undo" => ws.update(cx, |_, cx| {
+                cx.emit(crate::workspace::WorkspaceEvent::Toast {
+                    message: rest.into(),
+                    undo: Some(crate::workspace::UndoAction::Unsettle(String::new())),
+                })
+            }),
             "error" => {
-                let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
-                main.update(cx, |_, window, cx| crate::toast::push(window, crate::toast::Toast::error(rest.to_string()), cx))?;
+                let main = ws
+                    .read(cx)
+                    .main_window
+                    .ok_or_else(|| anyhow::anyhow!("no main window"))?;
+                main.update(cx, |_, window, cx| {
+                    crate::toast::push(window, crate::toast::Toast::error(rest.to_string()), cx)
+                })?;
             }
-            _ => ws.update(cx, |_, cx| cx.emit(crate::workspace::WorkspaceEvent::Toast { message: arg.into(), undo: None })),
+            _ => ws.update(cx, |_, cx| {
+                cx.emit(crate::workspace::WorkspaceEvent::Toast {
+                    message: arg.into(),
+                    undo: None,
+                })
+            }),
         }
         return Ok(());
     }
@@ -706,9 +1085,15 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
             "all" => Range::All,
             _ => anyhow::bail!("range: unknown range {arg:?} (today|week|all)"),
         };
-        let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        let main = ws
+            .read(cx)
+            .main_window
+            .ok_or_else(|| anyhow::anyhow!("no main window"))?;
         main.update(cx, |root, _, cx| {
-            let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
+            let view = root
+                .downcast::<gpui_kit::component::Root>()
+                .ok()
+                .map(|r| r.read(cx).view().clone());
             if let Some(trek) = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok()) {
                 let basecamp = trek.read(cx).basecamp.clone();
                 basecamp.update(cx, |b, cx| b.set_range(range, cx));
@@ -718,7 +1103,10 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         return Ok(());
     }
     if verb == "tools" {
-        let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        let main = ws
+            .read(cx)
+            .main_window
+            .ok_or_else(|| anyhow::anyhow!("no main window"))?;
         main.update(cx, |root, window, cx| -> anyhow::Result<()> {
             let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
             let Some(trek) = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok()) else {
@@ -761,18 +1149,29 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         // an escape, `\a` the bell, `\\` a backslash), and `terminal link <n>` opens the n-th
         // link on it (from 1, top to bottom) as ⌘-clicking it does.
         let (sub, rest) = arg.split_once(' ').unwrap_or((arg, ""));
-        let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        let main = ws
+            .read(cx)
+            .main_window
+            .ok_or_else(|| anyhow::anyhow!("no main window"))?;
         let in_editor = ws.read(cx).ide();
         main.update(cx, |root, window, cx| -> anyhow::Result<()> {
-            let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
+            let view = root
+                .downcast::<gpui_kit::component::Root>()
+                .ok()
+                .map(|r| r.read(cx).view().clone());
             let Some(trek) = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok()) else {
                 anyhow::bail!("terminal: no Trek window");
             };
-            let term = front_terminal(&trek, in_editor, window, cx).ok_or_else(|| anyhow::anyhow!("terminal: none on screen (`tools terminal` shows the dock)"))?;
+            let term = front_terminal(&trek, in_editor, window, cx).ok_or_else(|| {
+                anyhow::anyhow!("terminal: none on screen (`tools terminal` shows the dock)")
+            })?;
             match sub {
                 "feed" => term.update(cx, |t, cx| t.print(unescape(rest).as_bytes(), cx)),
                 "link" => {
-                    let n: usize = rest.trim().parse().map_err(|_| anyhow::anyhow!("terminal link <n>: n counts from 1"))?;
+                    let n: usize = rest
+                        .trim()
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("terminal link <n>: n counts from 1"))?;
                     term.update(cx, |t, cx| t.open_nth_link(n, window, cx))?;
                 }
                 _ => anyhow::bail!("terminal feed <text>|link <n>"),
@@ -787,15 +1186,23 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         // for a new line; one is started when there's none), `note image <path>…` / `note attach <path>…` (files
         // put in at the cursor, as dropping them does) and `note mode write|split|preview`.
         let (sub, rest) = arg.split_once(' ').unwrap_or((arg, ""));
-        let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        let main = ws
+            .read(cx)
+            .main_window
+            .ok_or_else(|| anyhow::anyhow!("no main window"))?;
         main.update(cx, |root, window, cx| -> anyhow::Result<()> {
-            let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
+            let view = root
+                .downcast::<gpui_kit::component::Root>()
+                .ok()
+                .map(|r| r.read(cx).view().clone());
             let Some(trek) = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok()) else {
                 anyhow::bail!("note: no Trek window");
             };
             let notes = trek.read(cx).notes.clone();
             match sub {
-                "text" => notes.update(cx, |n, cx| n.set_text(rest.replace("\\n", "\n"), window, cx)),
+                "text" => notes.update(cx, |n, cx| {
+                    n.set_text(rest.replace("\\n", "\n"), window, cx)
+                }),
                 "image" | "attach" => {
                     anyhow::ensure!(!rest.is_empty(), "note image|attach <path>…");
                     let paths: Vec<PathBuf> = rest.split_whitespace().map(PathBuf::from).collect();
@@ -820,9 +1227,15 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     if verb == "dictate" || verb == "dictate-file" {
         // Voice input without a pointer: `dictate` runs the mic button's real path (permission
         // prompts included); `dictate-file <path>` skips the mic and transcribes the file.
-        let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        let main = ws
+            .read(cx)
+            .main_window
+            .ok_or_else(|| anyhow::anyhow!("no main window"))?;
         main.update(cx, |root, window, cx| -> anyhow::Result<()> {
-            let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
+            let view = root
+                .downcast::<gpui_kit::component::Root>()
+                .ok()
+                .map(|r| r.read(cx).view().clone());
             let Some(trek) = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok()) else {
                 anyhow::bail!("{verb}: no Trek window");
             };
@@ -851,7 +1264,10 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         // `editor rclick|hover <element id>` (a context menu, a hover, without a pointer; `name#3`
         // for a row's id). `editor snap <name>`: the preview's web view (see `editor_snap`).
         let (sub, rest) = arg.split_once(' ').unwrap_or((arg, ""));
-        let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        let main = ws
+            .read(cx)
+            .main_window
+            .ok_or_else(|| anyhow::anyhow!("no main window"))?;
         main.update(cx, |root, window, cx| -> anyhow::Result<()> {
             let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
             let Some(trek) = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok()) else {
@@ -1036,8 +1452,14 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         cx.refresh_windows();
         return Ok(());
     }
-    if matches!(verb, "click" | "rclick" | "hover" | "scroll" | "type" | "key" | "resize" | "elements" | "count") {
-        let main = ws.read(cx).main_window.ok_or_else(|| anyhow::anyhow!("no main window"))?;
+    if matches!(
+        verb,
+        "click" | "rclick" | "hover" | "scroll" | "type" | "key" | "resize" | "elements" | "count"
+    ) {
+        let main = ws
+            .read(cx)
+            .main_window
+            .ok_or_else(|| anyhow::anyhow!("no main window"))?;
         main.update(cx, |root, window, cx| -> anyhow::Result<()> {
             match verb {
                 "click" | "rclick" | "hover" => pointer(window, verb, arg, cx),
@@ -1047,14 +1469,18 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                 }
                 "key" => {
                     use gpui_kit::test::TestWindowExt as _;
-                    anyhow::ensure!(!arg.is_empty(), "key needs a keystroke (secondary-k, escape, shift-tab …)");
+                    anyhow::ensure!(
+                        !arg.is_empty(),
+                        "key needs a keystroke (secondary-k, escape, shift-tab …)"
+                    );
                     // Manifests write the Mac's keys (`cmd-k`); Trek's bindings read a Mac ⌘ as
                     // Ctrl on Windows, so the harness does too — `secondary` is gpui's spelling
                     // of exactly that, keeping one manifest right on both platforms.
                     let keys: Vec<String> = arg.split_whitespace().map(manifest_key).collect();
                     // All of them parse before any is pressed: a typo doesn't leave half a sequence done.
                     for k in &keys {
-                        Keystroke::parse(k).map_err(|e| anyhow::anyhow!("key: bad keystroke {k:?}: {e}"))?;
+                        Keystroke::parse(k)
+                            .map_err(|e| anyhow::anyhow!("key: bad keystroke {k:?}: {e}"))?;
                     }
                     for k in &keys {
                         window.press(k, cx);
@@ -1063,16 +1489,24 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                 }
                 "scroll" => {
                     use gpui_kit::test::TestWindowExt as _;
-                    let (id, dy) = arg.rsplit_once(' ').ok_or_else(|| anyhow::anyhow!("scroll <element id> <px>"))?;
+                    let (id, dy) = arg
+                        .rsplit_once(' ')
+                        .ok_or_else(|| anyhow::anyhow!("scroll <element id> <px>"))?;
                     let dy: f32 = dy.trim().parse()?;
                     pointer(window, "hover", id, cx)?;
                     // Positive is down the page, as a wheel turned towards you.
-                    window.scroll(element_id(id), ScrollDelta::Pixels(point(px(0.), px(-dy))), cx);
+                    window.scroll(
+                        element_id(id),
+                        ScrollDelta::Pixels(point(px(0.), px(-dy))),
+                        cx,
+                    );
                     Ok(())
                 }
                 "count" => {
                     use gpui_kit::test::TestWindowExt as _;
-                    let (id, n) = arg.rsplit_once(' ').ok_or_else(|| anyhow::anyhow!("count <element id>[*] <n>"))?;
+                    let (id, n) = arg
+                        .rsplit_once(' ')
+                        .ok_or_else(|| anyhow::anyhow!("count <element id>[*] <n>"))?;
                     let n: usize = n.trim().parse()?;
                     window.render_frame(cx);
                     let found = gpui_kit::base::test_support::snapshots(window)
@@ -1088,7 +1522,9 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                     Ok(())
                 }
                 "resize" => {
-                    let (w, h) = arg.split_once(' ').ok_or_else(|| anyhow::anyhow!("resize <width> <height>"))?;
+                    let (w, h) = arg
+                        .split_once(' ')
+                        .ok_or_else(|| anyhow::anyhow!("resize <width> <height>"))?;
                     let (w, h): (f32, f32) = (w.trim().parse()?, h.trim().parse()?);
                     anyhow::ensure!(w >= 100. && h >= 100., "resize: {w}×{h} is too small");
                     window.resize(size(px(w), px(h)));
@@ -1104,13 +1540,22 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         // How an install from the ACP Registry looks under way or failed, without downloading:
         // `agent-install <id> <percent>|fail <message>|clear`.
         use trek_core::registry::Progress;
-        let (id, what) = arg.split_once(' ').ok_or_else(|| anyhow::anyhow!("agent-install <id> <percent>|fail <message>|clear"))?;
+        let (id, what) = arg
+            .split_once(' ')
+            .ok_or_else(|| anyhow::anyhow!("agent-install <id> <percent>|fail <message>|clear"))?;
         let state = match what.split_once(' ').map_or((what, ""), |(a, b)| (a, b)) {
             ("clear", _) => None,
             ("fail", why) => Some(crate::workspace::AgentInstall::Failed(why.to_string())),
             (pct, _) => {
-                let pct: u64 = pct.parse().map_err(|_| anyhow::anyhow!("agent-install: bad percent {pct:?}"))?;
-                Some(crate::workspace::AgentInstall::Running(Some(Progress::Downloading { done: pct * 1_000_000, total: Some(100_000_000) })))
+                let pct: u64 = pct
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("agent-install: bad percent {pct:?}"))?;
+                Some(crate::workspace::AgentInstall::Running(Some(
+                    Progress::Downloading {
+                        done: pct * 1_000_000,
+                        total: Some(100_000_000),
+                    },
+                )))
             }
         };
         ws.update(cx, |ws, cx| {
@@ -1128,18 +1573,51 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         // too when there's a checkpoint for them (the confirmation's default), and the message
         // back in the composer. `rewind <n> keep` leaves the files alone.
         let (n, files) = arg.split_once(' ').unwrap_or((arg, ""));
-        let n: usize = if n.is_empty() { 1 } else { n.parse().map_err(|_| anyhow::anyhow!("rewind [n] [keep]: bad n {n:?}"))? };
+        let n: usize = if n.is_empty() {
+            1
+        } else {
+            n.parse()
+                .map_err(|_| anyhow::anyhow!("rewind [n] [keep]: bad n {n:?}"))?
+        };
         anyhow::ensure!(n >= 1, "rewind: n starts at 1 (the latest turn)");
         ws.update(cx, |ws, cx| -> anyhow::Result<()> {
-            let id = ws.focused_thread().map(str::to_string).ok_or_else(|| anyhow::anyhow!("rewind: no thread on screen"))?;
-            let live = ws.live.get(&id).ok_or_else(|| anyhow::anyhow!("rewind: the thread isn't loaded"))?;
-            let ends: Vec<usize> = live.items.iter().enumerate().filter(|(_, i)| matches!(i, trek_core::store::Item::TurnEnd { .. })).map(|(ix, _)| ix).collect();
-            let ix = *ends.iter().rev().nth(n - 1).ok_or_else(|| anyhow::anyhow!("rewind {n}: the thread has {} finished turns", ends.len()))?;
-            let end = live.items.id_at(ix).ok_or_else(|| anyhow::anyhow!("rewind {n}: the turn has no id"))?.to_string();
-            let start = ws.turn_start_item(&id, &end).ok_or_else(|| anyhow::anyhow!("rewind {n}: no message starts that turn"))?;
+            let id = ws
+                .focused_thread()
+                .map(str::to_string)
+                .ok_or_else(|| anyhow::anyhow!("rewind: no thread on screen"))?;
+            let live = ws
+                .live
+                .get(&id)
+                .ok_or_else(|| anyhow::anyhow!("rewind: the thread isn't loaded"))?;
+            let ends: Vec<usize> = live
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, i)| matches!(i, trek_core::store::Item::TurnEnd { .. }))
+                .map(|(ix, _)| ix)
+                .collect();
+            let ix = *ends.iter().rev().nth(n - 1).ok_or_else(|| {
+                anyhow::anyhow!("rewind {n}: the thread has {} finished turns", ends.len())
+            })?;
+            let end = live
+                .items
+                .id_at(ix)
+                .ok_or_else(|| anyhow::anyhow!("rewind {n}: the turn has no id"))?
+                .to_string();
+            let start = ws
+                .turn_start_item(&id, &end)
+                .ok_or_else(|| anyhow::anyhow!("rewind {n}: no message starts that turn"))?;
             let restore = files != "keep" && ws.restorable_checkpoint(&id, &start).is_some();
-            let (text, images) = ws.undo_turn(&id, &end, restore, cx).ok_or_else(|| anyhow::anyhow!("rewind {n}: refused (see the toast)"))?;
-            cx.emit(crate::workspace::WorkspaceEvent::ComposeIn { scope: ws.focused_scope(), thread: id, text, images, edit: None });
+            let (text, images) = ws
+                .undo_turn(&id, &end, restore, cx)
+                .ok_or_else(|| anyhow::anyhow!("rewind {n}: refused (see the toast)"))?;
+            cx.emit(crate::workspace::WorkspaceEvent::ComposeIn {
+                scope: ws.focused_scope(),
+                thread: id,
+                text,
+                images,
+                edit: None,
+            });
             Ok(())
         })?;
         cx.refresh_windows();
@@ -1159,37 +1637,62 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
             ("route", "notes") => ws.navigate(Route::Notes, cx),
             ("route", "appearance") => ws.navigate(Route::Settings(SettingsPage::Appearance), cx),
             ("route", "first") => {
-                let Some(id) = ws.threads.iter().find(|t| t.side_of.is_none() && t.parent_id.is_none()).map(|t| t.id.clone()) else {
+                let Some(id) = ws
+                    .threads
+                    .iter()
+                    .find(|t| t.side_of.is_none() && t.parent_id.is_none())
+                    .map(|t| t.id.clone())
+                else {
                     anyhow::bail!("route first: no threads");
                 };
                 ws.navigate(Route::Thread(id), cx)
             }
             ("route", other) if other.starts_with("settings:") => {
-                let Some(page) = crate::settings_view::page_named(&other["settings:".len()..]) else {
+                let Some(page) = crate::settings_view::page_named(&other["settings:".len()..])
+                else {
                     anyhow::bail!("route {other}: no such settings page");
                 };
                 ws.navigate(Route::Settings(page), cx)
             }
             ("route", other) if other.starts_with("title:") => {
                 let q = other["title:".len()..].to_lowercase();
-                let Some(id) = ws.threads.iter().find(|t| t.title.to_lowercase().contains(&q)).map(|t| t.id.clone()) else {
+                let Some(id) = ws
+                    .threads
+                    .iter()
+                    .find(|t| t.title.to_lowercase().contains(&q))
+                    .map(|t| t.id.clone())
+                else {
                     anyhow::bail!("route {other}: no thread title matches");
                 };
                 ws.navigate(Route::Thread(id), cx)
             }
-            ("route", other) if other.starts_with("project:") => ws.navigate(Route::Draft { project: Some(PathBuf::from(&other["project:".len()..])) }, cx),
-            ("route", other) if other.starts_with("thread:") => ws.navigate(Route::Thread(other["thread:".len()..].to_string()), cx),
+            ("route", other) if other.starts_with("project:") => ws.navigate(
+                Route::Draft {
+                    project: Some(PathBuf::from(&other["project:".len()..])),
+                },
+                cx,
+            ),
+            ("route", other) if other.starts_with("thread:") => {
+                ws.navigate(Route::Thread(other["thread:".len()..].to_string()), cx)
+            }
             ("route", other) => anyhow::bail!("route: unknown route {other:?}"),
             // An image in the composer's outbox, as a drop or paste attaches it.
             ("attach", "") => anyhow::bail!("attach needs an image path"),
-            ("attach", path) => cx.emit(crate::workspace::WorkspaceEvent::AttachImage(PathBuf::from(path))),
+            ("attach", path) => cx.emit(crate::workspace::WorkspaceEvent::AttachImage(
+                PathBuf::from(path),
+            )),
             ("send", "") => anyhow::bail!("send needs a prompt"),
             ("send", text) => ws.send(text.to_string(), vec![], cx),
             ("project", "") => anyhow::bail!("project needs a folder"),
             ("project", path) => {
                 let path = std::path::PathBuf::from(path);
                 ws.add_project(path.clone(), cx);
-                ws.navigate(Route::Draft { project: Some(path) }, cx);
+                ws.navigate(
+                    Route::Draft {
+                        project: Some(path),
+                    },
+                    cx,
+                );
             }
             ("push", "on") => ws.set_push(true, cx),
             ("push", "test") => ws.test_push(cx),
@@ -1204,7 +1707,9 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
             ("pair", _) => {
                 ws.offer_pairing(cx);
                 let Some(offer) = ws.remote.as_ref().and_then(|r| r.offer.clone()) else {
-                    anyhow::bail!("pair: no pairing offer (isolated processes don't run the remote)");
+                    anyhow::bail!(
+                        "pair: no pairing offer (isolated processes don't run the remote)"
+                    );
                 };
                 if let Some(dir) = std::env::var_os("TREK_SHOT_DIR") {
                     let _ = std::fs::write(Path::new(&dir).join("pair.txt"), offer.url);
@@ -1218,13 +1723,19 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                 // The latest turn's changes on screen, in the Git tool.
                 let end = ws.current_thread().map(|t| t.id.clone()).and_then(|id| {
                     let items = &ws.live.get(&id)?.items;
-                    let ix = items.iter().rposition(|i| matches!(i, trek_core::store::Item::TurnEnd { .. }))?;
+                    let ix = items
+                        .iter()
+                        .rposition(|i| matches!(i, trek_core::store::Item::TurnEnd { .. }))?;
                     Some((id, items.id_at(ix)?.to_string()))
                 });
                 let Some((thread, end)) = end else {
                     anyhow::bail!("diff: the current thread has no finished turn");
                 };
-                cx.emit(crate::workspace::WorkspaceEvent::ShowTurnDiff { thread, end, path: None });
+                cx.emit(crate::workspace::WorkspaceEvent::ShowTurnDiff {
+                    thread,
+                    end,
+                    path: None,
+                });
             }
             ("new", _) => ws.new_thread(cx),
             ("glass", "on") => {
@@ -1237,18 +1748,26 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
             }
             ("glass", other) => anyhow::bail!("glass: unknown argument {other:?} (on|off)"),
             ("tint", t) => {
-                ws.settings.appearance.glass_tint = t.parse().map_err(|_| anyhow::anyhow!("tint: bad value {t:?} (0.2–0.95)"))?;
+                ws.settings.appearance.glass_tint = t
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("tint: bad value {t:?} (0.2–0.95)"))?;
                 ws.save_settings(cx);
             }
             ("theme", t @ ("night" | "paper")) => {
-                let choice = if t == "paper" { trek_core::settings::ThemeChoice::Paper } else { trek_core::settings::ThemeChoice::Night };
+                let choice = if t == "paper" {
+                    trek_core::settings::ThemeChoice::Paper
+                } else {
+                    trek_core::settings::ThemeChoice::Night
+                };
                 ws.settings.appearance.theme = choice;
                 ws.save_settings(cx);
                 cx.defer(move |cx| crate::apply_theme(choice, None, cx));
             }
             ("theme", other) => anyhow::bail!("theme: unknown theme {other:?} (night|paper)"),
             ("pace", v) => {
-                let pace: f32 = v.parse().map_err(|_| anyhow::anyhow!("pace: bad value {v:?} (0 = instant, 1 = demo speed)"))?;
+                let pace: f32 = v.parse().map_err(|_| {
+                    anyhow::anyhow!("pace: bad value {v:?} (0 = instant, 1 = demo speed)")
+                })?;
                 trek_agents::mock::set_pace(pace);
             }
             _ => anyhow::bail!("command not understood: {verb} {arg}"),
@@ -1262,18 +1781,41 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
 /// An element id as written in a command: `name#3` is a row, ("name", 3).
 /// The terminal on screen: the one with the keys, else (in the editor) the editor's, else the
 /// dock's, else the tools panel's.
-fn front_terminal(trek: &Entity<crate::root::TrekWindow>, in_editor: bool, window: &Window, cx: &App) -> Option<Entity<crate::panels::terminal::TerminalPanel>> {
+fn front_terminal(
+    trek: &Entity<crate::root::TrekWindow>,
+    in_editor: bool,
+    window: &Window,
+    cx: &App,
+) -> Option<Entity<crate::panels::terminal::TerminalPanel>> {
     let t = trek.read(cx);
-    let (ide, dock, panel) = (t.ide.read(cx).shown_terminal(), t.terminal_dock.read(cx).shown(cx), t.right_panel.read(cx).shown_terminal());
-    let shown: Vec<_> = if in_editor { [ide, dock, panel] } else { [dock, panel, ide] }.into_iter().flatten().collect();
-    shown.iter().find(|t| t.read(cx).focus_handle().contains_focused(window, cx)).or(shown.first()).cloned()
+    let (ide, dock, panel) = (
+        t.ide.read(cx).shown_terminal(),
+        t.terminal_dock.read(cx).shown(cx),
+        t.right_panel.read(cx).shown_terminal(),
+    );
+    let shown: Vec<_> = if in_editor {
+        [ide, dock, panel]
+    } else {
+        [dock, panel, ide]
+    }
+    .into_iter()
+    .flatten()
+    .collect();
+    shown
+        .iter()
+        .find(|t| t.read(cx).focus_handle().contains_focused(window, cx))
+        .or(shown.first())
+        .cloned()
 }
 
 /// `terminal feed`'s text as bytes for the screen: `\n` a new line (CR LF, as a shell's output
 /// has it), `\r`, `\t`, `\e` an escape, `\a` the bell, `\\` a backslash. One pair of quotes
 /// around it all is the manifest's, not the text's.
 fn unescape(text: &str) -> String {
-    let text = text.strip_prefix('"').and_then(|t| t.strip_suffix('"')).unwrap_or(text);
+    let text = text
+        .strip_prefix('"')
+        .and_then(|t| t.strip_suffix('"'))
+        .unwrap_or(text);
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
@@ -1295,7 +1837,10 @@ fn unescape(text: &str) -> String {
 }
 
 fn element_id(id: &str) -> ElementId {
-    match id.rsplit_once('#').and_then(|(n, i)| Some((n, i.parse::<u64>().ok()?))) {
+    match id
+        .rsplit_once('#')
+        .and_then(|(n, i)| Some((n, i.parse::<u64>().ok()?)))
+    {
         Some((name, ix)) => ElementId::NamedInteger(name.to_string().into(), ix),
         None => ElementId::Name(id.to_string().into()),
     }
@@ -1317,19 +1862,64 @@ fn usage_demo(ws: &Entity<Workspace>, cx: &mut App) {
     use trek_core::AgentId;
     ws.update(cx, |ws, cx| {
         let now = ws.now();
-        let limit = |label: &str, window: &str, percent: f32, hours: i64| UsageLimit { label: label.into(), percent, resets_at: Some(now + hours * 3_600_000 + 1_380_000), window: window.into() };
-        for (agent, name) in [(AgentId::ClaudeCode, "Claude Code"), (AgentId::Codex, "Codex")] {
+        let limit = |label: &str, window: &str, percent: f32, hours: i64| UsageLimit {
+            label: label.into(),
+            percent,
+            resets_at: Some(now + hours * 3_600_000 + 1_380_000),
+            window: window.into(),
+        };
+        for (agent, name) in [
+            (AgentId::ClaudeCode, "Claude Code"),
+            (AgentId::Codex, "Codex"),
+        ] {
             if !ws.agents.iter().any(|a| a.agent == agent) {
                 let availability = trek_core::detect::Availability::Ready;
-                ws.agents.push(trek_core::detect::DetectedAgent { agent, name: name.into(), path: None, version: None, availability, models: vec![], install_hint: None });
+                ws.agents.push(trek_core::detect::DetectedAgent {
+                    agent,
+                    name: name.into(),
+                    path: None,
+                    version: None,
+                    availability,
+                    models: vec![],
+                    install_hint: None,
+                });
             }
         }
-        let claude = vec![limit("5-hour limit", "5h", 42., 2), limit("Weekly limit", "7d", 68., 50), limit("Weekly · Opus", "7d", 91., 50)];
-        ws.agent_status.insert(AgentId::ClaudeCode.key(), AgentStatus { plan: Some("Claude Max".into()), logged_in: true, limits: claude, ..Default::default() });
-        let codex = vec![limit("5-hour limit", "5h", 12., 3), limit("Weekly limit", "7d", 35., 120)];
-        ws.agent_status.insert(AgentId::Codex.key(), AgentStatus { plan: Some("ChatGPT Plus".into()), logged_in: true, limits: codex, ..Default::default() });
-        let devin = crate::workspace::usage::Snapshot { read_at: now - 25 * 60_000, plan: Some("Devin Pro".into()), limits: vec![limit("Daily quota", "24h", 55., 6)], note: None };
-        ws.usage_cached.insert(crate::workspace::devin_agent().key(), devin);
+        let claude = vec![
+            limit("5-hour limit", "5h", 42., 2),
+            limit("Weekly limit", "7d", 68., 50),
+            limit("Weekly · Opus", "7d", 91., 50),
+        ];
+        ws.agent_status.insert(
+            AgentId::ClaudeCode.key(),
+            AgentStatus {
+                plan: Some("Claude Max".into()),
+                logged_in: true,
+                limits: claude,
+                ..Default::default()
+            },
+        );
+        let codex = vec![
+            limit("5-hour limit", "5h", 12., 3),
+            limit("Weekly limit", "7d", 35., 120),
+        ];
+        ws.agent_status.insert(
+            AgentId::Codex.key(),
+            AgentStatus {
+                plan: Some("ChatGPT Plus".into()),
+                logged_in: true,
+                limits: codex,
+                ..Default::default()
+            },
+        );
+        let devin = crate::workspace::usage::Snapshot {
+            read_at: now - 25 * 60_000,
+            plan: Some("Devin Pro".into()),
+            limits: vec![limit("Daily quota", "24h", 55., 6)],
+            note: None,
+        };
+        ws.usage_cached
+            .insert(crate::workspace::devin_agent().key(), devin);
         cx.notify();
     });
 }
@@ -1353,16 +1943,29 @@ fn manifest_key(key: &str) -> String {
 /// so both are checked first.
 fn pointer(window: &mut Window, verb: &str, id: &str, cx: &mut App) -> anyhow::Result<()> {
     use gpui_kit::test::TestWindowExt as _;
-    anyhow::ensure!(!id.is_empty(), "{verb} needs an element id (see `elements`)");
+    anyhow::ensure!(
+        !id.is_empty(),
+        "{verb} needs an element id (see `elements`)"
+    );
     POINTER_SCRIPTED.store(true, Ordering::Relaxed);
     window.render_frame(cx);
     let id = element_id(id);
-    let found: Vec<_> = gpui_kit::base::test_support::snapshots(window).into_iter().filter(|s| s.path().last() == Some(&id)).collect();
+    let found: Vec<_> = gpui_kit::base::test_support::snapshots(window)
+        .into_iter()
+        .filter(|s| s.path().last() == Some(&id))
+        .collect();
     match found.as_slice() {
         [] => anyhow::bail!("{verb}: nothing on screen is {}", id_text(&id)),
-        [one] if !one.visible() => anyhow::bail!("{verb}: {} is hidden or scrolled away", id_text(&id)),
+        [one] if !one.visible() => {
+            anyhow::bail!("{verb}: {} is hidden or scrolled away", id_text(&id))
+        }
         [_] => {}
-        many => anyhow::bail!("{verb}: {} elements are {}: {:?}", many.len(), id_text(&id), many.iter().map(|s| s.path().to_vec()).collect::<Vec<_>>()),
+        many => anyhow::bail!(
+            "{verb}: {} elements are {}: {:?}",
+            many.len(),
+            id_text(&id),
+            many.iter().map(|s| s.path().to_vec()).collect::<Vec<_>>()
+        ),
     }
     match verb {
         "rclick" => window.right_click(id, cx),
@@ -1375,12 +1978,25 @@ fn pointer(window: &mut Window, verb: &str, id: &str, cx: &mut App) -> anyhow::R
 /// `type <text>`: into the focused field as typed text, or into the main composer when no field
 /// has the keyboard.
 fn type_text(root: AnyView, window: &mut Window, text: &str, cx: &mut App) -> anyhow::Result<()> {
-    let typed = window.focused(cx).is_some() && window.dispatch_keystroke(Keystroke { modifiers: Modifiers::default(), key: String::new(), key_char: Some(text.to_string()) }, cx);
+    let typed = window.focused(cx).is_some()
+        && window.dispatch_keystroke(
+            Keystroke {
+                modifiers: Modifiers::default(),
+                key: String::new(),
+                key_char: Some(text.to_string()),
+            },
+            cx,
+        );
     if typed {
         return Ok(());
     }
-    let view = root.downcast::<gpui_kit::component::Root>().ok().map(|r| r.read(cx).view().clone());
-    let trek = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok()).ok_or_else(|| anyhow::anyhow!("type: no Trek window"))?;
+    let view = root
+        .downcast::<gpui_kit::component::Root>()
+        .ok()
+        .map(|r| r.read(cx).view().clone());
+    let trek = view
+        .and_then(|v| v.downcast::<crate::root::TrekWindow>().ok())
+        .ok_or_else(|| anyhow::anyhow!("type: no Trek window"))?;
     let composer = trek.read(cx).composer.clone();
     composer.update(cx, |c, cx| {
         c.focus(window, cx);
@@ -1402,12 +2018,22 @@ fn elements(window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
             let b = s.bounds();
             let role = s.role().map(|r| format!(" {r:?}")).unwrap_or_default();
             let label = s.label().map(|l| format!(" {l:?}")).unwrap_or_default();
-            Some(format!("{id}{role}{label} @ {:.0},{:.0} {:.0}×{:.0}", f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)))
+            Some(format!(
+                "{id}{role}{label} @ {:.0},{:.0} {:.0}×{:.0}",
+                f32::from(b.origin.x),
+                f32::from(b.origin.y),
+                f32::from(b.size.width),
+                f32::from(b.size.height)
+            ))
         })
         .collect();
     lines.sort();
-    let dir = std::env::var_os("TREK_SHOT_DIR").ok_or_else(|| anyhow::anyhow!("elements: no TREK_SHOT_DIR"))?;
-    std::fs::write(Path::new(&dir).join("elements.txt"), lines.join("\n") + "\n")?;
+    let dir = std::env::var_os("TREK_SHOT_DIR")
+        .ok_or_else(|| anyhow::anyhow!("elements: no TREK_SHOT_DIR"))?;
+    std::fs::write(
+        Path::new(&dir).join("elements.txt"),
+        lines.join("\n") + "\n",
+    )?;
     Ok(())
 }
 
@@ -1415,14 +2041,29 @@ fn elements(window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
 /// buttons call. `approve` allows a permission or starts a plan; `deny` is Deny, Keep planning or
 /// Skip; `answer <n>` picks option n (from 1) of every question and sends, `answer <text>` is the
 /// answer typed in the composer.
-fn card(ws: &mut Workspace, verb: &str, arg: &str, cx: &mut Context<Workspace>) -> anyhow::Result<()> {
+fn card(
+    ws: &mut Workspace,
+    verb: &str,
+    arg: &str,
+    cx: &mut Context<Workspace>,
+) -> anyhow::Result<()> {
     use trek_agents::{Decision, Prompt};
-    let id = ws.focused_thread().map(str::to_string).ok_or_else(|| anyhow::anyhow!("{verb}: no thread on screen"))?;
-    let p = ws.live.get(&id).and_then(|l| l.permissions.first()).cloned().ok_or_else(|| anyhow::anyhow!("{verb}: nothing is waiting on the thread"))?;
+    let id = ws
+        .focused_thread()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("{verb}: no thread on screen"))?;
+    let p = ws
+        .live
+        .get(&id)
+        .and_then(|l| l.permissions.first())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("{verb}: nothing is waiting on the thread"))?;
     match (verb, &p.prompt) {
         ("approve", None) => ws.respond(&id, &p.request_id, Decision::Allow, cx),
         ("approve", Some(Prompt::Plan(_))) => ws.approve_plan(&id, &p.request_id, cx),
-        ("approve", Some(Prompt::Questions(_))) => anyhow::bail!("approve: it's a question (answer <text|n>, or deny to skip)"),
+        ("approve", Some(Prompt::Questions(_))) => {
+            anyhow::bail!("approve: it's a question (answer <text|n>, or deny to skip)")
+        }
         ("deny", _) => ws.respond(&id, &p.request_id, Decision::Deny, cx),
         ("answer", Some(Prompt::Questions(questions))) => {
             anyhow::ensure!(!arg.is_empty(), "answer needs <text> or an option number");
@@ -1430,9 +2071,16 @@ fn card(ws: &mut Workspace, verb: &str, arg: &str, cx: &mut Context<Workspace>) 
                 Ok(n) => {
                     let mut answers = vec![];
                     for (qi, q) in questions.iter().enumerate() {
-                        let (label, _) = q.options.get(n.wrapping_sub(1)).ok_or_else(|| anyhow::anyhow!("answer {n}: “{}” has {} options", q.question, q.options.len()))?;
+                        let (label, _) = q.options.get(n.wrapping_sub(1)).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "answer {n}: “{}” has {} options",
+                                q.question,
+                                q.options.len()
+                            )
+                        })?;
                         if let Some(live) = ws.live.get_mut(&id) {
-                            live.picks.insert((p.request_id.clone(), qi), vec![label.clone()]);
+                            live.picks
+                                .insert((p.request_id.clone(), qi), vec![label.clone()]);
                         }
                         answers.push((q.question.clone(), label.clone()));
                     }
@@ -1444,7 +2092,14 @@ fn card(ws: &mut Workspace, verb: &str, arg: &str, cx: &mut Context<Workspace>) 
                 }
             }
         }
-        ("answer", _) => anyhow::bail!("answer: the thread is waiting on a {}, not a question (approve or deny)", if p.prompt.is_some() { "plan" } else { "permission" }),
+        ("answer", _) => anyhow::bail!(
+            "answer: the thread is waiting on a {}, not a question (approve or deny)",
+            if p.prompt.is_some() {
+                "plan"
+            } else {
+                "permission"
+            }
+        ),
         _ => unreachable!(),
     }
     Ok(())
@@ -1473,15 +2128,27 @@ fn underlay(w: u32, h: u32) -> image::RgbaImage {
     let raw = source
         .as_ref()
         .and_then(|p| image::open(p).ok())
-        .map(|i| image::imageops::resize(&i.to_rgba8(), w, h, image::imageops::FilterType::Triangle))
+        .map(|i| {
+            image::imageops::resize(&i.to_rgba8(), w, h, image::imageops::FilterType::Triangle)
+        })
         .unwrap_or_else(|| {
             image::RgbaImage::from_fn(w, h, |x, y| {
                 let (fx, fy) = (x as f32 / w as f32, y as f32 / h as f32);
-                image::Rgba([(40. + 160. * fx) as u8, (70. + 60. * fy) as u8, (150. - 60. * fx) as u8, 255])
+                image::Rgba([
+                    (40. + 160. * fx) as u8,
+                    (70. + 60. * fy) as u8,
+                    (150. - 60. * fx) as u8,
+                    255,
+                ])
             })
         });
     let image = image::imageops::blur(&raw, 30.);
-    *cached = Some(Underlay { source, w, h, image: image.clone() });
+    *cached = Some(Underlay {
+        source,
+        w,
+        h,
+        image: image.clone(),
+    });
     image
 }
 

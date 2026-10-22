@@ -34,7 +34,8 @@ fn trim_end(text: &str, start: usize, mut end: usize) -> usize {
     while end > start {
         let s = &text[start..end];
         let last = s.as_bytes()[s.len() - 1];
-        let unbalanced = |open: char, close: char| s.matches(close).count() > s.matches(open).count();
+        let unbalanced =
+            |open: char, close: char| s.matches(close).count() > s.matches(open).count();
         let drop = match last {
             b'.' | b',' | b';' | b':' | b'!' | b'?' | b'*' => true,
             b')' => unbalanced('(', ')'),
@@ -52,7 +53,10 @@ fn trim_end(text: &str, start: usize, mut end: usize) -> usize {
 /// The link starting at byte `i` of `text`, if one does: its end and its address.
 fn link_at(text: &str, i: usize) -> Option<(usize, String)> {
     let rest = &text[i..];
-    let starts = |prefix: &str| rest.len() >= prefix.len() && rest.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes());
+    let starts = |prefix: &str| {
+        rest.len() >= prefix.len()
+            && rest.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+    };
     let scan = || i + rest.bytes().take_while(|b| url_byte(*b)).count();
     if let Some(scheme) = ["https://", "http://"].into_iter().find(|p| starts(p)) {
         let end = trim_end(text, i, scan());
@@ -64,12 +68,17 @@ fn link_at(text: &str, i: usize) -> Option<(usize, String)> {
         return Some((end, text[i..end].to_string()));
     }
     // Dev servers print where they listen without a scheme: `localhost:5173`, `127.0.0.1:8000/docs`.
-    let host = ["localhost:", "127.0.0.1:"].into_iter().find(|p| starts(p))?;
+    let host = ["localhost:", "127.0.0.1:"]
+        .into_iter()
+        .find(|p| starts(p))?;
     let end = trim_end(text, i, scan());
     if end <= i + host.len() {
         return None;
     }
-    let port = text[i + host.len()..end].bytes().take_while(u8::is_ascii_digit).count();
+    let port = text[i + host.len()..end]
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .count();
     let after = text.as_bytes().get(i + host.len() + port).copied();
     if port == 0 || port > 5 || after.is_some_and(|b| b.is_ascii_alphanumeric()) {
         return None;
@@ -108,7 +117,13 @@ pub fn open(ws: &Entity<Workspace>, url: String, window: &mut Window, cx: &mut A
 }
 
 /// Keep `choice` as where terminal links open, and open `url` there.
-pub fn choose(ws: &Entity<Workspace>, choice: OpenLinks, url: String, window: &mut Window, cx: &mut App) {
+pub fn choose(
+    ws: &Entity<Workspace>,
+    choice: OpenLinks,
+    url: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
     ws.update(cx, |ws, cx| {
         ws.settings.terminal.open_links = choice;
         ws.save_settings(cx);
@@ -163,40 +178,99 @@ mod tests {
         // Vite.
         let row = "  ➜  Local:   http://localhost:5173/";
         let found = find_links(row);
-        assert_eq!(found, vec![Found { range: row.find("http").unwrap()..row.len(), url: "http://localhost:5173/".into() }]);
-        assert_eq!(urls("  ➜  Network: use --host to expose"), Vec::<String>::new());
+        assert_eq!(
+            found,
+            vec![Found {
+                range: row.find("http").unwrap()..row.len(),
+                url: "http://localhost:5173/".into()
+            }]
+        );
+        assert_eq!(
+            urls("  ➜  Network: use --host to expose"),
+            Vec::<String>::new()
+        );
         // Next.js, uvicorn, Rails, a bare one.
-        assert_eq!(urls("   - Local:        http://localhost:3000"), ["http://localhost:3000"]);
-        assert_eq!(urls("INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)"), ["http://127.0.0.1:8000"]);
-        assert_eq!(urls("* Listening on http://127.0.0.1:3000"), ["http://127.0.0.1:3000"]);
-        assert_eq!(urls("Server ready at localhost:8080/graphql"), ["http://localhost:8080/graphql"]);
-        assert_eq!(urls("listening on 127.0.0.1:4000"), ["http://127.0.0.1:4000"]);
+        assert_eq!(
+            urls("   - Local:        http://localhost:3000"),
+            ["http://localhost:3000"]
+        );
+        assert_eq!(
+            urls("INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)"),
+            ["http://127.0.0.1:8000"]
+        );
+        assert_eq!(
+            urls("* Listening on http://127.0.0.1:3000"),
+            ["http://127.0.0.1:3000"]
+        );
+        assert_eq!(
+            urls("Server ready at localhost:8080/graphql"),
+            ["http://localhost:8080/graphql"]
+        );
+        assert_eq!(
+            urls("listening on 127.0.0.1:4000"),
+            ["http://127.0.0.1:4000"]
+        );
         // https, with a query and a fragment, and two on a row.
         assert_eq!(
-            urls("see https://github.com/dokyit/trek/pull/12?w=1#diff-3 or HTTPS://example.com/a_(b)"),
-            ["https://github.com/dokyit/trek/pull/12?w=1#diff-3", "HTTPS://example.com/a_(b)"]
+            urls(
+                "see https://github.com/dokyit/trek/pull/12?w=1#diff-3 or HTTPS://example.com/a_(b)"
+            ),
+            [
+                "https://github.com/dokyit/trek/pull/12?w=1#diff-3",
+                "HTTPS://example.com/a_(b)"
+            ]
         );
     }
 
     #[test]
     fn what_ends_a_sentence_is_not_part_of_the_link() {
-        assert_eq!(urls("Open http://localhost:5173/."), ["http://localhost:5173/"]);
-        assert_eq!(urls("(see https://example.com/docs)"), ["https://example.com/docs"]);
-        assert_eq!(urls("at https://example.com/a, then https://example.com/b;"), ["https://example.com/a", "https://example.com/b"]);
+        assert_eq!(
+            urls("Open http://localhost:5173/."),
+            ["http://localhost:5173/"]
+        );
+        assert_eq!(
+            urls("(see https://example.com/docs)"),
+            ["https://example.com/docs"]
+        );
+        assert_eq!(
+            urls("at https://example.com/a, then https://example.com/b;"),
+            ["https://example.com/a", "https://example.com/b"]
+        );
         assert_eq!(urls("ready: localhost:3000!"), ["http://localhost:3000"]);
         assert_eq!(urls("\"https://example.com/q\""), ["https://example.com/q"]);
-        assert_eq!(urls("**https://example.com/bold**"), ["https://example.com/bold"]);
-        assert_eq!(urls("[link](https://example.com/x)"), ["https://example.com/x"]);
+        assert_eq!(
+            urls("**https://example.com/bold**"),
+            ["https://example.com/bold"]
+        );
+        assert_eq!(
+            urls("[link](https://example.com/x)"),
+            ["https://example.com/x"]
+        );
         // Box drawing right after the address (a TUI's frame) isn't part of it.
-        assert_eq!(urls("│ http://localhost:5173/│"), ["http://localhost:5173/"]);
+        assert_eq!(
+            urls("│ http://localhost:5173/│"),
+            ["http://localhost:5173/"]
+        );
     }
 
     #[test]
     fn near_misses_are_not_links() {
-        assert!(find_links("http:// and https://").is_empty(), "a scheme alone");
-        assert!(find_links("ssh me@localhost:22").is_empty(), "an address, not a page");
-        assert!(find_links("dev.localhost:3000").is_empty(), "part of another host");
-        assert!(find_links("localhost:abc localhost: localhost:123456").is_empty(), "no port, or not one");
+        assert!(
+            find_links("http:// and https://").is_empty(),
+            "a scheme alone"
+        );
+        assert!(
+            find_links("ssh me@localhost:22").is_empty(),
+            "an address, not a page"
+        );
+        assert!(
+            find_links("dev.localhost:3000").is_empty(),
+            "part of another host"
+        );
+        assert!(
+            find_links("localhost:abc localhost: localhost:123456").is_empty(),
+            "no port, or not one"
+        );
         assert!(find_links("plain words, no links: here.").is_empty());
         // A link cut off at the end of a row is still a link to what's on the row (the rest, on
         // the next row, is missed).

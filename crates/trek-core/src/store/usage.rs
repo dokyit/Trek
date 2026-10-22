@@ -26,14 +26,23 @@ CREATE INDEX IF NOT EXISTS turn_stops_thread ON turn_stops(thread_id);
 CREATE TABLE IF NOT EXISTS history_cache (key TEXT PRIMARY KEY, stamp TEXT NOT NULL, data TEXT NOT NULL);";
 
 /// Columns `token_usage` gained after it was first made.
-const COLUMNS_ADDED: &[(&str, &str)] = &[("cost_usd", "REAL"), ("cost_reported", "INTEGER NOT NULL DEFAULT 0")];
+const COLUMNS_ADDED: &[(&str, &str)] = &[
+    ("cost_usd", "REAL"),
+    ("cost_reported", "INTEGER NOT NULL DEFAULT 0"),
+];
 
 pub(super) fn migrate(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     conn.execute_batch(SCHEMA)?;
-    let have: HashSet<String> = conn.prepare("SELECT name FROM pragma_table_info('token_usage')")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let have: HashSet<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('token_usage')")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
     for (name, decl) in COLUMNS_ADDED {
         if !have.contains(*name) {
-            conn.execute(&format!("ALTER TABLE token_usage ADD COLUMN {name} {decl}"), [])?;
+            conn.execute(
+                &format!("ALTER TABLE token_usage ADD COLUMN {name} {decl}"),
+                [],
+            )?;
         }
     }
     Ok(())
@@ -63,7 +72,8 @@ impl UsageRow {
     }
 }
 
-const ROW_COLS: &str = "thread_id, at, agent, model, input, output, cache_read, cache_write, cost_usd, cost_reported";
+const ROW_COLS: &str =
+    "thread_id, at, agent, model, input, output, cache_read, cache_write, cost_usd, cost_reported";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<UsageRow> {
     Ok(UsageRow {
@@ -77,7 +87,10 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<UsageRow> {
             cache_read: r.get::<_, i64>(6)?.max(0) as u64,
             cache_write: r.get::<_, i64>(7)?.max(0) as u64,
         },
-        cost: r.get::<_, Option<f64>>(8)?.map(|usd| UsageCost { usd, reported: r.get::<_, bool>(9).unwrap_or(false) }),
+        cost: r.get::<_, Option<f64>>(8)?.map(|usd| UsageCost {
+            usd,
+            reported: r.get::<_, bool>(9).unwrap_or(false),
+        }),
     })
 }
 
@@ -90,13 +103,19 @@ pub enum Activity {
     TurnEnd { at: i64, took_secs: u32 },
     /// A turn failed, or was stopped, after `took_secs`. Transcripts don't keep these as turn
     /// ends; Trek records them apart.
-    TurnStopped { at: i64, took_secs: u32, failed: bool },
+    TurnStopped {
+        at: i64,
+        took_secs: u32,
+        failed: bool,
+    },
 }
 
 impl Activity {
     pub fn at(&self) -> i64 {
         match self {
-            Activity::Prompt { at } | Activity::TurnEnd { at, .. } | Activity::TurnStopped { at, .. } => *at,
+            Activity::Prompt { at }
+            | Activity::TurnEnd { at, .. }
+            | Activity::TurnStopped { at, .. } => *at,
         }
     }
 }
@@ -104,7 +123,15 @@ impl Activity {
 impl Store {
     /// Keep what one model used in a turn of `thread_id`, and what it cost if that's known. A
     /// report with neither tokens nor a cost isn't kept.
-    pub fn record_usage(&self, thread_id: &str, at: i64, agent: &AgentId, model: Option<&str>, tokens: &TokenUsage, cost: Option<UsageCost>) -> Result<()> {
+    pub fn record_usage(
+        &self,
+        thread_id: &str,
+        at: i64,
+        agent: &AgentId,
+        model: Option<&str>,
+        tokens: &TokenUsage,
+        cost: Option<UsageCost>,
+    ) -> Result<()> {
         if tokens.is_empty() && cost.is_none_or(|c| c.usd <= 0.0) {
             return Ok(());
         }
@@ -131,7 +158,9 @@ impl Store {
     /// Everything `threads` reported, oldest first.
     pub fn usage_of(&self, threads: &[String]) -> Result<Vec<UsageRow>> {
         self.reading(|c| {
-            let mut st = c.prepare_cached(&format!("SELECT {ROW_COLS} FROM token_usage WHERE thread_id = ?1 ORDER BY at"))?;
+            let mut st = c.prepare_cached(&format!(
+                "SELECT {ROW_COLS} FROM token_usage WHERE thread_id = ?1 ORDER BY at"
+            ))?;
             let mut out = Vec::new();
             for id in threads {
                 for r in st.query_map([id], row)? {
@@ -158,9 +187,18 @@ impl Store {
     }
 
     /// A turn of `thread_id` that failed (or was stopped, `failed` false) at `at`.
-    pub fn record_stop(&self, thread_id: &str, at: i64, took_secs: u32, failed: bool) -> Result<()> {
+    pub fn record_stop(
+        &self,
+        thread_id: &str,
+        at: i64,
+        took_secs: u32,
+        failed: bool,
+    ) -> Result<()> {
         self.with(|c| {
-            c.prepare_cached("INSERT INTO turn_stops (thread_id, at, took_secs, failed) VALUES (?1, ?2, ?3, ?4)")?.execute(params![thread_id, at, took_secs, failed])?;
+            c.prepare_cached(
+                "INSERT INTO turn_stops (thread_id, at, took_secs, failed) VALUES (?1, ?2, ?3, ?4)",
+            )?
+            .execute(params![thread_id, at, took_secs, failed])?;
             Ok(())
         })
     }
@@ -168,7 +206,8 @@ impl Store {
     /// When Trek first recorded usage for each of `threads` (those it has recorded any for).
     pub fn first_usage(&self, threads: &[String]) -> Result<HashMap<String, i64>> {
         self.reading(|c| {
-            let mut st = c.prepare_cached("SELECT MIN(at) FROM token_usage WHERE thread_id = ?1")?;
+            let mut st =
+                c.prepare_cached("SELECT MIN(at) FROM token_usage WHERE thread_id = ?1")?;
             let mut out = HashMap::new();
             for id in threads {
                 if let Some(at) = st.query_row([id], |r| r.get::<_, Option<i64>>(0))? {
@@ -182,7 +221,9 @@ impl Store {
     /// Usage reported in `[from, to)`, oldest first.
     pub fn usage_between(&self, from: i64, to: i64) -> Result<Vec<UsageRow>> {
         self.reading(|c| {
-            let mut st = c.prepare(&format!("SELECT {ROW_COLS} FROM token_usage WHERE at >= ?1 AND at < ?2 ORDER BY at"))?;
+            let mut st = c.prepare(&format!(
+                "SELECT {ROW_COLS} FROM token_usage WHERE at >= ?1 AND at < ?2 ORDER BY at"
+            ))?;
             let rows = st.query_map(params![from, to], row)?;
             rows.collect()
         })
@@ -205,7 +246,8 @@ impl Store {
     /// Of `threads`, the ones with a stored transcript (Trek's own, or imported ones continued here).
     pub fn with_transcripts(&self, threads: &[String]) -> Result<HashSet<String>> {
         self.reading(|c| {
-            let mut st = c.prepare_cached("SELECT EXISTS (SELECT 1 FROM items WHERE thread_id = ?1)")?;
+            let mut st =
+                c.prepare_cached("SELECT EXISTS (SELECT 1 FROM items WHERE thread_id = ?1)")?;
             let mut out = HashSet::new();
             for id in threads {
                 if st.query_row([id], |r| r.get::<_, bool>(0))? {
@@ -257,8 +299,15 @@ impl Store {
     /// With `turns_stopped`, what tells Basecamp a thread's numbers moved without reading them.
     pub fn usage_counts(&self) -> Result<HashMap<String, (usize, i64, i64)>> {
         self.reading(|c| {
-            let mut st = c.prepare_cached("SELECT thread_id, COUNT(*), MIN(at), MAX(at) FROM token_usage GROUP BY thread_id")?;
-            let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, (r.get::<_, i64>(1)? as usize, r.get(2)?, r.get(3)?))))?;
+            let mut st = c.prepare_cached(
+                "SELECT thread_id, COUNT(*), MIN(at), MAX(at) FROM token_usage GROUP BY thread_id",
+            )?;
+            let rows = st.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (r.get::<_, i64>(1)? as usize, r.get(2)?, r.get(3)?),
+                ))
+            })?;
             rows.collect()
         })
     }
@@ -266,8 +315,11 @@ impl Store {
     /// How many turns of each thread failed or were stopped.
     pub fn turns_stopped(&self) -> Result<HashMap<String, usize>> {
         self.reading(|c| {
-            let mut st = c.prepare_cached("SELECT thread_id, COUNT(*) FROM turn_stops GROUP BY thread_id")?;
-            let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize)))?;
+            let mut st =
+                c.prepare_cached("SELECT thread_id, COUNT(*) FROM turn_stops GROUP BY thread_id")?;
+            let rows = st.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))
+            })?;
             rows.collect()
         })
     }
@@ -290,10 +342,16 @@ impl Store {
     /// found (`data`). Only `keys` are read.
     pub fn histories_kept(&self, keys: &[String]) -> Result<HashMap<String, (String, String)>> {
         self.reading(|c| {
-            let mut st = c.prepare_cached("SELECT stamp, data FROM history_cache WHERE key = ?1")?;
+            let mut st =
+                c.prepare_cached("SELECT stamp, data FROM history_cache WHERE key = ?1")?;
             let mut out = HashMap::new();
             for key in keys {
-                if let Some(found) = st.query_row([key], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).optional()? {
+                if let Some(found) = st
+                    .query_row([key], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                    })
+                    .optional()?
+                {
                     out.insert(key.clone(), found);
                 }
             }
@@ -339,7 +397,13 @@ fn activity_sql(filter: &str) -> String {
 }
 
 fn activity_params(from: i64, to: i64) -> (i64, i64, &'static str, i64, &'static str) {
-    (from, to, crate::limit::CONTINUE, crate::orchestrate::WAKE_PREFIX.chars().count() as i64, crate::orchestrate::WAKE_PREFIX)
+    (
+        from,
+        to,
+        crate::limit::CONTINUE,
+        crate::orchestrate::WAKE_PREFIX.chars().count() as i64,
+        crate::orchestrate::WAKE_PREFIX,
+    )
 }
 
 fn activity_row(r: &rusqlite::Row) -> rusqlite::Result<(String, Activity)> {
@@ -347,14 +411,27 @@ fn activity_row(r: &rusqlite::Row) -> rusqlite::Result<(String, Activity)> {
     let at: i64 = r.get(2)?;
     let activity = match kind.as_str() {
         "user" => Activity::Prompt { at },
-        _ => Activity::TurnEnd { at, took_secs: r.get::<_, Option<i64>>(3)?.unwrap_or(0).clamp(0, u32::MAX as i64) as u32 },
+        _ => Activity::TurnEnd {
+            at,
+            took_secs: r
+                .get::<_, Option<i64>>(3)?
+                .unwrap_or(0)
+                .clamp(0, u32::MAX as i64) as u32,
+        },
     };
     Ok((r.get::<_, String>(0)?, activity))
 }
 
 fn stop_row(r: &rusqlite::Row) -> rusqlite::Result<(String, Activity)> {
     let took_secs = r.get::<_, i64>(2)?.clamp(0, u32::MAX as i64) as u32;
-    Ok((r.get::<_, String>(0)?, Activity::TurnStopped { at: r.get(1)?, took_secs, failed: r.get(3)? }))
+    Ok((
+        r.get::<_, String>(0)?,
+        Activity::TurnStopped {
+            at: r.get(1)?,
+            took_secs,
+            failed: r.get(3)?,
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -364,24 +441,83 @@ mod tests {
     use crate::types::{Effort, HandHolding};
 
     fn user(text: &str, at: i64, aside: bool) -> Item {
-        Item::User { text: text.into(), images: vec![], at: Some(at), resume: None, aside }
+        Item::User {
+            text: text.into(),
+            images: vec![],
+            at: Some(at),
+            resume: None,
+            aside,
+        }
     }
 
     #[test]
     fn usage_is_kept_per_turn_and_read_back_by_time() {
         let s = Store::in_memory().unwrap();
-        let t = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap();
-        let tokens = TokenUsage { input: 10, output: 40, cache_read: 22_000, cache_write: 1_000 };
-        s.record_usage(&t.id, 1_000, &AgentId::ClaudeCode, Some("claude-opus-5-5"), &tokens, Some(UsageCost::reported(0.0161))).unwrap();
-        s.record_usage(&t.id, 2_000, &AgentId::ClaudeCode, None, &TokenUsage { output: 5, ..Default::default() }, None).unwrap();
+        let t = s
+            .create_thread(
+                None,
+                AgentId::ClaudeCode,
+                None,
+                Effort::High,
+                HandHolding::Auto,
+            )
+            .unwrap();
+        let tokens = TokenUsage {
+            input: 10,
+            output: 40,
+            cache_read: 22_000,
+            cache_write: 1_000,
+        };
+        s.record_usage(
+            &t.id,
+            1_000,
+            &AgentId::ClaudeCode,
+            Some("claude-opus-5-5"),
+            &tokens,
+            Some(UsageCost::reported(0.0161)),
+        )
+        .unwrap();
+        s.record_usage(
+            &t.id,
+            2_000,
+            &AgentId::ClaudeCode,
+            None,
+            &TokenUsage {
+                output: 5,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
         // Nothing used, nothing kept.
-        s.record_usage(&t.id, 3_000, &AgentId::ClaudeCode, None, &TokenUsage::default(), None).unwrap();
+        s.record_usage(
+            &t.id,
+            3_000,
+            &AgentId::ClaudeCode,
+            None,
+            &TokenUsage::default(),
+            None,
+        )
+        .unwrap();
         let rows = s.usage_between(0, 10_000).unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0], UsageRow { thread_id: t.id.clone(), at: 1_000, agent: AgentId::ClaudeCode, model: Some("claude-opus-5-5".into()), tokens, cost: Some(UsageCost::reported(0.0161)) });
+        assert_eq!(
+            rows[0],
+            UsageRow {
+                thread_id: t.id.clone(),
+                at: 1_000,
+                agent: AgentId::ClaudeCode,
+                model: Some("claude-opus-5-5".into()),
+                tokens,
+                cost: Some(UsageCost::reported(0.0161))
+            }
+        );
         assert_eq!(rows[1].cost, None);
         assert_eq!(s.usage_between(1_500, 10_000).unwrap().len(), 1);
-        assert_eq!(s.first_usage(&[t.id.clone(), "other".into()]).unwrap(), HashMap::from([(t.id.clone(), 1_000)]));
+        assert_eq!(
+            s.first_usage(&[t.id.clone(), "other".into()]).unwrap(),
+            HashMap::from([(t.id.clone(), 1_000)])
+        );
         // A deleted thread's usage goes with it.
         s.delete_thread(&t.id).unwrap();
         assert!(s.usage_between(0, 10_000).unwrap().is_empty());
@@ -389,26 +525,77 @@ mod tests {
 
     #[test]
     fn cost_is_kept_with_the_tokens_and_survives_reopening() {
-        let path = std::env::temp_dir().join(format!("trek-usage-cost-{}.sqlite", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("trek-usage-cost-{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let (parent, child, grandchild);
         {
             let s = Store::open(&path).unwrap();
-            parent = s.create_thread(None, AgentId::ClaudeCode, None, Effort::High, HandHolding::Auto).unwrap().id;
-            let mut c = s.create_thread(None, AgentId::Codex, None, Effort::Low, HandHolding::Auto).unwrap();
+            parent = s
+                .create_thread(
+                    None,
+                    AgentId::ClaudeCode,
+                    None,
+                    Effort::High,
+                    HandHolding::Auto,
+                )
+                .unwrap()
+                .id;
+            let mut c = s
+                .create_thread(None, AgentId::Codex, None, Effort::Low, HandHolding::Auto)
+                .unwrap();
             c.parent_id = Some(parent.clone());
             s.save_thread(&c).unwrap();
             child = c.id;
-            let mut g = s.create_thread(None, AgentId::Codex, None, Effort::Low, HandHolding::Auto).unwrap();
+            let mut g = s
+                .create_thread(None, AgentId::Codex, None, Effort::Low, HandHolding::Auto)
+                .unwrap();
             g.parent_id = Some(child.clone());
             s.save_thread(&g).unwrap();
             grandchild = g.id;
-            let t = TokenUsage { input: 1_000, output: 100, cache_read: 0, cache_write: 0 };
-            s.record_usage(&parent, 1, &AgentId::ClaudeCode, Some("claude-sonnet-5-5"), &t, Some(UsageCost::reported(0.25))).unwrap();
-            s.record_usage(&child, 2, &AgentId::Codex, Some("gpt-5.6-luna"), &t, Some(UsageCost::priced(0.00032))).unwrap();
-            s.record_usage(&grandchild, 3, &AgentId::Codex, Some("unknown-model"), &t, None).unwrap();
+            let t = TokenUsage {
+                input: 1_000,
+                output: 100,
+                cache_read: 0,
+                cache_write: 0,
+            };
+            s.record_usage(
+                &parent,
+                1,
+                &AgentId::ClaudeCode,
+                Some("claude-sonnet-5-5"),
+                &t,
+                Some(UsageCost::reported(0.25)),
+            )
+            .unwrap();
+            s.record_usage(
+                &child,
+                2,
+                &AgentId::Codex,
+                Some("gpt-5.6-luna"),
+                &t,
+                Some(UsageCost::priced(0.00032)),
+            )
+            .unwrap();
+            s.record_usage(
+                &grandchild,
+                3,
+                &AgentId::Codex,
+                Some("unknown-model"),
+                &t,
+                None,
+            )
+            .unwrap();
             // A cost with no tokens (an agent that reports only what it spent) is kept.
-            s.record_usage(&parent, 4, &AgentId::OpenCode, Some("anthropic/claude-sonnet-5-5"), &TokenUsage::default(), Some(UsageCost::reported(0.1))).unwrap();
+            s.record_usage(
+                &parent,
+                4,
+                &AgentId::OpenCode,
+                Some("anthropic/claude-sonnet-5-5"),
+                &TokenUsage::default(),
+                Some(UsageCost::reported(0.1)),
+            )
+            .unwrap();
         }
         let s = Store::open(&path).unwrap();
         let own = UsageRow::spend(&s.usage_of(std::slice::from_ref(&parent)).unwrap());
@@ -433,7 +620,9 @@ mod tests {
         .unwrap();
         migrate(&c).unwrap();
         migrate(&c).unwrap();
-        let got = c.query_row(&format!("SELECT {ROW_COLS} FROM token_usage"), [], row).unwrap();
+        let got = c
+            .query_row(&format!("SELECT {ROW_COLS} FROM token_usage"), [], row)
+            .unwrap();
         assert_eq!(got.cost, None);
         assert_eq!(got.tokens.output, 5);
     }
@@ -441,30 +630,73 @@ mod tests {
     #[test]
     fn activity_is_prompts_and_turn_ends_in_the_window() {
         let s = Store::in_memory().unwrap();
-        let t = s.create_thread(None, AgentId::Codex, None, Effort::High, HandHolding::Auto).unwrap();
+        let t = s
+            .create_thread(None, AgentId::Codex, None, Effort::High, HandHolding::Auto)
+            .unwrap();
         let items = vec![
             user("yesterday", 500, false),
-            Item::TurnEnd { at: 900, took_secs: 400 },
+            Item::TurnEnd {
+                at: 900,
+                took_secs: 400,
+            },
             user("go", 1_000, false),
             Item::Assistant { text: "ok".into() },
-            Item::TurnEnd { at: 1_200, took_secs: 12 },
+            Item::TurnEnd {
+                at: 1_200,
+                took_secs: 12,
+            },
             user("/model", 1_300, true),
             // Sent by a resume at a limit's reset, not by the user.
             user(crate::limit::CONTINUE, 1_400, false),
-            Item::User { text: "no time".into(), images: vec![], at: None, resume: None, aside: false },
+            Item::User {
+                text: "no time".into(),
+                images: vec![],
+                at: None,
+                resume: None,
+                aside: false,
+            },
             user("later", 5_000, false),
         ];
         let mut tr = crate::transcript::Transcript::unsaved(items);
         s.save_transcript(&t.id, &mut tr).unwrap();
-        let got: Vec<Activity> = s.activity_between(1_000, 5_000).unwrap().into_iter().map(|(_, a)| a).collect();
-        assert_eq!(got, vec![Activity::Prompt { at: 1_000 }, Activity::TurnEnd { at: 1_200, took_secs: 12 }]);
-        assert_eq!(s.with_transcripts(&[t.id.clone(), "other".into()]).unwrap(), HashSet::from([t.id.clone()]));
+        let got: Vec<Activity> = s
+            .activity_between(1_000, 5_000)
+            .unwrap()
+            .into_iter()
+            .map(|(_, a)| a)
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                Activity::Prompt { at: 1_000 },
+                Activity::TurnEnd {
+                    at: 1_200,
+                    took_secs: 12
+                }
+            ]
+        );
+        assert_eq!(
+            s.with_transcripts(&[t.id.clone(), "other".into()]).unwrap(),
+            HashSet::from([t.id.clone()])
+        );
         assert_eq!(s.threads_since(0).unwrap().len(), 1);
         // Turns that failed or were stopped are kept apart, and come after the transcript's.
         s.record_stop(&t.id, 1_500, 30, true).unwrap();
         s.record_stop(&t.id, 6_000, 5, false).unwrap();
-        let got: Vec<Activity> = s.activity_between(1_000, 5_000).unwrap().into_iter().map(|(_, a)| a).collect();
-        assert_eq!(got.last(), Some(&Activity::TurnStopped { at: 1_500, took_secs: 30, failed: true }));
+        let got: Vec<Activity> = s
+            .activity_between(1_000, 5_000)
+            .unwrap()
+            .into_iter()
+            .map(|(_, a)| a)
+            .collect();
+        assert_eq!(
+            got.last(),
+            Some(&Activity::TurnStopped {
+                at: 1_500,
+                took_secs: 30,
+                failed: true
+            })
+        );
         assert_eq!(got.len(), 3);
         assert!(s.threads_since(t.updated_at + 1).unwrap().is_empty());
     }

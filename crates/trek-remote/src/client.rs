@@ -42,8 +42,12 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls;
-use tokio_rustls::rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use tokio_rustls::rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
+use tokio_rustls::rustls::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
+use tokio_rustls::rustls::crypto::{
+    CryptoProvider, verify_tls12_signature, verify_tls13_signature,
+};
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use tokio_rustls::rustls::{DigitallySignedStruct, SignatureScheme};
 use tokio_tungstenite::WebSocketStream;
@@ -51,8 +55,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::protocol::{
-    ClientEnvelope, ClientMessage, CloneProjectRequest, ErrorCode, FileUpload, HostInfo, MachineInfo, PROTOCOL_VERSION, PutFile, PutFilesRequest, ServerEnvelope,
-    ServerMessage,
+    ClientEnvelope, ClientMessage, CloneProjectRequest, ErrorCode, FileUpload, HostInfo,
+    MachineInfo, PROTOCOL_VERSION, PutFile, PutFilesRequest, ServerEnvelope, ServerMessage,
 };
 
 /// The largest message taken from the machine (above anything it sends; one over it ends the
@@ -97,7 +101,11 @@ impl Default for ClientOptions {
 #[derive(Clone, PartialEq, Eq)]
 pub enum Auth {
     /// The first time: the code the machine shows (`ABCD-1234`), and who this is.
-    Pair { code: String, device_id: String, device_name: String },
+    Pair {
+        code: String,
+        device_id: String,
+        device_name: String,
+    },
     /// After: the device token `pair` gave.
     Hello { device_id: String, token: String },
 }
@@ -105,8 +113,19 @@ pub enum Auth {
 impl std::fmt::Debug for Auth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Pair { device_id, device_name, .. } => f.debug_struct("Pair").field("device_id", device_id).field("device_name", device_name).finish_non_exhaustive(),
-            Self::Hello { device_id, .. } => f.debug_struct("Hello").field("device_id", device_id).finish_non_exhaustive(),
+            Self::Pair {
+                device_id,
+                device_name,
+                ..
+            } => f
+                .debug_struct("Pair")
+                .field("device_id", device_id)
+                .field("device_name", device_name)
+                .finish_non_exhaustive(),
+            Self::Hello { device_id, .. } => f
+                .debug_struct("Hello")
+                .field("device_id", device_id)
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -131,7 +150,10 @@ pub struct Paired {
 impl Paired {
     /// `hello` with this token.
     pub fn auth(&self) -> Auth {
-        Auth::Hello { device_id: self.device_id.clone(), token: self.token.clone() }
+        Auth::Hello {
+            device_id: self.device_id.clone(),
+            token: self.token.clone(),
+        }
     }
 
     /// Whether the machine serves `feature`.
@@ -188,7 +210,11 @@ pub enum Event {
     /// Authenticated on `route`: `newly_paired` after `pair` (keep `paired`, it holds the
     /// token), else after `hello` (keep it too: the routes may have changed). Threads open
     /// before are subscribed to again right after.
-    Connected { route: String, paired: Paired, newly_paired: bool },
+    Connected {
+        route: String,
+        paired: Paired,
+        newly_paired: bool,
+    },
     /// The connection dropped; the client is connecting again. Requests in flight failed with
     /// [`ClientError::Disconnected`].
     Disconnected { reason: String },
@@ -223,7 +249,10 @@ pub enum ClientError {
 type Responder = oneshot::Sender<Result<ServerMessage, ClientError>>;
 
 enum Cmd {
-    Request { msg: ClientMessage, reply: Responder },
+    Request {
+        msg: ClientMessage,
+        reply: Responder,
+    },
     Close,
 }
 
@@ -237,7 +266,9 @@ pub struct Client {
 
 impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Client").field("state", &*self.state.borrow()).finish_non_exhaustive()
+        f.debug_struct("Client")
+            .field("state", &*self.state.borrow())
+            .finish_non_exhaustive()
     }
 }
 
@@ -245,7 +276,11 @@ impl Client {
     /// Connect to the machine at the first of `routes` (`host:port`) that answers, accepting only
     /// a certificate whose SHA-256 is `fingerprint`, and authenticate with `auth`. Returns at
     /// once; [`Client::state`] and [`Client::events`] say how it goes.
-    pub fn connect(routes: Vec<String>, fingerprint: &str, auth: Auth) -> Result<Self, ClientError> {
+    pub fn connect(
+        routes: Vec<String>,
+        fingerprint: &str,
+        auth: Auth,
+    ) -> Result<Self, ClientError> {
         Self::connect_with(routes, fingerprint, auth, ClientOptions::default())
     }
 
@@ -255,13 +290,24 @@ impl Client {
     }
 
     /// [`Client::connect`] with other timings.
-    pub fn connect_with(routes: Vec<String>, fingerprint: &str, auth: Auth, options: ClientOptions) -> Result<Self, ClientError> {
+    pub fn connect_with(
+        routes: Vec<String>,
+        fingerprint: &str,
+        auth: Auth,
+        options: ClientOptions,
+    ) -> Result<Self, ClientError> {
         let fingerprint = fingerprint.trim().to_ascii_lowercase();
         if fingerprint.len() != 64 || !fingerprint.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(ClientError::Invalid("The fingerprint must be a SHA-256, 64 hex characters".into()));
+            return Err(ClientError::Invalid(
+                "The fingerprint must be a SHA-256, 64 hex characters".into(),
+            ));
         }
         let mut clean: Vec<String> = Vec::new();
-        for route in routes.iter().map(|r| bare_route(r)).filter(|r| !r.is_empty()) {
+        for route in routes
+            .iter()
+            .map(|r| bare_route(r))
+            .filter(|r| !r.is_empty())
+        {
             if !clean.contains(&route) {
                 clean.push(route);
             }
@@ -289,7 +335,11 @@ impl Client {
             next_id: 0,
         };
         spawn(driver.run());
-        Ok(Self { cmds, state: state_rx, events: Mutex::new(Some(events_rx)) })
+        Ok(Self {
+            cmds,
+            state: state_rx,
+            events: Mutex::new(Some(events_rx)),
+        })
     }
 
     /// Send `msg` and wait for its reply: the machine's `error` is [`ClientError::Server`].
@@ -339,14 +389,21 @@ impl Client {
     /// `clone_progress` events.
     pub async fn clone_project(&self, req: CloneProjectRequest) -> Result<String, ClientError> {
         match self.request(ClientMessage::CloneProject(req)).await? {
-            ServerMessage::Ack { project_id: Some(id), .. } => Ok(id),
+            ServerMessage::Ack {
+                project_id: Some(id),
+                ..
+            } => Ok(id),
             other => Err(unexpected(&other)),
         }
     }
 
     /// Write `files` under the project's folder on the machine, in as many `put_files` as it
     /// takes to keep each under the size limits.
-    pub async fn put_files(&self, project_id: &str, files: &[FileUpload]) -> Result<(), ClientError> {
+    pub async fn put_files(
+        &self,
+        project_id: &str,
+        files: &[FileUpload],
+    ) -> Result<(), ClientError> {
         // Room for the envelope and the JSON around each file.
         let budget = MAX_OUTBOUND - (64 << 10);
         let mut batch: Vec<PutFile> = Vec::new();
@@ -357,8 +414,11 @@ impl Client {
             if cost > budget || file.bytes.len() > crate::protocol::MAX_PUT_FILES {
                 return Err(ClientError::TooLarge(cost));
             }
-            if !batch.is_empty() && (size + cost > budget || raw + file.bytes.len() > crate::protocol::MAX_PUT_FILES) {
-                self.put_batch(project_id, std::mem::take(&mut batch)).await?;
+            if !batch.is_empty()
+                && (size + cost > budget || raw + file.bytes.len() > crate::protocol::MAX_PUT_FILES)
+            {
+                self.put_batch(project_id, std::mem::take(&mut batch))
+                    .await?;
                 (size, raw) = (0, 0);
             }
             batch.push(put);
@@ -372,7 +432,13 @@ impl Client {
     }
 
     async fn put_batch(&self, project_id: &str, files: Vec<PutFile>) -> Result<(), ClientError> {
-        match self.request(ClientMessage::PutFiles(PutFilesRequest { project_id: project_id.to_string(), files })).await? {
+        match self
+            .request(ClientMessage::PutFiles(PutFilesRequest {
+                project_id: project_id.to_string(),
+                files,
+            }))
+            .await?
+        {
             ServerMessage::Ack { .. } => Ok(()),
             other => Err(unexpected(&other)),
         }
@@ -441,33 +507,61 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl ServerCertVerifier for Pinned {
-    fn verify_server_cert(&self, cert: &CertificateDer<'_>, _: &[CertificateDer<'_>], _: &ServerName<'_>, _: &[u8], _: UnixTime) -> Result<ServerCertVerified, rustls::Error> {
+    fn verify_server_cert(
+        &self,
+        cert: &CertificateDer<'_>,
+        _: &[CertificateDer<'_>],
+        _: &ServerName<'_>,
+        _: &[u8],
+        _: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
         let seen = crate::tls::fingerprint(cert);
         if seen == self.fingerprint {
             Ok(ServerCertVerified::assertion())
         } else {
             *lock(&self.rejected) = Some(seen);
-            Err(rustls::Error::General("not the paired machine's certificate".into()))
+            Err(rustls::Error::General(
+                "not the paired machine's certificate".into(),
+            ))
         }
     }
-    fn verify_tls12_signature(&self, m: &[u8], c: &CertificateDer<'_>, d: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
+    fn verify_tls12_signature(
+        &self,
+        m: &[u8],
+        c: &CertificateDer<'_>,
+        d: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
         verify_tls12_signature(m, c, d, &self.provider.signature_verification_algorithms)
     }
-    fn verify_tls13_signature(&self, m: &[u8], c: &CertificateDer<'_>, d: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
+    fn verify_tls13_signature(
+        &self,
+        m: &[u8],
+        c: &CertificateDer<'_>,
+        d: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
         verify_tls13_signature(m, c, d, &self.provider.signature_verification_algorithms)
     }
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.provider.signature_verification_algorithms.supported_schemes()
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
-fn connector(fingerprint: String, rejected: Arc<Mutex<Option<String>>>) -> Result<TlsConnector, ClientError> {
+fn connector(
+    fingerprint: String,
+    rejected: Arc<Mutex<Option<String>>>,
+) -> Result<TlsConnector, ClientError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
         .map_err(|e| ClientError::Invalid(e.to_string()))?
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(Pinned { fingerprint, provider, rejected }))
+        .with_custom_certificate_verifier(Arc::new(Pinned {
+            fingerprint,
+            provider,
+            rejected,
+        }))
         .with_no_client_auth();
     Ok(TlsConnector::from(Arc::new(config)))
 }
@@ -487,13 +581,26 @@ async fn open(route: &str, tls: &TlsConnector) -> Result<Ws, String> {
     let _ = tcp.set_nodelay(true);
     let name = ServerName::try_from("trek.local").map_err(|e| e.to_string())?;
     let stream = tls.connect(name, tcp).await.map_err(|e| e.to_string())?;
-    let config = WebSocketConfig::default().max_message_size(Some(MAX_INBOUND)).max_frame_size(Some(MAX_INBOUND));
-    let (ws, _) = tokio_tungstenite::client_async_with_config(format!("wss://{route}/"), stream, Some(config)).await.map_err(|e| e.to_string())?;
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(MAX_INBOUND))
+        .max_frame_size(Some(MAX_INBOUND));
+    let (ws, _) = tokio_tungstenite::client_async_with_config(
+        format!("wss://{route}/"),
+        stream,
+        Some(config),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(ws)
 }
 
 /// Each route in turn: the first that answers (its index), or why each didn't.
-async fn open_any(routes: &[String], tls: &TlsConnector, rejected: &Mutex<Option<String>>, timeout: Duration) -> Result<(usize, Ws), Vec<Failure>> {
+async fn open_any(
+    routes: &[String],
+    tls: &TlsConnector,
+    rejected: &Mutex<Option<String>>,
+    timeout: Duration,
+) -> Result<(usize, Ws), Vec<Failure>> {
     let mut failures = Vec::new();
     for (ix, route) in routes.iter().enumerate() {
         *lock(rejected) = None;
@@ -602,7 +709,11 @@ impl Driver {
         loop {
             if failures > 0 {
                 let shift = (failures - 1).min(16);
-                let delay = self.options.backoff_first.saturating_mul(1 << shift).min(self.options.backoff_max);
+                let delay = self
+                    .options
+                    .backoff_first
+                    .saturating_mul(1 << shift)
+                    .min(self.options.backoff_max);
                 let sleep = tokio::time::sleep(delay);
                 tokio::pin!(sleep);
                 loop {
@@ -614,7 +725,12 @@ impl Driver {
             }
             self.state.send_replace(State::Connecting);
             let opened = {
-                let attempt = open_any(&self.routes, &self.tls, &self.rejected, self.options.connect_timeout);
+                let attempt = open_any(
+                    &self.routes,
+                    &self.tls,
+                    &self.rejected,
+                    self.options.connect_timeout,
+                );
                 tokio::pin!(attempt);
                 loop {
                     tokio::select! {
@@ -632,14 +748,38 @@ impl Driver {
                     // Another certificate on every route: the machine changed, or something poses
                     // as it. Never trust it. (With some routes merely down, another machine may
                     // just have that address on this network now: keep trying the others.)
-                    let seen: Vec<&String> = why.iter().filter_map(|f| if let Failure::Mismatch(fp) = f { Some(fp) } else { None }).collect();
+                    let seen: Vec<&String> = why
+                        .iter()
+                        .filter_map(|f| {
+                            if let Failure::Mismatch(fp) = f {
+                                Some(fp)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
                     if seen.len() == why.len()
                         && let Some(seen) = seen.first()
                     {
-                        return StopReason::FingerprintMismatch { expected: self.fingerprint.clone(), seen: (*seen).clone() };
+                        return StopReason::FingerprintMismatch {
+                            expected: self.fingerprint.clone(),
+                            seen: (*seen).clone(),
+                        };
                     }
-                    let why: Vec<&str> = why.iter().map(|f| if let Failure::Other(e) = f { e.as_str() } else { "another certificate" }).collect();
-                    tracing::debug!(why = why.join("; "), "trek-remote client: no route answered");
+                    let why: Vec<&str> = why
+                        .iter()
+                        .map(|f| {
+                            if let Failure::Other(e) = f {
+                                e.as_str()
+                            } else {
+                                "another certificate"
+                            }
+                        })
+                        .collect();
+                    tracing::debug!(
+                        why = why.join("; "),
+                        "trek-remote client: no route answered"
+                    );
                     failures += 1;
                     continue;
                 }
@@ -660,23 +800,41 @@ impl Driver {
                 }
             };
             let (protocol, token, host, features, routes) = match reply {
-                ServerMessage::Paired { protocol, token, host, features, routes } => (protocol, Some(token), host, features, routes),
-                ServerMessage::Welcome { protocol, host, features, routes } => (protocol, None, host, features, routes),
+                ServerMessage::Paired {
+                    protocol,
+                    token,
+                    host,
+                    features,
+                    routes,
+                } => (protocol, Some(token), host, features, routes),
+                ServerMessage::Welcome {
+                    protocol,
+                    host,
+                    features,
+                    routes,
+                } => (protocol, None, host, features, routes),
                 _ => unreachable!("authenticate returns paired or welcome"),
             };
             if protocol != PROTOCOL_VERSION {
-                return StopReason::ProtocolMismatch(format!("this Trek speaks protocol {PROTOCOL_VERSION}, that one {protocol}"));
+                return StopReason::ProtocolMismatch(format!(
+                    "this Trek speaks protocol {PROTOCOL_VERSION}, that one {protocol}"
+                ));
             }
             let newly_paired = token.is_some();
             let token = match (token, &self.auth) {
                 (Some(token), _) => token,
                 (None, Auth::Hello { token, .. }) => token.clone(),
-                (None, Auth::Pair { .. }) => return StopReason::ProtocolMismatch("`welcome` in answer to `pair`".into()),
+                (None, Auth::Pair { .. }) => {
+                    return StopReason::ProtocolMismatch("`welcome` in answer to `pair`".into());
+                }
             };
             let device_id = match &self.auth {
                 Auth::Pair { device_id, .. } | Auth::Hello { device_id, .. } => device_id.clone(),
             };
-            self.auth = Auth::Hello { device_id: device_id.clone(), token: token.clone() };
+            self.auth = Auth::Hello {
+                device_id: device_id.clone(),
+                token: token.clone(),
+            };
             if !routes.is_empty() {
                 let mut merged = vec![route.clone()];
                 for r in routes.iter().map(|r| bare_route(r)) {
@@ -686,9 +844,20 @@ impl Driver {
                 }
                 self.routes = merged;
             }
-            let paired = Paired { device_id, token, fingerprint: self.fingerprint.clone(), host, routes: self.routes.clone(), features };
+            let paired = Paired {
+                device_id,
+                token,
+                fingerprint: self.fingerprint.clone(),
+                host,
+                routes: self.routes.clone(),
+                features,
+            };
             tracing::info!(route, "trek-remote client connected");
-            self.emit(Event::Connected { route, paired, newly_paired });
+            self.emit(Event::Connected {
+                route,
+                paired,
+                newly_paired,
+            });
             self.state.send_replace(State::Connected);
 
             match self.session(&mut ws).await {
@@ -722,8 +891,15 @@ impl Driver {
     async fn serve(&mut self, ws: &mut Ws, pending: &mut HashMap<String, Pending>) -> Ended {
         // The threads open before, again: now, with `welcome` in (the machine refuses anything
         // before it), and from where they were.
-        let again: Vec<ClientMessage> =
-            self.open.iter().map(|(id, t)| ClientMessage::Subscribe { thread_id: id.clone(), after_seq: t.seq, limit: t.limit }).collect();
+        let again: Vec<ClientMessage> = self
+            .open
+            .iter()
+            .map(|(id, t)| ClientMessage::Subscribe {
+                thread_id: id.clone(),
+                after_seq: t.seq,
+                limit: t.limit,
+            })
+            .collect();
         for msg in again {
             if let Err(err) = self.send(ws, pending, msg, None).await {
                 return Ended::Dropped(err);
@@ -788,15 +964,27 @@ impl Driver {
     }
 
     /// Send a request with a fresh id.
-    async fn send(&mut self, ws: &mut Ws, pending: &mut HashMap<String, Pending>, msg: ClientMessage, reply: Option<Responder>) -> Result<(), String> {
+    async fn send(
+        &mut self,
+        ws: &mut Ws,
+        pending: &mut HashMap<String, Pending>,
+        msg: ClientMessage,
+        reply: Option<Responder>,
+    ) -> Result<(), String> {
         self.next_id += 1;
         let id = format!("c{}", self.next_id);
         let (subscribe, limit, unsubscribe) = match &msg {
-            ClientMessage::Subscribe { thread_id, limit, .. } => (Some(thread_id.clone()), *limit, None),
+            ClientMessage::Subscribe {
+                thread_id, limit, ..
+            } => (Some(thread_id.clone()), *limit, None),
             ClientMessage::Unsubscribe { thread_id } => (None, None, Some(thread_id.clone())),
             _ => (None, None, None),
         };
-        let text = serde_json::to_string(&ClientEnvelope { id: Some(id.clone()), msg }).expect("client messages always serialize");
+        let text = serde_json::to_string(&ClientEnvelope {
+            id: Some(id.clone()),
+            msg,
+        })
+        .expect("client messages always serialize");
         if text.len() > MAX_OUTBOUND {
             if let Some(reply) = reply {
                 let _ = reply.send(Err(ClientError::TooLarge(text.len())));
@@ -840,7 +1028,9 @@ impl Driver {
             match p.reply {
                 Some(reply) => {
                     let _ = reply.send(match msg {
-                        ServerMessage::Error { code, message } => Err(ClientError::Server { code, message }),
+                        ServerMessage::Error { code, message } => {
+                            Err(ClientError::Server { code, message })
+                        }
                         msg => Ok(msg),
                     });
                 }
@@ -851,7 +1041,10 @@ impl Driver {
         match &msg {
             ServerMessage::Pong => return None,
             // Revoked while connected.
-            ServerMessage::Error { code: ErrorCode::Unauthorized, message } => return Some(Ended::Stop(StopReason::Unauthorized(message.clone()))),
+            ServerMessage::Error {
+                code: ErrorCode::Unauthorized,
+                message,
+            } => return Some(Ended::Stop(StopReason::Unauthorized(message.clone()))),
             ServerMessage::Item { thread_id, item } => {
                 if let Some(seq) = self.open.get_mut(thread_id).and_then(|t| t.seq.as_mut()) {
                     *seq = (*seq).max(item.seq);
@@ -875,10 +1068,29 @@ impl Driver {
 /// Send `pair` or `hello` and wait for `paired` or `welcome`.
 async fn authenticate(ws: &mut Ws, auth: &Auth, options: &ClientOptions) -> Authed {
     let msg = match auth.clone() {
-        Auth::Pair { code, device_id, device_name } => ClientMessage::Pair { protocol: PROTOCOL_VERSION, code, device_id, device_name, app_version: options.app_version.clone() },
-        Auth::Hello { device_id, token } => ClientMessage::Hello { protocol: PROTOCOL_VERSION, device_id, token, app_version: options.app_version.clone() },
+        Auth::Pair {
+            code,
+            device_id,
+            device_name,
+        } => ClientMessage::Pair {
+            protocol: PROTOCOL_VERSION,
+            code,
+            device_id,
+            device_name,
+            app_version: options.app_version.clone(),
+        },
+        Auth::Hello { device_id, token } => ClientMessage::Hello {
+            protocol: PROTOCOL_VERSION,
+            device_id,
+            token,
+            app_version: options.app_version.clone(),
+        },
     };
-    let text = serde_json::to_string(&ClientEnvelope { id: Some("auth".into()), msg }).expect("client messages always serialize");
+    let text = serde_json::to_string(&ClientEnvelope {
+        id: Some("auth".into()),
+        msg,
+    })
+    .expect("client messages always serialize");
     if let Err(err) = write(ws, Message::text(text)).await {
         return Authed::Retry(err);
     }
@@ -886,14 +1098,24 @@ async fn authenticate(ws: &mut Ws, auth: &Auth, options: &ClientOptions) -> Auth
         loop {
             match ws.next().await {
                 Some(Ok(Message::Text(text))) => {
-                    let Ok(envelope) = serde_json::from_str::<ServerEnvelope>(&text) else { continue };
+                    let Ok(envelope) = serde_json::from_str::<ServerEnvelope>(&text) else {
+                        continue;
+                    };
                     match envelope.msg {
-                        msg @ (ServerMessage::Paired { .. } | ServerMessage::Welcome { .. }) => return Authed::Ok(msg),
+                        msg @ (ServerMessage::Paired { .. } | ServerMessage::Welcome { .. }) => {
+                            return Authed::Ok(msg);
+                        }
                         ServerMessage::Error { code, message } => {
                             return match code {
-                                ErrorCode::Unauthorized => Authed::Stop(StopReason::Unauthorized(message)),
-                                ErrorCode::PairingFailed => Authed::Stop(StopReason::PairingFailed(message)),
-                                ErrorCode::UnsupportedProtocol => Authed::Stop(StopReason::ProtocolMismatch(message)),
+                                ErrorCode::Unauthorized => {
+                                    Authed::Stop(StopReason::Unauthorized(message))
+                                }
+                                ErrorCode::PairingFailed => {
+                                    Authed::Stop(StopReason::PairingFailed(message))
+                                }
+                                ErrorCode::UnsupportedProtocol => {
+                                    Authed::Stop(StopReason::ProtocolMismatch(message))
+                                }
                                 // Rate limited, a device list the machine couldn't save…: again later.
                                 code => Authed::Retry(format!("{code}: {message}")),
                             };
@@ -901,13 +1123,17 @@ async fn authenticate(ws: &mut Ws, auth: &Auth, options: &ClientOptions) -> Auth
                         _ => continue,
                     }
                 }
-                Some(Ok(Message::Close(_))) | None => return Authed::Retry("closed before answering".into()),
+                Some(Ok(Message::Close(_))) | None => {
+                    return Authed::Retry("closed before answering".into());
+                }
                 Some(Err(err)) => return Authed::Retry(err.to_string()),
                 Some(Ok(_)) => continue,
             }
         }
     };
-    tokio::time::timeout(options.connect_timeout, answer).await.unwrap_or_else(|_| Authed::Retry("no answer to pair or hello".into()))
+    tokio::time::timeout(options.connect_timeout, answer)
+        .await
+        .unwrap_or_else(|_| Authed::Retry("no answer to pair or hello".into()))
 }
 
 #[cfg(test)]
@@ -916,14 +1142,20 @@ mod tests {
 
     #[test]
     fn routes_lose_their_scheme() {
-        assert_eq!(bare_route(" wss://studio.local:7420/ "), "studio.local:7420");
+        assert_eq!(
+            bare_route(" wss://studio.local:7420/ "),
+            "studio.local:7420"
+        );
         assert_eq!(bare_route("HTTP://10.0.0.2:7420"), "10.0.0.2:7420");
         assert_eq!(bare_route("[fd00::1]:7420"), "[fd00::1]:7420");
     }
 
     #[test]
     fn a_fingerprint_must_be_a_sha256_and_a_route_given() {
-        let auth = Auth::Hello { device_id: "a".into(), token: "t".into() };
+        let auth = Auth::Hello {
+            device_id: "a".into(),
+            token: "t".into(),
+        };
         let err = Client::connect(vec!["127.0.0.1:1".into()], "abcd", auth.clone()).unwrap_err();
         assert!(matches!(err, ClientError::Invalid(_)));
         let err = Client::connect(vec![" ".into()], &"a".repeat(64), auth).unwrap_err();
@@ -932,13 +1164,20 @@ mod tests {
 
     #[test]
     fn secrets_stay_out_of_debug() {
-        let auth = Auth::Hello { device_id: "a".into(), token: "s3cret".into() };
+        let auth = Auth::Hello {
+            device_id: "a".into(),
+            token: "s3cret".into(),
+        };
         assert!(!format!("{auth:?}").contains("s3cret"));
         let paired = Paired {
             device_id: "a".into(),
             token: "s3cret".into(),
             fingerprint: "f".into(),
-            host: HostInfo { id: "h".into(), name: "Studio".into(), version: "0".into() },
+            host: HostInfo {
+                id: "h".into(),
+                name: "Studio".into(),
+                version: "0".into(),
+            },
             routes: vec![],
             features: vec![],
         };

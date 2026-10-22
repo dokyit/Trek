@@ -45,7 +45,10 @@ pub fn public_key() -> &'static str {
 
 /// The base64 line of a `minisign.pub` file (skipping its comment), or the input if it's bare.
 fn key_line(file: &str) -> &str {
-    file.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with("untrusted comment:")).unwrap_or("")
+    file.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with("untrusted comment:"))
+        .unwrap_or("")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -146,14 +149,22 @@ impl Blocker {
     /// takes reading from where it is and writing where the user owns. Not a build run from a
     /// checkout, and not a folder that is only a link to where Trek really is.
     pub fn movable(self) -> bool {
-        matches!(self, Blocker::ReadOnlyLocation | Blocker::ProtectedFolder | Blocker::SharedFolder | Blocker::GuardedFolder(_))
+        matches!(
+            self,
+            Blocker::ReadOnlyLocation
+                | Blocker::ProtectedFolder
+                | Blocker::SharedFolder
+                | Blocker::GuardedFolder(_)
+        )
     }
 }
 
 /// `GuardedFolder`'s message, suggesting a folder in the user's profile (`home`), which
 /// Controlled folder access doesn't guard.
 fn guarded_message(folder: KnownFolder, home: Option<&Path>) -> String {
-    let suggestion = home.map(|h| h.join("Trek").display().to_string()).unwrap_or_else(|| r"C:\Users\<you>\Trek".into());
+    let suggestion = home
+        .map(|h| h.join("Trek").display().to_string())
+        .unwrap_or_else(|| r"C:\Users\<you>\Trek".into());
     format!(
         "Trek is in {}, which Windows's ransomware protection (Controlled folder access) guards, so it can't update itself there. Move the Trek folder to one of its own, such as {suggestion}, to get updates.",
         folder.name()
@@ -172,7 +183,14 @@ pub enum KnownFolder {
 }
 
 impl KnownFolder {
-    const ALL: [KnownFolder; 6] = [KnownFolder::Documents, KnownFolder::Desktop, KnownFolder::Pictures, KnownFolder::Videos, KnownFolder::Music, KnownFolder::Favorites];
+    const ALL: [KnownFolder; 6] = [
+        KnownFolder::Documents,
+        KnownFolder::Desktop,
+        KnownFolder::Pictures,
+        KnownFolder::Videos,
+        KnownFolder::Music,
+        KnownFolder::Favorites,
+    ];
 
     /// As File Explorer names it, which is also its folder's name in the profile and in OneDrive.
     pub fn name(self) -> &'static str {
@@ -212,15 +230,23 @@ pub fn blocker() -> Option<Blocker> {
         return windows_blocker(false);
     }
     static RELEASE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let Some(bundle) = running_bundle() else { return Some(Blocker::DevBuild) };
-    let release = *RELEASE.get_or_init(|| std::env::var(LOCAL_UPDATES_ENV).is_ok_and(|v| v == "1") || is_release(&bundle));
+    let Some(bundle) = running_bundle() else {
+        return Some(Blocker::DevBuild);
+    };
+    let release = *RELEASE.get_or_init(|| {
+        std::env::var(LOCAL_UPDATES_ENV).is_ok_and(|v| v == "1") || is_release(&bundle)
+    });
     blocker_for(&bundle, release)
 }
 
 /// `blocker`, asking Windows again if the answer was one that may pass (`Blocker::may_pass`): for
 /// a check the user asked for. (macOS asks every time anyway.)
 pub fn blocker_now() -> Option<Blocker> {
-    if cfg!(windows) { windows_blocker(true) } else { blocker() }
+    if cfg!(windows) {
+        windows_blocker(true)
+    } else {
+        blocker()
+    }
 }
 
 /// Settled once, as the checks touch the disk and the Updates page asks on every frame; with
@@ -228,7 +254,9 @@ pub fn blocker_now() -> Option<Blocker> {
 /// registry value.
 fn windows_blocker(again: bool) -> Option<Blocker> {
     static WINDOWS: std::sync::Mutex<Option<Option<Blocker>>> = std::sync::Mutex::new(None);
-    let mut settled = WINDOWS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut settled = WINDOWS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(b) = *settled
         && !(again && b.is_some_and(Blocker::may_pass))
     {
@@ -237,8 +265,15 @@ fn windows_blocker(again: bool) -> Option<Blocker> {
     let b = match install_root() {
         None => Some(Blocker::DevBuild),
         Some(root) => {
-            let release = std::env::var(LOCAL_UPDATES_ENV).is_ok_and(|v| v == "1") || !is_cargo_output(&root);
-            windows_blocker_for(&root, release, &protected_folders(), &guarded_folders(), controlled_folder_access())
+            let release =
+                std::env::var(LOCAL_UPDATES_ENV).is_ok_and(|v| v == "1") || !is_cargo_output(&root);
+            windows_blocker_for(
+                &root,
+                release,
+                &protected_folders(),
+                &guarded_folders(),
+                controlled_folder_access(),
+            )
         }
     };
     *settled = Some(b);
@@ -266,7 +301,9 @@ fn is_release(app: &Path) -> bool {
 #[cfg(unix)]
 fn writable(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt as _;
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
     // SAFETY: a valid NUL-terminated path that outlives the call.
     unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
 }
@@ -276,14 +313,22 @@ fn writable(path: &Path) -> bool {
 /// for writing (without truncating it).
 #[cfg(windows)]
 fn writable(path: &Path) -> bool {
-    if path.is_dir() { probe_dir(path).is_ok() } else { std::fs::OpenOptions::new().write(true).open(path).is_ok() }
+    if path.is_dir() {
+        probe_dir(path).is_ok()
+    } else {
+        std::fs::OpenOptions::new().write(true).open(path).is_ok()
+    }
 }
 
 /// Create and remove a file in `dir`: whether Windows lets this program write there, ACLs and
 /// Controlled folder access (which answers per program) both.
 fn probe_dir(dir: &Path) -> std::io::Result<()> {
     let probe = dir.join(format!(".trek-write-test-{}", std::process::id()));
-    let made = std::fs::OpenOptions::new().write(true).create_new(true).open(&probe).map(drop);
+    let made = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .map(drop);
     let _ = std::fs::remove_file(&probe);
     made
 }
@@ -296,7 +341,9 @@ fn write_refused(dir: &Path) -> bool {
 /// The `.app` bundle we're running from, if any.
 pub fn running_bundle() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf)
+    exe.ancestors()
+        .find(|p| p.extension().is_some_and(|e| e == "app"))
+        .map(Path::to_path_buf)
 }
 
 pub mod relocate;
@@ -314,18 +361,29 @@ const HELPER_EXE: &str = "trek-update.exe";
 /// The folder Trek runs from on Windows: the one holding `trek.exe`, which an update replaces.
 fn install_root() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let exe = exe.to_str().and_then(|s| s.strip_prefix(r"\\?\")).map(PathBuf::from).unwrap_or(exe);
+    let exe = exe
+        .to_str()
+        .and_then(|s| s.strip_prefix(r"\\?\"))
+        .map(PathBuf::from)
+        .unwrap_or(exe);
     exe.parent().map(Path::to_path_buf)
 }
 
 /// A build cargo left where it built it (`target\debug`, its `deps`): a development build.
 fn is_cargo_output(root: &Path) -> bool {
-    root.ancestors().take(2).any(|d| d.join(".fingerprint").is_dir())
+    root.ancestors()
+        .take(2)
+        .any(|d| d.join(".fingerprint").is_dir())
 }
 
 /// Program Files, wherever this Windows keeps it.
 fn protected_folders() -> Vec<PathBuf> {
-    ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"].into_iter().filter_map(std::env::var_os).map(PathBuf::from).filter(|p| p.is_absolute()).collect()
+    ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .collect()
 }
 
 /// The folders Controlled folder access guards by default (`KnownFolder`), for this user: where
@@ -347,16 +405,32 @@ fn guarded_folders() -> Vec<(KnownFolder, PathBuf)> {
         .map(Path::to_path_buf)
     };
     let profile = std::env::var_os("USERPROFILE").map(PathBuf::from);
-    let onedrive = ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"].into_iter().filter_map(std::env::var_os).map(PathBuf::from);
-    let onedrive: Vec<PathBuf> = profile.iter().map(|p| p.join("OneDrive")).chain(onedrive).collect();
-    guarded_places(|f| known(f).into_iter().chain(shell_folder(f)).collect(), &onedrive)
+    let onedrive = ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from);
+    let onedrive: Vec<PathBuf> = profile
+        .iter()
+        .map(|p| p.join("OneDrive"))
+        .chain(onedrive)
+        .collect();
+    guarded_places(
+        |f| known(f).into_iter().chain(shell_folder(f)).collect(),
+        &onedrive,
+    )
 }
 
 /// Each guarded folder where `known` says it is, and in each of the `onedrive` folders.
-fn guarded_places(known: impl Fn(KnownFolder) -> Vec<PathBuf>, onedrive: &[PathBuf]) -> Vec<(KnownFolder, PathBuf)> {
+fn guarded_places(
+    known: impl Fn(KnownFolder) -> Vec<PathBuf>,
+    onedrive: &[PathBuf],
+) -> Vec<(KnownFolder, PathBuf)> {
     let mut places: Vec<(KnownFolder, PathBuf)> = vec![];
     for f in KnownFolder::ALL {
-        for p in known(f).into_iter().chain(onedrive.iter().map(|d| d.join(f.name()))) {
+        for p in known(f)
+            .into_iter()
+            .chain(onedrive.iter().map(|d| d.join(f.name())))
+        {
             if p.is_absolute() && !places.iter().any(|(_, q)| inside(q, &p) && inside(&p, q)) {
                 places.push((f, p));
             }
@@ -368,7 +442,9 @@ fn guarded_places(known: impl Fn(KnownFolder) -> Vec<PathBuf>, onedrive: &[PathB
 /// A known folder as `HKCU\…\User Shell Folders` has it (`%USERPROFILE%` and the like expanded).
 #[cfg(windows)]
 fn shell_folder(f: KnownFolder) -> Option<PathBuf> {
-    let key = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders").ok()?;
+    let key = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders")
+        .ok()?;
     let raw: String = key.get_value(f.shell_folder_value()).ok()?;
     Some(PathBuf::from(expand_env(&raw, |k| std::env::var(k).ok())))
 }
@@ -384,7 +460,9 @@ fn expand_env(s: &str, var: impl Fn(&str) -> Option<String>) -> String {
     let mut out = String::new();
     let mut rest = s;
     while let Some(start) = rest.find('%') {
-        let Some(len) = rest[start + 1..].find('%') else { break };
+        let Some(len) = rest[start + 1..].find('%') else {
+            break;
+        };
         let name = &rest[start + 1..start + 1 + len];
         out.push_str(&rest[..start]);
         match var(name).filter(|_| !name.is_empty()) {
@@ -406,8 +484,14 @@ fn expand_env(s: &str, var: impl Fn(&str) -> Option<String>) -> String {
 fn controlled_folder_access() -> Option<bool> {
     const KEY: &str = r"Windows Defender\Windows Defender Exploit Guard\Controlled Folder Access";
     let setting = cfa_setting(
-        registry_dword(&format!(r"SOFTWARE\Policies\Microsoft\{KEY}"), "EnableControlledFolderAccess"),
-        registry_dword(&format!(r"SOFTWARE\Microsoft\{KEY}"), "EnableControlledFolderAccess"),
+        registry_dword(
+            &format!(r"SOFTWARE\Policies\Microsoft\{KEY}"),
+            "EnableControlledFolderAccess",
+        ),
+        registry_dword(
+            &format!(r"SOFTWARE\Microsoft\{KEY}"),
+            "EnableControlledFolderAccess",
+        ),
     );
     cfa_enforced(setting, real_time_protection)
 }
@@ -422,7 +506,9 @@ fn controlled_folder_access() -> Option<bool> {
 #[cfg(windows)]
 fn registry_dword(key: &str, name: &str) -> Result<Option<u32>, ()> {
     use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
-    let key = match winreg::RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(key, KEY_READ | KEY_WOW64_64KEY) {
+    let key = match winreg::RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(key, KEY_READ | KEY_WOW64_64KEY)
+    {
         Ok(k) => k,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(()),
@@ -442,8 +528,14 @@ fn real_time_protection() -> Option<bool> {
     const DEFENDER: &str = r"SOFTWARE\Microsoft\Windows Defender";
     const POLICY: &str = r"SOFTWARE\Policies\Microsoft\Windows Defender";
     let off = [
-        registry_dword(&format!(r"{DEFENDER}\Real-Time Protection"), "DisableRealtimeMonitoring"),
-        registry_dword(&format!(r"{POLICY}\Real-Time Protection"), "DisableRealtimeMonitoring"),
+        registry_dword(
+            &format!(r"{DEFENDER}\Real-Time Protection"),
+            "DisableRealtimeMonitoring",
+        ),
+        registry_dword(
+            &format!(r"{POLICY}\Real-Time Protection"),
+            "DisableRealtimeMonitoring",
+        ),
         registry_dword(DEFENDER, "DisableAntiSpyware"),
         registry_dword(POLICY, "DisableAntiSpyware"),
         registry_dword(DEFENDER, "DisableAntiVirus"),
@@ -456,11 +548,19 @@ fn real_time_protection() -> Option<bool> {
 #[cfg(windows)]
 fn antivirus_products() -> Result<Vec<(String, u32)>, ()> {
     use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
-    let list = winreg::RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(r"SOFTWARE\Microsoft\Security Center\Provider\Av", KEY_READ | KEY_WOW64_64KEY).map_err(|_| ())?;
+    let list = winreg::RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(
+            r"SOFTWARE\Microsoft\Security Center\Provider\Av",
+            KEY_READ | KEY_WOW64_64KEY,
+        )
+        .map_err(|_| ())?;
     let mut products = vec![];
     for name in list.enum_keys().flatten() {
         // A product whose state can't be read is one Trek can't say anything about.
-        let state = list.open_subkey_with_flags(&name, KEY_READ).and_then(|k| k.get_value::<u32, _>("STATE")).map_err(|_| ())?;
+        let state = list
+            .open_subkey_with_flags(&name, KEY_READ)
+            .and_then(|k| k.get_value::<u32, _>("STATE"))
+            .map_err(|_| ())?;
         products.push((name, state));
     }
     Ok(products)
@@ -483,15 +583,25 @@ fn product_is_on(state: u32) -> bool {
 /// on too (Defender then runs passively under it, and enforces nothing). Anything else: `None`,
 /// and a refused write decides.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn real_time_state(off: &[Result<Option<u32>, ()>], products: Result<Vec<(String, u32)>, ()>) -> Option<bool> {
+fn real_time_state(
+    off: &[Result<Option<u32>, ()>],
+    products: Result<Vec<(String, u32)>, ()>,
+) -> Option<bool> {
     if off.iter().any(|v| *v == Ok(Some(1))) {
         return Some(false);
     }
     let products = products.ok()?;
-    let (defender, others): (Vec<_>, Vec<_>) = products.iter().partition(|(guid, _)| guid.eq_ignore_ascii_case(DEFENDER_PRODUCT));
+    let (defender, others): (Vec<_>, Vec<_>) = products
+        .iter()
+        .partition(|(guid, _)| guid.eq_ignore_ascii_case(DEFENDER_PRODUCT));
     match defender.first() {
         Some(&&(_, state)) if !product_is_on(state) => Some(false),
-        Some(_) if off.iter().all(Result::is_ok) && !others.iter().any(|&&(_, state)| product_is_on(state)) => Some(true),
+        Some(_)
+            if off.iter().all(Result::is_ok)
+                && !others.iter().any(|&&(_, state)| product_is_on(state)) =>
+        {
+            Some(true)
+        }
         _ => None,
     }
 }
@@ -522,14 +632,27 @@ fn cfa_setting(policy: Result<Option<u32>, ()>, setting: Result<Option<u32>, ()>
 
 /// The guarded folder Trek is in, if Controlled folder access keeps updates out of it: it's on,
 /// or, when Trek can't tell, writing there was just refused.
-fn guarded_by(root: &Path, guarded: &[(KnownFolder, PathBuf)], cfa_on: Option<bool>) -> Option<KnownFolder> {
+fn guarded_by(
+    root: &Path,
+    guarded: &[(KnownFolder, PathBuf)],
+    cfa_on: Option<bool>,
+) -> Option<KnownFolder> {
     let &(folder, _) = guarded.iter().find(|(_, p)| inside(root, p))?;
-    let on = cfa_on.unwrap_or_else(|| write_refused(root) || root.parent().is_some_and(write_refused));
+    let on =
+        cfa_on.unwrap_or_else(|| write_refused(root) || root.parent().is_some_and(write_refused));
     on.then_some(folder)
 }
 
-fn windows_blocker_for(root: &Path, release: bool, protected: &[PathBuf], guarded: &[(KnownFolder, PathBuf)], cfa_on: Option<bool>) -> Option<Blocker> {
-    let windows_apps = root.components().any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"));
+fn windows_blocker_for(
+    root: &Path,
+    release: bool,
+    protected: &[PathBuf],
+    guarded: &[(KnownFolder, PathBuf)],
+    cfa_on: Option<bool>,
+) -> Option<Blocker> {
+    let windows_apps = root
+        .components()
+        .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"));
     if !release {
         Some(Blocker::DevBuild)
     } else if windows_apps || protected.iter().any(|p| inside(root, p)) {
@@ -554,7 +677,10 @@ fn inside(path: &Path, folder: &Path) -> bool {
     let parts = |p: &Path| -> Vec<String> {
         let s = p.to_string_lossy().to_lowercase();
         let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
-        Path::new(s).components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect()
+        Path::new(s)
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect()
     };
     let (path, folder) = (parts(path), parts(folder));
     !folder.is_empty() && path.starts_with(&folder)
@@ -572,11 +698,14 @@ fn own_folder(dir: &Path) -> bool {
 
 /// Every entry is one of `TREK_FILES` (or the moment's probe `writable` makes); none is a folder.
 fn only_trek_files(dir: &Path) -> bool {
-    let Ok(mut entries) = std::fs::read_dir(dir) else { return false };
+    let Ok(mut entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
     entries.all(|e| {
         e.is_ok_and(|e| {
             let name = e.file_name().to_string_lossy().to_lowercase();
-            e.file_type().is_ok_and(|t| t.is_file()) && (TREK_FILES.contains(&name.as_str()) || name.starts_with(".trek-write-test-"))
+            e.file_type().is_ok_and(|t| t.is_file())
+                && (TREK_FILES.contains(&name.as_str()) || name.starts_with(".trek-write-test-"))
         })
     })
 }
@@ -587,7 +716,10 @@ fn only_trek_files(dir: &Path) -> bool {
 const CLEAN_OLD_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// `clean_old_installs`, once `delay` has passed, on a thread of its own.
-fn clean_old_installs_later(root: PathBuf, delay: std::time::Duration) -> std::thread::JoinHandle<()> {
+fn clean_old_installs_later(
+    root: PathBuf,
+    delay: std::time::Duration,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         std::thread::sleep(delay);
         clean_old_installs(&root);
@@ -597,17 +729,29 @@ fn clean_old_installs_later(root: PathBuf, delay: std::time::Duration) -> std::t
 /// Delete what updates left next to the install, now that this version runs: `<install>.old-*`,
 /// the version an update replaced or one that failed to start. Only folders of Trek's files.
 fn clean_old_installs(root: &Path) {
-    let (Some(parent), Some(name)) = (root.parent(), root.file_name()) else { return };
+    let (Some(parent), Some(name)) = (root.parent(), root.file_name()) else {
+        return;
+    };
     let prefix = format!("{}.old-", name.to_string_lossy().to_lowercase());
     for entry in std::fs::read_dir(parent).into_iter().flatten().flatten() {
-        let leftover = entry.file_name().to_string_lossy().to_lowercase().starts_with(&prefix);
+        let leftover = entry
+            .file_name()
+            .to_string_lossy()
+            .to_lowercase()
+            .starts_with(&prefix);
         // `file_type` doesn't follow links: a junction is never a folder here.
-        if !leftover || !entry.file_type().is_ok_and(|t| t.is_dir()) || !only_trek_files(&entry.path()) {
+        if !leftover
+            || !entry.file_type().is_ok_and(|t| t.is_dir())
+            || !only_trek_files(&entry.path())
+        {
             continue;
         }
         match std::fs::remove_dir_all(entry.path()) {
             Ok(()) => tracing::info!("removed {}, left by an update", entry.path().display()),
-            Err(e) => tracing::warn!("couldn't remove {}, left by an update: {e}", entry.path().display()),
+            Err(e) => tracing::warn!(
+                "couldn't remove {}, left by an update: {e}",
+                entry.path().display()
+            ),
         }
     }
 }
@@ -672,7 +816,11 @@ impl std::error::Error for NetError {}
 
 /// A network failure in a sentence, without reqwest's URL-and-cause chain.
 fn net_error(e: reqwest::Error) -> anyhow::Error {
-    let host = e.url().and_then(|u| u.host_str()).unwrap_or("the update server").to_string();
+    let host = e
+        .url()
+        .and_then(|u| u.host_str())
+        .unwrap_or("the update server")
+        .to_string();
     let message = if e.is_connect() {
         format!("couldn't connect to {host}")
     } else if e.is_timeout() {
@@ -692,11 +840,21 @@ pub fn is_transient(e: &anyhow::Error) -> bool {
 }
 
 async fn fetch_manifest(client: &reqwest::Client, url: &str) -> Result<Manifest> {
-    let resp = client.get(url).timeout(std::time::Duration::from_secs(20)).send().await.map_err(net_error)?;
+    let resp = client
+        .get(url)
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(net_error)?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         bail!("no release has been published on this channel yet");
     }
-    let bytes = resp.error_for_status().map_err(net_error)?.bytes().await.map_err(net_error)?;
+    let bytes = resp
+        .error_for_status()
+        .map_err(net_error)?
+        .bytes()
+        .await
+        .map_err(net_error)?;
     serde_json::from_slice(&bytes).with_context(|| format!("unreadable update manifest at {url}"))
 }
 
@@ -718,18 +876,31 @@ pub enum Found {
 pub async fn check(urls: &[String]) -> Result<Found> {
     let client = http()?;
     let results = futures::future::join_all(urls.iter().map(|u| fetch_manifest(&client, u))).await;
-    newest(results, &current_version(), skipped_version(&crate::paths::updates_dir()).as_ref())
+    newest(
+        results,
+        &current_version(),
+        skipped_version(&crate::paths::updates_dir()).as_ref(),
+    )
 }
 
 /// The version a rollback turned away from (`SKIP_MARKER`), if any.
 fn skipped_version(updates: &Path) -> Option<semver::Version> {
-    semver::Version::parse(std::fs::read_to_string(updates.join(SKIP_MARKER)).ok()?.trim()).ok()
+    semver::Version::parse(
+        std::fs::read_to_string(updates.join(SKIP_MARKER))
+            .ok()?
+            .trim(),
+    )
+    .ok()
 }
 
 /// The newest build above `current` across the feeds' manifests, `skipped` aside, else the newest
 /// version above it still waiting for this platform's build; the first error only if every feed
 /// failed.
-fn newest(results: Vec<Result<Manifest>>, current: &semver::Version, skipped: Option<&semver::Version>) -> Result<Found> {
+fn newest(
+    results: Vec<Result<Manifest>>,
+    current: &semver::Version,
+    skipped: Option<&semver::Version>,
+) -> Result<Found> {
     let mut best: Option<AvailableUpdate> = None;
     let mut coming: Option<semver::Version> = None;
     let mut first_error = None;
@@ -739,8 +910,17 @@ fn newest(results: Vec<Result<Manifest>>, current: &semver::Version, skipped: Op
             Ok(found) => {
                 any_ok = true;
                 match found {
-                    Found::Update(u) if skipped != Some(&u.version) && best.as_ref().is_none_or(|b| u.version > b.version) => best = Some(u),
-                    Found::Coming(v) if skipped != Some(&v) && coming.as_ref().is_none_or(|c| v > *c) => coming = Some(v),
+                    Found::Update(u)
+                        if skipped != Some(&u.version)
+                            && best.as_ref().is_none_or(|b| u.version > b.version) =>
+                    {
+                        best = Some(u)
+                    }
+                    Found::Coming(v)
+                        if skipped != Some(&v) && coming.as_ref().is_none_or(|c| v > *c) =>
+                    {
+                        coming = Some(v)
+                    }
                     _ => {}
                 }
             }
@@ -767,24 +947,41 @@ fn newer_than(manifest: Manifest, current: &semver::Version) -> Result<Found> {
     let Some(artifact) = manifest.platforms.get(&platform_key()).cloned() else {
         return Ok(Found::Coming(version));
     };
-    Ok(Found::Update(AvailableUpdate { version, notes: manifest.notes.trim().to_string(), pub_date: manifest.pub_date, artifact }))
+    Ok(Found::Update(AvailableUpdate {
+        version,
+        notes: manifest.notes.trim().to_string(),
+        pub_date: manifest.pub_date,
+        artifact,
+    }))
 }
 
 /// Download into a new download folder, reporting progress in 0.0..=1.0. Returns the archive only
 /// once its SHA-256 and minisign signature check out; a bad or cancelled download is deleted.
-pub async fn download(update: &AvailableUpdate, cancel: &AtomicBool, mut progress: impl FnMut(f32)) -> Result<PathBuf> {
+pub async fn download(
+    update: &AvailableUpdate,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(f32),
+) -> Result<PathBuf> {
     use sha2::Digest;
     use tokio::io::AsyncWriteExt;
 
     // Refuse before downloading anything if the release isn't signed for this version.
-    let key = minisign_verify::PublicKey::from_base64(public_key()).context("this build's update key is invalid")?;
+    let key = minisign_verify::PublicKey::from_base64(public_key())
+        .context("this build's update key is invalid")?;
     let signature = signature_for(&update.artifact.signature, &update.version)?;
-    let mut verifier = key.verify_stream(&signature).context("the update isn't signed with this build's release key")?;
+    let mut verifier = key
+        .verify_stream(&signature)
+        .context("the update isn't signed with this build's release key")?;
 
     let dir = new_download_dir(&crate::paths::updates_dir())?;
     let dest = dir.join(archive_name(&update.version));
     let result: Result<()> = async {
-        let resp = http()?.get(&update.artifact.url).send().await.and_then(|r| r.error_for_status()).map_err(net_error)?;
+        let resp = http()?
+            .get(&update.artifact.url)
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(net_error)?;
         let total = resp.content_length().unwrap_or(0);
         let mut file = tokio::fs::File::create(&dest).await?;
         let mut hasher = sha2::Sha256::new();
@@ -808,7 +1005,9 @@ pub async fn download(update: &AvailableUpdate, cancel: &AtomicBool, mut progres
         if !digest.eq_ignore_ascii_case(update.artifact.sha256.trim()) {
             bail!("the download is damaged (checksum mismatch)");
         }
-        verifier.finalize().map_err(|_| anyhow!("the update's signature doesn't match; it was not installed"))?;
+        verifier
+            .finalize()
+            .map_err(|_| anyhow!("the update's signature doesn't match; it was not installed"))?;
         Ok(())
     }
     .await;
@@ -822,7 +1021,11 @@ pub async fn download(update: &AvailableUpdate, cancel: &AtomicBool, mut progres
 
 /// What the download is saved as: the macOS app is a `.tar.gz`, the Windows folder a `.zip`.
 fn archive_name(version: &semver::Version) -> String {
-    if cfg!(windows) { format!("Trek-{version}.zip") } else { format!("Trek-{version}.tar.gz") }
+    if cfg!(windows) {
+        format!("Trek-{version}.zip")
+    } else {
+        format!("Trek-{version}.tar.gz")
+    }
 }
 
 /// Decode a release signature and check its trusted comment names `version`.
@@ -830,9 +1033,14 @@ fn signature_for(text: &str, version: &semver::Version) -> Result<minisign_verif
     if text.trim().is_empty() {
         bail!("the update isn't signed; it was not downloaded");
     }
-    let sig = minisign_verify::Signature::decode(text.trim()).map_err(|_| anyhow!("the update's signature is unreadable"))?;
+    let sig = minisign_verify::Signature::decode(text.trim())
+        .map_err(|_| anyhow!("the update's signature is unreadable"))?;
     let v = version.to_string();
-    if !sig.trusted_comment().split_whitespace().any(|w| w.trim_start_matches('v') == v) {
+    if !sig
+        .trusted_comment()
+        .split_whitespace()
+        .any(|w| w.trim_start_matches('v') == v)
+    {
         bail!("the update's signature is for another version");
     }
     Ok(sig)
@@ -840,9 +1048,11 @@ fn signature_for(text: &str, version: &semver::Version) -> Result<minisign_verif
 
 /// Check a whole file against a minisign signature (used where the bytes are already on disk).
 pub fn verify_file(path: &Path, signature: &str, public_key: &str) -> Result<()> {
-    let key = minisign_verify::PublicKey::from_base64(key_line(public_key)).context("bad public key")?;
+    let key =
+        minisign_verify::PublicKey::from_base64(key_line(public_key)).context("bad public key")?;
     let sig = minisign_verify::Signature::decode(signature.trim()).context("bad signature")?;
-    key.verify(&std::fs::read(path)?, &sig, false).map_err(|_| anyhow!("signature verification failed"))
+    key.verify(&std::fs::read(path)?, &sig, false)
+        .map_err(|_| anyhow!("signature verification failed"))
 }
 
 // ---------- staging and install ----------
@@ -853,7 +1063,11 @@ pub fn verify_file(path: &Path, signature: &str, public_key: &str) -> Result<()>
 /// Spotlight from listing the waiting copy as a second Trek.
 fn new_download_dir(updates: &Path) -> Result<PathBuf> {
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = updates.join(format!("download-{}-{}.noindex", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let dir = updates.join(format!(
+        "download-{}-{}.noindex",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
@@ -861,12 +1075,22 @@ fn new_download_dir(updates: &Path) -> Result<PathBuf> {
 
 /// The process that owns a download folder, if `name` is one.
 fn download_owner(name: &str) -> Option<u32> {
-    name.strip_prefix("download-")?.strip_suffix(".noindex")?.split('-').next()?.parse().ok()
+    name.strip_prefix("download-")?
+        .strip_suffix(".noindex")?
+        .split('-')
+        .next()?
+        .parse()
+        .ok()
 }
 
 /// The download folder a staged app sits in.
 fn download_dir_of(staged: &Path) -> Option<&Path> {
-    staged.parent().filter(|d| d.file_name().and_then(OsStr::to_str).and_then(download_owner).is_some())
+    staged.parent().filter(|d| {
+        d.file_name()
+            .and_then(OsStr::to_str)
+            .and_then(download_owner)
+            .is_some()
+    })
 }
 
 /// Delete a staged update that won't be installed (the channel changed under it). Blocking.
@@ -886,7 +1110,16 @@ pub fn stage(archive: &Path, expected: &semver::Version, cancel: &AtomicBool) ->
     let dir = archive.parent().context("the download has no folder")?;
     let result = (|| {
         let bundle = running_bundle().context("not running from an app bundle")?;
-        run("/usr/bin/tar", [OsStr::new("-xzf"), archive.as_os_str(), OsStr::new("-C"), dir.as_os_str()]).context("couldn't unpack the update")?;
+        run(
+            "/usr/bin/tar",
+            [
+                OsStr::new("-xzf"),
+                archive.as_os_str(),
+                OsStr::new("-C"),
+                dir.as_os_str(),
+            ],
+        )
+        .context("couldn't unpack the update")?;
         let app = std::fs::read_dir(dir)?
             .flatten()
             .map(|e| e.path())
@@ -895,8 +1128,20 @@ pub fn stage(archive: &Path, expected: &semver::Version, cancel: &AtomicBool) ->
         check_bundle(&app, &bundle_id(&bundle)?, expected, &current_version())?;
         // Downloaded by Trek itself, so normally unquarantined; an archive fetched by a browser
         // would carry the flag into every file.
-        let _ = std::process::Command::new("/usr/bin/xattr").arg("-dr").arg("com.apple.quarantine").arg(&app).output();
-        run("/usr/bin/codesign", [OsStr::new("--verify"), OsStr::new("--strict"), app.as_os_str()]).context("the update's code signature is broken")?;
+        let _ = std::process::Command::new("/usr/bin/xattr")
+            .arg("-dr")
+            .arg("com.apple.quarantine")
+            .arg(&app)
+            .output();
+        run(
+            "/usr/bin/codesign",
+            [
+                OsStr::new("--verify"),
+                OsStr::new("--strict"),
+                app.as_os_str(),
+            ],
+        )
+        .context("the update's code signature is broken")?;
         if cancel.load(Ordering::Relaxed) {
             bail!("cancelled");
         }
@@ -912,7 +1157,10 @@ pub fn stage(archive: &Path, expected: &semver::Version, cancel: &AtomicBool) ->
 fn run<'a>(program: &str, args: impl IntoIterator<Item = &'a OsStr>) -> Result<()> {
     let out = crate::procs::command(program).args(args).output()?;
     if !out.status.success() {
-        bail!("{program} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "{program} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(())
 }
@@ -935,10 +1183,16 @@ fn bundle_id(app: &Path) -> Result<String> {
 /// The bundle's full version: `CFBundleVersion` carries the semver (pre-release included).
 fn bundle_version(app: &Path) -> Result<semver::Version> {
     let v = plist_value(app, "CFBundleVersion")?;
-    semver::Version::parse(&v).with_context(|| format!("the update has an unreadable version ({v})"))
+    semver::Version::parse(&v)
+        .with_context(|| format!("the update has an unreadable version ({v})"))
 }
 
-fn check_bundle(app: &Path, id: &str, expected: &semver::Version, current: &semver::Version) -> Result<()> {
+fn check_bundle(
+    app: &Path,
+    id: &str,
+    expected: &semver::Version,
+    current: &semver::Version,
+) -> Result<()> {
     let found = bundle_id(app)?;
     if found != id {
         bail!("the update is a different app ({found})");
@@ -959,7 +1213,13 @@ const MAX_UNPACKED: u64 = 1 << 30;
 /// Windows: unpack a verified zip into `stage` next to it and check it: Trek's files and nothing
 /// else, and a `trek.exe` of exactly `expected`, newer than `current`. Returns the staged folder;
 /// the archive is removed, and on failure the whole download folder.
-fn stage_zip(archive: &Path, expected: &semver::Version, current: &semver::Version, cancel: &AtomicBool, version_of: impl Fn(&Path) -> Result<semver::Version>) -> Result<PathBuf> {
+fn stage_zip(
+    archive: &Path,
+    expected: &semver::Version,
+    current: &semver::Version,
+    cancel: &AtomicBool,
+    version_of: impl Fn(&Path) -> Result<semver::Version>,
+) -> Result<PathBuf> {
     let dir = archive.parent().context("the download has no folder")?;
     let staged = dir.join("stage");
     let result = (|| {
@@ -982,15 +1242,21 @@ fn stage_zip(archive: &Path, expected: &semver::Version, current: &semver::Versi
 /// list, so nothing can land outside `into`.
 fn unpack_release_zip(archive: &Path, into: &Path, limit: u64) -> Result<()> {
     let file = std::fs::File::open(archive)?;
-    let mut zip = zip::ZipArchive::new(std::io::BufReader::new(file)).map_err(|_| anyhow!("the update isn't a zip archive"))?;
+    let mut zip = zip::ZipArchive::new(std::io::BufReader::new(file))
+        .map_err(|_| anyhow!("the update isn't a zip archive"))?;
     if zip.len() > TREK_FILES.len() {
-        bail!("the update has more in it than Trek ({} entries)", zip.len());
+        bail!(
+            "the update has more in it than Trek ({} entries)",
+            zip.len()
+        );
     }
     let _ = std::fs::remove_dir_all(into);
     std::fs::create_dir(into)?;
     let mut left = limit;
     for i in 0..zip.len() {
-        let mut entry = zip.by_index(i).map_err(|e| anyhow!("couldn't unpack the update: {e}"))?;
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| anyhow!("couldn't unpack the update: {e}"))?;
         let name = entry.name().map(|n| n.into_owned()).unwrap_or_default();
         if !TREK_FILES.contains(&name.as_str()) || !entry.is_file() || entry.is_symlink() {
             bail!("the update has something in it that isn't Trek ({name})");
@@ -998,7 +1264,11 @@ fn unpack_release_zip(archive: &Path, into: &Path, limit: u64) -> Result<()> {
         if entry.size() > left {
             bail!("the update is larger than Trek could be");
         }
-        let mut out = std::fs::OpenOptions::new().write(true).create_new(true).open(into.join(&name)).with_context(|| format!("couldn't unpack {name} from the update"))?;
+        let mut out = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(into.join(&name))
+            .with_context(|| format!("couldn't unpack {name} from the update"))?;
         // The size the archive states can lie: stop past what's left either way.
         let copied = std::io::copy(&mut std::io::Read::take(&mut entry, left + 1), &mut out)?;
         if copied > left {
@@ -1012,7 +1282,11 @@ fn unpack_release_zip(archive: &Path, into: &Path, limit: u64) -> Result<()> {
     Ok(())
 }
 
-fn check_version(found: &semver::Version, expected: &semver::Version, current: &semver::Version) -> Result<()> {
+fn check_version(
+    found: &semver::Version,
+    expected: &semver::Version,
+    current: &semver::Version,
+) -> Result<()> {
     if found != expected {
         bail!("the update contains version {found}, not {expected}");
     }
@@ -1026,8 +1300,10 @@ fn check_version(found: &semver::Version, expected: &semver::Version, current: &
 /// (trek-app's build.rs writes the semver there, pre-release included).
 #[cfg(windows)]
 fn exe_version(exe: &Path) -> Result<semver::Version> {
-    let v = exe_product_version(exe).with_context(|| format!("{} has no version", exe.display()))?;
-    semver::Version::parse(v.trim()).with_context(|| format!("the update has an unreadable version ({v})"))
+    let v =
+        exe_product_version(exe).with_context(|| format!("{} has no version", exe.display()))?;
+    semver::Version::parse(v.trim())
+        .with_context(|| format!("the update has an unreadable version ({v})"))
 }
 
 #[cfg(not(windows))]
@@ -1039,7 +1315,9 @@ fn exe_version(exe: &Path) -> Result<semver::Version> {
 #[cfg(windows)]
 fn exe_product_version(exe: &Path) -> Option<String> {
     use std::os::windows::ffi::OsStrExt as _;
-    use windows_sys::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+    };
     let wide = |s: &OsStr| s.encode_wide().chain([0]).collect::<Vec<u16>>();
     let path = wide(exe.as_os_str());
     // SAFETY: a NUL-terminated path; a buffer of at least the size asked for, DWORD-aligned like
@@ -1057,7 +1335,9 @@ fn exe_product_version(exe: &Path) -> Option<String> {
         let query = |sub: &str| {
             let sub = wide(OsStr::new(sub));
             let (mut ptr, mut len) = (std::ptr::null_mut(), 0u32);
-            let found = VerQueryValueW(data.as_ptr().cast(), sub.as_ptr(), &mut ptr, &mut len) != 0 && !ptr.is_null() && len > 0;
+            let found = VerQueryValueW(data.as_ptr().cast(), sub.as_ptr(), &mut ptr, &mut len) != 0
+                && !ptr.is_null()
+                && len > 0;
             found.then_some((ptr as *const u8, len))
         };
         // Language and code page, as two little-endian u16s.
@@ -1066,11 +1346,20 @@ fn exe_product_version(exe: &Path) -> Option<String> {
             return None;
         }
         let t = std::slice::from_raw_parts(t, 4);
-        let (lang, codepage) = (u16::from_le_bytes([t[0], t[1]]), u16::from_le_bytes([t[2], t[3]]));
-        let (s, n) = query(&format!(r"\StringFileInfo\{lang:04x}{codepage:04x}\ProductVersion"))?;
+        let (lang, codepage) = (
+            u16::from_le_bytes([t[0], t[1]]),
+            u16::from_le_bytes([t[2], t[3]]),
+        );
+        let (s, n) = query(&format!(
+            r"\StringFileInfo\{lang:04x}{codepage:04x}\ProductVersion"
+        ))?;
         // A string's length is in characters, its NUL included.
         let chars = std::slice::from_raw_parts(s.cast::<u16>(), n as usize);
-        Some(String::from_utf16_lossy(chars).trim_end_matches('\0').to_string())
+        Some(
+            String::from_utf16_lossy(chars)
+                .trim_end_matches('\0')
+                .to_string(),
+        )
     }
 }
 
@@ -1095,7 +1384,11 @@ pub fn install(staged: &Path) -> Result<Installed> {
     }
     let bundle = running_bundle().context("not running from an app bundle (dev build)")?;
     let backup = install_into(staged, &bundle, &crate::paths::updates_dir())?;
-    Ok(Installed { bundle, backup, staged: None })
+    Ok(Installed {
+        bundle,
+        backup,
+        staged: None,
+    })
 }
 
 /// Windows: Trek can't replace the folder it runs from, so the swap waits for `trek-update`,
@@ -1103,28 +1396,51 @@ pub fn install(staged: &Path) -> Result<Installed> {
 /// newer than the install (another copy of Trek may have updated it, or the user replaced it by
 /// hand: then the download goes and nothing is swapped). The version that's running is noted for
 /// "Trek updated" next time; a version that didn't install finds its own and says nothing.
-fn prepare_swap(staged: &Path, root: &Path, updates: &Path, version_of: impl Fn(&Path) -> Result<semver::Version>) -> Result<Installed> {
+fn prepare_swap(
+    staged: &Path,
+    root: &Path,
+    updates: &Path,
+    version_of: impl Fn(&Path) -> Result<semver::Version>,
+) -> Result<Installed> {
     if !staged.join(TREK_EXE).is_file() {
         bail!("the downloaded update is gone; check again");
     }
-    if let (Ok(installed), Ok(incoming)) = (version_of(&root.join(TREK_EXE)), version_of(&staged.join(TREK_EXE))) {
+    if let (Ok(installed), Ok(incoming)) = (
+        version_of(&root.join(TREK_EXE)),
+        version_of(&staged.join(TREK_EXE)),
+    ) {
         if installed >= incoming {
-            tracing::info!("{} is already Trek {installed}; not installing {incoming}", root.display());
+            tracing::info!(
+                "{} is already Trek {installed}; not installing {incoming}",
+                root.display()
+            );
             if let Some(dir) = download_dir_of(staged) {
                 let _ = std::fs::remove_dir_all(dir);
             }
-            return Ok(Installed { bundle: root.to_path_buf(), backup: None, staged: None });
+            return Ok(Installed {
+                bundle: root.to_path_buf(),
+                backup: None,
+                staged: None,
+            });
         }
     }
     let _ = std::fs::write(updates.join(UPDATED_MARKER), crate::VERSION);
-    Ok(Installed { bundle: root.to_path_buf(), backup: None, staged: Some(staged.to_path_buf()) })
+    Ok(Installed {
+        bundle: root.to_path_buf(),
+        backup: None,
+        staged: Some(staged.to_path_buf()),
+    })
 }
 
 /// Quitting with an update ready: on Windows `install` only got it ready, and `trek-update` swaps
 /// it in once Trek has exited, without starting Trek again. Nothing to do on macOS, where
 /// `install` has swapped it already.
 pub fn swap_on_exit(installed: &Installed) -> Result<()> {
-    if cfg!(windows) { hand_over(installed, None) } else { Ok(()) }
+    if cfg!(windows) {
+        hand_over(installed, None)
+    } else {
+        Ok(())
+    }
 }
 
 /// Windows: start `trek-update` to swap the staged folder in once this process has exited and,
@@ -1138,9 +1454,24 @@ fn hand_over(installed: &Installed, relaunch: Option<bool>) -> Result<()> {
         None if relaunch.is_some() => root.join(HELPER_EXE),
         None => return Ok(()),
     };
-    let to = installed.staged.as_deref().and_then(|s| exe_version(&s.join(TREK_EXE)).ok()).map(|v| v.to_string()).unwrap_or_default();
-    let vars = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)));
-    let mut cmd = helper_command(&helper, std::process::id(), root, installed.staged.as_deref(), &to, &crate::paths::updates_dir(), relaunch, vars);
+    let to = installed
+        .staged
+        .as_deref()
+        .and_then(|s| exe_version(&s.join(TREK_EXE)).ok())
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    let vars = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)));
+    let mut cmd = helper_command(
+        &helper,
+        std::process::id(),
+        root,
+        installed.staged.as_deref(),
+        &to,
+        &crate::paths::updates_dir(),
+        relaunch,
+        vars,
+    );
     spawn_detached(&mut cmd).with_context(|| format!("couldn't start {}", helper.display()))
 }
 
@@ -1161,7 +1492,14 @@ fn helper_command(
     // Not `procs::command`: the helper is started detached (`spawn_detached`), which is not the
     // same as windowless, and must stay so.
     let mut cmd = std::process::Command::new(helper); // spawn: detached
-    cmd.arg("--pid").arg(pid.to_string()).arg("--install").arg(root).arg("--from").arg(crate::VERSION).arg("--updates").arg(updates);
+    cmd.arg("--pid")
+        .arg(pid.to_string())
+        .arg("--install")
+        .arg(root)
+        .arg("--from")
+        .arg(crate::VERSION)
+        .arg("--updates")
+        .arg(updates);
     if let Some(staged) = staged {
         cmd.arg("--staged").arg(staged);
     }
@@ -1169,7 +1507,9 @@ fn helper_command(
         cmd.arg("--to").arg(to);
     }
     // The helper, and the Trek it starts, inherit the rest.
-    for (k, _) in vars.filter(|(k, _)| k.starts_with("TREK_") && !RELAUNCH_KEEPS.contains(&k.as_str())) {
+    for (k, _) in
+        vars.filter(|(k, _)| k.starts_with("TREK_") && !RELAUNCH_KEEPS.contains(&k.as_str()))
+    {
         cmd.env_remove(k);
     }
     if let Some(foreground) = relaunch {
@@ -1182,7 +1522,9 @@ fn helper_command(
     if let Some(dir) = root.parent() {
         cmd.current_dir(dir);
     }
-    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     cmd
 }
 
@@ -1191,7 +1533,9 @@ fn helper_command(
 #[cfg(windows)]
 fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt as _;
-    use windows_sys::Win32::System::Threading::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+    use windows_sys::Win32::System::Threading::{
+        CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS,
+    };
     cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB);
     if cmd.spawn().is_ok() {
         return Ok(());
@@ -1225,7 +1569,9 @@ enum Replaced {
     /// The app on disk is already at least the staged version: another copy of Trek updated
     /// it, or the user installed a newer one by hand. Installing would downgrade it.
     No,
-    Yes { backup: Option<PathBuf> },
+    Yes {
+        backup: Option<PathBuf>,
+    },
 }
 
 fn replace_bundle(staged: &Path, bundle: &Path, updates: &Path) -> Result<Replaced> {
@@ -1234,7 +1580,10 @@ fn replace_bundle(staged: &Path, bundle: &Path, updates: &Path) -> Result<Replac
     }
     if let (Ok(installed), Ok(incoming)) = (bundle_version(bundle), bundle_version(staged)) {
         if installed >= incoming {
-            tracing::info!("{} is already Trek {installed}; not installing {incoming}", bundle.display());
+            tracing::info!(
+                "{} is already Trek {installed}; not installing {incoming}",
+                bundle.display()
+            );
             return Ok(Replaced::No);
         }
     }
@@ -1243,7 +1592,12 @@ fn replace_bundle(staged: &Path, bundle: &Path, updates: &Path) -> Result<Replac
     // Next to the bundle, so the swap is a rename on one volume.
     let work = parent.join(format!(".{}.update", name.to_string_lossy()));
     let _ = std::fs::remove_dir_all(&work);
-    std::fs::create_dir(&work).with_context(|| format!("Trek can't write to {}; move it to a folder you own", parent.display()))?;
+    std::fs::create_dir(&work).with_context(|| {
+        format!(
+            "Trek can't write to {}; move it to a folder you own",
+            parent.display()
+        )
+    })?;
     let result = (|| {
         let incoming = work.join(name);
         move_dir(staged, &incoming)?;
@@ -1255,7 +1609,9 @@ fn replace_bundle(staged: &Path, bundle: &Path, updates: &Path) -> Result<Replac
             tracing::warn!("couldn't keep a backup of the previous version");
             return Ok(Replaced::Yes { backup: None });
         }
-        Ok(Replaced::Yes { backup: Some(backup) })
+        Ok(Replaced::Yes {
+            backup: Some(backup),
+        })
     })();
     // A swap that couldn't put the current app back leaves it in `work`: the only copy then.
     if bundle.exists() {
@@ -1280,7 +1636,8 @@ fn move_dir(from: &Path, to: &Path) -> Result<()> {
     if std::fs::rename(from, to).is_ok() {
         return Ok(());
     }
-    run("/usr/bin/ditto", [from.as_os_str(), to.as_os_str()]).context("couldn't move the update into place")?;
+    run("/usr/bin/ditto", [from.as_os_str(), to.as_os_str()])
+        .context("couldn't move the update into place")?;
     let _ = std::fs::remove_dir_all(from);
     Ok(())
 }
@@ -1308,7 +1665,10 @@ fn swap_by_rename(incoming: &Path, bundle: &Path) -> Result<PathBuf> {
     std::fs::rename(bundle, &aside).context("couldn't move the current app aside")?;
     if let Err(e) = std::fs::rename(incoming, bundle) {
         if let Err(back) = std::fs::rename(&aside, bundle) {
-            bail!("couldn't install the update ({e}) or put the current app back ({back}); it is at {}", aside.display());
+            bail!(
+                "couldn't install the update ({e}) or put the current app back ({back}); it is at {}",
+                aside.display()
+            );
         }
         return Err(e).context("couldn't install the update");
     }
@@ -1330,10 +1690,26 @@ const RELAUNCH_SCRIPT: &str = r#"
     fi
 "#;
 
-fn relaunch_command(pid: u32, bundle: &Path, backup: Option<&Path>, skip: &Path, version: &str, opener: &str, open_args: &[String]) -> std::process::Command {
+fn relaunch_command(
+    pid: u32,
+    bundle: &Path,
+    backup: Option<&Path>,
+    skip: &Path,
+    version: &str,
+    opener: &str,
+    open_args: &[String],
+) -> std::process::Command {
     let mut cmd = std::process::Command::new("/bin/sh");
-    cmd.arg("-c").arg(RELAUNCH_SCRIPT).arg("trek-relaunch").arg(pid.to_string()).arg(bundle);
-    cmd.arg(backup.map(Path::as_os_str).unwrap_or_default()).arg(skip).arg(version).arg(opener).args(open_args);
+    cmd.arg("-c")
+        .arg(RELAUNCH_SCRIPT)
+        .arg("trek-relaunch")
+        .arg(pid.to_string())
+        .arg(bundle);
+    cmd.arg(backup.map(Path::as_os_str).unwrap_or_default())
+        .arg(skip)
+        .arg(version)
+        .arg(opener)
+        .args(open_args);
     cmd
 }
 
@@ -1355,9 +1731,19 @@ pub fn relaunch(installed: &Installed, foreground: bool) -> Result<()> {
         open_args.push("--env".into());
         open_args.push(format!("{k}={v}"));
     }
-    let version = bundle_version(&installed.bundle).map(|v| v.to_string()).unwrap_or_default();
+    let version = bundle_version(&installed.bundle)
+        .map(|v| v.to_string())
+        .unwrap_or_default();
     let skip = crate::paths::updates_dir().join(SKIP_MARKER);
-    let mut helper = relaunch_command(std::process::id(), &installed.bundle, installed.backup.as_deref(), &skip, &version, "/usr/bin/open", &open_args);
+    let mut helper = relaunch_command(
+        std::process::id(),
+        &installed.bundle,
+        installed.backup.as_deref(),
+        &skip,
+        &version,
+        "/usr/bin/open",
+        &open_args,
+    );
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
@@ -1371,14 +1757,26 @@ pub fn relaunch(installed: &Installed, foreground: bool) -> Result<()> {
 /// one-time launch flags (`TREK_MOCK_PROMPT`, `TREK_OPEN_*`, `TREK_ONBOARDING`, measurement aids),
 /// which would fire again after every update.
 /// (`TREK_UPDATE_PUBKEY` isn't one: it's read when Trek is built, never at run time.)
-const RELAUNCH_KEEPS: &[&str] = &["TREK_DATA_DIR", "TREK_UPDATE_AUTO_RESTART", LOCAL_UPDATES_ENV, "TREK_MOCK_AGENT", "TREK_AXE_PATH", "RUST_LOG"];
+const RELAUNCH_KEEPS: &[&str] = &[
+    "TREK_DATA_DIR",
+    "TREK_UPDATE_AUTO_RESTART",
+    LOCAL_UPDATES_ENV,
+    "TREK_MOCK_AGENT",
+    "TREK_AXE_PATH",
+    "RUST_LOG",
+];
 
 fn relaunch_env(foreground: bool) -> Vec<(String, String)> {
     relaunch_env_from(std::env::vars(), foreground)
 }
 
-fn relaunch_env_from(vars: impl Iterator<Item = (String, String)>, foreground: bool) -> Vec<(String, String)> {
-    let mut env: Vec<(String, String)> = vars.filter(|(k, _)| RELAUNCH_KEEPS.contains(&k.as_str())).collect();
+fn relaunch_env_from(
+    vars: impl Iterator<Item = (String, String)>,
+    foreground: bool,
+) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = vars
+        .filter(|(k, _)| RELAUNCH_KEEPS.contains(&k.as_str()))
+        .collect();
     if !foreground {
         env.push(("TREK_BACKGROUND".into(), "1".into()));
     }
@@ -1415,7 +1813,12 @@ fn take_install_failure_in(updates: &Path) -> Option<String> {
 
 fn after_launch_in(updates: &Path) -> Option<String> {
     for entry in std::fs::read_dir(updates).into_iter().flatten().flatten() {
-        if entry.file_name().to_str().and_then(download_owner).is_some_and(|pid| !process_alive(pid)) {
+        if entry
+            .file_name()
+            .to_str()
+            .and_then(download_owner)
+            .is_some_and(|pid| !process_alive(pid))
+        {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
@@ -1428,7 +1831,9 @@ fn after_launch_in(updates: &Path) -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn process_alive(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
     // SAFETY: signal 0 only asks whether the process exists. EPERM: it does, as another user's.
     let alive = unsafe { libc::kill(pid, 0) } == 0;
     alive || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
@@ -1436,8 +1841,12 @@ fn process_alive(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn process_alive(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError, STILL_ACTIVE};
-    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, GetLastError, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
     // SAFETY: plain calls; the handle is checked before use and closed after. Access denied: it
     // exists, as another user's.
     unsafe {
@@ -1465,11 +1874,14 @@ mod tests {
     const FIXTURE_SIG: &str = include_str!("../tests/fixtures/update/archive.bin.minisig");
 
     fn fixture(name: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/update").join(name)
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/update")
+            .join(name)
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("trek-update-test-{name}-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("trek-update-test-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -1479,7 +1891,14 @@ mod tests {
             version: v.into(),
             notes: " - fixed things\n".into(),
             pub_date: String::new(),
-            platforms: HashMap::from([(platform_key(), Artifact { url: "u".into(), sha256: "s".into(), signature: String::new() })]),
+            platforms: HashMap::from([(
+                platform_key(),
+                Artifact {
+                    url: "u".into(),
+                    sha256: "s".into(),
+                    signature: String::new(),
+                },
+            )]),
         }
     }
 
@@ -1496,7 +1915,14 @@ mod tests {
     fn elsewhere(v: &str) -> Manifest {
         let mut m = manifest(v);
         let artifact = m.platforms.remove(&platform_key()).unwrap();
-        m.platforms.insert(if cfg!(windows) { "darwin-aarch64".into() } else { "windows-x86_64".into() }, artifact);
+        m.platforms.insert(
+            if cfg!(windows) {
+                "darwin-aarch64".into()
+            } else {
+                "windows-x86_64".into()
+            },
+            artifact,
+        );
         m
     }
 
@@ -1507,9 +1933,18 @@ mod tests {
         assert_eq!(newer(manifest("0.1.9")).0, "nothing");
         assert_eq!(newer(manifest("0.2.0")).0, "nothing", "same version");
         assert_eq!(newer(manifest("0.2.1-beta.1")).0, "update");
-        assert_eq!(newer(manifest("0.2.0-beta.3")).0, "nothing", "a prerelease of this version is older");
-        let Found::Update(u) = newer_than(manifest("v0.3.0"), &current).unwrap() else { panic!("0.3.0 is newer") };
-        assert_eq!((u.version.to_string(), u.notes.as_str()), ("0.3.0".into(), "- fixed things"));
+        assert_eq!(
+            newer(manifest("0.2.0-beta.3")).0,
+            "nothing",
+            "a prerelease of this version is older"
+        );
+        let Found::Update(u) = newer_than(manifest("v0.3.0"), &current).unwrap() else {
+            panic!("0.3.0 is newer")
+        };
+        assert_eq!(
+            (u.version.to_string(), u.notes.as_str()),
+            ("0.3.0".into(), "- fixed things")
+        );
         assert!(newer_than(manifest("soon"), &current).is_err());
     }
 
@@ -1517,43 +1952,90 @@ mod tests {
     fn a_newer_version_without_this_platforms_build_is_on_its_way_not_up_to_date() {
         // The Mac's release.sh writes the manifest; the Windows build is added to it some minutes later.
         let current = semver::Version::parse("0.4.1-beta.1").unwrap();
-        assert_eq!(found(newer_than(elsewhere("0.4.1-beta.2"), &current).unwrap()), ("coming", "0.4.1-beta.2".into()));
-        assert_eq!(found(newer_than(elsewhere("0.4.1-beta.1"), &current).unwrap()).0, "nothing", "not newer: nothing, whatever's in it");
+        assert_eq!(
+            found(newer_than(elsewhere("0.4.1-beta.2"), &current).unwrap()),
+            ("coming", "0.4.1-beta.2".into())
+        );
+        assert_eq!(
+            found(newer_than(elsewhere("0.4.1-beta.1"), &current).unwrap()).0,
+            "nothing",
+            "not newer: nothing, whatever's in it"
+        );
         let mut empty = manifest("9.0.0");
         empty.platforms.clear();
-        assert_eq!(found(newer_than(empty, &current).unwrap()), ("coming", "9.0.0".into()));
+        assert_eq!(
+            found(newer_than(empty, &current).unwrap()),
+            ("coming", "9.0.0".into())
+        );
 
         // Across feeds: a build to install beats one on its way, whichever is newer; the newest of
         // those on their way is the one named.
-        let feeds = |list: Vec<Manifest>| found(newest(list.into_iter().map(Ok).collect(), &current, None).unwrap());
-        assert_eq!(feeds(vec![elsewhere("0.4.1-beta.2"), manifest("0.4.0")]), ("coming", "0.4.1-beta.2".into()));
-        assert_eq!(feeds(vec![elsewhere("0.5.0-beta.1"), elsewhere("0.4.1-beta.2")]), ("coming", "0.5.0-beta.1".into()));
-        assert_eq!(feeds(vec![elsewhere("0.5.0-beta.1"), manifest("0.4.1")]), ("update", "0.4.1".into()));
-        assert_eq!(feeds(vec![manifest("0.4.1-beta.1"), manifest("0.4.0")]), ("nothing", String::new()));
+        let feeds = |list: Vec<Manifest>| {
+            found(newest(list.into_iter().map(Ok).collect(), &current, None).unwrap())
+        };
+        assert_eq!(
+            feeds(vec![elsewhere("0.4.1-beta.2"), manifest("0.4.0")]),
+            ("coming", "0.4.1-beta.2".into())
+        );
+        assert_eq!(
+            feeds(vec![elsewhere("0.5.0-beta.1"), elsewhere("0.4.1-beta.2")]),
+            ("coming", "0.5.0-beta.1".into())
+        );
+        assert_eq!(
+            feeds(vec![elsewhere("0.5.0-beta.1"), manifest("0.4.1")]),
+            ("update", "0.4.1".into())
+        );
+        assert_eq!(
+            feeds(vec![manifest("0.4.1-beta.1"), manifest("0.4.0")]),
+            ("nothing", String::new())
+        );
         // A version rolled back from isn't named either.
         let skipped = semver::Version::parse("0.4.1-beta.2").unwrap();
-        assert_eq!(found(newest(vec![Ok(elsewhere("0.4.1-beta.2"))], &current, Some(&skipped)).unwrap()).0, "nothing");
+        assert_eq!(
+            found(
+                newest(
+                    vec![Ok(elsewhere("0.4.1-beta.2"))],
+                    &current,
+                    Some(&skipped)
+                )
+                .unwrap()
+            )
+            .0,
+            "nothing"
+        );
     }
 
     #[test]
     fn channel_urls_follow_github_release_paths() {
         let mut u = Updates::default();
-        assert_eq!(manifest_urls(&u), ["https://github.com/dokyit/Trek/releases/latest/download/stable.json"]);
+        assert_eq!(
+            manifest_urls(&u),
+            ["https://github.com/dokyit/Trek/releases/latest/download/stable.json"]
+        );
         u.channel = Channel::Beta;
         assert_eq!(
             manifest_urls(&u),
-            ["https://github.com/dokyit/Trek/releases/download/beta/beta.json", "https://github.com/dokyit/Trek/releases/latest/download/stable.json"]
+            [
+                "https://github.com/dokyit/Trek/releases/download/beta/beta.json",
+                "https://github.com/dokyit/Trek/releases/latest/download/stable.json"
+            ]
         );
         u.channel = Channel::Nightly;
         assert_eq!(manifest_urls(&u).len(), 3);
-        assert_eq!(manifest_urls(&u)[0], "https://github.com/dokyit/Trek/releases/download/nightly/nightly.json");
+        assert_eq!(
+            manifest_urls(&u)[0],
+            "https://github.com/dokyit/Trek/releases/download/nightly/nightly.json"
+        );
         u.feed_url = "http://127.0.0.1:8765/{channel}.json".into();
         assert_eq!(manifest_urls(&u)[1], "http://127.0.0.1:8765/beta.json");
         u.feed_url = "https://example.com/trek.json".into();
         assert_eq!(manifest_urls(&u), ["https://example.com/trek.json"]);
         u.feed_url = "  ".into();
         u.channel = Channel::Stable;
-        assert_eq!(manifest_urls(&u), ["https://github.com/dokyit/Trek/releases/latest/download/stable.json"]);
+        assert_eq!(
+            manifest_urls(&u),
+            ["https://github.com/dokyit/Trek/releases/latest/download/stable.json"]
+        );
     }
 
     #[test]
@@ -1572,7 +2054,10 @@ mod tests {
         bytes[0] ^= 1;
         std::fs::write(&tampered, bytes).unwrap();
         assert!(verify_file(&tampered, FIXTURE_SIG, FIXTURE_KEY).is_err());
-        assert!(verify_file(&data, FIXTURE_SIG, public_key()).is_err(), "release key must not accept the test key's signature");
+        assert!(
+            verify_file(&data, FIXTURE_SIG, public_key()).is_err(),
+            "release key must not accept the test key's signature"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1582,7 +2067,13 @@ mod tests {
         assert!(signature_for("", &v("1.0.0")).is_err());
         assert!(signature_for("garbage", &v("1.0.0")).is_err());
         // The fixture's trusted comment is "Trek test fixture": no version in it.
-        assert!(signature_for(FIXTURE_SIG, &v("1.0.0")).err().unwrap().to_string().contains("another version"));
+        assert!(
+            signature_for(FIXTURE_SIG, &v("1.0.0"))
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("another version")
+        );
     }
 
     fn write_app(app: &Path, id: &str, version: &str) {
@@ -1601,22 +2092,55 @@ mod tests {
     #[test]
     fn the_newest_feed_wins_and_failing_feeds_are_skipped() {
         let current = semver::Version::parse("0.2.0").unwrap();
-        let picked = newest(vec![Ok(manifest("0.3.0-beta.1")), Err(anyhow!("offline")), Ok(manifest("0.2.1"))], &current, None).unwrap();
+        let picked = newest(
+            vec![
+                Ok(manifest("0.3.0-beta.1")),
+                Err(anyhow!("offline")),
+                Ok(manifest("0.2.1")),
+            ],
+            &current,
+            None,
+        )
+        .unwrap();
         assert_eq!(found(picked), ("update", "0.3.0-beta.1".into()));
         // A version rolled back from isn't offered again; the next best is.
         let skipped = semver::Version::parse("0.3.0-beta.1").unwrap();
-        let picked = newest(vec![Ok(manifest("0.3.0-beta.1")), Ok(manifest("0.2.1"))], &current, Some(&skipped)).unwrap();
+        let picked = newest(
+            vec![Ok(manifest("0.3.0-beta.1")), Ok(manifest("0.2.1"))],
+            &current,
+            Some(&skipped),
+        )
+        .unwrap();
         assert_eq!(found(picked), ("update", "0.2.1".into()));
-        assert_eq!(found(newest(vec![Ok(manifest("0.1.0")), Err(anyhow!("404"))], &current, None).unwrap()).0, "nothing", "one feed answered: up to date");
-        let all_failed = newest(vec![Err(anyhow!("no release yet")), Err(anyhow!("offline"))], &current, None);
+        assert_eq!(
+            found(
+                newest(
+                    vec![Ok(manifest("0.1.0")), Err(anyhow!("404"))],
+                    &current,
+                    None
+                )
+                .unwrap()
+            )
+            .0,
+            "nothing",
+            "one feed answered: up to date"
+        );
+        let all_failed = newest(
+            vec![Err(anyhow!("no release yet")), Err(anyhow!("offline"))],
+            &current,
+            None,
+        );
         assert_eq!(all_failed.err().unwrap().to_string(), "no release yet");
     }
 
     #[test]
     fn network_failures_are_transient_and_bad_releases_are_not() {
-        let net = anyhow::Error::new(NetError("couldn't connect to github.com".into())).context("download");
+        let net = anyhow::Error::new(NetError("couldn't connect to github.com".into()))
+            .context("download");
         assert!(is_transient(&net));
-        assert!(!is_transient(&anyhow!("the update's signature doesn't match; it was not installed")));
+        assert!(!is_transient(&anyhow!(
+            "the update's signature doesn't match; it was not installed"
+        )));
     }
 
     #[test]
@@ -1626,7 +2150,10 @@ mod tests {
         write_app(&new, "dev.trek.Trek", "new");
         write_app(&old, "dev.trek.Trek", "old");
         let replaced = swap(&new, &old).unwrap();
-        assert_eq!((contents(&old), contents(&replaced)), ("new".into(), "old".into()));
+        assert_eq!(
+            (contents(&old), contents(&replaced)),
+            ("new".into(), "old".into())
+        );
         // Nothing to swap with: an error, and the bundle is untouched.
         assert!(swap(&dir.join("missing.app"), &old).is_err());
         assert_eq!(contents(&old), "new");
@@ -1641,10 +2168,17 @@ mod tests {
         write_app(&new, "dev.trek.Trek", "new");
         write_app(&old, "dev.trek.Trek", "old");
         let replaced = swap_by_rename(&new, &old).unwrap();
-        assert_eq!((contents(&old), contents(&replaced)), ("new".into(), "old".into()));
+        assert_eq!(
+            (contents(&old), contents(&replaced)),
+            ("new".into(), "old".into())
+        );
         assert!(replaced.starts_with(&work));
         assert!(swap_by_rename(&work.join("missing.app"), &old).is_err());
-        assert_eq!(contents(&old), "new", "restored after a failed second rename");
+        assert_eq!(
+            contents(&old),
+            "new",
+            "restored after a failed second rename"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1656,9 +2190,18 @@ mod tests {
         let v = |s: &str| semver::Version::parse(s).unwrap();
         write_app(&app, "dev.trek.Trek", "0.2.1");
         check_bundle(&app, "dev.trek.Trek", &v("0.2.1"), &v("0.2.0")).unwrap();
-        assert!(check_bundle(&app, "dev.trek.Trek", &v("0.2.2"), &v("0.2.0")).is_err(), "not the advertised version");
-        assert!(check_bundle(&app, "dev.trek.Trek", &v("0.2.1"), &v("0.2.1")).is_err(), "not newer");
-        assert!(check_bundle(&app, "com.example.Other", &v("0.2.1"), &v("0.2.0")).is_err(), "another app");
+        assert!(
+            check_bundle(&app, "dev.trek.Trek", &v("0.2.2"), &v("0.2.0")).is_err(),
+            "not the advertised version"
+        );
+        assert!(
+            check_bundle(&app, "dev.trek.Trek", &v("0.2.1"), &v("0.2.1")).is_err(),
+            "not newer"
+        );
+        assert!(
+            check_bundle(&app, "com.example.Other", &v("0.2.1"), &v("0.2.0")).is_err(),
+            "another app"
+        );
         write_app(&app, "dev.trek.Trek", "0.3.0-beta.2");
         check_bundle(&app, "dev.trek.Trek", &v("0.3.0-beta.2"), &v("0.2.1")).unwrap();
         let _ = std::fs::remove_dir_all(dir);
@@ -1678,28 +2221,63 @@ mod tests {
         };
 
         let staged = stage_new("0.2.1");
-        assert_eq!(install_into(&staged, &bundle, &updates).unwrap(), Some(updates.join("previous.noindex/Trek.app")));
+        assert_eq!(
+            install_into(&staged, &bundle, &updates).unwrap(),
+            Some(updates.join("previous.noindex/Trek.app"))
+        );
         assert_eq!(contents(&bundle), "0.2.1");
-        assert_eq!(contents(&updates.join("previous.noindex/Trek.app")), "0.2.0");
-        assert!(!download_dir_of(&staged).unwrap().exists(), "the download folder is gone");
+        assert_eq!(
+            contents(&updates.join("previous.noindex/Trek.app")),
+            "0.2.0"
+        );
+        assert!(
+            !download_dir_of(&staged).unwrap().exists(),
+            "the download folder is gone"
+        );
         assert!(!apps.join(".Trek.app.update").exists());
-        assert_eq!(std::fs::read_to_string(updates.join("updated-from")).unwrap(), crate::VERSION);
+        assert_eq!(
+            std::fs::read_to_string(updates.join("updated-from")).unwrap(),
+            crate::VERSION
+        );
 
         // The next update replaces the backup: there's only ever one.
         install_into(&stage_new("0.2.2"), &bundle, &updates).unwrap();
-        assert_eq!((contents(&bundle), contents(&updates.join("previous.noindex/Trek.app"))), ("0.2.2".into(), "0.2.1".into()));
+        assert_eq!(
+            (
+                contents(&bundle),
+                contents(&updates.join("previous.noindex/Trek.app"))
+            ),
+            ("0.2.2".into(), "0.2.1".into())
+        );
 
         // Something newer is already installed (another copy updated it): left alone, staged copy dropped.
         std::fs::remove_file(updates.join("updated-from")).unwrap();
         let older = stage_new("0.2.1");
-        assert_eq!(install_into(&older, &bundle, &updates).unwrap(), None, "no backup to roll back to");
+        assert_eq!(
+            install_into(&older, &bundle, &updates).unwrap(),
+            None,
+            "no backup to roll back to"
+        );
         assert_eq!(contents(&bundle), "0.2.2");
         assert!(!older.exists());
-        assert!(!updates.join("updated-from").exists(), "nothing was installed");
+        assert!(
+            !updates.join("updated-from").exists(),
+            "nothing was installed"
+        );
 
         let gone = updates.join("download-1-0.noindex/Trek.app");
-        assert!(install_into(&gone, &bundle, &updates).err().unwrap().to_string().contains("gone"));
-        assert_eq!(std::fs::read_dir(&apps).unwrap().count(), 1, "only Trek.app next to the bundle");
+        assert!(
+            install_into(&gone, &bundle, &updates)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("gone")
+        );
+        assert_eq!(
+            std::fs::read_dir(&apps).unwrap().count(),
+            1,
+            "only Trek.app next to the bundle"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1707,7 +2285,10 @@ mod tests {
     #[test]
     fn after_launch_clears_only_downloads_of_exited_processes() {
         let dir = scratch("after-launch");
-        let mut exited = std::process::Command::new(trek_test_fixtures::bin("fixture")).arg("exit").spawn().unwrap();
+        let mut exited = std::process::Command::new(trek_test_fixtures::bin("fixture"))
+            .arg("exit")
+            .spawn()
+            .unwrap();
         exited.wait().unwrap();
         let mine = new_download_dir(&dir).unwrap();
         let theirs = dir.join(format!("download-{}-0.noindex", exited.id()));
@@ -1718,7 +2299,10 @@ mod tests {
         assert_eq!(after_launch_in(&dir).as_deref(), Some("0.0.1"));
         assert!(mine.exists(), "a running process's download stays");
         assert!(!theirs.exists());
-        assert!(dir.join("previous.noindex/Trek.app").exists(), "the backup stays");
+        assert!(
+            dir.join("previous.noindex/Trek.app").exists(),
+            "the backup stays"
+        );
         assert_eq!(after_launch_in(&dir), None, "reported once");
         std::fs::write(dir.join("updated-from"), crate::VERSION).unwrap();
         assert_eq!(after_launch_in(&dir), None, "not an update");
@@ -1734,14 +2318,27 @@ mod tests {
         let (bundle, backup) = (dir.join("Trek.app"), dir.join("previous.noindex/Trek.app"));
         write_app(&bundle, "dev.trek.Trek", "new");
         write_app(&backup, "dev.trek.Trek", "old");
-        let mut exited = std::process::Command::new(trek_test_fixtures::bin("fixture")).arg("exit").spawn().unwrap();
+        let mut exited = std::process::Command::new(trek_test_fixtures::bin("fixture"))
+            .arg("exit")
+            .spawn()
+            .unwrap();
         exited.wait().unwrap();
         let skip = dir.join(SKIP_MARKER);
         // The "opener" is `fixture exit <code>`: the app opens or it doesn't.
         let fixture = trek_test_fixtures::bin("fixture");
         let fixture = fixture.to_str().unwrap();
         let helper = |backup: Option<&Path>, code: &str| {
-            relaunch_command(exited.id(), &bundle, backup, &skip, "0.2.1", fixture, &["exit".into(), code.into()]).status().unwrap()
+            relaunch_command(
+                exited.id(),
+                &bundle,
+                backup,
+                &skip,
+                "0.2.1",
+                fixture,
+                &["exit".into(), code.into()],
+            )
+            .status()
+            .unwrap()
         };
 
         assert!(helper(Some(&backup), "0").success());
@@ -1760,7 +2357,10 @@ mod tests {
         assert!(!backup.exists());
         assert!(!dir.join("Trek.app.failed").exists());
         // The version it went back to won't install the one that failed again.
-        assert_eq!(skipped_version(&dir).map(|v| v.to_string()).as_deref(), Some("0.2.1"));
+        assert_eq!(
+            skipped_version(&dir).map(|v| v.to_string()).as_deref(),
+            Some("0.2.1")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1775,10 +2375,20 @@ mod tests {
         assert!(!is_release(&app));
         assert_eq!(blocker_for(&app, false), Some(Blocker::DevBuild));
         let plist = std::fs::read_to_string(app.join("Contents/Info.plist")).unwrap();
-        std::fs::write(app.join("Contents/Info.plist"), plist.replace("</dict>", "<key>TrekRelease</key><true/></dict>")).unwrap();
+        std::fs::write(
+            app.join("Contents/Info.plist"),
+            plist.replace("</dict>", "<key>TrekRelease</key><true/></dict>"),
+        )
+        .unwrap();
         assert!(is_release(&app));
         assert_eq!(blocker_for(&app, true), None);
-        assert_eq!(blocker_for(Path::new("/private/var/folders/x/AppTranslocation/y/d/Trek.app"), true), Some(Blocker::Translocated));
+        assert_eq!(
+            blocker_for(
+                Path::new("/private/var/folders/x/AppTranslocation/y/d/Trek.app"),
+                true
+            ),
+            Some(Blocker::Translocated)
+        );
         // A folder this user can't write to: nothing would ever install.
         std::fs::set_permissions(dir.join("apps"), std::fs::Permissions::from_mode(0o555)).unwrap();
         assert_eq!(blocker_for(&app, true), Some(Blocker::ReadOnlyLocation));
@@ -1794,8 +2404,16 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         assert!(writable(&file));
         assert!(!writable(&dir.join("missing")));
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "x", "probing leaves files alone");
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "and leaves no probe behind");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "x",
+            "probing leaves files alone"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "and leaves no probe behind"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1804,13 +2422,19 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_builds_ask_for_the_windows_artifact() {
-        assert_eq!(platform_key(), format!("windows-{}", std::env::consts::ARCH));
+        assert_eq!(
+            platform_key(),
+            format!("windows-{}", std::env::consts::ARCH)
+        );
         if cfg!(target_arch = "x86_64") {
             assert_eq!(platform_key(), "windows-x86_64");
         }
         // The test binary sits in cargo's output: a development build, which never updates.
         assert_eq!(blocker(), Some(Blocker::DevBuild));
-        assert_eq!(archive_name(&semver::Version::new(0, 4, 1)), "Trek-0.4.1.zip");
+        assert_eq!(
+            archive_name(&semver::Version::new(0, 4, 1)),
+            "Trek-0.4.1.zip"
+        );
     }
 
     /// A Windows install: Trek's three files in a folder of their own.
@@ -1828,31 +2452,59 @@ mod tests {
         trek_folder(&root);
         let protected = [program_files.clone()];
         // Nothing guarded by ransomware protection here (`a_windows_install_in_a_guarded_folder_says_so`).
-        let blocker_for = |root: &Path, release: bool, protected: &[PathBuf]| windows_blocker_for(root, release, protected, &[], Some(false));
+        let blocker_for = |root: &Path, release: bool, protected: &[PathBuf]| {
+            windows_blocker_for(root, release, protected, &[], Some(false))
+        };
         assert_eq!(blocker_for(&root, true, &protected), None);
-        assert_eq!(blocker_for(&root, false, &protected), Some(Blocker::DevBuild));
+        assert_eq!(
+            blocker_for(&root, false, &protected),
+            Some(Blocker::DevBuild)
+        );
 
         // Program Files, however it's spelled, and Windows's app store folder.
         let installed = program_files.join("Trek");
         trek_folder(&installed);
-        assert_eq!(blocker_for(&installed, true, &protected), Some(Blocker::ProtectedFolder));
+        assert_eq!(
+            blocker_for(&installed, true, &protected),
+            Some(Blocker::ProtectedFolder)
+        );
         let shouting = PathBuf::from(installed.to_string_lossy().to_uppercase());
-        assert_eq!(blocker_for(&shouting, true, &protected), Some(Blocker::ProtectedFolder));
+        assert_eq!(
+            blocker_for(&shouting, true, &protected),
+            Some(Blocker::ProtectedFolder)
+        );
         let store = dir.join("WindowsApps").join("Trek_1.0_x64");
         trek_folder(&store);
-        assert_eq!(blocker_for(&store, true, &[]), Some(Blocker::ProtectedFolder));
+        assert_eq!(
+            blocker_for(&store, true, &[]),
+            Some(Blocker::ProtectedFolder)
+        );
 
         // Unzipped straight into Downloads: the folder isn't Trek's to replace.
         std::fs::write(root.join("holiday.jpg"), "x").unwrap();
-        assert_eq!(blocker_for(&root, true, &protected), Some(Blocker::SharedFolder));
+        assert_eq!(
+            blocker_for(&root, true, &protected),
+            Some(Blocker::SharedFolder)
+        );
         std::fs::remove_file(root.join("holiday.jpg")).unwrap();
         std::fs::create_dir(root.join("projects")).unwrap();
-        assert_eq!(blocker_for(&root, true, &protected), Some(Blocker::SharedFolder));
+        assert_eq!(
+            blocker_for(&root, true, &protected),
+            Some(Blocker::SharedFolder)
+        );
         std::fs::remove_dir(root.join("projects")).unwrap();
         std::fs::remove_file(root.join("trek-mcp.exe")).unwrap();
-        assert_eq!(blocker_for(&root, true, &protected), None, "an older release's folder, without a file, is still Trek's own");
+        assert_eq!(
+            blocker_for(&root, true, &protected),
+            None,
+            "an older release's folder, without a file, is still Trek's own"
+        );
         std::fs::remove_file(root.join("trek.exe")).unwrap();
-        assert_eq!(blocker_for(&root, true, &protected), Some(Blocker::SharedFolder), "no trek.exe: not an install");
+        assert_eq!(
+            blocker_for(&root, true, &protected),
+            Some(Blocker::SharedFolder),
+            "no trek.exe: not an install"
+        );
 
         assert!(is_cargo_output(&{
             let target = dir.join("target").join("debug");
@@ -1861,8 +2513,15 @@ mod tests {
             target.join("deps")
         }));
         assert!(!is_cargo_output(&root));
-        for b in [Blocker::ProtectedFolder, Blocker::SharedFolder, Blocker::GuardedFolder(KnownFolder::Desktop)] {
-            assert!(b.message().ends_with("to get updates."), "{b:?} says what to do");
+        for b in [
+            Blocker::ProtectedFolder,
+            Blocker::SharedFolder,
+            Blocker::GuardedFolder(KnownFolder::Desktop),
+        ] {
+            assert!(
+                b.message().ends_with("to get updates."),
+                "{b:?} says what to do"
+            );
         }
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1876,14 +2535,26 @@ mod tests {
             // can be added to it.
             let mut icacls = std::process::Command::new("icacls");
             icacls.arg(dir);
-            if refuse { icacls.args(["/deny", "*S-1-1-0:(WD,AD)"]) } else { icacls.args(["/remove:d", "*S-1-1-0"]) };
+            if refuse {
+                icacls.args(["/deny", "*S-1-1-0:(WD,AD)"])
+            } else {
+                icacls.args(["/remove:d", "*S-1-1-0"])
+            };
             let out = icacls.output().unwrap();
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stdout)
+            );
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(if refuse { 0o555 } else { 0o755 })).unwrap();
+            std::fs::set_permissions(
+                dir,
+                std::fs::Permissions::from_mode(if refuse { 0o555 } else { 0o755 }),
+            )
+            .unwrap();
         }
     }
 
@@ -1891,25 +2562,51 @@ mod tests {
     fn a_windows_install_in_a_guarded_folder_says_so() {
         let dir = scratch("win-guarded");
         let documents = dir.join("OneDrive").join("Documents");
-        let root = documents.join("Trek").join("Trek-0.4.1-beta.1-windows-x86_64");
+        let root = documents
+            .join("Trek")
+            .join("Trek-0.4.1-beta.1-windows-x86_64");
         trek_folder(&root);
-        let guarded = [(KnownFolder::Desktop, dir.join("OneDrive").join("Desktop")), (KnownFolder::Documents, documents.clone())];
-        let blocked = |root: &Path, cfa_on: Option<bool>| windows_blocker_for(root, true, &[], &guarded, cfa_on);
+        let guarded = [
+            (KnownFolder::Desktop, dir.join("OneDrive").join("Desktop")),
+            (KnownFolder::Documents, documents.clone()),
+        ];
+        let blocked = |root: &Path, cfa_on: Option<bool>| {
+            windows_blocker_for(root, true, &[], &guarded, cfa_on)
+        };
         let in_documents = Some(Blocker::GuardedFolder(KnownFolder::Documents));
 
         // Controlled folder access on: certain, whether or not Trek itself may write there (each
         // program is judged on its own, and the helper an update brings is a new one).
         assert_eq!(blocked(&root, Some(true)), in_documents);
-        assert_eq!(blocked(&root, Some(false)), None, "off, or only auditing: it updates as anywhere else");
-        assert_eq!(blocked(&root, None), None, "can't tell, and writing there works: it tries");
+        assert_eq!(
+            blocked(&root, Some(false)),
+            None,
+            "off, or only auditing: it updates as anywhere else"
+        );
+        assert_eq!(
+            blocked(&root, None),
+            None,
+            "can't tell, and writing there works: it tries"
+        );
         let elsewhere = dir.join("Trek");
         trek_folder(&elsewhere);
-        assert_eq!(blocked(&elsewhere, Some(true)), None, "not in a guarded folder");
-        assert_eq!(blocked(&documents, Some(true)), in_documents, "unzipped straight into Documents");
+        assert_eq!(
+            blocked(&elsewhere, Some(true)),
+            None,
+            "not in a guarded folder"
+        );
+        assert_eq!(
+            blocked(&documents, Some(true)),
+            in_documents,
+            "unzipped straight into Documents"
+        );
 
         // After Program Files and links, before a folder holding more than Trek: moving Trek to a
         // folder of its own deals with both.
-        assert_eq!(windows_blocker_for(&root, true, &[documents.clone()], &guarded, Some(true)), Some(Blocker::ProtectedFolder));
+        assert_eq!(
+            windows_blocker_for(&root, true, &[documents.clone()], &guarded, Some(true)),
+            Some(Blocker::ProtectedFolder)
+        );
         std::fs::write(root.join("notes.txt"), "x").unwrap();
         assert_eq!(blocked(&root, Some(true)), in_documents);
         std::fs::remove_file(root.join("notes.txt")).unwrap();
@@ -1919,8 +2616,14 @@ mod tests {
         refuse_writes(&root, true);
         let (unknown, off) = (blocked(&root, None), blocked(&root, Some(false)));
         refuse_writes(&root, false);
-        assert_eq!((unknown, off), (in_documents, Some(Blocker::ReadOnlyLocation)));
-        assert!(probe_dir(&root).is_ok() && std::fs::read_dir(&root).unwrap().count() == 3, "and the probe leaves nothing behind");
+        assert_eq!(
+            (unknown, off),
+            (in_documents, Some(Blocker::ReadOnlyLocation))
+        );
+        assert!(
+            probe_dir(&root).is_ok() && std::fs::read_dir(&root).unwrap().count() == 3,
+            "and the probe leaves nothing behind"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1928,46 +2631,107 @@ mod tests {
     fn the_guarded_folder_message_names_the_folder_and_one_to_move_to() {
         let m = Blocker::GuardedFolder(KnownFolder::Documents).message();
         assert!(m.starts_with("Trek is in Documents, which Windows's ransomware protection (Controlled folder access) guards, so it can't update itself there."), "{m}");
-        assert!(guarded_message(KnownFolder::Pictures, None).contains(r"such as C:\Users\<you>\Trek, to get updates."));
+        assert!(
+            guarded_message(KnownFolder::Pictures, None)
+                .contains(r"such as C:\Users\<you>\Trek, to get updates.")
+        );
         if cfg!(windows) {
             assert_eq!(
                 guarded_message(KnownFolder::Desktop, Some(Path::new(r"C:\Users\tobyj"))),
                 r"Trek is in Desktop, which Windows's ransomware protection (Controlled folder access) guards, so it can't update itself there. Move the Trek folder to one of its own, such as C:\Users\tobyj\Trek, to get updates."
             );
         }
-        assert!(Blocker::GuardedFolder(KnownFolder::Music).may_pass() && Blocker::ReadOnlyLocation.may_pass());
-        assert!(!Blocker::SharedFolder.may_pass() && !Blocker::DevBuild.may_pass(), "where Trek is doesn't change while it runs");
+        assert!(
+            Blocker::GuardedFolder(KnownFolder::Music).may_pass()
+                && Blocker::ReadOnlyLocation.may_pass()
+        );
+        assert!(
+            !Blocker::SharedFolder.may_pass() && !Blocker::DevBuild.may_pass(),
+            "where Trek is doesn't change while it runs"
+        );
     }
 
     #[test]
     fn guarded_folders_are_where_windows_says_and_in_onedrive() {
-        let p = |s: &str| PathBuf::from(if cfg!(windows) { format!("C:{s}") } else { s.replace('\\', "/") });
+        let p = |s: &str| {
+            PathBuf::from(if cfg!(windows) {
+                format!("C:{s}")
+            } else {
+                s.replace('\\', "/")
+            })
+        };
         // Documents moved to OneDrive (Known Folder Move); Favorites only in the registry.
         let known = |f: KnownFolder| match f {
             KnownFolder::Documents => vec![p(r"\Users\me\OneDrive\Documents")],
             KnownFolder::Favorites => vec![p(r"\Users\me\Favorites"), PathBuf::from("relative")],
             _ => vec![],
         };
-        let places = guarded_places(known, &[p(r"\Users\me\OneDrive"), p(r"\Users\me\OneDrive - Work")]);
-        let of = |f: KnownFolder| places.iter().filter(|(k, _)| *k == f).map(|(_, path)| path.clone()).collect::<Vec<_>>();
-        assert_eq!(of(KnownFolder::Documents), [p(r"\Users\me\OneDrive\Documents"), p(r"\Users\me\OneDrive - Work\Documents")], "each once");
-        assert_eq!(of(KnownFolder::Pictures), [p(r"\Users\me\OneDrive\Pictures"), p(r"\Users\me\OneDrive - Work\Pictures")]);
-        assert_eq!(of(KnownFolder::Favorites)[0], p(r"\Users\me\Favorites"), "a relative path is never a guarded folder");
+        let places = guarded_places(
+            known,
+            &[p(r"\Users\me\OneDrive"), p(r"\Users\me\OneDrive - Work")],
+        );
+        let of = |f: KnownFolder| {
+            places
+                .iter()
+                .filter(|(k, _)| *k == f)
+                .map(|(_, path)| path.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            of(KnownFolder::Documents),
+            [
+                p(r"\Users\me\OneDrive\Documents"),
+                p(r"\Users\me\OneDrive - Work\Documents")
+            ],
+            "each once"
+        );
+        assert_eq!(
+            of(KnownFolder::Pictures),
+            [
+                p(r"\Users\me\OneDrive\Pictures"),
+                p(r"\Users\me\OneDrive - Work\Pictures")
+            ]
+        );
+        assert_eq!(
+            of(KnownFolder::Favorites)[0],
+            p(r"\Users\me\Favorites"),
+            "a relative path is never a guarded folder"
+        );
         assert_eq!(places.len(), 1 + 6 * 2);
     }
 
     #[test]
     fn controlled_folder_access_is_on_only_when_it_blocks() {
         assert_eq!(cfa_setting(Ok(None), Ok(Some(1))), Some(true));
-        assert_eq!(cfa_setting(Ok(None), Ok(Some(2))), Some(false), "audit mode blocks nothing");
+        assert_eq!(
+            cfa_setting(Ok(None), Ok(Some(2))),
+            Some(false),
+            "audit mode blocks nothing"
+        );
         assert_eq!(cfa_setting(Ok(None), Ok(Some(0))), Some(false));
-        assert_eq!(cfa_setting(Ok(None), Ok(None)), Some(false), "never set: off");
-        assert_eq!(cfa_setting(Ok(Some(0)), Ok(Some(1))), Some(false), "Group Policy wins");
+        assert_eq!(
+            cfa_setting(Ok(None), Ok(None)),
+            Some(false),
+            "never set: off"
+        );
+        assert_eq!(
+            cfa_setting(Ok(Some(0)), Ok(Some(1))),
+            Some(false),
+            "Group Policy wins"
+        );
         assert_eq!(cfa_setting(Ok(Some(1)), Err(())), Some(true));
         assert_eq!(cfa_setting(Err(()), Ok(Some(1))), Some(true));
-        assert_eq!(cfa_setting(Err(()), Ok(Some(0))), None, "a policy Trek can't read may turn it on");
+        assert_eq!(
+            cfa_setting(Err(()), Ok(Some(0))),
+            None,
+            "a policy Trek can't read may turn it on"
+        );
         assert_eq!(cfa_setting(Ok(None), Err(())), None);
-        assert_eq!(expand_env(r"%USERPROFILE%\Favorites", |k| (k == "USERPROFILE").then(|| r"C:\Users\me".into())), r"C:\Users\me\Favorites");
+        assert_eq!(
+            expand_env(r"%USERPROFILE%\Favorites", |k| (k == "USERPROFILE")
+                .then(|| r"C:\Users\me".into())),
+            r"C:\Users\me\Favorites"
+        );
         assert_eq!(expand_env(r"%NOPE%\x %", |_| None), r"%NOPE%\x %");
     }
 
@@ -1977,20 +2741,51 @@ mod tests {
         let defender = |state: u32| (DEFENDER_PRODUCT.to_lowercase(), state);
         let (on, off_state) = (0x61100, 0x60100);
         assert!(product_is_on(on) && !product_is_on(off_state));
-        let no_switches = [Ok(None), Ok(None), Ok(Some(0)), Ok(None), Ok(Some(0)), Ok(None)];
+        let no_switches = [
+            Ok(None),
+            Ok(None),
+            Ok(Some(0)),
+            Ok(None),
+            Ok(Some(0)),
+            Ok(None),
+        ];
         let third_party = ("{00000000-0000-0000-0000-000000000001}".to_string(), on);
 
-        assert_eq!(real_time_state(&no_switches, Ok(vec![defender(on)])), Some(true));
+        assert_eq!(
+            real_time_state(&no_switches, Ok(vec![defender(on)])),
+            Some(true)
+        );
         // Switched off in Windows Security: its switch, or its entry in the antivirus list.
-        let switched = [Ok(Some(1)), Ok(None), Ok(None), Ok(None), Ok(None), Ok(None)];
-        assert_eq!(real_time_state(&switched, Ok(vec![defender(on)])), Some(false));
-        assert_eq!(real_time_state(&switched, Err(())), Some(false), "whatever else can't be read");
-        assert_eq!(real_time_state(&no_switches, Ok(vec![defender(off_state)])), Some(false));
+        let switched = [
+            Ok(Some(1)),
+            Ok(None),
+            Ok(None),
+            Ok(None),
+            Ok(None),
+            Ok(None),
+        ];
+        assert_eq!(
+            real_time_state(&switched, Ok(vec![defender(on)])),
+            Some(false)
+        );
+        assert_eq!(
+            real_time_state(&switched, Err(())),
+            Some(false),
+            "whatever else can't be read"
+        );
+        assert_eq!(
+            real_time_state(&no_switches, Ok(vec![defender(off_state)])),
+            Some(false)
+        );
         // Group Policy, or an antispyware switch an old installer left behind.
         for at in 0..no_switches.len() {
             let mut one = no_switches.clone();
             one[at] = Ok(Some(1));
-            assert_eq!(real_time_state(&one, Ok(vec![defender(on)])), Some(false), "switch {at}");
+            assert_eq!(
+                real_time_state(&one, Ok(vec![defender(on)])),
+                Some(false),
+                "switch {at}"
+            );
         }
         // Can't tell: a value or the list unreadable, Defender not in it, or another product on
         // beside it (Defender runs passively under it).
@@ -1999,10 +2794,27 @@ mod tests {
         assert_eq!(real_time_state(&unreadable, Ok(vec![defender(on)])), None);
         assert_eq!(real_time_state(&no_switches, Err(())), None);
         assert_eq!(real_time_state(&no_switches, Ok(vec![])), None);
-        assert_eq!(real_time_state(&no_switches, Ok(vec![third_party.clone()])), None);
-        assert_eq!(real_time_state(&no_switches, Ok(vec![defender(on), third_party.clone()])), None);
-        assert_eq!(real_time_state(&no_switches, Ok(vec![defender(on), (third_party.0.clone(), off_state)])), Some(true), "a product that's off beside it changes nothing");
-        assert_eq!(real_time_state(&no_switches, Ok(vec![defender(off_state), third_party])), Some(false), "primary elsewhere, Defender off");
+        assert_eq!(
+            real_time_state(&no_switches, Ok(vec![third_party.clone()])),
+            None
+        );
+        assert_eq!(
+            real_time_state(&no_switches, Ok(vec![defender(on), third_party.clone()])),
+            None
+        );
+        assert_eq!(
+            real_time_state(
+                &no_switches,
+                Ok(vec![defender(on), (third_party.0.clone(), off_state)])
+            ),
+            Some(true),
+            "a product that's off beside it changes nothing"
+        );
+        assert_eq!(
+            real_time_state(&no_switches, Ok(vec![defender(off_state), third_party])),
+            Some(false),
+            "primary elsewhere, Defender off"
+        );
 
         // The setting only matters when it's on, and then only while Defender is scanning.
         let asked = std::cell::Cell::new(0);
@@ -2015,9 +2827,21 @@ mod tests {
             (answer, asked.get())
         };
         assert_eq!(enforced(Some(true), Some(true)), (Some(true), 1));
-        assert_eq!(enforced(Some(true), Some(false)), (Some(false), 1), "on, but nothing scans: nothing is guarded");
-        assert_eq!(enforced(Some(true), None), (None, 1), "can't tell: a refused write decides");
-        assert_eq!(enforced(Some(false), Some(true)), (Some(false), 0), "off or auditing: real-time protection isn't asked");
+        assert_eq!(
+            enforced(Some(true), Some(false)),
+            (Some(false), 1),
+            "on, but nothing scans: nothing is guarded"
+        );
+        assert_eq!(
+            enforced(Some(true), None),
+            (None, 1),
+            "can't tell: a refused write decides"
+        );
+        assert_eq!(
+            enforced(Some(false), Some(true)),
+            (Some(false), 0),
+            "off or auditing: real-time protection isn't asked"
+        );
         assert_eq!(enforced(None, Some(true)), (None, 0));
     }
 
@@ -2027,14 +2851,25 @@ mod tests {
     #[test]
     fn the_helper_and_trek_guard_the_same_folders() {
         let same = |a: &Path, b: &Path| inside(a, b) && inside(b, a);
-        let trek: Vec<(&str, PathBuf)> = guarded_folders().into_iter().map(|(f, p)| (f.name(), p)).collect();
+        let trek: Vec<(&str, PathBuf)> = guarded_folders()
+            .into_iter()
+            .map(|(f, p)| (f.name(), p))
+            .collect();
         let helper = trek_update::guarded_folders();
         assert!(!helper.is_empty());
         for (name, path) in &helper {
-            assert!(trek.iter().any(|(n, p)| n == name && same(p, path)), "Trek doesn't guard {name} {}: {trek:?}", path.display());
+            assert!(
+                trek.iter().any(|(n, p)| n == name && same(p, path)),
+                "Trek doesn't guard {name} {}: {trek:?}",
+                path.display()
+            );
         }
         for (name, path) in &trek {
-            assert!(helper.iter().any(|(n, p)| n == name && same(p, path)), "the helper doesn't guard {name} {}: {helper:?}", path.display());
+            assert!(
+                helper.iter().any(|(n, p)| n == name && same(p, path)),
+                "the helper doesn't guard {name} {}: {helper:?}",
+                path.display()
+            );
         }
     }
 
@@ -2043,8 +2878,15 @@ mod tests {
     #[test]
     #[ignore = "reads this machine's settings"]
     fn print_this_machines_guarded_folders() {
-        println!("controlled folder access enforced: {:?}", controlled_folder_access());
-        println!("real-time protection: {:?}, antivirus products {:x?}", real_time_protection(), antivirus_products());
+        println!(
+            "controlled folder access enforced: {:?}",
+            controlled_folder_access()
+        );
+        println!(
+            "real-time protection: {:?}, antivirus products {:x?}",
+            real_time_protection(),
+            antivirus_products()
+        );
         for (f, p) in guarded_folders() {
             println!("{f:?}: {}", p.display());
         }
@@ -2057,7 +2899,10 @@ mod tests {
         assert!(inside(Path::new(r"c:\program files\Trek"), pf));
         assert!(inside(Path::new(r"\\?\C:\Program Files\Trek"), pf));
         assert!(inside(pf, pf));
-        assert!(!inside(Path::new(r"C:\Program Files (x86)\Trek"), pf), "a sibling isn't inside");
+        assert!(
+            !inside(Path::new(r"C:\Program Files (x86)\Trek"), pf),
+            "a sibling isn't inside"
+        );
         assert!(!inside(Path::new(r"D:\Program Files\Trek"), pf));
         assert!(!inside(Path::new(r"C:\Users\me\Trek"), Path::new("")));
     }
@@ -2066,7 +2911,8 @@ mod tests {
     /// symlink to it.
     fn zip_of(path: &Path, entries: &[(&str, &str)]) {
         let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
-        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
         for (name, body) in entries {
             if let Some(target) = body.strip_prefix('@') {
                 z.add_symlink(*name, target, options).unwrap();
@@ -2080,7 +2926,11 @@ mod tests {
         z.finish().unwrap();
     }
 
-    const RELEASE: &[(&str, &str)] = &[("trek.exe", "0.4.1"), ("trek-mcp.exe", "mcp"), ("trek-update.exe", "helper")];
+    const RELEASE: &[(&str, &str)] = &[
+        ("trek.exe", "0.4.1"),
+        ("trek-mcp.exe", "mcp"),
+        ("trek-update.exe", "helper"),
+    ];
 
     #[test]
     fn a_windows_release_unpacks_only_as_trek_s_flat_folder() {
@@ -2091,32 +2941,67 @@ mod tests {
             unpack_release_zip(&archive, &into, 1 << 20).map_err(|e| e.to_string())
         };
         unpack(RELEASE).unwrap();
-        assert_eq!(std::fs::read_to_string(into.join("trek-update.exe")).unwrap(), "helper");
+        assert_eq!(
+            std::fs::read_to_string(into.join("trek-update.exe")).unwrap(),
+            "helper"
+        );
         assert_eq!(std::fs::read_dir(&into).unwrap().count(), 3);
 
         let refused = |entries: &[(&str, &str)], why: &str| {
             let e = unpack(entries).unwrap_err();
             assert!(e.contains(why), "{entries:?}: {e}");
         };
-        refused(&[("trek.exe", "x"), ("trek-mcp.exe", "x")], "no trek-update.exe");
-        refused(&[("Trek-0.4.1/trek.exe", "x"), ("Trek-0.4.1/trek-mcp.exe", "x"), ("Trek-0.4.1/trek-update.exe", "x")], "isn't Trek (Trek-0.4.1/trek.exe)");
+        refused(
+            &[("trek.exe", "x"), ("trek-mcp.exe", "x")],
+            "no trek-update.exe",
+        );
+        refused(
+            &[
+                ("Trek-0.4.1/trek.exe", "x"),
+                ("Trek-0.4.1/trek-mcp.exe", "x"),
+                ("Trek-0.4.1/trek-update.exe", "x"),
+            ],
+            "isn't Trek (Trek-0.4.1/trek.exe)",
+        );
         refused(&[("../trek.exe", "x")], "isn't Trek");
         refused(&[("C:/Windows/trek.exe", "x")], "isn't Trek");
         refused(&[("trek.exe/", "")], "isn't Trek (trek.exe/)");
-        refused(&[("trek.exe", "@C:/Windows/System32/cmd.exe")], "isn't Trek (trek.exe)");
-        refused(&[("trek.exe", "x"), ("trek-mcp.exe", "x"), ("trek-update.exe", "x"), ("readme.txt", "x")], "more in it than Trek");
+        refused(
+            &[("trek.exe", "@C:/Windows/System32/cmd.exe")],
+            "isn't Trek (trek.exe)",
+        );
+        refused(
+            &[
+                ("trek.exe", "x"),
+                ("trek-mcp.exe", "x"),
+                ("trek-update.exe", "x"),
+                ("readme.txt", "x"),
+            ],
+            "more in it than Trek",
+        );
         refused(&[("TREK.EXE", "x")], "isn't Trek");
         refused(&[(r"..\trek.exe", "x")], "isn't Trek");
         refused(&[(r"stage\trek.exe", "x")], "isn't Trek");
         refused(&[("trek.exe/..", "x")], "isn't Trek");
         refused(&[("trek.exe:evil", "x")], "isn't Trek");
         refused(&[("/trek.exe", "x")], "isn't Trek");
-        assert!(!dir.join("trek.exe").exists() && !dir.join("evil").exists(), "nothing lands outside the stage folder");
+        assert!(
+            !dir.join("trek.exe").exists() && !dir.join("evil").exists(),
+            "nothing lands outside the stage folder"
+        );
         let big = "x".repeat(600 * 1024);
-        refused(&[("trek.exe", &big), ("trek-mcp.exe", &big)], "larger than Trek could be");
+        refused(
+            &[("trek.exe", &big), ("trek-mcp.exe", &big)],
+            "larger than Trek could be",
+        );
         assert!(unpack(&[]).unwrap_err().contains("no trek.exe"));
         std::fs::write(&archive, "not a zip").unwrap();
-        assert!(unpack_release_zip(&archive, &into, 1 << 20).unwrap_err().to_string().contains("isn't a zip"));
+        assert!(
+            unpack_release_zip(&archive, &into, 1 << 20)
+                .unwrap_err()
+                .to_string()
+                .contains("isn't a zip")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -2125,7 +3010,8 @@ mod tests {
         let updates = scratch("stage");
         let v = |s: &str| semver::Version::parse(s).unwrap();
         // The fake trek.exe says its version as its contents.
-        let version_of = |exe: &Path| -> Result<semver::Version> { Ok(v(&std::fs::read_to_string(exe)?)) };
+        let version_of =
+            |exe: &Path| -> Result<semver::Version> { Ok(v(&std::fs::read_to_string(exe)?)) };
         let nobody = AtomicBool::new(false);
         let download = |entries: &[(&str, &str)]| {
             let archive = new_download_dir(&updates).unwrap().join("Trek-0.4.1.zip");
@@ -2137,24 +3023,60 @@ mod tests {
         let staged = stage_zip(&archive, &v("0.4.1"), &v("0.4.0"), &nobody, version_of).unwrap();
         assert_eq!(staged, archive.with_file_name("stage"));
         assert!(!archive.exists(), "the archive is gone once unpacked");
-        assert_eq!(download_dir_of(&staged), archive.parent(), "discard finds its download folder");
+        assert_eq!(
+            download_dir_of(&staged),
+            archive.parent(),
+            "discard finds its download folder"
+        );
         discard(&staged);
         assert!(!archive.parent().unwrap().exists());
 
-        for (current, expected, why) in [("0.4.0", "0.4.2", "contains version 0.4.1, not 0.4.2"), ("0.4.1", "0.4.1", "isn't newer")] {
+        for (current, expected, why) in [
+            ("0.4.0", "0.4.2", "contains version 0.4.1, not 0.4.2"),
+            ("0.4.1", "0.4.1", "isn't newer"),
+        ] {
             let archive = download(RELEASE);
-            let e = stage_zip(&archive, &v(expected), &v(current), &nobody, version_of).unwrap_err();
+            let e =
+                stage_zip(&archive, &v(expected), &v(current), &nobody, version_of).unwrap_err();
             assert!(e.to_string().contains(why), "{e}");
-            assert!(!archive.parent().unwrap().exists(), "a refused update leaves nothing behind");
+            assert!(
+                !archive.parent().unwrap().exists(),
+                "a refused update leaves nothing behind"
+            );
         }
         // The resource carries the whole semver, pre-release and all: a beta isn't its release.
-        let beta = || [("trek.exe", "0.4.1-beta.1"), ("trek-mcp.exe", "x"), ("trek-update.exe", "x")];
+        let beta = || {
+            [
+                ("trek.exe", "0.4.1-beta.1"),
+                ("trek-mcp.exe", "x"),
+                ("trek-update.exe", "x"),
+            ]
+        };
         let archive = download(&beta());
-        assert!(stage_zip(&archive, &v("0.4.1-beta.1"), &v("0.4.0"), &nobody, version_of).is_ok());
+        assert!(
+            stage_zip(
+                &archive,
+                &v("0.4.1-beta.1"),
+                &v("0.4.0"),
+                &nobody,
+                version_of
+            )
+            .is_ok()
+        );
         discard(&archive.with_file_name("stage"));
         let archive = download(&beta());
-        assert!(stage_zip(&archive, &v("0.4.1"), &v("0.4.0"), &nobody, version_of).unwrap_err().to_string().contains("not 0.4.1"));
-        let archive = download(&[("trek.exe", "0.4.1"), ("trek-mcp.exe", "x"), ("trek-update.exe", "x"), ("evil.dll", "x")]);
+        assert!(
+            stage_zip(&archive, &v("0.4.1"), &v("0.4.0"), &nobody, version_of)
+                .unwrap_err()
+                .to_string()
+                .contains("not 0.4.1")
+        );
+        let archive = download(&[
+            ("trek.exe", "0.4.1"),
+            ("trek-mcp.exe", "x"),
+            ("trek-update.exe", "x"),
+            ("evil.dll", "x"),
+        ]);
         assert!(stage_zip(&archive, &v("0.4.1"), &v("0.4.0"), &nobody, version_of).is_err());
         assert!(!archive.parent().unwrap().exists());
         let cancelled = AtomicBool::new(true);
@@ -2168,11 +3090,22 @@ mod tests {
     #[test]
     fn versions_are_read_from_an_executables_version_resource() {
         // Every Windows DLL carries one, in four numbers rather than semver.
-        let kernel32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join(r"System32\kernel32.dll");
+        let kernel32 =
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join(r"System32\kernel32.dll");
         let v = exe_product_version(&kernel32).unwrap();
         assert!(v.starts_with("10.0."), "{v}");
-        assert!(exe_version(&kernel32).unwrap_err().to_string().contains("unreadable version"));
-        assert!(exe_version(&fixture("archive.bin")).unwrap_err().to_string().contains("has no version"));
+        assert!(
+            exe_version(&kernel32)
+                .unwrap_err()
+                .to_string()
+                .contains("unreadable version")
+        );
+        assert!(
+            exe_version(&fixture("archive.bin"))
+                .unwrap_err()
+                .to_string()
+                .contains("has no version")
+        );
     }
 
     #[test]
@@ -2180,7 +3113,8 @@ mod tests {
         let dir = scratch("prepare");
         let (root, updates) = (dir.join("Trek"), dir.join("updates"));
         let v = |s: &str| semver::Version::parse(s).unwrap();
-        let version_of = |exe: &Path| -> Result<semver::Version> { Ok(v(&std::fs::read_to_string(exe)?)) };
+        let version_of =
+            |exe: &Path| -> Result<semver::Version> { Ok(v(&std::fs::read_to_string(exe)?)) };
         trek_folder(&root);
         std::fs::write(root.join("trek.exe"), "0.4.0").unwrap();
         let stage_new = |version: &str| {
@@ -2192,41 +3126,139 @@ mod tests {
 
         let staged = stage_new("0.4.1");
         let installed = prepare_swap(&staged, &root, &updates, version_of).unwrap();
-        assert_eq!(installed, Installed { bundle: root.clone(), backup: None, staged: Some(staged.clone()) });
-        assert_eq!(std::fs::read_to_string(&root.join("trek.exe")).unwrap(), "0.4.0", "nothing moves while Trek runs");
-        assert_eq!(std::fs::read_to_string(updates.join(UPDATED_MARKER)).unwrap(), crate::VERSION);
+        assert_eq!(
+            installed,
+            Installed {
+                bundle: root.clone(),
+                backup: None,
+                staged: Some(staged.clone())
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(&root.join("trek.exe")).unwrap(),
+            "0.4.0",
+            "nothing moves while Trek runs"
+        );
+        assert_eq!(
+            std::fs::read_to_string(updates.join(UPDATED_MARKER)).unwrap(),
+            crate::VERSION
+        );
 
         // Another copy of Trek got there first: the download goes, nothing is swapped.
         std::fs::remove_file(updates.join(UPDATED_MARKER)).unwrap();
         std::fs::write(root.join("trek.exe"), "0.4.2").unwrap();
         let older = stage_new("0.4.1");
-        assert_eq!(prepare_swap(&older, &root, &updates, version_of).unwrap().staged, None);
+        assert_eq!(
+            prepare_swap(&older, &root, &updates, version_of)
+                .unwrap()
+                .staged,
+            None
+        );
         assert!(!download_dir_of(&older).unwrap().exists());
         assert!(!updates.join(UPDATED_MARKER).exists());
-        assert!(prepare_swap(&older, &root, &updates, version_of).unwrap_err().to_string().contains("gone"));
+        assert!(
+            prepare_swap(&older, &root, &updates, version_of)
+                .unwrap_err()
+                .to_string()
+                .contains("gone")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn the_helper_is_told_what_to_swap_and_how_to_relaunch() {
-        let (helper, root, staged, updates) = (Path::new("S/trek-update.exe"), Path::new("Apps/Trek"), Path::new("S"), Path::new("U"));
+        let (helper, root, staged, updates) = (
+            Path::new("S/trek-update.exe"),
+            Path::new("Apps/Trek"),
+            Path::new("S"),
+            Path::new("U"),
+        );
         let vars = || {
-            [("TREK_DATA_DIR", "D"), ("TREK_MOCK_PROMPT", "plan"), ("TREK_BACKGROUND", "1"), ("RUST_LOG", "info"), ("PATH", "P")].into_iter().map(|(k, v)| (k.to_string(), v.to_string()))
+            [
+                ("TREK_DATA_DIR", "D"),
+                ("TREK_MOCK_PROMPT", "plan"),
+                ("TREK_BACKGROUND", "1"),
+                ("RUST_LOG", "info"),
+                ("PATH", "P"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
         };
-        let args = |cmd: &std::process::Command| cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>();
-        let env = |cmd: &std::process::Command| cmd.get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect::<Vec<_>>();
+        let args = |cmd: &std::process::Command| {
+            cmd.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let env = |cmd: &std::process::Command| {
+            cmd.get_envs()
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.map(|v| v.to_string_lossy().into_owned()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
 
-        let cmd = helper_command(helper, 42, root, Some(staged), "0.4.1", updates, Some(false), vars());
+        let cmd = helper_command(
+            helper,
+            42,
+            root,
+            Some(staged),
+            "0.4.1",
+            updates,
+            Some(false),
+            vars(),
+        );
         assert_eq!(cmd.get_program(), helper.as_os_str());
-        assert_eq!(args(&cmd), ["--pid", "42", "--install", "Apps/Trek", "--from", crate::VERSION, "--updates", "U", "--staged", "S", "--to", "0.4.1", "--relaunch"]);
-        assert_eq!(cmd.get_current_dir(), Some(Path::new("Apps")), "never inside the install it renames");
+        assert_eq!(
+            args(&cmd),
+            [
+                "--pid",
+                "42",
+                "--install",
+                "Apps/Trek",
+                "--from",
+                crate::VERSION,
+                "--updates",
+                "U",
+                "--staged",
+                "S",
+                "--to",
+                "0.4.1",
+                "--relaunch"
+            ]
+        );
+        assert_eq!(
+            cmd.get_current_dir(),
+            Some(Path::new("Apps")),
+            "never inside the install it renames"
+        );
         let env = env(&cmd);
-        assert!(env.contains(&("TREK_MOCK_PROMPT".into(), None)), "one-time flags don't fire again: {env:?}");
-        assert!(env.contains(&("TREK_BACKGROUND".into(), Some("1".into()))), "behind other windows, as this one was: {env:?}");
-        assert!(!env.iter().any(|(k, _)| k == "TREK_DATA_DIR" || k == "PATH"), "setup is inherited as it is: {env:?}");
+        assert!(
+            env.contains(&("TREK_MOCK_PROMPT".into(), None)),
+            "one-time flags don't fire again: {env:?}"
+        );
+        assert!(
+            env.contains(&("TREK_BACKGROUND".into(), Some("1".into()))),
+            "behind other windows, as this one was: {env:?}"
+        );
+        assert!(
+            !env.iter().any(|(k, _)| k == "TREK_DATA_DIR" || k == "PATH"),
+            "setup is inherited as it is: {env:?}"
+        );
 
         // In front: no TREK_BACKGROUND, even though this launch had it.
-        let cmd = helper_command(helper, 42, root, Some(staged), "0.4.1", updates, Some(true), vars());
+        let cmd = helper_command(
+            helper,
+            42,
+            root,
+            Some(staged),
+            "0.4.1",
+            updates,
+            Some(true),
+            vars(),
+        );
         assert!(env_of(&cmd, "TREK_BACKGROUND").is_some_and(|v| v.is_none()));
         // Quitting: swapped, not started.
         let cmd = helper_command(helper, 42, root, Some(staged), "", updates, None, vars());
@@ -2234,7 +3266,9 @@ mod tests {
     }
 
     fn env_of(cmd: &std::process::Command, key: &str) -> Option<Option<String>> {
-        cmd.get_envs().find(|(k, _)| *k == key).map(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        cmd.get_envs()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
     }
 
     #[test]
@@ -2242,7 +3276,11 @@ mod tests {
         let dir = scratch("old");
         let root = dir.join("Trek");
         trek_folder(&root);
-        for leftover in ["Trek.old-0.4.0", "trek.OLD-0.4.0-2", "Trek.old-failed-0.4.1"] {
+        for leftover in [
+            "Trek.old-0.4.0",
+            "trek.OLD-0.4.0-2",
+            "Trek.old-failed-0.4.1",
+        ] {
             trek_folder(&dir.join(leftover));
         }
         std::fs::create_dir(dir.join("Trek.old-empty")).unwrap();
@@ -2255,9 +3293,21 @@ mod tests {
         std::fs::write(dir.join("Trek.old-notes.txt"), "x").unwrap();
 
         clean_old_installs(&root);
-        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
         left.sort();
-        assert_eq!(left, ["Other.old-1", "Trek", "Trek.old-notes.txt", "Trek.old-photos", "Trek.older"]);
+        assert_eq!(
+            left,
+            [
+                "Other.old-1",
+                "Trek",
+                "Trek.old-notes.txt",
+                "Trek.old-photos",
+                "Trek.older"
+            ]
+        );
         assert!(mine.join("cat.jpg").exists());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2277,15 +3327,30 @@ mod tests {
         trek_folder(&hidden);
         std::fs::write(hidden.join("desktop.ini"), "[.ShellClassInfo]").unwrap();
         clean_old_installs(&root);
-        assert!(mixed.join("notes.txt").exists() && nested.join("Trek").join("trek.exe").exists() && hidden.join("desktop.ini").exists());
+        assert!(
+            mixed.join("notes.txt").exists()
+                && nested.join("Trek").join("trek.exe").exists()
+                && hidden.join("desktop.ini").exists()
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A junction `link` to `target`, made as a user would (`mklink /J`).
     #[cfg(windows)]
     fn junction(link: &Path, target: &Path) {
-        let made = std::process::Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(link).arg(target).output().unwrap();
-        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stdout));
+        let made = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stdout)
+        );
     }
 
     #[cfg(windows)]
@@ -2304,7 +3369,10 @@ mod tests {
         junction(&dir.join("Trek.old-theirs"), &theirs);
         clean_old_installs(&root);
         for f in TREK_FILES {
-            assert!(elsewhere.join(f).exists(), "{f} was deleted through a junction");
+            assert!(
+                elsewhere.join(f).exists(),
+                "{f} was deleted through a junction"
+            );
         }
         assert!(theirs.join("cat.jpg").exists());
         let _ = std::fs::remove_dir_all(dir);
@@ -2316,12 +3384,18 @@ mod tests {
         let dir = scratch("link-root");
         let (real, link) = (dir.join("real"), dir.join("Trek"));
         trek_folder(&real);
-        assert_eq!(windows_blocker_for(&real, true, &[], &[], Some(false)), None);
+        assert_eq!(
+            windows_blocker_for(&real, true, &[], &[], Some(false)),
+            None
+        );
         junction(&link, &real);
         assert!(is_link(&link) && !is_link(&real));
         // Before a guarded folder too: starting Trek from the folder itself comes first.
         let guarded = [(KnownFolder::Documents, dir.clone())];
-        assert_eq!(windows_blocker_for(&link, true, &[], &guarded, Some(true)), Some(Blocker::LinkedFolder));
+        assert_eq!(
+            windows_blocker_for(&link, true, &[], &guarded, Some(true)),
+            Some(Blocker::LinkedFolder)
+        );
         assert!(Blocker::LinkedFolder.message().ends_with("to get updates."));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2345,8 +3419,15 @@ mod tests {
     fn a_failed_install_is_reported_once() {
         let dir = scratch("failed");
         assert_eq!(take_install_failure_in(&dir), None);
-        std::fs::write(dir.join(INSTALL_FAILED), "Trek 0.4.1 didn't install: it's locked.\n").unwrap();
-        assert_eq!(take_install_failure_in(&dir).as_deref(), Some("Trek 0.4.1 didn't install: it's locked."));
+        std::fs::write(
+            dir.join(INSTALL_FAILED),
+            "Trek 0.4.1 didn't install: it's locked.\n",
+        )
+        .unwrap();
+        assert_eq!(
+            take_install_failure_in(&dir).as_deref(),
+            Some("Trek 0.4.1 didn't install: it's locked.")
+        );
         assert_eq!(take_install_failure_in(&dir), None);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2367,27 +3448,58 @@ mod tests {
             ("TREK_BACKGROUND", "1"),
             ("HOME", "/Users/me"),
         ];
-        let from = |foreground| relaunch_env_from(vars.iter().map(|(k, v)| (k.to_string(), v.to_string())), foreground);
+        let from = |foreground| {
+            relaunch_env_from(
+                vars.iter().map(|(k, v)| (k.to_string(), v.to_string())),
+                foreground,
+            )
+        };
         let keys = |env: Vec<(String, String)>| env.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
-        assert_eq!(keys(from(true)), ["TREK_DATA_DIR", "TREK_MOCK_AGENT", "RUST_LOG"]);
+        assert_eq!(
+            keys(from(true)),
+            ["TREK_DATA_DIR", "TREK_MOCK_AGENT", "RUST_LOG"]
+        );
         // In the background it opens behind other apps again, whatever this launch was.
         let env = from(false);
         assert!(env.contains(&("TREK_DATA_DIR".into(), "/tmp/trek-data".into())));
         assert_eq!(env.last(), Some(&("TREK_BACKGROUND".into(), "1".into())));
-        assert_eq!(env.iter().filter(|(k, _)| k == "TREK_BACKGROUND").count(), 1);
+        assert_eq!(
+            env.iter().filter(|(k, _)| k == "TREK_BACKGROUND").count(),
+            1
+        );
     }
 
     #[test]
     fn a_blockers_cause_is_its_message_without_the_advice() {
         // Where Trek offers to move itself, the advice to move the folder by hand would
         // contradict the button: the cause is the first sentence, and only that.
-        for b in [Blocker::ReadOnlyLocation, Blocker::ProtectedFolder, Blocker::SharedFolder, Blocker::GuardedFolder(KnownFolder::Documents)] {
+        for b in [
+            Blocker::ReadOnlyLocation,
+            Blocker::ProtectedFolder,
+            Blocker::SharedFolder,
+            Blocker::GuardedFolder(KnownFolder::Documents),
+        ] {
             let cause = b.cause();
-            assert!(b.movable() && b.message().starts_with(&cause), "{b:?}: {cause}");
-            assert!(cause.ends_with("can't update itself.") || cause.ends_with("can't update itself there."), "{b:?}: {cause}");
-            assert!(!cause.contains("to get updates") && !cause.contains("Move ") && !cause.contains("Put "), "{b:?}: {cause}");
+            assert!(
+                b.movable() && b.message().starts_with(&cause),
+                "{b:?}: {cause}"
+            );
+            assert!(
+                cause.ends_with("can't update itself.")
+                    || cause.ends_with("can't update itself there."),
+                "{b:?}: {cause}"
+            );
+            assert!(
+                !cause.contains("to get updates")
+                    && !cause.contains("Move ")
+                    && !cause.contains("Put "),
+                "{b:?}: {cause}"
+            );
         }
-        assert_eq!(Blocker::GuardedFolder(KnownFolder::Desktop).cause(), "Trek is in Desktop, which Windows's ransomware protection (Controlled folder access) guards, so it can't update itself there.");
+        assert_eq!(
+            Blocker::GuardedFolder(KnownFolder::Desktop).cause(),
+            "Trek is in Desktop, which Windows's ransomware protection (Controlled folder access) guards, so it can't update itself there."
+        );
         assert_eq!(Blocker::DevBuild.cause(), "This is a development build.");
     }
 }

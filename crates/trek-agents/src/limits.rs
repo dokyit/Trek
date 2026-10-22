@@ -20,11 +20,19 @@ pub struct Limit {
 impl Limit {
     /// The limit `message` describes, if it describes one, as of `now` (unix ms).
     pub fn from_text(message: &str, now: i64) -> Option<Limit> {
-        looks_like_limit(message).then(|| Limit { message: message.trim().to_string(), resets_at: reset_from_text(message, now), scope: scope_of(message) })
+        looks_like_limit(message).then(|| Limit {
+            message: message.trim().to_string(),
+            resets_at: reset_from_text(message, now),
+            scope: scope_of(message),
+        })
     }
 
     pub fn event(self) -> crate::AgentEvent {
-        crate::AgentEvent::LimitReached { message: self.message, resets_at: self.resets_at, scope: self.scope }
+        crate::AgentEvent::LimitReached {
+            message: self.message,
+            resets_at: self.resets_at,
+            scope: self.scope,
+        }
     }
 }
 
@@ -44,7 +52,17 @@ impl std::error::Error for LimitError {}
 /// a spending budget, or the service being busy for everyone).
 pub fn looks_like_limit(message: &str) -> bool {
     let m = message.to_lowercase();
-    const NOT: &[&str] = &["context", "budget", "output limit", "token limit", "subagent", "nesting", "not your usage limit", "temporarily limiting", "spend limit"];
+    const NOT: &[&str] = &[
+        "context",
+        "budget",
+        "output limit",
+        "token limit",
+        "subagent",
+        "nesting",
+        "not your usage limit",
+        "temporarily limiting",
+        "spend limit",
+    ];
     if NOT.iter().any(|n| m.contains(n)) {
         return false;
     }
@@ -66,15 +84,22 @@ pub fn looks_like_limit(message: &str) -> bool {
 }
 
 fn http_429(message: &str) -> bool {
-    let code = |s: &str| s.strip_prefix("429").is_some_and(|rest| rest.chars().next().is_none_or(|c| !c.is_ascii_digit()));
+    let code = |s: &str| {
+        s.strip_prefix("429")
+            .is_some_and(|rest| rest.chars().next().is_none_or(|c| !c.is_ascii_digit()))
+    };
     if code(message.trim_start()) || message.contains("(429)") {
         return true;
     }
     ["status", "http", "error", "code"].iter().any(|lead| {
         message.match_indices(lead).any(|(i, _)| {
             let before = &message[..i];
-            let boundary = before.chars().next_back().is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_');
-            let after = message[i + lead.len()..].trim_start_matches(|c: char| c.is_ascii_whitespace() || matches!(c, ':' | '='));
+            let boundary = before
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_');
+            let after = message[i + lead.len()..]
+                .trim_start_matches(|c: char| c.is_ascii_whitespace() || matches!(c, ':' | '='));
             boundary && code(after)
         })
     })
@@ -88,7 +113,11 @@ pub fn scope_of(message: &str) -> LimitScope {
             return LimitScope::Model(crate::status::capitalize(family));
         }
     }
-    if m.contains("session limit") || m.contains("5-hour") || m.contains("five_hour") || m.contains("5h limit") {
+    if m.contains("session limit")
+        || m.contains("5-hour")
+        || m.contains("five_hour")
+        || m.contains("5h limit")
+    {
         LimitScope::Session
     } else if m.contains("weekly") || m.contains("seven_day") || m.contains("7-day") {
         LimitScope::Weekly
@@ -117,23 +146,43 @@ pub fn reset_from_text(message: &str, now: i64) -> Option<i64> {
 
 /// `reset_from_text`, with `offset` giving a zone's UTC offset in seconds at an instant (`None`:
 /// the local zone).
-fn reset_in(message: &str, now: i64, offset: &dyn Fn(Option<&str>, i64) -> Option<i32>) -> Option<i64> {
+fn reset_in(
+    message: &str,
+    now: i64,
+    offset: &dyn Fn(Option<&str>, i64) -> Option<i32>,
+) -> Option<i64> {
     // Older Claude Code: "Claude AI usage limit reached|1759000000". Only an epoch counts (seconds
     // or milliseconds): "Rate limit exceeded | 5 requests per minute" names no time.
     if let Some((_, tail)) = message.rsplit_once('|') {
         let digits = tail.trim();
         if (10..=13).contains(&digits.len()) && digits.chars().all(|c| c.is_ascii_digit()) {
-            let n = digits.parse::<i64>().ok()? ;
+            let n = digits.parse::<i64>().ok()?;
             return Some(if digits.len() == 13 { n } else { n * 1000 });
         }
     }
     // ASCII lowercase keeps byte offsets, so a match points into `message` too.
     let lower = message.to_ascii_lowercase();
-    const IN: &[&str] = &["try again in ", "retry in ", "resets in ", "reset in ", "available in ", "retry after "];
-    const AT: &[&str] = &["resets at ", "reset at ", "try again at ", "retry after ", "available again at ", "resets on ", "resets "];
+    const IN: &[&str] = &[
+        "try again in ",
+        "retry in ",
+        "resets in ",
+        "reset in ",
+        "available in ",
+        "retry after ",
+    ];
+    const AT: &[&str] = &[
+        "resets at ",
+        "reset at ",
+        "try again at ",
+        "retry after ",
+        "available again at ",
+        "resets on ",
+        "resets ",
+    ];
     for lead in IN {
         if let Some(i) = lower.find(lead)
-            && let Some(at) = parse_span(&lower[i + lead.len()..]).and_then(|ms| now.checked_add(ms))
+            && let Some(at) =
+                parse_span(&lower[i + lead.len()..]).and_then(|ms| now.checked_add(ms))
         {
             return Some(at);
         }
@@ -157,13 +206,19 @@ fn parse_span(s: &str) -> Option<i64> {
     let mut rest = s;
     loop {
         rest = rest.trim_start();
-        let num_len = rest.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(rest.len());
+        let num_len = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(rest.len());
         if num_len == 0 {
             break;
         }
-        let Ok(n) = rest[..num_len].parse::<f64>() else { break };
+        let Ok(n) = rest[..num_len].parse::<f64>() else {
+            break;
+        };
         let after = rest[num_len..].trim_start();
-        let unit_len = after.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(after.len());
+        let unit_len = after
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(after.len());
         let unit = &after[..unit_len];
         let ms = match unit {
             "ms" | "millisecond" | "milliseconds" => 1.,
@@ -180,7 +235,9 @@ fn parse_span(s: &str) -> Option<i64> {
     found.then_some(total.round() as i64)
 }
 
-const MONTHS: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+const MONTHS: [&str; 12] = [
+    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+];
 
 /// A time of day, maybe with a date and a zone, as agents write them: "7:40pm (America/New_York)",
 /// "9:10am (UTC)", "tomorrow at 2:10 AM", "Oct 3rd, 2026 2:10 AM", "Oct 9, 3pm". The next such
@@ -203,12 +260,19 @@ fn parse_when(s: &str, now: i64, offset: &dyn Fn(Option<&str>, i64) -> Option<i3
         }
         None => (sentence, None),
     };
-    let words: Vec<String> = body.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty()).map(|w| w.trim_end_matches('.').to_lowercase()).collect();
-    let (mut month, mut day, mut year, mut tomorrow, mut time) = (None, None, None, false, None::<NaiveTime>);
+    let words: Vec<String> = body
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|w| !w.is_empty())
+        .map(|w| w.trim_end_matches('.').to_lowercase())
+        .collect();
+    let (mut month, mut day, mut year, mut tomorrow, mut time) =
+        (None, None, None, false, None::<NaiveTime>);
     let mut i = 0;
     while i < words.len() {
         let w = words[i].as_str();
-        if let Some(m) = MONTHS.iter().position(|m| w.starts_with(m) && w.len() <= 9 && w.chars().all(|c| c.is_ascii_alphabetic())) {
+        if let Some(m) = MONTHS.iter().position(|m| {
+            w.starts_with(m) && w.len() <= 9 && w.chars().all(|c| c.is_ascii_alphabetic())
+        }) {
             month = Some(m as u32 + 1);
         } else if w == "tomorrow" {
             tomorrow = true;
@@ -216,7 +280,12 @@ fn parse_when(s: &str, now: i64, offset: &dyn Fn(Option<&str>, i64) -> Option<i3
         } else if let Some(t) = parse_clock(w, words.get(i + 1).map(String::as_str)) {
             time = Some(t.0);
             i += t.1;
-        } else if let Some(n) = w.strip_suffix(|c: char| c.is_ascii_alphabetic()).map(|w| w.trim_end_matches(|c: char| c.is_ascii_alphabetic())).or(Some(w)).and_then(|d| d.parse::<u32>().ok()) {
+        } else if let Some(n) = w
+            .strip_suffix(|c: char| c.is_ascii_alphabetic())
+            .map(|w| w.trim_end_matches(|c: char| c.is_ascii_alphabetic()))
+            .or(Some(w))
+            .and_then(|d| d.parse::<u32>().ok())
+        {
             if n >= 1000 {
                 year = Some(n as i32);
             } else if month.is_some() && day.is_none() && n <= 31 {
@@ -233,9 +302,13 @@ fn parse_when(s: &str, now: i64, offset: &dyn Fn(Option<&str>, i64) -> Option<i3
     }
     let time = time?;
     let zone = zone.filter(|z| !z.is_empty());
-    let off_now = zone.and_then(|z| offset(Some(z), now)).or_else(|| offset(None, now))?;
+    let off_now = zone
+        .and_then(|z| offset(Some(z), now))
+        .or_else(|| offset(None, now))?;
     let fixed = chrono::FixedOffset::east_opt(off_now)?;
-    let local_now = chrono::DateTime::from_timestamp_millis(now)?.with_timezone(&fixed).naive_local();
+    let local_now = chrono::DateTime::from_timestamp_millis(now)?
+        .with_timezone(&fixed)
+        .naive_local();
     let at = match (month, day) {
         (Some(m), Some(d)) => {
             let y = year.unwrap_or(local_now.year());
@@ -258,7 +331,9 @@ fn parse_when(s: &str, now: i64, offset: &dyn Fn(Option<&str>, i64) -> Option<i3
     };
     // The zone's offset then, not now: a reset on the far side of a daylight-saving change.
     let guess = fixed.from_local_datetime(&at).single()?.timestamp_millis();
-    let off_then = zone.and_then(|z| offset(Some(z), guess)).or_else(|| offset(None, guess))?;
+    let off_then = zone
+        .and_then(|z| offset(Some(z), guess))
+        .or_else(|| offset(None, guess))?;
     let then = chrono::FixedOffset::east_opt(off_then)?;
     Some(then.from_local_datetime(&at).single()?.timestamp_millis())
 }
@@ -298,7 +373,12 @@ fn parse_clock(w: &str, next: Option<&str>) -> Option<(NaiveTime, usize)> {
 /// UTC, else the bundled IANA database's. A name that isn't in it (anything an agent's message
 /// might say) is no zone.
 fn system_offset(zone: Option<&str>, at: i64) -> Option<i32> {
-    let local = || chrono::Local.timestamp_millis_opt(at).single().map(|d| d.offset().fix().local_minus_utc());
+    let local = || {
+        chrono::Local
+            .timestamp_millis_opt(at)
+            .single()
+            .map(|d| d.offset().fix().local_minus_utc())
+    };
     match zone {
         None => local(),
         Some("UTC" | "GMT" | "Z" | "utc") => Some(0),
@@ -326,7 +406,8 @@ pub fn is_fable_model(model: Option<&str>) -> bool {
 /// do not intervene with Fable. Fable only responds to windows scoped specifically to Fable.
 pub fn fable_applies(l: &UsageLimit, scope: &LimitScope) -> bool {
     let lower = l.label.to_lowercase();
-    lower.contains("fable") || matches!(scope, LimitScope::Model(m) if m.to_lowercase().contains("fable"))
+    lower.contains("fable")
+        || matches!(scope, LimitScope::Model(m) if m.to_lowercase().contains("fable"))
 }
 
 /// Whether `model` refers to Cognition Devin's SWE-2 models (e.g. `swe-2-high`, `swe-2-medium`, `swe-2-max`).
@@ -359,16 +440,23 @@ pub fn swe_applies(l: &UsageLimit, scope: &LimitScope) -> bool {
 /// For standard models, account windows hold back every model; one on a model or
 /// surface ("Weekly · Fable", "5-hour · gpt-reserve") only that one.
 pub fn applies(l: &UsageLimit, scope: &LimitScope, model: Option<&str>) -> bool {
-    if is_fable_model(model) || matches!(scope, LimitScope::Model(m) if m.to_lowercase().contains("fable")) {
+    if is_fable_model(model)
+        || matches!(scope, LimitScope::Model(m) if m.to_lowercase().contains("fable"))
+    {
         return fable_applies(l, scope);
     }
     if is_swe_model(model) || matches!(scope, LimitScope::Model(m) if is_swe_model(Some(m))) {
         return swe_applies(l, scope);
     }
-    let Some((_, name)) = l.label.split_once('·') else { return !l.label.contains("(scoped)") };
+    let Some((_, name)) = l.label.split_once('·') else {
+        return !l.label.contains("(scoped)");
+    };
     let name = name.trim().to_lowercase();
-    let Some(word) = name.split_whitespace().next() else { return false };
-    matches!(scope, LimitScope::Model(m) if m.to_lowercase().contains(word)) || model.is_some_and(|m| m.to_lowercase().contains(word))
+    let Some(word) = name.split_whitespace().next() else {
+        return false;
+    };
+    matches!(scope, LimitScope::Model(m) if m.to_lowercase().contains(word))
+        || model.is_some_and(|m| m.to_lowercase().contains(word))
 }
 
 /// Which limit usage window `l` is: the account's 5-hour or weekly one, or a model's or
@@ -393,18 +481,37 @@ pub fn window_scope(l: &UsageLimit) -> LimitScope {
 /// Until when the agent's usage windows still hold back a thread on `model` that a limit in
 /// `scope` stopped: the latest reset among the windows that apply to it and are used up. `None`
 /// when none is (the thread can go on).
-pub fn limited_until(limits: &[UsageLimit], scope: &LimitScope, model: Option<&str>, now: i64) -> Option<i64> {
-    limits.iter().filter(|l| l.percent >= 99.5 && applies(l, scope, model)).filter_map(|l| l.resets_at).filter(|r| *r > now).max()
+pub fn limited_until(
+    limits: &[UsageLimit],
+    scope: &LimitScope,
+    model: Option<&str>,
+    now: i64,
+) -> Option<i64> {
+    limits
+        .iter()
+        .filter(|l| l.percent >= 99.5 && applies(l, scope, model))
+        .filter_map(|l| l.resets_at)
+        .filter(|r| *r > now)
+        .max()
 }
 
 /// When a limit in `scope` resets, judged by the agent's usage windows: when those used up that
 /// apply to the thread's `model` reset (`limited_until`), else the window the scope names. For a
 /// limit message without a time.
-pub fn reset_from_usage(limits: &[UsageLimit], scope: &LimitScope, model: Option<&str>, now: i64) -> Option<i64> {
+pub fn reset_from_usage(
+    limits: &[UsageLimit],
+    scope: &LimitScope,
+    model: Option<&str>,
+    now: i64,
+) -> Option<i64> {
     if let Some(at) = limited_until(limits, scope, model, now) {
         return Some(at);
     }
-    let ahead = || limits.iter().filter(|l| l.resets_at.is_some_and(|r| r > now));
+    let ahead = || {
+        limits
+            .iter()
+            .filter(|l| l.resets_at.is_some_and(|r| r > now))
+    };
     let named = |l: &&UsageLimit| match scope {
         LimitScope::Session => l.window == "5h",
         LimitScope::Weekly => l.window == "7d" && !l.label.contains('·'),
@@ -417,31 +524,53 @@ pub fn reset_from_usage(limits: &[UsageLimit], scope: &LimitScope, model: Option
 /// A rate-limited HTTP response (429) from a model provider: when it lifts, from its headers
 /// (`retry-after`; Anthropic's `anthropic-ratelimit-*-reset`; OpenAI's `x-ratelimit-reset-*`),
 /// else from the message.
-pub(crate) fn from_response(headers: &reqwest::header::HeaderMap, message: String, now: i64) -> Limit {
-    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::trim);
+pub(crate) fn from_response(
+    headers: &reqwest::header::HeaderMap,
+    message: String,
+    now: i64,
+) -> Limit {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+    };
     let mut resets: Vec<i64> = vec![];
     for kind in ["requests", "tokens", "input-tokens", "output-tokens"] {
         // Anthropic: RFC 3339 instants, for the budgets that ran out.
         if header(&format!("anthropic-ratelimit-{kind}-remaining")) == Some("0") {
-            if let Some(at) = header(&format!("anthropic-ratelimit-{kind}-reset")).and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok()) {
+            if let Some(at) = header(&format!("anthropic-ratelimit-{kind}-reset"))
+                .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+            {
                 resets.push(at.timestamp_millis());
             }
         }
         // OpenAI and compatible servers: spans like "6m0s".
         if header(&format!("x-ratelimit-remaining-{kind}")) == Some("0")
-            && let Some(at) = header(&format!("x-ratelimit-reset-{kind}")).and_then(parse_span).and_then(|ms| now.checked_add(ms))
+            && let Some(at) = header(&format!("x-ratelimit-reset-{kind}"))
+                .and_then(parse_span)
+                .and_then(|ms| now.checked_add(ms))
         {
             resets.push(at);
         }
     }
     if let Some(at) = header("retry-after").and_then(|v| match v.parse::<f64>() {
         Ok(secs) => now.checked_add((secs * 1000.).round() as i64),
-        Err(_) => chrono::DateTime::parse_from_rfc2822(v).ok().map(|d| d.timestamp_millis()),
+        Err(_) => chrono::DateTime::parse_from_rfc2822(v)
+            .ok()
+            .map(|d| d.timestamp_millis()),
     }) {
         resets.push(at);
     }
-    let resets_at = resets.into_iter().max().or_else(|| reset_from_text(&message, now));
-    Limit { scope: scope_of(&message), message, resets_at }
+    let resets_at = resets
+        .into_iter()
+        .max()
+        .or_else(|| reset_from_text(&message, now));
+    Limit {
+        scope: scope_of(&message),
+        message,
+        resets_at,
+    }
 }
 
 #[cfg(test)]
@@ -459,7 +588,9 @@ mod tests {
     }
 
     fn ms(s: &str) -> i64 {
-        chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis()
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .timestamp_millis()
     }
 
     // 2026-10-02 18:15:47 in New York: when the recorded limit below was hit.
@@ -468,13 +599,22 @@ mod tests {
     #[test]
     fn absurd_numbers_give_no_reset_rather_than_overflow() {
         let now = ms(HIT);
-        assert_eq!(reset_in("try again in 99999999999999999999 days", now, &zones), None);
+        assert_eq!(
+            reset_in("try again in 99999999999999999999 days", now, &zones),
+            None
+        );
         assert_eq!(reset_in("resets 4294967295pm", now, &zones), None);
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("retry-after", "1e300".parse().unwrap());
         headers.insert("x-ratelimit-remaining-requests", "0".parse().unwrap());
-        headers.insert("x-ratelimit-reset-requests", "99999999999999999999d".parse().unwrap());
-        assert_eq!(from_response(&headers, "rate limited".into(), now).resets_at, None);
+        headers.insert(
+            "x-ratelimit-reset-requests",
+            "99999999999999999999d".parse().unwrap(),
+        );
+        assert_eq!(
+            from_response(&headers, "rate limited".into(), now).resets_at,
+            None
+        );
     }
 
     #[test]
@@ -486,31 +626,71 @@ mod tests {
         assert_eq!(scope_of(recorded), LimitScope::Session);
         assert!(looks_like_limit(recorded));
         // In another zone; and the next 9:10 after now is tomorrow's.
-        assert_eq!(reset_in("You've hit your session limit · resets 9:10am (UTC)", now, &zones), Some(ms("2026-10-03T09:10:00Z")));
-        assert_eq!(reset_in("resets 3pm (Europe/Berlin)", now, &zones), Some(ms("2026-10-03T13:00:00Z")));
+        assert_eq!(
+            reset_in(
+                "You've hit your session limit · resets 9:10am (UTC)",
+                now,
+                &zones
+            ),
+            Some(ms("2026-10-03T09:10:00Z"))
+        );
+        assert_eq!(
+            reset_in("resets 3pm (Europe/Berlin)", now, &zones),
+            Some(ms("2026-10-03T13:00:00Z"))
+        );
         // Weekly limits name the day.
         let weekly = "You've hit your weekly limit · resets Oct 8, 3pm (America/New_York)";
-        assert_eq!(reset_in(weekly, now, &zones), Some(ms("2026-10-08T19:00:00Z")));
+        assert_eq!(
+            reset_in(weekly, now, &zones),
+            Some(ms("2026-10-08T19:00:00Z"))
+        );
         assert_eq!(scope_of(weekly), LimitScope::Weekly);
-        assert_eq!(scope_of("You've hit your Opus limit · resets 2am"), LimitScope::Model("Opus".into()));
+        assert_eq!(
+            scope_of("You've hit your Opus limit · resets 2am"),
+            LimitScope::Model("Opus".into())
+        );
         // Older builds: the reset as unix seconds after a bar.
-        assert_eq!(reset_in("Claude AI usage limit reached|1790984400", now, &zones), Some(1_790_984_400_000));
+        assert_eq!(
+            reset_in("Claude AI usage limit reached|1790984400", now, &zones),
+            Some(1_790_984_400_000)
+        );
         // No zone: the Mac's own.
-        assert_eq!(reset_in("5-hour limit reached ∙ resets 11pm", now, &zones), Some(ms("2026-10-03T03:00:00Z")));
+        assert_eq!(
+            reset_in("5-hour limit reached ∙ resets 11pm", now, &zones),
+            Some(ms("2026-10-03T03:00:00Z"))
+        );
         // A bar and a small number is no epoch.
-        assert_eq!(reset_in("Rate limit exceeded | 5 requests per minute", now, &zones), None);
-        assert_eq!(reset_in("Claude AI usage limit reached|1790984400000", now, &zones), Some(1_790_984_400_000));
+        assert_eq!(
+            reset_in("Rate limit exceeded | 5 requests per minute", now, &zones),
+            None
+        );
+        assert_eq!(
+            reset_in("Claude AI usage limit reached|1790984400000", now, &zones),
+            Some(1_790_984_400_000)
+        );
     }
 
     #[test]
     fn a_reset_across_a_daylight_saving_change_takes_the_offset_then() {
         // New York leaves summer time at 2am on Nov 1, 2026 (06:00 UTC).
-        let new_york = |_: Option<&str>, at: i64| Some(if at < ms("2026-11-01T06:00:00Z") { -4 * 3600 } else { -5 * 3600 });
+        let new_york = |_: Option<&str>, at: i64| {
+            Some(if at < ms("2026-11-01T06:00:00Z") {
+                -4 * 3600
+            } else {
+                -5 * 3600
+            })
+        };
         let now = ms("2026-10-30T16:00:00Z");
         let weekly = "You've hit your weekly limit · resets Nov 2, 3pm (America/New_York)";
-        assert_eq!(reset_in(weekly, now, &new_york), Some(ms("2026-11-02T20:00:00Z")));
+        assert_eq!(
+            reset_in(weekly, now, &new_york),
+            Some(ms("2026-11-02T20:00:00Z"))
+        );
         // Before the change, the summer offset still holds.
-        assert_eq!(reset_in("resets Oct 31, 3pm (America/New_York)", now, &new_york), Some(ms("2026-10-31T19:00:00Z")));
+        assert_eq!(
+            reset_in("resets Oct 31, 3pm (America/New_York)", now, &new_york),
+            Some(ms("2026-10-31T19:00:00Z"))
+        );
     }
 
     #[test]
@@ -518,18 +698,64 @@ mod tests {
         let now = ms(HIT);
         // As codex-cli words it: a time today, or a date further out.
         let today = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 9:41 PM.";
-        assert_eq!(reset_in(today, now, &zones), Some(ms("2026-10-03T01:41:00Z")));
+        assert_eq!(
+            reset_in(today, now, &zones),
+            Some(ms("2026-10-03T01:41:00Z"))
+        );
         let later = "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Oct 3rd, 2026 2:10 AM.";
-        assert_eq!(reset_in(later, now, &zones), Some(ms("2026-10-03T06:10:00Z")));
-        assert_eq!(reset_in("Usage limit reached. Retry after tomorrow at 2:10 AM.", now, &zones), Some(ms("2026-10-03T06:10:00Z")));
-        assert_eq!(reset_in("Retry after 20 seconds", now, &zones), Some(now + 20_000));
-        assert_eq!(reset_in("resets at 9:41 PM. Upgrade to Pro (https://chatgpt.com/pro)", now, &zones), Some(ms("2026-10-03T01:41:00Z")));
-        assert_eq!(reset_in("resets at 9:41 PM (estimated)", now, &zones), Some(ms("2026-10-03T01:41:00Z")));
+        assert_eq!(
+            reset_in(later, now, &zones),
+            Some(ms("2026-10-03T06:10:00Z"))
+        );
+        assert_eq!(
+            reset_in(
+                "Usage limit reached. Retry after tomorrow at 2:10 AM.",
+                now,
+                &zones
+            ),
+            Some(ms("2026-10-03T06:10:00Z"))
+        );
+        assert_eq!(
+            reset_in("Retry after 20 seconds", now, &zones),
+            Some(now + 20_000)
+        );
+        assert_eq!(
+            reset_in(
+                "resets at 9:41 PM. Upgrade to Pro (https://chatgpt.com/pro)",
+                now,
+                &zones
+            ),
+            Some(ms("2026-10-03T01:41:00Z"))
+        );
+        assert_eq!(
+            reset_in("resets at 9:41 PM (estimated)", now, &zones),
+            Some(ms("2026-10-03T01:41:00Z"))
+        );
         // OpenAI's rate-limit wording, and plain spans.
-        assert_eq!(reset_in("Rate limit reached for gpt-6 on tokens per min. Please try again in 6m0s.", now, &zones), Some(now + 360_000));
-        assert_eq!(reset_in("rate limited, retry in 1.5s", now, &zones), Some(now + 1_500));
-        assert_eq!(reset_in("Too many requests: try again in 3h 41m", now, &zones), Some(now + (3 * 60 + 41) * 60_000));
-        assert_eq!(reset_in("You've hit your usage limit or try again later.", now, &zones), None);
+        assert_eq!(
+            reset_in(
+                "Rate limit reached for gpt-6 on tokens per min. Please try again in 6m0s.",
+                now,
+                &zones
+            ),
+            Some(now + 360_000)
+        );
+        assert_eq!(
+            reset_in("rate limited, retry in 1.5s", now, &zones),
+            Some(now + 1_500)
+        );
+        assert_eq!(
+            reset_in("Too many requests: try again in 3h 41m", now, &zones),
+            Some(now + (3 * 60 + 41) * 60_000)
+        );
+        assert_eq!(
+            reset_in(
+                "You've hit your usage limit or try again later.",
+                now,
+                &zones
+            ),
+            None
+        );
     }
 
     #[test]
@@ -566,42 +792,127 @@ mod tests {
     fn claude_rate_limit_types_name_their_scope() {
         assert_eq!(claude_scope("five_hour"), LimitScope::Session);
         assert_eq!(claude_scope("seven_day"), LimitScope::Weekly);
-        assert_eq!(claude_scope("seven_day_opus"), LimitScope::Model("Opus".into()));
+        assert_eq!(
+            claude_scope("seven_day_opus"),
+            LimitScope::Model("Opus".into())
+        );
         assert_eq!(claude_scope("overage"), LimitScope::Other);
     }
 
     fn window(label: &str, window: &str, percent: f32, resets_at: i64) -> UsageLimit {
-        UsageLimit { label: label.into(), percent, resets_at: Some(resets_at), window: window.into() }
+        UsageLimit {
+            label: label.into(),
+            percent,
+            resets_at: Some(resets_at),
+            window: window.into(),
+        }
     }
 
     #[test]
     fn usage_windows_stand_in_for_a_message_without_a_time() {
-        let limits = [window("5-hour limit", "5h", 100., 5_000), window("Weekly limit", "7d", 40., 90_000), window("Weekly · Fable", "7d", 100., 70_000)];
+        let limits = [
+            window("5-hour limit", "5h", 100., 5_000),
+            window("Weekly limit", "7d", 40., 90_000),
+            window("Weekly · Fable", "7d", 100., 70_000),
+        ];
         // The used-up windows that apply to the thread all have to reset: Fable's only on Fable.
-        assert_eq!(reset_from_usage(&limits, &LimitScope::Other, None, 1_000), Some(5_000));
-        assert_eq!(reset_from_usage(&limits, &LimitScope::Other, Some("claude-fable-5-1"), 1_000), Some(70_000));
-        assert_eq!(reset_from_usage(&limits, &LimitScope::Model("Fable".into()), None, 1_000), Some(70_000));
+        assert_eq!(
+            reset_from_usage(&limits, &LimitScope::Other, None, 1_000),
+            Some(5_000)
+        );
+        assert_eq!(
+            reset_from_usage(&limits, &LimitScope::Other, Some("claude-fable-5-1"), 1_000),
+            Some(70_000)
+        );
+        assert_eq!(
+            reset_from_usage(&limits, &LimitScope::Model("Fable".into()), None, 1_000),
+            Some(70_000)
+        );
         // Only past resets used up: the window the limit names.
-        assert_eq!(reset_from_usage(&limits, &LimitScope::Weekly, None, 80_000), Some(90_000));
-        let fresh = [window("5-hour limit", "5h", 20., 5_000), window("Weekly limit", "7d", 40., 90_000)];
-        assert_eq!(reset_from_usage(&fresh, &LimitScope::Session, None, 0), Some(5_000));
+        assert_eq!(
+            reset_from_usage(&limits, &LimitScope::Weekly, None, 80_000),
+            Some(90_000)
+        );
+        let fresh = [
+            window("5-hour limit", "5h", 20., 5_000),
+            window("Weekly limit", "7d", 40., 90_000),
+        ];
+        assert_eq!(
+            reset_from_usage(&fresh, &LimitScope::Session, None, 0),
+            Some(5_000)
+        );
         assert_eq!(reset_from_usage(&fresh, &LimitScope::Other, None, 0), None);
-        assert_eq!(reset_from_usage(&[window("Weekly · Fable", "7d", 10., 7)], &LimitScope::Model("Fable".into()), None, 0), Some(7));
+        assert_eq!(
+            reset_from_usage(
+                &[window("Weekly · Fable", "7d", 10., 7)],
+                &LimitScope::Model("Fable".into()),
+                None,
+                0
+            ),
+            Some(7)
+        );
     }
 
     #[test]
     fn a_limit_is_still_in_force_only_where_its_windows_apply() {
-        let limits = [window("5-hour limit", "5h", 100., 5_000), window("Weekly · Fable", "7d", 100., 900_000), window("Weekly (scoped)", "7d", 100., 800_000)];
+        let limits = [
+            window("5-hour limit", "5h", 100., 5_000),
+            window("Weekly · Fable", "7d", 100., 900_000),
+            window("Weekly (scoped)", "7d", 100., 800_000),
+        ];
         // A Sonnet thread at its 5-hour limit goes on once that resets, Fable's week regardless.
-        assert_eq!(limited_until(&limits, &LimitScope::Session, Some("claude-sonnet-5-5"), 1_000), Some(5_000));
-        assert_eq!(limited_until(&limits, &LimitScope::Session, Some("claude-sonnet-5-5"), 6_000), None);
+        assert_eq!(
+            limited_until(
+                &limits,
+                &LimitScope::Session,
+                Some("claude-sonnet-5-5"),
+                1_000
+            ),
+            Some(5_000)
+        );
+        assert_eq!(
+            limited_until(
+                &limits,
+                &LimitScope::Session,
+                Some("claude-sonnet-5-5"),
+                6_000
+            ),
+            None
+        );
         // A Fable thread waits for the Fable week, by its model or its limit's name.
-        assert_eq!(limited_until(&limits, &LimitScope::Session, Some("claude-fable-5-1"), 6_000), Some(900_000));
+        assert_eq!(
+            limited_until(
+                &limits,
+                &LimitScope::Session,
+                Some("claude-fable-5-1"),
+                6_000
+            ),
+            Some(900_000)
+        );
         // General session limits do not intervene with Fable threads.
-        assert_eq!(limited_until(&limits[..1], &LimitScope::Session, Some("claude-fable-5-1"), 1_000), None);
-        assert_eq!(limited_until(&limits, &LimitScope::Model("Fable".into()), None, 6_000), Some(900_000));
+        assert_eq!(
+            limited_until(
+                &limits[..1],
+                &LimitScope::Session,
+                Some("claude-fable-5-1"),
+                1_000
+            ),
+            None
+        );
+        assert_eq!(
+            limited_until(&limits, &LimitScope::Model("Fable".into()), None, 6_000),
+            Some(900_000)
+        );
         // Nothing used up, nothing in force.
-        assert_eq!(limited_until(&[window("5-hour limit", "5h", 98., 5_000)], &LimitScope::Session, None, 0), None);
+        assert_eq!(
+            limited_until(
+                &[window("5-hour limit", "5h", 98., 5_000)],
+                &LimitScope::Session,
+                None,
+                0
+            ),
+            None
+        );
     }
 
     #[test]
@@ -612,15 +923,53 @@ mod tests {
             window("SWE-2 limit", "24h", 100., 50_000),
         ];
         // Standard model is stopped by Daily limit:
-        assert_eq!(limited_until(&devin_limits[..2], &LimitScope::Other, Some("gpt-5-6-luna"), 1_000), Some(86_400_000));
+        assert_eq!(
+            limited_until(
+                &devin_limits[..2],
+                &LimitScope::Other,
+                Some("gpt-5-6-luna"),
+                1_000
+            ),
+            Some(86_400_000)
+        );
         // swe-2-high is unmetered by the general daily/weekly quota during promotion:
-        assert_eq!(limited_until(&devin_limits[..2], &LimitScope::Other, Some("swe-2-high"), 1_000), None);
-        assert_eq!(limited_until(&devin_limits[..2], &LimitScope::Other, Some("swe-2"), 1_000), None);
-        assert_eq!(limited_until(&devin_limits[..2], &LimitScope::Other, Some("devin/swe-2-high"), 1_000), None);
+        assert_eq!(
+            limited_until(
+                &devin_limits[..2],
+                &LimitScope::Other,
+                Some("swe-2-high"),
+                1_000
+            ),
+            None
+        );
+        assert_eq!(
+            limited_until(&devin_limits[..2], &LimitScope::Other, Some("swe-2"), 1_000),
+            None
+        );
+        assert_eq!(
+            limited_until(
+                &devin_limits[..2],
+                &LimitScope::Other,
+                Some("devin/swe-2-high"),
+                1_000
+            ),
+            None
+        );
         // But if a window scoped to SWE-2 is present, it does apply to swe-2-high:
-        assert_eq!(limited_until(&devin_limits, &LimitScope::Other, Some("swe-2-high"), 1_000), Some(50_000));
+        assert_eq!(
+            limited_until(&devin_limits, &LimitScope::Other, Some("swe-2-high"), 1_000),
+            Some(50_000)
+        );
         // Reset from usage should also not return daily/weekly limit for swe-2-high when only general limits exist:
-        assert_eq!(reset_from_usage(&devin_limits[..2], &LimitScope::Other, Some("swe-2-high"), 1_000), None);
+        assert_eq!(
+            reset_from_usage(
+                &devin_limits[..2],
+                &LimitScope::Other,
+                Some("swe-2-high"),
+                1_000
+            ),
+            None
+        );
     }
 
     #[test]
@@ -629,7 +978,10 @@ mod tests {
         let map = |pairs: &[(&str, &str)]| {
             let mut h = HeaderMap::new();
             for (k, v) in pairs {
-                h.insert(HeaderName::from_bytes(k.as_bytes()).unwrap(), HeaderValue::from_str(v).unwrap());
+                h.insert(
+                    HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                    HeaderValue::from_str(v).unwrap(),
+                );
             }
             h
         };
@@ -642,29 +994,76 @@ mod tests {
             ("anthropic-ratelimit-tokens-remaining", "0"),
             ("anthropic-ratelimit-tokens-reset", "2026-10-03T06:10:00Z"),
         ]);
-        let l = from_response(&anthropic, "Anthropic API 429: Number of request tokens has exceeded your per-minute rate limit".into(), now);
+        let l = from_response(
+            &anthropic,
+            "Anthropic API 429: Number of request tokens has exceeded your per-minute rate limit"
+                .into(),
+            now,
+        );
         assert_eq!(l.resets_at, Some(ms("2026-10-03T06:10:00Z")));
         // OpenAI-style spans, then plain retry-after (seconds or a date).
-        let openai = map(&[("x-ratelimit-remaining-requests", "0"), ("x-ratelimit-reset-requests", "6m0s"), ("x-ratelimit-remaining-tokens", "100"), ("retry-after", "600")]);
-        assert_eq!(from_response(&openai, "429".into(), now).resets_at, Some(now + 600_000));
-        assert_eq!(from_response(&map(&[("retry-after", "30")]), "429".into(), now).resets_at, Some(now + 30_000));
-        assert_eq!(from_response(&map(&[("retry-after", "Sat, 03 Oct 2026 06:10:00 GMT")]), "429".into(), now).resets_at, Some(ms("2026-10-03T06:10:00Z")));
+        let openai = map(&[
+            ("x-ratelimit-remaining-requests", "0"),
+            ("x-ratelimit-reset-requests", "6m0s"),
+            ("x-ratelimit-remaining-tokens", "100"),
+            ("retry-after", "600"),
+        ]);
+        assert_eq!(
+            from_response(&openai, "429".into(), now).resets_at,
+            Some(now + 600_000)
+        );
+        assert_eq!(
+            from_response(&map(&[("retry-after", "30")]), "429".into(), now).resets_at,
+            Some(now + 30_000)
+        );
+        assert_eq!(
+            from_response(
+                &map(&[("retry-after", "Sat, 03 Oct 2026 06:10:00 GMT")]),
+                "429".into(),
+                now
+            )
+            .resets_at,
+            Some(ms("2026-10-03T06:10:00Z"))
+        );
         // Nothing in the headers: the message.
-        assert_eq!(from_response(&HeaderMap::new(), "Please try again in 20s.".into(), now).resets_at, Some(now + 20_000));
+        assert_eq!(
+            from_response(&HeaderMap::new(), "Please try again in 20s.".into(), now).resets_at,
+            Some(now + 20_000)
+        );
     }
 
     #[test]
     fn a_zones_offset_follows_its_daylight_saving_change() {
         // New York went from UTC-5 to UTC-4 at 2026-03-08 07:00 UTC, and back at 2026-11-01 06:00 UTC.
         let ny = Some("America/New_York");
-        assert_eq!(system_offset(ny, ms("2026-03-08T06:59:59Z")), Some(-5 * 3600));
-        assert_eq!(system_offset(ny, ms("2026-03-08T07:00:00Z")), Some(-4 * 3600));
-        assert_eq!(system_offset(ny, ms("2026-11-01T05:59:59Z")), Some(-4 * 3600));
-        assert_eq!(system_offset(ny, ms("2026-11-01T06:00:00Z")), Some(-5 * 3600));
+        assert_eq!(
+            system_offset(ny, ms("2026-03-08T06:59:59Z")),
+            Some(-5 * 3600)
+        );
+        assert_eq!(
+            system_offset(ny, ms("2026-03-08T07:00:00Z")),
+            Some(-4 * 3600)
+        );
+        assert_eq!(
+            system_offset(ny, ms("2026-11-01T05:59:59Z")),
+            Some(-4 * 3600)
+        );
+        assert_eq!(
+            system_offset(ny, ms("2026-11-01T06:00:00Z")),
+            Some(-5 * 3600)
+        );
         // A reset time read in the zone lands on the right side of the change.
         let message = "You've hit your limit - resets 7:40pm (America/New_York)";
-        assert_eq!(reset_in(message, ms("2026-11-01T04:00:00Z"), &system_offset), Some(ms("2026-11-02T00:40:00Z")), "7:40pm EST after the fall change");
-        assert_eq!(reset_in(message, ms("2026-03-08T04:00:00Z"), &system_offset), Some(ms("2026-03-08T23:40:00Z")), "7:40pm EDT after the spring change");
+        assert_eq!(
+            reset_in(message, ms("2026-11-01T04:00:00Z"), &system_offset),
+            Some(ms("2026-11-02T00:40:00Z")),
+            "7:40pm EST after the fall change"
+        );
+        assert_eq!(
+            reset_in(message, ms("2026-03-08T04:00:00Z"), &system_offset),
+            Some(ms("2026-03-08T23:40:00Z")),
+            "7:40pm EDT after the spring change"
+        );
     }
 
     #[test]

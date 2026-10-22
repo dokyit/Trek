@@ -15,7 +15,13 @@ fn the_binaries_are_built_before_any_test_runs_and_found_where_bin_looks() {
     ] {
         let found = trek_test_fixtures::bin(name);
         assert!(found.is_file(), "{name}");
-        let same = |a: &Path, b: &Path| std::fs::canonicalize(a).unwrap() == std::fs::canonicalize(b).unwrap();
-        assert!(same(&found, Path::new(built)), "bin({name}) is {}, cargo built {built}", found.display());
+        let same = |a: &Path, b: &Path| {
+            std::fs::canonicalize(a).unwrap() == std::fs::canonicalize(b).unwrap()
+        };
+        assert!(
+            same(&found, Path::new(built)),
+            "bin({name}) is {}, cargo built {built}",
+            found.display()
+        );
     }
 }

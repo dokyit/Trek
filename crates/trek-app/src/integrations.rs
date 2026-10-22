@@ -40,9 +40,11 @@ pub fn screen_recording_allowed() -> bool {
 }
 
 #[cfg(target_os = "macos")]
-pub const ACCESSIBILITY_PANE: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+pub const ACCESSIBILITY_PANE: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
 #[cfg(target_os = "macos")]
-pub const SCREEN_RECORDING_PANE: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+pub const SCREEN_RECORDING_PANE: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 // The "Allow…" buttons that open these never show where the check above is always true.
 #[cfg(not(target_os = "macos"))]
 pub const ACCESSIBILITY_PANE: &str = "ms-settings:easeofaccess";
@@ -51,7 +53,10 @@ pub const SCREEN_RECORDING_PANE: &str = "ms-settings:privacy";
 
 /// AXe drives simulator touches (taps, swipes, typing).
 pub fn axe_path() -> Option<PathBuf> {
-    std::env::var_os("TREK_AXE_PATH").map(PathBuf::from).filter(|p| p.exists()).or_else(|| trek_core::detect::which("axe"))
+    std::env::var_os("TREK_AXE_PATH")
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .or_else(|| trek_core::detect::which("axe"))
 }
 
 pub const AXE_INSTALL: &str = "brew install cameroncooke/axe/axe";
@@ -61,7 +66,11 @@ pub fn ffmpeg_installed() -> bool {
     trek_core::detect::which("ffmpeg").is_some() && trek_core::detect::which("ffprobe").is_some()
 }
 
-pub const FFMPEG_INSTALL: &str = if cfg!(windows) { "winget install ffmpeg" } else { "brew install ffmpeg" };
+pub const FFMPEG_INSTALL: &str = if cfg!(windows) {
+    "winget install ffmpeg"
+} else {
+    "brew install ffmpeg"
+};
 
 /// MCP servers each agent already loads from its own config: `(agent, server names)`.
 pub fn agent_mcp_servers() -> Vec<(&'static str, Vec<String>)> {
@@ -70,7 +79,10 @@ pub fn agent_mcp_servers() -> Vec<(&'static str, Vec<String>)> {
     // Claude Code: user-level `mcpServers` plus per-project ones in ~/.claude.json.
     if let Ok(text) = std::fs::read_to_string(home.join(".claude.json")) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-            let mut names: Vec<String> = v["mcpServers"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+            let mut names: Vec<String> = v["mcpServers"]
+                .as_object()
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default();
             if let Some(projects) = v["projects"].as_object() {
                 for p in projects.values() {
                     if let Some(m) = p["mcpServers"].as_object() {
@@ -84,10 +96,17 @@ pub fn agent_mcp_servers() -> Vec<(&'static str, Vec<String>)> {
         }
     }
     // Codex: `[mcp_servers.<name>]` tables in config.toml of its home (`~/.codex`, or `$CODEX_HOME`).
-    if let Ok(text) = std::fs::read_to_string(trek_core::import::codex::codex_home_for(&home).join("config.toml")) {
+    if let Ok(text) =
+        std::fs::read_to_string(trek_core::import::codex::codex_home_for(&home).join("config.toml"))
+    {
         let mut names: Vec<String> = text
             .lines()
-            .filter_map(|l| l.trim().strip_prefix("[mcp_servers.")?.strip_suffix(']').map(str::to_string))
+            .filter_map(|l| {
+                l.trim()
+                    .strip_prefix("[mcp_servers.")?
+                    .strip_suffix(']')
+                    .map(str::to_string)
+            })
             .filter(|n| !n.contains('.'))
             .map(|n| n.trim_matches('"').to_string())
             .collect();
@@ -100,9 +119,16 @@ pub fn agent_mcp_servers() -> Vec<(&'static str, Vec<String>)> {
 /// Claude Code plugins the user has installed (`name@marketplace`).
 pub fn claude_plugins() -> Vec<String> {
     let path = trek_core::paths::agents_home().join(".claude/plugins/installed_plugins.json");
-    let Ok(text) = std::fs::read_to_string(path) else { return vec![] };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return vec![] };
-    let mut names: Vec<String> = v["plugins"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return vec![];
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return vec![];
+    };
+    let mut names: Vec<String> = v["plugins"]
+        .as_object()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
     names.sort();
     names
 }

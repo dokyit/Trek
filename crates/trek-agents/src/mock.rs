@@ -93,7 +93,10 @@
 //! Selected by `AgentId::Direct("mock")`. Trek offers it only when `TREK_MOCK_AGENT=1` (and in
 //! its own tests).
 
-use crate::{AgentEvent, BackgroundKind, BackgroundTask, Billing, Command, Decision, Prompt, Question, SessionConfig};
+use crate::{
+    AgentEvent, BackgroundKind, BackgroundTask, Billing, Command, Decision, Prompt, Question,
+    SessionConfig,
+};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -108,12 +111,19 @@ pub const RECAP_MODEL: &str = "mock-recap";
 
 /// Every mock session's history, by session id: each message with the mark of the turn it
 /// belongs to, oldest first. The mock's stand-in for an agent's session files.
-static HISTORY: LazyLock<Mutex<HashMap<String, Vec<(String, String)>>>> = LazyLock::new(Default::default);
+static HISTORY: LazyLock<Mutex<HashMap<String, Vec<(String, String)>>>> =
+    LazyLock::new(Default::default);
 
 fn new_id(kind: &str) -> String {
     static N: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    format!("mock-{kind}-{nanos:x}-{}", N.fetch_add(1, Ordering::Relaxed))
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "mock-{kind}-{nanos:x}-{}",
+        N.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 /// Sessions at their usage limit: session id → when it resets (unix ms).
@@ -138,20 +148,36 @@ pub fn hold_limit(id: &str) {
 
 /// The messages the mock remembers in session `id`, oldest first.
 pub fn remembered(id: &str) -> Vec<String> {
-    HISTORY.lock().unwrap().get(id).map(|h| h.iter().map(|(_, m)| m.clone()).collect()).unwrap_or_default()
+    HISTORY
+        .lock()
+        .unwrap()
+        .get(id)
+        .map(|h| h.iter().map(|(_, m)| m.clone()).collect())
+        .unwrap_or_default()
 }
 
 /// The mark of the last turn in session `id` (see `crate::session_tail`).
 pub fn last_mark(id: &str) -> Option<String> {
-    HISTORY.lock().unwrap().get(id)?.last().map(|(mark, _)| mark.clone())
+    HISTORY
+        .lock()
+        .unwrap()
+        .get(id)?
+        .last()
+        .map(|(mark, _)| mark.clone())
 }
 
 /// A message that came with a recap of the conversation: the messages the recap holds, and the
 /// message itself.
 fn split_recap(text: &str) -> (Vec<String>, &str) {
-    let Some((head, message)) = text.split_once("</recap>") else { return (vec![], text) };
+    let Some((head, message)) = text.split_once("</recap>") else {
+        return (vec![], text);
+    };
     let recap = head.split_once("<recap>").map_or("", |(_, r)| r);
-    let said = recap.split("\n\n").filter_map(|e| e.trim().strip_prefix("User: ")).map(|e| e.trim().to_string()).collect();
+    let said = recap
+        .split("\n\n")
+        .filter_map(|e| e.trim().strip_prefix("User: "))
+        .map(|e| e.trim().to_string())
+        .collect();
     (said, message.trim_start())
 }
 
@@ -190,7 +216,9 @@ enum Script {
     /// A long answer with every kind of block, for reviewing how answers read.
     Prose,
     /// An answer in TeX math, inline and display (`mock:math`); `stream`: at reading pace.
-    Math { slow: bool },
+    Math {
+        slow: bool,
+    },
     /// An answer with native visualization blocks: the showcase, or one `type`'s example.
     Visualization(Option<&'static str>),
     /// `Visualization`, slowly: the block arrives over a few seconds.
@@ -198,9 +226,13 @@ enum Script {
     /// An answer whose visualization block closes invalid.
     VisualizationInvalid,
     /// An answer with two interactive artifacts; `stream`: slowly.
-    Interactive { stream: bool },
+    Interactive {
+        stream: bool,
+    },
     /// An answer with a live page in it (`PAGE`); `stream`: slowly.
-    Page { stream: bool },
+    Page {
+        stream: bool,
+    },
     Explore(Duration),
     /// `n` rounds of work at once, for a long transcript.
     History(u32),
@@ -208,7 +240,10 @@ enum Script {
     /// Add a note to a file in the session's folder: `NOTES.md`, or the file named after it.
     Write(Option<String>),
     /// Edit lines of a file in place, as Trek's ⌘K inline edit asks (`trek_core::inline_edit`).
-    InlineEdit { path: String, lines: (u32, u32) },
+    InlineEdit {
+        path: String,
+        lines: (u32, u32),
+    },
     Recall,
     /// Say what Trek told the session (`SessionConfig::instructions`).
     Told,
@@ -224,12 +259,17 @@ enum Script {
     /// Work on for a while, taking no notice of Stop (`mock:deaf`).
     Deaf(Duration),
     /// Start a sub-agent through Trek's orchestration tools: waiting for its answer, or not.
-    Delegate { wait: bool },
+    Delegate {
+        wait: bool,
+    },
     /// Start two sub-agents on the same task, and end the turn.
     Pair,
     /// Start a thread of the user's own through Trek (`start_thread`): in a worktree of its own,
     /// or not; waiting for its answer (`read_thread`), or not.
-    StartThread { worktree: bool, wait: bool },
+    StartThread {
+        worktree: bool,
+        wait: bool,
+    },
     /// Hand the work to a fresh thread through Trek (`handoff`).
     Handoff,
     /// Leave a dev server running in the background, for a while or until stopped.
@@ -239,7 +279,9 @@ enum Script {
     /// Leave a dev server and a test watcher running (one that catches nothing for a day).
     Dev,
     /// A turn on a real model with a real price: billed per token, or on a plan.
-    Cost { plan: bool },
+    Cost {
+        plan: bool,
+    },
     /// Trek woke it with what a sub-agent came back with.
     Wake,
     /// Asked to restate the request in its own words, and stop.
@@ -255,7 +297,9 @@ enum Script {
     /// Bring it up to date (`maintain-verification-skill`).
     MaintainVerification,
     /// Change a file, then run the verification CLI Trek named; `broken`: a change it fails on.
-    Verify { broken: bool },
+    Verify {
+        broken: bool,
+    },
 }
 
 impl Script {
@@ -269,7 +313,10 @@ impl Script {
         if trek_core::restate::split_restate(trek_core::orchestrate::split_consult(text).0).1 {
             return Script::Restate;
         }
-        if trek_core::orchestrate::split_consult(text).1.is_some_and(|c| c.style == trek_core::orchestrate::Style::Arena) {
+        if trek_core::orchestrate::split_consult(text)
+            .1
+            .is_some_and(|c| c.style == trek_core::orchestrate::Style::Arena)
+        {
             return Script::Arena;
         }
         if let Some((path, lines)) = trek_core::inline_edit::parse(text) {
@@ -282,50 +329,111 @@ impl Script {
             return Script::MaintainVerification;
         }
         // As written (a file name keeps its case), and lowercased for the keywords.
-        let raw: Vec<&str> = text.split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != ':' && c != '-' && c != '.' && c != '_' && c != '/')).collect();
+        let raw: Vec<&str> = text
+            .split_whitespace()
+            .map(|w| {
+                w.trim_matches(|c: char| {
+                    !c.is_alphanumeric() && c != ':' && c != '-' && c != '.' && c != '_' && c != '/'
+                })
+            })
+            .collect();
         let words: Vec<String> = text
             .split_whitespace()
-            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != ':' && c != '-').to_lowercase())
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_alphanumeric() && c != ':' && c != '-')
+                    .to_lowercase()
+            })
             .collect();
         let duration_after = |i: usize| words.get(i + 1).and_then(|w| parse_duration(w));
         let found = words.iter().enumerate().find_map(|(i, w)| {
             let key = w.strip_prefix("mock:").unwrap_or(w);
             Some(match key {
                 // Bare "long" and "stream" are too common to start a 30-second turn.
-                "long" if w.starts_with("mock:") => Script::Long(duration_after(i).unwrap_or(Duration::from_secs(30))),
-                "stream" if w.starts_with("mock:") => Script::Stream(duration_after(i).unwrap_or(Duration::from_secs(30))),
+                "long" if w.starts_with("mock:") => {
+                    Script::Long(duration_after(i).unwrap_or(Duration::from_secs(30)))
+                }
+                "stream" if w.starts_with("mock:") => {
+                    Script::Stream(duration_after(i).unwrap_or(Duration::from_secs(30)))
+                }
                 "prose" if w.starts_with("mock:") => Script::Prose,
-                "math" if w.starts_with("mock:") => Script::Math { slow: words.get(i + 1).is_some_and(|w| w == "stream") },
+                "math" if w.starts_with("mock:") => Script::Math {
+                    slow: words.get(i + 1).is_some_and(|w| w == "stream"),
+                },
                 "visualization" if w.starts_with("mock:") => {
-                    let kind = |j: usize| words.get(j).and_then(|t| VIZ_GALLERY.iter().find(|(kind, _)| *kind == t.as_str())).map(|(kind, _)| *kind);
+                    let kind = |j: usize| {
+                        words
+                            .get(j)
+                            .and_then(|t| VIZ_GALLERY.iter().find(|(kind, _)| *kind == t.as_str()))
+                            .map(|(kind, _)| *kind)
+                    };
                     match words.get(i + 1).map(String::as_str) {
                         Some("stream") => Script::VisualizationStream(kind(i + 2)),
                         Some("invalid") => Script::VisualizationInvalid,
                         _ => Script::Visualization(kind(i + 1)),
                     }
                 }
-                "interactive" if w.starts_with("mock:") => Script::Interactive { stream: words.get(i + 1).is_some_and(|w| w == "stream") },
-                "page" if w.starts_with("mock:") => Script::Page { stream: words.get(i + 1).is_some_and(|w| w == "stream") },
-                "explore" if w.starts_with("mock:") => Script::Explore(duration_after(i).unwrap_or(Duration::from_secs(30))),
-                "history" if w.starts_with("mock:") => Script::History(words.get(i + 1).and_then(|n| n.parse().ok()).unwrap_or(100).clamp(1, MAX_HISTORY)),
+                "interactive" if w.starts_with("mock:") => Script::Interactive {
+                    stream: words.get(i + 1).is_some_and(|w| w == "stream"),
+                },
+                "page" if w.starts_with("mock:") => Script::Page {
+                    stream: words.get(i + 1).is_some_and(|w| w == "stream"),
+                },
+                "explore" if w.starts_with("mock:") => {
+                    Script::Explore(duration_after(i).unwrap_or(Duration::from_secs(30)))
+                }
+                "history" if w.starts_with("mock:") => Script::History(
+                    words
+                        .get(i + 1)
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(100)
+                        .clamp(1, MAX_HISTORY),
+                ),
                 // The one script that changes files: only when asked for by its full name.
-                "write" if w.starts_with("mock:") => Script::Write(raw.get(i + 1).map(|n| n.trim_end_matches('.')).filter(|n| n.contains('.') && in_folder(n)).map(str::to_string)),
-                "limit" if w.starts_with("mock:") => Script::Limit(duration_after(i).unwrap_or(Duration::from_secs(5))),
-                "nearlimit" if w.starts_with("mock:") => Script::NearLimit(duration_after(i).unwrap_or(Duration::from_secs(60))),
-                "deaf" if w.starts_with("mock:") => Script::Deaf(duration_after(i).unwrap_or(Duration::from_secs(60))),
+                "write" if w.starts_with("mock:") => Script::Write(
+                    raw.get(i + 1)
+                        .map(|n| n.trim_end_matches('.'))
+                        .filter(|n| n.contains('.') && in_folder(n))
+                        .map(str::to_string),
+                ),
+                "limit" if w.starts_with("mock:") => {
+                    Script::Limit(duration_after(i).unwrap_or(Duration::from_secs(5)))
+                }
+                "nearlimit" if w.starts_with("mock:") => {
+                    Script::NearLimit(duration_after(i).unwrap_or(Duration::from_secs(60)))
+                }
+                "deaf" if w.starts_with("mock:") => {
+                    Script::Deaf(duration_after(i).unwrap_or(Duration::from_secs(60)))
+                }
                 "consult" if w.starts_with("mock:") => Script::Delegate { wait: true },
                 "delegate" if w.starts_with("mock:") => Script::Delegate { wait: false },
                 "pair" if w.starts_with("mock:") => Script::Pair,
-                "start-thread" if w.starts_with("mock:") => Script::StartThread { worktree: false, wait: false },
-                "start-worktree-thread" if w.starts_with("mock:") => Script::StartThread { worktree: true, wait: false },
-                "start-thread-wait" if w.starts_with("mock:") => Script::StartThread { worktree: false, wait: true },
+                "start-thread" if w.starts_with("mock:") => Script::StartThread {
+                    worktree: false,
+                    wait: false,
+                },
+                "start-worktree-thread" if w.starts_with("mock:") => Script::StartThread {
+                    worktree: true,
+                    wait: false,
+                },
+                "start-thread-wait" if w.starts_with("mock:") => Script::StartThread {
+                    worktree: false,
+                    wait: true,
+                },
                 "handoff" if w.starts_with("mock:") => Script::Handoff,
-                "task" if w.starts_with("mock:") => Script::Task(duration_after(i).unwrap_or(Duration::from_secs(6))),
+                "task" if w.starts_with("mock:") => {
+                    Script::Task(duration_after(i).unwrap_or(Duration::from_secs(6)))
+                }
                 "server" if w.starts_with("mock:") => Script::Server(duration_after(i)),
-                "watch" if w.starts_with("mock:") => Script::Watch(duration_after(i).unwrap_or(Duration::from_secs(3))),
+                "watch" if w.starts_with("mock:") => {
+                    Script::Watch(duration_after(i).unwrap_or(Duration::from_secs(3)))
+                }
                 "dev" if w.starts_with("mock:") => Script::Dev,
-                "cost" if w.starts_with("mock:") => Script::Cost { plan: words.get(i + 1).is_some_and(|w| w == "plan") },
-                "verify" if w.starts_with("mock:") => Script::Verify { broken: words.get(i + 1).is_some_and(|w| w == "broken") },
+                "cost" if w.starts_with("mock:") => Script::Cost {
+                    plan: words.get(i + 1).is_some_and(|w| w == "plan"),
+                },
+                "verify" if w.starts_with("mock:") => Script::Verify {
+                    broken: words.get(i + 1).is_some_and(|w| w == "broken"),
+                },
                 "design" if w.starts_with("mock:") => Script::Design,
                 "judge" if w.starts_with("mock:") => Script::Judge,
                 "error" => Script::Error,
@@ -353,14 +461,23 @@ impl Script {
 /// `path` is relative and stays in the session's folder: no `..`, not absolute.
 fn in_folder(path: &str) -> bool {
     // No root or drive either: `/etc/hosts` and `C:x` both leave the folder on Windows.
-    !path.contains("..") && std::path::Path::new(path).components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)) && !path.starts_with('~')
+    !path.contains("..")
+        && std::path::Path::new(path).components().all(|c| {
+            matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+        && !path.starts_with('~')
 }
 
 /// What follows the first of `keys` found in `text` (in any case), when there's something.
 fn after_keyword<'a>(text: &'a str, keys: &[&str]) -> Option<&'a str> {
     // ASCII lowercase keeps byte offsets, so a match points into `text` too.
     let lower = text.to_ascii_lowercase();
-    keys.iter().find_map(|k| lower.find(k).map(|at| text[at + k.len()..].trim())).filter(|t| !t.is_empty())
+    keys.iter()
+        .find_map(|k| lower.find(k).map(|at| text[at + k.len()..].trim()))
+        .filter(|t| !t.is_empty())
 }
 
 /// The title a thread gets after its first turn: the mock names it after its script instead of
@@ -378,7 +495,9 @@ pub fn title(request: &str) -> String {
         Script::Stream(_) => "Walk through the codebase",
         Script::Prose => "Tour the startup code",
         Script::Math { .. } => "Work out the posterior",
-        Script::Visualization(_) | Script::VisualizationStream(_) | Script::VisualizationInvalid => "Compare release health dashboards",
+        Script::Visualization(_)
+        | Script::VisualizationStream(_)
+        | Script::VisualizationInvalid => "Compare release health dashboards",
         Script::Interactive { .. } => "Plan the artifact rollout",
         Script::Page { .. } => "Check the monitor arm fits",
         Script::Explore(_) => "Animate the title as it appears",
@@ -416,7 +535,9 @@ const MAX_DURATION: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// `500ms`, `30s`, `2m`, at most a day.
 fn parse_duration(s: &str) -> Option<Duration> {
-    let (num, unit) = s.find(|c: char| !c.is_ascii_digit()).map(|i| s.split_at(i))?;
+    let (num, unit) = s
+        .find(|c: char| !c.is_ascii_digit())
+        .map(|i| s.split_at(i))?;
     let n: u64 = num.parse().ok()?;
     let d = match unit {
         "ms" => Duration::from_millis(n),
@@ -483,20 +604,43 @@ async fn make_clip(ffmpeg: &std::path::Path, clip: &std::path::Path) -> Result<(
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let out = trek_core::procs::async_command(ffmpeg)
-        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-f", "lavfi", "-i", "testsrc=duration=6:size=960x540:rate=24", "-f", "lavfi", "-i", "sine=frequency=330:duration=6", "-shortest"])
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=6:size=960x540:rate=24",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=330:duration=6",
+            "-shortest",
+        ])
         .args(["-c:v", "mpeg4", "-q:v", "4", "-c:a", "aac", "-y"])
         .arg(clip)
         .output()
         .await
         .map_err(|e| e.to_string())?;
-    if out.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&out.stderr).trim().to_string()) }
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
 }
 
 /// Call `watch_video` on `clip` through `server` (stdio, as the session would start it): its
 /// text blocks, or why it failed.
-async fn call_watch_video(server: &crate::McpServer, clip: &std::path::Path) -> Result<String, String> {
+async fn call_watch_video(
+    server: &crate::McpServer,
+    clip: &std::path::Path,
+) -> Result<String, String> {
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
-    let crate::McpTransport::Stdio { command, args, env } = &server.transport else { return Err("the video watcher isn't a local server".into()) };
+    let crate::McpTransport::Stdio { command, args, env } = &server.transport else {
+        return Err("the video watcher isn't a local server".into());
+    };
     let mut child = trek_core::procs::async_command(command)
         .args(args)
         .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -514,7 +658,10 @@ async fn call_watch_video(server: &crate::McpServer, clip: &std::path::Path) -> 
         serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "trek-mock", "version": "0"}}}),
         serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
     );
-    stdin.write_all(script.as_bytes()).await.map_err(|e| e.to_string())?;
+    stdin
+        .write_all(script.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
     let answer = tokio::time::timeout(Duration::from_secs(120), async {
         while let Ok(Some(line)) = lines.next_line().await {
             let v: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
@@ -529,8 +676,18 @@ async fn call_watch_video(server: &crate::McpServer, clip: &std::path::Path) -> 
     .flatten()
     .ok_or("the video watcher didn't answer")?;
     drop(stdin);
-    let text = answer["result"]["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n");
-    if answer["result"]["isError"] == true { Err(text) } else { Ok(text) }
+    let text = answer["result"]["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if answer["result"]["isError"] == true {
+        Err(text)
+    } else {
+        Ok(text)
+    }
 }
 
 /// Background work's news, for a turn the agent takes on its own (as Claude Code does on a
@@ -566,7 +723,11 @@ impl Drop for Job {
 
 impl Jobs {
     fn add(&self, task: BackgroundTask) {
-        self.0.lock().unwrap().push(Job { task, output: String::new(), file: None });
+        self.0.lock().unwrap().push(Job {
+            task,
+            output: String::new(),
+            file: None,
+        });
     }
 
     /// Add one that writes its whole output to a file, as well: where.
@@ -579,7 +740,11 @@ impl Jobs {
         let n = LOGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let file = dir.join(format!("{}-{n}-{}.output", std::process::id(), task.id));
         let _ = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, ""));
-        self.0.lock().unwrap().push(Job { task, output: String::new(), file: Some(file.clone()) });
+        self.0.lock().unwrap().push(Job {
+            task,
+            output: String::new(),
+            file: Some(file.clone()),
+        });
         file
     }
 
@@ -608,17 +773,32 @@ impl Jobs {
             j.output.push('\n');
             if let Some(f) = &j.file {
                 use std::io::Write as _;
-                let _ = std::fs::OpenOptions::new().append(true).open(f).and_then(|mut f| writeln!(f, "{line}"));
+                let _ = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(f)
+                    .and_then(|mut f| writeln!(f, "{line}"));
             }
         }
     }
 
     fn output(&self, id: &str) -> Option<String> {
-        self.0.lock().unwrap().iter().find(|j| j.task.id == id && j.task.readable).map(|j| j.output.clone())
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|j| j.task.id == id && j.task.readable)
+            .map(|j| j.output.clone())
     }
 
     fn event(&self) -> AgentEvent {
-        AgentEvent::Background(self.0.lock().unwrap().iter().map(|j| j.task.clone()).collect())
+        AgentEvent::Background(
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|j| j.task.clone())
+                .collect(),
+        )
     }
 }
 
@@ -663,14 +843,24 @@ pub async fn run(
         native_id: native_id.clone(),
         mark: String::new(),
         model: config.model.clone().unwrap_or_else(|| "mock-swift".into()),
-        orchestrate: config.mcp_servers.iter().find(|m| m.name == ORCHESTRATE_SERVER).and_then(|m| trek_ipc::Client::from_pairs(m.env())),
+        orchestrate: config
+            .mcp_servers
+            .iter()
+            .find(|m| m.name == ORCHESTRATE_SERVER)
+            .and_then(|m| trek_ipc::Client::from_pairs(m.env())),
         instructions: config.instructions.clone(),
-        video: config.mcp_servers.iter().find(|m| m.name == trek_core::media::VIDEO_SERVER).cloned(),
+        video: config
+            .mcp_servers
+            .iter()
+            .find(|m| m.name == trek_core::media::VIDEO_SERVER)
+            .cloned(),
         mcp: config
             .mcp_servers
             .iter()
             .map(|m| match &m.transport {
-                crate::McpTransport::Stdio { command, .. } => format!("{} (stdio: {command})", m.name),
+                crate::McpTransport::Stdio { command, .. } => {
+                    format!("{} (stdio: {command})", m.name)
+                }
                 crate::McpTransport::Http { url, .. } => format!("{} (http: {url})", m.name),
             })
             .collect(),
@@ -678,7 +868,13 @@ pub async fn run(
     // What it left running ends with it, however it ends: the loops printing for its shells
     // stop once they're off the list.
     let _jobs = EndJobs(s.background.clone());
-    if s.emit(AgentEvent::Started { native_id, model: Some(s.model.clone()) }).await.is_err() {
+    if s.emit(AgentEvent::Started {
+        native_id,
+        model: Some(s.model.clone()),
+    })
+    .await
+    .is_err()
+    {
         return Ok(());
     }
     if let Some(at) = resumed_at {
@@ -686,7 +882,12 @@ pub async fn run(
     }
     // Nothing leaves the Mac, so nothing is billed.
     let _ = s.emit(AgentEvent::Billing(Billing::Local)).await;
-    let _ = s.emit(AgentEvent::Context { used: s.context, window: WINDOW }).await;
+    let _ = s
+        .emit(AgentEvent::Context {
+            used: s.context,
+            window: WINDOW,
+        })
+        .await;
     loop {
         // Between turns: the user's next message, or a background shell that has something to say.
         let cmd = tokio::select! {
@@ -739,7 +940,11 @@ fn open_session(config: &SessionConfig) -> (String, Option<String>, Option<Strin
             }
         }
     }
-    let id = if config.fork || recap.is_some() { new_id("session") } else { from.clone() };
+    let id = if config.fork || recap.is_some() {
+        new_id("session")
+    } else {
+        from.clone()
+    };
     sessions.insert(id.clone(), history);
     let at = config.resume_at.clone().filter(|_| recap.is_none());
     (id, at, recap)
@@ -773,30 +978,51 @@ impl Session {
         let text = split_recap(text).1.to_string();
         let text = text.as_str();
         self.context += 1_200 + text.len() as u64 / 3;
-        self.emit(AgentEvent::Context { used: self.context, window: WINDOW }).await?;
+        self.emit(AgentEvent::Context {
+            used: self.context,
+            window: WINDOW,
+        })
+        .await?;
         let mut script = Script::parse(text, self.plan);
         // Until the limit resets, every prompt meets it.
         let held = HELD.lock().unwrap().contains(&self.native_id);
-        if let Some(until) = LIMITS.lock().unwrap().get(&self.native_id).copied().filter(|u| held || *u > trek_core::store::now_ms()) {
+        if let Some(until) = LIMITS
+            .lock()
+            .unwrap()
+            .get(&self.native_id)
+            .copied()
+            .filter(|u| held || *u > trek_core::store::now_ms())
+        {
             // (A held limit past its reset keeps the reset it first reported: `limit` finds it.)
-            script = Script::Limit(Duration::from_millis((until - trek_core::store::now_ms()).max(0) as u64));
+            script = Script::Limit(Duration::from_millis(
+                (until - trek_core::store::now_ms()).max(0) as u64,
+            ));
         }
         match self.play(script, text).await {
             Ok(()) => {}
             Err(Stop::Interrupted) => {
                 self.steer.clear();
-                self.emit(AgentEvent::TurnComplete { error: Some("Interrupted".into()) }).await?;
+                self.emit(AgentEvent::TurnComplete {
+                    error: Some("Interrupted".into()),
+                })
+                .await?;
             }
             Err(Stop::Closed) => return Err(Stop::Closed),
         }
-        self.emit(AgentEvent::Context { used: self.context, window: WINDOW }).await
+        self.emit(AgentEvent::Context {
+            used: self.context,
+            window: WINDOW,
+        })
+        .await
     }
 
     async fn play(&mut self, script: Script, text: &str) -> Step {
         match script {
             Script::Delegate { wait } => self.delegate(text, wait).await?,
             Script::Pair => self.pair(text).await?,
-            Script::StartThread { worktree, wait } => self.start_thread(text, worktree, wait).await?,
+            Script::StartThread { worktree, wait } => {
+                self.start_thread(text, worktree, wait).await?
+            }
             Script::Handoff => self.handoff(text).await?,
             Script::Background => self.background_use(text).await?,
             Script::Video => self.watch_video().await?,
@@ -808,8 +1034,15 @@ impl Session {
             }
             Script::Wake => {
                 let body = text.split_once(":\n\n").map_or(text, |(_, b)| b);
-                let gist = trek_core::orchestrate::preview(body.split("\n\n---\n\n").next().unwrap_or(body), 160);
-                let who = if trek_core::orchestrate::is_thread_wake(text) { "The thread" } else { "The sub-agent" };
+                let gist = trek_core::orchestrate::preview(
+                    body.split("\n\n---\n\n").next().unwrap_or(body),
+                    160,
+                );
+                let who = if trek_core::orchestrate::is_thread_wake(text) {
+                    "The thread"
+                } else {
+                    "The sub-agent"
+                };
                 self.say(&format!("{who} reported back: {gist}")).await?;
             }
             Script::Answer => {
@@ -838,13 +1071,35 @@ impl Session {
                 }
             }
             Script::Visualization(None) => self.say(VISUALIZATION).await?,
-            Script::Visualization(Some(kind)) => self.say(VIZ_GALLERY.iter().find(|(k, _)| *k == kind).map_or(VISUALIZATION, |(_, answer)| answer)).await?,
+            Script::Visualization(Some(kind)) => {
+                self.say(
+                    VIZ_GALLERY
+                        .iter()
+                        .find(|(k, _)| *k == kind)
+                        .map_or(VISUALIZATION, |(_, answer)| answer),
+                )
+                .await?
+            }
             // Slow enough to watch (and capture) a card's frame and then its marks arrive.
-            Script::VisualizationStream(kind) => self.say_at(kind.and_then(|kind| VIZ_GALLERY.iter().find(|(k, _)| *k == kind)).map_or(VISUALIZATION, |(_, answer)| answer), 90).await?,
+            Script::VisualizationStream(kind) => {
+                self.say_at(
+                    kind.and_then(|kind| VIZ_GALLERY.iter().find(|(k, _)| *k == kind))
+                        .map_or(VISUALIZATION, |(_, answer)| answer),
+                    90,
+                )
+                .await?
+            }
             Script::VisualizationInvalid => self.say(VIZ_INVALID).await?,
             // In pieces of a few hundred characters: it's 20 KB, which token by token takes half
             // a minute; streamed, slow enough to watch the card say "Building…" first.
-            Script::Interactive { stream } => self.say_in_pieces(INTERACTIVE, if stream { 160 } else { 600 }, if stream { 40 } else { 14 }).await?,
+            Script::Interactive { stream } => {
+                self.say_in_pieces(
+                    INTERACTIVE,
+                    if stream { 160 } else { 600 },
+                    if stream { 40 } else { 14 },
+                )
+                .await?
+            }
             Script::Page { stream: false } => self.say(PAGE).await?,
             // Slow enough to watch (and capture) the placeholder count up before the page shows.
             Script::Page { stream: true } => self.say_at(PAGE, 12).await?,
@@ -855,18 +1110,34 @@ impl Session {
             Script::Recall => {
                 let mut said = remembered(&self.native_id);
                 said.pop();
-                let text = if said.is_empty() { "I don't remember anything from before this message.".to_string() } else { format!("I remember: {}", said.join(" | ")) };
+                let text = if said.is_empty() {
+                    "I don't remember anything from before this message.".to_string()
+                } else {
+                    format!("I remember: {}", said.join(" | "))
+                };
                 self.say(&text).await?;
             }
             Script::Mcp => {
                 let text = match &self.mcp[..] {
                     [] => "No MCP servers.".to_string(),
-                    servers => format!("MCP servers:\n\n{}", servers.iter().map(|s| format!("- {s}")).collect::<Vec<_>>().join("\n")),
+                    servers => format!(
+                        "MCP servers:\n\n{}",
+                        servers
+                            .iter()
+                            .map(|s| format!("- {s}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ),
                 };
                 self.say(&text).await?;
             }
             Script::Told => {
-                let text = match self.instructions.as_deref().map(str::trim).filter(|i| !i.is_empty()) {
+                let text = match self
+                    .instructions
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|i| !i.is_empty())
+                {
                     Some(i) => format!("Trek told me:\n\n{i}"),
                     None => "Trek told me nothing.".to_string(),
                 };
@@ -888,7 +1159,14 @@ impl Session {
                 let id = self.id("tool");
                 self.tool_start(&id, "Run command", "cargo build").await?;
                 self.pause(paced(400)).await?;
-                self.emit(AgentEvent::ToolFinished { id, output: "error[E0425]: cannot find value `cfg` in this scope\n --> src/main.rs:14:9".into(), ok: false }).await?;
+                self.emit(AgentEvent::ToolFinished {
+                    id,
+                    output:
+                        "error[E0425]: cannot find value `cfg` in this scope\n --> src/main.rs:14:9"
+                            .into(),
+                    ok: false,
+                })
+                .await?;
                 self.report_usage().await?;
                 return self.emit(AgentEvent::TurnComplete { error: Some("The mock agent hit an error: the build failed and the session ended (exit code 101).".into()) }).await;
             }
@@ -907,14 +1185,37 @@ impl Session {
     async fn limit(&mut self, after: Duration) -> Step {
         let resets_at = {
             let mut limits = LIMITS.lock().unwrap();
-            *limits.entry(self.native_id.clone()).or_insert_with(|| trek_core::store::now_ms() + after.as_millis() as i64)
+            *limits
+                .entry(self.native_id.clone())
+                .or_insert_with(|| trek_core::store::now_ms() + after.as_millis() as i64)
         };
-        self.think("Picking up the parser refactor where it stood.").await?;
-        self.tool("Read", "src/parser.rs", "pub fn parse(input: &str) -> Result<Ast> { … }", 150).await?;
-        let at = chrono::DateTime::from_timestamp_millis(resets_at).map(|d| d.with_timezone(&chrono::Local).format("%-I:%M%P").to_string()).unwrap_or_default();
+        self.think("Picking up the parser refactor where it stood.")
+            .await?;
+        self.tool(
+            "Read",
+            "src/parser.rs",
+            "pub fn parse(input: &str) -> Result<Ast> { … }",
+            150,
+        )
+        .await?;
+        let at = chrono::DateTime::from_timestamp_millis(resets_at)
+            .map(|d| {
+                d.with_timezone(&chrono::Local)
+                    .format("%-I:%M%P")
+                    .to_string()
+            })
+            .unwrap_or_default();
         let message = format!("You've hit your session limit · resets {at}");
-        self.emit(AgentEvent::LimitReached { message: message.clone(), resets_at: Some(resets_at), scope: crate::LimitScope::Session }).await?;
-        self.emit(AgentEvent::TurnComplete { error: Some(message) }).await
+        self.emit(AgentEvent::LimitReached {
+            message: message.clone(),
+            resets_at: Some(resets_at),
+            scope: crate::LimitScope::Session,
+        })
+        .await?;
+        self.emit(AgentEvent::TurnComplete {
+            error: Some(message),
+        })
+        .await
     }
 
     /// The 5-hour window 96% used partway through, resetting `after` from now. Like Claude Code
@@ -922,9 +1223,21 @@ impl Session {
     /// stops where it is and says what's left; left alone, it finishes the job.
     async fn near_limit(&mut self, after: Duration) -> Step {
         let resets_at = trek_core::store::now_ms() + after.as_millis() as i64;
-        self.think("Picking up the parser refactor where it stood.").await?;
-        self.tool("Read", "src/parser.rs", "pub fn parse(input: &str) -> Result<Ast> { … }", 150).await?;
-        self.emit(AgentEvent::LimitUsed { scope: crate::LimitScope::Session, percent: 96.0, resets_at: Some(resets_at) }).await?;
+        self.think("Picking up the parser refactor where it stood.")
+            .await?;
+        self.tool(
+            "Read",
+            "src/parser.rs",
+            "pub fn parse(input: &str) -> Result<Ast> { … }",
+            150,
+        )
+        .await?;
+        self.emit(AgentEvent::LimitUsed {
+            scope: crate::LimitScope::Session,
+            percent: 96.0,
+            resets_at: Some(resets_at),
+        })
+        .await?;
         // Long enough for a word about it to arrive, however the turn is paced.
         self.hear(Duration::from_millis(1500)).await?;
         let told = |t: &String| t.starts_with(trek_core::limit::WRAP_UP_TAG);
@@ -933,8 +1246,17 @@ impl Session {
             self.say("Stopping here, ahead of the limit. **Done:** `parse` returns an `Ast`. **Still to do:** its two callers in `src/cli.rs` still expect tokens. **Next:** switch them over, then run the parser tests.").await?;
             return self.finish().await;
         }
-        self.tool("Edit", "src/cli.rs", "Switched both callers to the new `Ast`.", 150).await?;
-        self.say("The parser refactor is finished: `parse` returns an `Ast` and both callers use it.").await?;
+        self.tool(
+            "Edit",
+            "src/cli.rs",
+            "Switched both callers to the new `Ast`.",
+            150,
+        )
+        .await?;
+        self.say(
+            "The parser refactor is finished: `parse` returns an `Ast` and both callers use it.",
+        )
+        .await?;
         self.finish().await
     }
 
@@ -942,7 +1264,8 @@ impl Session {
     /// tell. Only the end of its session ends the turn early.
     async fn deaf(&mut self, d: Duration) -> Step {
         let id = self.id("tool");
-        self.tool_start(&id, "Run command", "./scripts/migrate.sh --all").await?;
+        self.tool_start(&id, "Run command", "./scripts/migrate.sh --all")
+            .await?;
         let sleep = tokio::time::sleep(d);
         tokio::pin!(sleep);
         loop {
@@ -954,7 +1277,12 @@ impl Session {
                 },
             }
         }
-        self.emit(AgentEvent::ToolFinished { id, output: "migrated 12 tables".into(), ok: true }).await?;
+        self.emit(AgentEvent::ToolFinished {
+            id,
+            output: "migrated 12 tables".into(),
+            ok: true,
+        })
+        .await?;
         self.say("The migration ran to the end.").await?;
         self.finish().await
     }
@@ -975,20 +1303,51 @@ impl Session {
     /// The tokens a turn used, as agents report them as it ends: the conversation so far read
     /// from the cache, the new message fresh, and the answer.
     async fn report_usage(&self) -> Step {
-        let tokens = trek_core::TokenUsage { input: 1_200, output: 420, cache_read: self.context, cache_write: 0 };
-        self.emit(AgentEvent::Usage { model: Some(self.model.clone()), tokens, cost: None }).await
+        let tokens = trek_core::TokenUsage {
+            input: 1_200,
+            output: 420,
+            cache_read: self.context,
+            cache_write: 0,
+        };
+        self.emit(AgentEvent::Usage {
+            model: Some(self.model.clone()),
+            tokens,
+            cost: None,
+        })
+        .await
     }
 
     /// `mock:cost`: a turn as Claude Code reports one on Claude Sonnet 5.5, priced at its API
     /// price: billed per token, or covered by a Claude Max plan.
     async fn priced_turn(&mut self, plan: bool) -> Step {
-        self.emit(AgentEvent::Billing(if plan { Billing::Plan(Some("Claude Max".into())) } else { Billing::Metered })).await?;
+        self.emit(AgentEvent::Billing(if plan {
+            Billing::Plan(Some("Claude Max".into()))
+        } else {
+            Billing::Metered
+        }))
+        .await?;
         self.think("Reading what the calls cost.").await?;
         self.say("Each call is priced at the model's API rates: fresh input, cache writes and reads, and output.").await?;
         let model = "claude-sonnet-5-5";
-        let tokens = trek_core::TokenUsage { input: 2_400, output: 1_850, cache_read: 182_000, cache_write: 12_600 };
-        let cost = trek_core::pricing::request(model, &trek_core::AgentId::ClaudeCode, &tokens, tokens.cache_write, false);
-        self.emit(AgentEvent::Usage { model: Some(model.into()), tokens, cost }).await?;
+        let tokens = trek_core::TokenUsage {
+            input: 2_400,
+            output: 1_850,
+            cache_read: 182_000,
+            cache_write: 12_600,
+        };
+        let cost = trek_core::pricing::request(
+            model,
+            &trek_core::AgentId::ClaudeCode,
+            &tokens,
+            tokens.cache_write,
+            false,
+        );
+        self.emit(AgentEvent::Usage {
+            model: Some(model.into()),
+            tokens,
+            cost,
+        })
+        .await?;
         self.emit(AgentEvent::TurnComplete { error: None }).await
     }
 
@@ -1016,7 +1375,10 @@ impl Session {
     }
 
     /// Commands that arrive while a turn runs and no request is pending.
-    fn handle_midturn(&mut self, cmd: std::result::Result<Command, async_channel::RecvError>) -> Step {
+    fn handle_midturn(
+        &mut self,
+        cmd: std::result::Result<Command, async_channel::RecvError>,
+    ) -> Step {
         match cmd {
             Ok(Command::Prompt { text, .. }) => {
                 self.remember(&text);
@@ -1037,19 +1399,34 @@ impl Session {
     /// `get_task_output` answers).
     fn read_task(&self, id: &str) {
         if let Some(output) = self.background.output(id) {
-            let _ = self.events.try_send(AgentEvent::TaskOutput { id: id.to_string(), output });
+            let _ = self.events.try_send(AgentEvent::TaskOutput {
+                id: id.to_string(),
+                output,
+            });
         }
     }
 
     /// Stop a background task: it's off the list at once. A sub-agent's call ends, failed, and
     /// the agent takes a turn of its own to say it was stopped, as Claude Code does.
     fn stop_task(&self, id: &str) {
-        let Some(task) = self.background.take(id) else { return };
+        let Some(task) = self.background.take(id) else {
+            return;
+        };
         let _ = self.events.try_send(self.background.event());
         if task.kind == BackgroundKind::Agent {
             let call = task.call.clone().unwrap_or_else(|| task.id.clone());
-            let _ = self.events.try_send(AgentEvent::Task { id: call.clone(), description: None, activity: None, tool_uses: None, done: Some(false) });
-            let _ = self.events.try_send(AgentEvent::ToolFinished { id: call, output: task.title.clone(), ok: false });
+            let _ = self.events.try_send(AgentEvent::Task {
+                id: call.clone(),
+                description: None,
+                activity: None,
+                tool_uses: None,
+                done: Some(false),
+            });
+            let _ = self.events.try_send(AgentEvent::ToolFinished {
+                id: call,
+                output: task.title.clone(),
+                ok: false,
+            });
             let _ = self.note.try_send(Note::Stopped(task.title));
         }
     }
@@ -1063,11 +1440,20 @@ impl Session {
                     self.think("The watcher has something.").await?;
                     // Real time, whatever the pace: a turn of its own is seen at work, not just done.
                     tokio::time::sleep(Duration::from_millis(250)).await;
-                    self.tool("Read", "tests/parser.rs", "#[test]\nfn rejects_a_truncated_body() { … }", 120).await?;
+                    self.tool(
+                        "Read",
+                        "tests/parser.rs",
+                        "#[test]\nfn rejects_a_truncated_body() { … }",
+                        120,
+                    )
+                    .await?;
                     self.say(&format!("{what} The parser accepts a body that ends early; I'll make it return `ParseError::Truncated`.")).await?;
                 }
                 Note::Stopped(what) => {
-                    self.say(&format!("The sub-agent \"{what}\" was stopped. Ready when you are.")).await?;
+                    self.say(&format!(
+                        "The sub-agent \"{what}\" was stopped. Ready when you are."
+                    ))
+                    .await?;
                 }
                 Note::Scouts => {
                     self.say("Both scouts reported back:\n\n1. **Routes** — 12 handlers in `src/routes.rs`, two of them unauthenticated.\n2. **Errors** — 7 `unwrap()` calls on request input; I'd turn those into `400`s.").await?;
@@ -1076,7 +1462,12 @@ impl Session {
             self.finish().await
         };
         match run.await {
-            Err(Stop::Interrupted) => self.emit(AgentEvent::TurnComplete { error: Some("Interrupted".into()) }).await,
+            Err(Stop::Interrupted) => {
+                self.emit(AgentEvent::TurnComplete {
+                    error: Some("Interrupted".into()),
+                })
+                .await
+            }
             other => other,
         }
     }
@@ -1085,8 +1476,14 @@ impl Session {
     async fn wait_reply(&mut self, request_id: &str) -> Step<Reply> {
         loop {
             match self.commands.recv().await {
-                Ok(Command::Respond { request_id: r, decision }) if r == request_id => return Ok(Reply::Decision(decision)),
-                Ok(Command::Answer { request_id: r, answers }) if r == request_id => return Ok(Reply::Answers(answers)),
+                Ok(Command::Respond {
+                    request_id: r,
+                    decision,
+                }) if r == request_id => return Ok(Reply::Decision(decision)),
+                Ok(Command::Answer {
+                    request_id: r,
+                    answers,
+                }) if r == request_id => return Ok(Reply::Answers(answers)),
                 other => self.handle_midturn(other)?,
             }
         }
@@ -1095,7 +1492,11 @@ impl Session {
     /// A prompt sent mid-turn is folded into the running turn, as Claude Code does.
     async fn acknowledge_steer(&mut self) -> Step {
         for text in std::mem::take(&mut self.steer) {
-            self.say(&format!("Noted — {}. I've taken that into account.", text.trim().trim_end_matches('.'))).await?;
+            self.say(&format!(
+                "Noted — {}. I've taken that into account.",
+                text.trim().trim_end_matches('.')
+            ))
+            .await?;
         }
         Ok(())
     }
@@ -1121,7 +1522,8 @@ impl Session {
             while !text.is_char_boundary(end) {
                 end += 1;
             }
-            self.emit(AgentEvent::TextDelta(text[start..end].into())).await?;
+            self.emit(AgentEvent::TextDelta(text[start..end].into()))
+                .await?;
             self.pause(paced(ms)).await?;
             start = end;
         }
@@ -1138,36 +1540,70 @@ impl Session {
     }
 
     async fn tool_start(&mut self, id: &str, title: &str, detail: &str) -> Step {
-        self.emit(AgentEvent::ToolStarted { id: id.into(), title: title.into(), detail: detail.into() }).await
+        self.emit(AgentEvent::ToolStarted {
+            id: id.into(),
+            title: title.into(),
+            detail: detail.into(),
+        })
+        .await
     }
 
     async fn tool(&mut self, title: &str, detail: &str, output: &str, ms: u64) -> Step {
         let id = self.id("tool");
         self.tool_start(&id, title, detail).await?;
         self.pause(paced(ms)).await?;
-        self.emit(AgentEvent::ToolFinished { id, output: output.into(), ok: true }).await
+        self.emit(AgentEvent::ToolFinished {
+            id,
+            output: output.into(),
+            ok: true,
+        })
+        .await
     }
 
     /// An edit that adds `added` lines and removes `removed`.
-    async fn edit(&mut self, path: &str, output: &str, ms: u64, (added, removed): (u32, u32)) -> Step {
+    async fn edit(
+        &mut self,
+        path: &str,
+        output: &str,
+        ms: u64,
+        (added, removed): (u32, u32),
+    ) -> Step {
         let id = self.id("tool");
         self.tool_start(&id, "Edit", path).await?;
-        self.emit(AgentEvent::ToolLines { id: id.clone(), added, removed }).await?;
+        self.emit(AgentEvent::ToolLines {
+            id: id.clone(),
+            added,
+            removed,
+        })
+        .await?;
         self.pause(paced(ms)).await?;
-        self.emit(AgentEvent::ToolFinished { id, output: output.into(), ok: true }).await
+        self.emit(AgentEvent::ToolFinished {
+            id,
+            output: output.into(),
+            ok: true,
+        })
+        .await
     }
 
     async fn tools(&mut self) -> Step {
-        self.think("I should look around before changing anything.").await?;
+        self.think("I should look around before changing anything.")
+            .await?;
         self.tool("Run command", "ls -la", LS_OUTPUT, 250).await?;
         self.tool("Read", "src/main.rs", MAIN_RS, 180).await?;
         self.tool("Search", "parse_args", "src/main.rs:3:    let cfg = parse_args();\nsrc/cli.rs:12:pub fn parse_args() -> Config {", 150).await?;
         self.acknowledge_steer().await?;
         self.say("The flag parsing lives in `src/cli.rs`; I'll add the `--verbose` flag there and wire it through `src/main.rs`.").await?;
-        self.edit("src/cli.rs", "Applied 1 edit to src/cli.rs", 220, (9, 1)).await?;
-        self.edit("src/main.rs", "Applied 2 edits to src/main.rs", 200, (5, 2)).await?;
-        self.emit(AgentEvent::DiffStat { additions: 14, deletions: 3 }).await?;
-        self.tool("Run command", "cargo test", TEST_OUTPUT, 600).await?;
+        self.edit("src/cli.rs", "Applied 1 edit to src/cli.rs", 220, (9, 1))
+            .await?;
+        self.edit("src/main.rs", "Applied 2 edits to src/main.rs", 200, (5, 2))
+            .await?;
+        self.emit(AgentEvent::DiffStat {
+            additions: 14,
+            deletions: 3,
+        })
+        .await?;
+        self.tool("Run command", "cargo test", TEST_OUTPUT, 600)
+            .await?;
         self.say("Added a `--verbose` flag:\n\n- `src/cli.rs` parses it into `Config::verbose`\n- `src/main.rs` raises the log level when it's set\n\nAll 14 tests pass.").await
     }
 
@@ -1176,32 +1612,64 @@ impl Session {
         let task = after_keyword(text, &["mock:consult", "mock:delegate"])
             .unwrap_or("Review how the app starts and say what you'd change.")
             .to_string();
-        self.say("I'll get a second opinion from another model.").await?;
+        self.say("I'll get a second opinion from another model.")
+            .await?;
         let id = self.id("tool");
         let title = "Second opinion";
         // Named as Claude names MCP tools.
-        self.tool_start(&id, &format!("mcp__{ORCHESTRATE_SERVER}__delegate_task"), title).await?;
+        self.tool_start(
+            &id,
+            &format!("mcp__{ORCHESTRATE_SERVER}__delegate_task"),
+            title,
+        )
+        .await?;
         let params = serde_json::json!({ "title": title, "prompt": task, "agent": format!("direct:{PROVIDER}"), "model": "mock-swift", "effort": "low", "mode": "advise", "wait": wait });
         match self.ipc("delegate_task", params).await? {
             Ok(answer) => {
                 let output = serde_json::to_string_pretty(&answer).unwrap_or_default();
-                self.emit(AgentEvent::ToolFinished { id, output, ok: true }).await?;
+                self.emit(AgentEvent::ToolFinished {
+                    id,
+                    output,
+                    ok: true,
+                })
+                .await?;
                 match answer["result"].as_str() {
-                    Some(r) if wait => self.say(&format!("The second opinion is in: {}", trek_core::orchestrate::preview(r, 160))).await,
-                    _ => self.say("It's on it. I'll pick its answer up when it reports back.").await,
+                    Some(r) if wait => {
+                        self.say(&format!(
+                            "The second opinion is in: {}",
+                            trek_core::orchestrate::preview(r, 160)
+                        ))
+                        .await
+                    }
+                    _ => {
+                        self.say("It's on it. I'll pick its answer up when it reports back.")
+                            .await
+                    }
                 }
             }
             Err(e) => {
-                self.emit(AgentEvent::ToolFinished { id, output: e.clone(), ok: false }).await?;
-                self.say(&format!("I couldn't get a second opinion: {e}")).await
+                self.emit(AgentEvent::ToolFinished {
+                    id,
+                    output: e.clone(),
+                    ok: false,
+                })
+                .await?;
+                self.say(&format!("I couldn't get a second opinion: {e}"))
+                    .await
             }
         }
     }
 
     /// One call to Trek's orchestration tools, as `trek-mcp orchestrate` would make it. The user
     /// can stop the turn while it waits: the call's connection is dropped.
-    async fn ipc(&mut self, method: &str, params: serde_json::Value) -> Step<std::result::Result<serde_json::Value, String>> {
-        let Some(client) = self.orchestrate.clone() else { return Ok(Err("Trek's sub-agent tools aren't in this session.".into())) };
+    async fn ipc(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Step<std::result::Result<serde_json::Value, String>> {
+        let Some(client) = self.orchestrate.clone() else {
+            return Ok(Err("Trek's sub-agent tools aren't in this session.".into()));
+        };
         let (handle_tx, handle_rx) = std::sync::mpsc::channel();
         let method = method.to_string();
         let mut call = tokio::task::spawn_blocking(move || {
@@ -1227,27 +1695,39 @@ impl Session {
     }
 
     /// One call to Trek's orchestration tool `method`, with its row in the transcript.
-    async fn orchestrate_call(&mut self, method: &str, detail: &str, params: serde_json::Value) -> Step<std::result::Result<serde_json::Value, String>> {
+    async fn orchestrate_call(
+        &mut self,
+        method: &str,
+        detail: &str,
+        params: serde_json::Value,
+    ) -> Step<std::result::Result<serde_json::Value, String>> {
         let id = self.id("tool");
-        self.tool_start(&id, &format!("mcp__{ORCHESTRATE_SERVER}__{method}"), detail).await?;
+        self.tool_start(&id, &format!("mcp__{ORCHESTRATE_SERVER}__{method}"), detail)
+            .await?;
         let answer = self.ipc(method, params).await?;
         let (output, ok) = match &answer {
             Ok(v) => (serde_json::to_string_pretty(v).unwrap_or_default(), true),
             Err(e) => (e.clone(), false),
         };
-        self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
+        self.emit(AgentEvent::ToolFinished { id, output, ok })
+            .await?;
         Ok(answer)
     }
 
     /// Say back what it was asked, in its own words, and stop there.
     async fn restate(&mut self, text: &str) -> Step {
         let said = trek_core::restate::as_written(text).trim();
-        let said = if said == trek_core::restate::THREAD { "" } else { said.trim_end_matches(['.', '?', '!']) };
+        let said = if said == trek_core::restate::THREAD {
+            ""
+        } else {
+            said.trim_end_matches(['.', '?', '!'])
+        };
         let ask = match said.chars().next() {
             Some(c) => format!("{}{}", c.to_lowercase(), &said[c.len_utf8()..]),
             None => "look at what we have so far".into(),
         };
-        self.think("Before anything else: say back what I've been asked, and nothing more.").await?;
+        self.think("Before anything else: say back what I've been asked, and nothing more.")
+            .await?;
         self.say(&format!(
             "Here's how I understand it, in my own words:\n\n- **What you want:** you'd like me to {ask}.\n- **Why it matters:** the current behaviour gets in your way, and you want it fixed at the cause rather than patched over.\n- **What I'd leave alone:** anything that isn't part of that.\n\nI haven't changed anything. Tell me if that's right and I'll go ahead."
         ))
@@ -1258,15 +1738,31 @@ impl Session {
     /// a design at once, have the judge score them blind, and synthesise.
     async fn arena(&mut self, text: &str) -> Step {
         let (said, consult) = trek_core::orchestrate::split_consult(text);
-        let Some(consult) = consult else { return self.say("There's no arena in that message.").await };
+        let Some(consult) = consult else {
+            return self.say("There's no arena in that message.").await;
+        };
         let said = trek_core::restate::as_written(said).trim().to_string();
         self.think("Ground the problem before anyone designs: what's there now, and how callers will use it.").await?;
-        self.tool("Read", "src/webhooks.rs", "pub fn deliver(endpoint: &Endpoint, event: Event) -> Result<()> { … }", 120).await?;
-        self.tool("Search", "deliver(", "src/webhooks.rs:41\nsrc/jobs/retry.rs:18\nsrc/api/events.rs:77", 100).await?;
+        self.tool(
+            "Read",
+            "src/webhooks.rs",
+            "pub fn deliver(endpoint: &Endpoint, event: Event) -> Result<()> { … }",
+            120,
+        )
+        .await?;
+        self.tool(
+            "Search",
+            "deliver(",
+            "src/webhooks.rs:41\nsrc/jobs/retry.rs:18\nsrc/api/events.rs:77",
+            100,
+        )
+        .await?;
         let brief = format!(
             "{said}\n\nGround: webhooks go out one event at a time through `deliver` in src/webhooks.rs, called from the API, the retry job and the event fan-out. Endpoints belong to customers; a slow one mustn't hold up the rest. Callers want to know whether an event went, waits, or was dropped."
         );
-        let letters: Vec<char> = (0..consult.consultants.len()).map(|i| (b'A' + i as u8) as char).collect();
+        let letters: Vec<char> = (0..consult.consultants.len())
+            .map(|i| (b'A' + i as u8) as char)
+            .collect();
         self.say(&format!("Here's the ground: `deliver` in `src/webhooks.rs` has three callers, and one slow endpoint can hold up the rest. {} candidates will draft designs on their own.", consult.consultants.len())).await?;
         // As agents whose tool calls run one at a time do it: every candidate starts without
         // waiting, then each design is collected in turn while the rest draft.
@@ -1277,32 +1773,78 @@ impl Session {
             let v = self.orchestrate_call("delegate_task", &title, call).await?;
             match v.as_ref().ok().and_then(|v| v["id"].as_str()) {
                 Some(child) => started.push((*letter, child.to_string())),
-                None => return self.say(&format!("The arena couldn't run: {}", v.err().unwrap_or_default())).await,
+                None => {
+                    return self
+                        .say(&format!(
+                            "The arena couldn't run: {}",
+                            v.err().unwrap_or_default()
+                        ))
+                        .await;
+                }
             }
         }
         let mut packages = vec![];
         for (letter, child) in started {
-            match self.orchestrate_call("task_result", &format!("Design {letter}"), serde_json::json!({ "id": child, "wait": true })).await? {
-                Ok(v) => packages.push(format!("Design {letter}:\n{}", v["result"].as_str().unwrap_or("(no design)"))),
+            match self
+                .orchestrate_call(
+                    "task_result",
+                    &format!("Design {letter}"),
+                    serde_json::json!({ "id": child, "wait": true }),
+                )
+                .await?
+            {
+                Ok(v) => packages.push(format!(
+                    "Design {letter}:\n{}",
+                    v["result"].as_str().unwrap_or("(no design)")
+                )),
                 Err(e) => return self.say(&format!("The arena couldn't run: {e}")).await,
             }
         }
         // The judge sees the designs by letter only.
-        let Some(judge) = consult.judge.clone().or_else(|| consult.consultants.first().cloned()) else { return self.say("The arena has no candidates.").await };
+        let Some(judge) = consult
+            .judge
+            .clone()
+            .or_else(|| consult.consultants.first().cloned())
+        else {
+            return self.say("The arena has no candidates.").await;
+        };
         let call = serde_json::json!({ "title": "Judge the designs", "prompt": format!("mock:judge Score these designs.\n\n{brief}\n\n{}", packages.join("\n\n")), "agent": judge.agent.key(), "model": judge.model, "effort": judge.effort.as_str(), "mode": "advise", "wait": true });
-        let verdict = match self.orchestrate_call("delegate_task", "Judge the designs", call).await? {
+        let verdict = match self
+            .orchestrate_call("delegate_task", "Judge the designs", call)
+            .await?
+        {
             Ok(v) => v["result"].as_str().unwrap_or_default().to_string(),
             Err(e) => return self.say(&format!("The judge couldn't run: {e}")).await,
         };
-        let winner = verdict.lines().find_map(|l| l.strip_prefix("Strongest: ")).unwrap_or("Design A").to_string();
-        let then = if consult.implement { "Implementing against this sketch now." } else { "I haven't changed any files." };
+        let winner = verdict
+            .lines()
+            .find_map(|l| l.strip_prefix("Strongest: "))
+            .unwrap_or("Design A")
+            .to_string();
+        let then = if consult.implement {
+            "Implementing against this sketch now."
+        } else {
+            "I haven't changed any files."
+        };
         self.say(&format!(
             "The judge scored the designs blind; **{winner} won**, and I've folded in the others' retry queue.\n\n```rust\n// Call site\nmatch limiter.admit(&endpoint) {{\n    Admit::Now => deliver(&endpoint, event)?,\n    Admit::After(wait) => queue.retry_in(wait, event),\n}}\n\npub struct Limiter {{ /* per-endpoint buckets */ }}\npub enum Admit {{ Now, After(Duration) }}\nimpl Limiter {{\n    pub fn per_endpoint(rate: u32, per: Duration) -> Self;\n    pub fn admit(&self, endpoint: &Endpoint) -> Admit;\n}}\n```\n\n{then}"
         ))
         .await?;
         if consult.implement {
-            self.edit("src/webhooks/limiter.rs", "Created src/webhooks/limiter.rs", 160, (64, 0)).await?;
-            self.edit("src/webhooks.rs", "Applied 2 edits to src/webhooks.rs", 140, (9, 3)).await?;
+            self.edit(
+                "src/webhooks/limiter.rs",
+                "Created src/webhooks/limiter.rs",
+                160,
+                (64, 0),
+            )
+            .await?;
+            self.edit(
+                "src/webhooks.rs",
+                "Applied 2 edits to src/webhooks.rs",
+                140,
+                (9, 3),
+            )
+            .await?;
         }
         Ok(())
     }
@@ -1310,11 +1852,21 @@ impl Session {
     /// A design package, its approach after the model playing it.
     async fn design(&mut self) -> Step {
         let (name, shape) = match self.model.as_str() {
-            "mock-deep" => ("Leaky bucket with a retry queue", "Queue::push(endpoint, event) -> Ticket"),
-            m if m.starts_with("relay") => ("Sliding window per endpoint", "Window::check(endpoint) -> Result<(), RetryAt>"),
-            _ => ("Token bucket per endpoint", "Limiter::admit(endpoint) -> Admit"),
+            "mock-deep" => (
+                "Leaky bucket with a retry queue",
+                "Queue::push(endpoint, event) -> Ticket",
+            ),
+            m if m.starts_with("relay") => (
+                "Sliding window per endpoint",
+                "Window::check(endpoint) -> Result<(), RetryAt>",
+            ),
+            _ => (
+                "Token bucket per endpoint",
+                "Limiter::admit(endpoint) -> Admit",
+            ),
         };
-        self.think("Sketch the call sites first; the types follow from them.").await?;
+        self.think("Sketch the call sites first; the types follow from them.")
+            .await?;
         self.say(&format!(
             "## {name}\n\n**Call sites**\n\n```rust\nlet admit = limiter.admit(&endpoint);\n```\n\n**Core types and signatures**\n\n```rust\n{shape}\n```\n\n**Rationale:** one decision per event, made where `deliver` is called, so no caller needs to know how the limit is kept. It fails closed: an endpoint it can't place waits rather than floods."
         ))
@@ -1323,16 +1875,33 @@ impl Session {
 
     /// Scores for the designs in `text`, by letter.
     async fn judge(&mut self, text: &str) -> Step {
-        let letters: Vec<char> = text.lines().filter_map(|l| l.strip_prefix("Design ").and_then(|r| r.strip_suffix(':')).and_then(|r| r.chars().next())).collect();
-        let strongest = if letters.len() > 1 { letters[1] } else { letters.first().copied().unwrap_or('A') };
+        let letters: Vec<char> = text
+            .lines()
+            .filter_map(|l| {
+                l.strip_prefix("Design ")
+                    .and_then(|r| r.strip_suffix(':'))
+                    .and_then(|r| r.chars().next())
+            })
+            .collect();
+        let strongest = if letters.len() > 1 {
+            letters[1]
+        } else {
+            letters.first().copied().unwrap_or('A')
+        };
         let rows: Vec<String> = letters
             .iter()
             .map(|l| {
                 let total = if *l == strongest { "4.6" } else { "3.8" };
-                format!("| {l} | {} | {} | 4 | {} | 4 | {total} |", if *l == strongest { 5 } else { 4 }, if *l == strongest { 5 } else { 3 }, if *l == strongest { 5 } else { 4 })
+                format!(
+                    "| {l} | {} | {} | 4 | {} | 4 | {total} |",
+                    if *l == strongest { 5 } else { 4 },
+                    if *l == strongest { 5 } else { 3 },
+                    if *l == strongest { 5 } else { 4 }
+                )
             })
             .collect();
-        self.think("Score each against the rubric, without knowing who wrote it.").await?;
+        self.think("Score each against the rubric, without knowing who wrote it.")
+            .await?;
         self.say(&format!(
             "Strongest: Design {strongest}\n\nIts interface is one call deep and fails closed. The others' retry queue is worth keeping.\n\n| Design | Call sites | Depth | Simplicity | Failure | Fit | Score |\n| --- | --- | --- | --- | --- | --- | --- |\n{}",
             rows.join("\n")
@@ -1348,8 +1917,15 @@ impl Session {
     async fn setup_verification(&mut self) -> Step {
         let dir = self.cwd.join(Self::VERIFY_SKILL);
         let cli = format!("./{}/scripts/app", Self::VERIFY_SKILL);
-        self.think("Learn how the app runs, then build the lever: a CLI first, the notes after.").await?;
-        self.tool("Read", "README.md", "# The app\n\nRun it with `cargo run`.", 120).await?;
+        self.think("Learn how the app runs, then build the lever: a CLI first, the notes after.")
+            .await?;
+        self.tool(
+            "Read",
+            "README.md",
+            "# The app\n\nRun it with `cargo run`.",
+            120,
+        )
+        .await?;
         let files: [(&str, String, bool); 4] = [
             ("SKILL.md", format!("---\nname: verify-app\ndescription: Drive, debug and verify the app. Use it to check any change works before calling it done.\nmetadata:\n  trek: verification\n  cli: {cli}\n---\n\n# Verify the app\n\nRun `{cli} check` before calling a change done. `{cli} --help` lists every command.\n\nThe Feature Map is in references/features/README.md.\n"), false),
             ("scripts/app", "#!/bin/sh\n# The app's verification CLI.\ncase \"$1\" in\n  check)\n    if grep -qs 'todo!()' src/notes.rs; then echo '{\"ok\":false,\"checks\":[\"build\",\"launch\"],\"error\":\"The smoke run failed: loading notes panics (src/notes.rs has a todo!())\"}'; exit 1; fi\n    echo '{\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}' ;;\n  --help|\"\") echo 'app <check|open|screenshot> [--json] [--dry-run]' ;;\n  *) echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"No command $1: see app --help\\\"}\"; exit 2 ;;\nesac\n".to_string(), true),
@@ -1359,8 +1935,13 @@ impl Session {
         for (path, body, exec) in files {
             let id = self.id("tool");
             let full = dir.join(path);
-            self.tool_start(&id, "Write", &full.display().to_string()).await?;
-            let wrote = full.parent().map(|p| std::fs::create_dir_all(p)).transpose().and_then(|_| std::fs::write(&full, &body));
+            self.tool_start(&id, "Write", &full.display().to_string())
+                .await?;
+            let wrote = full
+                .parent()
+                .map(|p| std::fs::create_dir_all(p))
+                .transpose()
+                .and_then(|_| std::fs::write(&full, &body));
             // Windows has no execute bit: nothing to set.
             #[cfg(unix)]
             if exec && wrote.is_ok() {
@@ -1369,16 +1950,26 @@ impl Session {
             }
             #[cfg(not(unix))]
             let _ = exec;
-            self.emit(AgentEvent::ToolLines { id: id.clone(), added: body.lines().count() as u32, removed: 0 }).await?;
+            self.emit(AgentEvent::ToolLines {
+                id: id.clone(),
+                added: body.lines().count() as u32,
+                removed: 0,
+            })
+            .await?;
             let (output, ok) = match wrote {
                 Ok(()) => (format!("Wrote {path}"), true),
                 Err(e) => (format!("Couldn't write {path}: {e}"), false),
             };
-            self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
+            self.emit(AgentEvent::ToolFinished { id, output, ok })
+                .await?;
             self.pause(paced(60)).await?;
         }
         let passed = self.run(&format!("{cli} check --json")).await?;
-        let check = if passed { "`check` passes." } else { "`check` fails for now: see its output above." };
+        let check = if passed {
+            "`check` passes."
+        } else {
+            "`check` fails for now: see its output above."
+        };
         self.say(&format!("The verification skill is in `{}`: a CLI (`{cli}`) with `check`, `open` and `screenshot`, and a Feature Map. {check}", Self::VERIFY_SKILL)).await
     }
 
@@ -1386,21 +1977,50 @@ impl Session {
     async fn maintain_verification(&mut self) -> Step {
         let skill = self.cwd.join(Self::VERIFY_SKILL);
         let map = skill.join("references/features/README.md");
-        let read = std::fs::read_to_string(skill.join("SKILL.md")).unwrap_or_else(|e| format!("Couldn't read it: {e}"));
-        self.tool("Read", &skill.join("SKILL.md").display().to_string(), &read, 100).await?;
-        let Ok(before) = std::fs::read_to_string(&map) else { return self.say("There's no verification skill here to maintain yet: it has no Feature Map.").await };
+        let read = std::fs::read_to_string(skill.join("SKILL.md"))
+            .unwrap_or_else(|e| format!("Couldn't read it: {e}"));
+        self.tool(
+            "Read",
+            &skill.join("SKILL.md").display().to_string(),
+            &read,
+            100,
+        )
+        .await?;
+        let Ok(before) = std::fs::read_to_string(&map) else {
+            return self
+                .say("There's no verification skill here to maintain yet: it has no Feature Map.")
+                .await;
+        };
         let cli = format!("./{}/scripts/app", Self::VERIFY_SKILL);
         let passed = self.run(&format!("{cli} check --json")).await?;
         let line = "- [Settings](settings.md): the app's preferences.\n";
         if !before.contains(line) {
             let id = self.id("tool");
-            self.tool_start(&id, "Edit", &map.display().to_string()).await?;
+            self.tool_start(&id, "Edit", &map.display().to_string())
+                .await?;
             let _ = std::fs::write(&map, format!("{before}{line}"));
-            let _ = std::fs::write(map.with_file_name("settings.md"), "# Settings\n\nThe app's preferences. Reach them with ⌘, or `app open settings`.\n");
-            self.emit(AgentEvent::ToolLines { id: id.clone(), added: 1, removed: 0 }).await?;
-            self.emit(AgentEvent::ToolFinished { id, output: "Applied 1 edit".into(), ok: true }).await?;
+            let _ = std::fs::write(
+                map.with_file_name("settings.md"),
+                "# Settings\n\nThe app's preferences. Reach them with ⌘, or `app open settings`.\n",
+            );
+            self.emit(AgentEvent::ToolLines {
+                id: id.clone(),
+                added: 1,
+                removed: 0,
+            })
+            .await?;
+            self.emit(AgentEvent::ToolFinished {
+                id,
+                output: "Applied 1 edit".into(),
+                ok: true,
+            })
+            .await?;
         }
-        let check = if passed { "`check` passes" } else { "`check` fails on the app as it is (see above)" };
+        let check = if passed {
+            "`check` passes"
+        } else {
+            "`check` fails on the app as it is (see above)"
+        };
         self.say(&format!("The verification skill is up to date: {check}, and the Feature Map has the Settings screen now.")).await
     }
 
@@ -1409,24 +2029,47 @@ impl Session {
     async fn verify(&mut self, broken: bool) -> Step {
         // The verification note names its CLI in "(`…`)"; the visualization and artifact notes
         // every session carries come first and are no place to look.
-        let notes = self.instructions.as_deref().map(|i| i.replace(trek_core::visualization::AGENT_INSTRUCTIONS, "").replace(trek_core::artifact::AGENT_INSTRUCTIONS, ""));
-        let cli = notes.as_deref().and_then(|i| i.split_once("(`")).and_then(|(_, rest)| rest.split_once('`')).map(|(cli, _)| cli.to_string());
-        let Some(cli) = cli else { return self.say("This project has no verification skill yet, so there's nothing to check the change with.").await };
-        let body = if broken { "pub fn load() -> Vec<String> {\n    todo!()\n}\n" } else { "pub fn load() -> Vec<String> {\n    Vec::new()\n}\n" };
+        let notes = self.instructions.as_deref().map(|i| {
+            i.replace(trek_core::visualization::AGENT_INSTRUCTIONS, "")
+                .replace(trek_core::artifact::AGENT_INSTRUCTIONS, "")
+        });
+        let cli = notes
+            .as_deref()
+            .and_then(|i| i.split_once("(`"))
+            .and_then(|(_, rest)| rest.split_once('`'))
+            .map(|(cli, _)| cli.to_string());
+        let Some(cli) = cli else {
+            return self.say("This project has no verification skill yet, so there's nothing to check the change with.").await;
+        };
+        let body = if broken {
+            "pub fn load() -> Vec<String> {\n    todo!()\n}\n"
+        } else {
+            "pub fn load() -> Vec<String> {\n    Vec::new()\n}\n"
+        };
         let path = self.cwd.join("src/notes.rs");
         let id = self.id("tool");
         self.tool_start(&id, "Edit", "src/notes.rs").await?;
-        let wrote = std::fs::create_dir_all(self.cwd.join("src")).and_then(|_| std::fs::write(&path, body));
-        self.emit(AgentEvent::ToolLines { id: id.clone(), added: 3, removed: 0 }).await?;
+        let wrote =
+            std::fs::create_dir_all(self.cwd.join("src")).and_then(|_| std::fs::write(&path, body));
+        self.emit(AgentEvent::ToolLines {
+            id: id.clone(),
+            added: 3,
+            removed: 0,
+        })
+        .await?;
         let (output, ok) = match wrote {
             Ok(()) => ("Applied 1 edit to src/notes.rs".to_string(), true),
             Err(e) => (format!("Couldn't write src/notes.rs: {e}"), false),
         };
-        self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
+        self.emit(AgentEvent::ToolFinished { id, output, ok })
+            .await?;
         if self.run(&format!("{cli} check --json")).await? {
             self.say(&format!("Changed `src/notes.rs` and verified it with `{cli} check`: build, launch and the smoke run pass.")).await
         } else {
-            self.say(&format!("Changed `src/notes.rs`, but `{cli} check` fails: it's not done until that passes.")).await
+            self.say(&format!(
+                "Changed `src/notes.rs`, but `{cli} check` fails: it's not done until that passes."
+            ))
+            .await
         }
     }
 
@@ -1439,11 +2082,21 @@ impl Session {
         sh.arg("-c").arg(command).current_dir(&self.cwd);
         let out = crate::output_group(&mut sh, None, std::time::Duration::from_secs(600)).await;
         let (output, ok) = match out {
-            Ok(o) => (format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)).trim_end().to_string(), o.status.success()),
+            Ok(o) => (
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                )
+                .trim_end()
+                .to_string(),
+                o.status.success(),
+            ),
             Err(e) => (format!("Couldn't run it: {e}"), false),
         };
         self.pause(paced(100)).await?;
-        self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
+        self.emit(AgentEvent::ToolFinished { id, output, ok })
+            .await?;
         Ok(ok)
     }
 
@@ -1466,17 +2119,31 @@ impl Session {
             Err(output) => return self.edit_failed(id, output).await,
         };
         let n = before.lines().filter(|l| l.starts_with("- ")).count() + 1;
-        let text = if before.is_empty() { format!("# Notes\n\n- Note {n}\n") } else { format!("{before}- Note {n}\n") };
+        let text = if before.is_empty() {
+            format!("# Notes\n\n- Note {n}\n")
+        } else {
+            format!("{before}- Note {n}\n")
+        };
         let (output, ok) = match std::fs::write(&path, &text) {
             Ok(()) => (format!("Wrote note {n} to {file}"), true),
             Err(e) => (format!("Couldn't write {file}: {e}"), false),
         };
         let added = (text.lines().count() - before.lines().count()) as i64;
         if ok {
-            self.emit(AgentEvent::ToolLines { id: id.clone(), added: added as u32, removed: 0 }).await?;
+            self.emit(AgentEvent::ToolLines {
+                id: id.clone(),
+                added: added as u32,
+                removed: 0,
+            })
+            .await?;
         }
-        self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
-        self.emit(AgentEvent::DiffStat { additions: added, deletions: 0 }).await?;
+        self.emit(AgentEvent::ToolFinished { id, output, ok })
+            .await?;
+        self.emit(AgentEvent::DiffStat {
+            additions: added,
+            deletions: 0,
+        })
+        .await?;
         self.say(&format!("Added note {n} to `{file}`.")).await
     }
 
@@ -1519,16 +2186,31 @@ impl Session {
         };
         let n = (b + 1 - a) as u32;
         if ok {
-            self.emit(AgentEvent::ToolLines { id: id.clone(), added: n, removed: n }).await?;
+            self.emit(AgentEvent::ToolLines {
+                id: id.clone(),
+                added: n,
+                removed: n,
+            })
+            .await?;
         }
-        self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
-        let which = if a == b { format!("line {a}") } else { format!("lines {a}–{b}") };
+        self.emit(AgentEvent::ToolFinished { id, output, ok })
+            .await?;
+        let which = if a == b {
+            format!("line {a}")
+        } else {
+            format!("lines {a}–{b}")
+        };
         self.say(&format!("Edited {which} of `{path}`.")).await
     }
 
     /// An edit that didn't happen: the tool fails with `output`, and the turn says so.
     async fn edit_failed(&mut self, id: String, output: String) -> Step {
-        self.emit(AgentEvent::ToolFinished { id, output: output.clone(), ok: false }).await?;
+        self.emit(AgentEvent::ToolFinished {
+            id,
+            output: output.clone(),
+            ok: false,
+        })
+        .await?;
         self.say(&format!("I left it alone: {output}.")).await
     }
 
@@ -1536,34 +2218,76 @@ impl Session {
         let after = after.unwrap_or_else(|| paced(6_000));
         self.say("I'll send two scouts ahead: one maps the HTTP routes, the other audits error handling.").await?;
         let scouts = [
-            ("Map the HTTP routes", "Reading src/routes.rs", ("Read", "src/routes.rs")),
-            ("Audit error handling", "Searching for unwrap()", ("Search", "unwrap()")),
+            (
+                "Map the HTTP routes",
+                "Reading src/routes.rs",
+                ("Read", "src/routes.rs"),
+            ),
+            (
+                "Audit error handling",
+                "Searching for unwrap()",
+                ("Search", "unwrap()"),
+            ),
         ];
         let mut ids = vec![];
         for (description, ..) in scouts {
             let id = self.id("agent");
             self.tool_start(&id, "Subagent", description).await?;
-            self.emit(AgentEvent::Task { id: id.clone(), description: Some(description.into()), activity: None, tool_uses: None, done: None }).await?;
-            self.background.add(BackgroundTask { id: id.clone(), kind: BackgroundKind::Agent, title: description.into(), call: Some(id.clone()), readable: false, stoppable: true });
+            self.emit(AgentEvent::Task {
+                id: id.clone(),
+                description: Some(description.into()),
+                activity: None,
+                tool_uses: None,
+                done: None,
+            })
+            .await?;
+            self.background.add(BackgroundTask {
+                id: id.clone(),
+                kind: BackgroundKind::Agent,
+                title: description.into(),
+                call: Some(id.clone()),
+                readable: false,
+                stoppable: true,
+            });
             ids.push(id);
         }
         self.emit(self.background.event()).await?;
         for id in &ids {
-            self.emit(AgentEvent::ToolFinished { id: id.clone(), output: "Async agent launched successfully.".into(), ok: true }).await?;
+            self.emit(AgentEvent::ToolFinished {
+                id: id.clone(),
+                output: "Async agent launched successfully.".into(),
+                ok: true,
+            })
+            .await?;
         }
-        self.say("Both scouts are out. I'll pull their findings together when they report back.").await?;
+        self.say("Both scouts are out. I'll pull their findings together when they report back.")
+            .await?;
         self.finish().await?;
         // The turn is over; the scouts work on, and the agent takes a turn of its own once they're
         // back (none if they were all stopped). Meanwhile the session takes messages as usual.
-        let (jobs, events, note) = (self.background.clone(), self.events.clone(), self.note.clone());
+        let (jobs, events, note) = (
+            self.background.clone(),
+            self.events.clone(),
+            self.note.clone(),
+        );
         tokio::spawn(async move {
             let send = |ev: AgentEvent| events.try_send(ev).is_ok();
             for (i, id) in ids.iter().enumerate() {
                 tokio::time::sleep(after / 3).await;
                 let (_, activity, (title, detail)) = scouts[i];
                 if jobs.running(id) {
-                    send(AgentEvent::TaskStep { task: id.clone(), title: title.into(), detail: detail.into() });
-                    send(AgentEvent::Task { id: id.clone(), description: None, activity: Some(activity.into()), tool_uses: Some(2 + i as u64 * 3), done: None });
+                    send(AgentEvent::TaskStep {
+                        task: id.clone(),
+                        title: title.into(),
+                        detail: detail.into(),
+                    });
+                    send(AgentEvent::Task {
+                        id: id.clone(),
+                        description: None,
+                        activity: Some(activity.into()),
+                        tool_uses: Some(2 + i as u64 * 3),
+                        done: None,
+                    });
                 }
             }
             let mut back = 0;
@@ -1571,11 +2295,21 @@ impl Session {
                 tokio::time::sleep(after / 3).await;
                 // Stopped on request: it's off the list already, and says nothing more.
                 let done = jobs.remove(&id);
-                send(AgentEvent::Task { id: id.clone(), description: None, activity: None, tool_uses: None, done: Some(done) });
+                send(AgentEvent::Task {
+                    id: id.clone(),
+                    description: None,
+                    activity: None,
+                    tool_uses: None,
+                    done: Some(done),
+                });
                 if done {
                     back += 1;
                     send(jobs.event());
-                    send(AgentEvent::ToolFinished { id, output: "Found what it was sent for.".into(), ok: true });
+                    send(AgentEvent::ToolFinished {
+                        id,
+                        output: "Found what it was sent for.".into(),
+                        ok: true,
+                    });
                 }
             }
             if back > 0 {
@@ -1588,44 +2322,107 @@ impl Session {
     /// `mock:task`: a sub-agent of its own (Claude's `Task`, in the foreground) that the turn
     /// waits on while it works, reporting its steps as it goes.
     async fn task(&mut self, total: Duration) -> Step {
-        self.say("I'll have a sub-agent survey the tests while I wait for it.").await?;
+        self.say("I'll have a sub-agent survey the tests while I wait for it.")
+            .await?;
         let id = self.id("agent");
         let description = "Survey the test suite";
         self.tool_start(&id, "Subagent", description).await?;
-        self.emit(AgentEvent::Task { id: id.clone(), description: Some(description.into()), activity: None, tool_uses: None, done: None }).await?;
-        let steps = [("Read", "tests/routes.rs", "Reading tests/routes.rs"), ("Search", "#[test]", "Searching for #[test]"), ("Run command", "cargo test --no-run", "Running cargo test --no-run")];
+        self.emit(AgentEvent::Task {
+            id: id.clone(),
+            description: Some(description.into()),
+            activity: None,
+            tool_uses: None,
+            done: None,
+        })
+        .await?;
+        let steps = [
+            ("Read", "tests/routes.rs", "Reading tests/routes.rs"),
+            ("Search", "#[test]", "Searching for #[test]"),
+            (
+                "Run command",
+                "cargo test --no-run",
+                "Running cargo test --no-run",
+            ),
+        ];
         for (i, (title, detail, activity)) in steps.into_iter().enumerate() {
             self.pause(total / steps.len() as u32).await?;
-            self.emit(AgentEvent::TaskStep { task: id.clone(), title: title.into(), detail: detail.into() }).await?;
-            self.emit(AgentEvent::Task { id: id.clone(), description: None, activity: Some(activity.into()), tool_uses: Some(i as u64 + 1), done: None }).await?;
+            self.emit(AgentEvent::TaskStep {
+                task: id.clone(),
+                title: title.into(),
+                detail: detail.into(),
+            })
+            .await?;
+            self.emit(AgentEvent::Task {
+                id: id.clone(),
+                description: None,
+                activity: Some(activity.into()),
+                tool_uses: Some(i as u64 + 1),
+                done: None,
+            })
+            .await?;
         }
-        self.emit(AgentEvent::Task { id: id.clone(), description: None, activity: None, tool_uses: None, done: Some(true) }).await?;
-        self.emit(AgentEvent::ToolFinished { id, output: "212 tests across 18 files; 3 are ignored.".into(), ok: true }).await?;
-        self.say("The sub-agent counted 212 tests across 18 files, 3 of them ignored.").await
+        self.emit(AgentEvent::Task {
+            id: id.clone(),
+            description: None,
+            activity: None,
+            tool_uses: None,
+            done: Some(true),
+        })
+        .await?;
+        self.emit(AgentEvent::ToolFinished {
+            id,
+            output: "212 tests across 18 files; 3 are ignored.".into(),
+            ok: true,
+        })
+        .await?;
+        self.say("The sub-agent counted 212 tests across 18 files, 3 of them ignored.")
+            .await
     }
 
     /// `mock:pair`: two sub-agents on the same task, through Trek; the turn ends while they work.
     async fn pair(&mut self, text: &str) -> Step {
-        let task = after_keyword(text, &["mock:pair"]).unwrap_or("Review how the app starts.").to_string();
+        let task = after_keyword(text, &["mock:pair"])
+            .unwrap_or("Review how the app starts.")
+            .to_string();
         self.say("I'll ask two models at once.").await?;
         for title in ["First opinion", "Second opinion"] {
             let id = self.id("tool");
-            self.tool_start(&id, &format!("mcp__{ORCHESTRATE_SERVER}__delegate_task"), title).await?;
+            self.tool_start(
+                &id,
+                &format!("mcp__{ORCHESTRATE_SERVER}__delegate_task"),
+                title,
+            )
+            .await?;
             let params = serde_json::json!({ "title": title, "prompt": task, "agent": format!("direct:{PROVIDER}"), "model": "mock-swift", "effort": "low", "mode": "advise" });
             let (output, ok) = match self.ipc("delegate_task", params).await? {
-                Ok(answer) => (serde_json::to_string_pretty(&answer).unwrap_or_default(), true),
+                Ok(answer) => (
+                    serde_json::to_string_pretty(&answer).unwrap_or_default(),
+                    true,
+                ),
                 Err(e) => (e, false),
             };
-            self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
+            self.emit(AgentEvent::ToolFinished { id, output, ok })
+                .await?;
         }
-        self.say("Both are on it. I'll compare what they say when they report back.").await
+        self.say("Both are on it. I'll compare what they say when they report back.")
+            .await
     }
 
     /// `mock:start-thread`: a thread of the user's own for whatever follows the keyword, started
     /// through Trek; with `wait`, its answer read back once it's done.
     async fn start_thread(&mut self, text: &str, worktree: bool, wait: bool) -> Step {
-        let task = after_keyword(text, &["mock:start-thread-wait", "mock:start-worktree-thread", "mock:start-thread"]).unwrap_or("Find the slowest tests and say why they're slow.").to_string();
-        self.say("That's separate work: I'll start a thread of its own for it.").await?;
+        let task = after_keyword(
+            text,
+            &[
+                "mock:start-thread-wait",
+                "mock:start-worktree-thread",
+                "mock:start-thread",
+            ],
+        )
+        .unwrap_or("Find the slowest tests and say why they're slow.")
+        .to_string();
+        self.say("That's separate work: I'll start a thread of its own for it.")
+            .await?;
         let title = "Speed up the slow tests";
         let params = serde_json::json!({ "title": title, "prompt": task, "agent": format!("direct:{PROVIDER}"), "model": "mock-swift", "worktree": worktree });
         let started = match self.orchestrate_call("start_thread", title, params).await? {
@@ -1634,12 +2431,28 @@ impl Session {
         };
         let id = started["id"].as_str().unwrap_or_default().to_string();
         if !wait {
-            return self.say(&format!("Started “{title}”: it's in your sidebar, and I'll keep an eye on it.")).await;
+            return self
+                .say(&format!(
+                    "Started “{title}”: it's in your sidebar, and I'll keep an eye on it."
+                ))
+                .await;
         }
-        match self.orchestrate_call("read_thread", title, serde_json::json!({ "id": id, "wait": true })).await? {
+        match self
+            .orchestrate_call(
+                "read_thread",
+                title,
+                serde_json::json!({ "id": id, "wait": true }),
+            )
+            .await?
+        {
             Ok(v) => {
                 let answer = v["answer"].as_str().unwrap_or("(nothing yet)");
-                self.say(&format!("The thread is {}: {}", v["status"].as_str().unwrap_or("?"), trek_core::orchestrate::preview(answer, 160))).await
+                self.say(&format!(
+                    "The thread is {}: {}",
+                    v["status"].as_str().unwrap_or("?"),
+                    trek_core::orchestrate::preview(answer, 160)
+                ))
+                .await
             }
             Err(e) => self.say(&format!("I couldn't read the thread: {e}")).await,
         }
@@ -1648,14 +2461,23 @@ impl Session {
     /// `mock:handoff`: the work goes to a fresh thread, with a brief whose next step is whatever
     /// follows the keyword.
     async fn handoff(&mut self, text: &str) -> Step {
-        let next = after_keyword(text, &["mock:handoff"]).unwrap_or("Run the parser's tests and fix what fails.").to_string();
-        self.say("My context is nearly full, so I'll hand this over to a fresh thread.").await?;
+        let next = after_keyword(text, &["mock:handoff"])
+            .unwrap_or("Run the parser's tests and fix what fails.")
+            .to_string();
+        self.say("My context is nearly full, so I'll hand this over to a fresh thread.")
+            .await?;
         let brief = format!(
             "Goal: refactor the request parser in src/parser.rs.\nDone: split tokenising from parsing; the existing tests pass.\nDecisions: keep the public API as it is.\nFiles: src/parser.rs, src/lexer.rs.\nNext: {next}"
         );
         let params = serde_json::json!({ "brief": brief, "title": "Finish the parser refactor" });
-        match self.orchestrate_call("handoff", "Finish the parser refactor", params).await? {
-            Ok(_) => self.say("Handed off: the work goes on in the new thread.").await,
+        match self
+            .orchestrate_call("handoff", "Finish the parser refactor", params)
+            .await?
+        {
+            Ok(_) => {
+                self.say("Handed off: the work goes on in the new thread.")
+                    .await
+            }
             Err(e) => self.say(&format!("I couldn't hand off: {e}")).await,
         }
     }
@@ -1664,13 +2486,27 @@ impl Session {
     /// and a report to Trek (`trek_ipc::COMPUTER_ACTIVITY`) as `trek-mcp computer` sends in the
     /// background. Nothing is clicked or typed for real.
     async fn background_use(&mut self, text: &str) -> Step {
-        let args: Vec<&str> = after_keyword(text, &["mock:background"]).unwrap_or_default().split_whitespace().collect();
+        let args: Vec<&str> = after_keyword(text, &["mock:background"])
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect();
         let Some(id) = args.first().and_then(|a| a.parse::<i64>().ok()) else {
-            return self.say("Which window? `mock:background <window id> [WxH] [app]`.").await;
+            return self
+                .say("Which window? `mock:background <window id> [WxH] [app]`.")
+                .await;
         };
-        let (w, h) = args.get(1).and_then(|s| s.split_once('x')).and_then(|(w, h)| Some((w.parse::<f64>().ok()?, h.parse::<f64>().ok()?))).unwrap_or((800., 600.));
-        let app = args.get(2..).map(|a| a.join(" ")).filter(|a| !a.is_empty()).unwrap_or_else(|| "Safari".into());
-        self.think("I'll check the page in its own window, behind the user's.").await?;
+        let (w, h) = args
+            .get(1)
+            .and_then(|s| s.split_once('x'))
+            .and_then(|(w, h)| Some((w.parse::<f64>().ok()?, h.parse::<f64>().ok()?)))
+            .unwrap_or((800., 600.));
+        let app = args
+            .get(2..)
+            .map(|a| a.join(" "))
+            .filter(|a| !a.is_empty())
+            .unwrap_or_else(|| "Safari".into());
+        self.think("I'll check the page in its own window, behind the user's.")
+            .await?;
         let window = serde_json::json!({"id": id, "pid": 0, "app": app, "title": "", "x": 0.0, "y": 0.0, "width": w, "height": h});
         let at = |x: f64, y: f64| Some(serde_json::json!({"x": w * x, "y": h * y}));
         let steps = [
@@ -1683,14 +2519,21 @@ impl Session {
         ];
         for (tool, detail, point) in steps {
             let call = self.id("tool");
-            self.tool_start(&call, &format!("mcp__trek-computer__{tool}"), detail).await?;
+            self.tool_start(&call, &format!("mcp__trek-computer__{tool}"), detail)
+                .await?;
             let action = if tool == "type_text" { "type" } else { tool };
             let report = serde_json::json!({"action": action, "detail": detail, "window": window, "point": point, "from": null});
             let told = self.ipc(trek_ipc::COMPUTER_ACTIVITY, report).await?;
-            self.emit(AgentEvent::ToolFinished { id: call, output: format!("{detail} in {app}'s window, in the background."), ok: told.is_ok() }).await?;
+            self.emit(AgentEvent::ToolFinished {
+                id: call,
+                output: format!("{detail} in {app}'s window, in the background."),
+                ok: told.is_ok(),
+            })
+            .await?;
             self.pause(Duration::from_millis(1500)).await?;
         }
-        self.say(&format!("Done: I worked in {app}'s window behind yours.")).await
+        self.say(&format!("Done: I worked in {app}'s window behind yours."))
+            .await
     }
 
     /// `mock:video`: a test clip (made once, with ffmpeg, in Trek's data folder) watched through the
@@ -1700,16 +2543,26 @@ impl Session {
         let Some(ffmpeg) = trek_core::detect::which("ffmpeg") else {
             return self.say("`mock:video` makes its clip with ffmpeg, which isn't installed (`brew install ffmpeg`).").await;
         };
-        let clip = trek_core::paths::data_dir().join("mock-video").join("clip.mp4");
+        let clip = trek_core::paths::data_dir()
+            .join("mock-video")
+            .join("clip.mp4");
         if !clip.is_file() {
             let made = make_clip(&ffmpeg, &clip).await;
             if let Err(e) = made {
                 return self.say(&format!("Couldn't make the test clip: {e}")).await;
             }
         }
-        self.think("I can't see video myself, so I'll have Trek's watcher take frames and a transcript.").await?;
+        self.think(
+            "I can't see video myself, so I'll have Trek's watcher take frames and a transcript.",
+        )
+        .await?;
         let id = self.id("tool");
-        self.tool_start(&id, "mcp__trek-video__watch_video", &clip.display().to_string()).await?;
+        self.tool_start(
+            &id,
+            "mcp__trek-video__watch_video",
+            &clip.display().to_string(),
+        )
+        .await?;
         let (output, ok) = match &self.video {
             Some(server) => match call_watch_video(server, &clip).await {
                 Ok(text) => (text, true),
@@ -1717,11 +2570,18 @@ impl Session {
             },
             None => ("Trek gave this session no video watcher (Settings › Tools › Video watcher is off).".to_string(), false),
         };
-        self.emit(AgentEvent::ToolFinished { id, output, ok }).await?;
+        self.emit(AgentEvent::ToolFinished { id, output, ok })
+            .await?;
         let answer = if ok {
-            format!("I watched the clip: a test pattern with a running counter and a steady tone, six seconds long.\n\n[The test clip]({})", clip.display())
+            format!(
+                "I watched the clip: a test pattern with a running counter and a steady tone, six seconds long.\n\n[The test clip]({})",
+                clip.display()
+            )
         } else {
-            format!("I couldn't watch it. The clip is here:\n\n[The test clip]({})", clip.display())
+            format!(
+                "I couldn't watch it. The clip is here:\n\n[The test clip]({})",
+                clip.display()
+            )
         };
         self.say(&answer).await
     }
@@ -1731,21 +2591,49 @@ impl Session {
     async fn server(&mut self, until: Option<Duration>) -> Step {
         let id = self.id("shell");
         self.tool_start(&id, "Run command", "npm run dev").await?;
-        let log = self.background.add_logged(BackgroundTask { id: id.clone(), kind: BackgroundKind::Shell, title: "npm run dev".into(), call: Some(id.clone()), readable: true, stoppable: true });
-        for line in ["> trail-app@0.4.0 dev", "> vite", "", "  VITE v5.4.2  ready in 312 ms", "", "  ➜  Local:   http://localhost:5173/"] {
+        let log = self.background.add_logged(BackgroundTask {
+            id: id.clone(),
+            kind: BackgroundKind::Shell,
+            title: "npm run dev".into(),
+            call: Some(id.clone()),
+            readable: true,
+            stoppable: true,
+        });
+        for line in [
+            "> trail-app@0.4.0 dev",
+            "> vite",
+            "",
+            "  VITE v5.4.2  ready in 312 ms",
+            "",
+            "  ➜  Local:   http://localhost:5173/",
+        ] {
             self.background.print(&id, line);
         }
         self.emit(self.background.event()).await?;
-        let output = format!("Command running in background with ID: {id}. Output is being written to: {}.", log.display());
-        self.emit(AgentEvent::ToolFinished { id: id.clone(), output, ok: true }).await?;
+        let output = format!(
+            "Command running in background with ID: {id}. Output is being written to: {}.",
+            log.display()
+        );
+        self.emit(AgentEvent::ToolFinished {
+            id: id.clone(),
+            output,
+            ok: true,
+        })
+        .await?;
         let (jobs, events) = (self.background.clone(), self.events.clone());
         tokio::spawn(async move {
             let started = tokio::time::Instant::now();
-            let lines = ["[vite] page reload src/App.tsx", "[vite] hmr update /src/routes/Home.tsx", "GET / 200 in 14ms", "[vite] page reload src/styles.css"];
+            let lines = [
+                "[vite] page reload src/App.tsx",
+                "[vite] hmr update /src/routes/Home.tsx",
+                "GET / 200 in 14ms",
+                "[vite] page reload src/styles.css",
+            ];
             let mut n = 0;
             while jobs.running(&id) && until.is_none_or(|u| started.elapsed() < u) {
                 // Real time, whatever the pace: a server prints when it prints.
-                tokio::time::sleep(Duration::from_millis(400).min(until.unwrap_or(Duration::MAX))).await;
+                tokio::time::sleep(Duration::from_millis(400).min(until.unwrap_or(Duration::MAX)))
+                    .await;
                 if n % 3 == 2 {
                     jobs.print(&id, lines[(n / 3) % lines.len()]);
                 }
@@ -1763,37 +2651,69 @@ impl Session {
     /// the agent takes a turn of its own about it.
     async fn watch(&mut self, after: Duration) -> Step {
         let id = self.id("watch");
-        self.tool_start(&id, "Monitor", "cargo watch -x test").await?;
-        self.background.add(BackgroundTask { id: id.clone(), kind: BackgroundKind::Monitor, title: "cargo watch -x test".into(), call: Some(id.clone()), readable: true, stoppable: true });
+        self.tool_start(&id, "Monitor", "cargo watch -x test")
+            .await?;
+        self.background.add(BackgroundTask {
+            id: id.clone(),
+            kind: BackgroundKind::Monitor,
+            title: "cargo watch -x test".into(),
+            call: Some(id.clone()),
+            readable: true,
+            stoppable: true,
+        });
         self.background.print(&id, "[Running 'cargo test']");
-        self.background.print(&id, "test result: ok. 14 passed; 0 failed");
+        self.background
+            .print(&id, "test result: ok. 14 passed; 0 failed");
         self.emit(self.background.event()).await?;
-        self.emit(AgentEvent::ToolFinished { id: id.clone(), output: format!("Monitor started (task {id})."), ok: true }).await?;
-        let (jobs, events, note) = (self.background.clone(), self.events.clone(), self.note.clone());
+        self.emit(AgentEvent::ToolFinished {
+            id: id.clone(),
+            output: format!("Monitor started (task {id})."),
+            ok: true,
+        })
+        .await?;
+        let (jobs, events, note) = (
+            self.background.clone(),
+            self.events.clone(),
+            self.note.clone(),
+        );
         tokio::spawn(async move {
             // A watcher stopped (or whose session ended) catches nothing more.
             let started = tokio::time::Instant::now();
             while jobs.running(&id) && started.elapsed() < after {
-                tokio::time::sleep((after - started.elapsed()).min(Duration::from_millis(200))).await;
+                tokio::time::sleep((after - started.elapsed()).min(Duration::from_millis(200)))
+                    .await;
             }
             jobs.print(&id, "test parser::rejects_a_truncated_body ... FAILED");
             if jobs.remove(&id) {
                 let _ = events.send(jobs.event()).await;
-                let _ = note.send(Note::Watcher("The test watcher caught a failure: `parser::rejects_a_truncated_body`.".into())).await;
+                let _ = note
+                    .send(Note::Watcher(
+                        "The test watcher caught a failure: `parser::rejects_a_truncated_body`."
+                            .into(),
+                    ))
+                    .await;
             }
         });
-        self.say("The test watcher is running in the background; I'll pick up anything it catches.").await
+        self.say("The test watcher is running in the background; I'll pick up anything it catches.")
+            .await
     }
 
     async fn permission(&mut self) -> Step {
-        self.say("The schema change needs the migration script to run.").await?;
+        self.say("The schema change needs the migration script to run.")
+            .await?;
         let tool = self.id("tool");
         let command = "./scripts/migrate.sh --apply";
         self.tool_start(&tool, "Run command", command).await?;
         let ask = !self.commands_allowed && self.hand_holding != HandHolding::FullAccess;
         let decision = if ask {
             let request_id = self.id("permission");
-            self.emit(AgentEvent::PermissionRequest { request_id: request_id.clone(), title: "Run command".into(), detail: command.into(), prompt: None }).await?;
+            self.emit(AgentEvent::PermissionRequest {
+                request_id: request_id.clone(),
+                title: "Run command".into(),
+                detail: command.into(),
+                prompt: None,
+            })
+            .await?;
             match self.wait_reply(&request_id).await? {
                 Reply::Decision(d) => d,
                 Reply::Answers(_) => Decision::Allow,
@@ -1805,12 +2725,20 @@ impl Session {
             self.commands_allowed = true;
         }
         if decision == Decision::Deny {
-            self.emit(AgentEvent::ToolFinished { id: tool, output: "The user declined this action.".into(), ok: false }).await?;
+            self.emit(AgentEvent::ToolFinished {
+                id: tool,
+                output: "The user declined this action.".into(),
+                ok: false,
+            })
+            .await?;
             return self.say("Okay, I won't run it. The migration is in `scripts/migrate.sh` if you want to apply it yourself.").await;
         }
         self.pause(paced(500)).await?;
         self.emit(AgentEvent::ToolFinished { id: tool, output: "Applying 3 migrations…\n✓ 0007_add_users_email\n✓ 0008_index_sessions\n✓ 0009_drop_legacy_tokens".into(), ok: true }).await?;
-        self.say("Migrations applied: the `users` table has an `email` column and sessions are indexed.").await
+        self.say(
+            "Migrations applied: the `users` table has an `email` column and sessions are indexed.",
+        )
+        .await
     }
 
     async fn questions(&mut self) -> Step {
@@ -1821,8 +2749,14 @@ impl Session {
                 question: "Which database should the service use?".into(),
                 header: "Database".into(),
                 options: vec![
-                    ("SQLite".into(), "One file next to the binary, zero setup.".into()),
-                    ("Postgres".into(), "A server; better for many concurrent writers.".into()),
+                    (
+                        "SQLite".into(),
+                        "One file next to the binary, zero setup.".into(),
+                    ),
+                    (
+                        "Postgres".into(),
+                        "A server; better for many concurrent writers.".into(),
+                    ),
                 ],
                 multi: false,
                 secret: false,
@@ -1830,36 +2764,82 @@ impl Session {
             Question {
                 question: "What should ship with it?".into(),
                 header: "Extras".into(),
-                options: vec![("Migrations".into(), String::new()), ("Seed data".into(), String::new()), ("Backups".into(), "Nightly, kept for a week.".into())],
+                options: vec![
+                    ("Migrations".into(), String::new()),
+                    ("Seed data".into(), String::new()),
+                    ("Backups".into(), "Nightly, kept for a week.".into()),
+                ],
                 multi: true,
                 secret: false,
             },
         ];
-        self.emit(AgentEvent::PermissionRequest { request_id: request_id.clone(), title: "AskUserQuestion".into(), detail: String::new(), prompt: Some(Prompt::Questions(questions)) })
-            .await?;
+        self.emit(AgentEvent::PermissionRequest {
+            request_id: request_id.clone(),
+            title: "AskUserQuestion".into(),
+            detail: String::new(),
+            prompt: Some(Prompt::Questions(questions)),
+        })
+        .await?;
         match self.wait_reply(&request_id).await? {
             Reply::Answers(answers) => {
-                let summary = answers.iter().map(|(q, a)| format!("- {q} **{a}**")).collect::<Vec<_>>().join("\n");
-                self.say(&format!("Got it:\n\n{summary}\n\nSetting that up now.")).await
+                let summary = answers
+                    .iter()
+                    .map(|(q, a)| format!("- {q} **{a}**"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.say(&format!("Got it:\n\n{summary}\n\nSetting that up now."))
+                    .await
             }
-            Reply::Decision(_) => self.say("No problem — I'll go with SQLite and migrations, the simplest setup.").await,
+            Reply::Decision(_) => {
+                self.say("No problem — I'll go with SQLite and migrations, the simplest setup.")
+                    .await
+            }
         }
     }
 
     async fn plan_turn(&mut self) -> Step {
-        self.think("Read-only first: understand the layout, then propose a plan.").await?;
-        self.tool("Read", "src/routes.rs", "pub fn routes() -> Router { … }", 200).await?;
-        self.tool("Search", "fn handler", "src/routes.rs: 12 matches", 150).await?;
+        self.think("Read-only first: understand the layout, then propose a plan.")
+            .await?;
+        self.tool(
+            "Read",
+            "src/routes.rs",
+            "pub fn routes() -> Router { … }",
+            200,
+        )
+        .await?;
+        self.tool("Search", "fn handler", "src/routes.rs: 12 matches", 150)
+            .await?;
         let request_id = self.id("plan");
-        self.emit(AgentEvent::PermissionRequest { request_id: request_id.clone(), title: "ExitPlanMode".into(), detail: String::new(), prompt: Some(Prompt::Plan(PLAN.into())) }).await?;
+        self.emit(AgentEvent::PermissionRequest {
+            request_id: request_id.clone(),
+            title: "ExitPlanMode".into(),
+            detail: String::new(),
+            prompt: Some(Prompt::Plan(PLAN.into())),
+        })
+        .await?;
         match self.wait_reply(&request_id).await? {
-            Reply::Decision(Decision::Deny) => self.say("Okay — I'll keep refining the plan. What should change?").await,
+            Reply::Decision(Decision::Deny) => {
+                self.say("Okay — I'll keep refining the plan. What should change?")
+                    .await
+            }
             _ => {
                 self.plan = false;
-                self.edit("src/auth.rs", "Applied 1 edit to src/auth.rs", 250, (24, 2)).await?;
-                self.edit("src/routes.rs", "Applied 2 edits to src/routes.rs", 250, (7, 4)).await?;
-                self.emit(AgentEvent::DiffStat { additions: 31, deletions: 6 }).await?;
-                self.tool("Run command", "cargo test", TEST_OUTPUT, 500).await?;
+                self.edit("src/auth.rs", "Applied 1 edit to src/auth.rs", 250, (24, 2))
+                    .await?;
+                self.edit(
+                    "src/routes.rs",
+                    "Applied 2 edits to src/routes.rs",
+                    250,
+                    (7, 4),
+                )
+                .await?;
+                self.emit(AgentEvent::DiffStat {
+                    additions: 31,
+                    deletions: 6,
+                })
+                .await?;
+                self.tool("Run command", "cargo test", TEST_OUTPUT, 500)
+                    .await?;
                 self.say("Implemented the plan: every route now goes through `require_session`, and the tests pass.").await
             }
         }
@@ -1870,27 +2850,47 @@ impl Session {
     /// how fast the machine runs them). Steering is acknowledged within a quarter second.
     async fn long(&mut self, total: Duration) -> Step {
         let started = tokio::time::Instant::now();
-        self.think("This needs the full test suite; it takes a while.").await?;
+        self.think("This needs the full test suite; it takes a while.")
+            .await?;
         let id = self.id("tool");
-        self.tool_start(&id, "Run command", "cargo test --workspace").await?;
+        self.tool_start(&id, "Run command", "cargo test --workspace")
+            .await?;
         let end = started + total;
         let every = paced(10_000);
-        let mut next_context = if every.is_zero() { end } else { started + every };
+        let mut next_context = if every.is_zero() {
+            end
+        } else {
+            started + every
+        };
         loop {
             let now = tokio::time::Instant::now();
             if now >= end {
                 break;
             }
-            self.pause((end - now).min(Duration::from_millis(250))).await?;
+            self.pause((end - now).min(Duration::from_millis(250)))
+                .await?;
             self.acknowledge_steer().await?;
             if tokio::time::Instant::now() >= next_context && next_context < end {
                 next_context += every;
                 self.context += 800;
-                self.emit(AgentEvent::Context { used: self.context, window: WINDOW }).await?;
+                self.emit(AgentEvent::Context {
+                    used: self.context,
+                    window: WINDOW,
+                })
+                .await?;
             }
         }
-        self.emit(AgentEvent::ToolFinished { id, output: TEST_OUTPUT.into(), ok: true }).await?;
-        self.say(&format!("The full suite passed after {} — nothing to fix.", humanize(total))).await
+        self.emit(AgentEvent::ToolFinished {
+            id,
+            output: TEST_OUTPUT.into(),
+            ok: true,
+        })
+        .await?;
+        self.say(&format!(
+            "The full suite passed after {} — nothing to fix.",
+            humanize(total)
+        ))
+        .await
     }
 
     /// One long answer, streamed a token at a time (as `say` does) for `total`: section after
@@ -1901,7 +2901,11 @@ impl Session {
         let mut part = 0;
         loop {
             part += 1;
-            let section = format!("{}## Part {part}\n\n{}\n\n", if part == 1 { "" } else { "\n" }, if part % 2 == 1 { ANSWER } else { PLAN });
+            let section = format!(
+                "{}## Part {part}\n\n{}\n\n",
+                if part == 1 { "" } else { "\n" },
+                if part % 2 == 1 { ANSWER } else { PLAN }
+            );
             for chunk in tokens(&section) {
                 self.emit(AgentEvent::TextDelta(chunk.into())).await?;
                 text.push_str(chunk);
@@ -1932,17 +2936,28 @@ impl Session {
                     let id = self.id("tool");
                     self.tool_start(&id, title, detail).await?;
                     if let Explore::Edit(.., added, removed) = EXPLORE[i % EXPLORE.len()] {
-                        self.emit(AgentEvent::ToolLines { id: id.clone(), added, removed }).await?;
+                        self.emit(AgentEvent::ToolLines {
+                            id: id.clone(),
+                            added,
+                            removed,
+                        })
+                        .await?;
                     }
                     self.pause(step).await?;
-                    self.emit(AgentEvent::ToolFinished { id, output: format!("{title} {detail}: done"), ok: true }).await?;
+                    self.emit(AgentEvent::ToolFinished {
+                        id,
+                        output: format!("{title} {detail}: done"),
+                        ok: true,
+                    })
+                    .await?;
                     self.pause(step / 4).await?;
                 }
             }
             self.acknowledge_steer().await?;
             i += 1;
         }
-        self.say("The title now fades in from the left as it arrives, and the tests pass.").await
+        self.say("The title now fades in from the left as it arrives, and the tests pass.")
+            .await
     }
 }
 
@@ -1954,21 +2969,55 @@ impl Session {
     /// (with its lines) and an answer using markdown, a code block and a table.
     async fn history(&mut self, rounds: u32) -> Step {
         for n in 1..=rounds {
-            self.emit(AgentEvent::ReasoningDelta(format!("**Step {n}**\n\nLooking at how `parse_header` handles case {n} before changing it."))).await?;
+            self.emit(AgentEvent::ReasoningDelta(format!(
+                "**Step {n}**\n\nLooking at how `parse_header` handles case {n} before changing it."
+            )))
+            .await?;
             let file = HISTORY_FILES[n as usize % HISTORY_FILES.len()];
             for (title, detail, output) in [
-                ("Read", file.to_string(), format!("fn parse_header(line: &str) -> Result<Header> {{\n    // case {n}\n    let (name, value) = line.split_once(':').ok_or(ParseError::BadHeader)?;\n    Ok(Header::new(name.trim(), value.trim()))\n}}")),
-                ("Search", format!("ParseError::BadHeader case_{n}"), format!("{file}:{}:    Err(ParseError::BadHeader)", 10 + n % 90)),
-                ("Run command", format!("cargo test parser::case_{n}"), format!("running 1 test\ntest parser::case_{n} ... ok\n\ntest result: ok. 1 passed; 0 failed")),
+                (
+                    "Read",
+                    file.to_string(),
+                    format!(
+                        "fn parse_header(line: &str) -> Result<Header> {{\n    // case {n}\n    let (name, value) = line.split_once(':').ok_or(ParseError::BadHeader)?;\n    Ok(Header::new(name.trim(), value.trim()))\n}}"
+                    ),
+                ),
+                (
+                    "Search",
+                    format!("ParseError::BadHeader case_{n}"),
+                    format!("{file}:{}:    Err(ParseError::BadHeader)", 10 + n % 90),
+                ),
+                (
+                    "Run command",
+                    format!("cargo test parser::case_{n}"),
+                    format!(
+                        "running 1 test\ntest parser::case_{n} ... ok\n\ntest result: ok. 1 passed; 0 failed"
+                    ),
+                ),
             ] {
                 let id = self.id("tool");
                 self.tool_start(&id, title, &detail).await?;
-                self.emit(AgentEvent::ToolFinished { id, output, ok: true }).await?;
+                self.emit(AgentEvent::ToolFinished {
+                    id,
+                    output,
+                    ok: true,
+                })
+                .await?;
             }
             let id = self.id("tool");
             self.tool_start(&id, "Edit", file).await?;
-            self.emit(AgentEvent::ToolLines { id: id.clone(), added: 3 + n % 7, removed: n % 3 }).await?;
-            self.emit(AgentEvent::ToolFinished { id, output: format!("Applied 1 edit to {file}"), ok: true }).await?;
+            self.emit(AgentEvent::ToolLines {
+                id: id.clone(),
+                added: 3 + n % 7,
+                removed: n % 3,
+            })
+            .await?;
+            self.emit(AgentEvent::ToolFinished {
+                id,
+                output: format!("Applied 1 edit to {file}"),
+                ok: true,
+            })
+            .await?;
             let answer = format!(
                 "### Step {n}: case {n}\n\n`parse_header` in `{file}` now **rejects** case {n} with a typed error instead of panicking:\n\n```rust\nmatch parse_header(line) {{\n    Ok(h) => headers.push(h),\n    Err(ParseError::BadHeader) => return reply(400, \"bad header (case {n})\"),\n    Err(e) => return Err(e.into()),\n}}\n```\n\n| Case | Before | After |\n| --- | --- | --- |\n| {n} | panic | `400 Bad Request` |\n| {} | ok | ok |\n\n- [x] regression test `parser::case_{n}`\n- [ ] the remaining {} cases",
                 n + 1,
@@ -1977,11 +3026,19 @@ impl Session {
             self.emit(AgentEvent::TextDone(answer)).await?;
             self.pause(Duration::ZERO).await?;
         }
-        self.say(&format!("Done: {rounds} cases of `parse_header` are handled, each with its test.")).await
+        self.say(&format!(
+            "Done: {rounds} cases of `parse_header` are handled, each with its test."
+        ))
+        .await
     }
 }
 
-const HISTORY_FILES: &[&str] = &["src/parser.rs", "src/headers.rs", "src/request.rs", "tests/parser.rs"];
+const HISTORY_FILES: &[&str] = &[
+    "src/parser.rs",
+    "src/headers.rs",
+    "src/request.rs",
+    "tests/parser.rs",
+];
 
 /// One step of `mock:explore`.
 #[derive(Clone, Copy)]
@@ -1995,18 +3052,33 @@ enum Explore {
 }
 
 const EXPLORE: &[Explore] = &[
-    Explore::Think("**Exploring the project**\n\nFirst, where titles come from and where the sidebar draws them."),
-    Explore::Tool("Run command", "cd /Users/me/code/trail-app && git status --short"),
-    Explore::Tool("Run command", "sed -n 165,260p src/shared/ui/ParticleText.tsx"),
+    Explore::Think(
+        "**Exploring the project**\n\nFirst, where titles come from and where the sidebar draws them.",
+    ),
+    Explore::Tool(
+        "Run command",
+        "cd /Users/me/code/trail-app && git status --short",
+    ),
+    Explore::Tool(
+        "Run command",
+        "sed -n 165,260p src/shared/ui/ParticleText.tsx",
+    ),
     Explore::Tool("Search", "generateTitle|titleGen|generatedTitle"),
     Explore::Tool("Read", "src/features/sessions/model/session.ts"),
     Explore::Tool("List files", "src/features/sessions/ui/**/*.tsx"),
     Explore::Tool("Read", "src/features/sessions/ui/AgentTitle.tsx"),
     Explore::Tool("Read", "Cargo.toml"),
-    Explore::Say("Titles come from `generateTitle` in `src/features/sessions/model/session.ts`; the sidebar draws them in `AgentTitle.tsx`."),
-    Explore::Tool("Fetch", "https://developer.mozilla.org/en-US/docs/Web/CSS/mask-image"),
+    Explore::Say(
+        "Titles come from `generateTitle` in `src/features/sessions/model/session.ts`; the sidebar draws them in `AgentTitle.tsx`.",
+    ),
+    Explore::Tool(
+        "Fetch",
+        "https://developer.mozilla.org/en-US/docs/Web/CSS/mask-image",
+    ),
     Explore::Tool("Search the web", "css mask-image gradient text reveal"),
-    Explore::Think("**Planning the change**\n\nA mask that sweeps left to right, keyed on the title so it only plays when it changes."),
+    Explore::Think(
+        "**Planning the change**\n\nA mask that sweeps left to right, keyed on the title so it only plays when it changes.",
+    ),
     Explore::Edit("Edit", "src/features/sessions/ui/AgentTitle.tsx", 18, 4),
     Explore::Edit("Edit", "src/shared/ui/ParticleText.tsx", 42, 0),
     Explore::Edit("Write", "src/shared/ui/reveal.css", 27, 0),
@@ -2017,7 +3089,10 @@ const EXPLORE: &[Explore] = &[
     Explore::Tool("Run command", "rg -n \"set_title\" src-tauri/src"),
     Explore::Tool("Read", "README.md"),
     Explore::Edit("Edit", "src-tauri/src/window.rs", 6, 2),
-    Explore::Tool("Run command", "cargo test --manifest-path src-tauri/Cargo.toml"),
+    Explore::Tool(
+        "Run command",
+        "cargo test --manifest-path src-tauri/Cargo.toml",
+    ),
     Explore::Say("Native titles follow the same rule now."),
 ];
 
@@ -2139,61 +3214,94 @@ The app crate is still the slow one."#;
 
 /// One example of each visualization type, by its `type`: `mock:visualization flow`.
 pub const VIZ_GALLERY: &[(&str, &str)] = &[
-    ("bar", r#"Build time is dominated by the app crate; the rest are small.
+    (
+        "bar",
+        r#"Build time is dominated by the app crate; the rest are small.
 
 ```trek-viz
 {"version":1,"title":"Build time by crate","summary":"Clean release build, seconds per crate.","type":"bar","bars":[{"label":"trek-app","value":142},{"label":"trek-core","value":48},{"label":"trek-agents","value":31},{"label":"gpui-kit","value":96,"tone":"info"},{"label":"vendor/gpui-base","value":22,"tone":"neutral"}],"x_label":"seconds"}
-```"#),
-    ("line", r#"Latency fell after Tuesday's deploy everywhere but the workers.
+```"#,
+    ),
+    (
+        "line",
+        r#"Latency fell after Tuesday's deploy everywhere but the workers.
 
 ```trek-viz
 {"version":1,"title":"p95 latency by service","summary":"Daily p95; the workers spike on Thursday.","type":"line","x_labels":["Mon","Tue","Wed","Thu","Fri","Sat","Sun"],"series":[{"label":"API","values":[212,205,168,171,160,158,152]},{"label":"Web","values":[248,240,201,196,190,184,181]},{"label":"Workers","values":[310,302,296,488,371,322,305]}],"area":true,"y_label":"p95","unit":"ms"}
-```"#),
-    ("donut", r#"Most of the bundle is the editor.
+```"#,
+    ),
+    (
+        "donut",
+        r#"Most of the bundle is the editor.
 
 ```trek-viz
 {"version":1,"title":"Where the bundle's bytes go","summary":"Release binary by component.","type":"donut","parts":[{"label":"Editor & LSP","value":18.4},{"label":"GPUI","value":12.1},{"label":"Tree-sitter grammars","value":9.6},{"label":"Agents","value":4.2},{"label":"Everything else","value":3.1,"tone":"neutral"}],"unit":"MB"}
-```"#),
-    ("stats", r#"The week in four numbers.
+```"#,
+    ),
+    (
+        "stats",
+        r#"The week in four numbers.
 
 ```trek-viz
 {"version":1,"title":"This week","summary":"Against last week.","type":"stats","tiles":[{"label":"Threads","value":"184","delta":"+22%","trend":[20,24,22,31,28,30,29],"tone":"positive"},{"label":"Tokens","value":"12.9M","delta":"+8%","trend":[1.6,1.9,1.7,2.1,1.8,2.0,1.8]},{"label":"Spend","value":"$41.20","delta":"-6%","tone":"positive"},{"label":"Failed turns","value":"3","delta":"+2","trend":[0,0,1,0,0,2,0],"tone":"negative"}]}
-```"#),
-    ("table", r#"Three services need attention; workers most of all.
+```"#,
+    ),
+    (
+        "table",
+        r#"Three services need attention; workers most of all.
 
 ```trek-viz
 {"version":1,"title":"Service health","summary":"Last 24 hours.","type":"table","columns":["Service","Requests","p95 (ms)","Errors","Owner"],"rows":[["API",1284000,152,0.02,"Platform"],["Web",842300,181,0.04,"Frontend"],{"cells":["Workers",96400,488,1.8,"Data"],"tone":"warning"},["Database",3120000,12,0,"Platform"],{"cells":["Search",44100,920,4.1,"Discovery"],"tone":"negative"}]}
-```"#),
-    ("heatmap", r#"Incidents cluster on Thursday.
+```"#,
+    ),
+    (
+        "heatmap",
+        r#"Incidents cluster on Thursday.
 
 ```trek-viz
 {"version":1,"title":"Incidents by service and weekday","summary":"The worker queue peaks on Thursday.","type":"heatmap","x_labels":["Mon","Tue","Wed","Thu","Fri"],"y_labels":["API","Web","Workers","Database"],"values":[[1,0,1,1,0],[0,1,0,1,1],[1,2,2,7,3],[0,0,1,1,0]]}
-```"#),
-    ("treemap", r#"Where the code lives.
+```"#,
+    ),
+    (
+        "treemap",
+        r#"Where the code lives.
 
 ```trek-viz
 {"version":1,"title":"Lines of Rust by module","summary":"trek-app, by top-level module.","type":"treemap","items":[{"label":"workspace","weight":6400},{"label":"thread_view","weight":3900},{"label":"ide","weight":3600},{"label":"root","weight":2100},{"label":"settings_view","weight":1900},{"label":"remote","weight":1500},{"label":"composer","weight":1400},{"label":"panels","weight":1300},{"label":"sidebar","weight":900},{"label":"visualization","weight":1700,"tone":"info"},{"label":"md","weight":600},{"label":"shots","weight":850}]}
-```"#),
-    ("timeline", r#"The plan fits the quarter with two weeks to spare.
+```"#,
+    ),
+    (
+        "timeline",
+        r#"The plan fits the quarter with two weeks to spare.
 
 ```trek-viz
 {"version":1,"title":"Q4 plan","summary":"Phases by team; GA lands in the first week of January.","type":"timeline","ticks":["Oct","Nov","Dec","Jan"],"events":[{"label":"Design review","start":"Oct","end":"Oct","lane":"Design","tone":"info"},{"label":"Prototype","start":"Oct","end":"Nov","lane":"Engineering"},{"label":"Hardening","start":"Dec","end":"Dec","lane":"Engineering","tone":"warning"},{"label":"Beta","start":"Nov","end":"Dec","lane":"Release","tone":"positive"},{"label":"GA","start":"Jan","lane":"Release","tone":"positive"}]}
-```"#),
-    ("flow", r#"A message takes this path from the composer to the transcript.
+```"#,
+    ),
+    (
+        "flow",
+        r#"A message takes this path from the composer to the transcript.
 
 ```trek-viz
 {"version":1,"title":"How a turn flows","summary":"From the composer to the agent and back, with the parts that can stop it.","type":"flow","nodes":[{"id":"composer","label":"Composer","detail":"text, images, mode","group":"App"},{"id":"workspace","label":"Workspace","detail":"routes the turn","group":"App","tone":"accent"},{"id":"session","label":"Agent session","detail":"ACP or direct","group":"Agents"},{"id":"permission","label":"Permission card","detail":"Supervised only","group":"App","tone":"warning"},{"id":"tools","label":"Tools","detail":"edits, commands","group":"Agents"},{"id":"transcript","label":"Transcript","detail":"streamed answer","group":"App","tone":"positive"}],"edges":[{"from":"composer","to":"workspace","label":"send"},{"from":"workspace","to":"session"},{"from":"session","to":"permission","label":"asks"},{"from":"session","to":"tools"},{"from":"permission","to":"tools","label":"allowed"},{"from":"tools","to":"transcript"},{"from":"session","to":"transcript","label":"answer"}]}
-```"#),
-    ("layers", r#"Trek's stack, top to bottom.
+```"#,
+    ),
+    (
+        "layers",
+        r#"Trek's stack, top to bottom.
 
 ```trek-viz
 {"version":1,"title":"Trek's architecture","summary":"Each layer only calls the one beneath it.","type":"layers","layers":[{"label":"Views","detail":"GPUI windows, panels and the transcript","items":["Sidebar","Transcript","IDE","Settings"],"tone":"accent"},{"label":"Workspace","detail":"threads, routing, settings, the remote","items":["Router","Store","Remote"],"tone":"info"},{"label":"Agents","detail":"ACP and direct sessions behind one trait","items":["Claude","Codex","Mock"],"tone":"positive"},{"label":"Core","detail":"storage, transcripts, schemas","items":["SQLite","Paths","trek-viz"],"tone":"neutral"}]}
-```"#),
-    ("mockup", r#"Two ways to show a release in the browser.
+```"#,
+    ),
+    (
+        "mockup",
+        r#"Two ways to show a release in the browser.
 
 ```trek-viz
 {"version":1,"title":"Release dashboard","summary":"A browser view with a nav, a search field and the rollout status.","type":"mockup","nodes":[{"kind":"frame","device":"browser","text":"releases.internal","children":[{"kind":"nav","text":"Trek Ops","children":[{"kind":"text","text":"Deploys"},{"kind":"text","text":"Incidents"},{"kind":"avatar","text":"Ada Lovelace"}]},{"kind":"row","children":[{"kind":"card","text":"Rollout","children":[{"kind":"progress","text":"Canary to 100%","value":"64","tone":"info"},{"kind":"badge","text":"Healthy","tone":"positive"}]},{"kind":"card","text":"Search","children":[{"kind":"input","text":"Filter services"},{"kind":"toggle","text":"Only failing","value":"off"}]}]},{"kind":"image","text":"Latency chart","value":"wide"},{"kind":"row","children":[{"kind":"button","text":"Promote"},{"kind":"button","text":"Roll back","tone":"negative"}]}]}]}
-```"#),
+```"#,
+    ),
 ];
 
 /// `mock:page`: a live page between prose. Tabs that switch panels, a wireframe on a canvas that
@@ -2364,7 +3472,8 @@ const PLAN: &str = "## Require a session on every route\n\n1. Add `require_sessi
 
 const LS_OUTPUT: &str = "total 48\ndrwxr-xr-x  8 me  staff   256 Oct  2 09:14 .\n-rw-r--r--  1 me  staff  1184 Oct  2 09:14 Cargo.toml\n-rw-r--r--  1 me  staff   912 Oct  2 09:14 README.md\ndrwxr-xr-x  5 me  staff   160 Oct  2 09:14 src\ndrwxr-xr-x  3 me  staff    96 Oct  2 09:14 tests";
 
-const MAIN_RS: &str = "mod cli;\n\nfn main() {\n    let cfg = cli::parse_args();\n    app::run(cfg);\n}";
+const MAIN_RS: &str =
+    "mod cli;\n\nfn main() {\n    let cfg = cli::parse_args();\n    app::run(cfg);\n}";
 
 const TEST_OUTPUT: &str = "running 14 tests\n..............\ntest result: ok. 14 passed; 0 failed; 0 ignored; finished in 0.42s";
 
@@ -2377,64 +3486,208 @@ mod tests {
     fn scripts_follow_keywords() {
         assert_eq!(Script::parse("explain the startup", false), Script::Answer);
         assert_eq!(Script::parse("Run the tools please", false), Script::Tools);
-        assert_eq!(Script::parse("mock:long 2s", false), Script::Long(Duration::from_secs(2)));
-        assert_eq!(Script::parse("mock:long", false), Script::Long(Duration::from_secs(30)));
-        assert_eq!(Script::parse("how long is it?", false), Script::Answer, "bare `long` is just a word");
-        assert_eq!(Script::parse("mock:stream 2m", false), Script::Stream(Duration::from_secs(120)));
-        assert_eq!(Script::parse("stream the logs", false), Script::Answer);
-        assert_eq!(Script::parse("mock:explore 5s", false), Script::Explore(Duration::from_secs(5)));
-        assert_eq!(Script::parse("mock:task 2s", false), Script::Task(Duration::from_secs(2)));
-        assert_eq!(Script::parse("mock:dev", false), Script::Dev);
-        assert_eq!(Script::parse("explore the repo", false), Script::Answer, "bare `explore` is just a word");
-        assert_eq!(Script::parse("mock:prose", false), Script::Prose);
-        assert_eq!(Script::parse("mock:math", false), Script::Math { slow: false });
-        assert_eq!(Script::parse("mock:math stream", false), Script::Math { slow: true });
-        assert_eq!(Script::parse("do the math", false), Script::Answer, "only by its full name");
-        assert_eq!(Script::parse("mock:visualization", false), Script::Visualization(None));
-        assert_eq!(Script::parse("mock:visualization flow", false), Script::Visualization(Some("flow")));
-        assert_eq!(Script::parse("mock:visualization nonsense", false), Script::Visualization(None));
-        assert_eq!(Script::parse("mock:visualization stream bar", false), Script::VisualizationStream(Some("bar")));
-        assert_eq!(Script::parse("mock:visualization stream", false), Script::VisualizationStream(None));
-        assert_eq!(Script::parse("mock:visualization invalid", false), Script::VisualizationInvalid);
-        assert_eq!(Script::parse("mock:interactive", false), Script::Interactive { stream: false });
-        assert_eq!(Script::parse("mock:interactive stream", false), Script::Interactive { stream: true });
-        assert_eq!(Script::parse("show a visualization", false), Script::Answer, "only by its full name");
-        assert_eq!(Script::parse("mock:page", false), Script::Page { stream: false });
-        assert_eq!(Script::parse("mock:page stream", false), Script::Page { stream: true });
-        assert_eq!(Script::parse("turn the page", false), Script::Answer, "bare `page` is just a word");
-        assert_eq!(Script::parse("mock:write CHANGELOG.md", false), Script::Write(Some("CHANGELOG.md".into())), "the file's name as written");
-        assert_eq!(Script::parse("Start one: mock:write docs/Notes.md.", false), Script::Write(Some("docs/Notes.md".into())));
         assert_eq!(
-            Script::parse(&trek_core::inline_edit::with_block("make it loud", "src/a.rs", (2, 3)), false),
-            Script::InlineEdit { path: "src/a.rs".into(), lines: (2, 3) }
+            Script::parse("mock:long 2s", false),
+            Script::Long(Duration::from_secs(2))
+        );
+        assert_eq!(
+            Script::parse("mock:long", false),
+            Script::Long(Duration::from_secs(30))
+        );
+        assert_eq!(
+            Script::parse("how long is it?", false),
+            Script::Answer,
+            "bare `long` is just a word"
+        );
+        assert_eq!(
+            Script::parse("mock:stream 2m", false),
+            Script::Stream(Duration::from_secs(120))
+        );
+        assert_eq!(Script::parse("stream the logs", false), Script::Answer);
+        assert_eq!(
+            Script::parse("mock:explore 5s", false),
+            Script::Explore(Duration::from_secs(5))
+        );
+        assert_eq!(
+            Script::parse("mock:task 2s", false),
+            Script::Task(Duration::from_secs(2))
+        );
+        assert_eq!(Script::parse("mock:dev", false), Script::Dev);
+        assert_eq!(
+            Script::parse("explore the repo", false),
+            Script::Answer,
+            "bare `explore` is just a word"
+        );
+        assert_eq!(Script::parse("mock:prose", false), Script::Prose);
+        assert_eq!(
+            Script::parse("mock:math", false),
+            Script::Math { slow: false }
+        );
+        assert_eq!(
+            Script::parse("mock:math stream", false),
+            Script::Math { slow: true }
+        );
+        assert_eq!(
+            Script::parse("do the math", false),
+            Script::Answer,
+            "only by its full name"
+        );
+        assert_eq!(
+            Script::parse("mock:visualization", false),
+            Script::Visualization(None)
+        );
+        assert_eq!(
+            Script::parse("mock:visualization flow", false),
+            Script::Visualization(Some("flow"))
+        );
+        assert_eq!(
+            Script::parse("mock:visualization nonsense", false),
+            Script::Visualization(None)
+        );
+        assert_eq!(
+            Script::parse("mock:visualization stream bar", false),
+            Script::VisualizationStream(Some("bar"))
+        );
+        assert_eq!(
+            Script::parse("mock:visualization stream", false),
+            Script::VisualizationStream(None)
+        );
+        assert_eq!(
+            Script::parse("mock:visualization invalid", false),
+            Script::VisualizationInvalid
+        );
+        assert_eq!(
+            Script::parse("mock:interactive", false),
+            Script::Interactive { stream: false }
+        );
+        assert_eq!(
+            Script::parse("mock:interactive stream", false),
+            Script::Interactive { stream: true }
+        );
+        assert_eq!(
+            Script::parse("show a visualization", false),
+            Script::Answer,
+            "only by its full name"
+        );
+        assert_eq!(
+            Script::parse("mock:page", false),
+            Script::Page { stream: false }
+        );
+        assert_eq!(
+            Script::parse("mock:page stream", false),
+            Script::Page { stream: true }
+        );
+        assert_eq!(
+            Script::parse("turn the page", false),
+            Script::Answer,
+            "bare `page` is just a word"
+        );
+        assert_eq!(
+            Script::parse("mock:write CHANGELOG.md", false),
+            Script::Write(Some("CHANGELOG.md".into())),
+            "the file's name as written"
+        );
+        assert_eq!(
+            Script::parse("Start one: mock:write docs/Notes.md.", false),
+            Script::Write(Some("docs/Notes.md".into()))
+        );
+        assert_eq!(
+            Script::parse(
+                &trek_core::inline_edit::with_block("make it loud", "src/a.rs", (2, 3)),
+                false
+            ),
+            Script::InlineEdit {
+                path: "src/a.rs".into(),
+                lines: (2, 3)
+            }
         );
         assert_eq!(Script::parse("mock:history", false), Script::History(100));
-        assert_eq!(Script::parse("mock:history 500", false), Script::History(500));
-        assert_eq!(Script::parse("mock:history 999999", false), Script::History(MAX_HISTORY));
-        assert_eq!(Script::parse("the history of it", false), Script::Answer, "only by its full name");
-        assert_eq!(Script::parse("purple prose", false), Script::Answer, "bare `prose` is just a word");
-        assert_eq!(Script::parse("send subagents 300ms", false), Script::Agents(Some(Duration::from_millis(300))));
+        assert_eq!(
+            Script::parse("mock:history 500", false),
+            Script::History(500)
+        );
+        assert_eq!(
+            Script::parse("mock:history 999999", false),
+            Script::History(MAX_HISTORY)
+        );
+        assert_eq!(
+            Script::parse("the history of it", false),
+            Script::Answer,
+            "only by its full name"
+        );
+        assert_eq!(
+            Script::parse("purple prose", false),
+            Script::Answer,
+            "bare `prose` is just a word"
+        );
+        assert_eq!(
+            Script::parse("send subagents 300ms", false),
+            Script::Agents(Some(Duration::from_millis(300)))
+        );
         assert_eq!(Script::parse("ask a question", false), Script::Questions);
         assert_eq!(Script::parse("mock:permission", false), Script::Permission);
         assert_eq!(Script::parse("anything", true), Script::Plan);
         assert_eq!(Script::parse("Error!", false), Script::Error);
-        assert_eq!(Script::parse("mock:limit 5s", false), Script::Limit(Duration::from_secs(5)));
-        assert_eq!(Script::parse("mock:limit", false), Script::Limit(Duration::from_secs(5)));
-        assert_eq!(Script::parse("mock:nearlimit 10m", false), Script::NearLimit(Duration::from_secs(600)));
-        assert_eq!(Script::parse("the rate limit", false), Script::Answer, "bare `limit` is just a word");
-        assert_eq!(Script::parse("mock:consult mock:long 2s", false), Script::Delegate { wait: true }, "the first keyword is the parent's");
-        assert_eq!(Script::parse("mock:delegate", false), Script::Delegate { wait: false });
-        assert_eq!(Script::parse("mock:handoff mock:long 2s", false), Script::Handoff);
+        assert_eq!(
+            Script::parse("mock:limit 5s", false),
+            Script::Limit(Duration::from_secs(5))
+        );
+        assert_eq!(
+            Script::parse("mock:limit", false),
+            Script::Limit(Duration::from_secs(5))
+        );
+        assert_eq!(
+            Script::parse("mock:nearlimit 10m", false),
+            Script::NearLimit(Duration::from_secs(600))
+        );
+        assert_eq!(
+            Script::parse("the rate limit", false),
+            Script::Answer,
+            "bare `limit` is just a word"
+        );
+        assert_eq!(
+            Script::parse("mock:consult mock:long 2s", false),
+            Script::Delegate { wait: true },
+            "the first keyword is the parent's"
+        );
+        assert_eq!(
+            Script::parse("mock:delegate", false),
+            Script::Delegate { wait: false }
+        );
+        assert_eq!(
+            Script::parse("mock:handoff mock:long 2s", false),
+            Script::Handoff
+        );
         assert_eq!(Script::parse("consult a friend", false), Script::Answer);
-        assert_eq!(Script::parse("[Trek] Sub-agent “x” failed: error", false), Script::Wake);
-        assert_eq!(Script::parse("mock:verify the notes", false), Script::Verify { broken: false });
-        assert_eq!(Script::parse("mock:verify broken notes", false), Script::Verify { broken: true });
-        assert_eq!(Script::parse("mock:design an error budget", false), Script::Design, "the first keyword decides");
-        assert_eq!(Script::parse("mock:judge these: Design A has an error path", false), Script::Judge);
+        assert_eq!(
+            Script::parse("[Trek] Sub-agent “x” failed: error", false),
+            Script::Wake
+        );
+        assert_eq!(
+            Script::parse("mock:verify the notes", false),
+            Script::Verify { broken: false }
+        );
+        assert_eq!(
+            Script::parse("mock:verify broken notes", false),
+            Script::Verify { broken: true }
+        );
+        assert_eq!(
+            Script::parse("mock:design an error budget", false),
+            Script::Design,
+            "the first keyword decides"
+        );
+        assert_eq!(
+            Script::parse("mock:judge these: Design A has an error path", false),
+            Script::Judge
+        );
         assert_eq!(Script::parse("mock:told", false), Script::Told);
         assert_eq!(Script::parse("mock:mcp", false), Script::Mcp);
         assert_eq!(Script::parse("mock:video", false), Script::Video);
-        assert_eq!(Script::parse("what were you told", false), Script::Answer, "bare `told` is just a word");
+        assert_eq!(
+            Script::parse("what were you told", false),
+            Script::Answer,
+            "bare `told` is just a word"
+        );
     }
 
     #[test]
@@ -2443,13 +3696,54 @@ mod tests {
         // Whatever the words say ("plan", "error"), a request to restate is played as one.
         let restate = trek_core::restate::with_restate("plan the error pages");
         assert_eq!(Script::parse(&restate, false), Script::Restate);
-        assert_eq!(Script::parse(&restate, true), Script::Restate, "in plan mode too");
-        let c = Consult { consultants: vec![Consultant { agent: trek_core::AgentId::Direct(PROVIDER.into()), model: "mock-deep".into(), effort: trek_core::Effort::High }], style: Style::Arena, implement: false, judge: None };
-        assert_eq!(Script::parse(&consult_prompt("rate-limit the webhooks", &c, |_| "Deep".into()), false), Script::Arena);
-        let advise = Consult { style: Style::Advise, ..c };
-        assert_eq!(Script::parse(&consult_prompt("explain it", &advise, |_| "Deep".into()), false), Script::Answer, "an ordinary consult is the words' to decide");
-        assert_eq!(Script::parse("Set up verification following `/x/skills/create-verification-skill/SKILL.md`", false), Script::SetupVerification);
-        assert_eq!(Script::parse("Maintain it following `/x/maintain-verification-skill/SKILL.md`", false), Script::MaintainVerification);
+        assert_eq!(
+            Script::parse(&restate, true),
+            Script::Restate,
+            "in plan mode too"
+        );
+        let c = Consult {
+            consultants: vec![Consultant {
+                agent: trek_core::AgentId::Direct(PROVIDER.into()),
+                model: "mock-deep".into(),
+                effort: trek_core::Effort::High,
+            }],
+            style: Style::Arena,
+            implement: false,
+            judge: None,
+        };
+        assert_eq!(
+            Script::parse(
+                &consult_prompt("rate-limit the webhooks", &c, |_| "Deep".into()),
+                false
+            ),
+            Script::Arena
+        );
+        let advise = Consult {
+            style: Style::Advise,
+            ..c
+        };
+        assert_eq!(
+            Script::parse(
+                &consult_prompt("explain it", &advise, |_| "Deep".into()),
+                false
+            ),
+            Script::Answer,
+            "an ordinary consult is the words' to decide"
+        );
+        assert_eq!(
+            Script::parse(
+                "Set up verification following `/x/skills/create-verification-skill/SKILL.md`",
+                false
+            ),
+            Script::SetupVerification
+        );
+        assert_eq!(
+            Script::parse(
+                "Maintain it following `/x/maintain-verification-skill/SKILL.md`",
+                false
+            ),
+            Script::MaintainVerification
+        );
     }
 
     #[test]
@@ -2461,7 +3755,11 @@ mod tests {
         // Huge values are capped rather than overflowing.
         assert_eq!(parse_duration("999999999999999999m"), Some(MAX_DURATION));
         assert_eq!(parse_duration("99999999999s"), Some(MAX_DURATION));
-        assert_eq!(parse_duration("99999999999999999999999s"), None, "not a u64");
+        assert_eq!(
+            parse_duration("99999999999999999999999s"),
+            None,
+            "not a u64"
+        );
     }
 
     #[test]
@@ -2470,18 +3768,36 @@ mod tests {
         assert_eq!(title("mock:long 5s"), "Run the full test suite");
         assert_eq!(title("ask a question"), "Choose a database");
         assert_eq!(title("mock:write"), "Add a note");
-        assert_eq!(title("mock:visualization"), "Compare release health dashboards");
+        assert_eq!(
+            title("mock:visualization"),
+            "Compare release health dashboards"
+        );
         assert_eq!(title("mock:page stream"), "Check the monitor arm fits");
-        assert_eq!(title("write it down"), "How the app starts", "only `mock:write` writes");
+        assert_eq!(
+            title("write it down"),
+            "How the app starts",
+            "only `mock:write` writes"
+        );
     }
 
     #[test]
     fn mock_edits_stay_in_the_session_s_folder() {
         assert!(in_folder("NOTES.md") && in_folder("docs/a.md"));
-        assert!(!in_folder("../x.md") && !in_folder("a/../../x.md") && !in_folder("/etc/hosts") && !in_folder("~/x.md"));
-        assert_eq!(Script::parse("mock:write ../escape.md", false), Script::Write(None));
+        assert!(
+            !in_folder("../x.md")
+                && !in_folder("a/../../x.md")
+                && !in_folder("/etc/hosts")
+                && !in_folder("~/x.md")
+        );
+        assert_eq!(
+            Script::parse("mock:write ../escape.md", false),
+            Script::Write(None)
+        );
         // Byte offsets of a lowercased "İ" don't match the original's.
-        assert_eq!(after_keyword("İİ MOCK:PAIR review İt", &["mock:pair"]), Some("review İt"));
+        assert_eq!(
+            after_keyword("İİ MOCK:PAIR review İt", &["mock:pair"]),
+            Some("review İt")
+        );
         assert_eq!(after_keyword("İ mock:consult", &["mock:consult"]), None);
     }
 
@@ -2496,10 +3812,19 @@ mod tests {
             let mut c = config(None, None, false, None);
             c.cwd = dir.clone();
             let m = Live::of(c);
-            for prompt in [trek_core::inline_edit::with_block("loud", "bin.rs", (1, 1)), trek_core::inline_edit::with_block("loud", "../bin.rs", (1, 1)), "mock:write".into()] {
+            for prompt in [
+                trek_core::inline_edit::with_block("loud", "bin.rs", (1, 1)),
+                trek_core::inline_edit::with_block("loud", "../bin.rs", (1, 1)),
+                "mock:write".into(),
+            ] {
                 m.prompt(&prompt).await;
                 let events = m.turn().await;
-                assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolFinished { ok: false, .. })), "{prompt}: {events:?}");
+                assert!(
+                    events
+                        .iter()
+                        .any(|e| matches!(e, AgentEvent::ToolFinished { ok: false, .. })),
+                    "{prompt}: {events:?}"
+                );
             }
         });
         assert_eq!(std::fs::read(dir.join("bin.rs")).unwrap(), binary);
@@ -2509,7 +3834,17 @@ mod tests {
 
     #[test]
     fn tokens_rebuild_the_text() {
-        for text in [ANSWER, PLAN, PROSE, PROSE_THOUGHT, MATH, MATH_THOUGHT, VISUALIZATION, "short", "ünïcödé words stream fine"] {
+        for text in [
+            ANSWER,
+            PLAN,
+            PROSE,
+            PROSE_THOUGHT,
+            MATH,
+            MATH_THOUGHT,
+            VISUALIZATION,
+            "short",
+            "ünïcödé words stream fine",
+        ] {
             assert_eq!(tokens(text).concat(), text);
             assert!(tokens(text).iter().all(|t| !t.is_empty()));
         }
@@ -2520,8 +3855,15 @@ mod tests {
         fn blocks(text: &str) -> Vec<trek_core::visualization::Visualization> {
             text.split("```trek-viz\n")
                 .skip(1)
-                .map(|tail| tail.split_once("\n```").expect("closed visualization fence").0)
-                .map(|block| trek_core::visualization::parse(block).expect("mock emits a valid visualization"))
+                .map(|tail| {
+                    tail.split_once("\n```")
+                        .expect("closed visualization fence")
+                        .0
+                })
+                .map(|block| {
+                    trek_core::visualization::parse(block)
+                        .expect("mock emits a valid visualization")
+                })
                 .collect()
         }
         trek_core::runtime().block_on(async {
@@ -2532,25 +3874,54 @@ mod tests {
             assert_eq!(blocks(VISUALIZATION).len(), 4);
             m.prompt("mock:visualization layers").await;
             let events = m.turn().await;
-            assert_eq!(blocks(&text(&events)).iter().map(|v| v.content.kind()).collect::<Vec<_>>(), vec!["layers"]);
+            assert_eq!(
+                blocks(&text(&events))
+                    .iter()
+                    .map(|v| v.content.kind())
+                    .collect::<Vec<_>>(),
+                vec!["layers"]
+            );
         });
         // One example of every type, each exactly one block of that type.
-        assert_eq!(VIZ_GALLERY.iter().map(|(k, _)| *k).collect::<Vec<_>>(), trek_core::visualization::TYPES);
+        assert_eq!(
+            VIZ_GALLERY.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            trek_core::visualization::TYPES
+        );
         for (kind, answer) in VIZ_GALLERY {
-            assert_eq!(blocks(answer).iter().map(|v| v.content.kind()).collect::<Vec<_>>(), vec![*kind]);
+            assert_eq!(
+                blocks(answer)
+                    .iter()
+                    .map(|v| v.content.kind())
+                    .collect::<Vec<_>>(),
+                vec![*kind]
+            );
             assert_eq!(tokens(answer).concat(), *answer);
         }
     }
 
     #[test]
     fn page_script_streams_one_whole_page_between_prose() {
-        let blocks: Vec<&str> = PAGE.split("```trek-html\n").skip(1).map(|tail| tail.split_once("\n```").expect("a closed page fence").0).collect();
+        let blocks: Vec<&str> = PAGE
+            .split("```trek-html\n")
+            .skip(1)
+            .map(|tail| tail.split_once("\n```").expect("a closed page fence").0)
+            .collect();
         assert_eq!(blocks.len(), 1);
         let html = blocks[0];
-        assert_eq!(trek_core::artifact::title(html).as_deref(), Some("Monitor arm: will the clamp fit?"));
+        assert_eq!(
+            trek_core::artifact::title(html).as_deref(),
+            Some("Monitor arm: will the clamp fit?")
+        );
         // Offline: nothing from the web but the one link, which is the browser's to open.
         assert!(!html.contains("<script src") && !html.contains("<link"));
-        for part in ["role=\"tab\"", "<canvas", "aria-sort", "--trek-accent", "--trek-bg", "pointermove"] {
+        for part in [
+            "role=\"tab\"",
+            "<canvas",
+            "aria-sort",
+            "--trek-accent",
+            "--trek-bg",
+            "pointermove",
+        ] {
             assert!(html.contains(part), "{part}");
         }
         // Prose on both sides, more after it than a screenful's worth of lines.
@@ -2596,7 +3967,10 @@ mod tests {
         fn of(config: SessionConfig) -> Live {
             set_pace(0.);
             let h = crate::start(config);
-            Live { commands: h.commands, events: h.events }
+            Live {
+                commands: h.commands,
+                events: h.events,
+            }
         }
 
         async fn send(&self, cmd: Command) {
@@ -2604,14 +3978,21 @@ mod tests {
         }
 
         async fn prompt(&self, text: &str) {
-            self.send(Command::Prompt { text: text.into(), images: vec![] }).await;
+            self.send(Command::Prompt {
+                text: text.into(),
+                images: vec![],
+            })
+            .await;
         }
 
         /// Events up to and including the first one `stop` accepts.
         async fn until(&self, stop: impl Fn(&AgentEvent) -> bool) -> Vec<AgentEvent> {
             let mut out = vec![];
             loop {
-                let ev = tokio::time::timeout(Duration::from_secs(10), self.events.recv()).await.expect("mock stalled").expect("mock exited");
+                let ev = tokio::time::timeout(Duration::from_secs(10), self.events.recv())
+                    .await
+                    .expect("mock stalled")
+                    .expect("mock exited");
                 let done = stop(&ev);
                 out.push(ev);
                 if done {
@@ -2621,15 +4002,31 @@ mod tests {
         }
 
         async fn turn(&self) -> Vec<AgentEvent> {
-            self.until(|e| matches!(e, AgentEvent::TurnComplete { .. })).await
+            self.until(|e| matches!(e, AgentEvent::TurnComplete { .. }))
+                .await
         }
     }
 
     fn text(events: &[AgentEvent]) -> String {
-        events.iter().filter_map(|e| if let AgentEvent::TextDone(t) = e { Some(t.as_str()) } else { None }).collect::<Vec<_>>().join("\n")
+        events
+            .iter()
+            .filter_map(|e| {
+                if let AgentEvent::TextDone(t) = e {
+                    Some(t.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
-    fn config(resume: Option<&str>, at: Option<&str>, fork: bool, recap: Option<&str>) -> SessionConfig {
+    fn config(
+        resume: Option<&str>,
+        at: Option<&str>,
+        fork: bool,
+        recap: Option<&str>,
+    ) -> SessionConfig {
         SessionConfig {
             agent: trek_core::AgentId::Direct(PROVIDER.into()),
             cwd: PathBuf::from("/tmp"),
@@ -2652,7 +4049,15 @@ mod tests {
     #[test]
     fn sessions_resume_partway_fork_or_fall_back_to_a_recap() {
         let said = |m: &str, t: &str| (m.to_string(), t.to_string());
-        HISTORY.lock().unwrap().insert("s".into(), vec![said("m1", "one"), said("m2", "two"), said("m2", "steered"), said("m3", "three")]);
+        HISTORY.lock().unwrap().insert(
+            "s".into(),
+            vec![
+                said("m1", "one"),
+                said("m2", "two"),
+                said("m2", "steered"),
+                said("m3", "three"),
+            ],
+        );
         // A fork through a turn copies the history up to it; the session is left as it was.
         let (fork, at, recap) = open_session(&config(Some("s"), Some("m2"), true, Some("recap")));
         assert!(fork != "s" && at.as_deref() == Some("m2") && recap.is_none());
@@ -2663,12 +4068,17 @@ mod tests {
         assert_eq!((id.as_str(), at.as_deref()), ("s", Some("m1")));
         assert_eq!(remembered("s"), ["one"]);
         // A point it doesn't have: a new session, with the recap to go with the first message.
-        let (id, at, recap) = open_session(&config(Some("s"), Some("gone"), false, Some("User: one")));
+        let (id, at, recap) =
+            open_session(&config(Some("s"), Some("gone"), false, Some("User: one")));
         assert!(id != "s" && at.is_none() && recap.as_deref() == Some("User: one"));
         assert!(remembered(&id).is_empty());
         // Resumed whole, and new.
         assert_eq!(open_session(&config(Some("s"), None, false, None)).0, "s");
-        assert!(open_session(&config(None, None, false, None)).0.starts_with("mock-session-"));
+        assert!(
+            open_session(&config(None, None, false, None))
+                .0
+                .starts_with("mock-session-")
+        );
     }
 
     #[test]
@@ -2677,12 +4087,28 @@ mod tests {
             set_pace(0.);
             let open = |c: SessionConfig| {
                 let h = crate::start(c);
-                Live { commands: h.commands, events: h.events }
+                Live {
+                    commands: h.commands,
+                    events: h.events,
+                }
             };
             let m = open(config(None, None, false, None));
             let started = m.until(|e| matches!(e, AgentEvent::Started { .. })).await;
-            let Some(AgentEvent::Started { native_id, .. }) = started.last() else { panic!() };
-            let mark = |events: &[AgentEvent]| events.iter().find_map(|e| if let AgentEvent::Mark(m) = e { Some(m.clone()) } else { None }).unwrap();
+            let Some(AgentEvent::Started { native_id, .. }) = started.last() else {
+                panic!()
+            };
+            let mark = |events: &[AgentEvent]| {
+                events
+                    .iter()
+                    .find_map(|e| {
+                        if let AgentEvent::Mark(m) = e {
+                            Some(m.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap()
+            };
             m.prompt("apple").await;
             let first = mark(&m.turn().await);
             m.prompt("banana").await;
@@ -2694,12 +4120,20 @@ mod tests {
             // Cut back to the first turn: the second is forgotten.
             let back = open(config(Some(native_id), Some(&first), false, None));
             let started = back.until(|e| matches!(e, AgentEvent::Mark(_))).await;
-            assert!(started.contains(&AgentEvent::Started { native_id: native_id.clone(), model: Some("mock-swift".into()) }));
+            assert!(started.contains(&AgentEvent::Started {
+                native_id: native_id.clone(),
+                model: Some("mock-swift".into())
+            }));
             back.prompt("recall").await;
             assert_eq!(text(&back.turn().await), "I remember: apple");
 
             // A new session primed with a recap remembers what the recap says.
-            let recapped = open(config(None, None, false, Some("User: apple\n\nAssistant: OK\n\nUser: cherry")));
+            let recapped = open(config(
+                None,
+                None,
+                false,
+                Some("User: apple\n\nAssistant: OK\n\nUser: cherry"),
+            ));
             recapped.prompt("recall").await;
             assert_eq!(text(&recapped.turn().await), "I remember: apple | cherry");
         });
@@ -2728,16 +4162,32 @@ mod tests {
     fn restating_says_it_back_and_does_nothing_else() {
         trek_core::runtime().block_on(async {
             let m = Live::start(HandHolding::FullAccess, false);
-            m.prompt(&trek_core::restate::with_restate("Fix the flaky upload test.")).await;
+            m.prompt(&trek_core::restate::with_restate(
+                "Fix the flaky upload test.",
+            ))
+            .await;
             let events = m.turn().await;
             let said = text(&events);
-            assert!(said.contains("in my own words") && said.contains("you'd like me to fix the flaky upload test.") && said.contains("I haven't changed anything"), "{said}");
-            assert!(!events.iter().any(|e| matches!(e, AgentEvent::ToolStarted { .. })), "nothing done yet");
+            assert!(
+                said.contains("in my own words")
+                    && said.contains("you'd like me to fix the flaky upload test.")
+                    && said.contains("I haven't changed anything"),
+                "{said}"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::ToolStarted { .. })),
+                "nothing done yet"
+            );
         });
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "the mock's verification CLI is a /bin/sh script; a Windows one comes with the Phase 2 verification work")]
+    #[cfg_attr(
+        windows,
+        ignore = "the mock's verification CLI is a /bin/sh script; a Windows one comes with the Phase 2 verification work"
+    )]
     fn it_sets_up_a_verification_skill_then_verifies_with_its_cli() {
         let dir = std::env::temp_dir().join(format!("trek-mock-verify-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2750,12 +4200,25 @@ mod tests {
         });
         // Trek finds what it made, and its CLI really runs.
         let found = trek_core::verification::find(&dir).expect("a verification skill");
-        assert_eq!((found.name.as_str(), found.cli.as_deref()), ("verify-app", Some("./.agents/skills/verify-app/scripts/app")));
+        assert_eq!(
+            (found.name.as_str(), found.cli.as_deref()),
+            (
+                "verify-app",
+                Some("./.agents/skills/verify-app/scripts/app")
+            )
+        );
         assert!(found.dir.join("references/features/README.md").exists());
-        let out = std::process::Command::new(found.dir.join("scripts/app")).arg("check").output().unwrap();
+        let out = std::process::Command::new(found.dir.join("scripts/app"))
+            .arg("check")
+            .output()
+            .unwrap();
         assert!(String::from_utf8_lossy(&out.stdout).contains("\"ok\":true"));
         // Told about it, a session checks its change with the CLI.
-        let notes = trek_core::verification::instructions(&trek_core::verification::record(&found, None, None), &dir, &dir);
+        let notes = trek_core::verification::instructions(
+            &trek_core::verification::record(&found, None, None),
+            &dir,
+            &dir,
+        );
         trek_core::runtime().block_on(async {
             let m = Live::of(SessionConfig { cwd: dir.clone(), instructions: Some(notes), ..config(None, None, false, None) });
             m.prompt("mock:verify the notes change").await;
@@ -2781,7 +4244,11 @@ mod tests {
             m.prompt("Maintain it, following `/x/maintain-verification-skill/SKILL.md`.").await;
             m.turn().await;
         });
-        assert!(std::fs::read_to_string(found.dir.join("references/features/README.md")).unwrap().contains("settings.md"));
+        assert!(
+            std::fs::read_to_string(found.dir.join("references/features/README.md"))
+                .unwrap()
+                .contains("settings.md")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -2790,19 +4257,45 @@ mod tests {
         trek_core::runtime().block_on(async {
             let m = Live::start(HandHolding::Auto, false);
             let start = m.until(|e| matches!(e, AgentEvent::Context { .. })).await;
-            assert!(start.contains(&AgentEvent::Billing(crate::Billing::Local)), "{start:?}");
+            assert!(
+                start.contains(&AgentEvent::Billing(crate::Billing::Local)),
+                "{start:?}"
+            );
             m.prompt("explain").await;
             let events = m.turn().await;
-            assert!(events.iter().any(|e| matches!(e, AgentEvent::Usage { cost: None, .. })), "the mock's models have no price");
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::Usage { cost: None, .. })),
+                "the mock's models have no price"
+            );
             m.prompt("mock:cost").await;
             let events = m.turn().await;
             assert!(events.contains(&AgentEvent::Billing(crate::Billing::Metered)));
-            let Some(AgentEvent::Usage { model: Some(model), cost: Some(cost), .. }) = events.iter().find(|e| matches!(e, AgentEvent::Usage { .. })) else { panic!("{events:?}") };
+            let Some(AgentEvent::Usage {
+                model: Some(model),
+                cost: Some(cost),
+                ..
+            }) = events
+                .iter()
+                .find(|e| matches!(e, AgentEvent::Usage { .. }))
+            else {
+                panic!("{events:?}")
+            };
             // 2,400 × $2 + 1,850 × $10 + 182,000 × $0.20 + 12,600 × $4 (1-hour writes), per million.
             assert_eq!(model, "claude-sonnet-5-5");
-            assert!((cost.usd - (0.0048 + 0.0185 + 0.0364 + 0.0504)).abs() < 1e-9, "{cost:?}");
+            assert!(
+                (cost.usd - (0.0048 + 0.0185 + 0.0364 + 0.0504)).abs() < 1e-9,
+                "{cost:?}"
+            );
             m.prompt("mock:cost plan").await;
-            assert!(m.turn().await.contains(&AgentEvent::Billing(crate::Billing::Plan(Some("Claude Max".into())))));
+            assert!(
+                m.turn()
+                    .await
+                    .contains(&AgentEvent::Billing(crate::Billing::Plan(Some(
+                        "Claude Max".into()
+                    ))))
+            );
         });
     }
 
@@ -2811,18 +4304,44 @@ mod tests {
         trek_core::runtime().block_on(async {
             let m = Live::start(HandHolding::Supervised, false);
             m.prompt("mock:permission").await;
-            let events = m.until(|e| matches!(e, AgentEvent::PermissionRequest { .. })).await;
-            let Some(AgentEvent::PermissionRequest { request_id, prompt: None, .. }) = events.last() else { panic!("{events:?}") };
-            m.send(Command::Respond { request_id: request_id.clone(), decision: Decision::Deny }).await;
+            let events = m
+                .until(|e| matches!(e, AgentEvent::PermissionRequest { .. }))
+                .await;
+            let Some(AgentEvent::PermissionRequest {
+                request_id,
+                prompt: None,
+                ..
+            }) = events.last()
+            else {
+                panic!("{events:?}")
+            };
+            m.send(Command::Respond {
+                request_id: request_id.clone(),
+                decision: Decision::Deny,
+            })
+            .await;
             let events = m.turn().await;
-            assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolFinished { ok: false, .. })));
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::ToolFinished { ok: false, .. }))
+            );
             assert!(text(&events).contains("won't run it"));
             // Full access: no prompt at all.
-            m.send(Command::SetHandHolding(HandHolding::FullAccess)).await;
+            m.send(Command::SetHandHolding(HandHolding::FullAccess))
+                .await;
             m.prompt("permission again").await;
             let events = m.turn().await;
-            assert!(!events.iter().any(|e| matches!(e, AgentEvent::PermissionRequest { .. })));
-            assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolFinished { ok: true, .. })));
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::PermissionRequest { .. }))
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::ToolFinished { ok: true, .. }))
+            );
         });
     }
 
@@ -2831,11 +4350,24 @@ mod tests {
         trek_core::runtime().block_on(async {
             let m = Live::start(HandHolding::Auto, false);
             m.prompt("a question for you").await;
-            let events = m.until(|e| matches!(e, AgentEvent::PermissionRequest { .. })).await;
-            let Some(AgentEvent::PermissionRequest { request_id, prompt: Some(Prompt::Questions(q)), .. }) = events.last() else { panic!("{events:?}") };
+            let events = m
+                .until(|e| matches!(e, AgentEvent::PermissionRequest { .. }))
+                .await;
+            let Some(AgentEvent::PermissionRequest {
+                request_id,
+                prompt: Some(Prompt::Questions(q)),
+                ..
+            }) = events.last()
+            else {
+                panic!("{events:?}")
+            };
             assert_eq!(q.len(), 2);
             assert!(q[1].multi);
-            m.send(Command::Answer { request_id: request_id.clone(), answers: vec![(q[0].question.clone(), "Postgres".into())] }).await;
+            m.send(Command::Answer {
+                request_id: request_id.clone(),
+                answers: vec![(q[0].question.clone(), "Postgres".into())],
+            })
+            .await;
             assert!(text(&m.turn().await).contains("**Postgres**"));
         });
     }
@@ -2845,15 +4377,37 @@ mod tests {
         trek_core::runtime().block_on(async {
             let m = Live::start(HandHolding::Auto, true);
             m.prompt("add auth").await;
-            let events = m.until(|e| matches!(e, AgentEvent::PermissionRequest { .. })).await;
-            let Some(AgentEvent::PermissionRequest { request_id, prompt: Some(Prompt::Plan(plan)), .. }) = events.last() else { panic!("{events:?}") };
+            let events = m
+                .until(|e| matches!(e, AgentEvent::PermissionRequest { .. }))
+                .await;
+            let Some(AgentEvent::PermissionRequest {
+                request_id,
+                prompt: Some(Prompt::Plan(plan)),
+                ..
+            }) = events.last()
+            else {
+                panic!("{events:?}")
+            };
             assert!(plan.contains("require_session"));
-            m.send(Command::Respond { request_id: request_id.clone(), decision: Decision::Allow }).await;
+            m.send(Command::Respond {
+                request_id: request_id.clone(),
+                decision: Decision::Allow,
+            })
+            .await;
             let events = m.turn().await;
-            assert!(events.iter().any(|e| matches!(e, AgentEvent::DiffStat { .. })));
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::DiffStat { .. }))
+            );
             // Approving leaves plan mode: the next prompt is answered normally.
             m.prompt("thanks").await;
-            assert!(!m.turn().await.iter().any(|e| matches!(e, AgentEvent::PermissionRequest { .. })));
+            assert!(
+                !m.turn()
+                    .await
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::PermissionRequest { .. }))
+            );
         });
     }
 
@@ -2863,14 +4417,57 @@ mod tests {
             let m = Live::start(HandHolding::Auto, false);
             m.prompt("subagents 30ms").await;
             let first = m.turn().await;
-            let out = first.iter().find_map(|e| if let AgentEvent::Background(b) = e { Some(b.clone()) } else { None }).expect("a background set");
-            assert_eq!(out.iter().map(|t| (t.kind, t.title.as_str())).collect::<Vec<_>>(), [(BackgroundKind::Agent, "Map the HTTP routes"), (BackgroundKind::Agent, "Audit error handling")]);
-            let tasks = first.iter().filter(|e| matches!(e, AgentEvent::Task { description: Some(_), .. })).count();
+            let out = first
+                .iter()
+                .find_map(|e| {
+                    if let AgentEvent::Background(b) = e {
+                        Some(b.clone())
+                    } else {
+                        None
+                    }
+                })
+                .expect("a background set");
+            assert_eq!(
+                out.iter()
+                    .map(|t| (t.kind, t.title.as_str()))
+                    .collect::<Vec<_>>(),
+                [
+                    (BackgroundKind::Agent, "Map the HTTP routes"),
+                    (BackgroundKind::Agent, "Audit error handling")
+                ]
+            );
+            let tasks = first
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        AgentEvent::Task {
+                            description: Some(_),
+                            ..
+                        }
+                    )
+                })
+                .count();
             assert_eq!(tasks, 2);
             let rest = m.turn().await;
-            assert!(rest.iter().any(|e| matches!(e, AgentEvent::TaskStep { title, .. } if title == "Read")), "{rest:?}");
+            assert!(
+                rest.iter()
+                    .any(|e| matches!(e, AgentEvent::TaskStep { title, .. } if title == "Read")),
+                "{rest:?}"
+            );
             assert!(rest.contains(&AgentEvent::Background(vec![])));
-            assert_eq!(rest.iter().filter(|e| matches!(e, AgentEvent::Task { done: Some(true), .. })).count(), 2);
+            assert_eq!(
+                rest.iter()
+                    .filter(|e| matches!(
+                        e,
+                        AgentEvent::Task {
+                            done: Some(true),
+                            ..
+                        }
+                    ))
+                    .count(),
+                2
+            );
             assert!(text(&rest).contains("reported back"));
         });
     }
@@ -2881,11 +4478,32 @@ mod tests {
             let m = Live::start(HandHolding::Auto, false);
             m.prompt("subagents 30s").await;
             let first = m.turn().await;
-            let out = first.iter().find_map(|e| if let AgentEvent::Background(b) = e { Some(b.clone()) } else { None }).expect("a background set");
-            m.send(Command::StopTask { id: out[0].id.clone() }).await;
+            let out = first
+                .iter()
+                .find_map(|e| {
+                    if let AgentEvent::Background(b) = e {
+                        Some(b.clone())
+                    } else {
+                        None
+                    }
+                })
+                .expect("a background set");
+            m.send(Command::StopTask {
+                id: out[0].id.clone(),
+            })
+            .await;
             // As Claude Code does (recorded live): the call fails, and a turn of its own says so.
             let echo = m.turn().await;
-            assert!(echo.contains(&AgentEvent::Task { id: out[0].id.clone(), description: None, activity: None, tool_uses: None, done: Some(false) }), "{echo:?}");
+            assert!(
+                echo.contains(&AgentEvent::Task {
+                    id: out[0].id.clone(),
+                    description: None,
+                    activity: None,
+                    tool_uses: None,
+                    done: Some(false)
+                }),
+                "{echo:?}"
+            );
             assert!(text(&echo).contains("was stopped"), "{echo:?}");
         });
     }
@@ -2925,7 +4543,14 @@ mod tests {
     #[test]
     fn two_sessions_servers_never_share_an_output_file() {
         // Both are task "mock-shell-1" in their own session; one ending mustn't take the other's file.
-        let task = || BackgroundTask { id: "mock-shell-1".into(), kind: BackgroundKind::Shell, title: "npm run dev".into(), call: None, readable: true, stoppable: true };
+        let task = || BackgroundTask {
+            id: "mock-shell-1".into(),
+            kind: BackgroundKind::Shell,
+            title: "npm run dev".into(),
+            call: None,
+            readable: true,
+            stoppable: true,
+        };
         let (a, b) = (Jobs::default(), Jobs::default());
         let (fa, fb) = (a.add_logged(task()), b.add_logged(task()));
         assert_ne!(fa, fb);
@@ -2941,7 +4566,14 @@ mod tests {
     #[test]
     fn a_session_s_background_work_ends_with_it() {
         let jobs = Jobs::default();
-        jobs.add(BackgroundTask { id: "shell-1".into(), kind: BackgroundKind::Shell, title: "npm run dev".into(), call: None, readable: true, stoppable: true });
+        jobs.add(BackgroundTask {
+            id: "shell-1".into(),
+            kind: BackgroundKind::Shell,
+            title: "npm run dev".into(),
+            call: None,
+            readable: true,
+            stoppable: true,
+        });
         drop(EndJobs(jobs.clone()));
         assert!(!jobs.running("shell-1"), "the loop printing for it stops");
     }
@@ -2952,12 +4584,37 @@ mod tests {
             let m = Live::start(HandHolding::Auto, false);
             m.prompt("mock:task 30ms").await;
             let turn = m.turn().await;
-            let started = turn.iter().position(|e| matches!(e, AgentEvent::ToolStarted { title, .. } if title == "Subagent")).expect("its row");
-            let steps = turn.iter().filter(|e| matches!(e, AgentEvent::TaskStep { .. })).count();
-            let done = turn.iter().position(|e| matches!(e, AgentEvent::Task { done: Some(true), .. })).expect("it finishes");
-            let finished = turn.iter().position(|e| matches!(e, AgentEvent::ToolFinished { .. })).expect("its call returns");
+            let started = turn
+                .iter()
+                .position(
+                    |e| matches!(e, AgentEvent::ToolStarted { title, .. } if title == "Subagent"),
+                )
+                .expect("its row");
+            let steps = turn
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::TaskStep { .. }))
+                .count();
+            let done = turn
+                .iter()
+                .position(|e| {
+                    matches!(
+                        e,
+                        AgentEvent::Task {
+                            done: Some(true),
+                            ..
+                        }
+                    )
+                })
+                .expect("it finishes");
+            let finished = turn
+                .iter()
+                .position(|e| matches!(e, AgentEvent::ToolFinished { .. }))
+                .expect("its call returns");
             assert!(started < done && done < finished && steps == 3, "{turn:?}");
-            assert!(!turn.iter().any(|e| matches!(e, AgentEvent::Background(_))), "in the foreground: nothing left running");
+            assert!(
+                !turn.iter().any(|e| matches!(e, AgentEvent::Background(_))),
+                "in the foreground: nothing left running"
+            );
             assert!(text(&turn).contains("212 tests"));
         });
     }
@@ -2988,13 +4645,22 @@ mod tests {
             m.prompt("use tabs").await;
             let events = m.turn().await;
             assert!(text(&events).contains("Noted — use tabs"));
-            assert!(matches!(events.last(), Some(AgentEvent::TurnComplete { error: None, .. })));
+            assert!(matches!(
+                events.last(),
+                Some(AgentEvent::TurnComplete { error: None, .. })
+            ));
             // As long as a prompt can ask for: the turn runs (no overflow) until stopped.
             m.prompt("mock:long 99999999999s").await;
-            m.until(|e| matches!(e, AgentEvent::ToolStarted { .. })).await;
+            m.until(|e| matches!(e, AgentEvent::ToolStarted { .. }))
+                .await;
             m.send(Command::Interrupt).await;
             let events = m.turn().await;
-            assert_eq!(events.last(), Some(&AgentEvent::TurnComplete { error: Some("Interrupted".into()) }));
+            assert_eq!(
+                events.last(),
+                Some(&AgentEvent::TurnComplete {
+                    error: Some("Interrupted".into())
+                })
+            );
         });
     }
 
@@ -3008,10 +4674,32 @@ mod tests {
             m.prompt("mock:stream 2s").await;
             let events = m.turn().await;
             assert!(start.elapsed() >= Duration::from_secs(2));
-            let streamed: String = events.iter().filter_map(|e| if let AgentEvent::TextDelta(t) = e { Some(t.as_str()) } else { None }).collect();
-            assert!(streamed.starts_with("## Part 1\n\n## How the app starts"), "{streamed}");
-            assert_eq!(text(&events), streamed, "one message, sent whole at the end");
-            assert!(events.iter().filter(|e| matches!(e, AgentEvent::TextDelta(_))).count() > 10);
+            let streamed: String = events
+                .iter()
+                .filter_map(|e| {
+                    if let AgentEvent::TextDelta(t) = e {
+                        Some(t.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert!(
+                streamed.starts_with("## Part 1\n\n## How the app starts"),
+                "{streamed}"
+            );
+            assert_eq!(
+                text(&events),
+                streamed,
+                "one message, sent whole at the end"
+            );
+            assert!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e, AgentEvent::TextDelta(_)))
+                    .count()
+                    > 10
+            );
         });
     }
 
@@ -3022,12 +4710,38 @@ mod tests {
             let start = std::time::Instant::now();
             m.prompt("mock:history 400").await;
             let events = m.turn().await;
-            assert!(start.elapsed() < Duration::from_secs(10), "fast: {:?}", start.elapsed());
-            let tools = events.iter().filter(|e| matches!(e, AgentEvent::ToolStarted { .. })).count();
-            let answers: Vec<&str> = events.iter().filter_map(|e| if let AgentEvent::TextDone(t) = e { Some(t.as_str()) } else { None }).collect();
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "fast: {:?}",
+                start.elapsed()
+            );
+            let tools = events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::ToolStarted { .. }))
+                .count();
+            let answers: Vec<&str> = events
+                .iter()
+                .filter_map(|e| {
+                    if let AgentEvent::TextDone(t) = e {
+                        Some(t.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             assert_eq!((tools, answers.len()), (1600, 401));
-            assert!(answers[0].contains("```rust") && answers[0].contains("| Case | Before | After |"), "{}", answers[0]);
-            assert_eq!(events.iter().filter(|e| matches!(e, AgentEvent::ToolLines { .. })).count(), 400);
+            assert!(
+                answers[0].contains("```rust") && answers[0].contains("| Case | Before | After |"),
+                "{}",
+                answers[0]
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e, AgentEvent::ToolLines { .. }))
+                    .count(),
+                400
+            );
         });
     }
 
@@ -3039,15 +4753,37 @@ mod tests {
             m.prompt("mock:explore 2s").await;
             let events = m.turn().await;
             assert!(start.elapsed() >= Duration::from_secs(2));
-            let tools: Vec<&str> = events.iter().filter_map(|e| if let AgentEvent::ToolStarted { title, .. } = e { Some(title.as_str()) } else { None }).collect();
+            let tools: Vec<&str> = events
+                .iter()
+                .filter_map(|e| {
+                    if let AgentEvent::ToolStarted { title, .. } = e {
+                        Some(title.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             assert!(tools.len() >= 8, "{tools:?}");
-            assert_eq!(tools.len(), events.iter().filter(|e| matches!(e, AgentEvent::ToolFinished { ok: true, .. })).count());
+            assert_eq!(
+                tools.len(),
+                events
+                    .iter()
+                    .filter(|e| matches!(e, AgentEvent::ToolFinished { ok: true, .. }))
+                    .count()
+            );
             // Messages between the groups, and the last word at the end.
             assert!(text(&events).contains("Titles come from"));
             assert!(text(&events).ends_with("the tests pass."));
             // Edits say how many lines they changed.
             if tools.len() > 13 {
-                assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolLines { added: 18, removed: 4, .. })));
+                assert!(events.iter().any(|e| matches!(
+                    e,
+                    AgentEvent::ToolLines {
+                        added: 18,
+                        removed: 4,
+                        ..
+                    }
+                )));
             }
         });
     }
@@ -3063,7 +4799,10 @@ mod tests {
         let path = trek_ipc::pipe_name(0).unwrap();
         #[cfg(unix)]
         let _ = std::fs::remove_file(&path);
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let mut listener = {
             let _enter = rt.enter();
             trek_ipc::server::Listener::bind(&path).unwrap()
@@ -3121,7 +4860,11 @@ mod tests {
             let m = Live::start(HandHolding::Auto, false);
             m.prompt("mock:delegate").await;
             let events = m.turn().await;
-            assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolFinished { ok: false, .. })));
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::ToolFinished { ok: false, .. }))
+            );
             assert!(text(&events).contains("couldn't get a second opinion"));
         });
     }
@@ -3132,7 +4875,10 @@ mod tests {
             let m = Live::start(HandHolding::Auto, false);
             m.prompt("mock:error").await;
             let events = m.turn().await;
-            assert!(matches!(events.last(), Some(AgentEvent::TurnComplete { error: Some(_), .. })));
+            assert!(matches!(
+                events.last(),
+                Some(AgentEvent::TurnComplete { error: Some(_), .. })
+            ));
         });
     }
 
@@ -3141,22 +4887,45 @@ mod tests {
         trek_core::runtime().block_on(async {
             let m = Live::start(HandHolding::Auto, false);
             let started = m.until(|e| matches!(e, AgentEvent::Started { .. })).await;
-            let Some(AgentEvent::Started { native_id, .. }) = started.last() else { panic!() };
+            let Some(AgentEvent::Started { native_id, .. }) = started.last() else {
+                panic!()
+            };
             let before = trek_core::store::now_ms();
             m.prompt("mock:limit 5s").await;
             let events = m.turn().await;
-            let Some(AgentEvent::LimitReached { message, resets_at: Some(at), scope }) = events.iter().find(|e| matches!(e, AgentEvent::LimitReached { .. })) else { panic!("{events:?}") };
+            let Some(AgentEvent::LimitReached {
+                message,
+                resets_at: Some(at),
+                scope,
+            }) = events
+                .iter()
+                .find(|e| matches!(e, AgentEvent::LimitReached { .. }))
+            else {
+                panic!("{events:?}")
+            };
             assert!(*at >= before + 5_000 && *at < before + 7_000);
             assert_eq!(*scope, crate::LimitScope::Session);
             assert!(message.starts_with("You've hit your session limit · resets "));
-            assert_eq!(events.last(), Some(&AgentEvent::TurnComplete { error: Some(message.clone()) }));
+            assert_eq!(
+                events.last(),
+                Some(&AgentEvent::TurnComplete {
+                    error: Some(message.clone())
+                })
+            );
             // Anything else meets the same limit until it resets.
             m.prompt("explain the startup").await;
             let again = m.turn().await;
-            assert!(again.contains(&AgentEvent::LimitReached { message: message.clone(), resets_at: Some(*at), scope: crate::LimitScope::Session }));
+            assert!(again.contains(&AgentEvent::LimitReached {
+                message: message.clone(),
+                resets_at: Some(*at),
+                scope: crate::LimitScope::Session
+            }));
             lift_limit(native_id);
             m.prompt("explain the startup").await;
-            assert!(matches!(m.turn().await.last(), Some(AgentEvent::TurnComplete { error: None, .. })));
+            assert!(matches!(
+                m.turn().await.last(),
+                Some(AgentEvent::TurnComplete { error: None, .. })
+            ));
         });
     }
 

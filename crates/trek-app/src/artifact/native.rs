@@ -45,8 +45,16 @@ pub struct Spec {
 }
 
 /// Serve the document at `/` and nothing anywhere else, with the CSP, never cached.
-fn respond(document: &str, csp: &str, media: Option<&std::path::Path>, path: &str, range: Option<&str>) -> wry::http::Response<Cow<'static, [u8]>> {
-    let base = wry::http::Response::builder().header("Cache-Control", "no-store").header("X-Content-Type-Options", "nosniff");
+fn respond(
+    document: &str,
+    csp: &str,
+    media: Option<&std::path::Path>,
+    path: &str,
+    range: Option<&str>,
+) -> wry::http::Response<Cow<'static, [u8]>> {
+    let base = wry::http::Response::builder()
+        .header("Cache-Control", "no-store")
+        .header("X-Content-Type-Options", "nosniff");
     if path == "/" || path.is_empty() {
         base.header("Content-Type", "text/html; charset=utf-8")
             .header("Content-Security-Policy", csp)
@@ -55,7 +63,9 @@ fn respond(document: &str, csp: &str, media: Option<&std::path::Path>, path: &st
     } else if let (Some(file), true) = (media, path == trek_core::artifact::MEDIA_PATH) {
         crate::ide::preview::serve(file, range).map(Cow::Owned)
     } else {
-        base.status(404).body(Cow::Borrowed(&[][..])).unwrap_or_default()
+        base.status(404)
+            .body(Cow::Borrowed(&[][..]))
+            .unwrap_or_default()
     }
 }
 
@@ -70,19 +80,33 @@ pub struct NativeSurface {
 impl NativeSurface {
     /// A view for `spec` over `window`, hidden until placed.
     pub fn new(spec: Spec, window: &Window) -> Result<Self, String> {
-        let handle = raw_window_handle::HasWindowHandle::window_handle(window).map_err(|e| e.to_string())?.as_raw();
+        let handle = raw_window_handle::HasWindowHandle::window_handle(window)
+            .map_err(|e| e.to_string())?
+            .as_raw();
         let clip = platform::Clip::new(handle).ok_or("Couldn't make the web view's container.")?;
         let parent = clip.handle();
-        let Spec { origin, document, csp, media, bootstrap, background, events } = spec;
+        let Spec {
+            origin,
+            document,
+            csp,
+            media,
+            bootstrap,
+            background,
+            events,
+        } = spec;
         let (t1, t2, t3) = (events.clone(), events.clone(), events);
         let nav_origin = origin.clone();
         // A profile of the artifacts' own, beside the Browser panel's and not in it: a page an
         // agent wrote shares no cookies, logins or storage with the user's own browsing.
         #[cfg(windows)]
-        let mut context = wry::WebContext::new(Some(crate::panels::browser::webview_data_dir().with_file_name("WebView2-pages")));
+        let mut context = wry::WebContext::new(Some(
+            crate::panels::browser::webview_data_dir().with_file_name("WebView2-pages"),
+        ));
         // It mustn't take the keys from Trek: a click on it does.
         #[cfg(windows)]
-        let builder = wry::WebViewBuilder::new_with_web_context(&mut context).with_focused(false).with_background_color((background.0, background.1, background.2, 255));
+        let builder = wry::WebViewBuilder::new_with_web_context(&mut context)
+            .with_focused(false)
+            .with_background_color((background.0, background.1, background.2, 255));
         #[cfg(not(windows))]
         let builder = {
             let _ = background;
@@ -98,7 +122,15 @@ impl NativeSurface {
             .with_autoplay(false)
             .with_hotkeys_zoom(false)
             .with_initialization_script_for_main_only(bootstrap, true)
-            .with_custom_protocol(trek_core::artifact::SCHEME.into(), move |_, request| respond(&document.borrow(), csp, media.as_deref(), request.uri().path(), request.headers().get("range").and_then(|r| r.to_str().ok())))
+            .with_custom_protocol(trek_core::artifact::SCHEME.into(), move |_, request| {
+                respond(
+                    &document.borrow(),
+                    csp,
+                    media.as_deref(),
+                    request.uri().path(),
+                    request.headers().get("range").and_then(|r| r.to_str().ok()),
+                )
+            })
             .with_ipc_handler(move |request| {
                 let _ = t1.try_send(Event::Message(request.into_body()));
             })
@@ -121,7 +153,11 @@ impl NativeSurface {
             })
             .build_as_child(&parent)
             .map_err(|e| e.to_string())?;
-        Ok(Self { web, clip, shown: None })
+        Ok(Self {
+            web,
+            clip,
+            shown: None,
+        })
     }
 }
 
@@ -137,13 +173,25 @@ impl Surface for NativeSurface {
                 let rect = if cfg!(windows) {
                     let s = window.scale_factor();
                     wry::Rect {
-                        position: wry::dpi::Position::Physical(wry::dpi::PhysicalPosition::new((f32::from(inner.x) * s).round() as i32, (f32::from(inner.y) * s).round() as i32)),
-                        size: wry::dpi::Size::Physical(wry::dpi::PhysicalSize::new((f32::from(p.body.size.width) * s).round() as u32, (f32::from(p.body.size.height) * s).round() as u32)),
+                        position: wry::dpi::Position::Physical(wry::dpi::PhysicalPosition::new(
+                            (f32::from(inner.x) * s).round() as i32,
+                            (f32::from(inner.y) * s).round() as i32,
+                        )),
+                        size: wry::dpi::Size::Physical(wry::dpi::PhysicalSize::new(
+                            (f32::from(p.body.size.width) * s).round() as u32,
+                            (f32::from(p.body.size.height) * s).round() as u32,
+                        )),
                     }
                 } else {
                     wry::Rect {
-                        position: wry::dpi::Position::Logical(wry::dpi::LogicalPosition::new(f32::from(inner.x) as f64, f32::from(inner.y) as f64)),
-                        size: wry::dpi::Size::Logical(wry::dpi::LogicalSize::new(f32::from(p.body.size.width) as f64, f32::from(p.body.size.height) as f64)),
+                        position: wry::dpi::Position::Logical(wry::dpi::LogicalPosition::new(
+                            f32::from(inner.x) as f64,
+                            f32::from(inner.y) as f64,
+                        )),
+                        size: wry::dpi::Size::Logical(wry::dpi::LogicalSize::new(
+                            f32::from(p.body.size.width) as f64,
+                            f32::from(p.body.size.height) as f64,
+                        )),
                     }
                 };
                 let _ = self.web.set_bounds(rect);
@@ -184,20 +232,28 @@ impl Drop for NativeSurface {
 
 /// Decode an image a platform gave (TIFF, PNG) into BGRA rows.
 pub fn decode(bytes: &[u8]) -> Result<Shot, String> {
-    let picture = image::load_from_memory(bytes).map_err(|e| e.to_string())?.into_rgba8();
+    let picture = image::load_from_memory(bytes)
+        .map_err(|e| e.to_string())?
+        .into_rgba8();
     let (width, height) = picture.dimensions();
     let mut bgra = picture.into_raw();
     for px in bgra.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
-    Ok(Shot { width, height, bgra })
+    Ok(Shot {
+        width,
+        height,
+        bgra,
+    })
 }
 
 /// A raw handle (the container's) as wry wants a parent.
 struct Parent(raw_window_handle::RawWindowHandle);
 
 impl raw_window_handle::HasWindowHandle for Parent {
-    fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+    fn window_handle(
+        &self,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
         // SAFETY: the handle is the container's, which outlives the borrow (it's built with it).
         Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(self.0) })
     }
@@ -206,10 +262,10 @@ impl raw_window_handle::HasWindowHandle for Parent {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::{Parent, Placement};
-    use objc2::{MainThreadMarker, MainThreadOnly as _};
+    use objc2::msg_send;
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
-    use objc2::msg_send;
+    use objc2::{MainThreadMarker, MainThreadOnly as _};
     use objc2_app_kit::NSView;
     use objc2_foundation::{NSPoint, NSRect, NSSize};
     use std::ptr::NonNull;
@@ -228,11 +284,16 @@ mod platform {
 
     impl Clip {
         pub fn new(handle: raw_window_handle::RawWindowHandle) -> Option<Self> {
-            let raw_window_handle::RawWindowHandle::AppKit(h) = handle else { return None };
+            let raw_window_handle::RawWindowHandle::AppKit(h) = handle else {
+                return None;
+            };
             let mtm = MainThreadMarker::new()?;
             // SAFETY: GPUI's view, alive as long as its window (which outlives every card in it).
             let host: Retained<NSView> = unsafe { Retained::retain(h.ns_view.as_ptr().cast())? };
-            let view = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0., 0.), NSSize::new(0., 0.)));
+            let view = NSView::initWithFrame(
+                NSView::alloc(mtm),
+                NSRect::new(NSPoint::new(0., 0.), NSSize::new(0., 0.)),
+            );
             view.setWantsLayer(true);
             // SAFETY: a layer-backed view has a CALayer; these are its documented properties.
             unsafe {
@@ -248,16 +309,27 @@ mod platform {
 
         pub fn handle(&self) -> Parent {
             let ptr = NonNull::from(&*self.view).cast();
-            Parent(raw_window_handle::RawWindowHandle::AppKit(raw_window_handle::AppKitWindowHandle::new(ptr)))
+            Parent(raw_window_handle::RawWindowHandle::AppKit(
+                raw_window_handle::AppKitWindowHandle::new(ptr),
+            ))
         }
 
         /// Frame the visible part (window px, from the top left) and show it.
         pub fn place(&self, p: &Placement, _scale: f32) {
             let host = self.host.frame();
-            let (x, w, h) = (f32::from(p.clip.origin.x) as f64, f32::from(p.clip.size.width) as f64, f32::from(p.clip.size.height) as f64);
+            let (x, w, h) = (
+                f32::from(p.clip.origin.x) as f64,
+                f32::from(p.clip.size.width) as f64,
+                f32::from(p.clip.size.height) as f64,
+            );
             let top = f32::from(p.clip.origin.y) as f64;
-            let y = if self.host.isFlipped() { top } else { host.size.height - top - h };
-            self.view.setFrame(NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)));
+            let y = if self.host.isFlipped() {
+                top
+            } else {
+                host.size.height - top - h
+            };
+            self.view
+                .setFrame(NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)));
             // SAFETY: as in `new`.
             unsafe {
                 let layer: *mut AnyObject = msg_send![&*self.view, layer];
@@ -293,14 +365,18 @@ mod platform {
     }
 
     /// The page as WebKit draws it: a TIFF.
-    pub fn snapshot(web: &wry::WebView) -> Option<async_channel::Receiver<Result<Vec<u8>, String>>> {
+    pub fn snapshot(
+        web: &wry::WebView,
+    ) -> Option<async_channel::Receiver<Result<Vec<u8>, String>>> {
         use objc2_app_kit::NSImage;
         use objc2_foundation::NSError;
         use wry::WebViewExtMacOS as _;
         let (tx, rx) = async_channel::bounded(1);
         let done = block2::RcBlock::new(move |image: *mut NSImage, _: *mut NSError| {
             // SAFETY: WebKit hands a valid image or nil.
-            let tiff = unsafe { image.as_ref() }.and_then(|i| i.TIFFRepresentation()).map(|d| d.to_vec());
+            let tiff = unsafe { image.as_ref() }
+                .and_then(|i| i.TIFFRepresentation())
+                .map(|d| d.to_vec());
             let _ = tx.try_send(tiff.ok_or_else(|| "WebKit took no snapshot".to_string()));
         });
         let view = web.webview();
@@ -317,7 +393,11 @@ mod platform {
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, GetParent, HWND_TOP, IsWindowVisible, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, GetParent, HWND_TOP, IsWindowVisible, SW_HIDE,
+        SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, WS_CHILD, WS_CLIPCHILDREN,
+        WS_CLIPSIBLINGS,
+    };
 
     /// A child window over GPUI's that clips the web view in it (Windows clips a child window's
     /// children to it).
@@ -327,28 +407,58 @@ mod platform {
 
     impl Clip {
         pub fn new(handle: raw_window_handle::RawWindowHandle) -> Option<Self> {
-            let raw_window_handle::RawWindowHandle::Win32(h) = handle else { return None };
+            let raw_window_handle::RawWindowHandle::Win32(h) = handle else {
+                return None;
+            };
             let parent = h.hwnd.get() as HWND;
             let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
             // SAFETY: a plain child window of GPUI's, on its thread; destroyed in `drop`.
             let hwnd = unsafe {
-                CreateWindowExW(0, class.as_ptr(), std::ptr::null(), WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0, 0, 0, parent, std::ptr::null_mut(), GetModuleHandleW(std::ptr::null()), std::ptr::null())
+                CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    std::ptr::null(),
+                    WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                    0,
+                    0,
+                    0,
+                    0,
+                    parent,
+                    std::ptr::null_mut(),
+                    GetModuleHandleW(std::ptr::null()),
+                    std::ptr::null(),
+                )
             };
             (!hwnd.is_null()).then_some(Self { hwnd })
         }
 
         pub fn handle(&self) -> Parent {
             let hwnd = NonZeroIsize::new(self.hwnd as isize).expect("a window");
-            Parent(raw_window_handle::RawWindowHandle::Win32(raw_window_handle::Win32WindowHandle::new(hwnd)))
+            Parent(raw_window_handle::RawWindowHandle::Win32(
+                raw_window_handle::Win32WindowHandle::new(hwnd),
+            ))
         }
 
         /// Frame the visible part (window px from the top left, in GPUI's logical px) and show it.
         pub fn place(&self, p: &Placement, scale: f32) {
             let at = |v: gpui_kit::Pixels| (f32::from(v) * scale).round() as i32;
             let (x, y) = (at(p.clip.origin.x), at(p.clip.origin.y));
-            let (w, h) = (at(p.clip.origin.x + p.clip.size.width) - x, at(p.clip.origin.y + p.clip.size.height) - y);
+            let (w, h) = (
+                at(p.clip.origin.x + p.clip.size.width) - x,
+                at(p.clip.origin.y + p.clip.size.height) - y,
+            );
             // SAFETY: our own child window.
-            unsafe { SetWindowPos(self.hwnd, HWND_TOP, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW) };
+            unsafe {
+                SetWindowPos(
+                    self.hwnd,
+                    HWND_TOP,
+                    x,
+                    y,
+                    w,
+                    h,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                )
+            };
         }
 
         pub fn hide(&self) {
@@ -380,7 +490,9 @@ mod platform {
     }
 
     /// The page as WebView2 draws it (CapturePreview): a PNG.
-    pub fn snapshot(web: &wry::WebView) -> Option<async_channel::Receiver<Result<Vec<u8>, String>>> {
+    pub fn snapshot(
+        web: &wry::WebView,
+    ) -> Option<async_channel::Receiver<Result<Vec<u8>, String>>> {
         Some(crate::panels::browser::capture_png(web))
     }
 }
@@ -416,7 +528,10 @@ mod tests {
     fn the_document_is_served_at_its_root_with_the_csp_and_nothing_else_is() {
         let page = respond("<p>hi</p>", trek_core::artifact::CSP, None, "/", None);
         assert_eq!(page.status(), 200);
-        assert_eq!(page.headers()["content-security-policy"], trek_core::artifact::CSP);
+        assert_eq!(
+            page.headers()["content-security-policy"],
+            trek_core::artifact::CSP
+        );
         assert_eq!(page.headers()["content-type"], "text/html; charset=utf-8");
         assert_eq!(page.headers()["cache-control"], "no-store");
         assert_eq!(&page.body()[..], b"<p>hi</p>");
@@ -438,19 +553,41 @@ mod tests {
         assert_eq!(&part.body()[..], &(10..20u8).collect::<Vec<u8>>()[..]);
         assert_eq!(part.headers()["content-range"], "bytes 10-19/256");
         assert_eq!(part.headers()["content-type"], "video/mp4");
-        assert_eq!(respond("<video>", csp, Some(&file), media, None).status(), 200);
+        assert_eq!(
+            respond("<video>", csp, Some(&file), media, None).status(),
+            200
+        );
         // The page carries the video policy; another path, or a document with no file, is a 404.
-        assert_eq!(respond("<video>", csp, Some(&file), "/", None).headers()["content-security-policy"], csp);
-        assert_eq!(respond("<video>", csp, Some(&file), "/other.mp4", None).status(), 404);
-        assert_eq!(respond("<p>hi</p>", trek_core::artifact::CSP, None, media, Some("bytes=0-1")).status(), 404);
+        assert_eq!(
+            respond("<video>", csp, Some(&file), "/", None).headers()["content-security-policy"],
+            csp
+        );
+        assert_eq!(
+            respond("<video>", csp, Some(&file), "/other.mp4", None).status(),
+            404
+        );
+        assert_eq!(
+            respond(
+                "<p>hi</p>",
+                trek_core::artifact::CSP,
+                None,
+                media,
+                Some("bytes=0-1")
+            )
+            .status(),
+            404
+        );
         let _ = std::fs::remove_file(file);
     }
 
     #[test]
     fn pictures_are_handed_on_as_bgra() {
         let mut png = Vec::new();
-        let picture = image::RgbaImage::from_raw(2, 1, vec![10, 20, 30, 255, 1, 2, 3, 128]).unwrap();
-        picture.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let picture =
+            image::RgbaImage::from_raw(2, 1, vec![10, 20, 30, 255, 1, 2, 3, 128]).unwrap();
+        picture
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
         let shot = super::decode(&png).unwrap();
         assert_eq!((shot.width, shot.height), (2, 1));
         assert_eq!(shot.bgra, vec![30, 20, 10, 255, 3, 2, 1, 128]);

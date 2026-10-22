@@ -48,11 +48,18 @@ fn cache_file(repo: &str) -> std::path::PathBuf {
 /// for other feeds, which have no release list to read.
 pub fn github_repo(updates: &Updates) -> Option<String> {
     let feed = updates.feed_url.trim().trim_end_matches('/');
-    let feed = if feed.is_empty() { crate::update::OFFICIAL_FEED } else { feed };
-    let rest = feed.strip_prefix("https://github.com/")?.strip_suffix("/releases")?;
+    let feed = if feed.is_empty() {
+        crate::update::OFFICIAL_FEED
+    } else {
+        feed
+    };
+    let rest = feed
+        .strip_prefix("https://github.com/")?
+        .strip_suffix("/releases")?;
     let mut parts = rest.split('/');
     let (owner, repo) = (parts.next()?, parts.next()?);
-    (parts.next().is_none() && !owner.is_empty() && !repo.is_empty()).then(|| format!("{owner}/{repo}"))
+    (parts.next().is_none() && !owner.is_empty() && !repo.is_empty())
+        .then(|| format!("{owner}/{repo}"))
 }
 
 /// Every published release, newest first (`for_channel` picks a channel's): fetched, or the copy
@@ -76,7 +83,9 @@ fn cached(path: &Path) -> Option<Vec<Release>> {
 }
 
 async fn fetch_live(updates: &Updates) -> Result<Vec<Release>> {
-    let Some(repo) = github_repo(updates) else { bail!("this update feed has no release list") };
+    let Some(repo) = github_repo(updates) else {
+        bail!("this update feed has no release list")
+    };
     let url = format!("https://api.github.com/repos/{repo}/releases?per_page=50");
     let resp = crate::update::http()?
         .get(&url)
@@ -85,7 +94,9 @@ async fn fetch_live(updates: &Updates) -> Result<Vec<Release>> {
         .send()
         .await
         .with_context(|| format!("couldn't reach {url}"))?;
-    let resp = resp.error_for_status().with_context(|| format!("couldn't read {url}"))?;
+    let resp = resp
+        .error_for_status()
+        .with_context(|| format!("couldn't read {url}"))?;
     let releases: Vec<ApiRelease> = resp.json().await.context("unreadable release list")?;
     Ok(parse(releases))
 }
@@ -97,10 +108,16 @@ fn parse(releases: Vec<ApiRelease>) -> Vec<Release> {
         .filter_map(|r| {
             // Stable and beta tags are `v<version>`; the nightly prerelease lives under the fixed
             // tag `nightly`, its title naming the version ("Trek 0.3.0-nightly.20261003 (nightly)").
-            let version = version_in(&r.tag_name).or_else(|| r.name.as_deref().and_then(version_in))?;
+            let version =
+                version_in(&r.tag_name).or_else(|| r.name.as_deref().and_then(version_in))?;
             Some(Release {
                 version,
-                notes: r.body.unwrap_or_default().replace("\r\n", "\n").trim().to_string(),
+                notes: r
+                    .body
+                    .unwrap_or_default()
+                    .replace("\r\n", "\n")
+                    .trim()
+                    .to_string(),
                 date: r.published_at.unwrap_or_default(),
                 url: r.html_url,
                 prerelease: r.prerelease,
@@ -114,7 +131,8 @@ fn parse(releases: Vec<ApiRelease>) -> Vec<Release> {
 
 /// The first word of `text` that reads as a version, `v` prefix allowed.
 fn version_in(text: &str) -> Option<semver::Version> {
-    text.split(|c: char| c.is_whitespace() || c == '(' || c == ')').find_map(|w| semver::Version::parse(w.trim_start_matches('v')).ok())
+    text.split(|c: char| c.is_whitespace() || c == '(' || c == ')')
+        .find_map(|w| semver::Version::parse(w.trim_start_matches('v')).ok())
 }
 
 /// Whether `channel` offers `release`: stable gets releases, beta also betas, nightly everything.
@@ -129,8 +147,16 @@ pub fn on_channel(release: &Release, channel: Channel) -> bool {
 
 /// The channel's releases after `from` up to and including `to`, newest first: what an update
 /// from `from` to `to` brings.
-pub fn between<'a>(releases: &'a [Release], channel: Channel, from: &semver::Version, to: &semver::Version) -> Vec<&'a Release> {
-    releases.iter().filter(|r| r.version > *from && r.version <= *to && on_channel(r, channel)).collect()
+pub fn between<'a>(
+    releases: &'a [Release],
+    channel: Channel,
+    from: &semver::Version,
+    to: &semver::Version,
+) -> Vec<&'a Release> {
+    releases
+        .iter()
+        .filter(|r| r.version > *from && r.version <= *to && on_channel(r, channel))
+        .collect()
 }
 
 /// GitHub's comparison of two tagged versions, for "all the changes" beyond the notes.
@@ -171,24 +197,57 @@ mod tests {
             draft,
         ]);
         let versions: Vec<String> = all.iter().map(|r| r.version.to_string()).collect();
-        assert_eq!(versions, ["0.3.0-nightly.20261004", "0.3.0-beta.1", "0.2.1", "0.2.0"]);
-        assert_eq!(all[2].notes, "notes for Trek 0.2.1", "trimmed, with Unix line ends");
+        assert_eq!(
+            versions,
+            ["0.3.0-nightly.20261004", "0.3.0-beta.1", "0.2.1", "0.2.0"]
+        );
+        assert_eq!(
+            all[2].notes, "notes for Trek 0.2.1",
+            "trimmed, with Unix line ends"
+        );
     }
 
     #[test]
     fn each_channel_sees_its_own_releases_and_the_steadier_ones() {
-        let all = parse(vec![api("v0.2.0", "Trek 0.2.0", false), api("v0.3.0-beta.1", "b", true), api("nightly", "Trek 0.3.0-nightly.1", true)]);
-        let names = |c| all.iter().filter(|r| on_channel(r, c)).map(|r| r.version.to_string()).collect::<Vec<_>>();
+        let all = parse(vec![
+            api("v0.2.0", "Trek 0.2.0", false),
+            api("v0.3.0-beta.1", "b", true),
+            api("nightly", "Trek 0.3.0-nightly.1", true),
+        ]);
+        let names = |c| {
+            all.iter()
+                .filter(|r| on_channel(r, c))
+                .map(|r| r.version.to_string())
+                .collect::<Vec<_>>()
+        };
         assert_eq!(names(Channel::Stable), ["0.2.0"]);
         assert_eq!(names(Channel::Beta), ["0.3.0-beta.1", "0.2.0"]);
-        assert_eq!(names(Channel::Nightly), ["0.3.0-nightly.1", "0.3.0-beta.1", "0.2.0"]);
+        assert_eq!(
+            names(Channel::Nightly),
+            ["0.3.0-nightly.1", "0.3.0-beta.1", "0.2.0"]
+        );
     }
 
     #[test]
     fn an_update_brings_every_release_since_the_installed_one() {
-        let all = parse(vec![api("v0.2.0", "a", false), api("v0.2.1", "b", false), api("v0.3.0-beta.1", "c", true), api("v0.3.0", "d", false), api("v0.3.1", "e", false)]);
-        let brought = |c| between(&all, c, &v("0.2.0"), &v("0.3.0")).iter().map(|r| r.version.to_string()).collect::<Vec<_>>();
-        assert_eq!(brought(Channel::Stable), ["0.3.0", "0.2.1"], "no betas on stable");
+        let all = parse(vec![
+            api("v0.2.0", "a", false),
+            api("v0.2.1", "b", false),
+            api("v0.3.0-beta.1", "c", true),
+            api("v0.3.0", "d", false),
+            api("v0.3.1", "e", false),
+        ]);
+        let brought = |c| {
+            between(&all, c, &v("0.2.0"), &v("0.3.0"))
+                .iter()
+                .map(|r| r.version.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            brought(Channel::Stable),
+            ["0.3.0", "0.2.1"],
+            "no betas on stable"
+        );
         assert_eq!(brought(Channel::Beta), ["0.3.0", "0.3.0-beta.1", "0.2.1"]);
         assert!(between(&all, Channel::Stable, &v("0.3.1"), &v("0.3.1")).is_empty());
     }
@@ -201,7 +260,10 @@ mod tests {
         assert_eq!(github_repo(&u).as_deref(), Some("someone/fork"));
         u.feed_url = "http://127.0.0.1:8765/{channel}.json".into();
         assert_eq!(github_repo(&u), None);
-        assert_eq!(compare_url("dokyit/Trek", &v("0.2.0"), &v("0.2.1")), "https://github.com/dokyit/Trek/compare/v0.2.0...v0.2.1");
+        assert_eq!(
+            compare_url("dokyit/Trek", &v("0.2.0"), &v("0.2.1")),
+            "https://github.com/dokyit/Trek/compare/v0.2.0...v0.2.1"
+        );
     }
 
     #[test]

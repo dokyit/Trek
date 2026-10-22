@@ -17,7 +17,16 @@ pub enum FileKind {
 }
 
 impl FileKind {
-    pub const ALL: [FileKind; 8] = [Self::Code, Self::Tests, Self::Docs, Self::Config, Self::Generated, Self::Assets, Self::Scripts, Self::Other];
+    pub const ALL: [FileKind; 8] = [
+        Self::Code,
+        Self::Tests,
+        Self::Docs,
+        Self::Config,
+        Self::Generated,
+        Self::Assets,
+        Self::Scripts,
+        Self::Other,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -51,12 +60,22 @@ impl FileKind {
     /// assets, config, code.
     pub fn of(path: &str) -> FileKind {
         let path = path.replace('\\', "/").to_ascii_lowercase();
-        let mut dirs: Vec<&str> = path.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
+        let mut dirs: Vec<&str> = path
+            .split('/')
+            .filter(|s| !s.is_empty() && *s != ".")
+            .collect();
         let name = dirs.pop().unwrap_or_default();
         // "a.test.ts" → stem "a", ext "ts"; ".gitignore" is a dotfile with no extension.
-        let ext = name.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()).map(|(_, e)| e).unwrap_or_default();
+        let ext = name
+            .rsplit_once('.')
+            .filter(|(stem, _)| !stem.is_empty())
+            .map(|(_, e)| e)
+            .unwrap_or_default();
         let first = name.split('.').next().unwrap_or_default();
-        let stem = name.strip_suffix(&format!(".{ext}")).filter(|_| !ext.is_empty()).unwrap_or(name);
+        let stem = name
+            .strip_suffix(&format!(".{ext}"))
+            .filter(|_| !ext.is_empty())
+            .unwrap_or(name);
         let in_dir = |set: &[&str]| dirs.iter().any(|d| set.contains(d));
 
         if LOCKFILES.contains(&name)
@@ -71,7 +90,9 @@ impl FileKind {
         if in_dir(TEST_DIRS)
             || name.contains(".test.")
             || name.contains(".spec.")
-            || ["_test", "_tests", "_spec"].iter().any(|s| stem.ends_with(s))
+            || ["_test", "_tests", "_spec"]
+                .iter()
+                .any(|s| stem.ends_with(s))
             || (stem.starts_with("test_") && ext == "py")
             || (matches!(stem, "test" | "tests") && CODE.contains(&ext))
         {
@@ -92,7 +113,11 @@ impl FileKind {
         if in_dir(&["script", "scripts"]) {
             return Self::Scripts;
         }
-        if in_dir(CONFIG_DIRS) || name.starts_with('.') || CONFIG_NAMES.contains(&name) || CONFIG_EXTS.contains(&ext) {
+        if in_dir(CONFIG_DIRS)
+            || name.starts_with('.')
+            || CONFIG_NAMES.contains(&name)
+            || CONFIG_EXTS.contains(&ext)
+        {
             return Self::Config;
         }
         if CODE.contains(&ext) {
@@ -125,20 +150,104 @@ const LOCKFILES: &[&str] = &[
     "gradle.lockfile",
     "packages.lock.json",
 ];
-const GENERATED_SUFFIXES: &[&str] = &[".min.js", ".min.css", ".js.map", ".css.map", ".pb.go", ".pb.cc", ".pb.h", ".pb.swift", "_pb2.py", "_pb2_grpc.py", ".g.dart", ".freezed.dart"];
-const TEST_DIRS: &[&str] = &["test", "tests", "spec", "specs", "__tests__", "__mocks__", "fixtures", "__fixtures__", "testdata", "test-fixtures", "test_fixtures", "e2e"];
+const GENERATED_SUFFIXES: &[&str] = &[
+    ".min.js",
+    ".min.css",
+    ".js.map",
+    ".css.map",
+    ".pb.go",
+    ".pb.cc",
+    ".pb.h",
+    ".pb.swift",
+    "_pb2.py",
+    "_pb2_grpc.py",
+    ".g.dart",
+    ".freezed.dart",
+];
+const TEST_DIRS: &[&str] = &[
+    "test",
+    "tests",
+    "spec",
+    "specs",
+    "__tests__",
+    "__mocks__",
+    "fixtures",
+    "__fixtures__",
+    "testdata",
+    "test-fixtures",
+    "test_fixtures",
+    "e2e",
+];
 const DOC_EXTS: &[&str] = &["md", "mdx", "markdown", "rst", "adoc", "asciidoc"];
-const DOC_NAMES: &[&str] = &["readme", "changelog", "changes", "license", "licence", "contributing", "authors", "notice", "code_of_conduct"];
+const DOC_NAMES: &[&str] = &[
+    "readme",
+    "changelog",
+    "changes",
+    "license",
+    "licence",
+    "contributing",
+    "authors",
+    "notice",
+    "code_of_conduct",
+];
 const SCRIPT_EXTS: &[&str] = &["sh", "bash", "zsh", "fish", "ps1", "psm1", "bat", "cmd"];
 const ASSET_EXTS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "icns", "svg", "tif", "tiff", "avif", "heic", "ttf", "otf", "woff", "woff2", "eot", "mp3", "wav", "ogg", "flac", "m4a", "mp4", "mov", "webm", "psd", "sketch", "fig", "riv", "lottie",
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "icns", "svg", "tif", "tiff", "avif",
+    "heic", "ttf", "otf", "woff", "woff2", "eot", "mp3", "wav", "ogg", "flac", "m4a", "mp4", "mov",
+    "webm", "psd", "sketch", "fig", "riv", "lottie",
 ];
-const CONFIG_DIRS: &[&str] = &[".github", ".vscode", ".cargo", ".config", ".devcontainer", ".circleci", ".husky", ".idea"];
-const CONFIG_NAMES: &[&str] = &["makefile", "dockerfile", "justfile", "cmakelists.txt", "procfile", "rust-toolchain", "gemfile", "podfile", "brewfile", "vagrantfile", "codeowners"];
-const CONFIG_EXTS: &[&str] = &["toml", "yaml", "yml", "json", "jsonc", "json5", "ini", "cfg", "conf", "plist", "xcconfig", "entitlements", "properties", "gradle", "pbxproj", "xcscheme", "xcworkspacedata", "manifest", "iss", "wxs"];
+const CONFIG_DIRS: &[&str] = &[
+    ".github",
+    ".vscode",
+    ".cargo",
+    ".config",
+    ".devcontainer",
+    ".circleci",
+    ".husky",
+    ".idea",
+];
+const CONFIG_NAMES: &[&str] = &[
+    "makefile",
+    "dockerfile",
+    "justfile",
+    "cmakelists.txt",
+    "procfile",
+    "rust-toolchain",
+    "gemfile",
+    "podfile",
+    "brewfile",
+    "vagrantfile",
+    "codeowners",
+];
+const CONFIG_EXTS: &[&str] = &[
+    "toml",
+    "yaml",
+    "yml",
+    "json",
+    "jsonc",
+    "json5",
+    "ini",
+    "cfg",
+    "conf",
+    "plist",
+    "xcconfig",
+    "entitlements",
+    "properties",
+    "gradle",
+    "pbxproj",
+    "xcscheme",
+    "xcworkspacedata",
+    "manifest",
+    "iss",
+    "wxs",
+];
 const CODE: &[&str] = &[
-    "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "py", "pyi", "go", "swift", "kt", "kts", "java", "c", "h", "cc", "cpp", "cxx", "hh", "hpp", "cs", "fs", "rb", "php", "m", "mm", "lua", "zig", "scala", "ex", "exs", "erl", "hs", "ml", "mli",
-    "dart", "vue", "svelte", "astro", "css", "scss", "sass", "less", "html", "htm", "sql", "wgsl", "metal", "glsl", "hlsl", "proto", "graphql", "gql", "r", "jl", "clj", "elm", "nim", "sol", "vb", "pl", "nix", "tf", "scm", "el", "vim",
+    "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "py", "pyi", "go", "swift", "kt",
+    "kts", "java", "c", "h", "cc", "cpp", "cxx", "hh", "hpp", "cs", "fs", "rb", "php", "m", "mm",
+    "lua", "zig", "scala", "ex", "exs", "erl", "hs", "ml", "mli", "dart", "vue", "svelte", "astro",
+    "css", "scss", "sass", "less", "html", "htm", "sql", "wgsl", "metal", "glsl", "hlsl", "proto",
+    "graphql", "gql", "r", "jl", "clj", "elm", "nim", "sol", "vb", "pl", "nix", "tf", "scm", "el",
+    "vim",
 ];
 
 /// One kind's lines in a breakdown.
@@ -163,8 +272,17 @@ impl LineBreakdown {
         for (path, added, removed) in files {
             let kind = FileKind::of(path.as_ref());
             match rows.iter_mut().find(|r| r.kind == kind) {
-                Some(r) => (r.added, r.removed) = (r.added.saturating_add(added), r.removed.saturating_add(removed)),
-                None => rows.push(KindLines { kind, added, removed }),
+                Some(r) => {
+                    (r.added, r.removed) = (
+                        r.added.saturating_add(added),
+                        r.removed.saturating_add(removed),
+                    )
+                }
+                None => rows.push(KindLines {
+                    kind,
+                    added,
+                    removed,
+                }),
             }
         }
         rows.sort_by_key(|r| r.kind);
@@ -178,13 +296,19 @@ impl LineBreakdown {
 
     /// Lines added and removed over every kind.
     pub fn total(&self) -> (u32, u32) {
-        self.rows.iter().fold((0u32, 0u32), |(a, r), k| (a.saturating_add(k.added), r.saturating_add(k.removed)))
+        self.rows.iter().fold((0u32, 0u32), |(a, r), k| {
+            (a.saturating_add(k.added), r.saturating_add(k.removed))
+        })
     }
 
     /// "Code +3 −1" a row, then "Total +a −r": what the card shows, as text.
     pub fn describe(&self) -> Vec<String> {
         let (a, r) = self.total();
-        self.rows.iter().map(|k| format!("{} +{} −{}", k.kind.label(), k.added, k.removed)).chain([format!("Total +{a} −{r}")]).collect()
+        self.rows
+            .iter()
+            .map(|k| format!("{} +{} −{}", k.kind.label(), k.added, k.removed))
+            .chain([format!("Total +{a} −{r}")])
+            .collect()
     }
 }
 
@@ -199,7 +323,18 @@ mod tests {
 
     #[test]
     fn source_files_are_code() {
-        assert_eq!(kinds(&["src/main.rs", "crates/trek-app/src/panels/git.rs", "web/App.tsx", "lib/util.py", "ios/Trek/App.swift", "styles/site.css", "a.go"]), [Code; 7]);
+        assert_eq!(
+            kinds(&[
+                "src/main.rs",
+                "crates/trek-app/src/panels/git.rs",
+                "web/App.tsx",
+                "lib/util.py",
+                "ios/Trek/App.swift",
+                "styles/site.css",
+                "a.go"
+            ]),
+            [Code; 7]
+        );
     }
 
     #[test]
@@ -223,20 +358,52 @@ mod tests {
             [Tests; 13]
         );
         // "test" inside a name isn't a test folder.
-        assert_eq!(kinds(&["src/contest.rs", "src/testing_utils.rs", "latest/x.rs"]), [Code; 3]);
+        assert_eq!(
+            kinds(&["src/contest.rs", "src/testing_utils.rs", "latest/x.rs"]),
+            [Code; 3]
+        );
         // Nor is a README's name a doc when it's a source file's.
-        assert_eq!(kinds(&["crates/trek-core/src/changes.rs", "src/license.rs"]), [Code; 2]);
+        assert_eq!(
+            kinds(&["crates/trek-core/src/changes.rs", "src/license.rs"]),
+            [Code; 2]
+        );
     }
 
     #[test]
     fn docs_are_markdown_readmes_changelogs_and_the_docs_folder() {
-        assert_eq!(kinds(&["README.md", "readme", "CHANGELOG", "CHANGELOG.txt", "docs/guide.html", ".agents/skills/x/SKILL.md", ".github/pull_request_template.md", "LICENSE"]), [Docs; 8]);
+        assert_eq!(
+            kinds(&[
+                "README.md",
+                "readme",
+                "CHANGELOG",
+                "CHANGELOG.txt",
+                "docs/guide.html",
+                ".agents/skills/x/SKILL.md",
+                ".github/pull_request_template.md",
+                "LICENSE"
+            ]),
+            [Docs; 8]
+        );
     }
 
     #[test]
     fn config_is_manifests_data_files_dotfiles_and_ci() {
         assert_eq!(
-            kinds(&["Cargo.toml", "crates/trek-app/Cargo.toml", "package.json", "tsconfig.json", "config.yaml", "ci.yml", ".github/workflows/release.yml", ".github/CODEOWNERS", ".gitignore", ".env", ".eslintrc.js", "Makefile", "Info.plist"]),
+            kinds(&[
+                "Cargo.toml",
+                "crates/trek-app/Cargo.toml",
+                "package.json",
+                "tsconfig.json",
+                "config.yaml",
+                "ci.yml",
+                ".github/workflows/release.yml",
+                ".github/CODEOWNERS",
+                ".gitignore",
+                ".env",
+                ".eslintrc.js",
+                "Makefile",
+                "Info.plist"
+            ]),
             [Config; 13]
         );
     }
@@ -244,30 +411,77 @@ mod tests {
     #[test]
     fn lockfiles_and_tool_output_are_generated() {
         assert_eq!(
-            kinds(&["Cargo.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "go.sum", "src/__snapshots__/view.ts.snap", "tests/snapshots/a.snap", "dist/app.min.js", "api/service.pb.go", "gen/thing_pb2.py"]),
+            kinds(&[
+                "Cargo.lock",
+                "package-lock.json",
+                "pnpm-lock.yaml",
+                "yarn.lock",
+                "go.sum",
+                "src/__snapshots__/view.ts.snap",
+                "tests/snapshots/a.snap",
+                "dist/app.min.js",
+                "api/service.pb.go",
+                "gen/thing_pb2.py"
+            ]),
             [Generated; 10]
         );
     }
 
     #[test]
     fn images_fonts_and_icons_are_assets() {
-        assert_eq!(kinds(&["assets/logo.png", "icon.svg", "macos/Trek.icns", "fonts/Inter.woff2", "ios/Assets.xcassets/AppIcon.appiconset/Contents.json"]), [Assets; 5]);
+        assert_eq!(
+            kinds(&[
+                "assets/logo.png",
+                "icon.svg",
+                "macos/Trek.icns",
+                "fonts/Inter.woff2",
+                "ios/Assets.xcassets/AppIcon.appiconset/Contents.json"
+            ]),
+            [Assets; 5]
+        );
     }
 
     #[test]
     fn scripts_are_shell_files_and_the_scripts_folders() {
-        assert_eq!(kinds(&["scripts/install-device.sh", "build.ps1", "script/bootstrap", "scripts/release.py", "run.bat"]), [Scripts; 5]);
+        assert_eq!(
+            kinds(&[
+                "scripts/install-device.sh",
+                "build.ps1",
+                "script/bootstrap",
+                "scripts/release.py",
+                "run.bat"
+            ]),
+            [Scripts; 5]
+        );
     }
 
     #[test]
     fn anything_else_is_other() {
-        assert_eq!(kinds(&["notes.txt", "data.csv", "binary.bin", ""]), [Other; 4]);
+        assert_eq!(
+            kinds(&["notes.txt", "data.csv", "binary.bin", ""]),
+            [Other; 4]
+        );
     }
 
     #[test]
     fn the_breakdown_sums_each_kind_and_lists_only_kinds_that_changed() {
-        let b = LineBreakdown::of([("src/main.rs", 300, 80), ("README.md", 4, 1), ("src/lib.rs", 200, 20), ("tests/a.rs", 0, 4), ("Cargo.lock", 0, 0)]);
-        assert_eq!(b.describe(), ["Code +500 −100", "Tests +0 −4", "Docs +4 −1", "Generated +0 −0", "Total +504 −105"]);
+        let b = LineBreakdown::of([
+            ("src/main.rs", 300, 80),
+            ("README.md", 4, 1),
+            ("src/lib.rs", 200, 20),
+            ("tests/a.rs", 0, 4),
+            ("Cargo.lock", 0, 0),
+        ]);
+        assert_eq!(
+            b.describe(),
+            [
+                "Code +500 −100",
+                "Tests +0 −4",
+                "Docs +4 −1",
+                "Generated +0 −0",
+                "Total +504 −105"
+            ]
+        );
         assert_eq!(b.total(), (504, 105));
     }
 
@@ -275,6 +489,9 @@ mod tests {
     fn one_kind_still_has_its_row_and_a_total() {
         let b = LineBreakdown::of([("a.rs", 2, 0), ("b.rs", 1, 1)]);
         assert_eq!(b.describe(), ["Code +3 −1", "Total +3 −1"]);
-        assert_eq!(LineBreakdown::of(Vec::<(String, u32, u32)>::new()).describe(), ["Total +0 −0"]);
+        assert_eq!(
+            LineBreakdown::of(Vec::<(String, u32, u32)>::new()).describe(),
+            ["Total +0 −0"]
+        );
     }
 }

@@ -6,9 +6,9 @@
 
 use super::{Prefs, Route, Scope, Workspace, WorkspaceEvent};
 use gpui_kit::Context;
+use std::path::{Path, PathBuf};
 use trek_agents::{AgentEvent, Command, Decision};
 use trek_core::settings::FollowUp;
-use std::path::{Path, PathBuf};
 use trek_core::store::now_ms;
 
 /// Which of the main window's two layouts is on screen.
@@ -99,12 +99,23 @@ pub struct IdeChat {
 
 /// The title of `path`'s ⌘K chat.
 pub fn inline_title(path: &Path) -> String {
-    format!("Inline edits · {}", path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.display().to_string()))
+    format!(
+        "Inline edits · {}",
+        path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string())
+    )
 }
 
 impl IdeChat {
     pub fn new(draft_prefs: Prefs) -> Self {
-        Self { tabs: vec![IdeTab::Draft], active: 0, draft_prefs, draft_ask: false, inline: Default::default() }
+        Self {
+            tabs: vec![IdeTab::Draft],
+            active: 0,
+            draft_prefs,
+            draft_ask: false,
+            inline: Default::default(),
+        }
     }
 
     pub fn active_tab(&self) -> Option<&IdeTab> {
@@ -138,7 +149,11 @@ impl IdeChat {
 
     /// Take `id`'s tab off the bar (archived, deleted). The bar always keeps a tab.
     pub(super) fn forget(&mut self, id: &str) {
-        if let Some(ix) = self.tabs.iter().position(|t| matches!(t, IdeTab::Thread(t) if t == id)) {
+        if let Some(ix) = self
+            .tabs
+            .iter()
+            .position(|t| matches!(t, IdeTab::Thread(t) if t == id))
+        {
             self.close(ix);
         }
     }
@@ -229,9 +244,15 @@ impl Workspace {
                 }
                 self.mode = Mode::Editor;
                 if let Some(path) = adopt {
-                    let back = self.ide_prev_route.clone().unwrap_or(Route::Draft { project: self.ide_root.clone() });
+                    let back = self.ide_prev_route.clone().unwrap_or(Route::Draft {
+                        project: self.ide_root.clone(),
+                    });
                     self.navigate(back, cx);
-                    cx.emit(WorkspaceEvent::OpenEditor { path, line: None, preview: false });
+                    cx.emit(WorkspaceEvent::OpenEditor {
+                        path,
+                        line: None,
+                        preview: false,
+                    });
                 }
                 if let Some(id) = self.ide_chat.active_thread().map(str::to_string) {
                     self.ensure_loaded(&id, cx);
@@ -243,9 +264,18 @@ impl Workspace {
             }
             Mode::Agents => {
                 self.mode = Mode::Agents;
-                let follow = self.ide_chat.active_thread().filter(|_| self.settings.ide.follow_active_chat).map(str::to_string);
+                let follow = self
+                    .ide_chat
+                    .active_thread()
+                    .filter(|_| self.settings.ide.follow_active_chat)
+                    .map(str::to_string);
                 match follow {
-                    Some(id) if self.route != Route::Thread(id.clone()) && self.thread(&id).is_some() => self.navigate(Route::Thread(id), cx),
+                    Some(id)
+                        if self.route != Route::Thread(id.clone())
+                            && self.thread(&id).is_some() =>
+                    {
+                        self.navigate(Route::Thread(id), cx)
+                    }
                     _ => cx.emit(WorkspaceEvent::FocusComposer),
                 }
             }
@@ -266,7 +296,11 @@ impl Workspace {
 
     /// Open `id` where the user is: the AI side bar in the editor, the harness otherwise.
     pub fn open_thread_here(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.ide() { self.ide_open_thread(id, cx) } else { self.navigate(Route::Thread(id.to_string()), cx) }
+        if self.ide() {
+            self.ide_open_thread(id, cx)
+        } else {
+            self.navigate(Route::Thread(id.to_string()), cx)
+        }
     }
 
     /// Switch the AI side bar to tab `ix`.
@@ -295,7 +329,9 @@ impl Workspace {
 
     /// Close every chat tab but `keep`.
     pub fn ide_close_other_chats(&mut self, keep: usize, cx: &mut Context<Self>) {
-        let Some(tab) = self.ide_chat.tabs.get(keep).cloned() else { return };
+        let Some(tab) = self.ide_chat.tabs.get(keep).cloned() else {
+            return;
+        };
         self.ide_chat.tabs = vec![tab];
         self.ide_chat.active = 0;
         self.chats_moved();
@@ -326,19 +362,29 @@ impl Workspace {
 
     /// The AI side bar's new chat sends its first message: the thread starts in the IDE folder
     /// and takes the tab's place. The harness stays where it was (no route change, no tab there).
-    pub(super) fn send_ide_draft(&mut self, text: String, images: Vec<PathBuf>, cx: &mut Context<Self>) {
+    pub(super) fn send_ide_draft(
+        &mut self,
+        text: String,
+        images: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         let text = text.trim().to_string();
         if text.is_empty() && images.is_empty() {
             return;
         }
         if let Some(reply) = self.run_builtin_command(None, &text, cx) {
             if !reply.is_empty() {
-                cx.emit(WorkspaceEvent::Toast { message: reply.replace("**", "").replace('`', ""), undo: None });
+                cx.emit(WorkspaceEvent::Toast {
+                    message: reply.replace("**", "").replace('`', ""),
+                    undo: None,
+                });
             }
             return;
         }
         let prefs = self.ide_chat.draft_prefs.clone();
-        let Some(id) = self.start_thread(self.ide_root.clone(), prefs, &text, &images, cx) else { return };
+        let Some(id) = self.start_thread(self.ide_root.clone(), prefs, &text, &images, cx) else {
+            return;
+        };
         if self.ide_chat.draft_ask {
             let live = self.live.entry(id.clone()).or_default();
             live.ask = true;
@@ -360,7 +406,13 @@ impl Workspace {
 
     /// Send from the AI side bar: `follow` says what a message sent while a turn runs does
     /// (Return queues it, ⌘Return steers the turn with it now).
-    pub fn send_ide(&mut self, text: String, images: Vec<PathBuf>, follow: FollowUp, cx: &mut Context<Self>) {
+    pub fn send_ide(
+        &mut self,
+        text: String,
+        images: Vec<PathBuf>,
+        follow: FollowUp,
+        cx: &mut Context<Self>,
+    ) {
         match self.ide_chat.active_thread().map(str::to_string) {
             Some(id) => self.send_as(&id, text, images, Some(follow), cx),
             None => self.send_ide_draft(text, images, cx),
@@ -370,7 +422,10 @@ impl Workspace {
     /// The chat ⌘K's edits of `path` go to, while it's still there.
     pub fn inline_chat(&self, path: &Path) -> Option<&str> {
         let id = self.ide_chat.inline.get(path)?;
-        self.threads.iter().any(|t| t.id == *id && t.archived_at.is_none()).then_some(id.as_str())
+        self.threads
+            .iter()
+            .any(|t| t.id == *id && t.archived_at.is_none())
+            .then_some(id.as_str())
     }
 
     /// Where a ⌘K edit of `path` goes, as its card says it: the file's chat (its title), and
@@ -389,7 +444,14 @@ impl Workspace {
                     worktree: false,
                 },
             ),
-            None => (inline_title(path), Prefs { plan: false, fast: false, ..self.ide_chat.draft_prefs.clone() }),
+            None => (
+                inline_title(path),
+                Prefs {
+                    plan: false,
+                    fast: false,
+                    ..self.ide_chat.draft_prefs.clone()
+                },
+            ),
         }
     }
 
@@ -400,22 +462,42 @@ impl Workspace {
     /// undo. Never the chat that happened to be open: an unrelated conversation doesn't get the
     /// request (or a new title from it). Not when that chat was put in Ask mode, which changes
     /// nothing.
-    pub fn inline_edit(&mut self, path: &Path, lines: (u32, u32), selected: String, instruction: &str, cx: &mut Context<Self>) {
+    pub fn inline_edit(
+        &mut self,
+        path: &Path,
+        lines: (u32, u32),
+        selected: String,
+        instruction: &str,
+        cx: &mut Context<Self>,
+    ) {
         let existing = self.inline_chat(path).map(str::to_string);
-        if existing.as_ref().is_some_and(|id| self.live.get(id).is_some_and(|l| l.ask)) {
+        if existing
+            .as_ref()
+            .is_some_and(|id| self.live.get(id).is_some_and(|l| l.ask))
+        {
             cx.emit(WorkspaceEvent::Toast { message: "This file's inline edit chat is in Ask mode, which changes nothing. Switch it to Agent to edit.".into(), undo: None });
             return;
         }
         let root = self.ide_root.clone();
-        let rel = root.as_deref().and_then(|r| path.strip_prefix(r).ok()).map_or_else(|| path.display().to_string(), |p| p.display().to_string());
-        let chip = crate::ide::ai::context::ContextChip::Selection { path: path.to_path_buf(), lines, text: selected };
-        let text = crate::ide::ai::context::with_context(instruction.trim(), &[chip], root.as_deref());
+        let rel = root
+            .as_deref()
+            .and_then(|r| path.strip_prefix(r).ok())
+            .map_or_else(|| path.display().to_string(), |p| p.display().to_string());
+        let chip = crate::ide::ai::context::ContextChip::Selection {
+            path: path.to_path_buf(),
+            lines,
+            text: selected,
+        };
+        let text =
+            crate::ide::ai::context::with_context(instruction.trim(), &[chip], root.as_deref());
         let text = trek_core::inline_edit::with_block(&text, &rel, lines);
         let id = match existing {
             Some(id) => id,
             None => {
                 let (title, prefs) = self.inline_target(path);
-                let Some(id) = self.start_thread(root, prefs, &text, &[], cx) else { return };
+                let Some(id) = self.start_thread(root, prefs, &text, &[], cx) else {
+                    return;
+                };
                 // Its own name from the start: the first-answer title never replaces it.
                 self.rename(&id, title, cx);
                 self.ide_chat.inline.insert(path.to_path_buf(), id.clone());
@@ -480,13 +562,25 @@ impl Workspace {
     /// A chat in Ask mode doesn't change things: what its agent asks to do is declined before
     /// anyone sees it. Its questions still come through.
     pub(super) fn screen_ask(&mut self, id: &str, events: Vec<AgentEvent>) -> Vec<AgentEvent> {
-        let Some(tx) = self.live.get(id).filter(|l| l.ask).map(|l| l.commands.clone()) else { return events };
+        let Some(tx) = self
+            .live
+            .get(id)
+            .filter(|l| l.ask)
+            .map(|l| l.commands.clone())
+        else {
+            return events;
+        };
         events
             .into_iter()
             .filter_map(|ev| match ev {
-                AgentEvent::PermissionRequest { request_id, prompt, .. } if !matches!(prompt, Some(trek_agents::Prompt::Questions(_))) => {
+                AgentEvent::PermissionRequest {
+                    request_id, prompt, ..
+                } if !matches!(prompt, Some(trek_agents::Prompt::Questions(_))) => {
                     if let Some(tx) = &tx {
-                        let _ = tx.try_send(Command::Respond { request_id, decision: Decision::Deny });
+                        let _ = tx.try_send(Command::Respond {
+                            request_id,
+                            decision: Decision::Deny,
+                        });
                     }
                     None
                 }
@@ -515,7 +609,12 @@ impl Workspace {
             return;
         }
         self.ide_root = root;
-        let saved = self.ide_root.as_ref().and_then(|r| self.store.ide_chats(&r.display().to_string()).ok().flatten());
+        let saved = self.ide_root.as_ref().and_then(|r| {
+            self.store
+                .ide_chats(&r.display().to_string())
+                .ok()
+                .flatten()
+        });
         self.ide_chats_saved = saved.clone();
         let saved = saved.and_then(|d| serde_json::from_str::<SavedChats>(&d).ok());
         let Some(saved) = saved else {
@@ -524,8 +623,16 @@ impl Workspace {
             self.ide_chat.inline.clear();
             return;
         };
-        self.ide_chat.inline = saved.inline.iter().map(|(p, id)| (PathBuf::from(p), id.clone())).collect();
-        let live = |id: &str| self.threads.iter().any(|t| t.id == id && t.archived_at.is_none());
+        self.ide_chat.inline = saved
+            .inline
+            .iter()
+            .map(|(p, id)| (PathBuf::from(p), id.clone()))
+            .collect();
+        let live = |id: &str| {
+            self.threads
+                .iter()
+                .any(|t| t.id == id && t.archived_at.is_none())
+        };
         let mut tabs = vec![];
         let mut active = 0;
         for (ix, tab) in saved.tabs.into_iter().enumerate() {
@@ -549,15 +656,32 @@ impl Workspace {
 
     /// The chat tabs moved: the store keeps them for the IDE folder.
     pub(super) fn chats_moved(&mut self) {
-        let Some(root) = self.ide_root.as_ref().map(|r| r.display().to_string()) else { return };
-        let mut inline: Vec<(String, String)> = self.ide_chat.inline.iter().map(|(p, id)| (p.display().to_string(), id.clone())).collect();
+        let Some(root) = self.ide_root.as_ref().map(|r| r.display().to_string()) else {
+            return;
+        };
+        let mut inline: Vec<(String, String)> = self
+            .ide_chat
+            .inline
+            .iter()
+            .map(|(p, id)| (p.display().to_string(), id.clone()))
+            .collect();
         inline.sort();
         let saved = SavedChats {
-            tabs: self.ide_chat.tabs.iter().map(|t| match t { IdeTab::Draft => None, IdeTab::Thread(id) => Some(id.clone()) }).collect(),
+            tabs: self
+                .ide_chat
+                .tabs
+                .iter()
+                .map(|t| match t {
+                    IdeTab::Draft => None,
+                    IdeTab::Thread(id) => Some(id.clone()),
+                })
+                .collect(),
             active: self.ide_chat.active,
             inline,
         };
-        let Ok(data) = serde_json::to_string(&saved) else { return };
+        let Ok(data) = serde_json::to_string(&saved) else {
+            return;
+        };
         if self.ide_chats_saved.as_deref() == Some(data.as_str()) {
             return;
         }
@@ -568,7 +692,12 @@ impl Workspace {
     }
 
     /// The language server's diagnostics for `path` (an open file) changed.
-    pub fn set_diagnostics(&mut self, path: PathBuf, diags: Vec<lsp_types::Diagnostic>, cx: &mut Context<Self>) {
+    pub fn set_diagnostics(
+        &mut self,
+        path: PathBuf,
+        diags: Vec<lsp_types::Diagnostic>,
+        cx: &mut Context<Self>,
+    ) {
         if self.diagnostics.get(&path) == Some(&diags) {
             return;
         }
@@ -601,14 +730,22 @@ impl Workspace {
     /// Threads working in the IDE folder (or a worktree of it), for the Agents view and the
     /// status bar: newest first, sub-agents and side chats left to their parents.
     pub fn ide_threads(&self) -> Vec<&trek_core::store::Thread> {
-        let Some(root) = self.ide_root.as_deref() else { return vec![] };
+        let Some(root) = self.ide_root.as_deref() else {
+            return vec![];
+        };
         let mut list: Vec<_> = self
             .threads
             .iter()
             .filter(|t| t.archived_at.is_none() && t.parent_id.is_none() && t.side_of.is_none())
             // A project's thread (in a worktree elsewhere, say), by its project: never by walking
             // up from its folder, which can only find `root` for a folder under it anyway.
-            .filter(|t| t.cwd.as_deref().is_some_and(|c| c.starts_with(root)) || t.project_id.as_deref().and_then(|p| self.project(p)).is_some_and(|p| p.path == root))
+            .filter(|t| {
+                t.cwd.as_deref().is_some_and(|c| c.starts_with(root))
+                    || t.project_id
+                        .as_deref()
+                        .and_then(|p| self.project(p))
+                        .is_some_and(|p| p.path == root)
+            })
             .collect();
         list.sort_by_key(|t| -t.updated_at);
         list
@@ -620,7 +757,15 @@ mod tests {
     use super::*;
 
     fn prefs() -> Prefs {
-        Prefs { agent: trek_core::AgentId::ClaudeCode, model: None, effort: trek_core::Effort::Medium, hand_holding: trek_core::HandHolding::Auto, plan: false, fast: false, worktree: false }
+        Prefs {
+            agent: trek_core::AgentId::ClaudeCode,
+            model: None,
+            effort: trek_core::Effort::Medium,
+            hand_holding: trek_core::HandHolding::Auto,
+            plan: false,
+            fast: false,
+            worktree: false,
+        }
     }
 
     #[test]
@@ -628,7 +773,14 @@ mod tests {
         let mut chat = IdeChat::new(prefs());
         chat.show("a");
         chat.show("b");
-        assert_eq!(chat.tabs, vec![IdeTab::Draft, IdeTab::Thread("a".into()), IdeTab::Thread("b".into())]);
+        assert_eq!(
+            chat.tabs,
+            vec![
+                IdeTab::Draft,
+                IdeTab::Thread("a".into()),
+                IdeTab::Thread("b".into())
+            ]
+        );
         assert_eq!(chat.active_thread(), Some("b"));
         // Showing one that has a tab goes back to it.
         chat.show("a");

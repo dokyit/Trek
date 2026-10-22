@@ -3,8 +3,8 @@
 pub(crate) mod branch_graph;
 pub(crate) mod browser;
 pub mod explorer;
-pub mod ide_search;
 pub(crate) mod git;
+pub mod ide_search;
 mod side_chat;
 mod simhid;
 mod simulator;
@@ -44,7 +44,15 @@ pub fn tool_blurb(tool: PanelTool) -> &'static str {
 
 /// Quiet centered message for empty tool states.
 pub fn empty(text: impl Into<SharedString>, cx: &App) -> Div {
-    v_flex().size_full().items_center().justify_center().px_6().text_sm().text_center().text_color(cx.theme().muted_foreground).child(text.into())
+    v_flex()
+        .size_full()
+        .items_center()
+        .justify_center()
+        .px_6()
+        .text_sm()
+        .text_center()
+        .text_color(cx.theme().muted_foreground)
+        .child(text.into())
 }
 
 enum View {
@@ -134,15 +142,26 @@ impl RightPanel {
         let ws = self.workspace.clone();
         let view = match tool {
             PanelTool::Git => View::Git(cx.new(|cx| git::GitPanel::new(ws, window, cx))),
-            PanelTool::Explorer => View::Explorer(cx.new(|cx| explorer::ExplorerPanel::new(ws, cx))),
+            PanelTool::Explorer => {
+                View::Explorer(cx.new(|cx| explorer::ExplorerPanel::new(ws, cx)))
+            }
             PanelTool::Terminal => {
-                let (cwd, shell) = (ws.read(cx).current_cwd(), ws.read(cx).settings.terminal.shell.clone());
+                let (cwd, shell) = (
+                    ws.read(cx).current_cwd(),
+                    ws.read(cx).settings.terminal.shell.clone(),
+                );
                 let ws = ws.downgrade();
                 View::Terminal(cx.new(|cx| terminal::TerminalPanel::new(ws, cwd, shell, cx)))
             }
-            PanelTool::Browser => View::Browser(cx.new(|cx| browser::BrowserPanel::new(ws, window, cx))),
-            PanelTool::SideChat => View::SideChat(cx.new(|cx| side_chat::SideChatPanel::new(ws, window, cx))),
-            PanelTool::Simulator => View::Simulator(cx.new(|cx| simulator::SimulatorPanel::new(ws, window, cx))),
+            PanelTool::Browser => {
+                View::Browser(cx.new(|cx| browser::BrowserPanel::new(ws, window, cx)))
+            }
+            PanelTool::SideChat => {
+                View::SideChat(cx.new(|cx| side_chat::SideChatPanel::new(ws, window, cx)))
+            }
+            PanelTool::Simulator => {
+                View::Simulator(cx.new(|cx| simulator::SimulatorPanel::new(ws, window, cx)))
+            }
         };
         let id = self.next_id;
         self.next_id += 1;
@@ -154,16 +173,30 @@ impl RightPanel {
     /// Open the Browser tool on `url` (a link clicked in a terminal).
     pub fn open_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.open_tool(PanelTool::Browser, window, cx);
-        if let Some(Tab { view: View::Browser(b), .. }) = self.active_tab() {
+        if let Some(Tab {
+            view: View::Browser(b),
+            ..
+        }) = self.active_tab()
+        {
             b.update(cx, |b, cx| b.open_url(url, window, cx));
         }
     }
 
     /// Open the Git tool on the changes of the turn ending at `end` (by item id) of `thread`,
     /// `path`'s diff open.
-    pub fn show_turn_diff(&mut self, thread: String, end: String, path: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn show_turn_diff(
+        &mut self,
+        thread: String,
+        end: String,
+        path: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_tool(PanelTool::Git, window, cx);
-        if let Some(Tab { view: View::Git(g), .. }) = self.active_tab() {
+        if let Some(Tab {
+            view: View::Git(g), ..
+        }) = self.active_tab()
+        {
             g.update(cx, |g, cx| g.show_turn(thread, end, path, cx));
         }
     }
@@ -210,7 +243,8 @@ impl RightPanel {
     }
 
     fn active_tab(&self) -> Option<&Tab> {
-        self.active.and_then(|id| self.tabs.iter().find(|t| t.id == id))
+        self.active
+            .and_then(|id| self.tabs.iter().find(|t| t.id == id))
     }
 
     /// What the Git tool's commit message box holds, while it's the tab on show.
@@ -258,7 +292,9 @@ impl RightPanel {
         let ix = self.tabs.iter().position(|t| t.id == id);
         self.tabs.retain(|t| t.id != id);
         if self.active == Some(id) {
-            self.active = ix.and_then(|i| self.tabs.get(i.saturating_sub(1)).or(self.tabs.first())).map(|t| t.id);
+            self.active = ix
+                .and_then(|i| self.tabs.get(i.saturating_sub(1)).or(self.tabs.first()))
+                .map(|t| t.id);
         }
         self.after_activate(window, cx);
     }
@@ -302,7 +338,9 @@ impl RightPanel {
                     .hover(|s| s.bg(theme.foreground.opacity(0.08)))
                     .child(tool_icon(tool).small().text_color(theme.muted_foreground))
                     .child(tool.label())
-                    .on_click(cx.listener(move |this, _, window, cx| this.open_tool(tool, window, cx)))
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.open_tool(tool, window, cx)),
+                    )
                     .into_any_element()
             })
             .collect()
@@ -340,8 +378,19 @@ impl RightPanel {
                     v_flex()
                         .min_w_0()
                         .gap(px(1.))
-                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(tool.label()))
-                        .child(div().text_xs().text_color(theme.muted_foreground).child(tool_blurb(tool))),
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.foreground)
+                                .child(tool.label()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(tool_blurb(tool)),
+                        ),
                 )
                 .on_click(cx.listener(move |this, _, window, cx| this.open_tool(tool, window, cx)))
         });
@@ -357,7 +406,13 @@ impl RightPanel {
                     .w_full()
                     .max_w(px(if cols == 2 { 520. } else { 300. }))
                     .gap(px(10.))
-                    .child(div().px(px(10.)).text_xs().text_color(theme.muted_foreground).child("Open a tool"))
+                    .child(
+                        div()
+                            .px(px(10.))
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Open a tool"),
+                    )
                     .child(div().grid().grid_cols(cols).gap(px(4.)).children(tiles)),
             )
             .into_any_element()
@@ -377,7 +432,11 @@ impl Render for RightPanel {
             w if w > px(0.) => f32::from(w),
             _ => self.width - 140.,
         };
-        let labelled: f32 = self.tabs.iter().map(|t| TAB_CHROME + TAB_CHAR * t.tool.label().len() as f32 + 4.).sum();
+        let labelled: f32 = self
+            .tabs
+            .iter()
+            .map(|t| TAB_CHROME + TAB_CHAR * t.tool.label().len() as f32 + 4.)
+            .sum();
         let compact = labelled > room;
         if active != self.scrolled_to {
             self.scrolled_to = active;
@@ -412,26 +471,37 @@ impl Render for RightPanel {
                     .cursor_pointer()
                     .text_sm()
                     .when(is_active, |el| el.bg(theme.foreground.opacity(0.08)))
-                    .when(!is_active, |el| el.text_color(theme.muted_foreground).hover(|s| s.bg(theme.foreground.opacity(0.05))))
-                    .when(icon_only, |el| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label).build(window, cx)))
+                    .when(!is_active, |el| {
+                        el.text_color(theme.muted_foreground)
+                            .hover(|s| s.bg(theme.foreground.opacity(0.05)))
+                    })
+                    .when(icon_only, |el| {
+                        el.tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(label).build(window, cx)
+                        })
+                    })
                     .child(tool_icon(t.tool).xsmall())
                     .when(!icon_only, |el| el.child(label))
-                    .when(!icon_only, |el| el.child(
-                        div()
-                            .id(("panel-tab-close", id as usize))
-                            .size(px(18.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(4.))
-                            .when(!is_active, |el| el.invisible().group_hover("panel-tab", |s| s.visible()))
-                            .hover(|s| s.bg(theme.foreground.opacity(0.1)))
-                            .child(Icon::new(IconName::Close).xsmall())
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.close(id, window, cx);
-                            })),
-                    ))
+                    .when(!icon_only, |el| {
+                        el.child(
+                            div()
+                                .id(("panel-tab-close", id as usize))
+                                .size(px(18.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(4.))
+                                .when(!is_active, |el| {
+                                    el.invisible().group_hover("panel-tab", |s| s.visible())
+                                })
+                                .hover(|s| s.bg(theme.foreground.opacity(0.1)))
+                                .child(Icon::new(IconName::Close).xsmall())
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.close(id, window, cx);
+                                })),
+                        )
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.active = Some(id);
                         this.after_activate(window, cx);
@@ -439,7 +509,11 @@ impl Render for RightPanel {
             }));
         let bg = crate::ui::panel_bg(self.workspace.read(cx).glass(), cx);
         let fade = |id: &'static str, left: bool| {
-            let (from, to) = if left { (bg, bg.opacity(0.)) } else { (bg.opacity(0.), bg) };
+            let (from, to) = if left {
+                (bg, bg.opacity(0.))
+            } else {
+                (bg.opacity(0.), bg)
+            };
             div()
                 .id(id)
                 .test_support()
@@ -449,7 +523,11 @@ impl Render for RightPanel {
                 .w(px(24.))
                 .when(left, |el| el.left_0())
                 .when(!left, |el| el.right_0())
-                .bg(linear_gradient(90., linear_color_stop(from, 0.), linear_color_stop(to, 1.)))
+                .bg(linear_gradient(
+                    90.,
+                    linear_color_stop(from, 0.),
+                    linear_color_stop(to, 1.),
+                ))
         };
         let tabs = div()
             .relative()
@@ -457,25 +535,41 @@ impl Render for RightPanel {
             .min_w_0()
             .h(px(28.))
             .child(tabs)
-            .when(cut_start, |el| el.child(fade("panel-tabs-fade-start", true)))
-            .when(cut_end, |el| el.child(fade("panel-tabs-fade-end", false)))
-            .child(watch_overflow(self.tab_scroll.clone(), self.drawn.clone(), self.tabs.iter().position(|t| Some(t.id) == active)));
-        let all_tabs = over.then(|| {
-            let items: Vec<(u64, PanelTool, bool)> = self.tabs.iter().map(|t| (t.id, t.tool, Some(t.id) == active)).collect();
-            let panel = cx.entity().downgrade();
-            ui::icon_button("panel-tabs-all", IconName::ChevronDown, "All tabs").dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
-                menu = menu.min_w(px(180.));
-                for (id, tool, on) in &items {
-                    let (panel, id) = (panel.clone(), *id);
-                    menu = menu.item(PopupMenuItem::new(tool.label()).icon(tool_icon(*tool)).checked(*on).on_click(move |_, window, cx| {
-                        let _ = panel.update(cx, |p, cx| {
-                            p.active = Some(id);
-                            p.after_activate(window, cx);
-                        });
-                    }));
-                }
-                menu
+            .when(cut_start, |el| {
+                el.child(fade("panel-tabs-fade-start", true))
             })
+            .when(cut_end, |el| el.child(fade("panel-tabs-fade-end", false)))
+            .child(watch_overflow(
+                self.tab_scroll.clone(),
+                self.drawn.clone(),
+                self.tabs.iter().position(|t| Some(t.id) == active),
+            ));
+        let all_tabs = over.then(|| {
+            let items: Vec<(u64, PanelTool, bool)> = self
+                .tabs
+                .iter()
+                .map(|t| (t.id, t.tool, Some(t.id) == active))
+                .collect();
+            let panel = cx.entity().downgrade();
+            ui::icon_button("panel-tabs-all", IconName::ChevronDown, "All tabs")
+                .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
+                    menu = menu.min_w(px(180.));
+                    for (id, tool, on) in &items {
+                        let (panel, id) = (panel.clone(), *id);
+                        menu = menu.item(
+                            PopupMenuItem::new(tool.label())
+                                .icon(tool_icon(*tool))
+                                .checked(*on)
+                                .on_click(move |_, window, cx| {
+                                    let _ = panel.update(cx, |p, cx| {
+                                        p.active = Some(id);
+                                        p.after_activate(window, cx);
+                                    });
+                                }),
+                        );
+                    }
+                    menu
+                })
         });
 
         let launcher_open = self.launcher_open;
@@ -506,14 +600,28 @@ impl Render for RightPanel {
             .child(launcher)
             .child({
                 let wide = self.width >= WIDE_PANEL - 1.;
-                ui::icon_button("panel-wide", if wide { IconName::Minimize } else { IconName::Maximize }, if wide { "Narrower" } else { "Wider" }).on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        let w = if wide { trek_core::settings::DEFAULT_RIGHT_PANEL_WIDTH } else { WIDE_PANEL };
-                        this.set_width(w, cx);
+                ui::icon_button(
+                    "panel-wide",
+                    if wide {
+                        IconName::Minimize
+                    } else {
+                        IconName::Maximize
                     },
-                ))
+                    if wide { "Narrower" } else { "Wider" },
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let w = if wide {
+                        trek_core::settings::DEFAULT_RIGHT_PANEL_WIDTH
+                    } else {
+                        WIDE_PANEL
+                    };
+                    this.set_width(w, cx);
+                }))
             })
-            .child(ui::icon_button("panel-close", IconName::PanelRightClose, "Hide panel (⌘J)").on_click(cx.listener(|this, _, _, cx| this.toggle(cx))));
+            .child(
+                ui::icon_button("panel-close", IconName::PanelRightClose, "Hide panel (⌘J)")
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle(cx))),
+            );
 
         let body = match self.active_tab() {
             Some(t) => match &t.view {
@@ -527,7 +635,10 @@ impl Render for RightPanel {
             None => self.tool_grid(cx),
         };
 
-        v_flex().size_full().child(header).child(div().flex_1().min_h_0().child(body))
+        v_flex()
+            .size_full()
+            .child(header)
+            .child(div().flex_1().min_h_0().child(body))
     }
 }
 
@@ -543,14 +654,20 @@ fn tab_overflow(scroll: &ScrollHandle) -> (bool, bool, bool) {
 /// to overflow it, or it scrolled to an edge), so the fades and the menu keep up; and scrolls the
 /// tab in front into view once it has been laid out (the panel is a cached view: no other frame
 /// would get to it).
-fn watch_overflow(scroll: ScrollHandle, drawn: std::rc::Rc<std::cell::Cell<(bool, bool, bool)>>, front: Option<usize>) -> impl IntoElement {
+fn watch_overflow(
+    scroll: ScrollHandle,
+    drawn: std::rc::Rc<std::cell::Cell<(bool, bool, bool)>>,
+    front: Option<usize>,
+) -> impl IntoElement {
     canvas(
         move |_, window, _| {
             let view = scroll.bounds();
-            let hidden = front.and_then(|ix| scroll.bounds_for_item(ix)).is_some_and(|b| {
-                let at = scroll.offset().x;
-                b.left() + at < view.left() - px(0.5) || b.right() + at > view.right() + px(0.5)
-            });
+            let hidden = front
+                .and_then(|ix| scroll.bounds_for_item(ix))
+                .is_some_and(|b| {
+                    let at = scroll.offset().x;
+                    b.left() + at < view.left() - px(0.5) || b.right() + at > view.right() + px(0.5)
+                });
             if hidden {
                 scroll.scroll_to_item(front.unwrap_or_default());
             }

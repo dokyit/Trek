@@ -11,41 +11,97 @@ const MAX_DEPTH: usize = 48;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
     /// One glyph.
-    Sym { ch: char, face: Face, class: Class },
+    Sym {
+        ch: char,
+        face: Face,
+        class: Class,
+    },
     /// A run of text, set as one line (`\text{…}`, an operator's name).
-    Text { text: String, face: Face },
+    Text {
+        text: String,
+        face: Face,
+    },
     /// `{…}`: an ordinary atom.
     Group(Vec<Node>),
     /// A base with scripts. `limits`: set above and below (`Some(true)`), beside (`Some(false)`),
     /// or as the base decides.
-    Scripts { base: Box<Node>, sup: Option<Vec<Node>>, sub: Option<Vec<Node>>, limits: Option<bool> },
+    Scripts {
+        base: Box<Node>,
+        sup: Option<Vec<Node>>,
+        sub: Option<Vec<Node>>,
+        limits: Option<bool>,
+    },
     /// `\frac` and friends. `style`: forced (`\dfrac`, `\tfrac`); `delims`: `\binom`'s.
-    Frac { num: Vec<Node>, den: Vec<Node>, rule: bool, style: Option<Style>, delims: Option<(char, char)> },
-    Sqrt { index: Option<Vec<Node>>, body: Vec<Node> },
+    Frac {
+        num: Vec<Node>,
+        den: Vec<Node>,
+        rule: bool,
+        style: Option<Style>,
+        delims: Option<(char, char)>,
+    },
+    Sqrt {
+        index: Option<Vec<Node>>,
+        body: Vec<Node>,
+    },
     /// A large operator (`\sum`, `\int`) or a named one (`\lim`, `\sin`, `\operatorname`).
-    Op { body: OpBody, limits: bool },
-    Accent { accent: Accent, body: Vec<Node> },
+    Op {
+        body: OpBody,
+        limits: bool,
+    },
+    Accent {
+        accent: Accent,
+        body: Vec<Node>,
+    },
     /// `\left( … \middle| … \right)`: the delimiters, the parts between them.
-    LeftRight { delims: Vec<char>, parts: Vec<Vec<Node>> },
+    LeftRight {
+        delims: Vec<char>,
+        parts: Vec<Vec<Node>>,
+    },
     /// `\big(`, `\Bigg]`: a delimiter at a fixed size, 1 to 4.
-    Big { delim: char, size: u8, class: Class },
+    Big {
+        delim: char,
+        size: u8,
+        class: Class,
+    },
     /// Space, in ems (negative: back).
     Space(f32),
     Boxed(Vec<Node>),
     /// The rest of a group in another style (`\displaystyle`).
-    Styled { style: Style, body: Vec<Node> },
+    Styled {
+        style: Style,
+        body: Vec<Node>,
+    },
     /// An environment: rows of cells.
     Array(Array),
-    Phantom { body: Vec<Node>, width: bool, height: bool },
-    Cancel { body: Vec<Node>, forward: bool, back: bool },
+    Phantom {
+        body: Vec<Node>,
+        width: bool,
+        height: bool,
+    },
+    Cancel {
+        body: Vec<Node>,
+        forward: bool,
+        back: bool,
+    },
     /// `\overset{over}{base}`, `\underset{under}{base}`, `\stackrel`.
-    Stack { base: Vec<Node>, over: Option<Vec<Node>>, under: Option<Vec<Node>> },
+    Stack {
+        base: Vec<Node>,
+        over: Option<Vec<Node>>,
+        under: Option<Vec<Node>>,
+    },
     /// `\xrightarrow[under]{over}`.
-    Arrow { right: bool, over: Vec<Node>, under: Vec<Node> },
+    Arrow {
+        right: bool,
+        over: Vec<Node>,
+        under: Vec<Node>,
+    },
     /// A slash through the next atom (`\not=`, `\neq`).
     Not(Box<Node>),
     /// The body as an atom of another class (`\mathrel{…}`).
-    Class { class: Class, body: Vec<Node> },
+    Class {
+        class: Class,
+        body: Vec<Node>,
+    },
     /// `\tag{…}`: shown after the formula, in parentheses.
     Tag(Vec<Node>),
     /// A command Trek doesn't know, shown as written.
@@ -70,7 +126,10 @@ pub enum Accent {
     Tilde,
     Overline,
     Underline,
-    OverArrow { left: bool, right: bool },
+    OverArrow {
+        left: bool,
+        right: bool,
+    },
     OverBrace,
     UnderBrace,
 }
@@ -130,7 +189,12 @@ enum MathFont {
 
 /// Parse `tex` (math mode).
 pub fn parse(tex: &str) -> Vec<Node> {
-    let mut p = Parser { src: tex, pos: 0, depth: 0, font: MathFont::Default };
+    let mut p = Parser {
+        src: tex,
+        pos: 0,
+        depth: 0,
+        font: MathFont::Default,
+    };
     let mut out = p.list(Stop::End);
     // A stray `}` ends a list early: show it and carry on.
     while p.pos < p.src.len() {
@@ -204,12 +268,18 @@ impl<'a> Parser<'a> {
     /// Whether the next thing is `\name`, without consuming it.
     fn at_command(&self, name: &str) -> bool {
         let rest = &self.src[self.pos..];
-        rest.strip_prefix('\\').and_then(|r| r.strip_prefix(name)).is_some_and(|r| !r.starts_with(|c: char| c.is_ascii_alphabetic()))
+        rest.strip_prefix('\\')
+            .and_then(|r| r.strip_prefix(name))
+            .is_some_and(|r| !r.starts_with(|c: char| c.is_ascii_alphabetic()))
     }
 
     fn list(&mut self, stop: Stop) -> Vec<Node> {
         self.depth += 1;
-        let out = if self.depth > MAX_DEPTH { self.rest_as_text() } else { self.list_inner(stop) };
+        let out = if self.depth > MAX_DEPTH {
+            self.rest_as_text()
+        } else {
+            self.list_inner(stop)
+        };
         self.depth -= 1;
         out
     }
@@ -218,7 +288,10 @@ impl<'a> Parser<'a> {
     fn rest_as_text(&mut self) -> Vec<Node> {
         let rest = self.src[self.pos..].to_string();
         self.pos = self.src.len();
-        vec![Node::Text { text: rest, face: Face::Main }]
+        vec![Node::Text {
+            text: rest,
+            face: Face::Main,
+        }]
     }
 
     fn list_inner(&mut self, stop: Stop) -> Vec<Node> {
@@ -247,7 +320,11 @@ impl<'a> Parser<'a> {
                     let mut primes = Vec::new();
                     while self.peek() == Some('\'') {
                         self.pos += 1;
-                        primes.push(Node::Sym { ch: '\u{2032}', face: Face::Main, class: Class::Ord });
+                        primes.push(Node::Sym {
+                            ch: '\u{2032}',
+                            face: Face::Main,
+                            class: Class::Ord,
+                        });
                     }
                     attach(&mut out, true, primes);
                 }
@@ -271,7 +348,13 @@ impl<'a> Parser<'a> {
                     } {
                         let num = std::mem::take(&mut out);
                         let den = self.list(stop);
-                        out.push(Node::Frac { num, den, rule, style: None, delims });
+                        out.push(Node::Frac {
+                            num,
+                            den,
+                            rule,
+                            style: None,
+                            delims,
+                        });
                         break;
                     }
                     if let Some(style) = style_switch(&name) {
@@ -294,7 +377,9 @@ impl<'a> Parser<'a> {
                     }
                     if name == "not" {
                         let next = self.atom();
-                        out.push(Node::Not(Box::new(next.into_iter().next().unwrap_or(Node::Group(Vec::new())))));
+                        out.push(Node::Not(Box::new(
+                            next.into_iter().next().unwrap_or(Node::Group(Vec::new())),
+                        )));
                         continue;
                     }
                     out.extend(self.command(&name));
@@ -419,13 +504,20 @@ impl<'a> Parser<'a> {
         self.skip_space();
         if self.peek() != Some('{') {
             return match self.bump() {
-                Some(c) => vec![Node::Text { text: c.to_string(), face }],
+                Some(c) => vec![Node::Text {
+                    text: c.to_string(),
+                    face,
+                }],
                 None => Vec::new(),
             };
         }
         self.pos += 1;
         self.depth += 1;
-        let out = if self.depth > MAX_DEPTH { self.rest_as_text() } else { self.text_inner(face) };
+        let out = if self.depth > MAX_DEPTH {
+            self.rest_as_text()
+        } else {
+            self.text_inner(face)
+        };
         self.depth -= 1;
         out
     }
@@ -435,7 +527,10 @@ impl<'a> Parser<'a> {
         let mut run = String::new();
         let flush = |run: &mut String, out: &mut Vec<Node>| {
             if !run.is_empty() {
-                out.push(Node::Text { text: std::mem::take(run), face });
+                out.push(Node::Text {
+                    text: std::mem::take(run),
+                    face,
+                });
             }
         };
         while let Some(c) = self.bump() {
@@ -444,16 +539,27 @@ impl<'a> Parser<'a> {
                 '{' => {
                     flush(&mut run, &mut out);
                     self.depth += 1;
-                    let inner = if self.depth > MAX_DEPTH { self.rest_as_text() } else { self.text_inner(face) };
+                    let inner = if self.depth > MAX_DEPTH {
+                        self.rest_as_text()
+                    } else {
+                        self.text_inner(face)
+                    };
                     self.depth -= 1;
                     out.extend(inner);
                 }
                 '$' => {
                     flush(&mut run, &mut out);
                     let start = self.pos;
-                    let end = self.src[start..].find('$').map_or(self.src.len(), |i| start + i);
+                    let end = self.src[start..]
+                        .find('$')
+                        .map_or(self.src.len(), |i| start + i);
                     let inner = &self.src[start..end];
-                    let mut sub = Parser { src: inner, pos: 0, depth: self.depth, font: MathFont::Default };
+                    let mut sub = Parser {
+                        src: inner,
+                        pos: 0,
+                        depth: self.depth,
+                        font: MathFont::Default,
+                    };
                     out.push(Node::Group(sub.list(Stop::End)));
                     self.pos = (end + 1).min(self.src.len());
                 }
@@ -463,11 +569,14 @@ impl<'a> Parser<'a> {
                         "$" | "%" | "&" | "#" | "_" | "{" | "}" => run.push_str(&name),
                         " " | "," | ";" | ":" => run.push(' '),
                         "textbackslash" => run.push('\\'),
-                        "textbf" | "bf" | "textit" | "it" | "emph" | "texttt" | "textrm" | "textup" | "textnormal" | "textsf" => {
+                        "textbf" | "bf" | "textit" | "it" | "emph" | "texttt" | "textrm"
+                        | "textup" | "textnormal" | "textsf" => {
                             flush(&mut run, &mut out);
                             let inner = match name.as_str() {
                                 "textbf" | "bf" if face == Face::MainItalic => Face::MainBoldItalic,
-                                "textit" | "it" | "emph" if face == Face::MainBold => Face::MainBoldItalic,
+                                "textit" | "it" | "emph" if face == Face::MainBold => {
+                                    Face::MainBoldItalic
+                                }
                                 "textbf" | "bf" => Face::MainBold,
                                 "textit" | "it" | "emph" => Face::MainItalic,
                                 "texttt" => Face::Typewriter,
@@ -527,10 +636,21 @@ impl<'a> Parser<'a> {
             return sym(ch, face, class, italic, self.font);
         }
         match c {
-            '%' | '#' => Node::Sym { ch: c, face: Face::Main, class: Class::Ord },
-            '|' => Node::Sym { ch: '\u{2223}', face: Face::Main, class: Class::Ord },
+            '%' | '#' => Node::Sym {
+                ch: c,
+                face: Face::Main,
+                class: Class::Ord,
+            },
+            '|' => Node::Sym {
+                ch: '\u{2223}',
+                face: Face::Main,
+                class: Class::Ord,
+            },
             // Anything else (accented letters, CJK) from the system's fonts.
-            _ => Node::Text { text: c.to_string(), face: Face::Main },
+            _ => Node::Text {
+                text: c.to_string(),
+                face: Face::Main,
+            },
         }
     }
 
@@ -554,7 +674,13 @@ impl<'a> Parser<'a> {
                     "tfrac" => Some(Style::Text),
                     _ => None,
                 };
-                one(Node::Frac { num, den, rule: true, style, delims: None })
+                one(Node::Frac {
+                    num,
+                    den,
+                    rule: true,
+                    style,
+                    delims: None,
+                })
             }
             "binom" | "dbinom" | "tbinom" => {
                 let num = self.arg();
@@ -564,7 +690,13 @@ impl<'a> Parser<'a> {
                     "tbinom" => Some(Style::Text),
                     _ => None,
                 };
-                one(Node::Frac { num, den, rule: false, style, delims: Some(('(', ')')) })
+                one(Node::Frac {
+                    num,
+                    den,
+                    rule: false,
+                    style,
+                    delims: Some(('(', ')')),
+                })
             }
             "genfrac" => {
                 let left = self.arg_text();
@@ -573,7 +705,11 @@ impl<'a> Parser<'a> {
                 let style = self.arg_text();
                 let num = self.arg();
                 let den = self.arg();
-                let d = |s: &str| delim_named(s.trim_start_matches('\\')).or_else(|| s.chars().next()).unwrap_or(NO_DELIM);
+                let d = |s: &str| {
+                    delim_named(s.trim_start_matches('\\'))
+                        .or_else(|| s.chars().next())
+                        .unwrap_or(NO_DELIM)
+                };
                 let delims = (!left.is_empty() || !right.is_empty()).then(|| (d(&left), d(&right)));
                 let style = match style.trim() {
                     "0" => Some(Style::Display),
@@ -582,20 +718,30 @@ impl<'a> Parser<'a> {
                     "3" => Some(Style::ScriptScript),
                     _ => None,
                 };
-                one(Node::Frac { num, den, rule: !thickness.trim().starts_with('0'), style, delims })
+                one(Node::Frac {
+                    num,
+                    den,
+                    rule: !thickness.trim().starts_with('0'),
+                    style,
+                    delims,
+                })
             }
             "sqrt" => {
                 let index = self.optional();
                 let body = self.arg();
                 one(Node::Sqrt { index, body })
             }
-            "text" | "textrm" | "textnormal" | "textup" | "textmd" | "mbox" | "hbox" | "mathrm_text" => one(Node::Group(self.text_arg(Face::Main))),
+            "text" | "textrm" | "textnormal" | "textup" | "textmd" | "mbox" | "hbox"
+            | "mathrm_text" => one(Node::Group(self.text_arg(Face::Main))),
             "textbf" => one(Node::Group(self.text_arg(Face::MainBold))),
             "textit" | "emph" | "textsl" => one(Node::Group(self.text_arg(Face::MainItalic))),
             "texttt" => one(Node::Group(self.text_arg(Face::Typewriter))),
             "textsf" => one(Node::Group(self.text_arg(Face::SansSerif))),
             "fbox" => one(Node::Boxed(self.text_arg(Face::Main))),
-            "boxed" => one(Node::Boxed(vec![Node::Styled { style: Style::Display, body: self.arg() }])),
+            "boxed" => one(Node::Boxed(vec![Node::Styled {
+                style: Style::Display,
+                body: self.arg(),
+            }])),
             "operatorname" | "operatorname*" | "mathop" => {
                 let saved = self.font;
                 if name != "mathop" {
@@ -603,9 +749,13 @@ impl<'a> Parser<'a> {
                 }
                 let body = self.arg();
                 self.font = saved;
-                one(Node::Op { body: OpBody::Name(body), limits: name != "operatorname" })
+                one(Node::Op {
+                    body: OpBody::Name(body),
+                    limits: name != "operatorname",
+                })
             }
-            "mathbin" | "mathrel" | "mathord" | "mathopen" | "mathclose" | "mathpunct" | "mathinner" => {
+            "mathbin" | "mathrel" | "mathord" | "mathopen" | "mathclose" | "mathpunct"
+            | "mathinner" => {
                 let class = match name {
                     "mathbin" => Class::Bin,
                     "mathrel" => Class::Rel,
@@ -615,7 +765,10 @@ impl<'a> Parser<'a> {
                     "mathinner" => Class::Inner,
                     _ => Class::Ord,
                 };
-                one(Node::Class { class, body: self.arg() })
+                one(Node::Class {
+                    class,
+                    body: self.arg(),
+                })
             }
             "left" => {
                 let mut delims = vec![self.delim()];
@@ -638,13 +791,22 @@ impl<'a> Parser<'a> {
                 }
                 one(Node::LeftRight { delims, parts })
             }
-            "middle" => one(Node::Big { delim: self.delim(), size: 0, class: Class::Rel }),
+            "middle" => one(Node::Big {
+                delim: self.delim(),
+                size: 0,
+                class: Class::Rel,
+            }),
             "right" => {
                 // A `\right` with no `\left`: its delimiter, as written.
                 let d = self.delim();
-                one(Node::Sym { ch: d, face: Face::Main, class: Class::Close })
+                one(Node::Sym {
+                    ch: d,
+                    face: Face::Main,
+                    class: Class::Close,
+                })
             }
-            "big" | "Big" | "bigg" | "Bigg" | "bigl" | "Bigl" | "biggl" | "Biggl" | "bigr" | "Bigr" | "biggr" | "Biggr" | "bigm" | "Bigm" | "biggm" | "Biggm" => {
+            "big" | "Big" | "bigg" | "Bigg" | "bigl" | "Bigl" | "biggl" | "Biggl" | "bigr"
+            | "Bigr" | "biggr" | "Biggr" | "bigm" | "Bigm" | "biggm" | "Biggm" => {
                 let size = match name.trim_end_matches(['l', 'r', 'm']) {
                     "big" => 1,
                     "Big" => 2,
@@ -657,7 +819,11 @@ impl<'a> Parser<'a> {
                     Some('m') => Class::Rel,
                     _ => Class::Ord,
                 };
-                one(Node::Big { delim: self.delim(), size, class })
+                one(Node::Big {
+                    delim: self.delim(),
+                    size,
+                    class,
+                })
             }
             "," | "thinspace" => one(Node::Space(3. / 18.)),
             ":" | ">" | "medspace" => one(Node::Space(4. / 18.)),
@@ -674,11 +840,18 @@ impl<'a> Parser<'a> {
                 one(Node::Space(dimension(&dim)))
             }
             "kern" | "mkern" | "hskip" | "mskip" | "mspace" => {
-                let dim = if self.peek() == Some('{') { self.arg_text() } else { self.dimension_text() };
+                let dim = if self.peek() == Some('{') {
+                    self.arg_text()
+                } else {
+                    self.dimension_text()
+                };
                 one(Node::Space(dimension(&dim)))
             }
             "displaystyle" | "textstyle" | "scriptstyle" | "scriptscriptstyle" => Vec::new(),
-            "hat" | "widehat" | "check" | "widecheck" | "tilde" | "widetilde" | "bar" | "overline" | "underline" | "vec" | "dot" | "ddot" | "dddot" | "acute" | "grave" | "breve" | "mathring" | "overrightarrow" | "overleftarrow" | "overleftrightarrow" | "overbrace" | "underbrace" => {
+            "hat" | "widehat" | "check" | "widecheck" | "tilde" | "widetilde" | "bar"
+            | "overline" | "underline" | "vec" | "dot" | "ddot" | "dddot" | "acute" | "grave"
+            | "breve" | "mathring" | "overrightarrow" | "overleftarrow" | "overleftrightarrow"
+            | "overbrace" | "underbrace" => {
                 let accent = match name {
                     "hat" => Accent::Glyph('\u{2c6}'),
                     "check" | "widecheck" => Accent::Glyph('\u{2c7}'),
@@ -696,9 +869,18 @@ impl<'a> Parser<'a> {
                     "vec" => Accent::Vec,
                     "overline" => Accent::Overline,
                     "underline" => Accent::Underline,
-                    "overrightarrow" => Accent::OverArrow { left: false, right: true },
-                    "overleftarrow" => Accent::OverArrow { left: true, right: false },
-                    "overleftrightarrow" => Accent::OverArrow { left: true, right: true },
+                    "overrightarrow" => Accent::OverArrow {
+                        left: false,
+                        right: true,
+                    },
+                    "overleftarrow" => Accent::OverArrow {
+                        left: true,
+                        right: false,
+                    },
+                    "overleftrightarrow" => Accent::OverArrow {
+                        left: true,
+                        right: true,
+                    },
                     "overbrace" => Accent::OverBrace,
                     _ => Accent::UnderBrace,
                 };
@@ -706,51 +888,102 @@ impl<'a> Parser<'a> {
                 // A brace takes its label as a script set above or below it.
                 let node = Node::Accent { accent, body };
                 if matches!(accent, Accent::OverBrace | Accent::UnderBrace) {
-                    one(Node::Scripts { base: Box::new(node), sup: None, sub: None, limits: Some(true) })
+                    one(Node::Scripts {
+                        base: Box::new(node),
+                        sup: None,
+                        sub: None,
+                        limits: Some(true),
+                    })
                 } else {
                     one(node)
                 }
             }
             "phantom" | "hphantom" | "vphantom" => {
                 let body = self.arg();
-                one(Node::Phantom { body, width: name != "vphantom", height: name != "hphantom" })
+                one(Node::Phantom {
+                    body,
+                    width: name != "vphantom",
+                    height: name != "hphantom",
+                })
             }
             "smash" | "mathstrut" => {
                 if name == "mathstrut" {
-                    return one(Node::Phantom { body: vec![self.symbol('(')], width: false, height: true });
+                    return one(Node::Phantom {
+                        body: vec![self.symbol('(')],
+                        width: false,
+                        height: true,
+                    });
                 }
                 let _ = self.optional();
                 one(Node::Group(self.arg()))
             }
             "cancel" | "bcancel" | "xcancel" | "sout" => {
                 let body = self.arg();
-                one(Node::Cancel { body, forward: name != "bcancel", back: name == "bcancel" || name == "xcancel" })
+                one(Node::Cancel {
+                    body,
+                    forward: name != "bcancel",
+                    back: name == "bcancel" || name == "xcancel",
+                })
             }
             "overset" | "stackrel" => {
                 let over = self.arg();
                 let base = self.arg();
-                let class = if name == "stackrel" { Class::Rel } else { Class::Ord };
-                let stack = Node::Stack { base, over: Some(over), under: None };
-                one(if class == Class::Rel { Node::Class { class, body: vec![stack] } } else { stack })
+                let class = if name == "stackrel" {
+                    Class::Rel
+                } else {
+                    Class::Ord
+                };
+                let stack = Node::Stack {
+                    base,
+                    over: Some(over),
+                    under: None,
+                };
+                one(if class == Class::Rel {
+                    Node::Class {
+                        class,
+                        body: vec![stack],
+                    }
+                } else {
+                    stack
+                })
             }
             "underset" => {
                 let under = self.arg();
                 let base = self.arg();
-                one(Node::Stack { base, over: None, under: Some(under) })
+                one(Node::Stack {
+                    base,
+                    over: None,
+                    under: Some(under),
+                })
             }
-            "xrightarrow" | "xleftarrow" | "xLeftarrow" | "xRightarrow" | "xleftrightarrow" | "xmapsto" => {
+            "xrightarrow" | "xleftarrow" | "xLeftarrow" | "xRightarrow" | "xleftrightarrow"
+            | "xmapsto" => {
                 let under = self.optional().unwrap_or_default();
                 let over = self.arg();
-                one(Node::Class { class: Class::Rel, body: vec![Node::Arrow { right: !name.contains("left"), over, under }] })
+                one(Node::Class {
+                    class: Class::Rel,
+                    body: vec![Node::Arrow {
+                        right: !name.contains("left"),
+                        over,
+                        under,
+                    }],
+                })
             }
             "textcolor" | "colorbox" => {
                 self.arg_text();
-                if name == "colorbox" { one(Node::Group(self.text_arg(Face::Main))) } else { one(Node::Group(self.arg())) }
+                if name == "colorbox" {
+                    one(Node::Group(self.text_arg(Face::Main)))
+                } else {
+                    one(Node::Group(self.arg()))
+                }
             }
             "pmod" => {
                 let arg = self.arg();
                 let mut body = vec![Node::Space(1.), self.symbol('(')];
-                body.push(Node::Text { text: "mod".into(), face: Face::Main });
+                body.push(Node::Text {
+                    text: "mod".into(),
+                    face: Face::Main,
+                });
                 body.push(Node::Space(6. / 18.));
                 body.extend(arg);
                 body.push(self.symbol(')'));
@@ -763,17 +996,38 @@ impl<'a> Parser<'a> {
                 body.push(self.symbol(')'));
                 one(Node::Group(body))
             }
-            "bmod" => one(Node::Class { class: Class::Bin, body: vec![Node::Text { text: "mod".into(), face: Face::Main }] }),
-            "mod" => one(Node::Group(vec![Node::Space(1.), Node::Text { text: "mod".into(), face: Face::Main }, Node::Space(6. / 18.)])),
+            "bmod" => one(Node::Class {
+                class: Class::Bin,
+                body: vec![Node::Text {
+                    text: "mod".into(),
+                    face: Face::Main,
+                }],
+            }),
+            "mod" => one(Node::Group(vec![
+                Node::Space(1.),
+                Node::Text {
+                    text: "mod".into(),
+                    face: Face::Main,
+                },
+                Node::Space(6. / 18.),
+            ])),
             "tag" | "tag*" => {
                 let body = self.text_arg(Face::Main);
                 one(Node::Tag(body))
             }
             "label" | "ref" | "eqref" => {
                 let text = self.arg_text();
-                if name == "label" { Vec::new() } else { one(Node::Text { text: format!("({text})"), face: Face::Main }) }
+                if name == "label" {
+                    Vec::new()
+                } else {
+                    one(Node::Text {
+                        text: format!("({text})"),
+                        face: Face::Main,
+                    })
+                }
             }
-            "nonumber" | "notag" | "nolimits_" | "allowbreak" | "nobreak" | "relax" | "displaybreak" | "hline" | "hdashline" | "strut" => {
+            "nonumber" | "notag" | "nolimits_" | "allowbreak" | "nobreak" | "relax"
+            | "displaybreak" | "hline" | "hdashline" | "strut" => {
                 if name == "hline" || name == "hdashline" {
                     return one(Node::Unknown("\\hline".into()));
                 }
@@ -781,7 +1035,12 @@ impl<'a> Parser<'a> {
             }
             "substack" => {
                 let body = self.arg();
-                one(Node::Array(rows_of(body, ArrayKind::Small, vec![Align::Center], (NO_DELIM, NO_DELIM))))
+                one(Node::Array(rows_of(
+                    body,
+                    ArrayKind::Small,
+                    vec![Align::Center],
+                    (NO_DELIM, NO_DELIM),
+                )))
             }
             "begin" => self.environment(),
             "end" => {
@@ -789,15 +1048,63 @@ impl<'a> Parser<'a> {
                 let env = self.arg_text();
                 one(Node::Unknown(format!("\\end{{{env}}}")))
             }
-            "neq" | "ne" => one(Node::Not(Box::new(Node::Sym { ch: '=', face: Face::Main, class: Class::Rel }))),
-            "notin" => one(Node::Not(Box::new(Node::Sym { ch: '\u{2208}', face: Face::Main, class: Class::Rel }))),
-            "implies" => vec![Node::Space(5. / 18.), Node::Sym { ch: '\u{27f9}', face: Face::Main, class: Class::Rel }, Node::Space(5. / 18.)],
-            "impliedby" => vec![Node::Space(5. / 18.), Node::Sym { ch: '\u{27f8}', face: Face::Main, class: Class::Rel }, Node::Space(5. / 18.)],
-            "iff" => vec![Node::Space(5. / 18.), Node::Sym { ch: '\u{27fa}', face: Face::Main, class: Class::Rel }, Node::Space(5. / 18.)],
-            "dots" | "dotsc" | "dotso" | "ldots" | "mathellipsis" => one(Node::Sym { ch: '\u{2026}', face: Face::Main, class: Class::Inner }),
-            "cdots" | "dotsb" | "dotsm" | "dotsi" => one(Node::Sym { ch: '\u{22ef}', face: Face::Main, class: Class::Inner }),
-            "vdots" => one(Node::Sym { ch: '\u{22ee}', face: Face::Main, class: Class::Ord }),
-            "colon" => one(Node::Sym { ch: ':', face: Face::Main, class: Class::Punct }),
+            "neq" | "ne" => one(Node::Not(Box::new(Node::Sym {
+                ch: '=',
+                face: Face::Main,
+                class: Class::Rel,
+            }))),
+            "notin" => one(Node::Not(Box::new(Node::Sym {
+                ch: '\u{2208}',
+                face: Face::Main,
+                class: Class::Rel,
+            }))),
+            "implies" => vec![
+                Node::Space(5. / 18.),
+                Node::Sym {
+                    ch: '\u{27f9}',
+                    face: Face::Main,
+                    class: Class::Rel,
+                },
+                Node::Space(5. / 18.),
+            ],
+            "impliedby" => vec![
+                Node::Space(5. / 18.),
+                Node::Sym {
+                    ch: '\u{27f8}',
+                    face: Face::Main,
+                    class: Class::Rel,
+                },
+                Node::Space(5. / 18.),
+            ],
+            "iff" => vec![
+                Node::Space(5. / 18.),
+                Node::Sym {
+                    ch: '\u{27fa}',
+                    face: Face::Main,
+                    class: Class::Rel,
+                },
+                Node::Space(5. / 18.),
+            ],
+            "dots" | "dotsc" | "dotso" | "ldots" | "mathellipsis" => one(Node::Sym {
+                ch: '\u{2026}',
+                face: Face::Main,
+                class: Class::Inner,
+            }),
+            "cdots" | "dotsb" | "dotsm" | "dotsi" => one(Node::Sym {
+                ch: '\u{22ef}',
+                face: Face::Main,
+                class: Class::Inner,
+            }),
+            "vdots" => one(Node::Sym {
+                ch: '\u{22ee}',
+                face: Face::Main,
+                class: Class::Ord,
+            }),
+            "colon" => one(Node::Sym {
+                ch: ':',
+                face: Face::Main,
+                class: Class::Punct,
+            }),
             "R" | "N" | "Z" | "Q" | "C" | "Reals" | "Complex" | "natnums" | "reals" | "Bbbk" => {
                 let c = match name {
                     "Reals" | "reals" => 'R',
@@ -806,15 +1113,55 @@ impl<'a> Parser<'a> {
                     "Bbbk" => 'k',
                     n => n.chars().next().unwrap_or('R'),
                 };
-                one(Node::Sym { ch: c, face: Face::Ams, class: Class::Ord })
+                one(Node::Sym {
+                    ch: c,
+                    face: Face::Ams,
+                    class: Class::Ord,
+                })
             }
-            "lt" => one(Node::Sym { ch: '<', face: Face::Main, class: Class::Rel }),
-            "gt" => one(Node::Sym { ch: '>', face: Face::Main, class: Class::Rel }),
-            "argmax" | "argmin" => one(Node::Op { body: OpBody::Name(vec![Node::Text { text: format!("arg\u{2009}{}", &name[3..]), face: Face::Main }]), limits: true }),
+            "lt" => one(Node::Sym {
+                ch: '<',
+                face: Face::Main,
+                class: Class::Rel,
+            }),
+            "gt" => one(Node::Sym {
+                ch: '>',
+                face: Face::Main,
+                class: Class::Rel,
+            }),
+            "argmax" | "argmin" => one(Node::Op {
+                body: OpBody::Name(vec![Node::Text {
+                    text: format!("arg\u{2009}{}", &name[3..]),
+                    face: Face::Main,
+                }]),
+                limits: true,
+            }),
             _ => {
                 if let Some(text) = named_operator(name) {
-                    let limits = matches!(name, "lim" | "liminf" | "limsup" | "max" | "min" | "sup" | "inf" | "det" | "gcd" | "Pr" | "injlim" | "projlim" | "varliminf" | "varlimsup");
-                    return one(Node::Op { body: OpBody::Name(vec![Node::Text { text: text.into(), face: Face::Main }]), limits });
+                    let limits = matches!(
+                        name,
+                        "lim"
+                            | "liminf"
+                            | "limsup"
+                            | "max"
+                            | "min"
+                            | "sup"
+                            | "inf"
+                            | "det"
+                            | "gcd"
+                            | "Pr"
+                            | "injlim"
+                            | "projlim"
+                            | "varliminf"
+                            | "varlimsup"
+                    );
+                    return one(Node::Op {
+                        body: OpBody::Name(vec![Node::Text {
+                            text: text.into(),
+                            face: Face::Main,
+                        }]),
+                        limits,
+                    });
                 }
                 if let Some(f) = font_command(name) {
                     let saved = self.font;
@@ -827,12 +1174,19 @@ impl<'a> Parser<'a> {
                 if let Some((ch, face, class, italic)) = lookup(&key) {
                     if class == Class::Op {
                         let limits = !matches!(ch, '\u{222b}'..='\u{2233}');
-                        return one(Node::Op { body: OpBody::Glyph(ch), limits });
+                        return one(Node::Op {
+                            body: OpBody::Glyph(ch),
+                            limits,
+                        });
                     }
                     return one(sym(ch, face, class, italic, self.font));
                 }
                 if let Some(d) = delim_named(name) {
-                    return one(Node::Sym { ch: d, face: Face::Main, class: Class::Ord });
+                    return one(Node::Sym {
+                        ch: d,
+                        face: Face::Main,
+                        class: Class::Ord,
+                    });
                 }
                 one(Node::Unknown(format!("\\{name}")))
             }
@@ -844,8 +1198,15 @@ impl<'a> Parser<'a> {
         self.skip_space();
         let start = self.pos;
         let rest = &self.src[start..];
-        let number = rest.bytes().take_while(|b| b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'+' | b' ')).count();
-        let unit = rest[number..].bytes().take_while(u8::is_ascii_alphabetic).take(2).count();
+        let number = rest
+            .bytes()
+            .take_while(|b| b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'+' | b' '))
+            .count();
+        let unit = rest[number..]
+            .bytes()
+            .take_while(u8::is_ascii_alphabetic)
+            .take(2)
+            .count();
         self.pos += number + unit;
         self.src[start..self.pos].to_string()
     }
@@ -870,14 +1231,40 @@ impl<'a> Parser<'a> {
             "vmatrix" => (ArrayKind::Matrix, ('|', '|'), vec![]),
             "Vmatrix" => (ArrayKind::Matrix, ('\u{2016}', '\u{2016}'), vec![]),
             "smallmatrix" => (ArrayKind::Small, (NO_DELIM, NO_DELIM), vec![]),
-            "cases" => (ArrayKind::Cases { display: false }, ('{', NO_DELIM), vec![Align::Left, Align::Left]),
-            "dcases" => (ArrayKind::Cases { display: true }, ('{', NO_DELIM), vec![Align::Left, Align::Left]),
-            "rcases" => (ArrayKind::Cases { display: false }, (NO_DELIM, '}'), vec![Align::Left, Align::Left]),
-            "aligned" | "align" | "alignat" | "alignedat" | "split" | "eqnarray" | "flalign" => (ArrayKind::Aligned, (NO_DELIM, NO_DELIM), vec![]),
-            "gathered" | "gather" | "equation" | "multline" | "displaymath" | "math" => (ArrayKind::Gathered, (NO_DELIM, NO_DELIM), vec![Align::Center]),
+            "cases" => (
+                ArrayKind::Cases { display: false },
+                ('{', NO_DELIM),
+                vec![Align::Left, Align::Left],
+            ),
+            "dcases" => (
+                ArrayKind::Cases { display: true },
+                ('{', NO_DELIM),
+                vec![Align::Left, Align::Left],
+            ),
+            "rcases" => (
+                ArrayKind::Cases { display: false },
+                (NO_DELIM, '}'),
+                vec![Align::Left, Align::Left],
+            ),
+            "aligned" | "align" | "alignat" | "alignedat" | "split" | "eqnarray" | "flalign" => {
+                (ArrayKind::Aligned, (NO_DELIM, NO_DELIM), vec![])
+            }
+            "gathered" | "gather" | "equation" | "multline" | "displaymath" | "math" => (
+                ArrayKind::Gathered,
+                (NO_DELIM, NO_DELIM),
+                vec![Align::Center],
+            ),
             "array" | "subarray" => {
                 let (cols, _) = column_spec(spec.as_deref().unwrap_or("c"));
-                (if base == "subarray" { ArrayKind::Small } else { ArrayKind::Matrix }, (NO_DELIM, NO_DELIM), cols)
+                (
+                    if base == "subarray" {
+                        ArrayKind::Small
+                    } else {
+                        ArrayKind::Matrix
+                    },
+                    (NO_DELIM, NO_DELIM),
+                    cols,
+                )
             }
             _ => (ArrayKind::Matrix, (NO_DELIM, NO_DELIM), vec![]),
         };
@@ -908,7 +1295,12 @@ pub fn rows_of(body: Vec<Node>, kind: ArrayKind, cols: Vec<Align>, delims: (char
                     row_rules.push(at + 1);
                 }
             }
-            other => rows.last_mut().expect("a row").last_mut().expect("a cell").push(other),
+            other => rows
+                .last_mut()
+                .expect("a row")
+                .last_mut()
+                .expect("a cell")
+                .push(other),
         }
     }
     // A trailing `\\` leaves an empty row.
@@ -916,7 +1308,14 @@ pub fn rows_of(body: Vec<Node>, kind: ArrayKind, cols: Vec<Align>, delims: (char
         rows.pop();
     }
     row_rules.iter_mut().for_each(|r| *r = (*r).min(rows.len()));
-    Array { rows, cols, col_rules: Vec::new(), row_rules, kind, delims }
+    Array {
+        rows,
+        cols,
+        col_rules: Vec::new(),
+        row_rules,
+        kind,
+        delims,
+    }
 }
 
 /// Columns of an `array` spec (`{c|cc}`), and where its vertical rules go.
@@ -980,11 +1379,22 @@ fn dimension(text: &str) -> f32 {
 /// `^` or `_` on the last atom of `out` (or on nothing).
 fn attach(out: &mut Vec<Node>, sup: bool, arg: Vec<Node>) {
     let base = match out.pop() {
-        Some(Node::Scripts { base, sup: s, sub, limits }) => {
+        Some(Node::Scripts {
+            base,
+            sup: s,
+            sub,
+            limits,
+        }) => {
             // `x^a_b`, `x_b^a`, `x'^2`: one set of scripts. A second of the same kind starts
             // a new atom, as TeX would complain and show it anyway.
             let taken = if sup { s.is_some() } else { sub.is_some() };
-            if !taken || (sup && s.as_ref().is_some_and(|s| s.iter().all(|n| matches!(n, Node::Sym { ch: '\u{2032}', .. })))) {
+            if !taken
+                || (sup
+                    && s.as_ref().is_some_and(|s| {
+                        s.iter()
+                            .all(|n| matches!(n, Node::Sym { ch: '\u{2032}', .. }))
+                    }))
+            {
                 let (s, sub) = if sup {
                     let mut merged = s.unwrap_or_default();
                     merged.extend(arg);
@@ -992,10 +1402,20 @@ fn attach(out: &mut Vec<Node>, sup: bool, arg: Vec<Node>) {
                 } else {
                     (s, Some(arg))
                 };
-                out.push(Node::Scripts { base, sup: s, sub, limits });
+                out.push(Node::Scripts {
+                    base,
+                    sup: s,
+                    sub,
+                    limits,
+                });
                 return;
             }
-            out.push(Node::Scripts { base, sup: s, sub, limits });
+            out.push(Node::Scripts {
+                base,
+                sup: s,
+                sub,
+                limits,
+            });
             Node::Group(Vec::new())
         }
         Some(node @ (Node::Space(_) | Node::Tab | Node::Newline)) => {
@@ -1005,8 +1425,17 @@ fn attach(out: &mut Vec<Node>, sup: bool, arg: Vec<Node>) {
         Some(node) => node,
         None => Node::Group(Vec::new()),
     };
-    let (s, sub) = if sup { (Some(arg), None) } else { (None, Some(arg)) };
-    out.push(Node::Scripts { base: Box::new(base), sup: s, sub, limits: None });
+    let (s, sub) = if sup {
+        (Some(arg), None)
+    } else {
+        (None, Some(arg))
+    };
+    out.push(Node::Scripts {
+        base: Box::new(base),
+        sup: s,
+        sub,
+        limits: None,
+    });
 }
 
 /// `\limits` or `\nolimits` after an operator.
@@ -1148,7 +1577,9 @@ fn delim_named(name: &str) -> Option<char> {
 
 /// A math symbol from KaTeX's table: its glyph, face, class, and whether it's an italic letter.
 fn lookup(key: &str) -> Option<(char, Face, Class, bool)> {
-    let i = tables::SYMBOLS.binary_search_by(|(name, ..)| name.as_bytes().cmp(key.as_bytes())).ok()?;
+    let i = tables::SYMBOLS
+        .binary_search_by(|(name, ..)| name.as_bytes().cmp(key.as_bytes()))
+        .ok()?;
     let (_, ch, font, class, italic) = tables::SYMBOLS[i];
     let face = match font {
         super::layout::SymbolFont::Main => Face::Main,
@@ -1208,7 +1639,11 @@ fn letter(c: char, font: MathFont) -> Node {
         }
         MathFont::Blackboard | MathFont::Calligraphic | MathFont::Script => Face::Main,
     };
-    Node::Sym { ch: c, face, class: Class::Ord }
+    Node::Sym {
+        ch: c,
+        face,
+        class: Class::Ord,
+    }
 }
 
 #[cfg(test)]
@@ -1230,58 +1665,119 @@ mod tests {
 
     #[test]
     fn parses_the_bayes_answer() {
-        let nodes = parse(r" P(\theta=1\mid T=+) =\frac{0.99(0.001)}{0.99(0.001)+0.06(0.999)} \approx \boxed{0.0162482}. ");
+        let nodes = parse(
+            r" P(\theta=1\mid T=+) =\frac{0.99(0.001)}{0.99(0.001)+0.06(0.999)} \approx \boxed{0.0162482}. ",
+        );
         assert!(nodes.iter().any(|n| matches!(n, Node::Frac { .. })));
         assert!(nodes.iter().any(|n| matches!(n, Node::Boxed(_))));
-        assert!(nodes.iter().any(|n| matches!(n, Node::Sym { ch: '\u{3b8}', face: Face::MathItalic, .. })));
-        assert!(nodes.iter().any(|n| matches!(n, Node::Sym { ch: '\u{2223}', class: Class::Rel, .. })));
-        assert!(nodes.iter().any(|n| matches!(n, Node::Sym { ch: '\u{2248}', class: Class::Rel, .. })));
+        assert!(nodes.iter().any(|n| matches!(
+            n,
+            Node::Sym {
+                ch: '\u{3b8}',
+                face: Face::MathItalic,
+                ..
+            }
+        )));
+        assert!(nodes.iter().any(|n| matches!(
+            n,
+            Node::Sym {
+                ch: '\u{2223}',
+                class: Class::Rel,
+                ..
+            }
+        )));
+        assert!(nodes.iter().any(|n| matches!(
+            n,
+            Node::Sym {
+                ch: '\u{2248}',
+                class: Class::Rel,
+                ..
+            }
+        )));
         assert!(!nodes.iter().any(|n| matches!(n, Node::Unknown(_))));
     }
 
     #[test]
     fn scripts_attach_and_nest() {
         let nodes = parse("x_{i}^{2^{n}} + y'");
-        let Node::Scripts { sup: Some(sup), sub: Some(sub), .. } = &nodes[0] else { panic!("{nodes:?}") };
+        let Node::Scripts {
+            sup: Some(sup),
+            sub: Some(sub),
+            ..
+        } = &nodes[0]
+        else {
+            panic!("{nodes:?}")
+        };
         assert_eq!(syms(sub), "i");
         assert!(matches!(&sup[0], Node::Scripts { .. }));
-        assert!(matches!(nodes.last(), Some(Node::Scripts { sup: Some(p), .. }) if syms(p) == "\u{2032}"));
+        assert!(
+            matches!(nodes.last(), Some(Node::Scripts { sup: Some(p), .. }) if syms(p) == "\u{2032}")
+        );
         // Scripts on nothing still show.
         assert!(matches!(&parse("^2")[0], Node::Scripts { .. }));
     }
 
     #[test]
     fn fonts_and_text() {
-        assert!(matches!(parse(r"\mathbb{R}")[0], Node::Group(ref g) if matches!(g[0], Node::Sym { ch: 'R', face: Face::Ams, .. })));
-        assert!(matches!(parse(r"\mathbf{v}")[0], Node::Group(ref g) if matches!(g[0], Node::Sym { face: Face::MainBold, .. })));
+        assert!(
+            matches!(parse(r"\mathbb{R}")[0], Node::Group(ref g) if matches!(g[0], Node::Sym { ch: 'R', face: Face::Ams, .. }))
+        );
+        assert!(
+            matches!(parse(r"\mathbf{v}")[0], Node::Group(ref g) if matches!(g[0], Node::Sym { face: Face::MainBold, .. }))
+        );
         assert_eq!(syms(&parse(r"\text{if } x")), "{if }x");
-        assert_eq!(syms(&parse(r"\text{costs \$5 and $x$}")), "{costs $5 and {x}}");
-        assert!(matches!(parse(r"\operatorname{argmax}_x")[0], Node::Scripts { .. }));
-        assert!(matches!(parse(r"\lim_{n\to\infty}")[0], Node::Scripts { ref base, .. } if matches!(**base, Node::Op { limits: true, .. })));
+        assert_eq!(
+            syms(&parse(r"\text{costs \$5 and $x$}")),
+            "{costs $5 and {x}}"
+        );
+        assert!(matches!(
+            parse(r"\operatorname{argmax}_x")[0],
+            Node::Scripts { .. }
+        ));
+        assert!(
+            matches!(parse(r"\lim_{n\to\infty}")[0], Node::Scripts { ref base, .. } if matches!(**base, Node::Op { limits: true, .. }))
+        );
     }
 
     #[test]
     fn environments() {
-        let Node::Array(a) = &parse(r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}")[0] else { panic!() };
+        let Node::Array(a) = &parse(r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}")[0] else {
+            panic!()
+        };
         assert_eq!(a.rows.len(), 2);
         assert_eq!(a.rows[0].len(), 2);
         assert_eq!(a.delims, ('(', ')'));
-        let Node::Array(c) = &parse(r"f(x)=\begin{cases} 1 & x>0 \\ 0 & \text{otherwise} \end{cases}")[5] else { panic!() };
+        let Node::Array(c) =
+            &parse(r"f(x)=\begin{cases} 1 & x>0 \\ 0 & \text{otherwise} \end{cases}")[5]
+        else {
+            panic!()
+        };
         assert_eq!(c.kind, ArrayKind::Cases { display: false });
-        let Node::Array(arr) = &parse(r"\begin{array}{c|c} 1 & 2 \\ \hline 3 & 4 \end{array}")[0] else { panic!() };
+        let Node::Array(arr) = &parse(r"\begin{array}{c|c} 1 & 2 \\ \hline 3 & 4 \end{array}")[0]
+        else {
+            panic!()
+        };
         assert_eq!(arr.col_rules, vec![1]);
         assert_eq!(arr.row_rules, vec![1]);
-        let Node::Array(al) = &parse("\\begin{aligned} a &= b \\\\ &= c \\\\ \\end{aligned}")[0] else { panic!() };
+        let Node::Array(al) = &parse("\\begin{aligned} a &= b \\\\ &= c \\\\ \\end{aligned}")[0]
+        else {
+            panic!()
+        };
         assert_eq!(al.rows.len(), 2);
     }
 
     #[test]
     fn left_right_and_middle() {
-        let Node::LeftRight { delims, parts } = &parse(r"\left( \frac{a}{b} \middle| c \right]")[0] else { panic!() };
+        let Node::LeftRight { delims, parts } = &parse(r"\left( \frac{a}{b} \middle| c \right]")[0]
+        else {
+            panic!()
+        };
         assert_eq!(delims, &vec!['(', '|', ']']);
         assert_eq!(parts.len(), 2);
         // An unclosed `\left` closes at the end.
-        assert!(matches!(&parse(r"\left\{ x")[0], Node::LeftRight { delims, .. } if delims == &vec!['{', NO_DELIM]));
+        assert!(
+            matches!(&parse(r"\left\{ x")[0], Node::LeftRight { delims, .. } if delims == &vec!['{', NO_DELIM])
+        );
     }
 
     #[test]
@@ -1294,7 +1790,30 @@ mod tests {
 
     #[test]
     fn broken_tex_never_panics_or_loses_text() {
-        for s in [r"\frac{a}", r"\frac", r"x^", r"_", r"{{{", r"}}}", r"\left(", r"\right)", r"\begin{matrix} a &", r"\end{matrix}", r"\sqrt[", r"\sqrt[3", r"\text{abc", r"$", r"\\", r"\", r"\begin{array}{", r"a''''^2_3_4", r"\not", r"\hspace{", r"\kern", r"\genfrac{}{}{}{}"] {
+        for s in [
+            r"\frac{a}",
+            r"\frac",
+            r"x^",
+            r"_",
+            r"{{{",
+            r"}}}",
+            r"\left(",
+            r"\right)",
+            r"\begin{matrix} a &",
+            r"\end{matrix}",
+            r"\sqrt[",
+            r"\sqrt[3",
+            r"\text{abc",
+            r"$",
+            r"\\",
+            r"\",
+            r"\begin{array}{",
+            r"a''''^2_3_4",
+            r"\not",
+            r"\hspace{",
+            r"\kern",
+            r"\genfrac{}{}{}{}",
+        ] {
             let _ = parse(s);
         }
         let nested = "{".repeat(500) + "x" + &"}".repeat(500);
@@ -1306,7 +1825,11 @@ mod tests {
     #[test]
     fn multi_byte_whitespace_is_just_space() {
         for ws in ["\u{a0}", "\u{85}", "\u{2003}", "\u{202f}", "\u{3000}"] {
-            assert_eq!(syms(&parse(&format!("a{ws}b"))), syms(&parse("a b")), "{ws:?}");
+            assert_eq!(
+                syms(&parse(&format!("a{ws}b"))),
+                syms(&parse("a b")),
+                "{ws:?}"
+            );
             let _ = parse(&format!("x{ws}={ws}1{ws}"));
             let _ = parse(&format!(r"\frac{ws}{{a}}{ws}{{b}}"));
             let _ = parse(&format!(r"\alpha{ws}\beta"));
@@ -1321,7 +1844,63 @@ mod tests {
 
     #[test]
     fn fuzz_never_panics() {
-        let pieces = [r"\frac", r"\sqrt", "[", "]", "{", "}", "^", "_", "&", r"\\", r"\left", r"\right", r"\middle", "(", ")", "|", r"\begin{pmatrix}", r"\end{pmatrix}", r"\begin{cases}", r"\end{cases}", r"\begin{array}{c|l}", r"\end{array}", "x", "1", " ", r"\alpha", r"\text{", "$", r"\boxed", r"\hat", r"\overbrace", r"\over", r"\displaystyle", r"\not", r"\limits", "'", r"\hline", r"\big", r"\unknowncmd", "é", "日", r"\operatorname*", r"\xrightarrow[", r"\mathbb", r"\binom", r"\tag", r"\kern", "%", "~", r"\,", "\u{a0}", "\u{202f}", "\u{3000}", "\u{2003}", "\u{85}"];
+        let pieces = [
+            r"\frac",
+            r"\sqrt",
+            "[",
+            "]",
+            "{",
+            "}",
+            "^",
+            "_",
+            "&",
+            r"\\",
+            r"\left",
+            r"\right",
+            r"\middle",
+            "(",
+            ")",
+            "|",
+            r"\begin{pmatrix}",
+            r"\end{pmatrix}",
+            r"\begin{cases}",
+            r"\end{cases}",
+            r"\begin{array}{c|l}",
+            r"\end{array}",
+            "x",
+            "1",
+            " ",
+            r"\alpha",
+            r"\text{",
+            "$",
+            r"\boxed",
+            r"\hat",
+            r"\overbrace",
+            r"\over",
+            r"\displaystyle",
+            r"\not",
+            r"\limits",
+            "'",
+            r"\hline",
+            r"\big",
+            r"\unknowncmd",
+            "é",
+            "日",
+            r"\operatorname*",
+            r"\xrightarrow[",
+            r"\mathbb",
+            r"\binom",
+            r"\tag",
+            r"\kern",
+            "%",
+            "~",
+            r"\,",
+            "\u{a0}",
+            "\u{202f}",
+            "\u{3000}",
+            "\u{2003}",
+            "\u{85}",
+        ];
         let mut seed = 0x9e37_79b9_7f4a_7c15u64;
         for _ in 0..6000 {
             seed ^= seed << 13;

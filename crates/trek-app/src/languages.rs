@@ -16,11 +16,19 @@ pub struct Language {
 }
 
 const fn lang(name: &'static str, grammar: &'static str) -> Language {
-    Language { name, grammar, hard_tabs: false }
+    Language {
+        name,
+        grammar,
+        hard_tabs: false,
+    }
 }
 
 const fn tabbed(name: &'static str, grammar: &'static str) -> Language {
-    Language { name, grammar, hard_tabs: true }
+    Language {
+        name,
+        grammar,
+        hard_tabs: true,
+    }
 }
 
 const PLAIN: Language = lang("Plain Text", "text");
@@ -36,30 +44,85 @@ pub fn register_highlights() {
     ONCE.call_once(|| {
         let registry = LanguageRegistry::singleton();
         if let Some(mut config) = registry.language("javascript") {
-            config.highlights = format!("{}\n{}", config.highlights, tree_sitter_javascript::JSX_HIGHLIGHT_QUERY).into();
+            config.highlights = format!(
+                "{}\n{}",
+                config.highlights,
+                tree_sitter_javascript::JSX_HIGHLIGHT_QUERY
+            )
+            .into();
             registry.register("javascript", &config);
         }
         // C++'s query is C's additions: `int`, `return` and `if` are C's.
         if let Some(mut config) = registry.language("cpp") {
-            config.highlights = format!("{}\n{}", tree_sitter_c::HIGHLIGHT_QUERY, config.highlights).into();
+            config.highlights =
+                format!("{}\n{}", tree_sitter_c::HIGHLIGHT_QUERY, config.highlights).into();
             registry.register("cpp", &config);
         }
         if let Some(mut config) = registry.language("tsx") {
-            config.highlights = format!("{}\n{}\n{}", tree_sitter_javascript::HIGHLIGHT_QUERY, tree_sitter_javascript::JSX_HIGHLIGHT_QUERY, config.highlights).into();
+            config.highlights = format!(
+                "{}\n{}\n{}",
+                tree_sitter_javascript::HIGHLIGHT_QUERY,
+                tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+                config.highlights
+            )
+            .into();
             registry.register("tsx", &config);
         }
-        registry.register("csharp", &LanguageConfig::new("csharp", tree_sitter_c_sharp::LANGUAGE.into(), vec![], tree_sitter_c_sharp::HIGHLIGHTS_QUERY, "", ""));
+        registry.register(
+            "csharp",
+            &LanguageConfig::new(
+                "csharp",
+                tree_sitter_c_sharp::LANGUAGE.into(),
+                vec![],
+                tree_sitter_c_sharp::HIGHLIGHTS_QUERY,
+                "",
+                "",
+            ),
+        );
         // Kotlin comes out plain with gpui-kit's own query (no colour in the test below); the grammar crate's colours it.
-        registry.register("kotlin", &LanguageConfig::new("kotlin", tree_sitter_kotlin_sg::LANGUAGE.into(), vec![], tree_sitter_kotlin_sg::HIGHLIGHTS_QUERY, "", ""));
-        registry.register("swift",&LanguageConfig::new("swift", tree_sitter_swift::LANGUAGE.into(), vec![], tree_sitter_swift::HIGHLIGHTS_QUERY, "", ""));
-        registry.register("cmake", &LanguageConfig::new("cmake", tree_sitter_cmake::LANGUAGE.into(), vec![], tree_sitter_cmake::HIGHLIGHTS_QUERY, "", ""));
+        registry.register(
+            "kotlin",
+            &LanguageConfig::new(
+                "kotlin",
+                tree_sitter_kotlin_sg::LANGUAGE.into(),
+                vec![],
+                tree_sitter_kotlin_sg::HIGHLIGHTS_QUERY,
+                "",
+                "",
+            ),
+        );
+        registry.register(
+            "swift",
+            &LanguageConfig::new(
+                "swift",
+                tree_sitter_swift::LANGUAGE.into(),
+                vec![],
+                tree_sitter_swift::HIGHLIGHTS_QUERY,
+                "",
+                "",
+            ),
+        );
+        registry.register(
+            "cmake",
+            &LanguageConfig::new(
+                "cmake",
+                tree_sitter_cmake::LANGUAGE.into(),
+                vec![],
+                tree_sitter_cmake::HIGHLIGHTS_QUERY,
+                "",
+                "",
+            ),
+        );
     });
 }
 
 /// The language of the file at `path`: by its name first (`Makefile`), then its extension, in
 /// whatever case the file system keeps it (`MAIN.CS` on Windows).
 pub fn of(path: &Path) -> Language {
-    let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
     match name.as_str() {
         "makefile" | "gnumakefile" => return tabbed("Makefile", "make"),
         "cmakelists.txt" => return lang("CMake", "cmake"),
@@ -68,7 +131,10 @@ pub fn of(path: &Path) -> Language {
         "gemfile" | "rakefile" => return lang("Ruby", "ruby"),
         _ => {}
     }
-    let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
     match ext.as_str() {
         "rs" => lang("Rust", "rust"),
         "swift" => lang("Swift", "swift"),
@@ -189,7 +255,11 @@ mod tests {
         let rope = ropey::Rope::from_str(code);
         highlighter.update(None, &rope, None);
         // Spans with a colour of their own: plain text still comes back as one uncoloured span.
-        highlighter.styles(&(0..code.len()), &*HighlightTheme::default_dark()).iter().filter(|(_, style)| style.color.is_some()).count()
+        highlighter
+            .styles(&(0..code.len()), &*HighlightTheme::default_dark())
+            .iter()
+            .filter(|(_, style)| style.color.is_some())
+            .count()
     }
 
     #[test]
@@ -207,7 +277,10 @@ mod tests {
             ("a.c", "int main() { return 0; }"),
             ("a.h", "int main(void);"),
             ("a.cpp", "int main() { return 0; }"),
-            ("Program.cs", "class A { static void Main() { var x = 1; } }"),
+            (
+                "Program.cs",
+                "class A { static void Main() { var x = 1; } }",
+            ),
             ("A.java", "class A { void f() { int x = 1; } }"),
             ("a.kt", "fun f() { val x = 1 }"),
             ("a.scala", "object A { def f = 1 }"),
@@ -236,7 +309,10 @@ mod tests {
                 plain.push(format!("{file} ({})", of(Path::new(file)).grammar));
             }
         }
-        assert!(plain.is_empty(), "not coloured (no grammar compiled in, or none that colours): {plain:?}");
+        assert!(
+            plain.is_empty(),
+            "not coloured (no grammar compiled in, or none that colours): {plain:?}"
+        );
     }
 
     #[test]
@@ -253,7 +329,15 @@ mod tests {
         for tabs in ["main.go", "Makefile", "rules.mk", "GNUmakefile"] {
             assert!(of(Path::new(tabs)).hard_tabs, "{tabs}");
         }
-        for spaces in ["main.rs", "a.py", "a.cs", "a.ts", "CMakeLists.txt", "notes.txt", "a.yaml"] {
+        for spaces in [
+            "main.rs",
+            "a.py",
+            "a.cs",
+            "a.ts",
+            "CMakeLists.txt",
+            "notes.txt",
+            "a.yaml",
+        ] {
             assert!(!of(Path::new(spaces)).hard_tabs, "{spaces}");
         }
     }

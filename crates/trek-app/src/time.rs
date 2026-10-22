@@ -19,7 +19,9 @@ fn short_date<Tz: TimeZone>(ms: i64, tz: &Tz) -> String
 where
     Tz::Offset: std::fmt::Display,
 {
-    DateTime::from_timestamp_millis(ms).map(|d| d.with_timezone(tz).format("%b %-d").to_string()).unwrap_or_default()
+    DateTime::from_timestamp_millis(ms)
+        .map(|d| d.with_timezone(tz).format("%b %-d").to_string())
+        .unwrap_or_default()
 }
 
 /// Elapsed run time: "12s", "4m 03s", "1h 3m".
@@ -41,7 +43,13 @@ pub fn until(ms: i64) -> String {
         60..=3_599 => format!("in {}m", s / 60),
         3_600..=86_399 => format!("in {}h {}m", s / 3_600, (s % 3_600) / 60),
         _ => {
-            let d = chrono::DateTime::from_timestamp_millis(ms).map(|d| d.with_timezone(&chrono::Local).format("%a %-I:%M %p").to_string()).unwrap_or_default();
+            let d = chrono::DateTime::from_timestamp_millis(ms)
+                .map(|d| {
+                    d.with_timezone(&chrono::Local)
+                        .format("%a %-I:%M %p")
+                        .to_string()
+                })
+                .unwrap_or_default();
             format!("{d} (in {}d)", s / 86_400)
         }
     }
@@ -49,15 +57,27 @@ pub fn until(ms: i64) -> String {
 
 /// "3:42 PM" today, "Oct 1, 3:42 PM" otherwise.
 pub fn clock(ms: i64) -> String {
-    let Some(t) = chrono::DateTime::from_timestamp_millis(ms).map(|d| d.with_timezone(&chrono::Local)) else { return String::new() };
-    if t.date_naive() == chrono::Local::now().date_naive() { t.format("%-I:%M %p").to_string() } else { t.format("%b %-d, %-I:%M %p").to_string() }
+    let Some(t) =
+        chrono::DateTime::from_timestamp_millis(ms).map(|d| d.with_timezone(&chrono::Local))
+    else {
+        return String::new();
+    };
+    if t.date_naive() == chrono::Local::now().date_naive() {
+        t.format("%-I:%M %p").to_string()
+    } else {
+        t.format("%b %-d, %-I:%M %p").to_string()
+    }
 }
 
 /// When a usage limit resets, as of `now` (both unix ms): "2:10 AM" today, "tomorrow 2:10 AM",
 /// "Oct 9, 2:10 AM" further out.
 pub fn reset_clock(ms: i64, now: i64) -> String {
-    let local = |ms: i64| chrono::DateTime::from_timestamp_millis(ms).map(|d| d.with_timezone(&chrono::Local));
-    let (Some(at), Some(now)) = (local(ms), local(now)) else { return String::new() };
+    let local = |ms: i64| {
+        chrono::DateTime::from_timestamp_millis(ms).map(|d| d.with_timezone(&chrono::Local))
+    };
+    let (Some(at), Some(now)) = (local(ms), local(now)) else {
+        return String::new();
+    };
     let time = at.format("%-I:%M %p");
     match (at.date_naive() - now.date_naive()).num_days() {
         0 => time.to_string(),
@@ -96,50 +116,101 @@ const DAY_ENDS: u32 = 5;
 /// from the day the user is still in. A clock change can skip 9:00 (a DST gap, in the few zones
 /// that change then) or repeat it: the first 9:00 is used, or the hour after a skipped one.
 pub fn morning<Tz: TimeZone>(now: &DateTime<Tz>, days: i64) -> Option<DateTime<Tz>> {
-    let today = if now.hour() < DAY_ENDS { now.date_naive().pred_opt()? } else { now.date_naive() };
+    let today = if now.hour() < DAY_ENDS {
+        now.date_naive().pred_opt()?
+    } else {
+        now.date_naive()
+    };
     let at = (today + Duration::days(days)).and_hms_opt(MORNING, 0, 0)?;
     let tz = now.timezone();
-    tz.from_local_datetime(&at).earliest().or_else(|| tz.from_local_datetime(&(at + Duration::hours(1))).earliest())
+    tz.from_local_datetime(&at).earliest().or_else(|| {
+        tz.from_local_datetime(&(at + Duration::hours(1)))
+            .earliest()
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{countdown, morning, reset_clock, short_date};
-    use chrono::{DateTime, FixedOffset, MappedLocalTime, NaiveDate, NaiveDateTime, Offset, TimeZone};
+    use chrono::{
+        DateTime, FixedOffset, MappedLocalTime, NaiveDate, NaiveDateTime, Offset, TimeZone,
+    };
 
     fn at(tz: &impl TimeZone<Offset = FixedOffset>, s: &str) -> DateTime<FixedOffset> {
         let naive = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").expect("time");
-        tz.from_local_datetime(&naive).earliest().expect("exists").fixed_offset()
+        tz.from_local_datetime(&naive)
+            .earliest()
+            .expect("exists")
+            .fixed_offset()
     }
 
     fn fmt(t: Option<DateTime<FixedOffset>>) -> String {
-        t.map(|t| t.format("%Y-%m-%d %H:%M %:z").to_string()).unwrap_or_default()
+        t.map(|t| t.format("%Y-%m-%d %H:%M %:z").to_string())
+            .unwrap_or_default()
     }
 
     #[test]
     fn old_dates_are_the_users_own_day() {
         // 01:00 UTC on Sep 12 is still the evening of Sep 11 at UTC-8, and already Sep 12 at UTC+9.
-        let ms = NaiveDate::from_ymd_opt(2026, 9, 12).unwrap().and_hms_opt(1, 0, 0).unwrap().and_utc().timestamp_millis();
-        assert_eq!(short_date(ms, &FixedOffset::west_opt(8 * 3600).unwrap()), "Sep 11");
-        assert_eq!(short_date(ms, &FixedOffset::east_opt(9 * 3600).unwrap()), "Sep 12");
+        let ms = NaiveDate::from_ymd_opt(2026, 9, 12)
+            .unwrap()
+            .and_hms_opt(1, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis();
+        assert_eq!(
+            short_date(ms, &FixedOffset::west_opt(8 * 3600).unwrap()),
+            "Sep 11"
+        );
+        assert_eq!(
+            short_date(ms, &FixedOffset::east_opt(9 * 3600).unwrap()),
+            "Sep 12"
+        );
     }
 
     #[test]
     fn mornings_count_from_the_day_the_user_is_in() {
         let cet = FixedOffset::east_opt(3600).unwrap();
         // Evening, and just before midnight: the next calendar day.
-        assert_eq!(fmt(morning(&at(&cet, "2026-03-10 18:30"), 1)), "2026-03-11 09:00 +01:00");
-        assert_eq!(fmt(morning(&at(&cet, "2026-03-10 23:59"), 1)), "2026-03-11 09:00 +01:00");
+        assert_eq!(
+            fmt(morning(&at(&cet, "2026-03-10 18:30"), 1)),
+            "2026-03-11 09:00 +01:00"
+        );
+        assert_eq!(
+            fmt(morning(&at(&cet, "2026-03-10 23:59"), 1)),
+            "2026-03-11 09:00 +01:00"
+        );
         // Just after midnight it's still last night: the morning about to come.
-        assert_eq!(fmt(morning(&at(&cet, "2026-03-11 00:01"), 1)), "2026-03-11 09:00 +01:00");
-        assert_eq!(fmt(morning(&at(&cet, "2026-03-11 04:59"), 1)), "2026-03-11 09:00 +01:00");
+        assert_eq!(
+            fmt(morning(&at(&cet, "2026-03-11 00:01"), 1)),
+            "2026-03-11 09:00 +01:00"
+        );
+        assert_eq!(
+            fmt(morning(&at(&cet, "2026-03-11 04:59"), 1)),
+            "2026-03-11 09:00 +01:00"
+        );
         // From 5 AM on, tomorrow is the next calendar day, even before 9.
-        assert_eq!(fmt(morning(&at(&cet, "2026-03-11 05:00"), 1)), "2026-03-12 09:00 +01:00");
-        assert_eq!(fmt(morning(&at(&cet, "2026-03-11 08:00"), 1)), "2026-03-12 09:00 +01:00");
+        assert_eq!(
+            fmt(morning(&at(&cet, "2026-03-11 05:00"), 1)),
+            "2026-03-12 09:00 +01:00"
+        );
+        assert_eq!(
+            fmt(morning(&at(&cet, "2026-03-11 08:00"), 1)),
+            "2026-03-12 09:00 +01:00"
+        );
         // Next week: the same weekday a week on, across a month and a year end.
-        assert_eq!(fmt(morning(&at(&cet, "2026-03-27 16:00"), 7)), "2026-04-03 09:00 +01:00");
-        assert_eq!(fmt(morning(&at(&cet, "2026-12-29 10:00"), 7)), "2027-01-05 09:00 +01:00");
-        assert_eq!(fmt(morning(&at(&cet, "2027-01-01 02:00"), 7)), "2027-01-07 09:00 +01:00");
+        assert_eq!(
+            fmt(morning(&at(&cet, "2026-03-27 16:00"), 7)),
+            "2026-04-03 09:00 +01:00"
+        );
+        assert_eq!(
+            fmt(morning(&at(&cet, "2026-12-29 10:00"), 7)),
+            "2027-01-05 09:00 +01:00"
+        );
+        assert_eq!(
+            fmt(morning(&at(&cet, "2027-01-01 02:00"), 7)),
+            "2027-01-07 09:00 +01:00"
+        );
         // Every wake time is ahead.
         for h in 0..24 {
             let now = at(&cet, &format!("2026-03-11 {h:02}:30"));
@@ -154,7 +225,8 @@ mod tests {
 
     impl ShiftsAtNine {
         fn summer(d: NaiveDate) -> bool {
-            d > NaiveDate::from_ymd_opt(2026, 3, 29).unwrap() && d < NaiveDate::from_ymd_opt(2026, 10, 25).unwrap()
+            d > NaiveDate::from_ymd_opt(2026, 3, 29).unwrap()
+                && d < NaiveDate::from_ymd_opt(2026, 10, 25).unwrap()
         }
     }
 
@@ -166,9 +238,23 @@ mod tests {
         fn offset_from_local_date(&self, local: &NaiveDate) -> MappedLocalTime<FixedOffset> {
             self.offset_from_local_datetime(&local.and_hms_opt(12, 0, 0).unwrap())
         }
-        fn offset_from_local_datetime(&self, local: &NaiveDateTime) -> MappedLocalTime<FixedOffset> {
-            let (winter, summer) = (FixedOffset::east_opt(3600).unwrap(), FixedOffset::east_opt(7200).unwrap());
-            let (d, h) = (local.date(), local.time().format("%H").to_string().parse::<u32>().unwrap());
+        fn offset_from_local_datetime(
+            &self,
+            local: &NaiveDateTime,
+        ) -> MappedLocalTime<FixedOffset> {
+            let (winter, summer) = (
+                FixedOffset::east_opt(3600).unwrap(),
+                FixedOffset::east_opt(7200).unwrap(),
+            );
+            let (d, h) = (
+                local.date(),
+                local
+                    .time()
+                    .format("%H")
+                    .to_string()
+                    .parse::<u32>()
+                    .unwrap(),
+            );
             if d == NaiveDate::from_ymd_opt(2026, 3, 29).unwrap() {
                 return match h {
                     0..9 => MappedLocalTime::Single(winter),
@@ -190,14 +276,26 @@ mod tests {
         }
         fn offset_from_utc_datetime(&self, utc: &NaiveDateTime) -> FixedOffset {
             let local = *utc + chrono::Duration::hours(1);
-            self.offset_from_local_datetime(&local).earliest().unwrap_or(FixedOffset::east_opt(3600).unwrap()).fix()
+            self.offset_from_local_datetime(&local)
+                .earliest()
+                .unwrap_or(FixedOffset::east_opt(3600).unwrap())
+                .fix()
         }
     }
 
     #[test]
     fn clock_changes_neither_lose_nor_double_a_wake_time() {
         let tz = ShiftsAtNine;
-        let wake = |s: &str, days| morning(&tz.from_local_datetime(&NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap()).unwrap(), days).map(|t| t.fixed_offset());
+        let wake = |s: &str, days| {
+            morning(
+                &tz.from_local_datetime(
+                    &NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap(),
+                )
+                .unwrap(),
+                days,
+            )
+            .map(|t| t.fixed_offset())
+        };
         // 9:00 is skipped: the hour after it.
         assert_eq!(fmt(wake("2026-03-28 20:00", 1)), "2026-03-29 10:00 +02:00");
         assert_eq!(fmt(wake("2026-03-22 20:00", 7)), "2026-03-29 10:00 +02:00");
@@ -210,11 +308,23 @@ mod tests {
     #[test]
     fn limit_resets_read_as_a_clock_and_a_countdown() {
         use chrono::Local;
-        let local = |s: &str| Local.from_local_datetime(&NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap()).earliest().unwrap().timestamp_millis();
+        let local = |s: &str| {
+            Local
+                .from_local_datetime(&NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap())
+                .earliest()
+                .unwrap()
+                .timestamp_millis()
+        };
         let now = local("2026-10-02 22:29");
         assert_eq!(reset_clock(local("2026-10-02 23:40"), now), "11:40 PM");
-        assert_eq!(reset_clock(local("2026-10-03 02:10"), now), "tomorrow 2:10 AM");
-        assert_eq!(reset_clock(local("2026-10-09 15:00"), now), "Oct 9, 3:00 PM");
+        assert_eq!(
+            reset_clock(local("2026-10-03 02:10"), now),
+            "tomorrow 2:10 AM"
+        );
+        assert_eq!(
+            reset_clock(local("2026-10-09 15:00"), now),
+            "Oct 9, 3:00 PM"
+        );
         assert_eq!(countdown(now + (3 * 60 + 41) * 60_000, now), "3h 41m");
         assert_eq!(countdown(now + 41 * 60_000, now), "41m");
         assert_eq!(countdown(now + 30_000, now), "under a minute");

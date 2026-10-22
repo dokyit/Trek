@@ -51,7 +51,9 @@ pub fn now_ms() -> i64 {
 /// A fresh random pairing code, formatted `XXXX-XXXX`.
 pub fn generate_code() -> String {
     let mut rng = rand::rng();
-    let raw: String = (0..CODE_LEN).map(|_| CODE_ALPHABET[rng.random_range(0..32)] as char).collect();
+    let raw: String = (0..CODE_LEN)
+        .map(|_| CODE_ALPHABET[rng.random_range(0..32)] as char)
+        .collect();
     format_code(&raw)
 }
 
@@ -154,7 +156,11 @@ impl Pairing {
     /// Activate `code` (replacing any active one) until `ttl` from now.
     pub fn activate(&mut self, code: &str, ttl: Duration) -> Result<(), PairingError> {
         let normalized = normalize_code(code).ok_or(PairingError::Wrong)?;
-        self.active = Some(ActiveCode { normalized, expires: Instant::now() + ttl, wrong: 0 });
+        self.active = Some(ActiveCode {
+            normalized,
+            expires: Instant::now() + ttl,
+            wrong: 0,
+        });
         Ok(())
     }
 
@@ -164,7 +170,9 @@ impl Pairing {
     }
 
     pub fn is_active(&self) -> bool {
-        self.active.as_ref().is_some_and(|a| a.expires > Instant::now())
+        self.active
+            .as_ref()
+            .is_some_and(|a| a.expires > Instant::now())
     }
 
     /// Redeem a code typed at `from`. Success consumes the code; a wrong code makes `from` wait
@@ -179,18 +187,26 @@ impl Pairing {
         self.check_at(input, from, Instant::now())
     }
 
-    pub(crate) fn check_at(&mut self, input: &str, from: IpAddr, now: Instant) -> Result<(), PairingError> {
+    pub(crate) fn check_at(
+        &mut self,
+        input: &str,
+        from: IpAddr,
+        now: Instant,
+    ) -> Result<(), PairingError> {
         let active = self.active.as_mut().ok_or(PairingError::NoOffer)?;
         if now >= active.expires {
             self.active = None;
             return Err(PairingError::Expired);
         }
         let from = source(from);
-        self.strikes.retain(|_, s| now.saturating_duration_since(s.last) < FORGET_AFTER);
+        self.strikes
+            .retain(|_, s| now.saturating_duration_since(s.last) < FORGET_AFTER);
         if let Some(s) = self.strikes.get(&from).filter(|s| now < s.until) {
             // Not even compared: waiting is the point.
             let wait = s.until - now;
-            return Err(PairingError::Backoff(wait.as_secs() + u64::from(wait.subsec_nanos() > 0)));
+            return Err(PairingError::Backoff(
+                wait.as_secs() + u64::from(wait.subsec_nanos() > 0),
+            ));
         }
         let matches = normalize_code(input)
             .is_some_and(|typed| bool::from(typed.as_bytes().ct_eq(active.normalized.as_bytes())));
@@ -204,10 +220,18 @@ impl Pairing {
             return Err(PairingError::Burned);
         }
         if self.strikes.len() >= MAX_TRACKED && !self.strikes.contains_key(&from) {
-            let oldest = self.strikes.iter().min_by_key(|(_, s)| s.last).map(|(ip, _)| *ip);
+            let oldest = self
+                .strikes
+                .iter()
+                .min_by_key(|(_, s)| s.last)
+                .map(|(ip, _)| *ip);
             oldest.map(|ip| self.strikes.remove(&ip));
         }
-        let s = self.strikes.entry(from).or_insert(Strikes { wrong: 0, until: now, last: now });
+        let s = self.strikes.entry(from).or_insert(Strikes {
+            wrong: 0,
+            until: now,
+            last: now,
+        });
         s.wrong += 1;
         s.until = now + backoff(s.wrong);
         s.last = now;
@@ -217,14 +241,32 @@ impl Pairing {
 
 /// The QR code's URL: `trek://pair?host=<host:port>&code=<code>&name=<host name>&hid=<host id>`,
 /// and `&fp=<SHA-256 of the server's certificate>` when it speaks TLS (the phone pins it).
-pub fn pairing_url(advertise: &str, code: &str, host_name: &str, host_id: &str, fingerprint: Option<&str>) -> String {
-    pairing_url_with_routes(&[advertise.to_string()], code, host_name, host_id, fingerprint)
+pub fn pairing_url(
+    advertise: &str,
+    code: &str,
+    host_name: &str,
+    host_id: &str,
+    fingerprint: Option<&str>,
+) -> String {
+    pairing_url_with_routes(
+        &[advertise.to_string()],
+        code,
+        host_name,
+        host_id,
+        fingerprint,
+    )
 }
 
 /// [`pairing_url`] for a Mac that answers at more than one address: the first is `host`, the
 /// others follow in `alt`, comma-separated, for a phone that can't reach the first (one off the
 /// Wi-Fi, on the tailnet; one on the Wi-Fi without Tailscale).
-pub fn pairing_url_with_routes(routes: &[String], code: &str, host_name: &str, host_id: &str, fingerprint: Option<&str>) -> String {
+pub fn pairing_url_with_routes(
+    routes: &[String],
+    code: &str,
+    host_name: &str,
+    host_id: &str,
+    fingerprint: Option<&str>,
+) -> String {
     let first = routes.first().map(String::as_str).unwrap_or_default();
     let mut url = format!(
         "trek://pair?host={}&code={}&name={}&hid={}",
@@ -234,7 +276,10 @@ pub fn pairing_url_with_routes(routes: &[String], code: &str, host_name: &str, h
         percent_encode(host_id, b""),
     );
     if routes.len() > 1 {
-        let alt: Vec<String> = routes[1..].iter().map(|r| percent_encode(r, b":[]")).collect();
+        let alt: Vec<String> = routes[1..]
+            .iter()
+            .map(|r| percent_encode(r, b":[]"))
+            .collect();
         url.push_str(&format!("&alt={}", alt.join(",")));
     }
     if let Some(fp) = fingerprint {
@@ -280,7 +325,8 @@ pub fn hash_token(token: &str) -> String {
 /// Whether `token` hashes to `stored_hash`, compared in constant time.
 pub fn verify_token(token: &str, stored_hash: &str) -> bool {
     let presented = hash_token(token);
-    presented.len() == stored_hash.len() && bool::from(presented.as_bytes().ct_eq(stored_hash.as_bytes()))
+    presented.len() == stored_hash.len()
+        && bool::from(presented.as_bytes().ct_eq(stored_hash.as_bytes()))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -312,7 +358,12 @@ pub struct DeviceInfo {
 
 impl From<&DeviceRecord> for DeviceInfo {
     fn from(r: &DeviceRecord) -> Self {
-        Self { device_id: r.device_id.clone(), name: r.name.clone(), paired_at: r.paired_at, last_seen_at: r.last_seen_at }
+        Self {
+            device_id: r.device_id.clone(),
+            name: r.name.clone(),
+            paired_at: r.paired_at,
+            last_seen_at: r.last_seen_at,
+        }
     }
 }
 
@@ -351,7 +402,10 @@ impl DeviceRegistry {
             Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(err) => return Err(err),
         };
-        Ok(Self { path: Some(path), devices })
+        Ok(Self {
+            path: Some(path),
+            devices,
+        })
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -383,7 +437,10 @@ impl DeviceRegistry {
 
     /// Whether `token` is the current token of `device_id`.
     pub fn verify(&self, device_id: &str, token: &str) -> bool {
-        self.devices.iter().find(|d| d.device_id == device_id).is_some_and(|d| verify_token(token, &d.token_sha256))
+        self.devices
+            .iter()
+            .find(|d| d.device_id == device_id)
+            .is_some_and(|d| verify_token(token, &d.token_sha256))
     }
 
     /// Record that the device was seen at `now`.
@@ -406,7 +463,10 @@ impl DeviceRegistry {
     }
 
     pub fn get(&self, device_id: &str) -> Option<DeviceInfo> {
-        self.devices.iter().find(|d| d.device_id == device_id).map(DeviceInfo::from)
+        self.devices
+            .iter()
+            .find(|d| d.device_id == device_id)
+            .map(DeviceInfo::from)
     }
 
     pub fn list(&self) -> Vec<DeviceInfo> {
@@ -415,11 +475,16 @@ impl DeviceRegistry {
 
     /// Write to the file (if any): a temp file next to it, then a rename.
     pub fn save(&self) -> io::Result<()> {
-        let Some(path) = &self.path else { return Ok(()) };
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)?;
         }
-        let json = serde_json::to_vec_pretty(&DevicesFile { devices: self.devices.clone() }).map_err(io::Error::other)?;
+        let json = serde_json::to_vec_pretty(&DevicesFile {
+            devices: self.devices.clone(),
+        })
+        .map_err(io::Error::other)?;
         // Two servers in one process (a restart) may save at once: each its own temp file.
         static SAVES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -459,7 +524,11 @@ mod tests {
             let code = generate_code();
             assert_eq!(code.len(), 9);
             assert_eq!(&code[4..5], "-");
-            assert!(code.bytes().filter(|&b| b != b'-').all(|b| CODE_ALPHABET.contains(&b)));
+            assert!(
+                code.bytes()
+                    .filter(|&b| b != b'-')
+                    .all(|b| CODE_ALPHABET.contains(&b))
+            );
             assert_eq!(normalize_code(&code).unwrap(), code.replace('-', ""));
         }
     }
@@ -496,7 +565,10 @@ mod tests {
     fn a_code_expires() {
         let mut p = Pairing::default();
         p.activate("K7Q2-9XMV", Duration::from_secs(60)).unwrap();
-        assert_eq!(p.check_at("K7Q2-9XMV", ip(1), Instant::now() + Duration::from_secs(61)), Err(PairingError::Expired));
+        assert_eq!(
+            p.check_at("K7Q2-9XMV", ip(1), Instant::now() + Duration::from_secs(61)),
+            Err(PairingError::Expired)
+        );
         assert_eq!(p.redeem("K7Q2-9XMV", ip(1)), Err(PairingError::NoOffer));
     }
 
@@ -505,16 +577,37 @@ mod tests {
         let mut p = Pairing::default();
         p.activate("K7Q2-9XMV", Duration::from_secs(600)).unwrap();
         let t0 = Instant::now();
-        assert_eq!(p.check_at("AAAA-AAAA", ip(66), t0), Err(PairingError::Wrong));
+        assert_eq!(
+            p.check_at("AAAA-AAAA", ip(66), t0),
+            Err(PairingError::Wrong)
+        );
         // Even the right code waits, uncompared.
-        assert_eq!(p.check_at("K7Q2-9XMV", ip(66), t0), Err(PairingError::Backoff(1)));
+        assert_eq!(
+            p.check_at("K7Q2-9XMV", ip(66), t0),
+            Err(PairingError::Backoff(1))
+        );
         // Garbage counts too; each wrong one doubles the wait.
-        assert_eq!(p.check_at("nope", ip(66), t0 + Duration::from_secs(1)), Err(PairingError::Wrong));
-        assert_eq!(p.check_at("AAAA-AAAA", ip(66), t0 + Duration::from_secs(2)), Err(PairingError::Backoff(1)));
-        assert_eq!(p.check_at("AAAA-AAAA", ip(66), t0 + Duration::from_secs(3)), Err(PairingError::Wrong));
-        assert_eq!(p.check_at("AAAA-AAAA", ip(66), t0 + Duration::from_secs(4)), Err(PairingError::Backoff(3)));
+        assert_eq!(
+            p.check_at("nope", ip(66), t0 + Duration::from_secs(1)),
+            Err(PairingError::Wrong)
+        );
+        assert_eq!(
+            p.check_at("AAAA-AAAA", ip(66), t0 + Duration::from_secs(2)),
+            Err(PairingError::Backoff(1))
+        );
+        assert_eq!(
+            p.check_at("AAAA-AAAA", ip(66), t0 + Duration::from_secs(3)),
+            Err(PairingError::Wrong)
+        );
+        assert_eq!(
+            p.check_at("AAAA-AAAA", ip(66), t0 + Duration::from_secs(4)),
+            Err(PairingError::Backoff(3))
+        );
         // Another phone isn't held up by it.
-        assert_eq!(p.check_at("K7Q2-9XMV", ip(7), t0 + Duration::from_secs(4)), Ok(()));
+        assert_eq!(
+            p.check_at("K7Q2-9XMV", ip(7), t0 + Duration::from_secs(4)),
+            Ok(())
+        );
         assert_eq!(backoff(1), Duration::from_secs(1));
         assert_eq!(backoff(4), Duration::from_secs(8));
         assert_eq!(backoff(40), MAX_BACKOFF);
@@ -526,14 +619,26 @@ mod tests {
         p.activate("K7Q2-9XMV", Duration::from_secs(3600)).unwrap();
         let t0 = Instant::now();
         for at in [0, 1, 3] {
-            assert_eq!(p.check_at("AAAA-AAAA", ip(66), t0 + Duration::from_secs(at)), Err(PairingError::Wrong));
+            assert_eq!(
+                p.check_at("AAAA-AAAA", ip(66), t0 + Duration::from_secs(at)),
+                Err(PairingError::Wrong)
+            );
         }
         p.activate("K7Q2-9XMV", Duration::from_secs(3600)).unwrap();
-        assert_eq!(p.check_at("K7Q2-9XMV", ip(66), t0 + Duration::from_secs(4)), Err(PairingError::Backoff(3)));
+        assert_eq!(
+            p.check_at("K7Q2-9XMV", ip(66), t0 + Duration::from_secs(4)),
+            Err(PairingError::Backoff(3))
+        );
         // Once it's been quiet a while, the next wrong code waits a second again.
         let later = t0 + Duration::from_secs(3) + FORGET_AFTER;
-        assert_eq!(p.check_at("AAAA-AAAA", ip(66), later), Err(PairingError::Wrong));
-        assert_eq!(p.check_at("K7Q2-9XMV", ip(66), later), Err(PairingError::Backoff(1)));
+        assert_eq!(
+            p.check_at("AAAA-AAAA", ip(66), later),
+            Err(PairingError::Wrong)
+        );
+        assert_eq!(
+            p.check_at("K7Q2-9XMV", ip(66), later),
+            Err(PairingError::Backoff(1))
+        );
     }
 
     #[test]
@@ -545,8 +650,14 @@ mod tests {
             let from = IpAddr::from([10, 0, (n / 256) as u8, (n % 256) as u8]);
             assert_eq!(p.check_at("AAAA-AAAA", from, now), Err(PairingError::Wrong));
         }
-        assert_eq!(p.check_at("AAAA-AAAA", ip(1), now), Err(PairingError::Burned));
-        assert_eq!(p.check_at("K7Q2-9XMV", ip(2), now), Err(PairingError::NoOffer));
+        assert_eq!(
+            p.check_at("AAAA-AAAA", ip(1), now),
+            Err(PairingError::Burned)
+        );
+        assert_eq!(
+            p.check_at("K7Q2-9XMV", ip(2), now),
+            Err(PairingError::NoOffer)
+        );
     }
 
     #[test]
@@ -558,7 +669,10 @@ mod tests {
             let _ = p.check_at("AAAA-AAAA", IpAddr::from([10, 0, 0, n as u8]), now);
         }
         p.activate("K7Q2-9XMV", Duration::from_secs(60)).unwrap();
-        assert_eq!(p.check_at("AAAA-AAAA", ip(1), now), Err(PairingError::Wrong));
+        assert_eq!(
+            p.check_at("AAAA-AAAA", ip(1), now),
+            Err(PairingError::Wrong)
+        );
         assert_eq!(p.check_at("K7Q2-9XMV", ip(2), now), Ok(()));
     }
 
@@ -575,7 +689,10 @@ mod tests {
 
     #[test]
     fn invalid_codes_cannot_be_activated() {
-        assert_eq!(Pairing::default().activate("TREK-DEMU", Duration::from_secs(1)), Err(PairingError::Wrong));
+        assert_eq!(
+            Pairing::default().activate("TREK-DEMU", Duration::from_secs(1)),
+            Err(PairingError::Wrong)
+        );
     }
 
     #[test]
@@ -589,7 +706,10 @@ mod tests {
         assert!(!verify_token("nope", &hash));
         assert!(!verify_token(&token, "short"));
         assert_ne!(generate_token(), token);
-        assert_eq!(hash_token("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(
+            hash_token("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]
@@ -611,7 +731,11 @@ mod tests {
 
     #[test]
     fn registry_persists() {
-        let dir = std::env::temp_dir().join(format!("trek-remote-test-{}-{}", std::process::id(), generate_token()));
+        let dir = std::env::temp_dir().join(format!(
+            "trek-remote-test-{}-{}",
+            std::process::id(),
+            generate_token()
+        ));
         let path = dir.join("devices.json");
         let token = {
             let mut r = DeviceRegistry::load(&path).unwrap();
@@ -633,17 +757,39 @@ mod tests {
 
     #[test]
     fn more_routes_go_in_alt() {
-        let routes = ["192.168.1.20:7420".to_string(), "100.101.1.2:7420".to_string(), "[fd7a::1]:7420".to_string()];
+        let routes = [
+            "192.168.1.20:7420".to_string(),
+            "100.101.1.2:7420".to_string(),
+            "[fd7a::1]:7420".to_string(),
+        ];
         let url = pairing_url_with_routes(&routes, "K7Q2-9XMV", "Mac", "7f3c", Some("ab12"));
         assert_eq!(url, "trek://pair?host=192.168.1.20:7420&code=K7Q2-9XMV&name=Mac&hid=7f3c&alt=100.101.1.2:7420,[fd7a%3A%3A1]:7420&fp=ab12".replace("%3A%3A", "::"));
-        assert_eq!(pairing_url_with_routes(&routes[..1], "K7Q2-9XMV", "Mac", "7f3c", None), pairing_url("192.168.1.20:7420", "K7Q2-9XMV", "Mac", "7f3c", None));
+        assert_eq!(
+            pairing_url_with_routes(&routes[..1], "K7Q2-9XMV", "Mac", "7f3c", None),
+            pairing_url("192.168.1.20:7420", "K7Q2-9XMV", "Mac", "7f3c", None)
+        );
     }
 
     #[test]
     fn urls_are_encoded() {
-        let url = pairing_url("192.168.1.20:7420", "K7Q2-9XMV", "Tobias\u{2019}s MacBook Pro", "7f3c", None);
-        assert_eq!(url, "trek://pair?host=192.168.1.20:7420&code=K7Q2-9XMV&name=Tobias%E2%80%99s%20MacBook%20Pro&hid=7f3c");
-        let pinned = pairing_url("192.168.1.20:7420", "K7Q2-9XMV", "Mac", "7f3c", Some("ab12"));
+        let url = pairing_url(
+            "192.168.1.20:7420",
+            "K7Q2-9XMV",
+            "Tobias\u{2019}s MacBook Pro",
+            "7f3c",
+            None,
+        );
+        assert_eq!(
+            url,
+            "trek://pair?host=192.168.1.20:7420&code=K7Q2-9XMV&name=Tobias%E2%80%99s%20MacBook%20Pro&hid=7f3c"
+        );
+        let pinned = pairing_url(
+            "192.168.1.20:7420",
+            "K7Q2-9XMV",
+            "Mac",
+            "7f3c",
+            Some("ab12"),
+        );
         assert!(pinned.ends_with("&hid=7f3c&fp=ab12"), "{pinned}");
         assert_eq!(percent_encode("a&b=c/d?", b""), "a%26b%3Dc%2Fd%3F");
     }

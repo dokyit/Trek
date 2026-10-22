@@ -24,7 +24,11 @@ impl Workspace {
     /// with the setting on. Not in a test process: that would run the user's own CLIs.
     pub fn check_agent_updates(&mut self, user: bool, cx: &mut Context<Self>) {
         let u = &mut self.agent_updates;
-        if u.checking || u.mock || (!user && !self.settings.updates.check_agents) || trek_core::paths::isolated() {
+        if u.checking
+            || u.mock
+            || (!user && !self.settings.updates.check_agents)
+            || trek_core::paths::isolated()
+        {
             return;
         }
         u.checking = true;
@@ -56,7 +60,10 @@ impl Workspace {
         if u.mock {
             return;
         }
-        let snapshot = Snapshot { checked_at: u.checked_at, agents: u.found.clone() };
+        let snapshot = Snapshot {
+            checked_at: u.checked_at,
+            agents: u.found.clone(),
+        };
         cx.background_executor()
             .spawn(async move {
                 if let Err(e) = snapshot.save() {
@@ -69,7 +76,10 @@ impl Workspace {
     /// From housekeeping: check when the last check is 12 hours old, and start updates whose
     /// agents' turns have ended.
     pub(super) fn maybe_check_agent_updates(&mut self, cx: &mut Context<Self>) {
-        if self.agent_updates.due(self.settings.updates.check_agents, now_ms()) {
+        if self
+            .agent_updates
+            .due(self.settings.updates.check_agents, now_ms())
+        {
             self.check_agent_updates(false, cx);
         }
         self.pump_agent_updates(cx);
@@ -84,7 +94,12 @@ impl Workspace {
 
     /// What `agent`'s update waits for, if anything: a turn, or background work.
     pub fn agent_hold(&self, agent: &str) -> Option<Hold> {
-        let lives = || self.threads.iter().filter(|t| t.agent.key() == agent).filter_map(|t| self.live.get(&t.id));
+        let lives = || {
+            self.threads
+                .iter()
+                .filter(|t| t.agent.key() == agent)
+                .filter_map(|t| self.live.get(&t.id))
+        };
         if lives().any(|l| l.turn_started.is_some()) {
             Some(Hold::Turn)
         } else if lives().any(|l| l.commands.is_some() && !l.background.is_empty()) {
@@ -131,8 +146,13 @@ impl Workspace {
             return;
         }
         // One update, or the batch run as an administrator (one prompt from Windows for all).
-        let Some(ids) = self.agent_updates.next(|a| self.agent_busy(a)) else { return };
-        let (ids, versions): (Vec<String>, Vec<_>) = ids.into_iter().filter_map(|id| self.agent_updates.start(&id).map(|v| (id, v))).unzip();
+        let Some(ids) = self.agent_updates.next(|a| self.agent_busy(a)) else {
+            return;
+        };
+        let (ids, versions): (Vec<String>, Vec<_>) = ids
+            .into_iter()
+            .filter_map(|id| self.agent_updates.start(&id).map(|v| (id, v)))
+            .unzip();
         if versions.is_empty() {
             return;
         }
@@ -148,12 +168,17 @@ impl Workspace {
             let _ = tx.send(runner.run_all(versions).await).await;
         });
         let task = cx.spawn(async move |this, cx| {
-            let Ok(outcomes) = rx.recv().await else { return };
+            let Ok(outcomes) = rx.recv().await else {
+                return;
+            };
             let _ = this.update(cx, |this, cx| {
                 // Each ends, one outcome or not: a job left running would hold up every update after it.
                 let mut outcomes = outcomes.into_iter();
                 for id in &ids {
-                    let outcome = outcomes.next().unwrap_or_else(|| Outcome::Failed { summary: "Trek lost track of this update.".into(), output: String::new() });
+                    let outcome = outcomes.next().unwrap_or_else(|| Outcome::Failed {
+                        summary: "Trek lost track of this update.".into(),
+                        output: String::new(),
+                    });
                     this.agent_updated(id, outcome, cx);
                 }
             });
@@ -164,19 +189,34 @@ impl Workspace {
     fn agent_updated(&mut self, id: &str, outcome: Outcome, cx: &mut Context<Self>) {
         // Its row is kept through checks while it runs; were it gone anyway, the job still ends,
         // or it would hold up every update after it (and Trek's own).
-        let row = self.agent_updates.found.iter().find(|v| v.id == id).map(|v| (v.agent.clone(), v.name.clone()));
+        let row = self
+            .agent_updates
+            .found
+            .iter()
+            .find(|v| v.id == id)
+            .map(|v| (v.agent.clone(), v.name.clone()));
         let (agent, name) = row.clone().unwrap_or_else(|| {
             let h = trek_core::agent_update::harness(id);
-            (h.map(|h| h.agent.to_string()).unwrap_or_default(), h.map(|h| h.name()).unwrap_or_else(|| id.to_string()))
+            (
+                h.map(|h| h.agent.to_string()).unwrap_or_default(),
+                h.map(|h| h.name()).unwrap_or_else(|| id.to_string()),
+            )
         });
         let dry = self.agent_updates.pretend();
         let message = match &outcome {
-            Outcome::Updated { version, .. } if dry => format!("Dry run: {name} would be at {version} now. Nothing was changed."),
+            Outcome::Updated { version, .. } if dry => {
+                format!("Dry run: {name} would be at {version} now. Nothing was changed.")
+            }
             Outcome::Updated { version, .. } => {
                 // Settings and pickers show the version the agent's CLI now reports (an adapter's
                 // isn't the agent's).
                 let adapter = trek_core::agent_update::harness(id).is_some_and(|h| h.adapter);
-                if let Some(a) = self.agents.iter_mut().find(|a| a.agent.key() == agent).filter(|_| !adapter) {
+                if let Some(a) = self
+                    .agents
+                    .iter_mut()
+                    .find(|a| a.agent.key() == agent)
+                    .filter(|_| !adapter)
+                {
                     a.version = Some(version.clone());
                 }
                 format!("{name} updated to {version}.")
@@ -190,7 +230,10 @@ impl Workspace {
         if installed && !dry {
             self.save_agent_versions(cx);
         }
-        cx.emit(WorkspaceEvent::Toast { message, undo: None });
+        cx.emit(WorkspaceEvent::Toast {
+            message,
+            undo: None,
+        });
         if !self.agent_updating(&agent) {
             self.agent_released(&agent, cx);
         }
@@ -204,7 +247,12 @@ impl Workspace {
     /// the new version. Only messages held for the update: follow-ups a failed turn left queued
     /// are the user's to hand back or send, those ahead of held messages too.
     fn agent_released(&mut self, agent: &str, cx: &mut Context<Self>) {
-        let held: Vec<String> = self.threads.iter().filter(|t| t.agent.key() == agent && self.agent_updates.held.contains_key(&t.id)).map(|t| t.id.clone()).collect();
+        let held: Vec<String> = self
+            .threads
+            .iter()
+            .filter(|t| t.agent.key() == agent && self.agent_updates.held.contains_key(&t.id))
+            .map(|t| t.id.clone())
+            .collect();
         for t in held {
             let left = self.agent_updates.held.remove(&t).unwrap_or(0);
             if let Some(l) = self.live.get_mut(&t).filter(|_| left > 0) {
@@ -216,7 +264,12 @@ impl Workspace {
         }
         // Parents whose sub-agents reported meanwhile hear from them (after those messages'
         // turns, if any).
-        let woken: Vec<String> = self.threads.iter().filter(|t| t.agent.key() == agent && self.wakes.contains_key(&t.id)).map(|t| t.id.clone()).collect();
+        let woken: Vec<String> = self
+            .threads
+            .iter()
+            .filter(|t| t.agent.key() == agent && self.wakes.contains_key(&t.id))
+            .map(|t| t.id.clone())
+            .collect();
         for t in woken {
             self.deliver_wakes(&t, cx);
         }
@@ -238,14 +291,20 @@ impl Workspace {
     /// pre-warmed draft session too.
     fn stop_sessions_of(&mut self, agent: &str) {
         for t in self.threads.iter().filter(|t| t.agent.key() == agent) {
-            let Some(live) = self.live.get_mut(&t.id) else { continue };
+            let Some(live) = self.live.get_mut(&t.id) else {
+                continue;
+            };
             if !live.free_to_relaunch() {
                 live.relaunch = true;
             } else if let Some(tx) = live.commands.take() {
                 let _ = tx.try_send(Command::Shutdown);
             }
         }
-        if self.warm.as_ref().is_some_and(|(key, _, _)| key.0.key() == agent) {
+        if self
+            .warm
+            .as_ref()
+            .is_some_and(|(key, _, _)| key.0.key() == agent)
+        {
             self.warm = None;
             if let (Some(key), Some(ipc)) = (self.warm_ipc.take(), &self.ipc) {
                 ipc.close_session(&key);

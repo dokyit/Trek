@@ -15,7 +15,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const REGISTRY_URL: &str = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
+pub const REGISTRY_URL: &str =
+    "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
 
 /// The registry's index is a few dozen KiB; anything near this is not it.
 const MAX_REGISTRY_BYTES: usize = 1 << 20;
@@ -136,7 +137,12 @@ impl RegistryAgent {
 impl Registry {
     /// The agents matching `query`, best first (registry order among equals).
     pub fn search(&self, query: &str) -> Vec<&RegistryAgent> {
-        let mut hits: Vec<(u8, usize, &RegistryAgent)> = self.agents.iter().enumerate().filter_map(|(i, a)| a.rank(query).map(|r| (r, i, a))).collect();
+        let mut hits: Vec<(u8, usize, &RegistryAgent)> = self
+            .agents
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| a.rank(query).map(|r| (r, i, a)))
+            .collect();
         hits.sort_by_key(|(r, i, _)| (*r, *i));
         hits.into_iter().map(|(_, _, a)| a).collect()
     }
@@ -155,14 +161,17 @@ pub fn parse(text: &str) -> Result<Registry> {
         version: String,
         agents: Vec<serde_json::Value>,
     }
-    let envelope: Envelope = serde_json::from_str(text).context("The ACP Registry sent something that isn't its index")?;
+    let envelope: Envelope = serde_json::from_str(text)
+        .context("The ACP Registry sent something that isn't its index")?;
     let mut skipped = 0;
     let agents: Vec<RegistryAgent> = envelope
         .agents
         .into_iter()
         .take(512)
         .filter_map(|v| {
-            let a = serde_json::from_value::<RegistryAgent>(v).ok().and_then(checked);
+            let a = serde_json::from_value::<RegistryAgent>(v)
+                .ok()
+                .and_then(checked);
             skipped += a.is_none() as usize;
             a
         })
@@ -170,7 +179,11 @@ pub fn parse(text: &str) -> Result<Registry> {
     if skipped > 0 {
         tracing::debug!("left out {skipped} ACP Registry entries this build can't read");
     }
-    Ok(Registry { version: envelope.version, agents, fetched_at: 0 })
+    Ok(Registry {
+        version: envelope.version,
+        agents,
+        fetched_at: 0,
+    })
 }
 
 fn checked(mut a: RegistryAgent) -> Option<RegistryAgent> {
@@ -184,7 +197,13 @@ fn checked(mut a: RegistryAgent) -> Option<RegistryAgent> {
             *link = None;
         }
     }
-    a.distribution.binary.retain(|_, t| https(&t.archive) && command_segments(&t.cmd).is_some() && t.sha256.as_deref().is_none_or(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())));
+    a.distribution.binary.retain(|_, t| {
+        https(&t.archive)
+            && command_segments(&t.cmd).is_some()
+            && t.sha256
+                .as_deref()
+                .is_none_or(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()))
+    });
     a.distribution.npx = a.distribution.npx.take().filter(|p| pinned_npx(&p.package));
     a.distribution.uvx = a.distribution.uvx.take().filter(|p| pinned_uvx(&p.package));
     Some(a)
@@ -201,29 +220,44 @@ fn https(url: &str) -> bool {
 pub fn valid_id(id: &str) -> bool {
     id.len() <= 128
         && id.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
-        && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
 }
 
 fn valid_version(v: &str) -> bool {
-    v.len() <= 128 && v.starts_with(|c: char| c.is_ascii_alphanumeric()) && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
+    v.len() <= 128
+        && v.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
 }
 
 /// An exact version, as a package must be pinned to: `1.2.3`, `v1.2.3-beta.1+build`.
 fn exact_version(v: &str) -> bool {
     let v = v.strip_prefix('v').unwrap_or(v);
-    let (core, rest) = v.split_once(['-', '+']).map_or((v, ""), |(c, _)| (c, &v[c.len()..]));
+    let (core, rest) = v
+        .split_once(['-', '+'])
+        .map_or((v, ""), |(c, _)| (c, &v[c.len()..]));
     let parts: Vec<&str> = core.split('.').collect();
     parts.len() == 3
-        && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
-        && rest.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        && rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
         && (rest.is_empty() || rest.len() > 1)
 }
 
 /// `name@1.2.3` or `@scope/name@1.2.3`: `npx -y` would otherwise run whatever is newest.
 pub fn pinned_npx(package: &str) -> bool {
-    let Some((name, version)) = package.rsplit_once('@') else { return false };
+    let Some((name, version)) = package.rsplit_once('@') else {
+        return false;
+    };
     let name_ok = match name.strip_prefix('@') {
-        Some(scoped) => scoped.split_once('/').is_some_and(|(s, n)| !s.is_empty() && !n.is_empty() && !n.contains('/')),
+        Some(scoped) => scoped
+            .split_once('/')
+            .is_some_and(|(s, n)| !s.is_empty() && !n.is_empty() && !n.contains('/')),
         None => !name.is_empty() && !name.contains('/'),
     };
     name_ok && !name.contains(char::is_whitespace) && exact_version(version)
@@ -231,9 +265,15 @@ pub fn pinned_npx(package: &str) -> bool {
 
 /// `name==1.2.3` or `name@1.2.3`.
 pub fn pinned_uvx(package: &str) -> bool {
-    let split = package.rsplit_once("==").or_else(|| package.rsplit_once('@'));
+    let split = package
+        .rsplit_once("==")
+        .or_else(|| package.rsplit_once('@'));
     split.is_some_and(|(name, version)| {
-        name.starts_with(|c: char| c.is_ascii_alphanumeric()) && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) && exact_version(version)
+        name.starts_with(|c: char| c.is_ascii_alphanumeric())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            && exact_version(version)
     })
 }
 
@@ -242,9 +282,17 @@ pub fn pinned_uvx(package: &str) -> bool {
 pub fn command_segments(cmd: &str) -> Option<Vec<String>> {
     let normal = cmd.trim().replace('\\', "/");
     let normal = normal.strip_prefix("./").unwrap_or(&normal);
-    let segments: Vec<String> = normal.split('/').filter(|s| !s.is_empty()).map(String::from).collect();
+    let segments: Vec<String> = normal
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
     let drive = normal.len() >= 2 && normal.as_bytes()[1] == b':';
-    if segments.is_empty() || normal.starts_with('/') || drive || segments.iter().any(|s| s == "." || s == "..") {
+    if segments.is_empty()
+        || normal.starts_with('/')
+        || drive
+        || segments.iter().any(|s| s == "." || s == "..")
+    {
         return None;
     }
     Some(segments)
@@ -363,7 +411,10 @@ pub struct AddedAgent {
 
 /// Ids an added agent can't take: the built-in agents' own.
 fn reserved(id: &str) -> bool {
-    matches!(id, "claude-code" | "codex" | "opencode" | "droid" | "mock" | "mock-relay") || crate::catalog::ACP_AGENTS.iter().any(|a| a.id == id)
+    matches!(
+        id,
+        "claude-code" | "codex" | "opencode" | "droid" | "mock" | "mock-relay"
+    ) || crate::catalog::ACP_AGENTS.iter().any(|a| a.id == id)
 }
 
 /// An id from a name: "My Agent 2" → "my-agent-2".
@@ -376,12 +427,18 @@ pub fn id_from_name(name: &str) -> String {
             id.push('-');
         }
     }
-    id.trim_end_matches('-').trim_start_matches(['.', '_']).chars().take(64).collect()
+    id.trim_end_matches('-')
+        .trim_start_matches(['.', '_'])
+        .chars()
+        .take(64)
+        .collect()
 }
 
 /// What follows `~/` (or on Windows `~\`) at the start of `command`.
 fn home_relative(command: &str, windows: bool) -> Option<&str> {
-    command.strip_prefix("~/").or_else(|| command.strip_prefix("~\\").filter(|_| windows))
+    command
+        .strip_prefix("~/")
+        .or_else(|| command.strip_prefix("~\\").filter(|_| windows))
 }
 
 /// Whether `command` is a full path on this platform: `/opt/x/agent`; on Windows a drive (`C:\x`,
@@ -391,14 +448,18 @@ fn is_full_path(command: &str, windows: bool) -> bool {
         return command.starts_with('/');
     }
     let b = command.as_bytes();
-    let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/');
+    let drive =
+        b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/');
     drive || command.starts_with(r"\\") || command.starts_with("//")
 }
 
 /// A program is its name on the PATH or a full path, not a path from somewhere (`./agent`,
 /// `.\agent.exe`, `tools/agent`) that depends on where Trek was started.
 fn check_command(command: &str, windows: bool) -> Result<()> {
-    if crate::detect::is_bare_name_on(command, windows) || is_full_path(command, windows) || home_relative(command, windows).is_some() {
+    if crate::detect::is_bare_name_on(command, windows)
+        || is_full_path(command, windows)
+        || home_relative(command, windows).is_some()
+    {
         return Ok(());
     }
     bail!("Give the program's full path, or just its name if it's on your PATH.");
@@ -406,14 +467,27 @@ fn check_command(command: &str, windows: bool) -> Result<()> {
 
 /// Check what the user typed for an agent of their own and make it one. `id` is optional (made
 /// from the name); `taken` are the ids already in use.
-pub fn custom(name: &str, id: &str, command: &str, args: Vec<String>, env: Vec<EnvVar>, taken: &[String]) -> Result<AddedAgent> {
+pub fn custom(
+    name: &str,
+    id: &str,
+    command: &str,
+    args: Vec<String>,
+    env: Vec<EnvVar>,
+    taken: &[String],
+) -> Result<AddedAgent> {
     let name = name.trim();
     if name.is_empty() {
         bail!("Give the agent a name.");
     }
-    let id = if id.trim().is_empty() { id_from_name(name) } else { id.trim().to_string() };
+    let id = if id.trim().is_empty() {
+        id_from_name(name)
+    } else {
+        id.trim().to_string()
+    };
     if !valid_id(&id) {
-        bail!("The id may use lowercase letters, digits, dots, dashes and underscores, starting with a letter or digit.");
+        bail!(
+            "The id may use lowercase letters, digits, dots, dashes and underscores, starting with a letter or digit."
+        );
     }
     if reserved(&id) {
         bail!("{id} is the id of an agent Trek has built in. Choose another.");
@@ -428,7 +502,12 @@ pub fn custom(name: &str, id: &str, command: &str, args: Vec<String>, env: Vec<E
     check_command(command, cfg!(windows))?;
     let mut seen = std::collections::HashSet::new();
     for v in &env {
-        let ok = v.name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && v.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        let ok = v
+            .name
+            .starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && v.name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_');
         if !ok {
             bail!("{:?} isn't a valid environment variable name.", v.name);
         }
@@ -444,7 +523,11 @@ pub fn custom(name: &str, id: &str, command: &str, args: Vec<String>, env: Vec<E
         id,
         name: name.to_string(),
         command,
-        args: args.into_iter().map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect(),
+        args: args
+            .into_iter()
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty())
+            .collect(),
         env: env.into_iter().filter(|v| !v.name.is_empty()).collect(),
         source: AgentSource::Command,
         ..Default::default()
@@ -472,10 +555,19 @@ impl AddedAgent {
     /// Why it can't start: what's missing, and how it comes back.
     pub fn missing(&self) -> String {
         match (self.source, self.distribution.as_deref()) {
-            (AgentSource::Registry, Some("npx")) => "npx isn't on your PATH: install Node.js to run it.".into(),
-            (AgentSource::Registry, Some("uvx")) => "uvx isn't on your PATH: install uv to run it.".into(),
-            (AgentSource::Registry, _) => "Its download is gone. Remove it and add it again from the ACP Registry.".into(),
-            (AgentSource::Command, _) if !crate::detect::is_bare_name(&self.command) => format!("{} doesn't exist.", crate::paths::tildify(Path::new(&self.command))),
+            (AgentSource::Registry, Some("npx")) => {
+                "npx isn't on your PATH: install Node.js to run it.".into()
+            }
+            (AgentSource::Registry, Some("uvx")) => {
+                "uvx isn't on your PATH: install uv to run it.".into()
+            }
+            (AgentSource::Registry, _) => {
+                "Its download is gone. Remove it and add it again from the ACP Registry.".into()
+            }
+            (AgentSource::Command, _) if !crate::detect::is_bare_name(&self.command) => format!(
+                "{} doesn't exist.",
+                crate::paths::tildify(Path::new(&self.command))
+            ),
             (AgentSource::Command, _) => format!("{} isn't on your PATH.", self.command),
         }
     }
@@ -485,7 +577,11 @@ impl AddedAgent {
         self.env
             .iter()
             .filter_map(|v| {
-                let value = if v.secret { secret(&self.id, &v.name)? } else { v.value.clone() };
+                let value = if v.secret {
+                    secret(&self.id, &v.name)?
+                } else {
+                    v.value.clone()
+                };
                 Some((v.name.clone(), value))
             })
             .collect()
@@ -493,8 +589,15 @@ impl AddedAgent {
 
     /// The command line it runs, for Settings: `npx -y @scope/agent@1.2.3 --acp`.
     pub fn command_line(&self) -> String {
-        let program = if !crate::detect::is_bare_name(&self.command) { crate::paths::tildify(Path::new(&self.command)) } else { self.command.clone() };
-        std::iter::once(program).chain(self.args.iter().cloned()).collect::<Vec<_>>().join(" ")
+        let program = if !crate::detect::is_bare_name(&self.command) {
+            crate::paths::tildify(Path::new(&self.command))
+        } else {
+            self.command.clone()
+        };
+        std::iter::once(program)
+            .chain(self.args.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 
@@ -506,7 +609,10 @@ fn secret_account(agent: &str, var: &str) -> String {
 }
 
 pub fn set_secret(agent: &str, var: &str, value: &str) -> Result<()> {
-    anyhow::ensure!(!crate::paths::isolated(), "the Keychain is off in this process");
+    anyhow::ensure!(
+        !crate::paths::isolated(),
+        "the Keychain is off in this process"
+    );
     keyring::Entry::new(KEYCHAIN_SERVICE, &secret_account(agent, var))?.set_password(value)?;
     Ok(())
 }
@@ -515,7 +621,10 @@ pub fn secret(agent: &str, var: &str) -> Option<String> {
     if crate::paths::isolated() {
         return None;
     }
-    keyring::Entry::new(KEYCHAIN_SERVICE, &secret_account(agent, var)).ok()?.get_password().ok()
+    keyring::Entry::new(KEYCHAIN_SERVICE, &secret_account(agent, var))
+        .ok()?
+        .get_password()
+        .ok()
 }
 
 fn delete_secret(agent: &str, var: &str) {
@@ -529,8 +638,21 @@ fn delete_secret(agent: &str, var: &str) {
 /// Drop what probing added agent `id` learned (its models, its login): a new version or command
 /// is asked afresh. The file is `trek_agents::acp`'s probe cache for `acp:<id>`.
 pub fn forget_probe(id: &str) {
-    let name: String = format!("acp:{id}").chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
-    let _ = std::fs::remove_file(crate::paths::data_dir().join("acp-agents").join(format!("{name}.json")));
+    let name: String = format!("acp:{id}")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let _ = std::fs::remove_file(
+        crate::paths::data_dir()
+            .join("acp-agents")
+            .join(format!("{name}.json")),
+    );
 }
 
 /// Where registry agents are installed, each under `<id>/<version>/`.
@@ -569,7 +691,11 @@ pub fn load_cached() -> Option<Registry> {
     let path = cache_file();
     let text = std::fs::read_to_string(&path).ok()?;
     let mut r = parse(&text).ok()?;
-    r.fetched_at = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as i64);
+    r.fetched_at = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_millis() as i64);
     attach_icons(&mut r);
     Some(r)
 }
@@ -581,7 +707,11 @@ fn attach_icons(r: &mut Registry) {
 }
 
 fn client(timeout: Duration) -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder().timeout(timeout).connect_timeout(Duration::from_secs(20)).user_agent(format!("Trek/{}", crate::VERSION)).build()?)
+    Ok(reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(Duration::from_secs(20))
+        .user_agent(format!("Trek/{}", crate::VERSION))
+        .build()?)
 }
 
 /// `url`'s body, refused past `cap` bytes.
@@ -603,12 +733,19 @@ async fn get_capped(client: &reqwest::Client, url: &str, cap: usize) -> Result<V
 /// Fetch the index (and the icons not cached yet), keep it, and return it. A test process never
 /// reaches the network: it reads `TREK_ACP_REGISTRY` or nothing.
 pub async fn fetch() -> Result<Registry> {
-    let fixture = std::env::var_os(FIXTURE_ENV).map(PathBuf::from).filter(|p| !p.as_os_str().is_empty());
+    let fixture = std::env::var_os(FIXTURE_ENV)
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty());
     let text = match &fixture {
-        Some(path) => std::fs::read_to_string(path).with_context(|| format!("couldn't read {}", path.display()))?,
-        None if crate::paths::isolated() => bail!("The ACP Registry isn't fetched in a test process"),
+        Some(path) => std::fs::read_to_string(path)
+            .with_context(|| format!("couldn't read {}", path.display()))?,
+        None if crate::paths::isolated() => {
+            bail!("The ACP Registry isn't fetched in a test process")
+        }
         None => {
-            let body = get_capped(&client(REGISTRY_TIMEOUT)?, REGISTRY_URL, MAX_REGISTRY_BYTES).await.context("Couldn't reach the ACP Registry")?;
+            let body = get_capped(&client(REGISTRY_TIMEOUT)?, REGISTRY_URL, MAX_REGISTRY_BYTES)
+                .await
+                .context("Couldn't reach the ACP Registry")?;
             String::from_utf8(body).context("The ACP Registry sent something that isn't text")?
         }
     };
@@ -627,28 +764,41 @@ pub async fn fetch() -> Result<Registry> {
 /// monogram, and asked for again next time.
 async fn fetch_icons(registry: &Registry, fixture_dir: Option<&Path>) {
     use futures::StreamExt as _;
-    let missing: Vec<&RegistryAgent> = registry.agents.iter().filter(|a| !icon_cache(&a.id).is_file()).collect();
+    let missing: Vec<&RegistryAgent> = registry
+        .agents
+        .iter()
+        .filter(|a| !icon_cache(&a.id).is_file())
+        .collect();
     if let Some(dir) = fixture_dir {
         for a in missing {
-            let _ = std::fs::copy(dir.join("icons").join(format!("{}.svg", a.id)), icon_cache(&a.id));
+            let _ = std::fs::copy(
+                dir.join("icons").join(format!("{}.svg", a.id)),
+                icon_cache(&a.id),
+            );
         }
         return;
     }
-    let Ok(client) = client(Duration::from_secs(15)) else { return };
-    futures::stream::iter(missing.into_iter().filter_map(|a| Some((a.id.clone(), a.icon.clone()?))))
-        .for_each_concurrent(8, |(id, url)| {
-            let client = client.clone();
-            async move {
-                match get_capped(&client, &url, MAX_ICON_BYTES).await {
-                    Ok(body) if looks_like_svg(&body) => {
-                        let _ = std::fs::write(icon_cache(&id), body);
-                    }
-                    Ok(_) => tracing::debug!("{id}'s registry icon isn't an SVG"),
-                    Err(e) => tracing::debug!("{id}'s registry icon: {e:#}"),
+    let Ok(client) = client(Duration::from_secs(15)) else {
+        return;
+    };
+    futures::stream::iter(
+        missing
+            .into_iter()
+            .filter_map(|a| Some((a.id.clone(), a.icon.clone()?))),
+    )
+    .for_each_concurrent(8, |(id, url)| {
+        let client = client.clone();
+        async move {
+            match get_capped(&client, &url, MAX_ICON_BYTES).await {
+                Ok(body) if looks_like_svg(&body) => {
+                    let _ = std::fs::write(icon_cache(&id), body);
                 }
+                Ok(_) => tracing::debug!("{id}'s registry icon isn't an SVG"),
+                Err(e) => tracing::debug!("{id}'s registry icon: {e:#}"),
             }
-        })
-        .await;
+        }
+    })
+    .await;
 }
 
 fn looks_like_svg(body: &[u8]) -> bool {
@@ -662,7 +812,10 @@ fn looks_like_svg(body: &[u8]) -> bool {
 /// How far an install has got, for its row.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Progress {
-    Downloading { done: u64, total: Option<u64> },
+    Downloading {
+        done: u64,
+        total: Option<u64>,
+    },
     Unpacking,
     /// `npx` fetching the package and its dependencies.
     Fetching,
@@ -670,10 +823,22 @@ pub enum Progress {
 
 /// Install `agent` on this Mac and return it as an added agent. A binary already unpacked for
 /// this version is used as it is. `progress` is called from the runtime.
-pub async fn install(agent: &RegistryAgent, progress: &(dyn Fn(Progress) + Send + Sync)) -> Result<AddedAgent> {
+pub async fn install(
+    agent: &RegistryAgent,
+    progress: &(dyn Fn(Progress) + Send + Sync),
+) -> Result<AddedAgent> {
     // Downloads and package managers stay out of tests and design reviews.
-    anyhow::ensure!(!crate::paths::isolated(), "Agents aren't installed from a test process.");
-    let plan = plan(agent, current_target()).ok_or_else(|| anyhow!("{} has no build for {}.", agent.name, if cfg!(windows) { "this PC" } else { "this Mac" }))?; // the app's `words` table, which core can't reach
+    anyhow::ensure!(
+        !crate::paths::isolated(),
+        "Agents aren't installed from a test process."
+    );
+    let plan = plan(agent, current_target()).ok_or_else(|| {
+        anyhow!(
+            "{} has no build for {}.",
+            agent.name,
+            if cfg!(windows) { "this PC" } else { "this Mac" }
+        )
+    })?; // the app's `words` table, which core can't reach
     let home = agents_dir().join(&agent.id);
     std::fs::create_dir_all(&home)?;
     let mut added = AddedAgent {
@@ -687,10 +852,23 @@ pub async fn install(agent: &RegistryAgent, progress: &(dyn Fn(Progress) + Send 
         icon: keep_icon(agent, &home),
         ..Default::default()
     };
-    let env = |env: &BTreeMap<String, String>| env.iter().map(|(name, value)| EnvVar { name: name.clone(), value: value.clone(), secret: false }).collect();
+    let env = |env: &BTreeMap<String, String>| {
+        env.iter()
+            .map(|(name, value)| EnvVar {
+                name: name.clone(),
+                value: value.clone(),
+                secret: false,
+            })
+            .collect()
+    };
     match plan {
         Plan::Binary(t) => {
-            let segments = command_segments(&t.cmd).ok_or_else(|| anyhow!("The registry's command for {} points outside its folder.", agent.name))?;
+            let segments = command_segments(&t.cmd).ok_or_else(|| {
+                anyhow!(
+                    "The registry's command for {} points outside its folder.",
+                    agent.name
+                )
+            })?;
             let root = home.join(&agent.version);
             let exe = segments.iter().fold(root.clone(), |p, s| p.join(s));
             if !exe.is_file() {
@@ -709,15 +887,28 @@ pub async fn install(agent: &RegistryAgent, progress: &(dyn Fn(Progress) + Send 
             added.env = env(&t.env);
         }
         Plan::Npx(p) => {
-            let npx = crate::detect::which("npx").ok_or_else(|| anyhow!("{} runs with npx, which isn't on your PATH. Install Node.js, then try again.", agent.name))?;
+            let npx = crate::detect::which("npx").ok_or_else(|| {
+                anyhow!(
+                    "{} runs with npx, which isn't on your PATH. Install Node.js, then try again.",
+                    agent.name
+                )
+            })?;
             progress(Progress::Fetching);
             warm_npx(&npx, &p.package).await?;
             added.command = "npx".into();
-            added.args = ["-y".to_string(), p.package].into_iter().chain(p.args).collect();
+            added.args = ["-y".to_string(), p.package]
+                .into_iter()
+                .chain(p.args)
+                .collect();
             added.env = env(&p.env);
         }
         Plan::Uvx(p) => {
-            crate::detect::which("uvx").ok_or_else(|| anyhow!("{} runs with uvx, which isn't on your PATH. Install uv, then try again.", agent.name))?;
+            crate::detect::which("uvx").ok_or_else(|| {
+                anyhow!(
+                    "{} runs with uvx, which isn't on your PATH. Install uv, then try again.",
+                    agent.name
+                )
+            })?;
             added.command = "uvx".into();
             added.args = std::iter::once(p.package).chain(p.args).collect();
             added.env = env(&p.env);
@@ -729,8 +920,13 @@ pub async fn install(agent: &RegistryAgent, progress: &(dyn Fn(Progress) + Send 
 /// Copy the cached icon beside the install, where clearing the cache doesn't take it.
 fn keep_icon(agent: &RegistryAgent, home: &Path) -> Option<String> {
     let kept = home.join("icon.svg");
-    let from = agent.icon_file.clone().unwrap_or_else(|| icon_cache(&agent.id));
-    std::fs::copy(&from, &kept).ok().map(|_| kept.display().to_string())
+    let from = agent
+        .icon_file
+        .clone()
+        .unwrap_or_else(|| icon_cache(&agent.id));
+    std::fs::copy(&from, &kept)
+        .ok()
+        .map(|_| kept.display().to_string())
 }
 
 /// Fetch the package and its dependencies into npm's cache now, so the agent's first start
@@ -748,10 +944,16 @@ async fn warm_npx(npx: &Path, package: &str) -> Result<()> {
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .output();
-    let out = tokio::time::timeout(PACKAGE_TIMEOUT, run).await.map_err(|_| anyhow!("npx was still fetching {package} after 10 minutes"))??;
+    let out = tokio::time::timeout(PACKAGE_TIMEOUT, run)
+        .await
+        .map_err(|_| anyhow!("npx was still fetching {package} after 10 minutes"))??;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        let line = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("npx failed");
+        let line = err
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("npx failed");
         bail!("npx couldn't fetch {package}: {}", line.trim());
     }
     Ok(())
@@ -765,8 +967,15 @@ enum ArchiveKind {
 }
 
 fn archive_kind(url: &str) -> ArchiveKind {
-    let path = url.split(['?', '#']).next().unwrap_or_default().to_lowercase();
-    if [".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".tar"].iter().any(|e| path.ends_with(e)) {
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    if [".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".tar"]
+        .iter()
+        .any(|e| path.ends_with(e))
+    {
         ArchiveKind::Tar
     } else if path.ends_with(".zip") {
         ArchiveKind::Zip
@@ -782,7 +991,13 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Download `t`'s archive into `home`, check it, and unpack it as `root`. Unpacked beside it
 /// first and moved into place whole, so a failed install leaves nothing half there.
-async fn download_and_unpack(t: &BinaryTarget, home: &Path, root: &Path, segments: &[String], progress: &(dyn Fn(Progress) + Send + Sync)) -> Result<()> {
+async fn download_and_unpack(
+    t: &BinaryTarget,
+    home: &Path,
+    root: &Path,
+    segments: &[String],
+    progress: &(dyn Fn(Progress) + Send + Sync),
+) -> Result<()> {
     use sha2::Digest as _;
     use tokio::io::AsyncWriteExt as _;
     let kind = archive_kind(&t.archive);
@@ -790,7 +1005,12 @@ async fn download_and_unpack(t: &BinaryTarget, home: &Path, root: &Path, segment
     let staging = home.join(format!(".unpack-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&staging);
     let result = async {
-        let mut resp = client(ARCHIVE_TIMEOUT)?.get(&t.archive).send().await.context("Couldn't start the download")?.error_for_status()?;
+        let mut resp = client(ARCHIVE_TIMEOUT)?
+            .get(&t.archive)
+            .send()
+            .await
+            .context("Couldn't start the download")?
+            .error_for_status()?;
         let total = resp.content_length();
         if total.is_some_and(|n| n > MAX_ARCHIVE_BYTES) {
             bail!("The download is larger than 1 GB");
@@ -847,7 +1067,14 @@ async fn unpack(archive: &Path, kind: ArchiveKind, into: &Path, segments: &[Stri
         ArchiveKind::Tar | ArchiveKind::Zip => {
             // On a blocking thread: the archive can be large, and the readers aren't async.
             let (archive, into) = (archive.to_path_buf(), into.to_path_buf());
-            tokio::task::spawn_blocking(move || if kind == ArchiveKind::Zip { unpack_zip(&archive, &into) } else { unpack_tar(&archive, &into) }).await??;
+            tokio::task::spawn_blocking(move || {
+                if kind == ArchiveKind::Zip {
+                    unpack_zip(&archive, &into)
+                } else {
+                    unpack_tar(&archive, &into)
+                }
+            })
+            .await??;
         }
     }
     if !exe.is_file() {
@@ -880,7 +1107,9 @@ fn unpack_tar(archive: &Path, into: &Path) -> Result<()> {
     std::io::Seek::rewind(&mut file)?;
     let reader: Box<dyn std::io::Read> = match &magic[..n] {
         [0x1f, 0x8b, ..] => Box::new(flate2::read::GzDecoder::new(file)),
-        [b'B', b'Z', b'h', ..] | [0xfd, b'7', b'z', b'X', b'Z', 0] => bail!("Trek opens .tar.gz, .tgz, .tar and .zip downloads, and this one is compressed another way"),
+        [b'B', b'Z', b'h', ..] | [0xfd, b'7', b'z', b'X', b'Z', 0] => bail!(
+            "Trek opens .tar.gz, .tgz, .tar and .zip downloads, and this one is compressed another way"
+        ),
         _ => Box::new(file),
     };
     let mut tar = tar::Archive::new(reader);
@@ -897,7 +1126,10 @@ fn unpack_tar(archive: &Path, into: &Path) -> Result<()> {
         };
         let kind = entry.header().entry_type();
         if kind.is_symlink() || kind.is_hard_link() {
-            let target = entry.link_name()?.map(|t| t.into_owned()).ok_or_else(|| outside(&name))?;
+            let target = entry
+                .link_name()?
+                .map(|t| t.into_owned())
+                .ok_or_else(|| outside(&name))?;
             let inside = if kind.is_hard_link() {
                 command_segments(&target.to_string_lossy()).is_some()
             } else {
@@ -938,9 +1170,12 @@ fn link_stays_inside(dir: &[String], target: &Path) -> bool {
 /// with `..`) refuse the archive. A symlink entry is skipped, never created. On Unix a file keeps
 /// the permission bits its entry has.
 pub(crate) fn unpack_zip(archive: &Path, into: &Path) -> Result<()> {
-    let mut zip = zip::ZipArchive::new(std::io::BufReader::new(std::fs::File::open(archive)?)).map_err(|_| anyhow!("The download isn't an archive Trek can open"))?;
+    let mut zip = zip::ZipArchive::new(std::io::BufReader::new(std::fs::File::open(archive)?))
+        .map_err(|_| anyhow!("The download isn't an archive Trek can open"))?;
     for i in 0..zip.len() {
-        let mut entry = zip.by_index(i).map_err(|e| anyhow!("Couldn't unpack the download: {e}"))?;
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| anyhow!("Couldn't unpack the download: {e}"))?;
         // The name as written is held to the same rule as a tar's, as well as `enclosed_name`.
         let Ok(name) = entry.name().map(|n| n.into_owned()) else {
             return Err(outside("a name that isn't text"));
@@ -948,7 +1183,10 @@ pub(crate) fn unpack_zip(archive: &Path, into: &Path) -> Result<()> {
         if name.trim_start_matches("./").trim_matches('/').is_empty() {
             continue; // the archive's own folder
         }
-        let Some(rel) = entry.enclosed_name().filter(|_| command_segments(&name).is_some()) else {
+        let Some(rel) = entry
+            .enclosed_name()
+            .filter(|_| command_segments(&name).is_some())
+        else {
             return Err(outside(name));
         };
         let dest = into.join(&rel);
@@ -985,7 +1223,10 @@ mod tests {
         assert_eq!(target_for("freebsd", "x86_64"), None);
         let r = fixture();
         let devin = r.agent("devin").unwrap();
-        assert!(matches!(plan(devin, target_for("windows", "x86_64")), Some(Plan::Binary(_))));
+        assert!(matches!(
+            plan(devin, target_for("windows", "x86_64")),
+            Some(Plan::Binary(_))
+        ));
     }
 
     #[test]
@@ -993,16 +1234,27 @@ mod tests {
         let r = fixture();
         assert_eq!(r.version, "1.0.0");
         assert!(r.agent("devin").is_some() && r.agent("fast-agent").is_some());
-        assert!(r.agents.iter().all(|a| valid_id(&a.id)), "the malformed id is skipped, not fatal");
+        assert!(
+            r.agents.iter().all(|a| valid_id(&a.id)),
+            "the malformed id is skipped, not fatal"
+        );
         assert_eq!(r.agents.len(), 10);
         let devin = r.agent("devin").unwrap();
         assert_eq!(devin.name, "Devin");
         assert_eq!(devin.link(), Some("https://docs.devin.ai/cli"));
-        assert_eq!(devin.distribution.binary["darwin-aarch64"].cmd, "./bin/devin");
+        assert_eq!(
+            devin.distribution.binary["darwin-aarch64"].cmd,
+            "./bin/devin"
+        );
         // A package without an exact version can't be installed; the entry stays listed.
         assert_eq!(r.agent("floating-npx").unwrap().distribution.npx, None);
         assert!(parse("<html>").is_err());
-        assert!(parse(r#"{"version":"1.0.0","agents":[{"id":"x"}]}"#).unwrap().agents.is_empty());
+        assert!(
+            parse(r#"{"version":"1.0.0","agents":[{"id":"x"}]}"#)
+                .unwrap()
+                .agents
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1010,20 +1262,33 @@ mod tests {
         let r = fixture();
         let kind = |id: &str, t: &str| plan(r.agent(id).unwrap(), Some(t)).map(|p| p.kind());
         assert_eq!(kind("devin", "darwin-aarch64"), Some("binary"));
-        assert_eq!(kind("kilo", "darwin-x86_64"), Some("binary"), "kilo has npx too");
+        assert_eq!(
+            kind("kilo", "darwin-x86_64"),
+            Some("binary"),
+            "kilo has npx too"
+        );
         assert_eq!(kind("auggie", "darwin-aarch64"), Some("npx"));
         assert_eq!(kind("fast-agent", "darwin-aarch64"), Some("uvx"));
         // Kimi has no Intel Mac build and no package.
         assert_eq!(kind("kimi", "darwin-x86_64"), None);
         assert_eq!(kind("kimi", "darwin-aarch64"), Some("binary"));
         assert_eq!(kind("floating-npx", "darwin-aarch64"), None);
-        assert_eq!(plan(r.agent("devin").unwrap(), None), None, "no target, no binary");
+        assert_eq!(
+            plan(r.agent("devin").unwrap(), None),
+            None,
+            "no target, no binary"
+        );
     }
 
     #[test]
     fn search_ranks_names_before_descriptions() {
         let r = fixture();
-        let ids = |q: &str| r.search(q).into_iter().map(|a| a.id.as_str()).collect::<Vec<_>>();
+        let ids = |q: &str| {
+            r.search(q)
+                .into_iter()
+                .map(|a| a.id.as_str())
+                .collect::<Vec<_>>()
+        };
         assert_eq!(ids("devin").first(), Some(&"devin"));
         assert_eq!(ids("").len(), r.agents.len());
         assert!(ids("zzzz-nothing").is_empty());
@@ -1039,14 +1304,31 @@ mod tests {
         for bad in ["", "Devin", "-x", ".x", "a b", "a/b", &"x".repeat(129)] {
             assert!(!valid_id(bad), "{bad}");
         }
-        assert_eq!(command_segments("./bin/devin"), Some(vec!["bin".into(), "devin".into()]));
+        assert_eq!(
+            command_segments("./bin/devin"),
+            Some(vec!["bin".into(), "devin".into()])
+        );
         assert_eq!(command_segments("kilo"), Some(vec!["kilo".into()]));
-        assert_eq!(command_segments("./bin\\devin.exe"), Some(vec!["bin".into(), "devin.exe".into()]));
+        assert_eq!(
+            command_segments("./bin\\devin.exe"),
+            Some(vec!["bin".into(), "devin.exe".into()])
+        );
         for bad in ["/usr/bin/env", "../x", "bin/../../x", "C:\\x.exe", "", "./"] {
             assert_eq!(command_segments(bad), None, "{bad}");
         }
-        assert!(pinned_npx("@augmentcode/auggie@0.36.0") && pinned_npx("cline@3.0.70") && pinned_npx("x@v1.2.3-beta.1"));
-        for bad in ["cline", "cline@latest", "@scope/x", "cline@1.2", "@a@1.0.0", "a/b@1.0.0"] {
+        assert!(
+            pinned_npx("@augmentcode/auggie@0.36.0")
+                && pinned_npx("cline@3.0.70")
+                && pinned_npx("x@v1.2.3-beta.1")
+        );
+        for bad in [
+            "cline",
+            "cline@latest",
+            "@scope/x",
+            "cline@1.2",
+            "@a@1.0.0",
+            "a/b@1.0.0",
+        ] {
             assert!(!pinned_npx(bad), "{bad}");
         }
         assert!(pinned_uvx("fast-agent-acp==0.10.1") && pinned_uvx("minion-code@0.1.44"));
@@ -1056,7 +1338,10 @@ mod tests {
     #[test]
     fn registry_ids_of_built_in_agents_map_to_them() {
         assert_eq!(built_in("devin"), Some(AgentId::Acp("devin".into())));
-        assert_eq!(built_in("github-copilot-cli"), Some(AgentId::Acp("github-copilot".into())));
+        assert_eq!(
+            built_in("github-copilot-cli"),
+            Some(AgentId::Acp("github-copilot".into()))
+        );
         assert_eq!(built_in("grok-build"), Some(AgentId::Acp("grok".into())));
         assert_eq!(built_in("factory-droid"), Some(AgentId::Droid));
         assert_eq!(built_in("claude-acp"), Some(AgentId::ClaudeCode));
@@ -1065,18 +1350,48 @@ mod tests {
 
     #[test]
     fn a_custom_agent_gets_an_id_from_its_name_and_is_checked() {
-        let a = custom("My Agent 2", "", "my-agent", vec!["--acp".into(), " ".into()], vec![], &[]).unwrap();
-        assert_eq!((a.id.as_str(), a.args.as_slice(), a.source), ("my-agent-2", &["--acp".to_string()][..], AgentSource::Command));
+        let a = custom(
+            "My Agent 2",
+            "",
+            "my-agent",
+            vec!["--acp".into(), " ".into()],
+            vec![],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            (a.id.as_str(), a.args.as_slice(), a.source),
+            (
+                "my-agent-2",
+                &["--acp".to_string()][..],
+                AgentSource::Command
+            )
+        );
         assert_eq!(id_from_name("  Über Bot!! "), "ber-bot");
         assert!(custom("", "", "x", vec![], vec![], &[]).is_err());
-        assert!(custom("Cursor", "", "x", vec![], vec![], &[]).is_err(), "a built-in id");
+        assert!(
+            custom("Cursor", "", "x", vec![], vec![], &[]).is_err(),
+            "a built-in id"
+        );
         assert!(custom("A", "Bad Id", "x", vec![], vec![], &[]).is_err());
-        assert!(custom("A", "", "x", vec![], vec![], &["a".into()]).is_err(), "taken");
+        assert!(
+            custom("A", "", "x", vec![], vec![], &["a".into()]).is_err(),
+            "taken"
+        );
         assert!(custom("A", "", "", vec![], vec![], &[]).is_err());
-        assert!(custom("A", "", "bin/agent", vec![], vec![], &[]).is_err(), "relative paths are ambiguous");
+        assert!(
+            custom("A", "", "bin/agent", vec![], vec![], &[]).is_err(),
+            "relative paths are ambiguous"
+        );
         // An absolute path looks different on each system.
         let abs = if cfg!(windows) { r"C:\opt\a" } else { "/opt/a" };
-        let env = |n: &str| vec![EnvVar { name: n.into(), value: "v".into(), secret: false }];
+        let env = |n: &str| {
+            vec![EnvVar {
+                name: n.into(),
+                value: "v".into(),
+                secret: false,
+            }]
+        };
         assert!(custom("A", "", abs, vec![], env("API_KEY"), &[]).is_ok());
         assert!(custom("A", "", abs, vec![], env("1BAD"), &[]).is_err());
         let a = custom("A", "", abs, vec![], env("TOKEN"), &[]).unwrap();
@@ -1092,24 +1407,67 @@ mod tests {
             assert!(ok(c, false) && ok(c, true), "{c}");
         }
         assert!(ok("/opt/x/agent", false));
-        for c in [r"C:\tools\agent.exe", "D:/x/agent", r"\\server\share\agent.exe", r"~\bin\agent.exe"] {
+        for c in [
+            r"C:\tools\agent.exe",
+            "D:/x/agent",
+            r"\\server\share\agent.exe",
+            r"~\bin\agent.exe",
+        ] {
             assert!(ok(c, true), "{c}");
         }
         // Not full: relative to wherever Trek happens to be, or rooted without a drive.
-        for c in [r".\agent.exe", "./agent", "bin/agent", r"tools\agent.exe", r"\agent.exe", "/opt/x/agent", "C:agent.exe", "agent/x.exe"] {
+        for c in [
+            r".\agent.exe",
+            "./agent",
+            "bin/agent",
+            r"tools\agent.exe",
+            r"\agent.exe",
+            "/opt/x/agent",
+            "C:agent.exe",
+            "agent/x.exe",
+        ] {
             assert!(!ok(c, true), "{c}");
         }
         for c in ["./agent", "bin/agent", "../agent"] {
             assert!(!ok(c, false), "{c}");
         }
-        assert_eq!(check_command("bin/agent", false).unwrap_err().to_string(), "Give the program's full path, or just its name if it's on your PATH.");
+        assert_eq!(
+            check_command("bin/agent", false).unwrap_err().to_string(),
+            "Give the program's full path, or just its name if it's on your PATH."
+        );
         // The same through `custom`, on this system.
-        let abs = if cfg!(windows) { r"C:\opt\a.exe" } else { "/opt/a" };
-        assert_eq!(custom("A", "", abs, vec![], vec![], &[]).unwrap().command, abs);
+        let abs = if cfg!(windows) {
+            r"C:\opt\a.exe"
+        } else {
+            "/opt/a"
+        };
+        assert_eq!(
+            custom("A", "", abs, vec![], vec![], &[]).unwrap().command,
+            abs
+        );
         assert!(custom("A", "", r".\agent.exe", vec![], vec![], &[]).is_err() == cfg!(windows));
-        assert_eq!(custom("A", "", "npx", vec![], vec![], &[]).unwrap().command, "npx");
-        let home = custom("A", "", if cfg!(windows) { r"~\bin\a.exe" } else { "~/bin/a" }, vec![], vec![], &[]).unwrap();
-        assert!(Path::new(&home.command).starts_with(crate::paths::home()), "{}", home.command);
+        assert_eq!(
+            custom("A", "", "npx", vec![], vec![], &[]).unwrap().command,
+            "npx"
+        );
+        let home = custom(
+            "A",
+            "",
+            if cfg!(windows) {
+                r"~\bin\a.exe"
+            } else {
+                "~/bin/a"
+            },
+            vec![],
+            vec![],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            Path::new(&home.command).starts_with(crate::paths::home()),
+            "{}",
+            home.command
+        );
     }
 
     #[test]
@@ -1120,29 +1478,58 @@ mod tests {
         // `npx` is `npx.cmd` on Windows.
         let script = dir.join(if cfg!(windows) { "npx.cmd" } else { "npx" });
         std::fs::write(&script, "").unwrap();
-        let path = std::env::join_paths([dir.as_path()]).unwrap().to_string_lossy().into_owned();
-        let added = |command: &str| AddedAgent { command: command.into(), ..Default::default() };
+        let path = std::env::join_paths([dir.as_path()])
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let added = |command: &str| AddedAgent {
+            command: command.into(),
+            ..Default::default()
+        };
         assert_eq!(added("npx").resolve_in(&path), Some(script.clone()));
         assert_eq!(added("uvx").resolve_in(&path), None);
-        assert_eq!(added(&script.display().to_string()).resolve_in(""), Some(script.clone()));
-        assert_eq!(added(&dir.join("gone").display().to_string()).resolve_in(&path), None);
+        assert_eq!(
+            added(&script.display().to_string()).resolve_in(""),
+            Some(script.clone())
+        );
+        assert_eq!(
+            added(&dir.join("gone").display().to_string()).resolve_in(&path),
+            None
+        );
         // What Settings says is missing is the path for a path, whichever slash it has.
-        assert!(added(&dir.join("gone").display().to_string()).missing().ends_with("doesn't exist."));
+        assert!(
+            added(&dir.join("gone").display().to_string())
+                .missing()
+                .ends_with("doesn't exist.")
+        );
         assert_eq!(added("npx").missing(), "npx isn't on your PATH.");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn checksums_are_compared_without_case() {
-        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-        assert_eq!(archive_kind("https://x/a-1.0.tar.gz?sig=1"), ArchiveKind::Tar);
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            archive_kind("https://x/a-1.0.tar.gz?sig=1"),
+            ArchiveKind::Tar
+        );
         assert_eq!(archive_kind("https://x/a.zip"), ArchiveKind::Zip);
         assert_eq!(archive_kind("https://x/agent"), ArchiveKind::Raw);
     }
 
     /// A tar entry named `name` whatever the name is: the `tar` crate's own `set_path` refuses the
     /// hostile ones these tests need.
-    fn tar_entry(b: &mut tar::Builder<Vec<u8>>, name: &str, kind: tar::EntryType, mode: u32, link: Option<&str>, data: &[u8]) {
+    fn tar_entry(
+        b: &mut tar::Builder<Vec<u8>>,
+        name: &str,
+        kind: tar::EntryType,
+        mode: u32,
+        link: Option<&str>,
+        data: &[u8],
+    ) {
         let mut h = tar::Header::new_gnu();
         h.as_gnu_mut().unwrap().name[..name.len()].copy_from_slice(name.as_bytes());
         if let Some(link) = link {
@@ -1166,7 +1553,9 @@ mod tests {
     fn zip_of(path: &Path, files: &[(&str, u32)]) {
         let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
         for (name, mode) in files {
-            let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).unix_permissions(*mode);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .unix_permissions(*mode);
             z.start_file(*name, options).unwrap();
             std::io::Write::write_all(&mut z, b"#!/bin/sh\necho hi\n").unwrap();
         }
@@ -1182,8 +1571,13 @@ mod tests {
         let cmd = ["bin".to_string(), "agent".to_string()];
         let script: &[u8] = b"#!/bin/sh\necho hi\n";
         let refused = |archive: &Path, kind: ArchiveKind, out: &str| {
-            let err = rt.block_on(unpack(archive, kind, &dir.join(out), &cmd)).expect_err(&format!("{out} was accepted"));
-            assert!(err.to_string().contains("outside its folder"), "{out}: {err}");
+            let err = rt
+                .block_on(unpack(archive, kind, &dir.join(out), &cmd))
+                .expect_err(&format!("{out} was accepted"));
+            assert!(
+                err.to_string().contains("outside its folder"),
+                "{out}: {err}"
+            );
         };
 
         // A tar.gz: the folder, then the command in it (no exec bit in the archive).
@@ -1191,36 +1585,93 @@ mod tests {
         tar_gz(&good, |b| {
             tar_entry(b, "./", tar::EntryType::Directory, 0o755, None, &[]);
             tar_entry(b, "./bin/", tar::EntryType::Directory, 0o755, None, &[]);
-            tar_entry(b, "./bin/agent", tar::EntryType::Regular, 0o644, None, script);
-            tar_entry(b, "./bin/alias", tar::EntryType::Symlink, 0o777, Some("agent"), &[]);
+            tar_entry(
+                b,
+                "./bin/agent",
+                tar::EntryType::Regular,
+                0o644,
+                None,
+                script,
+            );
+            tar_entry(
+                b,
+                "./bin/alias",
+                tar::EntryType::Symlink,
+                0o777,
+                Some("agent"),
+                &[],
+            );
         });
         let into = dir.join("out");
-        rt.block_on(unpack(&good, ArchiveKind::Tar, &into, &cmd)).unwrap();
+        rt.block_on(unpack(&good, ArchiveKind::Tar, &into, &cmd))
+            .unwrap();
         let exe = into.join("bin/agent");
         assert_eq!(std::fs::read(&exe).unwrap(), script);
         #[cfg(unix)]
         {
-            assert_ne!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&exe).unwrap().permissions()) & 0o111, 0);
-            assert_eq!(std::fs::read_link(into.join("bin/alias")).unwrap(), Path::new("agent"), "a link that stays inside is kept");
+            assert_ne!(
+                std::os::unix::fs::PermissionsExt::mode(
+                    &std::fs::metadata(&exe).unwrap().permissions()
+                ) & 0o111,
+                0
+            );
+            assert_eq!(
+                std::fs::read_link(into.join("bin/alias")).unwrap(),
+                Path::new("agent"),
+                "a link that stays inside is kept"
+            );
         }
         // The command must be in it.
-        let missing = rt.block_on(unpack(&good, ArchiveKind::Tar, &dir.join("out2"), &["agent".into()]));
+        let missing = rt.block_on(unpack(
+            &good,
+            ArchiveKind::Tar,
+            &dir.join("out2"),
+            &["agent".into()],
+        ));
         assert!(missing.unwrap_err().to_string().contains("no agent"));
         // A plain, uncompressed tar is read too.
         let plain = dir.join("plain.tar");
         let mut b = tar::Builder::new(Vec::new());
-        tar_entry(&mut b, "bin/agent", tar::EntryType::Regular, 0o755, None, script);
+        tar_entry(
+            &mut b,
+            "bin/agent",
+            tar::EntryType::Regular,
+            0o755,
+            None,
+            script,
+        );
         std::fs::write(&plain, b.into_inner().unwrap()).unwrap();
-        rt.block_on(unpack(&plain, ArchiveKind::Tar, &dir.join("out-plain"), &cmd)).unwrap();
+        rt.block_on(unpack(
+            &plain,
+            ArchiveKind::Tar,
+            &dir.join("out-plain"),
+            &cmd,
+        ))
+        .unwrap();
 
         // An entry that climbs out, is absolute, or links out is refused, and nothing lands outside.
         let hostile: [(&str, &str, tar::EntryType, Option<&str>); 6] = [
             ("up", "../escaped/agent", tar::EntryType::Regular, None),
-            ("deep", "bin/../../escaped/agent", tar::EntryType::Regular, None),
+            (
+                "deep",
+                "bin/../../escaped/agent",
+                tar::EntryType::Regular,
+                None,
+            ),
             ("abs", "/escaped/agent", tar::EntryType::Regular, None),
             ("drive", "C:/escaped/agent", tar::EntryType::Regular, None),
-            ("symlink", "bin/out", tar::EntryType::Symlink, Some("../../escaped")),
-            ("hardlink", "bin/out", tar::EntryType::Link, Some("../escaped/agent")),
+            (
+                "symlink",
+                "bin/out",
+                tar::EntryType::Symlink,
+                Some("../../escaped"),
+            ),
+            (
+                "hardlink",
+                "bin/out",
+                tar::EntryType::Link,
+                Some("../escaped/agent"),
+            ),
         ];
         for (name, entry, kind, link) in hostile {
             let archive = dir.join(format!("{name}.tar.gz"));
@@ -1232,7 +1683,16 @@ mod tests {
         }
         // An absolute symlink too, and nothing was written through a link that was refused.
         let absolute = dir.join("absolute.tar.gz");
-        tar_gz(&absolute, |b| tar_entry(b, "bin/out", tar::EntryType::Symlink, 0o777, Some("/etc"), &[]));
+        tar_gz(&absolute, |b| {
+            tar_entry(
+                b,
+                "bin/out",
+                tar::EntryType::Symlink,
+                0o777,
+                Some("/etc"),
+                &[],
+            )
+        });
         refused(&absolute, ArchiveKind::Tar, "out-absolute");
         assert!(!dir.join("escaped").exists() && !into.join("..").join("escaped").exists());
 
@@ -1240,13 +1700,35 @@ mod tests {
         let zip = dir.join("good.zip");
         zip_of(&zip, &[("bin/agent", 0o644), ("bin/readme.txt", 0o644)]);
         let zout = dir.join("zout");
-        rt.block_on(unpack(&zip, ArchiveKind::Zip, &zout, &cmd)).unwrap();
+        rt.block_on(unpack(&zip, ArchiveKind::Zip, &zout, &cmd))
+            .unwrap();
         assert_eq!(std::fs::read(zout.join("bin/agent")).unwrap(), script);
         assert!(zout.join("bin/readme.txt").is_file());
         #[cfg(unix)]
-        assert_ne!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(zout.join("bin/agent")).unwrap().permissions()) & 0o111, 0);
-        assert!(rt.block_on(unpack(&zip, ArchiveKind::Zip, &dir.join("zout2"), &["agent".into()])).unwrap_err().to_string().contains("no agent"));
-        for (name, entry) in [("zup", "../escaped/agent"), ("zdeep", "bin/../../escaped/agent"), ("zabs", "/escaped/agent")] {
+        assert_ne!(
+            std::os::unix::fs::PermissionsExt::mode(
+                &std::fs::metadata(zout.join("bin/agent"))
+                    .unwrap()
+                    .permissions()
+            ) & 0o111,
+            0
+        );
+        assert!(
+            rt.block_on(unpack(
+                &zip,
+                ArchiveKind::Zip,
+                &dir.join("zout2"),
+                &["agent".into()]
+            ))
+            .unwrap_err()
+            .to_string()
+            .contains("no agent")
+        );
+        for (name, entry) in [
+            ("zup", "../escaped/agent"),
+            ("zdeep", "bin/../../escaped/agent"),
+            ("zabs", "/escaped/agent"),
+        ] {
             let archive = dir.join(format!("{name}.zip"));
             zip_of(&archive, &[("bin/agent", 0o755), (entry, 0o644)]);
             refused(&archive, ArchiveKind::Zip, &format!("out-{name}"));
@@ -1256,11 +1738,31 @@ mod tests {
         // Not an archive, or one compressed in a way Trek doesn't read.
         let junk = dir.join("junk");
         std::fs::write(&junk, vec![b'x'; 2000]).unwrap();
-        assert!(rt.block_on(unpack(&junk, ArchiveKind::Tar, &dir.join("out-junk"), &cmd)).unwrap_err().to_string().contains("isn't an archive"));
-        assert!(rt.block_on(unpack(&junk, ArchiveKind::Zip, &dir.join("out-junk-zip"), &cmd)).unwrap_err().to_string().contains("isn't an archive"));
+        assert!(
+            rt.block_on(unpack(&junk, ArchiveKind::Tar, &dir.join("out-junk"), &cmd))
+                .unwrap_err()
+                .to_string()
+                .contains("isn't an archive")
+        );
+        assert!(
+            rt.block_on(unpack(
+                &junk,
+                ArchiveKind::Zip,
+                &dir.join("out-junk-zip"),
+                &cmd
+            ))
+            .unwrap_err()
+            .to_string()
+            .contains("isn't an archive")
+        );
         let xz = dir.join("a.tar.xz");
         std::fs::write(&xz, [0xfd, b'7', b'z', b'X', b'Z', 0, 1, 2, 3]).unwrap();
-        assert!(rt.block_on(unpack(&xz, ArchiveKind::Tar, &dir.join("out-xz"), &cmd)).unwrap_err().to_string().contains("compressed another way"));
+        assert!(
+            rt.block_on(unpack(&xz, ArchiveKind::Tar, &dir.join("out-xz"), &cmd))
+                .unwrap_err()
+                .to_string()
+                .contains("compressed another way")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

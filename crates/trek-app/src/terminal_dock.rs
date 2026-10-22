@@ -88,12 +88,16 @@ impl TerminalDock {
     /// shows its own dock. The draft's shells go to the thread it became; the first thread or
     /// draft shown gets the dock settings left open.
     fn follow_route(&mut self, ws: &Entity<Workspace>, cx: &mut Context<Self>) {
-        let Some(now) = owner(&ws.read(cx).route) else { return };
+        let Some(now) = owner(&ws.read(cx).route) else {
+            return;
+        };
         if now == self.shown && !self.launch_open {
             return;
         }
         if let (Owner::Draft, Owner::Thread(id)) = (&self.shown, &now) {
-            if ws.read(cx).draft_became.as_deref() == Some(id.as_str()) && !self.docks.contains_key(&now) {
+            if ws.read(cx).draft_became.as_deref() == Some(id.as_str())
+                && !self.docks.contains_key(&now)
+            {
                 if let Some(draft) = self.docks.remove(&Owner::Draft) {
                     self.docks.insert(now.clone(), draft);
                 }
@@ -160,13 +164,20 @@ impl TerminalDock {
     pub fn hide(&mut self, cx: &mut Context<Self>) {
         self.dock_mut(cx).open = false;
         self.save(cx);
-        self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::FocusComposer));
+        self.workspace
+            .update(cx, |_, cx| cx.emit(WorkspaceEvent::FocusComposer));
         cx.notify();
     }
 
     /// Run a command (an agent install or sign-in, a project action) in a shell of its own in
     /// the dock of the thread on screen; agents are looked for again when it exits.
-    pub fn run_command(&mut self, job: Job, cwd: Option<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn run_command(
+        &mut self,
+        job: Job,
+        cwd: Option<std::path::PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let cwd = cwd.or_else(|| self.workspace.read(cx).current_cwd());
         let shell = self.workspace.read(cx).settings.terminal.shell.clone();
         let ws = self.workspace.downgrade();
@@ -211,7 +222,9 @@ impl TerminalDock {
     /// The shells of the thread on screen (tests).
     #[cfg(test)]
     pub fn terminals(&self, cx: &App) -> Vec<Entity<TerminalPanel>> {
-        self.dock(cx).map(|d| d.terminals.clone()).unwrap_or_default()
+        self.dock(cx)
+            .map(|d| d.terminals.clone())
+            .unwrap_or_default()
     }
 
     /// How many shells the thread on screen has (tests).
@@ -228,7 +241,8 @@ impl TerminalDock {
 
     /// The shell in front in the thread on screen's dock.
     fn front(&self, cx: &App) -> Option<Entity<TerminalPanel>> {
-        self.dock(cx).and_then(|d| d.terminals.get(d.active).cloned())
+        self.dock(cx)
+            .and_then(|d| d.terminals.get(d.active).cloned())
     }
 
     fn new_terminal(&mut self, cx: &mut Context<Self>) {
@@ -245,7 +259,8 @@ impl TerminalDock {
 
     /// Redraw the tabs when `term`'s title changes.
     fn follow_title(term: &Entity<TerminalPanel>, cx: &mut Context<Self>) {
-        cx.subscribe(term, |_, _, _: &TitleChanged, cx| cx.notify()).detach();
+        cx.subscribe(term, |_, _, _: &TitleChanged, cx| cx.notify())
+            .detach();
     }
 
     /// Close the shell in front; the dock goes with the last one.
@@ -264,7 +279,9 @@ impl TerminalDock {
     fn save(&mut self, cx: &mut Context<Self>) {
         let (open, height) = (self.is_open(cx), self.height);
         self.workspace.update(cx, |ws, cx| {
-            if ws.settings.layout.terminal_open != open || ws.settings.layout.terminal_height != height {
+            if ws.settings.layout.terminal_open != open
+                || ws.settings.layout.terminal_height != height
+            {
                 ws.settings.layout.terminal_open = open;
                 ws.settings.layout.terminal_height = height;
                 ws.save_settings(cx);
@@ -293,7 +310,11 @@ impl TerminalDock {
                     .top(px(1.))
                     .h(px(2.))
                     .when(active, |el| el.bg(crate::palette::ember(cx).opacity(0.7)))
-                    .when(!active, |el| el.group_hover("terminal-dock-resize", |s| s.bg(theme.foreground.opacity(0.18)))),
+                    .when(!active, |el| {
+                        el.group_hover("terminal-dock-resize", |s| {
+                            s.bg(theme.foreground.opacity(0.18))
+                        })
+                    }),
             )
             .on_mouse_down(
                 MouseButton::Left,
@@ -316,15 +337,27 @@ impl Render for TerminalDock {
         crate::tests::rendered("TerminalDock");
         let theme = cx.theme().clone();
         let glass = self.workspace.read(cx).glass();
-        let line = if glass.is_some() { crate::ui::panel_border(glass, cx) } else { theme.border };
+        let line = if glass.is_some() {
+            crate::ui::panel_border(glass, cx)
+        } else {
+            theme.border
+        };
         let height = fit_height(self.height, window.viewport_size().height.as_f32());
-        let shell = crate::panels::terminal::shell_name(&self.workspace.read(cx).settings.terminal.shell);
+        let shell =
+            crate::panels::terminal::shell_name(&self.workspace.read(cx).settings.terminal.shell);
         let ember = crate::palette::ember(cx);
         let fill = StyleRefinement::default().size_full();
-        let (count, active) = self.dock(cx).map_or((0, 0), |d| (d.terminals.len(), d.active));
+        let (count, active) = self
+            .dock(cx)
+            .map_or((0, 0), |d| (d.terminals.len(), d.active));
         let many = count > 1;
         // What each shell is called: the title its shell or program set, else the shell's name.
-        let titles: Vec<Option<String>> = self.dock(cx).map_or(vec![], |d| d.terminals.iter().map(|t| t.read(cx).title().map(str::to_string)).collect());
+        let titles: Vec<Option<String>> = self.dock(cx).map_or(vec![], |d| {
+            d.terminals
+                .iter()
+                .map(|t| t.read(cx).title().map(str::to_string))
+                .collect()
+        });
 
         let header = h_flex()
             .h(px(HEADER))
@@ -341,11 +374,29 @@ impl Render for TerminalDock {
                     .text_size(px(11.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("TERMINAL")
-                    .when(!many, |el| el.child(div().absolute().bottom(px(4.)).left(px(8.)).right(px(8.)).h(px(1.5)).bg(ember))),
+                    .when(!many, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .bottom(px(4.))
+                                .left(px(8.))
+                                .right(px(8.))
+                                .h(px(1.5))
+                                .bg(ember),
+                        )
+                    }),
             )
             .when(!many, |el| {
                 el.children(titles.first().cloned().flatten().map(|title| {
-                    div().id("terminal-dock-title").test_support().min_w_0().max_w(px(360.)).truncate().text_size(px(11.5)).text_color(theme.muted_foreground).child(title)
+                    div()
+                        .id("terminal-dock-title")
+                        .test_support()
+                        .min_w_0()
+                        .max_w(px(360.))
+                        .truncate()
+                        .text_size(px(11.5))
+                        .text_color(theme.muted_foreground)
+                        .child(title)
                 }))
             })
             .when(many, |el| {
@@ -362,11 +413,33 @@ impl Render for TerminalDock {
                         .items_center()
                         .cursor_pointer()
                         .text_size(px(11.5))
-                        .text_color(if on { theme.foreground } else { theme.muted_foreground })
+                        .text_color(if on {
+                            theme.foreground
+                        } else {
+                            theme.muted_foreground
+                        })
                         .when(!on, |el| el.hover(|s| s.text_color(theme.foreground)))
                         .child(Icon::new(IconName::SquareTerminal).xsmall())
-                        .child(div().max_w(px(180.)).truncate().child(titles.get(ix).cloned().flatten().unwrap_or_else(|| format!("{shell} {}", ix + 1))))
-                        .when(on, |el| el.child(div().absolute().bottom(px(4.)).left(px(8.)).right(px(8.)).h(px(1.5)).bg(ember)))
+                        .child(
+                            div().max_w(px(180.)).truncate().child(
+                                titles
+                                    .get(ix)
+                                    .cloned()
+                                    .flatten()
+                                    .unwrap_or_else(|| format!("{shell} {}", ix + 1)),
+                            ),
+                        )
+                        .when(on, |el| {
+                            el.child(
+                                div()
+                                    .absolute()
+                                    .bottom(px(4.))
+                                    .left(px(8.))
+                                    .right(px(8.))
+                                    .h(px(1.5))
+                                    .bg(ember),
+                            )
+                        })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.dock_mut(cx).active = ix;
                             if let Some(t) = this.front(cx) {
@@ -377,19 +450,41 @@ impl Render for TerminalDock {
                 }))
             })
             .child(div().flex_1())
-            .child(crate::ui::icon_button("terminal-dock-new", IconName::Plus, "New terminal").on_click(cx.listener(|this, _, window, cx| {
-                this.new_terminal(cx);
-                this.show(window, cx);
-            })))
-            .child(crate::ui::icon_button("terminal-dock-kill", crate::assets::Lucide::Trash, "Kill terminal").on_click(cx.listener(|this, _, _, cx| this.kill_terminal(cx))))
             .child(
-                crate::ui::icon_button("terminal-dock-close", IconName::Close, format!("Hide terminal ({})", crate::keys::hint(crate::keys::Id::ToggleTerminal)))
-                    .on_click(cx.listener(|this, _, _, cx| this.hide(cx))),
+                crate::ui::icon_button("terminal-dock-new", IconName::Plus, "New terminal")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.new_terminal(cx);
+                        this.show(window, cx);
+                    })),
+            )
+            .child(
+                crate::ui::icon_button(
+                    "terminal-dock-kill",
+                    crate::assets::Lucide::Trash,
+                    "Kill terminal",
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.kill_terminal(cx))),
+            )
+            .child(
+                crate::ui::icon_button(
+                    "terminal-dock-close",
+                    IconName::Close,
+                    format!(
+                        "Hide terminal ({})",
+                        crate::keys::hint(crate::keys::Id::ToggleTerminal)
+                    ),
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.hide(cx))),
             );
 
         let body: AnyElement = match self.front(cx) {
-            Some(t) => div().size_full().pl(px(10.)).child(t.cached(fill)).into_any_element(),
-            None => crate::panels::empty("No terminal. + starts one in this folder.", cx).into_any_element(),
+            Some(t) => div()
+                .size_full()
+                .pl(px(10.))
+                .child(t.cached(fill))
+                .into_any_element(),
+            None => crate::panels::empty("No terminal. + starts one in this folder.", cx)
+                .into_any_element(),
         };
 
         v_flex()

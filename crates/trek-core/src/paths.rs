@@ -40,14 +40,21 @@ pub fn isolated() -> bool {
 /// `~/Library/Application Support/Trek` on macOS (platform equivalent elsewhere).
 pub fn data_dir() -> PathBuf {
     if let Some(dir) = isolated_dir() {
-        let dir = THREAD_DIR.with(|d| d.borrow().clone()).unwrap_or_else(|| dir.clone());
+        let dir = THREAD_DIR
+            .with(|d| d.borrow().clone())
+            .unwrap_or_else(|| dir.clone());
         let _ = std::fs::create_dir_all(&dir);
         return dir;
     }
     // TREK_DATA_DIR points Trek at another data folder (testing a build without touching real data).
-    let dir = std::env::var_os("TREK_DATA_DIR").map(PathBuf::from).filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| {
-        directories::ProjectDirs::from("dev", "trek", "Trek").map(|p| p.data_dir().to_path_buf()).unwrap_or_else(|| home().join(".trek"))
-    });
+    let dir = std::env::var_os("TREK_DATA_DIR")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| {
+            directories::ProjectDirs::from("dev", "trek", "Trek")
+                .map(|p| p.data_dir().to_path_buf())
+                .unwrap_or_else(|| home().join(".trek"))
+        });
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -58,7 +65,10 @@ pub fn data_dir() -> PathBuf {
 pub fn home() -> PathBuf {
     // Only a real, absolute folder: a POSIX-style `/c/Users/x` from an MSYS shell is left to the
     // resolver, as is a value that names nothing.
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute() && h.is_dir()) {
+    if let Some(home) = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|h| h.is_absolute() && h.is_dir())
+    {
         return home;
     }
     directories::BaseDirs::new()
@@ -70,7 +80,11 @@ pub fn home() -> PathBuf {
 /// change: the user's, or `home` in the data folder in an isolated process, so a test or capture
 /// run never sees or edits theirs.
 pub fn agents_home() -> PathBuf {
-    if isolated() { data_dir().join("home") } else { home() }
+    if isolated() {
+        data_dir().join("home")
+    } else {
+        home()
+    }
 }
 
 /// Where threads without a project run: each in a folder of its own under here, so an agent has
@@ -78,16 +92,30 @@ pub fn agents_home() -> PathBuf {
 /// find, and no space in the path for an agent's shell commands to trip on. Under the data folder
 /// when that's been moved (tests, `TREK_DATA_DIR`), so a trial run leaves nothing in the home folder.
 pub fn chats_dir() -> PathBuf {
-    let moved = isolated_dir().is_some() || std::env::var_os("TREK_DATA_DIR").is_some_and(|d| !d.is_empty());
-    if moved { data_dir().join("chats") } else { home().join("Trek").join("Chats") }
+    let moved = isolated_dir().is_some()
+        || std::env::var_os("TREK_DATA_DIR").is_some_and(|d| !d.is_empty());
+    if moved {
+        data_dir().join("chats")
+    } else {
+        home().join("Trek").join("Chats")
+    }
 }
 
 /// A new folder for a thread without a project: a git repository of its own, so Trek's file
 /// checkpoints (and rewinding a turn) work there as in a project.
 pub fn new_chat_dir() -> std::io::Result<PathBuf> {
-    let dir = chats_dir().join(chrono::Local::now().format("%Y-%m-%d-%H%M%S-%3f").to_string());
+    let dir = chats_dir().join(
+        chrono::Local::now()
+            .format("%Y-%m-%d-%H%M%S-%3f")
+            .to_string(),
+    );
     std::fs::create_dir_all(&dir)?;
-    let _ = crate::procs::command(crate::git::git_program()).args(["init", "-q"]).current_dir(&dir).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    let _ = crate::procs::command(crate::git::git_program())
+        .args(["init", "-q"])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
     Ok(dir)
 }
 
@@ -130,7 +158,10 @@ fn tildify_with(path: &std::path::Path, sep: &str) -> String {
     match path.strip_prefix(&home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
         Ok(rest) => {
-            let parts: Vec<_> = rest.components().map(|c| c.as_os_str().to_string_lossy()).collect();
+            let parts: Vec<_> = rest
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect();
             format!("~{sep}{}", parts.join(sep))
         }
         Err(_) => path.display().to_string(),
@@ -143,7 +174,9 @@ pub fn trash(path: &std::path::Path) -> anyhow::Result<()> {
     // The crate initialises COM on the calling thread, and panics if that thread already holds
     // it in another mode. A thread of its own always starts clean.
     #[cfg(windows)]
-    let result = std::thread::spawn(move || move_to_trash(&path)).join().map_err(|_| anyhow::anyhow!("The Recycle Bin wouldn't open"))?;
+    let result = std::thread::spawn(move || move_to_trash(&path))
+        .join()
+        .map_err(|_| anyhow::anyhow!("The Recycle Bin wouldn't open"))?;
     #[cfg(not(windows))]
     let result = move_to_trash(&path);
     result
@@ -194,14 +227,20 @@ mod tests {
             let items = loop {
                 let all = trash::os_limited::list().unwrap();
                 let total = all.len();
-                let items: Vec<_> = all.into_iter().filter(|i| i.original_parent.file_name() == dir.file_name()).collect();
+                let items: Vec<_> = all
+                    .into_iter()
+                    .filter(|i| i.original_parent.file_name() == dir.file_name())
+                    .collect();
                 if items.len() == 2 {
                     break items;
                 }
                 assert!(
                     std::time::Instant::now() < deadline,
                     "both went into the Recycle Bin; found {:?} of {total} items there",
-                    items.iter().map(|i| (&i.name, &i.original_parent)).collect::<Vec<_>>()
+                    items
+                        .iter()
+                        .map(|i| (&i.name, &i.original_parent))
+                        .collect::<Vec<_>>()
                 );
                 std::thread::sleep(std::time::Duration::from_millis(100));
             };
@@ -213,17 +252,33 @@ mod tests {
     #[test]
     fn a_home_relative_path_is_written_with_the_platforms_separator() {
         let home = super::home();
-        let (sep, written) = if cfg!(windows) { ('\\', "~\\Documents\\Trek") } else { ('/', "~/Documents/Trek") };
+        let (sep, written) = if cfg!(windows) {
+            ('\\', "~\\Documents\\Trek")
+        } else {
+            ('/', "~/Documents/Trek")
+        };
         // Built piece by piece, so on Windows it's `C:\Users\…\Documents\Trek` with backslashes,
         // and what's shown has them too, not the Unix form (nor `~/Documents\Trek`).
-        assert_eq!(super::tildify(&home.join("Documents").join("Trek")), written);
-        assert_eq!(super::tildify(&home.join("a").join("b").join("c.toml")), format!("~{sep}a{sep}b{sep}c.toml"));
+        assert_eq!(
+            super::tildify(&home.join("Documents").join("Trek")),
+            written
+        );
+        assert_eq!(
+            super::tildify(&home.join("a").join("b").join("c.toml")),
+            format!("~{sep}a{sep}b{sep}c.toml")
+        );
         assert_eq!(super::tildify(&home), "~");
         // What an agent is told is the same on both: `~/…` works in every shell.
-        assert_eq!(super::tildify_for_agents(&home.join("Documents").join("Trek")), "~/Documents/Trek");
+        assert_eq!(
+            super::tildify_for_agents(&home.join("Documents").join("Trek")),
+            "~/Documents/Trek"
+        );
         assert_eq!(super::tildify_for_agents(&home), "~");
         // A name with a space (OneDrive's folders have them) stays whole.
-        assert_eq!(super::tildify(&home.join("OneDrive").join("FC 24 LE v24.1.1.0")), format!("~{sep}OneDrive{sep}FC 24 LE v24.1.1.0"));
+        assert_eq!(
+            super::tildify(&home.join("OneDrive").join("FC 24 LE v24.1.1.0")),
+            format!("~{sep}OneDrive{sep}FC 24 LE v24.1.1.0")
+        );
         // And a path that merely shares a prefix with the home folder isn't taken for one under it.
         let mut sibling = home.clone().into_os_string();
         sibling.push("-other");
@@ -239,13 +294,19 @@ mod tests {
         super::isolate(std::env::temp_dir().join("elsewhere"));
         assert_eq!(super::data_dir(), dir);
         assert!(super::settings_file().starts_with(&dir));
-        assert_eq!(crate::settings::secrets::api_key("anthropic"), None, "no Keychain while isolated");
+        assert_eq!(
+            crate::settings::secrets::api_key("anthropic"),
+            None,
+            "no Keychain while isolated"
+        );
         assert!(crate::settings::secrets::set_api_key("anthropic", "x").is_err());
     }
 
     #[test]
     fn a_thread_can_have_a_folder_of_its_own() {
-        let own = std::env::temp_dir().join("trek-core-tests").join(format!("thread-{}", std::process::id()));
+        let own = std::env::temp_dir()
+            .join("trek-core-tests")
+            .join(format!("thread-{}", std::process::id()));
         std::thread::spawn({
             let own = own.clone();
             move || {

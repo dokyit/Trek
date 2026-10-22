@@ -9,8 +9,8 @@ use gpui_kit::{SystemNotificationResponse, TestAppContext, VisualTestContext};
 use std::cell::RefCell;
 use std::rc::Rc;
 use trek_agents::{AgentEvent, Decision};
-use trek_core::settings::NotifyMode;
 use trek_core::RunState;
+use trek_core::settings::NotifyMode;
 
 /// A Trek window with the app-wide alert handling the app installs at launch.
 fn alerting(cx: &mut TestAppContext, mode: NotifyMode) -> Trek {
@@ -46,17 +46,36 @@ fn titled(trek: &Trek, cx: &mut TestAppContext, title: &str) -> String {
 }
 
 fn finish(trek: &Trek, cx: &mut TestAppContext, id: &str, error: Option<&str>) {
-    let events = vec![AgentEvent::TextDelta("Done.".into()), AgentEvent::TurnComplete { error: error.map(String::from) }];
+    let events = vec![
+        AgentEvent::TextDelta("Done.".into()),
+        AgentEvent::TurnComplete {
+            error: error.map(String::from),
+        },
+    ];
     trek.update(cx, |ws, cx| ws.apply_events(id, events, cx));
 }
 
 fn ask(trek: &Trek, cx: &mut TestAppContext, id: &str) {
-    let ask = AgentEvent::PermissionRequest { request_id: format!("{id}-ask"), title: "Run command".into(), detail: "make deploy".into(), prompt: None };
-    trek.update(cx, |ws, cx| ws.apply_events(id, vec![AgentEvent::TextDelta("Deploying.".into()), ask], cx));
+    let ask = AgentEvent::PermissionRequest {
+        request_id: format!("{id}-ask"),
+        title: "Run command".into(),
+        detail: "make deploy".into(),
+        prompt: None,
+    };
+    trek.update(cx, |ws, cx| {
+        ws.apply_events(
+            id,
+            vec![AgentEvent::TextDelta("Deploying.".into()), ask],
+            cx,
+        )
+    });
 }
 
 fn banners(cx: &TestAppContext) -> Vec<(String, String)> {
-    cx.shown_system_notifications().into_iter().map(|n| (n.tag.to_string(), n.title.to_string())).collect()
+    cx.shown_system_notifications()
+        .into_iter()
+        .map(|n| (n.tag.to_string(), n.title.to_string()))
+        .collect()
 }
 
 fn toasts(trek: &Trek, cx: &mut TestAppContext) -> usize {
@@ -99,39 +118,91 @@ fn alerts_follow_focus_and_what_is_on_screen() {
 
         // Another thread while Trek is in front: a toast only (banners wait for the background).
         finish(&trek, cx, &away, None);
-        assert_eq!(said.borrow().last().map(String::as_str), Some("Finished: Fix the login bug"));
+        assert_eq!(
+            said.borrow().last().map(String::as_str),
+            Some("Finished: Fix the login bug")
+        );
         assert_eq!((toasts(&trek, cx), banners(cx).len(), sounds()), (1, 0, 0));
         // Clicking the toast opens that thread (once it has slid into place: mid-slide, the
         // press and the release land on different frames and make no click).
         settled_in(&trek, cx);
         trek.click(cx, "notification");
-        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Thread(away.clone()));
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Thread(away.clone())
+        );
 
         // In the background: a banner and the sound, even for the thread on screen.
         blur(&trek, cx);
         ask(&trek, cx, &away);
-        assert_eq!(said.borrow().last().map(String::as_str), Some("Needs your approval: Run command"));
-        assert_eq!(banners(cx), [(format!("trek-attention-{away}"), "Needs your approval: Run command".to_string())]);
+        assert_eq!(
+            said.borrow().last().map(String::as_str),
+            Some("Needs your approval: Run command")
+        );
+        assert_eq!(
+            banners(cx),
+            [(
+                format!("trek-attention-{away}"),
+                "Needs your approval: Run command".to_string()
+            )]
+        );
         assert_eq!(sounds(), 1);
 
         // A failed turn says so; a turn the user stopped says nothing.
         finish(&trek, cx, &here, Some("The agent crashed"));
-        assert_eq!(said.borrow().last().map(String::as_str), Some("Failed: Write the docs"));
-        assert_eq!(banners(cx).last(), Some(&(format!("trek-attention-{here}"), "Failed: Write the docs".to_string())));
+        assert_eq!(
+            said.borrow().last().map(String::as_str),
+            Some("Failed: Write the docs")
+        );
+        assert_eq!(
+            banners(cx).last(),
+            Some(&(
+                format!("trek-attention-{here}"),
+                "Failed: Write the docs".to_string()
+            ))
+        );
         let before = said.borrow().len();
-        trek.update(cx, |ws, cx| ws.apply_events(&away, vec![AgentEvent::TurnComplete { error: Some("Interrupted".into()) }], cx));
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &away,
+                vec![AgentEvent::TurnComplete {
+                    error: Some("Interrupted".into()),
+                }],
+                cx,
+            )
+        });
         assert_eq!(said.borrow().len(), before, "no alert for a stop");
 
         // Clicking a banner brings Trek forward on its thread.
-        cx.simulate_system_notification_response(SystemNotificationResponse { tag: format!("trek-attention-{here}").into(), action_id: None });
+        cx.simulate_system_notification_response(SystemNotificationResponse {
+            tag: format!("trek-attention-{here}").into(),
+            action_id: None,
+        });
         cx.run_until_parked();
-        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Thread(here.clone()));
-        assert_eq!(cx.update(|cx| cx.active_window()), trek.read(cx, |ws, _| ws.main_window), "the main window came forward");
-        assert_eq!(cx.update(|cx| cx.windows().len()), 1, "no second main window");
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Thread(here.clone())
+        );
+        assert_eq!(
+            cx.update(|cx| cx.active_window()),
+            trek.read(cx, |ws, _| ws.main_window),
+            "the main window came forward"
+        );
+        assert_eq!(
+            cx.update(|cx| cx.windows().len()),
+            1,
+            "no second main window"
+        );
         // Tags Trek didn't post are left alone.
-        cx.simulate_system_notification_response(SystemNotificationResponse { tag: "something-else".into(), action_id: None });
+        cx.simulate_system_notification_response(SystemNotificationResponse {
+            tag: "something-else".into(),
+            action_id: None,
+        });
         cx.run_until_parked();
-        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Thread(here.clone()));
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Thread(here.clone())
+        );
     });
 }
 
@@ -146,10 +217,21 @@ fn banners_open_threads_in_their_own_window_or_a_reopened_main_window() {
         VisualTestContext::from_window(own, cx).deactivate_window();
         finish(&trek, cx, &popped, None);
         assert_eq!(sounds(), 0, "banner only");
-        cx.simulate_system_notification_response(SystemNotificationResponse { tag: format!("trek-attention-{popped}").into(), action_id: None });
+        cx.simulate_system_notification_response(SystemNotificationResponse {
+            tag: format!("trek-attention-{popped}").into(),
+            action_id: None,
+        });
         cx.run_until_parked();
-        assert_eq!(cx.update(|cx| cx.active_window()), Some(own), "its own window comes forward");
-        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Thread(other.clone()), "the main window is left as it was");
+        assert_eq!(
+            cx.update(|cx| cx.active_window()),
+            Some(own),
+            "its own window comes forward"
+        );
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Thread(other.clone()),
+            "the main window is left as it was"
+        );
 
         // With the main window closed, a banner still goes out, and clicking it reopens the
         // main window on the thread.
@@ -157,12 +239,23 @@ fn banners_open_threads_in_their_own_window_or_a_reopened_main_window() {
         cx.run_until_parked();
         VisualTestContext::from_window(own, cx).deactivate_window();
         finish(&trek, cx, &other, Some("Out of credits"));
-        assert_eq!(banners(cx).last().map(|(_, t)| t.as_str()), Some("Failed: Stays in main"));
-        cx.simulate_system_notification_response(SystemNotificationResponse { tag: format!("trek-attention-{other}").into(), action_id: None });
+        assert_eq!(
+            banners(cx).last().map(|(_, t)| t.as_str()),
+            Some("Failed: Stays in main")
+        );
+        cx.simulate_system_notification_response(SystemNotificationResponse {
+            tag: format!("trek-attention-{other}").into(),
+            action_id: None,
+        });
         cx.run_until_parked();
-        let main = trek.read(cx, |ws, _| ws.main_window).expect("the main window is back");
+        let main = trek
+            .read(cx, |ws, _| ws.main_window)
+            .expect("the main window is back");
         assert_ne!(main, trek.window, "a new main window");
-        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Thread(other.clone()));
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Thread(other.clone())
+        );
     });
 }
 
@@ -204,11 +297,15 @@ fn the_dock_badge_counts_threads_waiting_on_the_user() {
 
         // Answering clears it; so does settling a failure (it's been seen to). Undone, the
         // failure is back.
-        trek.update(cx, |ws, cx| ws.respond(&asking, &format!("{asking}-ask"), Decision::Allow, cx));
+        trek.update(cx, |ws, cx| {
+            ws.respond(&asking, &format!("{asking}-ask"), Decision::Allow, cx)
+        });
         assert_eq!(badge(), 1);
         trek.update(cx, |ws, cx| ws.settle(&failing, cx));
         assert_eq!(badge(), 0);
-        trek.update(cx, |ws, cx| ws.undo(crate::workspace::UndoAction::Unsettle(failing.clone()), cx));
+        trek.update(cx, |ws, cx| {
+            ws.undo(crate::workspace::UndoAction::Unsettle(failing.clone()), cx)
+        });
         assert_eq!(badge(), 1);
         assert_eq!(trek.run_state(cx, &failing), RunState::Failed);
         trek.update(cx, |ws, cx| ws.settle(&failing, cx));
@@ -247,7 +344,9 @@ fn the_taskbar_badge_follows_the_main_window_where_the_button_is_the_windows() {
             crate::root::init(trek.ws.clone(), cx);
             crate::system::init(trek.ws.clone(), cx);
         });
-        let first = trek.read(cx, |ws, _| ws.main_window).expect("a main window");
+        let first = trek
+            .read(cx, |ws, _| ws.main_window)
+            .expect("a main window");
         let asking = trek.quiet_thread(cx);
         // Another thread on screen: the one asking is waiting off to the side.
         trek.quiet_thread(cx);
@@ -260,13 +359,20 @@ fn the_taskbar_badge_follows_the_main_window_where_the_button_is_the_windows() {
         cx.run_until_parked();
         cx.update(|cx| crate::root::show_main(trek.ws.clone(), cx));
         cx.run_until_parked();
-        let second = trek.read(cx, |ws, _| ws.main_window).expect("a new main window");
+        let second = trek
+            .read(cx, |ws, _| ws.main_window)
+            .expect("a new main window");
         assert_ne!(first, second);
-        assert_eq!(BADGE_ON.with(|w| w.get()), Some(if cfg!(windows) { second } else { first }));
+        assert_eq!(
+            BADGE_ON.with(|w| w.get()),
+            Some(if cfg!(windows) { second } else { first })
+        );
         assert_eq!(badge(), 1);
 
         // Answered: cleared, on the window it's on.
-        trek.update(cx, |ws, cx| ws.respond(&asking, &format!("{asking}-ask"), Decision::Allow, cx));
+        trek.update(cx, |ws, cx| {
+            ws.respond(&asking, &format!("{asking}-ask"), Decision::Allow, cx)
+        });
         assert_eq!((badge(), BADGE_ON.with(|w| w.get())), (0, Some(second)));
     });
 }
@@ -279,12 +385,17 @@ fn a_banner_is_the_message_alone_and_clicking_it_needs_no_button() {
         blur(&trek, cx);
         finish(&trek, cx, &id, None);
         let shown = cx.shown_system_notifications();
-        let [banner] = shown.as_slice() else { panic!("one banner, got {}", shown.len()) };
+        let [banner] = shown.as_slice() else {
+            panic!("one banner, got {}", shown.len())
+        };
         // What Windows (and macOS) show: the title, and nothing to press but the banner itself.
         assert_eq!(banner.title.as_ref(), "Finished: Fix the login bug");
         assert!(banner.body.is_empty() && banner.actions.is_empty());
         // Windows reports a click on the toast body with no action.
-        cx.simulate_system_notification_response(SystemNotificationResponse { tag: banner.tag.clone(), action_id: None });
+        cx.simulate_system_notification_response(SystemNotificationResponse {
+            tag: banner.tag.clone(),
+            action_id: None,
+        });
         cx.run_until_parked();
         assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Thread(id));
     });
@@ -300,17 +411,36 @@ fn the_mac_stays_awake_exactly_while_agents_work() {
         // Working through the checks below: a loaded runner can take seconds to reach them.
         let id = trek.send(cx, "mock:long 8s");
         let tid = id.clone();
-        trek.wait(cx, "the build to start", |ws| ws.any_turn_running() && ws.live[&tid].items.iter().any(|i| matches!(i, trek_core::store::Item::Tool { .. }))).await;
-        assert_eq!(cx.active_idle_sleep_preventions(), 1, "held while the turn runs");
+        trek.wait(cx, "the build to start", |ws| {
+            ws.any_turn_running()
+                && ws.live[&tid]
+                    .items
+                    .iter()
+                    .any(|i| matches!(i, trek_core::store::Item::Tool { .. }))
+        })
+        .await;
+        assert_eq!(
+            cx.active_idle_sleep_preventions(),
+            1,
+            "held while the turn runs"
+        );
         // A second running turn shares it.
         let other = trek.update(cx, |ws, cx| {
-            ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx);
+            ws.navigate(
+                Route::Draft {
+                    project: Some(trek.project.clone()),
+                },
+                cx,
+            );
             ws.route.clone()
         });
         assert!(matches!(other, Route::Draft { .. }));
         let second = trek.send(cx, "mock:long 5s");
         let sid = second.clone();
-        trek.wait(cx, "the second build", |ws| ws.live.get(&sid).is_some_and(|l| l.turn_started.is_some())).await;
+        trek.wait(cx, "the second build", |ws| {
+            ws.live.get(&sid).is_some_and(|l| l.turn_started.is_some())
+        })
+        .await;
         assert_eq!(cx.active_idle_sleep_preventions(), 1);
 
         // Turned off mid-turn: let go at once; back on: held again.
@@ -327,7 +457,11 @@ fn the_mac_stays_awake_exactly_while_agents_work() {
 
         trek.wait_done(cx, &second, RunState::Idle).await;
         trek.wait_done(cx, &id, RunState::Idle).await;
-        assert_eq!(cx.active_idle_sleep_preventions(), 0, "released when every turn is over");
+        assert_eq!(
+            cx.active_idle_sleep_preventions(),
+            0,
+            "released when every turn is over"
+        );
 
         // Waiting on the user isn't working: the Mac may sleep.
         let asking = trek.send(cx, "needs permission");
@@ -352,11 +486,16 @@ fn the_dock_shows_the_app_icon_picked_in_appearance() {
         cx.update(|cx| crate::system::init(trek.ws.clone(), cx));
         // The cairn on Trek orange goes up at launch, whatever the bundle's icon is.
         assert_eq!(APP_ICON.with(|i| i.get()), Some(AppIcon::Ember));
-        trek.update(cx, |ws, cx| ws.navigate(Route::Settings(SettingsPage::Appearance), cx));
+        trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Settings(SettingsPage::Appearance), cx)
+        });
         trek.render(cx);
         trek.click(cx, "app-icon-Night");
         cx.run_until_parked();
-        assert_eq!(trek.read(cx, |ws, _| ws.settings.appearance.app_icon), AppIcon::Night);
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.settings.appearance.app_icon),
+            AppIcon::Night
+        );
         assert_eq!(APP_ICON.with(|i| i.get()), Some(AppIcon::Night));
         trek.click(cx, "app-icon-Glass");
         cx.run_until_parked();

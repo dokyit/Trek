@@ -29,7 +29,12 @@ pub struct IgnoredFile {
 
 /// `git remote get-url origin` in `root`.
 pub fn origin_url(root: &Path) -> Option<String> {
-    let out = trek_core::procs::command("git").arg("-C").arg(root).args(["remote", "get-url", "origin"]).output().ok()?;
+    let out = trek_core::procs::command("git")
+        .arg("-C")
+        .arg(root)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
     let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (out.status.success() && !url.is_empty()).then_some(url)
 }
@@ -37,7 +42,11 @@ pub fn origin_url(root: &Path) -> Option<String> {
 /// The scheme `url` uses.
 pub fn scheme_of(url: &str) -> Scheme {
     let lower = url.to_ascii_lowercase();
-    if lower.starts_with("https://") || lower.starts_with("http://") { Scheme::Https } else { Scheme::Ssh }
+    if lower.starts_with("https://") || lower.starts_with("http://") {
+        Scheme::Https
+    } else {
+        Scheme::Ssh
+    }
 }
 
 /// `url` (`https://host/owner/repo.git`, `ssh://git@host/owner/repo`, `git@host:owner/repo.git`)
@@ -48,7 +57,9 @@ pub fn rewrite_url(url: &str, scheme: Scheme) -> String {
     if scheme_of(url) == scheme && !url.to_ascii_lowercase().starts_with("git://") {
         return url.to_string();
     }
-    let Some((host, path)) = host_and_path(url) else { return url.to_string() };
+    let Some((host, path)) = host_and_path(url) else {
+        return url.to_string();
+    };
     match scheme {
         Scheme::Https => format!("https://{host}/{path}"),
         Scheme::Ssh => format!("git@{host}:{path}"),
@@ -86,28 +97,51 @@ pub fn repo_name(url: &str) -> Option<String> {
 
 fn git_list(root: &Path, directory: bool) -> anyhow::Result<Vec<String>> {
     let mut cmd = trek_core::procs::command("git");
-    cmd.arg("-C").arg(root).args(["ls-files", "--others", "--ignored", "--exclude-standard", "-z"]);
+    cmd.arg("-C").arg(root).args([
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "-z",
+    ]);
     if directory {
         cmd.arg("--directory");
     }
     let out = cmd.output()?;
-    anyhow::ensure!(out.status.success(), "git ls-files: {}", String::from_utf8_lossy(&out.stderr).trim());
-    Ok(String::from_utf8_lossy(&out.stdout).split('\0').filter(|s| !s.is_empty()).map(str::to_string).collect())
+    anyhow::ensure!(
+        out.status.success(),
+        "git ls-files: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 /// The files git ignores in `root` that aren't inside a folder it ignores whole, with their sizes,
 /// ticked when under `FILE_LIMIT` each and `TOTAL_LIMIT` together (in path order).
 pub fn ignored_files(root: &Path) -> anyhow::Result<Vec<IgnoredFile>> {
     let all = git_list(root, false)?;
-    let whole: Vec<String> = git_list(root, true)?.into_iter().filter(|e| e.ends_with('/')).collect();
+    let whole: Vec<String> = git_list(root, true)?
+        .into_iter()
+        .filter(|e| e.ends_with('/'))
+        .collect();
     let mut files: Vec<IgnoredFile> = all
         .into_iter()
         .filter(|f| !whole.iter().any(|d| f.starts_with(d.as_str())))
         .filter(|f| tr::safe_relative_path(f))
         .filter_map(|path| {
             // Files only: a link could point anywhere.
-            let meta = std::fs::symlink_metadata(root.join(&path)).ok().filter(|m| m.is_file())?;
-            Some(IgnoredFile { path, size: meta.len(), ticked: false })
+            let meta = std::fs::symlink_metadata(root.join(&path))
+                .ok()
+                .filter(|m| m.is_file())?;
+            Some(IgnoredFile {
+                path,
+                size: meta.len(),
+                ticked: false,
+            })
         })
         .collect();
     files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -136,7 +170,11 @@ pub fn read_uploads(root: &Path, files: &[String]) -> anyhow::Result<Vec<tr::Fil
             };
             #[cfg(not(unix))]
             let mode = 0o644;
-            Ok(tr::FileUpload { path: path.clone(), bytes: std::fs::read(&full)?, mode })
+            Ok(tr::FileUpload {
+                path: path.clone(),
+                bytes: std::fs::read(&full)?,
+                mode,
+            })
         })
         .collect()
 }

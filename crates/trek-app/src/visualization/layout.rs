@@ -32,7 +32,10 @@ impl Scale {
     /// The tick values from `lo` to `hi`, inclusive.
     pub fn ticks(&self) -> Vec<f64> {
         let n = ((self.hi - self.lo) / self.step).round() as usize;
-        (0..=n.min(64)).map(|i| self.lo + i as f64 * self.step).map(|v| if v.abs() < self.step * 1e-9 { 0.0 } else { v }).collect()
+        (0..=n.min(64))
+            .map(|i| self.lo + i as f64 * self.step)
+            .map(|v| if v.abs() < self.step * 1e-9 { 0.0 } else { v })
+            .collect()
     }
 
     /// Where `value` falls on the axis, 0 at `lo` to 1 at `hi`.
@@ -86,7 +89,10 @@ pub fn squarify(weights: &[f64], bounds: Rect) -> Vec<Rect> {
     // The worst aspect ratio in a row of `sum` total area along a side of `side`.
     let worst = |row: &[usize], side: f32| -> f32 {
         let sum: f32 = row.iter().map(|i| area(*i)).sum();
-        let (lo, hi) = row.iter().map(|i| area(*i)).fold((f32::MAX, 0f32), |(lo, hi), a| (lo.min(a), hi.max(a)));
+        let (lo, hi) = row
+            .iter()
+            .map(|i| area(*i))
+            .fold((f32::MAX, 0f32), |(lo, hi), a| (lo.min(a), hi.max(a)));
         let (s2, side2) = (sum * sum, side * side);
         (side2 * hi / s2).max(s2 / (side2 * lo.max(f32::EPSILON)))
     };
@@ -100,7 +106,12 @@ pub fn squarify(weights: &[f64], bounds: Rect) -> Vec<Rect> {
             let mut y = rect.y;
             for i in row {
                 let h = if thick > 0.0 { area(*i) / thick } else { 0.0 };
-                out[*i] = Rect { x: rect.x, y, w: thick, h };
+                out[*i] = Rect {
+                    x: rect.x,
+                    y,
+                    w: thick,
+                    h,
+                };
                 y += h;
             }
             rect.x += thick;
@@ -111,7 +122,12 @@ pub fn squarify(weights: &[f64], bounds: Rect) -> Vec<Rect> {
             let mut x = rect.x;
             for i in row {
                 let w = if thick > 0.0 { area(*i) / thick } else { 0.0 };
-                out[*i] = Rect { x, y: rect.y, w, h: thick };
+                out[*i] = Rect {
+                    x,
+                    y: rect.y,
+                    w,
+                    h: thick,
+                };
                 x += w;
             }
             rect.y += thick;
@@ -159,7 +175,16 @@ pub fn flow_layout(nodes: usize, edges: &[(usize, usize)], groups: &[Option<usiz
     // Back edges: the ones a depth-first walk finds pointing at a node still on its stack.
     let mut back = vec![false; edges.len()];
     let mut state = vec![0u8; n]; // 0 new, 1 on stack, 2 done
-    let out: Vec<Vec<(usize, usize)>> = (0..n).map(|v| edges.iter().enumerate().filter(|(_, e)| e.0 == v).map(|(i, e)| (i, e.1)).collect()).collect();
+    let out: Vec<Vec<(usize, usize)>> = (0..n)
+        .map(|v| {
+            edges
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.0 == v)
+                .map(|(i, e)| (i, e.1))
+                .collect()
+        })
+        .collect();
     for root in 0..n {
         if state[root] != 0 {
             continue;
@@ -183,13 +208,19 @@ pub fn flow_layout(nodes: usize, edges: &[(usize, usize)], groups: &[Option<usiz
             }
         }
     }
-    let forward: Vec<(usize, usize)> = edges.iter().zip(&back).filter(|(_, b)| !**b).map(|(e, _)| *e).collect();
+    let forward: Vec<(usize, usize)> = edges
+        .iter()
+        .zip(&back)
+        .filter(|(_, b)| !**b)
+        .map(|(e, _)| *e)
+        .collect();
     // Longest path: relax in topological order (Kahn's).
     let mut indegree = vec![0usize; n];
     for (_, to) in &forward {
         indegree[*to] += 1;
     }
-    let mut queue: std::collections::VecDeque<usize> = (0..n).filter(|v| indegree[*v] == 0).collect();
+    let mut queue: std::collections::VecDeque<usize> =
+        (0..n).filter(|v| indegree[*v] == 0).collect();
     let mut rank = vec![0usize; n];
     while let Some(v) = queue.pop_front() {
         for (from, to) in forward.iter().filter(|(from, _)| *from == v) {
@@ -246,7 +277,11 @@ pub fn flow_layout(nodes: usize, edges: &[(usize, usize)], groups: &[Option<usiz
     for sweep in 0..4 {
         let pos = position(&rows);
         let down = sweep % 2 == 0;
-        let order: Vec<usize> = if down { (1..ranks).collect() } else { (0..ranks.saturating_sub(1)).rev().collect() };
+        let order: Vec<usize> = if down {
+            (1..ranks).collect()
+        } else {
+            (0..ranks.saturating_sub(1)).rev().collect()
+        };
         let mut pos = pos;
         for r in order {
             let mut keyed: Vec<(usize, f32, usize)> = rows[r]
@@ -255,9 +290,21 @@ pub fn flow_layout(nodes: usize, edges: &[(usize, usize)], groups: &[Option<usiz
                 .map(|(i, v)| {
                     let near: Vec<f32> = forward
                         .iter()
-                        .filter_map(|(a, b)| if down && *b == *v { Some(pos[*a]) } else if !down && *a == *v { Some(pos[*b]) } else { None })
+                        .filter_map(|(a, b)| {
+                            if down && *b == *v {
+                                Some(pos[*a])
+                            } else if !down && *a == *v {
+                                Some(pos[*b])
+                            } else {
+                                None
+                            }
+                        })
                         .collect();
-                    let bary = if near.is_empty() { pos[*v] } else { near.iter().sum::<f32>() / near.len() as f32 };
+                    let bary = if near.is_empty() {
+                        pos[*v]
+                    } else {
+                        near.iter().sum::<f32>() / near.len() as f32
+                    };
                     (group_key(*v), bary, i)
                 })
                 .collect();
@@ -282,7 +329,11 @@ pub fn flow_layout(nodes: usize, edges: &[(usize, usize)], groups: &[Option<usiz
             }
         }
         for i in (0..at.len()).rev() {
-            let cap = if i + 1 < at.len() { at[i + 1] - 1.0 } else { max_x };
+            let cap = if i + 1 < at.len() {
+                at[i + 1] - 1.0
+            } else {
+                max_x
+            };
             at[i] = at[i].min(cap);
         }
         debug_assert_eq!(at.len(), row.len());
@@ -294,8 +345,16 @@ pub fn flow_layout(nodes: usize, edges: &[(usize, usize)], groups: &[Option<usiz
             .iter()
             .enumerate()
             .map(|(i, v)| {
-                let parents: Vec<f32> = forward.iter().filter(|(a, b)| *b == *v && rank[*a] < r).map(|(a, _)| x[*a]).collect();
-                if parents.is_empty() { centred(i) } else { parents.iter().sum::<f32>() / parents.len() as f32 }
+                let parents: Vec<f32> = forward
+                    .iter()
+                    .filter(|(a, b)| *b == *v && rank[*a] < r)
+                    .map(|(a, _)| x[*a])
+                    .collect();
+                if parents.is_empty() {
+                    centred(i)
+                } else {
+                    parents.iter().sum::<f32>() / parents.len() as f32
+                }
             })
             .collect();
         for (v, at) in row.iter().zip(settle(row, &want)) {
@@ -307,18 +366,36 @@ pub fn flow_layout(nodes: usize, edges: &[(usize, usize)], groups: &[Option<usiz
         let want: Vec<f32> = row
             .iter()
             .map(|v| {
-                let kids: Vec<f32> = forward.iter().filter(|(a, _)| *a == *v).map(|(_, b)| x[*b]).collect();
-                if kids.is_empty() { x[*v] } else { (x[*v] + kids.iter().sum::<f32>() / kids.len() as f32) / 2.0 }
+                let kids: Vec<f32> = forward
+                    .iter()
+                    .filter(|(a, _)| *a == *v)
+                    .map(|(_, b)| x[*b])
+                    .collect();
+                if kids.is_empty() {
+                    x[*v]
+                } else {
+                    (x[*v] + kids.iter().sum::<f32>() / kids.len() as f32) / 2.0
+                }
             })
             .collect();
         for (v, at) in row.iter().zip(settle(row, &want)) {
             x[*v] = at;
         }
     }
-    let routes = chains.iter().map(|chain| chain.iter().map(|v| (rank[*v], x[*v])).collect()).collect();
+    let routes = chains
+        .iter()
+        .map(|chain| chain.iter().map(|v| (rank[*v], x[*v])).collect())
+        .collect();
     rank.truncate(real);
     x.truncate(real);
-    FlowLayout { rank, x, slots, ranks: ranks.max(1), back, routes }
+    FlowLayout {
+        rank,
+        x,
+        slots,
+        ranks: ranks.max(1),
+        back,
+        routes,
+    }
 }
 
 /// Rows for spans `(start, end)` so that none overlap within a row: each takes the first row
@@ -367,19 +444,37 @@ mod tests {
         assert_eq!(Scale::nice(5.0, 5.0, 4).lo, 0.0);
         assert_eq!(Scale::nice(-5.0, -5.0, 4).hi, 0.0);
         // Ticks don't drift into -0 or 0.30000000000000004.
-        assert!(Scale::nice(0.0, 0.9, 3).ticks().iter().all(|t| (t * 10.0).fract().abs() < 1e-9 || (t * 10.0).fract().abs() > 1.0 - 1e-9));
+        assert!(
+            Scale::nice(0.0, 0.9, 3)
+                .ticks()
+                .iter()
+                .all(|t| (t * 10.0).fract().abs() < 1e-9 || (t * 10.0).fract().abs() > 1.0 - 1e-9)
+        );
     }
 
     #[test]
     fn treemaps_fill_their_box_with_proportional_near_square_tiles() {
         let weights = [6.0, 6.0, 4.0, 3.0, 2.0, 2.0, 1.0];
-        let bounds = Rect { x: 0.0, y: 0.0, w: 6.0, h: 4.0 };
+        let bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 6.0,
+            h: 4.0,
+        };
         let tiles = squarify(&weights, bounds);
         let total: f64 = weights.iter().sum();
         for (tile, weight) in tiles.iter().zip(weights) {
             let area = tile.w * tile.h;
-            assert!((area as f64 - weight / total * 24.0).abs() < 1e-3, "{tile:?} for {weight}");
-            assert!(tile.x >= -1e-4 && tile.y >= -1e-4 && tile.x + tile.w <= 6.0 + 1e-3 && tile.y + tile.h <= 4.0 + 1e-3);
+            assert!(
+                (area as f64 - weight / total * 24.0).abs() < 1e-3,
+                "{tile:?} for {weight}"
+            );
+            assert!(
+                tile.x >= -1e-4
+                    && tile.y >= -1e-4
+                    && tile.x + tile.w <= 6.0 + 1e-3
+                    && tile.y + tile.h <= 4.0 + 1e-3
+            );
             // Squarified: nothing degenerates into a sliver.
             assert!(tile.w.max(tile.h) / tile.w.min(tile.h) < 4.0, "{tile:?}");
         }
@@ -404,10 +499,16 @@ mod tests {
         assert!(layout.back.iter().all(|b| !b));
         assert!(layout.x[1] != layout.x[2]);
         // The long edge a → e crosses ranks 1 and 2 in slots of its own, clear of b, c and d.
-        assert_eq!(layout.routes[5].iter().map(|(r, _)| *r).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(
+            layout.routes[5].iter().map(|(r, _)| *r).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
         assert_eq!(layout.slots, 3);
         for (r, x) in &layout.routes[5] {
-            assert!((0..5).all(|v| layout.rank[v] != *r || (layout.x[v] - x).abs() >= 1.0), "{layout:?}");
+            assert!(
+                (0..5).all(|v| layout.rank[v] != *r || (layout.x[v] - x).abs() >= 1.0),
+                "{layout:?}"
+            );
         }
         assert!(layout.routes[..5].iter().all(Vec::is_empty));
         // A cycle is broken, not looped forever, and its closing edge is marked.
@@ -422,13 +523,20 @@ mod tests {
         let edges = [(0, 3), (1, 2)];
         let layout = flow_layout(4, &edges, &[None; 4]);
         assert!(layout.x[0] < layout.x[1]);
-        assert!(layout.x[3] < layout.x[2], "children follow their parents: {:?}", layout.x);
+        assert!(
+            layout.x[3] < layout.x[2],
+            "children follow their parents: {:?}",
+            layout.x
+        );
         // Groups stay contiguous within a rank.
         let groups = [Some(0), Some(1), Some(0), Some(1)];
         let layout = flow_layout(4, &[], &groups);
         let mut by_x: Vec<usize> = (0..4).collect();
         by_x.sort_by(|a, b| layout.x[*a].total_cmp(&layout.x[*b]));
-        assert_eq!(by_x.iter().map(|v| groups[*v]).collect::<Vec<_>>(), vec![Some(0), Some(0), Some(1), Some(1)]);
+        assert_eq!(
+            by_x.iter().map(|v| groups[*v]).collect::<Vec<_>>(),
+            vec![Some(0), Some(0), Some(1), Some(1)]
+        );
         // Every node stays inside the slots, a slot apart from its rank's others.
         for v in 0..4 {
             assert!(layout.x[v] >= 0.0 && layout.x[v] <= (layout.slots - 1) as f32);
@@ -437,7 +545,10 @@ mod tests {
 
     #[test]
     fn lanes_pack_spans_without_overlap() {
-        let rows = pack(&[(0.0, 2.0), (1.0, 3.0), (2.5, 4.0), (3.5, 5.0), (3.0, 5.0)], 0.25);
+        let rows = pack(
+            &[(0.0, 2.0), (1.0, 3.0), (2.5, 4.0), (3.5, 5.0), (3.0, 5.0)],
+            0.25,
+        );
         assert_eq!(rows, vec![0, 1, 0, 1, 2]);
         assert_eq!(pack(&[(0.0, 1.0), (1.0, 2.0)], 0.0), vec![0, 0]);
     }

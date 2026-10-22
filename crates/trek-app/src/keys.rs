@@ -95,7 +95,12 @@ impl Stroke {
     /// The keystroke as gpui parses it (`ctrl-shift-k`).
     fn keystroke(&self) -> String {
         let mut s = String::new();
-        for (on, name) in [(self.ctrl, "ctrl-"), (self.alt, "alt-"), (self.shift, "shift-"), (self.cmd, "cmd-")] {
+        for (on, name) in [
+            (self.ctrl, "ctrl-"),
+            (self.alt, "alt-"),
+            (self.shift, "shift-"),
+            (self.cmd, "cmd-"),
+        ] {
             if on {
                 s.push_str(name);
             }
@@ -105,13 +110,22 @@ impl Stroke {
 
     /// The same keys on Windows when nothing says otherwise: Ctrl where the Mac has ⌘.
     fn ctrl_for_cmd(&self) -> Stroke {
-        Stroke { ctrl: self.ctrl || self.cmd, cmd: false, ..self.clone() }
+        Stroke {
+            ctrl: self.ctrl || self.cmd,
+            cmd: false,
+            ..self.clone()
+        }
     }
 
     /// A Ctrl+letter with nothing else held: the keys a shell uses (readline's, and the terminal's
     /// own Ctrl+C / Ctrl+L / Ctrl+V).
     fn is_plain_ctrl_letter(&self) -> bool {
-        self.ctrl && !self.alt && !self.shift && !self.cmd && self.key.len() == 1 && self.key.as_bytes()[0].is_ascii_lowercase()
+        self.ctrl
+            && !self.alt
+            && !self.shift
+            && !self.cmd
+            && self.key.len() == 1
+            && self.key.as_bytes()[0].is_ascii_lowercase()
     }
 
     /// The whole keystroke as one run of text: `⌘⇧K` or `Ctrl+Shift+K`.
@@ -130,7 +144,12 @@ impl Stroke {
     /// ⌃⌥⌘⇧, in the order Trek's labels have always had.
     fn mac_modifiers(&self) -> String {
         let mut s = String::new();
-        for (on, glyph) in [(self.ctrl, '⌃'), (self.alt, '⌥'), (self.cmd, '⌘'), (self.shift, '⇧')] {
+        for (on, glyph) in [
+            (self.ctrl, '⌃'),
+            (self.alt, '⌥'),
+            (self.cmd, '⌘'),
+            (self.shift, '⇧'),
+        ] {
             if on {
                 s.push(glyph);
             }
@@ -140,7 +159,12 @@ impl Stroke {
 
     fn windows_modifiers(&self) -> Vec<String> {
         let mut parts = vec![];
-        for (on, name) in [(self.ctrl, "Ctrl"), (self.alt, "Alt"), (self.shift, "Shift"), (self.cmd, "Win")] {
+        for (on, name) in [
+            (self.ctrl, "Ctrl"),
+            (self.alt, "Alt"),
+            (self.shift, "Shift"),
+            (self.cmd, "Win"),
+        ] {
             if on {
                 parts.push(name.to_string());
             }
@@ -152,7 +176,11 @@ impl Stroke {
     fn chips(&self, mac: bool) -> Vec<String> {
         if mac {
             let mut chips: Vec<String> = self.mac_modifiers().chars().map(String::from).collect();
-            chips.push(if self.key == "escape" { "esc".into() } else { mac_key(&self.key) });
+            chips.push(if self.key == "escape" {
+                "esc".into()
+            } else {
+                mac_key(&self.key)
+            });
             chips
         } else {
             let mut chips = self.windows_modifiers();
@@ -321,8 +349,22 @@ macro_rules! act {
     };
 }
 
-fn row(id: Id, group: Group, mac: &'static str, windows: Win, context: Option<&'static str>, build: Option<Build>) -> Binding {
-    Binding { id, group, mac: Some(mac), windows, context, build }
+fn row(
+    id: Id,
+    group: Group,
+    mac: &'static str,
+    windows: Win,
+    context: Option<&'static str>,
+    build: Option<Build>,
+) -> Binding {
+    Binding {
+        id,
+        group,
+        mac: Some(mac),
+        windows,
+        context,
+        build,
+    }
 }
 
 static TABLE: LazyLock<Vec<Binding>> = LazyLock::new(|| {
@@ -338,84 +380,413 @@ static TABLE: LazyLock<Vec<Binding>> = LazyLock::new(|| {
         row(Minimize, App, "cmd-m", Dropped, None, act!(crate::Minimize)),
         // ⌘N only ever makes something new: never an undo, whatever has focus.
         row(NewThread, App, "cmd-n", Same, None, act!(crate::NewThread)),
-        row(OpenFolder, App, "cmd-o", Same, None, act!(crate::OpenFolder)),
-        row(OpenSettings, App, "cmd-,", Same, None, act!(crate::OpenSettings)),
-        row(ToggleSidebar, App, "cmd-b", Same, None, act!(crate::ToggleSidebar)),
-        row(SettleThread, App, "cmd-e", Same, None, act!(crate::SettleThread)),
-        row(TogglePlan, App, "shift-tab", Same, Some("Composer"), act!(crate::TogglePlan)),
-        row(TakeSnapshot, App, "cmd-shift-s", Same, None, act!(crate::TakeSnapshot)),
-        row(CycleHandHolding, App, "cmd-shift-a", Same, None, act!(crate::CycleHandHolding)),
+        row(
+            OpenFolder,
+            App,
+            "cmd-o",
+            Same,
+            None,
+            act!(crate::OpenFolder),
+        ),
+        row(
+            OpenSettings,
+            App,
+            "cmd-,",
+            Same,
+            None,
+            act!(crate::OpenSettings),
+        ),
+        row(
+            ToggleSidebar,
+            App,
+            "cmd-b",
+            Same,
+            None,
+            act!(crate::ToggleSidebar),
+        ),
+        row(
+            SettleThread,
+            App,
+            "cmd-e",
+            Same,
+            None,
+            act!(crate::SettleThread),
+        ),
+        row(
+            TogglePlan,
+            App,
+            "shift-tab",
+            Same,
+            Some("Composer"),
+            act!(crate::TogglePlan),
+        ),
+        row(
+            TakeSnapshot,
+            App,
+            "cmd-shift-s",
+            Same,
+            None,
+            act!(crate::TakeSnapshot),
+        ),
+        row(
+            CycleHandHolding,
+            App,
+            "cmd-shift-a",
+            Same,
+            None,
+            act!(crate::CycleHandHolding),
+        ),
         row(Interrupt, App, "cmd-.", Same, None, act!(crate::Interrupt)),
-        row(ToggleRightPanel, App, "cmd-j", Same, None, act!(crate::ToggleRightPanel)),
+        row(
+            ToggleRightPanel,
+            App,
+            "cmd-j",
+            Same,
+            None,
+            act!(crate::ToggleRightPanel),
+        ),
         // Not in the editor's text, where ⌘K is an inline edit (below).
-        row(OpenPalette, App, "cmd-k", Same, Some("!IdeEditor"), act!(crate::OpenPalette)),
+        row(
+            OpenPalette,
+            App,
+            "cmd-k",
+            Same,
+            Some("!IdeEditor"),
+            act!(crate::OpenPalette),
+        ),
         // Ctrl+K belongs to the shell in the terminal panel (kill to end of line) and is the inline
         // edit in the editor's text, so the palette gets a second way in that works there too,
         // as in VS Code.
-        Binding { id: OpenPaletteAnywhere, group: App, mac: None, windows: Keys("ctrl-shift-p"), context: None, build: act!(crate::OpenPalette) },
-        row(OpenInNewWindow, App, "cmd-shift-enter", Same, None, act!(crate::OpenInNewWindow)),
-        row(OpenBasecamp, App, "cmd-shift-h", Same, None, act!(crate::OpenBasecamp)),
-        row(LeaveBasecamp, App, "escape", Same, Some("Basecamp"), act!(crate::basecamp::Leave)),
-        row(OpenNotes, App, "cmd-shift-j", Same, None, act!(crate::OpenNotes)),
+        Binding {
+            id: OpenPaletteAnywhere,
+            group: App,
+            mac: None,
+            windows: Keys("ctrl-shift-p"),
+            context: None,
+            build: act!(crate::OpenPalette),
+        },
+        row(
+            OpenInNewWindow,
+            App,
+            "cmd-shift-enter",
+            Same,
+            None,
+            act!(crate::OpenInNewWindow),
+        ),
+        row(
+            OpenBasecamp,
+            App,
+            "cmd-shift-h",
+            Same,
+            None,
+            act!(crate::OpenBasecamp),
+        ),
+        row(
+            LeaveBasecamp,
+            App,
+            "escape",
+            Same,
+            Some("Basecamp"),
+            act!(crate::basecamp::Leave),
+        ),
+        row(
+            OpenNotes,
+            App,
+            "cmd-shift-j",
+            Same,
+            None,
+            act!(crate::OpenNotes),
+        ),
         // ⌥⌘E switches Agents ⇄ Editor. On Windows Ctrl+Alt is AltGr, which types characters on
         // many layouts (German, French, Polish…), so ⌥⌘ chords become Alt+Shift.
-        row(SwitchMode, App, "alt-cmd-e", Keys("alt-shift-e"), None, act!(crate::SwitchMode)),
+        row(
+            SwitchMode,
+            App,
+            "alt-cmd-e",
+            Keys("alt-shift-e"),
+            None,
+            act!(crate::SwitchMode),
+        ),
         // ⌘⇧E is the Explorer, in the editor only (as in VS Code).
-        row(ToggleIde, App, "cmd-shift-e", Same, Some("TrekIde"), act!(crate::ToggleIde)),
-        row(ToggleIdeSearch, App, "cmd-shift-f", Same, Some("TrekWindow"), act!(crate::ToggleIdeSearch)),
+        row(
+            ToggleIde,
+            App,
+            "cmd-shift-e",
+            Same,
+            Some("TrekIde"),
+            act!(crate::ToggleIde),
+        ),
+        row(
+            ToggleIdeSearch,
+            App,
+            "cmd-shift-f",
+            Same,
+            Some("TrekWindow"),
+            act!(crate::ToggleIdeSearch),
+        ),
         row(QuickOpen, App, "cmd-p", Same, None, act!(crate::QuickOpen)),
         // Ctrl+Alt+B would be AltGr+B.
-        row(ToggleAiBar, App, "alt-cmd-b", Keys("alt-shift-b"), None, act!(crate::ToggleAiBar)),
+        row(
+            ToggleAiBar,
+            App,
+            "alt-cmd-b",
+            Keys("alt-shift-b"),
+            None,
+            act!(crate::ToggleAiBar),
+        ),
         // Ctrl+` as in VS Code; no ⌘ in it, so it's the same on both and the terminal panel
         // (which has focus when it's open) lets it through.
-        row(ToggleTerminal, App, "ctrl-`", Same, None, act!(crate::ToggleTerminal)),
+        row(
+            ToggleTerminal,
+            App,
+            "ctrl-`",
+            Same,
+            None,
+            act!(crate::ToggleTerminal),
+        ),
         // The same on both (VS Code's too).
-        row(FocusScm, App, "ctrl-shift-g", Same, None, act!(crate::FocusScm)),
+        row(
+            FocusScm,
+            App,
+            "ctrl-shift-g",
+            Same,
+            None,
+            act!(crate::FocusScm),
+        ),
         // The editor's selection to the AI side bar: ⌘⇧L the chat in front, ⌘L a new one.
-        row(AddSelectionToChat, App, "cmd-shift-l", Same, Some("TrekIde"), act!(crate::AddSelectionToChat)),
-        row(AddSelectionToNewChat, App, "cmd-l", Same, Some("TrekIde"), act!(crate::AddSelectionToNewChat)),
+        row(
+            AddSelectionToChat,
+            App,
+            "cmd-shift-l",
+            Same,
+            Some("TrekIde"),
+            act!(crate::AddSelectionToChat),
+        ),
+        row(
+            AddSelectionToNewChat,
+            App,
+            "cmd-l",
+            Same,
+            Some("TrekIde"),
+            act!(crate::AddSelectionToNewChat),
+        ),
         // In the editor's text: ⌘K edits the picked lines inline (elsewhere it's the palette);
         // with a review's hunks in the file, ⌘Y keeps the one the bar is on and ⌥⌘⌫ undoes it
         // (its toast takes that back), ⌥⌘↑/↓ step between them.
-        row(InlineEdit, App, "cmd-k", Same, Some("IdeEditor"), act!(crate::editor::InlineEdit)),
+        row(
+            InlineEdit,
+            App,
+            "cmd-k",
+            Same,
+            Some("IdeEditor"),
+            act!(crate::editor::InlineEdit),
+        ),
         // Ctrl+Y is redo in Windows text fields, so Keep takes Ctrl+Shift+Y.
-        row(KeepHunk, App, "cmd-y", Keys("ctrl-shift-y"), Some("IdeEditor && hunks"), act!(crate::editor::KeepHunk)),
+        row(
+            KeepHunk,
+            App,
+            "cmd-y",
+            Keys("ctrl-shift-y"),
+            Some("IdeEditor && hunks"),
+            act!(crate::editor::KeepHunk),
+        ),
         // Ctrl+Alt+Backspace is AltGr+Backspace.
-        row(UndoHunk, App, "alt-cmd-backspace", Keys("alt-shift-backspace"), Some("IdeEditor && hunks"), act!(crate::editor::UndoHunk)),
+        row(
+            UndoHunk,
+            App,
+            "alt-cmd-backspace",
+            Keys("alt-shift-backspace"),
+            Some("IdeEditor && hunks"),
+            act!(crate::editor::UndoHunk),
+        ),
         // Ctrl+Alt+Up/Down rotates the screen on some graphics drivers, and the text field's own
         // Alt+Shift+Up/Down add a cursor; Alt+F5 and Shift+Alt+F5 are VS Code's next/previous change.
-        row(NextHunk, App, "alt-cmd-down", Keys("alt-f5"), Some("IdeEditor && hunks"), act!(crate::editor::NextHunk)),
-        row(PreviousHunk, App, "alt-cmd-up", Keys("alt-shift-f5"), Some("IdeEditor && hunks"), act!(crate::editor::PreviousHunk)),
+        row(
+            NextHunk,
+            App,
+            "alt-cmd-down",
+            Keys("alt-f5"),
+            Some("IdeEditor && hunks"),
+            act!(crate::editor::NextHunk),
+        ),
+        row(
+            PreviousHunk,
+            App,
+            "alt-cmd-up",
+            Keys("alt-shift-f5"),
+            Some("IdeEditor && hunks"),
+            act!(crate::editor::PreviousHunk),
+        ),
         // In the AI input: undo every pending change, or stop the turn (⌘↩, its pair, comes
         // through the input's Enter).
-        row(UndoAllOrStop, App, "cmd-shift-backspace", Same, Some("AiInput"), act!(crate::ide::ai::UndoAllOrStop)),
+        row(
+            UndoAllOrStop,
+            App,
+            "cmd-shift-backspace",
+            Same,
+            Some("AiInput"),
+            act!(crate::ide::ai::UndoAllOrStop),
+        ),
         // Only thread windows close with ⌘W; the main window stays put.
-        row(CloseWindow, App, "cmd-w", Same, Some("ThreadWindow"), act!(crate::CloseWindow)),
+        row(
+            CloseWindow,
+            App,
+            "cmd-w",
+            Same,
+            Some("ThreadWindow"),
+            act!(crate::CloseWindow),
+        ),
         // In the main window ⌘W closes the tab in front; the window stays put.
-        row(CloseTab, App, "cmd-w", Same, Some("TrekWindow"), act!(crate::CloseTab)),
-        Binding { id: CloseTabCtrlF4, group: App, mac: None, windows: Keys("ctrl-f4"), context: Some("TrekWindow"), build: act!(crate::CloseTab) },
+        row(
+            CloseTab,
+            App,
+            "cmd-w",
+            Same,
+            Some("TrekWindow"),
+            act!(crate::CloseTab),
+        ),
+        Binding {
+            id: CloseTabCtrlF4,
+            group: App,
+            mac: None,
+            windows: Keys("ctrl-f4"),
+            context: Some("TrekWindow"),
+            build: act!(crate::CloseTab),
+        },
         // Standard on Windows too.
         row(NextTab, App, "ctrl-tab", Same, None, act!(crate::NextTab)),
-        row(PreviousTab, App, "ctrl-shift-tab", Same, None, act!(crate::PreviousTab)),
+        row(
+            PreviousTab,
+            App,
+            "ctrl-shift-tab",
+            Same,
+            None,
+            act!(crate::PreviousTab),
+        ),
         // Notes.
-        row(NoteBold, Notes, "cmd-b", Same, NOTES, act!(crate::notes::Bold)),
-        row(NoteItalic, Notes, "cmd-i", Same, NOTES, act!(crate::notes::Italic)),
-        row(NoteUnderline, Notes, "cmd-u", Same, NOTES, act!(crate::notes::Underline)),
-        row(NoteStrike, Notes, "cmd-shift-x", Same, NOTES, act!(crate::notes::Strike)),
-        row(NoteBullets, Notes, "cmd-shift-8", Same, NOTES, act!(crate::notes::Bullets)),
-        row(NoteNumbers, Notes, "cmd-shift-7", Same, NOTES, act!(crate::notes::Numbers)),
-        row(NoteChecklist, Notes, "cmd-shift-9", Same, NOTES, act!(crate::notes::Checklist)),
+        row(
+            NoteBold,
+            Notes,
+            "cmd-b",
+            Same,
+            NOTES,
+            act!(crate::notes::Bold),
+        ),
+        row(
+            NoteItalic,
+            Notes,
+            "cmd-i",
+            Same,
+            NOTES,
+            act!(crate::notes::Italic),
+        ),
+        row(
+            NoteUnderline,
+            Notes,
+            "cmd-u",
+            Same,
+            NOTES,
+            act!(crate::notes::Underline),
+        ),
+        row(
+            NoteStrike,
+            Notes,
+            "cmd-shift-x",
+            Same,
+            NOTES,
+            act!(crate::notes::Strike),
+        ),
+        row(
+            NoteBullets,
+            Notes,
+            "cmd-shift-8",
+            Same,
+            NOTES,
+            act!(crate::notes::Bullets),
+        ),
+        row(
+            NoteNumbers,
+            Notes,
+            "cmd-shift-7",
+            Same,
+            NOTES,
+            act!(crate::notes::Numbers),
+        ),
+        row(
+            NoteChecklist,
+            Notes,
+            "cmd-shift-9",
+            Same,
+            NOTES,
+            act!(crate::notes::Checklist),
+        ),
         // Ctrl+Alt+1 is AltGr+1.
-        row(NoteHeading1, Notes, "cmd-alt-1", Keys("alt-shift-1"), NOTES, act!(crate::notes::Heading1)),
-        row(NoteHeading2, Notes, "cmd-alt-2", Keys("alt-shift-2"), NOTES, act!(crate::notes::Heading2)),
-        row(NoteQuote, Notes, "cmd-shift-.", Same, NOTES, act!(crate::notes::Quote)),
-        row(NoteCode, Notes, "cmd-e", Same, NOTES, act!(crate::notes::Code)),
-        row(NoteToggleCheck, Notes, "cmd-enter", Same, NOTES, act!(crate::notes::ToggleCheck)),
-        row(NewNote, Notes, "cmd-n", Same, Some("Notes"), act!(crate::notes::NewNote)),
+        row(
+            NoteHeading1,
+            Notes,
+            "cmd-alt-1",
+            Keys("alt-shift-1"),
+            NOTES,
+            act!(crate::notes::Heading1),
+        ),
+        row(
+            NoteHeading2,
+            Notes,
+            "cmd-alt-2",
+            Keys("alt-shift-2"),
+            NOTES,
+            act!(crate::notes::Heading2),
+        ),
+        row(
+            NoteQuote,
+            Notes,
+            "cmd-shift-.",
+            Same,
+            NOTES,
+            act!(crate::notes::Quote),
+        ),
+        row(
+            NoteCode,
+            Notes,
+            "cmd-e",
+            Same,
+            NOTES,
+            act!(crate::notes::Code),
+        ),
+        row(
+            NoteToggleCheck,
+            Notes,
+            "cmd-enter",
+            Same,
+            NOTES,
+            act!(crate::notes::ToggleCheck),
+        ),
+        row(
+            NewNote,
+            Notes,
+            "cmd-n",
+            Same,
+            Some("Notes"),
+            act!(crate::notes::NewNote),
+        ),
         // The editor.
-        row(SaveFile, Editor, "cmd-s", Same, Some("TrekEditor"), act!(crate::editor::SaveFile)),
+        row(
+            SaveFile,
+            Editor,
+            "cmd-s",
+            Same,
+            Some("TrekEditor"),
+            act!(crate::editor::SaveFile),
+        ),
         // VS Code's: the same on both (no ⌘ or Ctrl in it).
-        row(FormatDocument, Editor, "alt-shift-f", Same, Some("TrekEditor"), act!(crate::editor::FormatDocument)),
+        row(
+            FormatDocument,
+            Editor,
+            "alt-shift-f",
+            Same,
+            Some("TrekEditor"),
+            act!(crate::editor::FormatDocument),
+        ),
         // Not Trek's.
         row(Redo, System, "cmd-shift-z", Keys("ctrl-y"), None, None),
     ]
@@ -437,13 +808,21 @@ fn windows_stroke(b: &Binding) -> Option<Stroke> {
 }
 
 fn stroke_of(b: &Binding, mac: bool) -> Option<Stroke> {
-    if mac { Stroke::parse(b.mac?, true) } else { windows_stroke(b) }
+    if mac {
+        Stroke::parse(b.mac?, true)
+    } else {
+        windows_stroke(b)
+    }
 }
 
 fn resolve(b: &Binding, mac: bool) -> Option<Resolved> {
     let stroke = stroke_of(b, mac)?;
     // The Mac's keys go to gpui as they're written in the table.
-    let keystroke = if mac { b.mac?.to_string() } else { stroke.keystroke() };
+    let keystroke = if mac {
+        b.mac?.to_string()
+    } else {
+        stroke.keystroke()
+    };
     let context = match (mac, &stroke) {
         (true, _) => b.context.map(str::to_string),
         // Ctrl+letter is what a shell reads (Ctrl+C interrupts, Ctrl+L clears, Ctrl+K and Ctrl+W
@@ -481,7 +860,10 @@ fn row_of(id: Id) -> Option<&'static Binding> {
 /// The keystroke that triggers `id` here, as gpui reads it: what a test presses.
 #[cfg(test)]
 pub fn keystroke(id: Id) -> String {
-    row_of(id).and_then(|b| resolve(b, is_mac())).map(|r| r.keystroke).unwrap_or_else(|| panic!("{id:?} has no keys here"))
+    row_of(id)
+        .and_then(|b| resolve(b, is_mac()))
+        .map(|r| r.keystroke)
+        .unwrap_or_else(|| panic!("{id:?} has no keys here"))
 }
 
 /// The keys `id` has on the platform running, as text (`⌘N`, `Ctrl+N`); empty where it has none.
@@ -490,7 +872,10 @@ pub fn hint(id: Id) -> String {
 }
 
 pub fn hint_for(id: Id, mac: bool) -> String {
-    row_of(id).and_then(|b| stroke_of(b, mac)).map(|s| s.label(mac)).unwrap_or_default()
+    row_of(id)
+        .and_then(|b| stroke_of(b, mac))
+        .map(|s| s.label(mac))
+        .unwrap_or_default()
 }
 
 // ───────────────────────────── glyphs in sentences ─────────────────────────────
@@ -563,8 +948,19 @@ pub fn localize_for(text: &str, mac: bool) -> Cow<'_, str> {
             Some('←') if modifiers > 0 => Some("left".into()),
             Some('→') if modifiers > 0 => Some("right".into()),
             // One letter or digit, not the start of a word.
-            Some(c) if modifiers > 0 && c.is_ascii_alphanumeric() && !after.is_some_and(char::is_alphanumeric) => Some(c.to_ascii_lowercase().to_string()),
-            Some(c) if modifiers > 0 && matches!(c, ',' | '.' | '`' | '/' | ';' | '\'' | '[' | ']' | '=') => Some(c.to_string()),
+            Some(c)
+                if modifiers > 0
+                    && c.is_ascii_alphanumeric()
+                    && !after.is_some_and(char::is_alphanumeric) =>
+            {
+                Some(c.to_ascii_lowercase().to_string())
+            }
+            Some(c)
+                if modifiers > 0
+                    && matches!(c, ',' | '.' | '`' | '/' | ';' | '\'' | '[' | ']' | '=') =>
+            {
+                Some(c.to_string())
+            }
             _ => None,
         };
         match key {
@@ -633,7 +1029,10 @@ const PAGE: &[(&str, &[(&str, Show)])] = &[
             ("Search threads and commands", Bound(Id::OpenPalette)),
             ("New thread", Bound(Id::NewThread)),
             ("Open a folder", Bound(Id::OpenFolder)),
-            ("Open the thread in a new window", Bound(Id::OpenInNewWindow)),
+            (
+                "Open the thread in a new window",
+                Bound(Id::OpenInNewWindow),
+            ),
             ("Settle the current thread", Bound(Id::SettleThread)),
             ("Stop the agent", Bound(Id::Interrupt)),
         ],
@@ -688,29 +1087,50 @@ const PAGE: &[(&str, &[(&str, Show)])] = &[
 /// The Keyboard Shortcuts page: groups of (what it does, its keys). `send_with_secondary_enter`
 /// is the setting that swaps Send and New line. Shortcuts that don't exist on the platform (Hide
 /// on Windows) are left out.
-pub fn shortcut_groups(mac: bool, send_with_secondary_enter: bool) -> Vec<(&'static str, Vec<(&'static str, Vec<Chip>)>)> {
-    let chips_of = |keystroke: &str| Stroke::parse(keystroke, mac).map(|s| Chip::keys(s.chips(mac))).unwrap_or_default();
+pub fn shortcut_groups(
+    mac: bool,
+    send_with_secondary_enter: bool,
+) -> Vec<(&'static str, Vec<(&'static str, Vec<Chip>)>)> {
+    let chips_of = |keystroke: &str| {
+        Stroke::parse(keystroke, mac)
+            .map(|s| Chip::keys(s.chips(mac)))
+            .unwrap_or_default()
+    };
     PAGE.iter()
         .map(|(group, rows)| {
             let rows = rows
                 .iter()
                 .filter_map(|(name, show)| {
                     let chips = match (*name, show) {
-                        ("Send", _) => chips_of(if send_with_secondary_enter { "secondary-enter" } else { "enter" }),
-                        ("New line", _) => chips_of(if send_with_secondary_enter { "enter" } else { "shift-enter" }),
-                        (_, Show::Bound(id)) => Chip::keys(stroke_of(row_of(*id)?, mac)?.chips(mac)),
+                        ("Send", _) => chips_of(if send_with_secondary_enter {
+                            "secondary-enter"
+                        } else {
+                            "enter"
+                        }),
+                        ("New line", _) => chips_of(if send_with_secondary_enter {
+                            "enter"
+                        } else {
+                            "shift-enter"
+                        }),
+                        (_, Show::Bound(id)) => {
+                            Chip::keys(stroke_of(row_of(*id)?, mac)?.chips(mac))
+                        }
                         (_, Show::Keys(keystroke)) => chips_of(keystroke),
                         (_, Show::Cap(text)) => vec![Chip::Key((*text).to_string())],
                         (_, Show::Hunks) if mac => {
-                            let mut chips = Chip::keys(stroke_of(row_of(Id::NextHunk)?, mac)?.chips(mac));
+                            let mut chips =
+                                Chip::keys(stroke_of(row_of(Id::NextHunk)?, mac)?.chips(mac));
                             chips.pop();
                             chips.push(Chip::Key("↓ ↑".into()));
                             chips
                         }
                         (_, Show::Hunks) => {
-                            let mut chips = Chip::keys(stroke_of(row_of(Id::NextHunk)?, mac)?.chips(mac));
+                            let mut chips =
+                                Chip::keys(stroke_of(row_of(Id::NextHunk)?, mac)?.chips(mac));
                             chips.push(Chip::Word("or"));
-                            chips.extend(Chip::keys(stroke_of(row_of(Id::PreviousHunk)?, mac)?.chips(mac)));
+                            chips.extend(Chip::keys(
+                                stroke_of(row_of(Id::PreviousHunk)?, mac)?.chips(mac),
+                            ));
                             chips
                         }
                     };
@@ -739,9 +1159,13 @@ mod tests {
             let mut seen: HashMap<(String, Option<String>), Id> = HashMap::new();
             for b in TABLE.iter().filter(|b| b.build.is_some()) {
                 let Some(r) = resolve(b, mac) else { continue };
-                let parsed = Stroke::parse(&r.keystroke, mac).unwrap_or_else(|| panic!("{:?}: {} doesn't parse", b.id, r.keystroke));
+                let parsed = Stroke::parse(&r.keystroke, mac)
+                    .unwrap_or_else(|| panic!("{:?}: {} doesn't parse", b.id, r.keystroke));
                 if let Some(other) = seen.insert((parsed.keystroke(), r.context.clone()), b.id) {
-                    panic!("{:?} and {:?} are both {} in {:?} (mac: {mac})", other, b.id, r.keystroke, r.context);
+                    panic!(
+                        "{:?} and {:?} are both {} in {:?} (mac: {mac})",
+                        other, b.id, r.keystroke, r.context
+                    );
                 }
             }
         }
@@ -751,8 +1175,16 @@ mod tests {
     fn every_action_has_keys_on_both_platforms_unless_dropped_there() {
         for b in TABLE.iter() {
             match (b.mac, b.windows) {
-                (Some(_), Win::Dropped) => assert!(resolve(b, true).is_some() && resolve(b, false).is_none(), "{:?}", b.id),
-                (Some(_), _) => assert!(resolve(b, true).is_some() && resolve(b, false).is_some(), "{:?}", b.id),
+                (Some(_), Win::Dropped) => assert!(
+                    resolve(b, true).is_some() && resolve(b, false).is_none(),
+                    "{:?}",
+                    b.id
+                ),
+                (Some(_), _) => assert!(
+                    resolve(b, true).is_some() && resolve(b, false).is_some(),
+                    "{:?}",
+                    b.id
+                ),
                 (None, Win::Keys(_)) => assert!(resolve(b, false).is_some(), "{:?}", b.id),
                 (None, _) => panic!("{:?} has no keys on either platform", b.id),
             }
@@ -770,10 +1202,27 @@ mod tests {
 
     #[test]
     fn what_the_mac_binds_is_what_it_always_has() {
-        let mac: Vec<String> = TABLE.iter().filter(|b| b.build.is_some()).filter_map(|b| resolve(b, true)).map(|r| format!("{}|{}", r.keystroke, r.context.unwrap_or_default())).collect();
+        let mac: Vec<String> = TABLE
+            .iter()
+            .filter(|b| b.build.is_some())
+            .filter_map(|b| resolve(b, true))
+            .map(|r| format!("{}|{}", r.keystroke, r.context.unwrap_or_default()))
+            .collect();
         // The 37 in main.rs, the 13 in notes.rs and the 2 in editor.rs.
         assert_eq!(mac.len(), 37 + 13 + 2);
-        for (keys, ctx) in [("cmd-q", ""), ("alt-cmd-e", ""), ("cmd-k", "!IdeEditor"), ("cmd-k", "IdeEditor"), ("alt-cmd-backspace", "IdeEditor && hunks"), ("ctrl-`", ""), ("cmd-shift-.", "NoteEditor"), ("cmd-s", "TrekEditor"), ("alt-shift-f", "TrekEditor"), ("cmd-w", "TrekWindow"), ("cmd-w", "ThreadWindow")] {
+        for (keys, ctx) in [
+            ("cmd-q", ""),
+            ("alt-cmd-e", ""),
+            ("cmd-k", "!IdeEditor"),
+            ("cmd-k", "IdeEditor"),
+            ("alt-cmd-backspace", "IdeEditor && hunks"),
+            ("ctrl-`", ""),
+            ("cmd-shift-.", "NoteEditor"),
+            ("cmd-s", "TrekEditor"),
+            ("alt-shift-f", "TrekEditor"),
+            ("cmd-w", "TrekWindow"),
+            ("cmd-w", "ThreadWindow"),
+        ] {
             let want = format!("{keys}|{ctx}");
             assert!(mac.contains(&want), "{want}");
         }
@@ -784,7 +1233,9 @@ mod tests {
         // `localize` finds a Windows spelling by the Mac's keystroke alone.
         let mut seen: HashMap<String, Option<String>> = HashMap::new();
         for b in TABLE.iter() {
-            let Some(mac) = b.mac.and_then(|m| Stroke::parse(m, true)) else { continue };
+            let Some(mac) = b.mac.and_then(|m| Stroke::parse(m, true)) else {
+                continue;
+            };
             let win = windows_stroke(b).map(|s| s.keystroke());
             if let Some(before) = seen.insert(mac.keystroke(), win.clone()) {
                 assert_eq!(before, win, "{:?}", b.id);
@@ -797,20 +1248,47 @@ mod tests {
         for b in TABLE.iter() {
             let Some(s) = windows_stroke(b) else { continue };
             // Ctrl+Alt is AltGr, and the Windows key is Windows'.
-            assert!(!(s.ctrl && s.alt), "{:?} is Ctrl+Alt: AltGr types characters on many layouts", b.id);
+            assert!(
+                !(s.ctrl && s.alt),
+                "{:?} is Ctrl+Alt: AltGr types characters on many layouts",
+                b.id
+            );
             assert!(!s.cmd, "{:?} uses the Windows key", b.id);
             // The system's.
-            for taken in [("alt", "f4"), ("alt", "space"), ("alt", "tab"), ("alt", "enter"), ("ctrl", "escape")] {
-                let held = if taken.0 == "alt" { s.alt && !s.ctrl && !s.shift } else { s.ctrl && !s.alt && !s.shift };
+            for taken in [
+                ("alt", "f4"),
+                ("alt", "space"),
+                ("alt", "tab"),
+                ("alt", "enter"),
+                ("ctrl", "escape"),
+            ] {
+                let held = if taken.0 == "alt" {
+                    s.alt && !s.ctrl && !s.shift
+                } else {
+                    s.ctrl && !s.alt && !s.shift
+                };
                 assert!(!(held && s.key == taken.1), "{:?} is {taken:?}", b.id);
             }
             // The terminal panel's: paste.
-            assert!(!(s.ctrl && s.shift && !s.alt && matches!(s.key.as_str(), "v" | "c")), "{:?} is the terminal's copy/paste", b.id);
-            assert!(!(s.shift && s.key == "insert" && !s.ctrl && !s.alt), "{:?}", b.id);
+            assert!(
+                !(s.ctrl && s.shift && !s.alt && matches!(s.key.as_str(), "v" | "c")),
+                "{:?} is the terminal's copy/paste",
+                b.id
+            );
+            assert!(
+                !(s.shift && s.key == "insert" && !s.ctrl && !s.alt),
+                "{:?}",
+                b.id
+            );
             // Shell keys (Ctrl+C, Ctrl+L, Ctrl+K…) are left to the shell while the terminal has focus.
             if s.is_plain_ctrl_letter() {
                 let r = resolve(b, false).unwrap();
-                assert!(r.context.is_some_and(|c| c.ends_with("!Terminal")), "{:?} would take {} from the shell", b.id, r.keystroke);
+                assert!(
+                    r.context.is_some_and(|c| c.ends_with("!Terminal")),
+                    "{:?} would take {} from the shell",
+                    b.id,
+                    r.keystroke
+                );
             }
         }
     }
@@ -836,20 +1314,40 @@ mod tests {
             (Id::NoteHeading2, "alt-shift-2"),
             (Id::Redo, "ctrl-y"),
         ];
-        assert_eq!(different, want.iter().map(|(i, k)| (*i, k.to_string())).collect::<Vec<_>>());
+        assert_eq!(
+            different,
+            want.iter()
+                .map(|(i, k)| (*i, k.to_string()))
+                .collect::<Vec<_>>()
+        );
     }
 
     /// Ctrl+W closes the tab or file in front in the main window and a thread window in its own
     /// (never the other), and Ctrl+F4 is the same as Ctrl+W on Windows only.
     #[test]
     fn closing_a_tab_and_closing_a_thread_window_are_told_apart_by_the_window() {
-        let at = |id: Id, mac: bool| resolve(row_of(id).unwrap(), mac).map(|r| (r.keystroke, r.context));
+        let at =
+            |id: Id, mac: bool| resolve(row_of(id).unwrap(), mac).map(|r| (r.keystroke, r.context));
         // On Windows Ctrl+W is the shell's (delete a word) while the terminal panel has the keys.
-        for (mac, w, tab, window) in [(true, "cmd-w", "TrekWindow", "ThreadWindow"), (false, "ctrl-w", "(TrekWindow) && !Terminal", "(ThreadWindow) && !Terminal")] {
+        for (mac, w, tab, window) in [
+            (true, "cmd-w", "TrekWindow", "ThreadWindow"),
+            (
+                false,
+                "ctrl-w",
+                "(TrekWindow) && !Terminal",
+                "(ThreadWindow) && !Terminal",
+            ),
+        ] {
             assert_eq!(at(Id::CloseTab, mac), Some((w.into(), Some(tab.into()))));
-            assert_eq!(at(Id::CloseWindow, mac), Some((w.into(), Some(window.into()))));
+            assert_eq!(
+                at(Id::CloseWindow, mac),
+                Some((w.into(), Some(window.into())))
+            );
         }
-        assert_eq!(at(Id::CloseTabCtrlF4, false), Some(("ctrl-f4".into(), Some("TrekWindow".into()))));
+        assert_eq!(
+            at(Id::CloseTabCtrlF4, false),
+            Some(("ctrl-f4".into(), Some("TrekWindow".into())))
+        );
         assert_eq!(at(Id::CloseTabCtrlF4, true), None);
         assert_eq!(hint_for(Id::CloseTab, false), "Ctrl+W");
         assert_eq!(hint_for(Id::CloseTab, true), "⌘W");
@@ -860,14 +1358,31 @@ mod tests {
     #[test]
     fn terminal_gets_the_shell_keys_but_trek_keeps_its_own() {
         let ctx = |id: Id| resolve(row_of(id).unwrap(), false).unwrap().context;
-        assert_eq!(ctx(Id::OpenPalette).as_deref(), Some("(!IdeEditor) && !Terminal"), "Ctrl+K is the shell's in the terminal");
+        assert_eq!(
+            ctx(Id::OpenPalette).as_deref(),
+            Some("(!IdeEditor) && !Terminal"),
+            "Ctrl+K is the shell's in the terminal"
+        );
         assert_eq!(ctx(Id::NewThread).as_deref(), Some("!Terminal"));
-        assert_eq!(ctx(Id::ToggleTerminal), None, "Ctrl+` must reach Trek from inside the terminal");
-        assert_eq!(ctx(Id::OpenPaletteAnywhere), None, "the palette is still there, in the terminal and the editor's text too");
+        assert_eq!(
+            ctx(Id::ToggleTerminal),
+            None,
+            "Ctrl+` must reach Trek from inside the terminal"
+        );
+        assert_eq!(
+            ctx(Id::OpenPaletteAnywhere),
+            None,
+            "the palette is still there, in the terminal and the editor's text too"
+        );
         assert_eq!(ctx(Id::NextTab), None);
         assert_eq!(ctx(Id::FocusScm), None);
         // The Mac has no such thing: there ⌘ is never the shell's.
-        assert_eq!(resolve(row_of(Id::NewThread).unwrap(), true).unwrap().context, None);
+        assert_eq!(
+            resolve(row_of(Id::NewThread).unwrap(), true)
+                .unwrap()
+                .context,
+            None
+        );
     }
 
     #[test]
@@ -938,7 +1453,13 @@ mod tests {
 
     #[test]
     fn on_a_mac_text_is_left_alone() {
-        for text in ["Stop ⌘. · x", "⌥⌘E", "↩ sends; ⇧↩ adds a new line.", "⌘-click", "hold ⌥"] {
+        for text in [
+            "Stop ⌘. · x",
+            "⌥⌘E",
+            "↩ sends; ⇧↩ adds a new line.",
+            "⌘-click",
+            "hold ⌥",
+        ] {
             assert!(matches!(localize_for(text, true), Cow::Borrowed(t) if t == text));
         }
     }
@@ -949,22 +1470,52 @@ mod tests {
             ("Agents (⌥⌘E)", "Agents (Alt+Shift+E)"),
             ("AI side bar (⌥⌘B)", "AI side bar (Alt+Shift+B)"),
             ("Settings (⌘,)", "Settings (Ctrl+,)"),
-            ("Open in new window (⌘⇧↩)", "Open in new window (Ctrl+Shift+Enter)"),
+            (
+                "Open in new window (⌘⇧↩)",
+                "Open in new window (Ctrl+Shift+Enter)",
+            ),
             ("Source Control (⌃⇧G)", "Source Control (Ctrl+Shift+G)"),
             ("Stop ⌘. · queued", "Stop Ctrl+. · queued"),
-            ("Plan mode: the agent plans before it changes anything (⇧⇥)", "Plan mode: the agent plans before it changes anything (Shift+Tab)"),
-            ("Steer the running turn · ⌥↩ queues for after it", "Steer the running turn · Alt+Enter queues for after it"),
-            ("↩ adds a new line; ⌘↩ sends.", "Enter adds a new line; Ctrl+Enter sends."),
-            ("↩ sends; ⇧↩ adds a new line.", "Enter sends; Shift+Enter adds a new line."),
-            ("Screenshots you attach from the composer’s + menu or with ⌘⇧S.", "Screenshots you attach from the composer’s + menu or with Ctrl+Shift+S."),
-            ("↑↓ to move · ↩ to pick · esc", "↑↓ to move · Enter to pick · esc"),
-            ("Keep / Undo a Change ⌘Y / ⌥⌘⌫", "Keep / Undo a Change Ctrl+Shift+Y / Alt+Shift+Backspace"),
+            (
+                "Plan mode: the agent plans before it changes anything (⇧⇥)",
+                "Plan mode: the agent plans before it changes anything (Shift+Tab)",
+            ),
+            (
+                "Steer the running turn · ⌥↩ queues for after it",
+                "Steer the running turn · Alt+Enter queues for after it",
+            ),
+            (
+                "↩ adds a new line; ⌘↩ sends.",
+                "Enter adds a new line; Ctrl+Enter sends.",
+            ),
+            (
+                "↩ sends; ⇧↩ adds a new line.",
+                "Enter sends; Shift+Enter adds a new line.",
+            ),
+            (
+                "Screenshots you attach from the composer’s + menu or with ⌘⇧S.",
+                "Screenshots you attach from the composer’s + menu or with Ctrl+Shift+S.",
+            ),
+            (
+                "↑↓ to move · ↩ to pick · esc",
+                "↑↓ to move · Enter to pick · esc",
+            ),
+            (
+                "Keep / Undo a Change ⌘Y / ⌥⌘⌫",
+                "Keep / Undo a Change Ctrl+Shift+Y / Alt+Shift+Backspace",
+            ),
             ("Redo (⇧⌘Z)", "Redo (Ctrl+Y)"),
             ("Heading (⌘⌥1)", "Heading (Alt+Shift+1)"),
-            ("Undo all (⌘⇧⌫, twice)", "Undo all (Ctrl+Shift+Backspace, twice)"),
+            (
+                "Undo all (⌘⇧⌫, twice)",
+                "Undo all (Ctrl+Shift+Backspace, twice)",
+            ),
             ("⌘1–9", "Ctrl+1–9"),
             ("Jump ⌘1–⌘9", "Jump Ctrl+1–Ctrl+9"),
-            ("⌘-click a link, or hold ⌥", "Ctrl-click a link, or hold Alt"),
+            (
+                "⌘-click a link, or hold ⌥",
+                "Ctrl-click a link, or hold Alt",
+            ),
             ("Message (⌘↩ to commit)", "Message (Ctrl+Enter to commit)"),
             ("Bold (⌘B)", "Bold (Ctrl+B)"),
             ("Copy image (⌘C)", "Copy image (Ctrl+C)"),
@@ -981,12 +1532,24 @@ mod tests {
         let flat = |rows: &Vec<(&str, Vec<Chip>)>| -> Vec<String> {
             rows.iter()
                 .map(|(name, chips)| {
-                    let keys: Vec<&str> = chips.iter().map(|c| if let Chip::Key(k) = c { k.as_str() } else { "?" }).collect();
+                    let keys: Vec<&str> = chips
+                        .iter()
+                        .map(|c| {
+                            if let Chip::Key(k) = c {
+                                k.as_str()
+                            } else {
+                                "?"
+                            }
+                        })
+                        .collect();
                     format!("{name}: {}", keys.join(" "))
                 })
                 .collect()
         };
-        assert_eq!(page.iter().map(|(g, _)| *g).collect::<Vec<_>>(), ["Threads", "Composer", "Editor", "Window"]);
+        assert_eq!(
+            page.iter().map(|(g, _)| *g).collect::<Vec<_>>(),
+            ["Threads", "Composer", "Editor", "Window"]
+        );
         assert_eq!(
             flat(&page[0].1),
             [
@@ -1049,23 +1612,51 @@ mod tests {
     #[test]
     fn the_shortcuts_page_on_windows_has_its_own_keys() {
         let page = shortcut_groups(false, false);
-        let keys = |group: usize, name: &str| -> Vec<Chip> { page[group].1.iter().find(|(n, _)| *n == name).unwrap_or_else(|| panic!("{name}")).1.clone() };
-        let k = |s: &[&str]| s.iter().map(|s| Chip::Key(s.to_string())).collect::<Vec<_>>();
+        let keys = |group: usize, name: &str| -> Vec<Chip> {
+            page[group]
+                .1
+                .iter()
+                .find(|(n, _)| *n == name)
+                .unwrap_or_else(|| panic!("{name}"))
+                .1
+                .clone()
+        };
+        let k = |s: &[&str]| {
+            s.iter()
+                .map(|s| Chip::Key(s.to_string()))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(keys(0, "Search threads and commands"), k(&["Ctrl", "K"]));
-        assert_eq!(keys(0, "Open the thread in a new window"), k(&["Ctrl", "Shift", "Enter"]));
+        assert_eq!(
+            keys(0, "Open the thread in a new window"),
+            k(&["Ctrl", "Shift", "Enter"])
+        );
         assert_eq!(keys(1, "New line"), k(&["Shift", "Enter"]));
         assert_eq!(keys(1, "Plan mode"), k(&["Shift", "Tab"]));
         assert_eq!(keys(2, "Switch to Agents"), k(&["Alt", "Shift", "E"]));
         assert_eq!(keys(2, "Undo a change"), k(&["Alt", "Shift", "Backspace"]));
         assert_eq!(
             keys(2, "Next or previous change"),
-            [Chip::Key("Alt".into()), Chip::Key("F5".into()), Chip::Word("or"), Chip::Key("Alt".into()), Chip::Key("Shift".into()), Chip::Key("F5".into())]
+            [
+                Chip::Key("Alt".into()),
+                Chip::Key("F5".into()),
+                Chip::Word("or"),
+                Chip::Key("Alt".into()),
+                Chip::Key("Shift".into()),
+                Chip::Key("F5".into())
+            ]
         );
         assert_eq!(keys(2, "Format the document"), k(&["Alt", "Shift", "F"]));
-        assert_eq!(keys(3, "Close the file or thread tab in front"), k(&["Ctrl", "W"]));
+        assert_eq!(
+            keys(3, "Close the file or thread tab in front"),
+            k(&["Ctrl", "W"])
+        );
         assert_eq!(keys(3, "Leave Basecamp"), k(&["Esc"]));
         let window: Vec<&str> = page[3].1.iter().map(|(n, _)| *n).collect();
-        assert!(!window.contains(&"Hide Trek") && !window.contains(&"Minimize"), "{window:?}");
+        assert!(
+            !window.contains(&"Hide Trek") && !window.contains(&"Minimize"),
+            "{window:?}"
+        );
         assert!(window.contains(&"Quit"));
         let swapped = shortcut_groups(false, true);
         assert_eq!(swapped[1].1[0].1, k(&["Ctrl", "Enter"]));
@@ -1075,7 +1666,10 @@ mod tests {
     #[test]
     fn both_platforms_bindings_build() {
         for mac in both() {
-            let n: usize = [Group::App, Group::Notes, Group::Editor].into_iter().map(|g| bindings_for(g, mac).len()).sum();
+            let n: usize = [Group::App, Group::Notes, Group::Editor]
+                .into_iter()
+                .map(|g| bindings_for(g, mac).len())
+                .sum();
             // Windows drops Hide and Minimize and adds Ctrl+Shift+P and Ctrl+F4.
             assert_eq!(n, if mac { 52 } else { 52 - 2 + 2 }, "mac: {mac}");
         }
@@ -1103,20 +1697,30 @@ mod tests {
                     if path.file_name().is_some_and(|n| n != "tests") {
                         walk(&path, out);
                     }
-                } else if path.extension().is_some_and(|e| e == "rs") && path.file_name().is_some_and(|n| n != "keys.rs") {
+                } else if path.extension().is_some_and(|e| e == "rs")
+                    && path.file_name().is_some_and(|n| n != "keys.rs")
+                {
                     out.push(path);
                 }
             }
         }
         let mut files = vec![];
-        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
         assert!(files.len() > 50, "found {} files", files.len());
         let mut bare = vec![];
         for path in files {
             let text = std::fs::read_to_string(&path).unwrap();
             let mut localized_where_used = false;
             for (n, line) in text.lines().enumerate() {
-                if line.trim_start().starts_with("#[cfg(test)]") && text.lines().nth(n + 1).is_some_and(|next| next.trim_start().starts_with("mod ")) {
+                if line.trim_start().starts_with("#[cfg(test)]")
+                    && text
+                        .lines()
+                        .nth(n + 1)
+                        .is_some_and(|next| next.trim_start().starts_with("mod "))
+                {
                     break; // the test module closes the file
                 }
                 // A table of texts that are localized where they're shown says so around it.
@@ -1134,11 +1738,28 @@ mod tests {
                 };
                 // A line that builds a string for `keys::localize` further down says so in a comment;
                 // `ui::icon_button` localizes its tooltip itself.
-                if has_glyphs(code) && !line.contains("keys::") && !line.contains("icon_button(") && !TITLE_BAR.iter().any(|(f, s)| path.ends_with(f) && line.contains(s)) {
-                    bare.push(format!("{}:{}: {}", path.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap().display(), n + 1, line.trim()));
+                if has_glyphs(code)
+                    && !line.contains("keys::")
+                    && !line.contains("icon_button(")
+                    && !TITLE_BAR
+                        .iter()
+                        .any(|(f, s)| path.ends_with(f) && line.contains(s))
+                {
+                    bare.push(format!(
+                        "{}:{}: {}",
+                        path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                            .unwrap()
+                            .display(),
+                        n + 1,
+                        line.trim()
+                    ));
                 }
             }
         }
-        assert!(bare.is_empty(), "key glyphs shown as they are (wrap them in keys::localize):\n{}", bare.join("\n"));
+        assert!(
+            bare.is_empty(),
+            "key glyphs shown as they are (wrap them in keys::localize):\n{}",
+            bare.join("\n")
+        );
     }
 }

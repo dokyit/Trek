@@ -33,18 +33,38 @@ pub struct Drag {
 /// The side bars' widths as drawn in a window `width` wide: the AI bar gives way first, then the
 /// primary one, down to their minimums.
 pub fn fit_widths(l: &IdeLayout, width: f32) -> (f32, f32) {
-    let primary = if l.primary_open { l.primary_width.clamp(*IdeLayout::PRIMARY.start(), *IdeLayout::PRIMARY.end()) } else { 0. };
-    let ai = if l.ai_open { l.ai_width.clamp(*IdeLayout::AI.start(), *IdeLayout::AI.end()) } else { 0. };
+    let primary = if l.primary_open {
+        l.primary_width
+            .clamp(*IdeLayout::PRIMARY.start(), *IdeLayout::PRIMARY.end())
+    } else {
+        0.
+    };
+    let ai = if l.ai_open {
+        l.ai_width
+            .clamp(*IdeLayout::AI.start(), *IdeLayout::AI.end())
+    } else {
+        0.
+    };
     let spare = width - MIN_EDITOR;
-    let ai = if l.ai_open { ai.min((spare - primary).max(*IdeLayout::AI.start())) } else { 0. };
-    let primary = if l.primary_open { primary.min((spare - ai).max(*IdeLayout::PRIMARY.start())) } else { 0. };
+    let ai = if l.ai_open {
+        ai.min((spare - primary).max(*IdeLayout::AI.start()))
+    } else {
+        0.
+    };
+    let primary = if l.primary_open {
+        primary.min((spare - ai).max(*IdeLayout::PRIMARY.start()))
+    } else {
+        0.
+    };
     (primary, ai)
 }
 
 /// The bottom panel's height as drawn in a window `height` tall: at most 70% of the workbench.
 pub fn fit_panel(l: &IdeLayout, height: f32) -> f32 {
     let room = (height - CHROME_HEIGHT).max(0.);
-    let max = (room * 0.7).min(room - MIN_EDITOR_HEIGHT).max(IdeLayout::MIN_PANEL);
+    let max = (room * 0.7)
+        .min(room - MIN_EDITOR_HEIGHT)
+        .max(IdeLayout::MIN_PANEL);
     l.panel_height.clamp(IdeLayout::MIN_PANEL, max)
 }
 
@@ -61,16 +81,43 @@ impl IdeWorkbench {
         };
         let strip = div().id(id).absolute().group(id);
         let strip = match split {
-            Split::Primary => strip.top_0().bottom_0().right_0().w(px(5.)).cursor(CursorStyle::ResizeLeftRight),
-            Split::Ai => strip.top_0().bottom_0().left_0().w(px(5.)).cursor(CursorStyle::ResizeLeftRight),
-            Split::Panel => strip.left_0().right_0().top_0().h(px(5.)).cursor(CursorStyle::ResizeUpDown),
+            Split::Primary => strip
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .w(px(5.))
+                .cursor(CursorStyle::ResizeLeftRight),
+            Split::Ai => strip
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .w(px(5.))
+                .cursor(CursorStyle::ResizeLeftRight),
+            Split::Panel => strip
+                .left_0()
+                .right_0()
+                .top_0()
+                .h(px(5.))
+                .cursor(CursorStyle::ResizeUpDown),
         };
         // A thin accent line shows where the edge is while it's held or hovered.
-        let mark = div().absolute().when(vertical, |el| el.left_0().right_0().top_0().h(px(2.))).when(!vertical, |el| {
-            el.top_0().bottom_0().w(px(2.)).when(split == Split::Primary, |el| el.right_0()).when(split == Split::Ai, |el| el.left_0())
-        });
+        let mark = div()
+            .absolute()
+            .when(vertical, |el| el.left_0().right_0().top_0().h(px(2.)))
+            .when(!vertical, |el| {
+                el.top_0()
+                    .bottom_0()
+                    .w(px(2.))
+                    .when(split == Split::Primary, |el| el.right_0())
+                    .when(split == Split::Ai, |el| el.left_0())
+            });
         strip
-            .child(mark.when(active, |el| el.bg(crate::palette::ember(cx).opacity(0.7))).when(!active, |el| el.group_hover(id, |s| s.bg(theme.foreground.opacity(0.18)))))
+            .child(
+                mark.when(active, |el| el.bg(crate::palette::ember(cx).opacity(0.7)))
+                    .when(!active, |el| {
+                        el.group_hover(id, |s| s.bg(theme.foreground.opacity(0.18)))
+                    }),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, e: &MouseDownEvent, _, cx| {
@@ -90,34 +137,58 @@ impl IdeWorkbench {
                         Split::Ai => this.layout.ai_width,
                         Split::Panel => this.layout.panel_height,
                     };
-                    this.drag = Some(Drag { split, from: e.position, size });
+                    this.drag = Some(Drag {
+                        split,
+                        from: e.position,
+                        size,
+                    });
                     cx.notify();
                 }),
             )
     }
 
     /// While an edge is held: follow the pointer anywhere over the workbench until it's let go.
-    pub(super) fn drag_listeners(&self, el: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
+    pub(super) fn drag_listeners(
+        &self,
+        el: Stateful<Div>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let vertical = self.drag.is_some_and(|d| d.split == Split::Panel);
-        el.cursor(if vertical { CursorStyle::ResizeUpDown } else { CursorStyle::ResizeLeftRight })
-            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, cx| {
-                let Some(d) = this.drag else { return };
-                let dx = (e.position.x - d.from.x).as_f32();
-                let dy = (e.position.y - d.from.y).as_f32();
-                let viewport = window.viewport_size();
-                match d.split {
-                    Split::Primary => this.layout.primary_width = (d.size + dx).clamp(*IdeLayout::PRIMARY.start(), *IdeLayout::PRIMARY.end()),
-                    Split::Ai => this.layout.ai_width = (d.size - dx).clamp(*IdeLayout::AI.start(), *IdeLayout::AI.end()),
-                    Split::Panel => {
-                        let mut l = this.layout.clone();
-                        l.panel_height = d.size - dy;
-                        this.layout.panel_height = fit_panel(&l, viewport.height.as_f32());
-                    }
+        el.cursor(if vertical {
+            CursorStyle::ResizeUpDown
+        } else {
+            CursorStyle::ResizeLeftRight
+        })
+        .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, cx| {
+            let Some(d) = this.drag else { return };
+            let dx = (e.position.x - d.from.x).as_f32();
+            let dy = (e.position.y - d.from.y).as_f32();
+            let viewport = window.viewport_size();
+            match d.split {
+                Split::Primary => {
+                    this.layout.primary_width =
+                        (d.size + dx).clamp(*IdeLayout::PRIMARY.start(), *IdeLayout::PRIMARY.end())
                 }
-                cx.notify();
-            }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_drag(cx)))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_drag(cx)))
+                Split::Ai => {
+                    this.layout.ai_width =
+                        (d.size - dx).clamp(*IdeLayout::AI.start(), *IdeLayout::AI.end())
+                }
+                Split::Panel => {
+                    let mut l = this.layout.clone();
+                    l.panel_height = d.size - dy;
+                    this.layout.panel_height = fit_panel(&l, viewport.height.as_f32());
+                }
+            }
+            cx.notify();
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| this.end_drag(cx)),
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| this.end_drag(cx)),
+        )
     }
 
     fn end_drag(&mut self, cx: &mut Context<Self>) {
@@ -140,10 +211,17 @@ mod tests {
         assert_eq!(fit_widths(&l, 900.), (260., 900. - MIN_EDITOR - 260.));
         // Narrower still: both at their minimums, and the editor makes do.
         assert_eq!(fit_widths(&l, 600.), (180., 320.));
-        let hidden = IdeLayout { primary_open: false, ai_open: false, ..l.clone() };
+        let hidden = IdeLayout {
+            primary_open: false,
+            ai_open: false,
+            ..l.clone()
+        };
         assert_eq!(fit_widths(&hidden, 900.), (0., 0.));
         // The panel stays within 70% of what's under the title bar.
-        let tall = IdeLayout { panel_height: 5000., ..l };
+        let tall = IdeLayout {
+            panel_height: 5000.,
+            ..l
+        };
         assert!(fit_panel(&tall, 820.) <= (820. - CHROME_HEIGHT) * 0.7);
     }
 }

@@ -10,12 +10,23 @@ fn without_a_web_view_the_browser_says_so_and_offers_webview2_on_windows() {
     run(async |cx| {
         let trek = open(cx);
         let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
-        trek.window(cx, |window, cx| panel.update(cx, |p, cx| p.open_tool(PanelTool::Browser, window, cx)));
+        trek.window(cx, |window, cx| {
+            panel.update(cx, |p, cx| p.open_tool(PanelTool::Browser, window, cx))
+        });
         trek.render(cx);
-        let browser = cx.read(|cx| panel.read(cx).browser()).expect("the Browser tool");
+        let browser = cx
+            .read(|cx| panel.read(cx).browser())
+            .expect("the Browser tool");
         assert!(cx.read(|cx| browser.read(cx).unavailable()));
-        assert!(!trek.visible(cx, "browser-url"), "no toolbar for a browser that isn't there");
-        assert_eq!(trek.visible(cx, "browser-get-webview2"), cfg!(windows), "the download link is Windows' alone");
+        assert!(
+            !trek.visible(cx, "browser-url"),
+            "no toolbar for a browser that isn't there"
+        );
+        assert_eq!(
+            trek.visible(cx, "browser-get-webview2"),
+            cfg!(windows),
+            "the download link is Windows' alone"
+        );
 
         // The palette over it and gone, the panel shut and opened again: nothing native to hide.
         trek.press(cx, "secondary-k");

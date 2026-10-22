@@ -57,10 +57,13 @@ pub const CSP: &str = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-ev
 /// `source`, a fenced block as Markdown found it, ends in its closing fence. An open fence runs to
 /// the end of the answer, so while an agent is still writing the block its last line is code.
 pub fn fence_closed(source: &str) -> bool {
-    source.trim_end().rsplit_once('\n').is_some_and(|(_, last)| {
-        let last = last.trim();
-        last.len() >= 3 && (last.bytes().all(|b| b == b'`') || last.bytes().all(|b| b == b'~'))
-    })
+    source
+        .trim_end()
+        .rsplit_once('\n')
+        .is_some_and(|(_, last)| {
+            let last = last.trim();
+            last.len() >= 3 && (last.bytes().all(|b| b == b'`') || last.bytes().all(|b| b == b'~'))
+        })
 }
 
 /// A stable identity for a document (FNV-1a), the same from one run to the next: what its cached
@@ -76,7 +79,11 @@ pub fn content_hash(html: &str) -> u64 {
 
 /// A reported content height as the card's: within `MIN_HEIGHT`..=`MAX_HEIGHT`.
 pub fn clamp_height(h: f32) -> f32 {
-    if h.is_finite() { h.clamp(MIN_HEIGHT, MAX_HEIGHT) } else { DEFAULT_HEIGHT }
+    if h.is_finite() {
+        h.clamp(MIN_HEIGHT, MAX_HEIGHT)
+    } else {
+        DEFAULT_HEIGHT
+    }
 }
 
 /// The document's title: its `<title>`, else its first `<h1>`–`<h3>`, as text (tags dropped,
@@ -99,7 +106,12 @@ pub fn title(html: &str) -> Option<String> {
         }
         None
     };
-    ["title", "h1", "h2", "h3"].iter().filter_map(|tag| element(tag)).map(|raw| text_of(&raw)).find(|t| !t.is_empty()).map(|t| cut(&t, MAX_TITLE_CHARS))
+    ["title", "h1", "h2", "h3"]
+        .iter()
+        .filter_map(|tag| element(tag))
+        .map(|raw| text_of(&raw))
+        .find(|t| !t.is_empty())
+        .map(|t| cut(&t, MAX_TITLE_CHARS))
 }
 
 /// Markup as the text it shows: tags dropped, the common entities decoded, whitespace collapsed.
@@ -117,7 +129,10 @@ fn text_of(markup: &str) -> String {
             _ => {}
         }
     }
-    decode_entities(&out).split_whitespace().collect::<Vec<_>>().join(" ")
+    decode_entities(&out)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn decode_entities(s: &str) -> String {
@@ -185,7 +200,11 @@ fn cut(s: &str, max: usize) -> String {
 pub fn hosts(html: &str, max: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for (at, _) in html.match_indices("https://") {
-        let host: String = html[at + 8..].chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-')).collect::<String>().to_ascii_lowercase();
+        let host: String = html[at + 8..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+            .collect::<String>()
+            .to_ascii_lowercase();
         if host.contains('.') && !out.contains(&host) {
             out.push(host);
             if out.len() == max {
@@ -244,7 +263,9 @@ pub fn theme_css(theme: &Theme) -> String {
     );
     css.push_str(":where(html){background:transparent}");
     css.push_str(":where(body){margin:0;padding:12px 16px 16px;background:transparent;color:var(--trek-fg);font-family:var(--trek-font);font-size:var(--trek-font-size);line-height:1.5;-webkit-font-smoothing:antialiased}");
-    css.push_str(":where(a){color:var(--trek-accent)}:where(code,pre,kbd){font-family:var(--trek-mono)}");
+    css.push_str(
+        ":where(a){color:var(--trek-accent)}:where(code,pre,kbd){font-family:var(--trek-mono)}",
+    );
     css.push_str("::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-thumb{background:var(--trek-border);border-radius:4px}::-webkit-scrollbar-track{background:transparent}");
     css
 }
@@ -256,7 +277,9 @@ pub const THEME_STYLE_ID: &str = "trek-theme";
 /// reaches a running artifact without reloading it.
 pub fn theme_update_script(css: &str) -> String {
     let quoted = serde_json::Value::String(css.to_string()).to_string();
-    format!("(()=>{{let s=document.getElementById('{THEME_STYLE_ID}');if(!s){{s=document.createElement('style');s.id='{THEME_STYLE_ID}';(document.head||document.documentElement).prepend(s);}}s.textContent={quoted};}})();")
+    format!(
+        "(()=>{{let s=document.getElementById('{THEME_STYLE_ID}');if(!s){{s=document.createElement('style');s.id='{THEME_STYLE_ID}';(document.head||document.documentElement).prepend(s);}}s.textContent={quoted};}})();"
+    )
 }
 
 /// The document as it's served: `html` with Trek's head first (charset, the CSP again — the
@@ -283,16 +306,30 @@ pub const REMOTE_VIDEO_CSP: &str = "default-src 'none'; media-src https:; style-
 /// The page a video from the web (`url`, an https link `media::remote_video` took) plays in: as
 /// `VIDEO_HTML`, from there.
 pub fn remote_video_html(url: &str) -> String {
-    let src = if url.contains('#') { url.to_string() } else { format!("{url}#t=0.001") };
-    let escaped = src.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;");
-    VIDEO_HTML.replacen(&format!("src=\"{MEDIA_PATH}#t=0.001\""), &format!("src=\"{escaped}\""), 1)
+    let src = if url.contains('#') {
+        url.to_string()
+    } else {
+        format!("{url}#t=0.001")
+    };
+    let escaped = src
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    VIDEO_HTML.replacen(
+        &format!("src=\"{MEDIA_PATH}#t=0.001\""),
+        &format!("src=\"{escaped}\""),
+        1,
+    )
 }
 
 /// A script that takes a video's page to `secs` and plays it (a frame clicked in the strip under
 /// it), once it knows how long the video is.
 pub fn seek_script(secs: f64) -> String {
     let t = if secs.is_finite() { secs.max(0.) } else { 0. };
-    format!("(()=>{{const v=document.querySelector('video');if(!v)return;const go=()=>{{v.currentTime={t:.3};v.play().catch(()=>{{}});}};if(v.readyState>=1)go();else v.addEventListener('loadedmetadata',go,{{once:true}});}})();")
+    format!(
+        "(()=>{{const v=document.querySelector('video');if(!v)return;const go=()=>{{v.currentTime={t:.3};v.play().catch(()=>{{}});}};if(v.readyState>=1)go();else v.addEventListener('loadedmetadata',go,{{once:true}});}})();"
+    )
 }
 
 /// `document` under another policy (`csp`).
@@ -332,7 +369,9 @@ pub fn document_with(html: &str, theme_css: &str, csp: &str) -> String {
 /// had no use for (`w`, so the answer scrolls on past it). It also gives the page `trek.send` and
 /// `trek.copy` (`ACTIONS_JS`), heard only within `GESTURE_WINDOW` of the user's own click or key.
 pub fn bootstrap(nonce: &str) -> String {
-    BOOTSTRAP.replace("__ACTIONS__", ACTIONS_JS).replace("__NONCE__", nonce)
+    BOOTSTRAP
+        .replace("__ACTIONS__", ACTIONS_JS)
+        .replace("__NONCE__", nonce)
 }
 
 /// The page's `trek.send(text)` and `trek.copy(text)`, as a function of `post` (how a message
@@ -464,7 +503,8 @@ pub fn parse_message(body: &str, nonce: &str) -> Option<Message> {
         "open" => external(object.get("u")?.as_str()?).map(Message::Open),
         "w" => {
             let (x, y) = (object.get("x")?.as_f64()?, object.get("y")?.as_f64()?);
-            (x.is_finite() && y.is_finite() && x.abs() <= 10_000. && y.abs() <= 10_000.).then_some(Message::Wheel(x as f32, y as f32))
+            (x.is_finite() && y.is_finite() && x.abs() <= 10_000. && y.abs() <= 10_000.)
+                .then_some(Message::Wheel(x as f32, y as f32))
         }
         _ => None,
     }
@@ -504,7 +544,11 @@ pub fn parse_action(body: &str, nonce: &str) -> Option<Action> {
 /// `text` if a page may send or copy it: not blank, at most `MAX_ACTION_BYTES`, and no control
 /// characters but tab, `\n` and `\r`.
 pub fn action_text(text: &str) -> Option<&str> {
-    let fits = !text.trim().is_empty() && text.len() <= MAX_ACTION_BYTES && !text.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'));
+    let fits = !text.trim().is_empty()
+        && text.len() <= MAX_ACTION_BYTES
+        && !text
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'));
     fits.then_some(text)
 }
 
@@ -518,7 +562,10 @@ pub struct SendGate {
 impl SendGate {
     /// Whether a send at `now` may go; if so it counts.
     pub fn allow(&mut self, now: std::time::Instant) -> bool {
-        if self.last.is_some_and(|last| now.saturating_duration_since(last) < SEND_INTERVAL) {
+        if self
+            .last
+            .is_some_and(|last| now.saturating_duration_since(last) < SEND_INTERVAL)
+        {
             return false;
         }
         self.last = Some(now);
@@ -530,11 +577,16 @@ impl SendGate {
 /// than 2 KB, with nothing in it a URL can't hold.
 pub fn external(url: &str) -> Option<String> {
     let url = url.trim();
-    if url.is_empty() || url.len() > MAX_URL_CHARS || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+    if url.is_empty()
+        || url.len() > MAX_URL_CHARS
+        || url.chars().any(|c| c.is_control() || c.is_whitespace())
+    {
         return None;
     }
     let lower = url.to_ascii_lowercase();
-    let ok = (lower.starts_with("https://") || lower.starts_with("http://")) && url.len() > lower.find("://")? + 3 || lower.starts_with("mailto:") && url.len() > 7;
+    let ok = (lower.starts_with("https://") || lower.starts_with("http://"))
+        && url.len() > lower.find("://")? + 3
+        || lower.starts_with("mailto:") && url.len() > 7;
     ok.then(|| url.to_string())
 }
 
@@ -546,7 +598,11 @@ pub const SCHEME: &str = "trek-artifact";
 /// The origin the document with `hash` is served from, as the view addresses it: its own, so no
 /// two artifacts share storage or a security origin. `windows`: in WebView2's form.
 pub fn origin(hash: u64, windows: bool) -> String {
-    if windows { format!("http://{SCHEME}.a{hash:016x}") } else { format!("{SCHEME}://a{hash:016x}") }
+    if windows {
+        format!("http://{SCHEME}.a{hash:016x}")
+    } else {
+        format!("{SCHEME}://a{hash:016x}")
+    }
 }
 
 /// Whether the frame may go to `url` given the document's `origin`: only to itself (its first
@@ -556,7 +612,9 @@ pub fn origin(hash: u64, windows: bool) -> String {
 pub fn navigation_allowed(url: &str, origin: &str) -> bool {
     let lower = url.to_ascii_lowercase();
     let origin = origin.to_ascii_lowercase();
-    lower.strip_prefix(&origin).is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '#', '?']))
+    lower
+        .strip_prefix(&origin)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '#', '?']))
         || lower == "about:blank"
         || lower == "about:srcdoc"
         || lower.starts_with("blob:")
@@ -568,9 +626,18 @@ mod tests {
 
     #[test]
     fn an_ampersand_before_wide_characters_is_not_an_entity() {
-        assert_eq!(title("<h1>Supply & Demand: ✓ done</h1>").as_deref(), Some("Supply & Demand: ✓ done"));
-        assert_eq!(title("<title>Tom & Jerry — 日本語 ✓</title>").as_deref(), Some("Tom & Jerry — 日本語 ✓"));
-        assert_eq!(decode_entities("a &amp; b &mdash; &#x2713;; &日本語日本語"), "a & b — ✓; &日本語日本語");
+        assert_eq!(
+            title("<h1>Supply & Demand: ✓ done</h1>").as_deref(),
+            Some("Supply & Demand: ✓ done")
+        );
+        assert_eq!(
+            title("<title>Tom & Jerry — 日本語 ✓</title>").as_deref(),
+            Some("Tom & Jerry — 日本語 ✓")
+        );
+        assert_eq!(
+            decode_entities("a &amp; b &mdash; &#x2713;; &日本語日本語"),
+            "a & b — ✓; &日本語日本語"
+        );
     }
 
     fn theme() -> Theme {
@@ -595,15 +662,30 @@ mod tests {
 
     #[test]
     fn a_notes_video_plays_under_a_policy_that_allows_its_own_file_and_nothing_else() {
-        assert!(VIDEO_CSP.contains("media-src 'self'") && VIDEO_CSP.starts_with("default-src 'none'"));
-        assert!(!VIDEO_CSP.contains("script-src") && !VIDEO_CSP.contains("https:") && !VIDEO_CSP.contains("connect-src"));
+        assert!(
+            VIDEO_CSP.contains("media-src 'self'") && VIDEO_CSP.starts_with("default-src 'none'")
+        );
+        assert!(
+            !VIDEO_CSP.contains("script-src")
+                && !VIDEO_CSP.contains("https:")
+                && !VIDEO_CSP.contains("connect-src")
+        );
         let doc = document_with(VIDEO_HTML, "", VIDEO_CSP);
-        assert!(doc.contains(&format!("content=\"{VIDEO_CSP}\"")) && !doc.contains(&format!("content=\"{CSP}\"")));
+        assert!(
+            doc.contains(&format!("content=\"{VIDEO_CSP}\""))
+                && !doc.contains(&format!("content=\"{CSP}\""))
+        );
         assert!(VIDEO_HTML.contains(&format!("src=\"{MEDIA_PATH}")));
         let remote = remote_video_html("https://cdn.example.com/a.mp4?x=1&y=\"2");
-        assert!(remote.contains("src=\"https://cdn.example.com/a.mp4?x=1&amp;y=&quot;2#t=0.001\""), "{remote}");
+        assert!(
+            remote.contains("src=\"https://cdn.example.com/a.mp4?x=1&amp;y=&quot;2#t=0.001\""),
+            "{remote}"
+        );
         assert!(!remote.contains(MEDIA_PATH));
-        assert!(REMOTE_VIDEO_CSP.contains("media-src https:") && !REMOTE_VIDEO_CSP.contains("script-src"));
+        assert!(
+            REMOTE_VIDEO_CSP.contains("media-src https:")
+                && !REMOTE_VIDEO_CSP.contains("script-src")
+        );
         assert!(seek_script(12.5).contains("currentTime=12.500"));
         assert!(seek_script(f64::NAN).contains("currentTime=0.000"));
     }
@@ -615,20 +697,39 @@ mod tests {
         assert!(fence_closed("````trek-html\n<p>hi</p>\n````"));
         assert!(fence_closed("~~~trek-html\n<p>hi</p>\n~~~"));
         assert!(!fence_closed("```trek-html\n<p>hi</p>"), "still streaming");
-        assert!(!fence_closed("```trek-html\n<p>hi</p>\n``"), "two backticks aren't a fence");
-        assert!(!fence_closed("```trek-html\n<pre>```</pre>"), "backticks inside a line aren't its end");
+        assert!(
+            !fence_closed("```trek-html\n<p>hi</p>\n``"),
+            "two backticks aren't a fence"
+        );
+        assert!(
+            !fence_closed("```trek-html\n<pre>```</pre>"),
+            "backticks inside a line aren't its end"
+        );
         assert!(!fence_closed("```trek-html"), "the opening line alone");
     }
 
     #[test]
     fn the_title_is_the_title_else_the_first_heading() {
-        assert_eq!(title("<html><head><title>Desk &amp; clamp</title></head></html>").as_deref(), Some("Desk & clamp"));
-        assert_eq!(title("<TITLE lang=en>\n  Plan  <b>B</b>\n</TITLE>").as_deref(), Some("Plan B"));
+        assert_eq!(
+            title("<html><head><title>Desk &amp; clamp</title></head></html>").as_deref(),
+            Some("Desk & clamp")
+        );
+        assert_eq!(
+            title("<TITLE lang=en>\n  Plan  <b>B</b>\n</TITLE>").as_deref(),
+            Some("Plan B")
+        );
         assert_eq!(title("<style>h1{}</style><h1 class=\"x\">World &amp; the <em>Hunt</em></h1><h2>Later</h2>").as_deref(), Some("World & the Hunt"));
-        assert_eq!(title("<title></title><h2>From the heading</h2>").as_deref(), Some("From the heading"), "an empty title isn't one");
+        assert_eq!(
+            title("<title></title><h2>From the heading</h2>").as_deref(),
+            Some("From the heading"),
+            "an empty title isn't one"
+        );
         assert_eq!(title("<titles>no</titles><p>none</p>"), None);
         assert_eq!(title("<title>Still being writ"), None, "not closed yet");
-        assert_eq!(title("<h1>&#x2014; &#8212; &hellip; &bogus;</h1>").as_deref(), Some("— — … &bogus;"));
+        assert_eq!(
+            title("<h1>&#x2014; &#8212; &hellip; &bogus;</h1>").as_deref(),
+            Some("— — … &bogus;")
+        );
         let long = format!("<title>{}</title>", "word ".repeat(40));
         let t = title(&long).unwrap();
         assert!(t.chars().count() <= 80 && t.ends_with('…'), "{t}");
@@ -645,12 +746,34 @@ mod tests {
     #[test]
     fn only_the_bootstraps_messages_are_heard_and_only_within_bounds() {
         let n = "3f9a";
-        assert_eq!(parse_message(r#"{"n":"3f9a","t":"h","v":412.5}"#, n), Some(Message::Height(412.5)));
-        assert_eq!(parse_message(r#"{"n":"3f9a","t":"focus"}"#, n), Some(Message::Focus));
-        assert_eq!(parse_message(r#"{"n":"3f9a","t":"esc"}"#, n), Some(Message::Escape));
-        assert_eq!(parse_message(r#"{"n":"3f9a","t":"open","u":"https://threejs.org/docs"}"#, n), Some(Message::Open("https://threejs.org/docs".into())));
-        assert_eq!(parse_message(r#"{"n":"3f9a","t":"w","x":0,"y":-120.5}"#, n), Some(Message::Wheel(0., -120.5)));
-        assert_eq!(parse_message(r#"{"n":"3f9a","t":"w","x":0,"y":1e9}"#, n), None, "no wheel that big");
+        assert_eq!(
+            parse_message(r#"{"n":"3f9a","t":"h","v":412.5}"#, n),
+            Some(Message::Height(412.5))
+        );
+        assert_eq!(
+            parse_message(r#"{"n":"3f9a","t":"focus"}"#, n),
+            Some(Message::Focus)
+        );
+        assert_eq!(
+            parse_message(r#"{"n":"3f9a","t":"esc"}"#, n),
+            Some(Message::Escape)
+        );
+        assert_eq!(
+            parse_message(
+                r#"{"n":"3f9a","t":"open","u":"https://threejs.org/docs"}"#,
+                n
+            ),
+            Some(Message::Open("https://threejs.org/docs".into()))
+        );
+        assert_eq!(
+            parse_message(r#"{"n":"3f9a","t":"w","x":0,"y":-120.5}"#, n),
+            Some(Message::Wheel(0., -120.5))
+        );
+        assert_eq!(
+            parse_message(r#"{"n":"3f9a","t":"w","x":0,"y":1e9}"#, n),
+            None,
+            "no wheel that big"
+        );
         assert_eq!(parse_message(r#"{"n":"3f9a","t":"w","y":5}"#, n), None);
         // Without the secret, or with another, nothing is heard: the page's own scripts can't
         // speak for the bootstrap.
@@ -659,46 +782,105 @@ mod tests {
         assert_eq!(parse_message(r#"{"n":"","t":"h","v":412}"#, ""), None);
         // Heights that aren't sane numbers.
         for bad in [r#""400""#, "-1", "0", "1e300", "null", "true"] {
-            assert_eq!(parse_message(&format!(r#"{{"n":"3f9a","t":"h","v":{bad}}}"#), n), None, "{bad}");
+            assert_eq!(
+                parse_message(&format!(r#"{{"n":"3f9a","t":"h","v":{bad}}}"#), n),
+                None,
+                "{bad}"
+            );
         }
         assert_eq!(parse_message(r#"{"n":"3f9a","t":"h"}"#, n), None);
         // Things Trek doesn't listen to.
-        assert_eq!(parse_message(r#"{"n":"3f9a","t":"eval","v":"rm -rf"}"#, n), None);
-        assert_eq!(parse_message(r#"{"n":"3f9a","t":"open","u":"file:///etc/passwd"}"#, n), None);
-        assert_eq!(parse_message(r#"{"n":"3f9a","t":"open","u":"javascript:alert(1)"}"#, n), None);
+        assert_eq!(
+            parse_message(r#"{"n":"3f9a","t":"eval","v":"rm -rf"}"#, n),
+            None
+        );
+        assert_eq!(
+            parse_message(r#"{"n":"3f9a","t":"open","u":"file:///etc/passwd"}"#, n),
+            None
+        );
+        assert_eq!(
+            parse_message(r#"{"n":"3f9a","t":"open","u":"javascript:alert(1)"}"#, n),
+            None
+        );
         assert_eq!(parse_message("not json", n), None);
         assert_eq!(parse_message(r#"["n","3f9a"]"#, n), None);
-        let huge = format!(r#"{{"n":"3f9a","t":"focus","pad":"{}"}}"#, "x".repeat(MAX_MESSAGE_BYTES));
+        let huge = format!(
+            r#"{{"n":"3f9a","t":"focus","pad":"{}"}}"#,
+            "x".repeat(MAX_MESSAGE_BYTES)
+        );
         assert_eq!(parse_message(&huge, n), None, "too long to read");
     }
 
     #[test]
     fn a_page_may_send_or_copy_text_and_nothing_else() {
         let n = "3f9a";
-        assert_eq!(parse_action(r#"{"n":"3f9a","t":"send","text":"  Resolve auth.ts: keep mine \n"}"#, n), Some(Action::Send("Resolve auth.ts: keep mine".into())));
-        assert_eq!(parse_action(r#"{"n":"3f9a","t":"copy","text":"  let x = 1;\n"}"#, n), Some(Action::Copy("  let x = 1;\n".into())), "a copy is kept as it is");
-        assert_eq!(parse_action(r#"{"n":"3f9a","t":"send","text":"Ein Café\tdraußen"}"#, n), Some(Action::Send("Ein Café\tdraußen".into())));
+        assert_eq!(
+            parse_action(
+                r#"{"n":"3f9a","t":"send","text":"  Resolve auth.ts: keep mine \n"}"#,
+                n
+            ),
+            Some(Action::Send("Resolve auth.ts: keep mine".into()))
+        );
+        assert_eq!(
+            parse_action(r#"{"n":"3f9a","t":"copy","text":"  let x = 1;\n"}"#, n),
+            Some(Action::Copy("  let x = 1;\n".into())),
+            "a copy is kept as it is"
+        );
+        assert_eq!(
+            parse_action(r#"{"n":"3f9a","t":"send","text":"Ein Café\tdraußen"}"#, n),
+            Some(Action::Send("Ein Café\tdraußen".into()))
+        );
         // The other messages aren't actions, and actions aren't other messages: a handler that
         // reads only `parse_message` ignores them.
         assert_eq!(parse_action(r#"{"n":"3f9a","t":"h","v":412}"#, n), None);
-        assert_eq!(parse_message(r#"{"n":"3f9a","t":"send","text":"Apply the migration"}"#, n), None);
+        assert_eq!(
+            parse_message(r#"{"n":"3f9a","t":"send","text":"Apply the migration"}"#, n),
+            None
+        );
         // Without the secret, or with another.
         assert_eq!(parse_action(r#"{"t":"send","text":"hi"}"#, n), None);
-        assert_eq!(parse_action(r#"{"n":"0000","t":"send","text":"hi"}"#, n), None);
+        assert_eq!(
+            parse_action(r#"{"n":"0000","t":"send","text":"hi"}"#, n),
+            None
+        );
         assert_eq!(parse_action(r#"{"n":"","t":"send","text":"hi"}"#, ""), None);
         // Blank, not text, or with control characters.
-        for bad in [r#""""#, r#""  \n ""#, "42", "null", r#"["hi"]"#, r#""a\u0000b""#, r#""a\u001bb""#, r#""a\u0085b""#] {
-            assert_eq!(parse_action(&format!(r#"{{"n":"3f9a","t":"send","text":{bad}}}"#), n), None, "{bad}");
+        for bad in [
+            r#""""#,
+            r#""  \n ""#,
+            "42",
+            "null",
+            r#"["hi"]"#,
+            r#""a\u0000b""#,
+            r#""a\u001bb""#,
+            r#""a\u0085b""#,
+        ] {
+            assert_eq!(
+                parse_action(&format!(r#"{{"n":"3f9a","t":"send","text":{bad}}}"#), n),
+                None,
+                "{bad}"
+            );
         }
         assert_eq!(parse_action(r#"{"n":"3f9a","t":"send"}"#, n), None);
-        assert_eq!(parse_action(r#"{"n":"3f9a","t":"run","text":"rm -rf /"}"#, n), None);
+        assert_eq!(
+            parse_action(r#"{"n":"3f9a","t":"run","text":"rm -rf /"}"#, n),
+            None
+        );
         // 4 KiB of text, in bytes, and no more.
         let most = "é".repeat(MAX_ACTION_BYTES / 2);
-        assert_eq!(parse_action(&format!(r#"{{"n":"3f9a","t":"copy","text":"{most}"}}"#), n), Some(Action::Copy(most.clone())));
-        assert_eq!(parse_action(&format!(r#"{{"n":"3f9a","t":"copy","text":"{most}x"}}"#), n), None);
+        assert_eq!(
+            parse_action(&format!(r#"{{"n":"3f9a","t":"copy","text":"{most}"}}"#), n),
+            Some(Action::Copy(most.clone()))
+        );
+        assert_eq!(
+            parse_action(&format!(r#"{{"n":"3f9a","t":"copy","text":"{most}x"}}"#), n),
+            None
+        );
         // Escaped, the message is longer than its text, and still read.
         let quoted = r#"\""#.repeat(MAX_ACTION_BYTES);
-        assert!(matches!(parse_action(&format!(r#"{{"n":"3f9a","t":"copy","text":"{quoted}"}}"#), n), Some(Action::Copy(t)) if t.len() == MAX_ACTION_BYTES));
+        assert!(
+            matches!(parse_action(&format!(r#"{{"n":"3f9a","t":"copy","text":"{quoted}"}}"#), n), Some(Action::Copy(t)) if t.len() == MAX_ACTION_BYTES)
+        );
     }
 
     #[test]
@@ -707,9 +889,15 @@ mod tests {
         let mut gate = SendGate::default();
         assert!(gate.allow(t0));
         assert!(!gate.allow(t0 + std::time::Duration::from_millis(400)));
-        assert!(!gate.allow(t0 + std::time::Duration::from_millis(999)), "a refused send doesn't restart the second");
+        assert!(
+            !gate.allow(t0 + std::time::Duration::from_millis(999)),
+            "a refused send doesn't restart the second"
+        );
         assert!(gate.allow(t0 + SEND_INTERVAL));
-        assert!(!gate.allow(t0), "a clock read late counts as the same second");
+        assert!(
+            !gate.allow(t0),
+            "a clock read late counts as the same second"
+        );
         // Each page has its own.
         assert!(SendGate::default().allow(t0));
     }
@@ -718,10 +906,21 @@ mod tests {
     fn the_page_helper_checks_what_trek_checks() {
         // The Mac runs it inside the bootstrap, with the channel and the user's last click.
         let js = bootstrap("c0ffee");
-        assert!(js.contains(ACTIONS_JS) && !js.contains("__ACTIONS__"), "{js}");
-        assert!(js.contains(&format!("(post, () => Date.now() - touched < {})", GESTURE_WINDOW.as_millis())));
+        assert!(
+            js.contains(ACTIONS_JS) && !js.contains("__ACTIONS__"),
+            "{js}"
+        );
+        assert!(js.contains(&format!(
+            "(post, () => Date.now() - touched < {})",
+            GESTURE_WINDOW.as_millis()
+        )));
         // The page sees `trek.send` and `trek.copy`, posting `{t, text}` as `parse_action` reads.
-        for part in ["send: act('send')", "copy: act('copy')", "post({ t, text })", "Object.defineProperty(window, 'trek'"] {
+        for part in [
+            "send: act('send')",
+            "copy: act('copy')",
+            "post({ t, text })",
+            "Object.defineProperty(window, 'trek'",
+        ] {
             assert!(ACTIONS_JS.contains(part), "{part}");
         }
         assert!(ACTIONS_JS.contains(&format!("const MAX = {MAX_ACTION_BYTES};")));
@@ -730,66 +929,146 @@ mod tests {
         assert!(ACTIONS_JS.contains(r"[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]"));
         for c in (0u32..0xa0).filter_map(char::from_u32) {
             let blocked = c.is_control() && !matches!(c, '\n' | '\r' | '\t');
-            assert_eq!(action_text(&format!("a{c}b")).is_none(), blocked, "{:#x}", c as u32);
+            assert_eq!(
+                action_text(&format!("a{c}b")).is_none(),
+                blocked,
+                "{:#x}",
+                c as u32
+            );
         }
     }
 
     #[test]
     fn the_phone_runs_the_same_page_helper() {
-        let swift = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ios/Trek/Views/LivePage.swift")).expect("LivePage.swift");
+        let swift = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../ios/Trek/Views/LivePage.swift"
+        ))
+        .expect("LivePage.swift");
         let theirs: Vec<&str> = swift.lines().map(str::trim).collect();
         let ours: Vec<&str> = ACTIONS_JS.lines().map(str::trim).collect();
-        assert!(theirs.windows(ours.len()).any(|w| w == ours), "LivePage.swift's `LivePage.actions` should hold `artifact::ACTIONS_JS` line for line");
+        assert!(
+            theirs.windows(ours.len()).any(|w| w == ours),
+            "LivePage.swift's `LivePage.actions` should hold `artifact::ACTIONS_JS` line for line"
+        );
     }
 
     #[test]
     fn links_go_to_the_browser_only_if_they_are_web_or_mail() {
-        assert_eq!(external("https://example.com/a?b#c").as_deref(), Some("https://example.com/a?b#c"));
-        assert_eq!(external("HTTP://example.com").as_deref(), Some("HTTP://example.com"));
+        assert_eq!(
+            external("https://example.com/a?b#c").as_deref(),
+            Some("https://example.com/a?b#c")
+        );
+        assert_eq!(
+            external("HTTP://example.com").as_deref(),
+            Some("HTTP://example.com")
+        );
         assert_eq!(external("mailto:a@b.c").as_deref(), Some("mailto:a@b.c"));
-        for bad in ["file:///Users", "javascript:alert(1)", "trek://settings", "https://", "mailto:", "ftp://x", "https://a b", "https://a\nb", ""] {
+        for bad in [
+            "file:///Users",
+            "javascript:alert(1)",
+            "trek://settings",
+            "https://",
+            "mailto:",
+            "ftp://x",
+            "https://a b",
+            "https://a\nb",
+            "",
+        ] {
             assert_eq!(external(bad), None, "{bad:?}");
         }
-        assert_eq!(external(&format!("https://x.com/{}", "a".repeat(3000))), None);
+        assert_eq!(
+            external(&format!("https://x.com/{}", "a".repeat(3000))),
+            None
+        );
     }
 
     #[test]
     fn the_frame_never_leaves_its_document() {
         let o = origin(0xabc, false);
         assert_eq!(o, "trek-artifact://a0000000000000abc");
-        assert_eq!(origin(0xabc, true), "http://trek-artifact.a0000000000000abc");
+        assert_eq!(
+            origin(0xabc, true),
+            "http://trek-artifact.a0000000000000abc"
+        );
         assert!(navigation_allowed(&format!("{o}/"), &o), "its first load");
         assert!(navigation_allowed(&format!("{o}/#tab-2"), &o), "a fragment");
         assert!(navigation_allowed(&o, &o));
-        assert!(navigation_allowed("about:blank", &o) && navigation_allowed("about:srcdoc", &o) && navigation_allowed("blob:trek-artifact://x/1", &o));
-        for away in ["https://example.com/", "http://localhost:3000/", "file:///etc/passwd", "trek-artifact://a0000000000000abd/", "trek-artifact://a0000000000000abc.evil.com/", "data:text/html,hi", "javascript:alert(1)", "trek://settings"] {
+        assert!(
+            navigation_allowed("about:blank", &o)
+                && navigation_allowed("about:srcdoc", &o)
+                && navigation_allowed("blob:trek-artifact://x/1", &o)
+        );
+        for away in [
+            "https://example.com/",
+            "http://localhost:3000/",
+            "file:///etc/passwd",
+            "trek-artifact://a0000000000000abd/",
+            "trek-artifact://a0000000000000abc.evil.com/",
+            "data:text/html,hi",
+            "javascript:alert(1)",
+            "trek://settings",
+        ] {
             assert!(!navigation_allowed(away, &o), "{away}");
         }
         let w = origin(0xabc, true);
         assert!(navigation_allowed(&format!("{w}/"), &w));
-        assert!(!navigation_allowed("http://trek-artifact.a0000000000000abc.evil.com/", &w));
+        assert!(!navigation_allowed(
+            "http://trek-artifact.a0000000000000abc.evil.com/",
+            &w
+        ));
     }
 
     #[test]
     fn the_theme_comes_first_as_css_variables_and_the_document_can_override_it() {
         let css = theme_css(&theme());
-        for var in ["--trek-bg:", "--trek-fg:", "--trek-muted:", "--trek-accent:rgba(255,106,61,1.000)", "--trek-border:", "--trek-surface:", "--trek-font:-apple-system", "--trek-mono:", "--trek-font-size:14.5px", "--trek-radius:8px", "color-scheme:dark"] {
+        for var in [
+            "--trek-bg:",
+            "--trek-fg:",
+            "--trek-muted:",
+            "--trek-accent:rgba(255,106,61,1.000)",
+            "--trek-border:",
+            "--trek-surface:",
+            "--trek-font:-apple-system",
+            "--trek-mono:",
+            "--trek-font-size:14.5px",
+            "--trek-radius:8px",
+            "color-scheme:dark",
+        ] {
             assert!(css.contains(var), "{var} in {css}");
         }
-        assert!(css.contains(":where(html){background:transparent}"), "the page is see-through, and any rule beats it");
-        let light = theme_css(&Theme { dark: false, ..theme() });
+        assert!(
+            css.contains(":where(html){background:transparent}"),
+            "the page is see-through, and any rule beats it"
+        );
+        let light = theme_css(&Theme {
+            dark: false,
+            ..theme()
+        });
         assert!(light.contains("color-scheme:light"));
 
         // A whole document: Trek's head goes first in its head, before its own styles.
-        let doc = document("<!DOCTYPE html><html lang=en><head><title>T</title><style>body{color:red}</style></head><body>x</body></html>", &css);
-        assert!(doc.starts_with("<!DOCTYPE html><html lang=en><head><meta charset=\"utf-8\">"), "{doc}");
+        let doc = document(
+            "<!DOCTYPE html><html lang=en><head><title>T</title><style>body{color:red}</style></head><body>x</body></html>",
+            &css,
+        );
+        assert!(
+            doc.starts_with("<!DOCTYPE html><html lang=en><head><meta charset=\"utf-8\">"),
+            "{doc}"
+        );
         assert!(doc.find("id=\"trek-theme\"").unwrap() < doc.find("color:red").unwrap());
-        assert!(doc.contains(&format!("<meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\">")));
+        assert!(doc.contains(&format!(
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\">"
+        )));
         // A head-less document, and a fragment.
         let doc = document("<html><body><canvas></canvas></body></html>", &css);
         assert!(doc.starts_with("<html><head><meta charset"), "{doc}");
         let doc = document("<div id=app></div><script>go()</script>", &css);
-        assert!(doc.starts_with("<!doctype html><html><head>") && doc.ends_with("<body><div id=app></div><script>go()</script></body></html>"), "{doc}");
+        assert!(
+            doc.starts_with("<!doctype html><html><head>")
+                && doc.ends_with("<body><div id=app></div><script>go()</script></body></html>"),
+            "{doc}"
+        );
         // `<header>` isn't `<head>`.
         let doc = document("<header>Top</header>", &css);
         assert!(doc.starts_with("<!doctype html>"), "{doc}");
@@ -799,7 +1078,11 @@ mod tests {
 
         // A theme switch swaps the stylesheet in place.
         let js = theme_update_script(&css);
-        assert!(js.contains("getElementById('trek-theme')") && js.contains("--trek-accent:rgba(255,106,61,1.000)"), "{js}");
+        assert!(
+            js.contains("getElementById('trek-theme')")
+                && js.contains("--trek-accent:rgba(255,106,61,1.000)"),
+            "{js}"
+        );
     }
 
     #[test]
@@ -808,7 +1091,10 @@ mod tests {
         assert!(js.contains("const N = 'c0ffee';"));
         assert!(!js.contains("__NONCE__"));
         // It binds the native channel at once (window.ipc is wry's, and the page could shadow it).
-        assert!(js.contains("window.webkit.messageHandlers.ipc") && js.contains("window.chrome.webview"));
+        assert!(
+            js.contains("window.webkit.messageHandlers.ipc")
+                && js.contains("window.chrome.webview")
+        );
         for t in ["t: 'h'", "t: 'focus'", "t: 'esc'", "t: 'open'", "t: 'w'"] {
             assert!(js.contains(t), "{t}");
         }
@@ -827,21 +1113,43 @@ mod tests {
         assert!(CSP.starts_with("default-src 'none'"));
         assert!(!CSP.contains("http:") && !CSP.contains("file:") && !CSP.contains("'self'"));
         assert!(CSP.contains("script-src 'unsafe-inline' 'unsafe-eval' https:"));
-        assert!(CSP.contains("form-action 'none'") && CSP.contains("object-src 'none'") && CSP.contains("base-uri 'none'"));
+        assert!(
+            CSP.contains("form-action 'none'")
+                && CSP.contains("object-src 'none'")
+                && CSP.contains("base-uri 'none'")
+        );
     }
 
     #[test]
     fn instructions_stay_compact() {
-        assert!(AGENT_INSTRUCTIONS.chars().count() < 1_200, "{} chars", AGENT_INSTRUCTIONS.chars().count());
+        assert!(
+            AGENT_INSTRUCTIONS.chars().count() < 1_200,
+            "{} chars",
+            AGENT_INSTRUCTIONS.chars().count()
+        );
         // What a page can do, and the card recipes Trek ships (`skills::CARD_RECIPES`).
-        assert!(AGENT_INSTRUCTIONS.contains("trek.send(text)") && AGENT_INSTRUCTIONS.contains("trek.copy(text)"));
+        assert!(
+            AGENT_INSTRUCTIONS.contains("trek.send(text)")
+                && AGENT_INSTRUCTIONS.contains("trek.copy(text)")
+        );
         for recipe in crate::skills::CARD_RECIPES {
             assert!(AGENT_INSTRUCTIONS.contains(recipe), "{recipe}");
         }
-        assert!(AGENT_INSTRUCTIONS.contains("`trek-html`") && AGENT_INSTRUCTIONS.contains("trek-viz") && AGENT_INSTRUCTIONS.contains("200 KB"));
+        assert!(
+            AGENT_INSTRUCTIONS.contains("`trek-html`")
+                && AGENT_INSTRUCTIONS.contains("trek-viz")
+                && AGENT_INSTRUCTIONS.contains("200 KB")
+        );
         // The mock agent finds a verification CLI by "(`": the note mustn't look like one.
         assert!(!AGENT_INSTRUCTIONS.contains("(`"));
-        for var in ["--trek-bg", "--trek-fg", "--trek-muted", "--trek-accent", "--trek-border", "--trek-font"] {
+        for var in [
+            "--trek-bg",
+            "--trek-fg",
+            "--trek-muted",
+            "--trek-accent",
+            "--trek-border",
+            "--trek-font",
+        ] {
             assert!(AGENT_INSTRUCTIONS.contains(var), "{var}");
         }
     }

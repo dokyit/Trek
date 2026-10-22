@@ -13,11 +13,20 @@ use std::rc::Rc;
 
 /// What Windows does on a call about a window of this thread: GPUI's callback updates the window
 /// there and then. Whether each such update ran.
-fn windows_calls_back(window: AnyWindowHandle, cx: &TestAppContext) -> (Rc<dyn Fn()>, Rc<RefCell<Vec<bool>>>) {
+fn windows_calls_back(
+    window: AnyWindowHandle,
+    cx: &TestAppContext,
+) -> (Rc<dyn Fn()>, Rc<RefCell<Vec<bool>>>) {
     let heard = Rc::new(RefCell::new(Vec::new()));
     let async_cx = cx.to_async();
     let log = heard.clone();
-    (Rc::new(move || log.borrow_mut().push(window.update(&mut async_cx.clone(), |_, _, _| ()).is_ok())), heard)
+    (
+        Rc::new(move || {
+            log.borrow_mut()
+                .push(window.update(&mut async_cx.clone(), |_, _, _| ()).is_ok())
+        }),
+        heard,
+    )
 }
 
 /// The tests' answer to "where is the cursor", until dropped.
@@ -41,8 +50,18 @@ impl Drop for Cursor {
 /// cursor that hasn't moved since.
 fn pointer_in_the_middle(trek: &Trek, cx: &mut TestAppContext) {
     trek.window(cx, |window, cx| {
-        let at = point(window.viewport_size().width / 2., window.viewport_size().height / 2.);
-        window.dispatch_event(PlatformInput::MouseMove(gpui_kit::MouseMoveEvent { position: at, pressed_button: None, modifiers: Default::default() }), cx)
+        let at = point(
+            window.viewport_size().width / 2.,
+            window.viewport_size().height / 2.,
+        );
+        window.dispatch_event(
+            PlatformInput::MouseMove(gpui_kit::MouseMoveEvent {
+                position: at,
+                pressed_button: None,
+                modifiers: Default::default(),
+            }),
+            cx,
+        )
     });
     cx.run_until_parked();
 }
@@ -68,9 +87,16 @@ fn the_cursor_is_asked_where_after_the_draw() {
         pointer_in_the_middle(&trek, cx);
         trek.render(cx);
         cx.run_until_parked();
-        assert!(!heard.borrow().is_empty() && heard.borrow().iter().all(|ran| *ran), "every callback reached the window: {:?}", heard.borrow());
+        assert!(
+            !heard.borrow().is_empty() && heard.borrow().iter().all(|ran| *ran),
+            "every callback reached the window: {:?}",
+            heard.borrow()
+        );
         assert_eq!(asked.get(), 1, "the system was asked once");
-        assert!(!trek.window(cx, |window, _| crate::chrome::pointer_inside(window)), "the cursor is over another window: the pointer was let go");
+        assert!(
+            !trek.window(cx, |window, _| crate::chrome::pointer_inside(window)),
+            "the cursor is over another window: the pointer was let go"
+        );
     });
 }
 
@@ -96,9 +122,16 @@ fn a_cursor_over_the_window_keeps_the_pointer() {
             window.render_frame(cx);
         });
         cx.run_until_parked();
-        assert!(heard.borrow().iter().all(|ran| *ran), "every callback reached the window: {:?}", heard.borrow());
+        assert!(
+            heard.borrow().iter().all(|ran| *ran),
+            "every callback reached the window: {:?}",
+            heard.borrow()
+        );
         assert_eq!(asked.get(), 1, "one question out at a time");
-        assert!(trek.window(cx, |window, _| crate::chrome::pointer_inside(window)), "the pointer stays: the cursor is over this window");
+        assert!(
+            trek.window(cx, |window, _| crate::chrome::pointer_inside(window)),
+            "the pointer stays: the cursor is over this window"
+        );
         // The next draw asks again.
         trek.render(cx);
         cx.run_until_parked();
@@ -122,7 +155,11 @@ fn after_update_is_outside_the_update_and_defer_is_not() {
             cx.defer(move |_| c());
         });
         cx.run_until_parked();
-        assert_eq!(*heard.borrow(), [false, true], "defer: inside the update (refused); after_update: after it (heard)");
+        assert_eq!(
+            *heard.borrow(),
+            [false, true],
+            "defer: inside the update (refused); after_update: after it (heard)"
+        );
     });
 }
 
@@ -136,14 +173,24 @@ fn a_refused_update_is_logged_once_with_where() {
         let said = crate::logging::tests::captured(|| {
             trek.window(cx, |_, _| {
                 for _ in 0..3 {
-                    assert!(crate::logging::ran(window.update(&mut async_cx, |_, _, _| ())).is_none());
+                    assert!(
+                        crate::logging::ran(window.update(&mut async_cx, |_, _, _| ())).is_none()
+                    );
                 }
             });
         });
         assert_eq!(said.matches("didn't run").count(), 1, "{said}");
-        assert!(said.contains(&format!("{}:", file!())) && said.contains("RefCell already borrowed"), "{said}");
+        assert!(
+            said.contains(&format!("{}:", file!())) && said.contains("RefCell already borrowed"),
+            "{said}"
+        );
         // Outside an update it runs, and nothing is said.
-        let said = crate::logging::tests::captured(|| assert_eq!(crate::logging::ran(window.update(&mut async_cx, |_, _, _| 7)), Some(7)));
+        let said = crate::logging::tests::captured(|| {
+            assert_eq!(
+                crate::logging::ran(window.update(&mut async_cx, |_, _, _| 7)),
+                Some(7)
+            )
+        });
         assert_eq!(said, "");
     });
 }

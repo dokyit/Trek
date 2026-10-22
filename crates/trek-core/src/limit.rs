@@ -60,7 +60,13 @@ pub fn late_retry(tries: u32) -> i64 {
 /// When to count on a limit having reset, as of `now`: as reported, unless that's already past
 /// (then in a while; longer after `tries` resumes that met the limit again).
 pub fn reset_ahead(resets_at: Option<i64>, now: i64, tries: u32) -> Option<i64> {
-    resets_at.map(|at| if at <= now { now + late_retry(tries) } else { at })
+    resets_at.map(|at| {
+        if at <= now {
+            now + late_retry(tries)
+        } else {
+            at
+        }
+    })
 }
 
 /// What a resume sends when the user queued nothing of their own.
@@ -77,7 +83,11 @@ pub const WRAP_UP_LONG: f32 = 98.0;
 /// Whether a window in `scope` that is `percent` used is close enough to its limit to wrap up
 /// for. One already used up isn't: the agent's next request is the one that fails.
 pub fn wrap_up_due(scope: &LimitScope, percent: f32) -> bool {
-    let at = if *scope == LimitScope::Session { WRAP_UP_SESSION } else { WRAP_UP_LONG };
+    let at = if *scope == LimitScope::Session {
+        WRAP_UP_SESSION
+    } else {
+        WRAP_UP_LONG
+    };
     (at..100.0).contains(&percent)
 }
 
@@ -87,7 +97,9 @@ pub const WRAP_UP_TAG: &str = "[Trek: usage limit]";
 /// What Trek tells an agent whose usage window is nearly used up mid-turn (`reset`: when the
 /// window resets, in words): stop somewhere clean, rather than be cut off mid-edit.
 pub fn wrap_up_prompt(scope: &LimitScope, percent: f32, reset: Option<&str>) -> String {
-    let resets = reset.map(|r| format!(" (it resets {r})")).unwrap_or_default();
+    let resets = reset
+        .map(|r| format!(" (it resets {r})"))
+        .unwrap_or_default();
     format!(
         "{WRAP_UP_TAG} Your {} is {}% used{resets} and is about to cut this turn off. Wrap up now: finish the edit you're in the middle of, leave the code in a consistent state with nothing half-written, and start nothing new. Then end your turn with a short note: what's done, what's left, and the next step, so the work can be picked up from there once the limit resets.",
         scope.words(),
@@ -97,7 +109,11 @@ pub fn wrap_up_prompt(scope: &LimitScope, percent: f32, reset: Option<&str>) -> 
 
 /// What the thread says of a turn that wrapped up ahead of its limit (`Pause::message`).
 pub fn wrapped_message(scope: &LimitScope, percent: f32) -> String {
-    format!("Wrapped up before the {} ({}% used)", scope.words(), percent.floor() as u32)
+    format!(
+        "Wrapped up before the {} ({}% used)",
+        scope.words(),
+        percent.floor() as u32
+    )
 }
 
 /// A message waiting for a limit to reset.
@@ -141,13 +157,30 @@ fn is_zero(n: &u32) -> bool {
 }
 
 impl Pause {
-    pub fn new(message: String, resets_at: Option<i64>, scope: LimitScope, since: i64, resume: bool) -> Pause {
-        Pause { message, resets_at, scope, since, resume, queued: vec![], tries: 0, wrapped: false }
+    pub fn new(
+        message: String,
+        resets_at: Option<i64>,
+        scope: LimitScope,
+        since: i64,
+        resume: bool,
+    ) -> Pause {
+        Pause {
+            message,
+            resets_at,
+            scope,
+            since,
+            resume,
+            queued: vec![],
+            tries: 0,
+            wrapped: false,
+        }
     }
 
     /// When the resume goes out: shortly after the reset. `None` without a reset time or a resume.
     pub fn resume_at(&self) -> Option<i64> {
-        self.resets_at.filter(|_| self.resume).map(|r| r + RESUME_GRACE_MS)
+        self.resets_at
+            .filter(|_| self.resume)
+            .map(|r| r + RESUME_GRACE_MS)
     }
 
     /// When the pause is over: at its resume, or (nothing scheduled) once the limit has reset.
@@ -162,12 +195,23 @@ impl Pause {
 
     /// What goes out at the resume, in order: what the user queued, or a plain "continue".
     pub fn messages(&self) -> Vec<Queued> {
-        if self.queued.is_empty() { vec![Queued { text: CONTINUE.into(), images: vec![] }] } else { self.queued.clone() }
+        if self.queued.is_empty() {
+            vec![Queued {
+                text: CONTINUE.into(),
+                images: vec![],
+            }]
+        } else {
+            self.queued.clone()
+        }
     }
 
     /// The same limit hit again: the newer report wins, but the user's choices and messages stay.
     pub fn renewed(self, next: Pause) -> Pause {
-        Pause { resume: self.resume || next.resume, queued: self.queued, ..next }
+        Pause {
+            resume: self.resume || next.resume,
+            queued: self.queued,
+            ..next
+        }
     }
 }
 
@@ -181,7 +225,13 @@ mod tests {
     use super::*;
 
     fn pause(resets_at: Option<i64>, resume: bool) -> Pause {
-        Pause::new("You've hit your session limit · resets 7:40pm".into(), resets_at, LimitScope::Session, 0, resume)
+        Pause::new(
+            "You've hit your session limit · resets 7:40pm".into(),
+            resets_at,
+            LimitScope::Session,
+            0,
+            resume,
+        )
     }
 
     #[test]
@@ -203,10 +253,15 @@ mod tests {
     #[test]
     fn a_reset_already_past_is_tried_again_in_a_while() {
         assert_eq!(reset_ahead(Some(10_000), 5_000, 3), Some(10_000));
-        assert_eq!(reset_ahead(Some(5_000), 5_000, 0), Some(5_000 + LATE_RESET_RETRY_MS));
+        assert_eq!(
+            reset_ahead(Some(5_000), 5_000, 0),
+            Some(5_000 + LATE_RESET_RETRY_MS)
+        );
         assert_eq!(reset_ahead(None, 5_000, 2), None);
         // Late again and again: twice as long each time, up to an hour.
-        let waits: Vec<i64> = (0..6).map(|tries| reset_ahead(Some(0), 0, tries).unwrap() / 60_000).collect();
+        let waits: Vec<i64> = (0..6)
+            .map(|tries| reset_ahead(Some(0), 0, tries).unwrap() / 60_000)
+            .collect();
         assert_eq!(waits, [5, 10, 20, 40, 60, 60]);
         assert_eq!(late_retry(u32::MAX), MAX_LATE_RETRY_MS);
     }
@@ -214,9 +269,21 @@ mod tests {
     #[test]
     fn a_resume_sends_what_was_queued_in_order_or_continue() {
         let mut p = pause(Some(1), true);
-        assert_eq!(p.messages(), vec![Queued { text: CONTINUE.into(), images: vec![] }]);
-        p.queued.push(Queued { text: "first".into(), images: vec![] });
-        p.queued.push(Queued { text: "second".into(), images: vec!["/tmp/a.png".into()] });
+        assert_eq!(
+            p.messages(),
+            vec![Queued {
+                text: CONTINUE.into(),
+                images: vec![]
+            }]
+        );
+        p.queued.push(Queued {
+            text: "first".into(),
+            images: vec![],
+        });
+        p.queued.push(Queued {
+            text: "second".into(),
+            images: vec!["/tmp/a.png".into()],
+        });
         let texts: Vec<String> = p.messages().into_iter().map(|q| q.text).collect();
         assert_eq!(texts, ["first", "second"]);
     }
@@ -224,12 +291,42 @@ mod tests {
     #[test]
     fn hitting_the_limit_again_keeps_the_users_choices() {
         let mut p = pause(Some(1_000), true);
-        p.queued.push(Queued { text: "go on".into(), images: vec![] });
-        let again = p.clone().renewed(Pause::new("still limited".into(), Some(9_000), LimitScope::Weekly, 5, false));
-        assert_eq!((again.resets_at, again.resume, again.scope.clone(), again.message.as_str()), (Some(9_000), true, LimitScope::Weekly, "still limited"));
+        p.queued.push(Queued {
+            text: "go on".into(),
+            images: vec![],
+        });
+        let again = p.clone().renewed(Pause::new(
+            "still limited".into(),
+            Some(9_000),
+            LimitScope::Weekly,
+            5,
+            false,
+        ));
+        assert_eq!(
+            (
+                again.resets_at,
+                again.resume,
+                again.scope.clone(),
+                again.message.as_str()
+            ),
+            (Some(9_000), true, LimitScope::Weekly, "still limited")
+        );
         // A thread that wrapped up and then met the limit itself is simply at its limit.
-        let wrapped = Pause { wrapped: true, ..p.clone() };
-        assert!(!wrapped.renewed(Pause::new("limit".into(), Some(9_000), LimitScope::Session, 5, false)).wrapped);
+        let wrapped = Pause {
+            wrapped: true,
+            ..p.clone()
+        };
+        assert!(
+            !wrapped
+                .renewed(Pause::new(
+                    "limit".into(),
+                    Some(9_000),
+                    LimitScope::Session,
+                    5,
+                    false
+                ))
+                .wrapped
+        );
         assert_eq!(again.queued, p.queued);
     }
 
@@ -241,23 +338,42 @@ mod tests {
         assert!(!wrap_up_due(&LimitScope::Session, 100.0));
         // A week's last points are worth more work than five hours' are.
         assert!(!wrap_up_due(&LimitScope::Weekly, 97.0) && wrap_up_due(&LimitScope::Weekly, 98.0));
-        assert!(!wrap_up_due(&LimitScope::Model("Opus".into()), 96.0) && wrap_up_due(&LimitScope::Other, 98.5));
+        assert!(
+            !wrap_up_due(&LimitScope::Model("Opus".into()), 96.0)
+                && wrap_up_due(&LimitScope::Other, 98.5)
+        );
         let prompt = wrap_up_prompt(&LimitScope::Session, 96.4, Some("7:40 PM"));
         assert!(prompt.starts_with(WRAP_UP_TAG), "{prompt}");
         assert!(prompt.contains("Your 5-hour limit is 96% used (it resets 7:40 PM) and is about to cut this turn off."), "{prompt}");
-        assert!(wrap_up_prompt(&LimitScope::Weekly, 98.0, None).contains("Your weekly limit is 98% used and is about to cut this turn off. Wrap up now"));
-        assert_eq!(wrapped_message(&LimitScope::Model("Opus".into()), 98.7), "Wrapped up before the Opus limit (98% used)");
+        assert!(wrap_up_prompt(&LimitScope::Weekly, 98.0, None).contains(
+            "Your weekly limit is 98% used and is about to cut this turn off. Wrap up now"
+        ));
+        assert_eq!(
+            wrapped_message(&LimitScope::Model("Opus".into()), 98.7),
+            "Wrapped up before the Opus limit (98% used)"
+        );
     }
 
     #[test]
     fn pauses_round_trip_and_read_older_shapes() {
         let mut p = pause(Some(42), true);
         p.scope = LimitScope::Model("Opus".into());
-        p.queued.push(Queued { text: "hi".into(), images: vec![] });
+        p.queued.push(Queued {
+            text: "hi".into(),
+            images: vec![],
+        });
         let json = serde_json::to_string(&p).unwrap();
         assert_eq!(serde_json::from_str::<Pause>(&json).unwrap(), p);
         let minimal: Pause = serde_json::from_str(r#"{"message":"limit","since":3}"#).unwrap();
-        assert_eq!((minimal.resets_at, minimal.scope, minimal.resume, minimal.queued.len()), (None, LimitScope::Other, false, 0));
+        assert_eq!(
+            (
+                minimal.resets_at,
+                minimal.scope,
+                minimal.resume,
+                minimal.queued.len()
+            ),
+            (None, LimitScope::Other, false, 0)
+        );
         assert!(!minimal.wrapped && !json.contains("wrapped"));
         assert_eq!(LimitScope::Model("Opus".into()).label(), "Opus limit");
     }

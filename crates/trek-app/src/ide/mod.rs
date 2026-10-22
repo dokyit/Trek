@@ -16,8 +16,8 @@
 //! `ai::AiPane` over `Scope::Ide`.
 
 mod activity;
-pub(crate) mod ai;
 mod agents_view;
+pub(crate) mod ai;
 pub(crate) mod diff_view;
 mod editor_group;
 pub(crate) mod git;
@@ -88,7 +88,9 @@ impl IdeWorkbench {
         let me = cx.weak_entity();
         explorer.update(cx, |e, _| {
             e.on_moved(Box::new(move |from, to, window, cx| {
-                let _ = me.update(cx, |this, cx| this.file_moved(&from, to.as_deref(), window, cx));
+                let _ = me.update(cx, |this, cx| {
+                    this.file_moved(&from, to.as_deref(), window, cx)
+                });
             }))
         });
         let search = cx.new(|cx| IdeSearch::new(workspace.clone(), window, cx));
@@ -97,46 +99,64 @@ impl IdeWorkbench {
         let status = cx.new(|cx| status_bar::IdeStatus::new(workspace.clone(), me, cx));
         let (layout, files_seen, edits_seen, mode_seen) = {
             let ws = workspace.read(cx);
-            (ws.settings.ide.layout.clone(), ws.files_epoch, ws.agent_edits, ws.mode)
+            (
+                ws.settings.ide.layout.clone(),
+                ws.files_epoch,
+                ws.agent_edits,
+                ws.mode,
+            )
         };
-        let subscriptions = vec![cx.observe_in(&workspace, window, |this, ws, window, cx| {
-            let (files, edits, mode) = (ws.read(cx).files_epoch, ws.read(cx).agent_edits, ws.read(cx).mode);
-            // Another branch checked out or a rewind: open files show what's on disk now.
-            if files != this.files_seen {
-                this.files_seen = files;
-                for e in this.editors() {
-                    e.update(cx, |e, cx| e.reload_from_disk(window, cx));
+        let subscriptions = vec![
+            cx.observe_in(&workspace, window, |this, ws, window, cx| {
+                let (files, edits, mode) = (
+                    ws.read(cx).files_epoch,
+                    ws.read(cx).agent_edits,
+                    ws.read(cx).mode,
+                );
+                // Another branch checked out or a rewind: open files show what's on disk now.
+                if files != this.files_seen {
+                    this.files_seen = files;
+                    for e in this.editors() {
+                        e.update(cx, |e, cx| e.reload_from_disk(window, cx));
+                    }
                 }
-            }
-            // An agent finished a tool call: files it wrote show in their clean editors. Not
-            // while the window shows Agents: the editors aren't on screen (and a lone harness
-            // editor is the one in front, which `Route::Editor` reloads as it comes back).
-            if edits != this.edits_seen && (mode == Mode::Editor || matches!(ws.read(cx).route, crate::workspace::Route::Editor { .. })) {
-                this.edits_seen = edits;
-                for e in this.editors() {
-                    e.update(cx, |e, cx| e.reload_if_changed(window, cx));
+                // An agent finished a tool call: files it wrote show in their clean editors. Not
+                // while the window shows Agents: the editors aren't on screen (and a lone harness
+                // editor is the one in front, which `Route::Editor` reloads as it comes back).
+                if edits != this.edits_seen
+                    && (mode == Mode::Editor
+                        || matches!(ws.read(cx).route, crate::workspace::Route::Editor { .. }))
+                {
+                    this.edits_seen = edits;
+                    for e in this.editors() {
+                        e.update(cx, |e, cx| e.reload_if_changed(window, cx));
+                    }
                 }
-            }
-            this.watch_root(window, cx);
-            // Agents mode, another route, a palette over the window: previews' web views hide.
-            this.sync_previews(cx);
-            // The editors draw their own header in the harness only.
-            if mode != this.mode_seen {
-                this.mode_seen = mode;
-                for e in this.editors() {
-                    e.update(cx, |_, cx| cx.notify());
+                this.watch_root(window, cx);
+                // Agents mode, another route, a palette over the window: previews' web views hide.
+                this.sync_previews(cx);
+                // The editors draw their own header in the harness only.
+                if mode != this.mode_seen {
+                    this.mode_seen = mode;
+                    for e in this.editors() {
+                        e.update(cx, |_, cx| cx.notify());
+                    }
                 }
-            }
-            cx.notify();
-        }),
-        // "Add to Chat" from the Explorer: a chip in the AI side bar, shown if it was hidden.
-        cx.subscribe_in(&workspace, window, |this, ws, event: &crate::workspace::WorkspaceEvent, window, cx| {
-            if let crate::workspace::WorkspaceEvent::AddToChat(chip) = event {
-                if ws.read(cx).ide() {
-                    this.add_chip(chip.clone(), window, cx);
-                }
-            }
-        })];
+                cx.notify();
+            }),
+            // "Add to Chat" from the Explorer: a chip in the AI side bar, shown if it was hidden.
+            cx.subscribe_in(
+                &workspace,
+                window,
+                |this, ws, event: &crate::workspace::WorkspaceEvent, window, cx| {
+                    if let crate::workspace::WorkspaceEvent::AddToChat(chip) = event {
+                        if ws.read(cx).ide() {
+                            this.add_chip(chip.clone(), window, cx);
+                        }
+                    }
+                },
+            ),
+        ];
         let mut this = Self {
             workspace,
             tabs: Vec::new(),
@@ -169,12 +189,26 @@ impl IdeWorkbench {
     /// `from` (a file or folder) moved to `to`, or went to the Trash (`None`): clean tabs of
     /// files under it open at the new place (or close); a tab with unsaved edits keeps them, and
     /// saves to the new place.
-    pub(crate) fn file_moved(&mut self, from: &std::path::Path, to: Option<&std::path::Path>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn file_moved(
+        &mut self,
+        from: &std::path::Path,
+        to: Option<&std::path::Path>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let front = self.tabs.get(self.active).map(EditorTab::id);
         for tab in self.tabs.clone() {
             let Some(path) = tab.file(cx) else { continue };
-            let Ok(rest) = path.strip_prefix(from) else { continue };
-            let moved = to.map(|t| if rest.as_os_str().is_empty() { t.to_path_buf() } else { t.join(rest) });
+            let Ok(rest) = path.strip_prefix(from) else {
+                continue;
+            };
+            let moved = to.map(|t| {
+                if rest.as_os_str().is_empty() {
+                    t.to_path_buf()
+                } else {
+                    t.join(rest)
+                }
+            });
             self.canonical.remove(&path);
             if let Some(e) = tab.editor().filter(|_| tab.dirty(cx)) {
                 if let Some(m) = moved {
@@ -204,12 +238,22 @@ impl IdeWorkbench {
 
     /// The open files' editors.
     pub(crate) fn editors(&self) -> Vec<Entity<EditorView>> {
-        self.tabs.iter().filter_map(|t| t.editor().cloned()).collect()
+        self.tabs
+            .iter()
+            .filter_map(|t| t.editor().cloned())
+            .collect()
     }
 
     /// Open `path` (a tab, or the one it has), on `line` when given. `preview`: in the preview
     /// tab, which the next preview replaces until it's edited or kept.
-    pub fn open(&mut self, path: PathBuf, line: Option<u32>, preview: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open(
+        &mut self,
+        path: PathBuf,
+        line: Option<u32>,
+        preview: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let ix = self.open_tab(path.clone(), preview, window, cx);
         self.activate(ix, cx);
         self.workspace.update(cx, |ws, _| ws.ide_file_seen(&path));
@@ -235,7 +279,12 @@ impl IdeWorkbench {
 
     /// The tab for `path` in the harness's lone editor screen (made if it has none), in front: its
     /// editor, or its preview when the file isn't text.
-    pub fn view_for(&mut self, path: &std::path::Path, window: &mut Window, cx: &mut Context<Self>) -> AnyView {
+    pub fn view_for(
+        &mut self,
+        path: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyView {
         let ix = self.open_tab(path.to_path_buf(), false, window, cx);
         if ix != self.active {
             self.activate(ix, cx);
@@ -301,15 +350,23 @@ impl IdeWorkbench {
     /// ⌘⇧L, ⌘L: the editor's selected lines (the file, with none) go to the AI side bar as a
     /// chip, for the chat in front or a new one.
     pub fn add_selection(&mut self, new_chat: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.active_editor() else { return };
+        let Some(view) = self.active_editor() else {
+            return;
+        };
         let chip = {
             let e = view.read(cx);
             if e.scratch {
                 return;
             }
             match e.selection(cx) {
-                Some((lines, text)) => ai::context::ContextChip::Selection { path: e.path.clone(), lines, text },
-                None => ai::context::ContextChip::File { path: e.path.clone() },
+                Some((lines, text)) => ai::context::ContextChip::Selection {
+                    path: e.path.clone(),
+                    lines,
+                    text,
+                },
+                None => ai::context::ContextChip::File {
+                    path: e.path.clone(),
+                },
             }
         };
         if new_chat {
@@ -324,7 +381,12 @@ impl IdeWorkbench {
 
     /// A chip (a file from the Explorer, a problem, terminal output) for the AI side bar's
     /// input, the bar shown if it was hidden.
-    pub fn add_chip(&mut self, chip: ai::context::ContextChip, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn add_chip(
+        &mut self,
+        chip: ai::context::ContextChip,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.layout.ai_open {
             self.layout.ai_open = true;
             self.save_layout(cx);
@@ -346,7 +408,11 @@ impl IdeWorkbench {
 
     /// A hairline between regions: the theme's, or the rim glass catches.
     fn line(glass: Option<f32>, cx: &App) -> Hsla {
-        if glass.is_some() { crate::ui::panel_border(glass, cx) } else { cx.theme().border }
+        if glass.is_some() {
+            crate::ui::panel_border(glass, cx)
+        } else {
+            cx.theme().border
+        }
     }
 
     /// The files' tabs (editors and previews): (file, preview).
@@ -354,14 +420,21 @@ impl IdeWorkbench {
     pub fn tab_paths(&self, cx: &App) -> Vec<(PathBuf, bool)> {
         self.tabs
             .iter()
-            .filter_map(|t| t.editor().map(|e| e.read(cx).path.clone()).or_else(|| t.preview_view().map(|p| p.read(cx).path.clone())).map(|p| (p, t.preview)))
+            .filter_map(|t| {
+                t.editor()
+                    .map(|e| e.read(cx).path.clone())
+                    .or_else(|| t.preview_view().map(|p| p.read(cx).path.clone()))
+                    .map(|p| (p, t.preview))
+            })
             .collect()
     }
 
     /// The preview in front, if the tab in front is one.
     #[cfg(any(test, feature = "shots"))]
     pub fn active_preview(&self) -> Option<Entity<preview::PreviewView>> {
-        self.tabs.get(self.active).and_then(|t| t.preview_view().cloned())
+        self.tabs
+            .get(self.active)
+            .and_then(|t| t.preview_view().cloned())
     }
 }
 
@@ -386,15 +459,25 @@ impl Render for IdeWorkbench {
             .h_full()
             .bg(crate::ui::panel_bg(glass, cx))
             .child(self.editor_area(glass, cx))
-            .when(layout.panel_open, |el| el.child(self.bottom_panel(panel_h, glass, window, cx)));
+            .when(layout.panel_open, |el| {
+                el.child(self.bottom_panel(panel_h, glass, window, cx))
+            });
 
         v_flex()
             .id("ide-workbench")
             .when(dragging, |el| self.drag_listeners(el, cx))
             .test_support()
             .key_context("TrekIde")
-            .on_action(cx.listener(|this, _: &crate::AddSelectionToChat, window, cx| this.add_selection(false, window, cx)))
-            .on_action(cx.listener(|this, _: &crate::AddSelectionToNewChat, window, cx| this.add_selection(true, window, cx)))
+            .on_action(
+                cx.listener(|this, _: &crate::AddSelectionToChat, window, cx| {
+                    this.add_selection(false, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::AddSelectionToNewChat, window, cx| {
+                    this.add_selection(true, window, cx)
+                }),
+            )
             .size_full()
             .border_t_1()
             .border_color(line)
@@ -406,7 +489,7 @@ impl Render for IdeWorkbench {
                         el.child(
                             v_flex()
                                 .id("ide-primary")
-            .test_support()
+                                .test_support()
                                 .relative()
                                 .w(px(primary_w))
                                 .h_full()
@@ -424,7 +507,7 @@ impl Render for IdeWorkbench {
                         el.child(
                             v_flex()
                                 .id("ide-ai")
-            .test_support()
+                                .test_support()
                                 .relative()
                                 .w(px(ai_w))
                                 .h_full()
@@ -437,6 +520,13 @@ impl Render for IdeWorkbench {
                         )
                     }),
             )
-            .child(self.status.clone().cached(StyleRefinement::default().w_full().flex_none().h(px(status_bar::HEIGHT))))
+            .child(
+                self.status.clone().cached(
+                    StyleRefinement::default()
+                        .w_full()
+                        .flex_none()
+                        .h(px(status_bar::HEIGHT)),
+                ),
+            )
     }
 }

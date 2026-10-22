@@ -13,18 +13,34 @@ fn the_figma_switch_gives_new_sessions_the_desktop_server() {
         // Off until it's turned on: a session gets no Figma server.
         let before = trek.send(cx, "mock:mcp");
         trek.wait_done(cx, &before, RunState::Idle).await;
-        assert!(!trek.answers(cx, &before).contains(FIGMA_DESKTOP_SERVER), "{}", trek.answers(cx, &before));
+        assert!(
+            !trek.answers(cx, &before).contains(FIGMA_DESKTOP_SERVER),
+            "{}",
+            trek.answers(cx, &before)
+        );
 
         // Turned on from the Tools page.
-        trek.update(cx, |ws, cx| ws.navigate(Route::Settings(SettingsPage::Tools), cx));
+        trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Settings(SettingsPage::Tools), cx)
+        });
         trek.render(cx);
-        assert!(trek.visible(cx, "figma-desktop-status"), "the desktop app's state is shown");
+        assert!(
+            trek.visible(cx, "figma-desktop-status"),
+            "the desktop app's state is shown"
+        );
         trek.click(cx, "figma-desktop");
         trek.render(cx);
         assert!(trek.read(cx, |ws, _| ws.settings.tools.figma_desktop));
 
         // A new session has it, as a remote (HTTP) server, alongside Trek's own tools.
-        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: Some(trek.project.clone()) }, cx));
+        trek.update(cx, |ws, cx| {
+            ws.navigate(
+                Route::Draft {
+                    project: Some(trek.project.clone()),
+                },
+                cx,
+            )
+        });
         trek.render(cx);
         let after = trek.send(cx, "mock:mcp");
         assert_ne!(after, before);

@@ -10,9 +10,11 @@ use super::preview::{Kind, NotText, PreviewEvent, PreviewView};
 use crate::editor::EditorView;
 use crate::keys::{self, Id};
 use crate::workspace::Route;
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::button::Button;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::{Path, PathBuf};
@@ -85,7 +87,9 @@ impl EditorTab {
 
     /// The editor's file (a diff tab has none of its own).
     pub fn path(&self, cx: &App) -> Option<PathBuf> {
-        self.editor().filter(|e| !e.read(cx).scratch).map(|e| e.read(cx).path.clone())
+        self.editor()
+            .filter(|e| !e.read(cx).scratch)
+            .map(|e| e.read(cx).path.clone())
     }
 
     /// What the tab says.
@@ -115,8 +119,18 @@ impl EditorTab {
 impl IdeWorkbench {
     /// The tab for `path`, made if there's none: in place of the preview tab when `preview`,
     /// else after the one in front. Returns its index.
-    pub(super) fn open_tab(&mut self, path: PathBuf, preview: bool, window: &mut Window, cx: &mut Context<Self>) -> usize {
-        if let Some(ix) = self.tabs.iter().position(|t| t.file(cx).as_ref() == Some(&path)) {
+    pub(super) fn open_tab(
+        &mut self,
+        path: PathBuf,
+        preview: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        if let Some(ix) = self
+            .tabs
+            .iter()
+            .position(|t| t.file(cx).as_ref() == Some(&path))
+        {
             // Opened on purpose (double click, ⌘P, a link): it stays.
             if !preview {
                 self.tabs[ix].preview = false;
@@ -130,8 +144,16 @@ impl IdeWorkbench {
     /// A tab for the file at `path`: an editor, or a preview when its name says it's an image, a
     /// PDF, video or audio, or when it's kept online and has to be fetched first (unless it just
     /// was, `fetched`). An editor whose file turns out not to be text gives way to a preview.
-    fn file_tab(&mut self, path: PathBuf, preview: bool, fetched: bool, window: &mut Window, cx: &mut Context<Self>) -> EditorTab {
-        let kind = super::preview::kind_by_name(&path).or_else(|| (!fetched && super::preview::online_only(&path)).then_some(Kind::Text));
+    fn file_tab(
+        &mut self,
+        path: PathBuf,
+        preview: bool,
+        fetched: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> EditorTab {
+        let kind = super::preview::kind_by_name(&path)
+            .or_else(|| (!fetched && super::preview::online_only(&path)).then_some(Kind::Text));
         if let Some(kind) = kind {
             return self.preview_tab(path, kind, None, preview, window, cx);
         }
@@ -142,44 +164,101 @@ impl IdeWorkbench {
                 return;
             }
             if view.read(cx).dirty {
-                if let Some(t) = this.tabs.iter_mut().find(|t| t.editor() == Some(&view) && t.preview) {
+                if let Some(t) = this
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.editor() == Some(&view) && t.preview)
+                {
                     t.preview = false;
                 }
             }
             cx.notify();
         });
-        EditorTab { view: TabView::Editor(view), preview, _watch: std::rc::Rc::new(watch) }
+        EditorTab {
+            view: TabView::Editor(view),
+            preview,
+            _watch: std::rc::Rc::new(watch),
+        }
     }
 
-    fn preview_tab(&mut self, path: PathBuf, kind: Kind, error: Option<std::io::Error>, preview: bool, window: &mut Window, cx: &mut Context<Self>) -> EditorTab {
+    fn preview_tab(
+        &mut self,
+        path: PathBuf,
+        kind: Kind,
+        error: Option<std::io::Error>,
+        preview: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> EditorTab {
         let view = cx.new(|cx| PreviewView::new(path, kind, error, window, cx));
-        let watch = cx.subscribe_in(&view, window, |this, view, event: &PreviewEvent, window, cx| match event {
-            PreviewEvent::Reopen { fetched } => this.reopen(view.entity_id(), *fetched, window, cx),
-        });
-        EditorTab { view: TabView::Preview(view), preview, _watch: std::rc::Rc::new(watch) }
+        let watch = cx.subscribe_in(
+            &view,
+            window,
+            |this, view, event: &PreviewEvent, window, cx| match event {
+                PreviewEvent::Reopen { fetched } => {
+                    this.reopen(view.entity_id(), *fetched, window, cx)
+                }
+            },
+        );
+        EditorTab {
+            view: TabView::Preview(view),
+            preview,
+            _watch: std::rc::Rc::new(watch),
+        }
     }
 
     /// The editor of `view` found its file isn't text, or can't be read: a preview takes its place.
-    fn show_instead(&mut self, view: &Entity<EditorView>, instead: NotText, window: &mut Window, cx: &mut Context<Self>) {
+    fn show_instead(
+        &mut self,
+        view: &Entity<EditorView>,
+        instead: NotText,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let path = view.read(cx).path.clone();
         let (kind, error) = match instead {
             NotText::Binary => (Kind::Binary, None),
             NotText::Unreadable(e) => (Kind::Text, Some(e)),
         };
-        self.replace_tab(view.entity_id(), |this, preview, window, cx| this.preview_tab(path, kind, error, preview, window, cx), window, cx);
+        self.replace_tab(
+            view.entity_id(),
+            |this, preview, window, cx| this.preview_tab(path, kind, error, preview, window, cx),
+            window,
+            cx,
+        );
     }
 
     /// The file of the preview `id` again (Retry, or it was fetched): an editor if it reads as text
     /// now, else a new preview.
     fn reopen(&mut self, id: EntityId, fetched: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.tabs.iter().find(|t| t.id() == id).and_then(|t| t.file(cx)) else { return };
-        self.replace_tab(id, |this, preview, window, cx| this.file_tab(path, preview, fetched, window, cx), window, cx);
+        let Some(path) = self
+            .tabs
+            .iter()
+            .find(|t| t.id() == id)
+            .and_then(|t| t.file(cx))
+        else {
+            return;
+        };
+        self.replace_tab(
+            id,
+            |this, preview, window, cx| this.file_tab(path, preview, fetched, window, cx),
+            window,
+            cx,
+        );
     }
 
     /// Put the tab `make` makes (given the old one's preview mark) where the tab of `id` is, in
     /// front (with the keys, if it isn't a preview) if that was.
-    fn replace_tab(&mut self, id: EntityId, make: impl FnOnce(&mut Self, bool, &mut Window, &mut Context<Self>) -> EditorTab, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(ix) = self.tabs.iter().position(|t| t.id() == id) else { return };
+    fn replace_tab(
+        &mut self,
+        id: EntityId,
+        make: impl FnOnce(&mut Self, bool, &mut Window, &mut Context<Self>) -> EditorTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.tabs.iter().position(|t| t.id() == id) else {
+            return;
+        };
         let preview = self.tabs[ix].preview;
         // A preview had the keys if they're in it; an editor is replaced as its file is first
         // read, so it has them if it was opened on purpose (`open` gave them to it).
@@ -208,9 +287,15 @@ impl IdeWorkbench {
     /// while the window shows the editor and nothing Trek draws (a palette, a menu) is over it.
     pub(super) fn sync_previews(&mut self, cx: &mut Context<Self>) {
         let ws = self.workspace.read(cx);
-        let on_screen = !ws.overlay_open && self.menus_open == 0 && (ws.ide() || matches!(ws.route, crate::workspace::Route::Editor { .. }));
+        let on_screen = !ws.overlay_open
+            && self.menus_open == 0
+            && (ws.ide() || matches!(ws.route, crate::workspace::Route::Editor { .. }));
         let front = self.tabs.get(self.active).map(EditorTab::id);
-        let previews: Vec<(bool, Entity<PreviewView>)> = self.tabs.iter().filter_map(|t| t.preview_view().map(|p| (Some(t.id()) == front, p.clone()))).collect();
+        let previews: Vec<(bool, Entity<PreviewView>)> = self
+            .tabs
+            .iter()
+            .filter_map(|t| t.preview_view().map(|p| (Some(t.id()) == front, p.clone())))
+            .collect();
         for (in_front, p) in previews {
             p.update(cx, |p, cx| p.set_shown(on_screen && in_front, cx));
         }
@@ -219,14 +304,20 @@ impl IdeWorkbench {
     /// A tab's menu opened or closed. It hangs over the editor, where a native web view would
     /// draw over it.
     fn tab_menu(&mut self, opened: bool, cx: &mut Context<Self>) {
-        self.menus_open = if opened { self.menus_open + 1 } else { self.menus_open.saturating_sub(1) };
+        self.menus_open = if opened {
+            self.menus_open + 1
+        } else {
+            self.menus_open.saturating_sub(1)
+        };
         self.sync_previews(cx);
     }
 
     /// Put `tab` in place of the preview tab when `preview` (and there's a clean one), else
     /// after the one in front. Returns its index.
     fn place(&mut self, tab: EditorTab, preview: bool, cx: &mut Context<Self>) -> usize {
-        let replace = preview.then(|| self.tabs.iter().position(|t| t.preview && !t.dirty(cx))).flatten();
+        let replace = preview
+            .then(|| self.tabs.iter().position(|t| t.preview && !t.dirty(cx)))
+            .flatten();
         match replace {
             Some(ix) => {
                 let old = std::mem::replace(&mut self.tabs[ix], tab);
@@ -234,7 +325,11 @@ impl IdeWorkbench {
                 ix
             }
             None => {
-                let at = if self.tabs.is_empty() { 0 } else { (self.active + 1).min(self.tabs.len()) };
+                let at = if self.tabs.is_empty() {
+                    0
+                } else {
+                    (self.active + 1).min(self.tabs.len())
+                };
                 self.tabs.insert(at, tab);
                 at
             }
@@ -262,8 +357,17 @@ impl IdeWorkbench {
 
     /// Show `text` (a patch) in a read-only plain text tab named `title`: the one already
     /// there, or a new one (a diff's "Open as patch").
-    pub fn open_diff(&mut self, title: String, text: String, window: &mut Window, cx: &mut Context<Self>) {
-        let existing = self.tabs.iter().position(|t| t.editor().is_some_and(|e| e.read(cx).scratch && e.read(cx).path.to_string_lossy() == title));
+    pub fn open_diff(
+        &mut self,
+        title: String,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let existing = self.tabs.iter().position(|t| {
+            t.editor()
+                .is_some_and(|e| e.read(cx).scratch && e.read(cx).path.to_string_lossy() == title)
+        });
         let ix = match existing {
             Some(ix) => {
                 if let Some(e) = self.tabs[ix].editor().cloned() {
@@ -272,9 +376,19 @@ impl IdeWorkbench {
                 ix
             }
             None => {
-                let view = cx.new(|cx| EditorView::scratch(self.workspace.clone(), &title, &text, "diff", window, cx));
+                let view = cx.new(|cx| {
+                    EditorView::scratch(self.workspace.clone(), &title, &text, "diff", window, cx)
+                });
                 let watch = cx.observe(&view, |_, _, cx| cx.notify());
-                self.place(EditorTab { view: TabView::Editor(view), preview: false, _watch: std::rc::Rc::new(watch) }, false, cx)
+                self.place(
+                    EditorTab {
+                        view: TabView::Editor(view),
+                        preview: false,
+                        _watch: std::rc::Rc::new(watch),
+                    },
+                    false,
+                    cx,
+                )
             }
         };
         self.activate(ix, cx);
@@ -283,8 +397,17 @@ impl IdeWorkbench {
 
     /// Show `source` in a diff tab: the one already showing it, or a new one (a Source Control
     /// file's diff in the preview tab, as a click in VS Code opens it).
-    pub fn open_diff_view(&mut self, source: DiffSource, preview: bool, window: &mut Window, cx: &mut Context<Self>) -> Entity<DiffView> {
-        let existing = self.tabs.iter().position(|t| t.diff().is_some_and(|d| d.read(cx).source == source));
+    pub fn open_diff_view(
+        &mut self,
+        source: DiffSource,
+        preview: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<DiffView> {
+        let existing = self
+            .tabs
+            .iter()
+            .position(|t| t.diff().is_some_and(|d| d.read(cx).source == source));
         let ix = match existing {
             Some(ix) => {
                 if !preview {
@@ -296,7 +419,15 @@ impl IdeWorkbench {
                 let me = cx.weak_entity();
                 let view = cx.new(|cx| DiffView::new(self.workspace.clone(), me, source, cx));
                 let watch = cx.observe(&view, |_, _, cx| cx.notify());
-                self.place(EditorTab { view: TabView::Diff(view), preview, _watch: std::rc::Rc::new(watch) }, preview, cx)
+                self.place(
+                    EditorTab {
+                        view: TabView::Diff(view),
+                        preview,
+                        _watch: std::rc::Rc::new(watch),
+                    },
+                    preview,
+                    cx,
+                )
             }
         };
         self.activate(ix, cx);
@@ -314,7 +445,12 @@ impl IdeWorkbench {
 
     /// Diff tabs of files in `top` read their files again (Source Control changed them).
     pub fn reload_diffs(&mut self, cx: &mut Context<Self>) {
-        for d in self.tabs.iter().filter_map(|t| t.diff().cloned()).collect::<Vec<_>>() {
+        for d in self
+            .tabs
+            .iter()
+            .filter_map(|t| t.diff().cloned())
+            .collect::<Vec<_>>()
+        {
             d.update(cx, |d, cx| d.reload(cx));
         }
     }
@@ -339,7 +475,12 @@ impl IdeWorkbench {
 
     /// Close the tab of the file at `path`, if it has one.
     pub fn close_file(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(id) = self.tabs.iter().find(|t| t.file(cx).as_deref() == Some(path)).map(|t| t.id()) {
+        if let Some(id) = self
+            .tabs
+            .iter()
+            .find(|t| t.file(cx).as_deref() == Some(path))
+            .map(|t| t.id())
+        {
             self.close(id, window, cx);
         }
     }
@@ -347,7 +488,9 @@ impl IdeWorkbench {
     /// Close the tab of `id`. With unsaved edits it asks: Save (closing once the save lands),
     /// Don't Save, or Cancel.
     pub fn close(&mut self, id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.iter().find(|t| t.id() == id).cloned() else { return };
+        let Some(tab) = self.tabs.iter().find(|t| t.id() == id).cloned() else {
+            return;
+        };
         let Some(view) = tab.editor().filter(|_| tab.dirty(cx)).cloned() else {
             self.remove(id, cx);
             return;
@@ -378,8 +521,16 @@ impl IdeWorkbench {
     /// Close every tab but `keep`'s, or those right of it; tabs with unsaved edits stay (closing
     /// them one by one asks about each).
     fn close_many(&mut self, keep: EntityId, right_only: bool, cx: &mut Context<Self>) {
-        let Some(at) = self.tabs.iter().position(|t| t.id() == keep) else { return };
-        let gone: Vec<EntityId> = self.tabs.iter().enumerate().filter(|(ix, t)| *ix != at && (!right_only || *ix > at) && !t.dirty(cx)).map(|(_, t)| t.id()).collect();
+        let Some(at) = self.tabs.iter().position(|t| t.id() == keep) else {
+            return;
+        };
+        let gone: Vec<EntityId> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(ix, t)| *ix != at && (!right_only || *ix > at) && !t.dirty(cx))
+            .map(|(_, t)| t.id())
+            .collect();
         for id in gone {
             self.remove(id, cx);
         }
@@ -387,7 +538,12 @@ impl IdeWorkbench {
 
     /// Close the tabs with nothing unsaved.
     fn close_saved(&mut self, cx: &mut Context<Self>) {
-        let gone: Vec<EntityId> = self.tabs.iter().filter(|t| !t.dirty(cx)).map(|t| t.id()).collect();
+        let gone: Vec<EntityId> = self
+            .tabs
+            .iter()
+            .filter(|t| !t.dirty(cx))
+            .map(|t| t.id())
+            .collect();
         for id in gone {
             self.remove(id, cx);
         }
@@ -395,13 +551,18 @@ impl IdeWorkbench {
 
     /// Take the tab of `id` away, unsaved edits and all; the one in front before it comes back.
     pub(super) fn remove(&mut self, id: EntityId, cx: &mut Context<Self>) {
-        let Some(ix) = self.tabs.iter().position(|t| t.id() == id) else { return };
+        let Some(ix) = self.tabs.iter().position(|t| t.id() == id) else {
+            return;
+        };
         let tab = self.tabs.remove(ix);
         // An editor's file or a preview's: either can be the file shown on its own.
         let file = tab.file(cx);
         self.forget_file(&tab, cx);
         self.mru.retain(|m| *m != id);
-        let front = self.mru.last().and_then(|m| self.tabs.iter().position(|t| t.id() == *m));
+        let front = self
+            .mru
+            .last()
+            .and_then(|m| self.tabs.iter().position(|t| t.id() == *m));
         match front {
             Some(f) => self.activate(f, cx),
             None => {
@@ -428,8 +589,11 @@ impl IdeWorkbench {
 
     /// A file's tab went: what its language server said about it goes from Problems.
     fn forget_file(&mut self, tab: &EditorTab, cx: &mut Context<Self>) {
-        let Some(path) = tab.editor().map(|e| e.read(cx).path.clone()) else { return };
-        self.workspace.update(cx, |ws, cx| ws.clear_diagnostics(&path, cx));
+        let Some(path) = tab.editor().map(|e| e.read(cx).path.clone()) else {
+            return;
+        };
+        self.workspace
+            .update(cx, |ws, cx| ws.clear_diagnostics(&path, cx));
     }
 
     /// The row of tabs over the editor.
@@ -443,7 +607,11 @@ impl IdeWorkbench {
         let me = cx.weak_entity();
         let ws = self.workspace.read(cx);
         // ✦: an agent changed the file and the change isn't kept or undone yet.
-        let edited: Vec<bool> = self.tabs.iter().map(|t| t.path(cx).is_some_and(|p| ws.agent_edited(&p))).collect();
+        let edited: Vec<bool> = self
+            .tabs
+            .iter()
+            .map(|t| t.path(cx).is_some_and(|p| ws.agent_edited(&p)))
+            .collect();
         h_flex()
             .id("ide-tabs")
             .w_full()
@@ -482,11 +650,34 @@ impl IdeWorkbench {
                     .border_r_1()
                     .border_color(line)
                     .when(on, |el| {
-                        el.bg(editor_bg).text_color(theme.foreground).child(div().absolute().top_0().left_0().right_0().h(px(2.)).bg(ember))
+                        el.bg(editor_bg).text_color(theme.foreground).child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .h(px(2.))
+                                .bg(ember),
+                        )
                     })
-                    .when(!on, |el| el.text_color(theme.muted_foreground).hover(|s| s.bg(theme.list_hover)))
-                    .child(if diff { Icon::new(crate::assets::Lucide::FileDiff).size(px(13.)).text_color(crate::palette::ember(cx)).into_any_element() } else { crate::file_icon::badge(&name, px(13.), cx) })
-                    .child(div().when(preview, |el| el.italic()).when_some(mark, |el, m| el.text_color(m.color(cx))).child(name))
+                    .when(!on, |el| {
+                        el.text_color(theme.muted_foreground)
+                            .hover(|s| s.bg(theme.list_hover))
+                    })
+                    .child(if diff {
+                        Icon::new(crate::assets::Lucide::FileDiff)
+                            .size(px(13.))
+                            .text_color(crate::palette::ember(cx))
+                            .into_any_element()
+                    } else {
+                        crate::file_icon::badge(&name, px(13.), cx)
+                    })
+                    .child(
+                        div()
+                            .when(preview, |el| el.italic())
+                            .when_some(mark, |el, m| el.text_color(m.color(cx)))
+                            .child(name),
+                    )
                     .when(agent, |el| {
                         el.child(
                             div()
@@ -494,11 +685,24 @@ impl IdeWorkbench {
                                 .test_support()
                                 .text_size(px(11.))
                                 .text_color(ember)
-                                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Changed by an agent: keep or undo it in the AI side bar").build(window, cx))
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(
+                                        "Changed by an agent: keep or undo it in the AI side bar",
+                                    )
+                                    .build(window, cx)
+                                })
                                 .child("✦"),
                         )
                     })
-                    .when_some(mark, |el, m| el.child(div().text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(m.color(cx)).child(m.letter())))
+                    .when_some(mark, |el, m| {
+                        el.child(
+                            div()
+                                .text_size(px(11.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(m.color(cx))
+                                .child(m.letter()),
+                        )
+                    })
                     .child(
                         // The dot of unsaved edits sits where × goes; × shows on hover.
                         div()
@@ -511,14 +715,34 @@ impl IdeWorkbench {
                             .justify_center()
                             .rounded(px(4.))
                             .hover(|s| s.bg(theme.foreground.opacity(0.1)))
-                            .when(dirty, |el| el.child(div().group_hover(group.clone(), |s| s.invisible()).size(px(7.)).rounded_full().bg(theme.foreground.opacity(0.7))))
+                            .when(dirty, |el| {
+                                el.child(
+                                    div()
+                                        .group_hover(group.clone(), |s| s.invisible())
+                                        .size(px(7.))
+                                        .rounded_full()
+                                        .bg(theme.foreground.opacity(0.7)),
+                                )
+                            })
                             .child(
                                 div()
                                     .when(dirty, |el| el.absolute())
-                                    .when(close_waits_for_hover(on, dirty), |el| el.invisible().group_hover(group.clone(), |s| s.visible()))
-                                    .child(Icon::new(IconName::Close).size(px(12.)).text_color(theme.muted_foreground)),
+                                    .when(close_waits_for_hover(on, dirty), |el| {
+                                        el.invisible().group_hover(group.clone(), |s| s.visible())
+                                    })
+                                    .child(
+                                        Icon::new(IconName::Close)
+                                            .size(px(12.))
+                                            .text_color(theme.muted_foreground),
+                                    ),
                             )
-                            .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(format!("Close ({})", keys::hint(Id::CloseTab))).build(window, cx))
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(format!(
+                                    "Close ({})",
+                                    keys::hint(Id::CloseTab)
+                                ))
+                                .build(window, cx)
+                            })
                             // The × closes only: the tab under it isn't brought forward first.
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -538,7 +762,10 @@ impl IdeWorkbench {
                             t.focus(window, cx);
                         }
                     }))
-                    .on_mouse_up(MouseButton::Middle, cx.listener(move |this, _, window, cx| this.close(id, window, cx)))
+                    .on_mouse_up(
+                        MouseButton::Middle,
+                        cx.listener(move |this, _, window, cx| this.close(id, window, cx)),
+                    )
                     .context_menu(move |menu, _, cx| {
                         // Counted once, whether it's dismissed, replaced by another or dropped.
                         let open = std::rc::Rc::new(std::cell::Cell::new(true));
@@ -557,17 +784,34 @@ impl IdeWorkbench {
                             }
                         })
                         .detach();
-                        let act =|label: &'static str, f: fn(&mut IdeWorkbench, EntityId, &mut Window, &mut Context<IdeWorkbench>)| {
+                        let act = |label: &'static str,
+                                   f: fn(
+                            &mut IdeWorkbench,
+                            EntityId,
+                            &mut Window,
+                            &mut Context<IdeWorkbench>,
+                        )| {
                             let me = me.clone();
                             PopupMenuItem::new(label).on_click(move |_, window, cx| {
                                 let _ = me.update(cx, |this, cx| f(this, id, window, cx));
                             })
                         };
-                        let copy = |label: &'static str, text: String| PopupMenuItem::new(label).on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())));
-                        let menu = menu.min_w(px(200.))
-                            .item(act("Close", |this, id, window, cx| this.close(id, window, cx)))
-                            .item(act("Close Others", |this, id, _, cx| this.close_many(id, false, cx)))
-                            .item(act("Close to the Right", |this, id, _, cx| this.close_many(id, true, cx)))
+                        let copy = |label: &'static str, text: String| {
+                            PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
+                            })
+                        };
+                        let menu = menu
+                            .min_w(px(200.))
+                            .item(act("Close", |this, id, window, cx| {
+                                this.close(id, window, cx)
+                            }))
+                            .item(act("Close Others", |this, id, _, cx| {
+                                this.close_many(id, false, cx)
+                            }))
+                            .item(act("Close to the Right", |this, id, _, cx| {
+                                this.close_many(id, true, cx)
+                            }))
                             .item(act("Close Saved", |this, _, _, cx| this.close_saved(cx)))
                             .separator()
                             .item(act("Keep Open", |this, id, _, cx| {
@@ -576,15 +820,27 @@ impl IdeWorkbench {
                                 }
                                 cx.notify();
                             }));
-                        let Some(path) = path.clone() else { return menu };
-                        let relative = root.as_ref().and_then(|r| path.strip_prefix(r).ok()).map(|p| p.display().to_string()).unwrap_or_else(|| path.display().to_string());
+                        let Some(path) = path.clone() else {
+                            return menu;
+                        };
+                        let relative = root
+                            .as_ref()
+                            .and_then(|r| path.strip_prefix(r).ok())
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| path.display().to_string());
                         let (reveal, open) = (path.clone(), path.clone());
                         menu.separator()
                             .item(copy("Copy Path", path.display().to_string()))
                             .item(copy("Copy Relative Path", relative))
                             .separator()
-                            .item(PopupMenuItem::new(crate::words::words().reveal_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&reveal)))
-                            .item(PopupMenuItem::new("Open in Default App").on_click(move |_, _, cx| cx.open_with_system(&open)))
+                            .item(
+                                PopupMenuItem::new(crate::words::words().reveal_in_file_manager)
+                                    .on_click(move |_, _, cx| cx.reveal_path(&reveal)),
+                            )
+                            .item(
+                                PopupMenuItem::new("Open in Default App")
+                                    .on_click(move |_, _, cx| cx.open_with_system(&open)),
+                            )
                     })
             }))
     }
@@ -593,8 +849,16 @@ impl IdeWorkbench {
     fn breadcrumbs(&self, path: &Path, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let root = self.workspace.read(cx).ide_root.clone();
-        let rel = root.as_ref().and_then(|r| path.strip_prefix(r).ok()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(trek_core::paths::tildify(&path)));
-        let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().to_string()).filter(|p| !p.is_empty() && p != "/").collect();
+        let rel = root
+            .as_ref()
+            .and_then(|r| path.strip_prefix(r).ok())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(trek_core::paths::tildify(&path)));
+        let parts: Vec<String> = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().to_string())
+            .filter(|p| !p.is_empty() && p != "/")
+            .collect();
         let last = parts.len().saturating_sub(1);
         h_flex()
             .id("ide-breadcrumbs")
@@ -610,8 +874,17 @@ impl IdeWorkbench {
                 h_flex()
                     .flex_none()
                     .gap(px(5.))
-                    .when(ix > 0, |el| el.child(Icon::new(IconName::ChevronRight).size(px(11.)).text_color(theme.muted_foreground.opacity(0.6))))
-                    .when(ix == last, |el| el.child(crate::file_icon::badge(&part, px(12.), cx)).text_color(theme.foreground.opacity(0.85)))
+                    .when(ix > 0, |el| {
+                        el.child(
+                            Icon::new(IconName::ChevronRight)
+                                .size(px(11.))
+                                .text_color(theme.muted_foreground.opacity(0.6)),
+                        )
+                    })
+                    .when(ix == last, |el| {
+                        el.child(crate::file_icon::badge(&part, px(12.), cx))
+                            .text_color(theme.foreground.opacity(0.85))
+                    })
                     .child(part)
             }))
     }
@@ -651,8 +924,18 @@ impl IdeWorkbench {
                 .child(self.tab_bar(glass, cx))
                 .child(div().flex_1().min_h_0().child(view.cached(fill())))
                 .into_any_element(),
-            None if self.workspace.read(cx).ide_root.is_none() => div().flex_1().min_h_0().w_full().child(self.welcome(cx)).into_any_element(),
-            None => div().flex_1().min_h_0().w_full().child(self.watermark(cx)).into_any_element(),
+            None if self.workspace.read(cx).ide_root.is_none() => div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(self.welcome(cx))
+                .into_any_element(),
+            None => div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(self.watermark(cx))
+                .into_any_element(),
         }
     }
 
@@ -663,7 +946,12 @@ impl IdeWorkbench {
             h_flex()
                 .gap(px(18.))
                 .child(div().w(px(150.)).text_right().child(label))
-                .child(div().min_w(px(110.)).text_color(theme.muted_foreground.opacity(0.75)).child(keys))
+                .child(
+                    div()
+                        .min_w(px(110.))
+                        .text_color(theme.muted_foreground.opacity(0.75))
+                        .child(keys),
+                )
         };
         v_flex()
             .id("ide-watermark")
@@ -674,10 +962,22 @@ impl IdeWorkbench {
             .gap(px(10.))
             .text_size(px(12.5))
             .text_color(theme.muted_foreground)
-            .child(div().pb(px(14.)).opacity(0.5).child(crate::brand::logo_mark(px(56.))))
+            .child(
+                div()
+                    .pb(px(14.))
+                    .opacity(0.5)
+                    .child(crate::brand::logo_mark(px(56.))),
+            )
             .child(row("Go to File", keys::hint(Id::QuickOpen)))
             .child(row("New Chat", keys::hint(Id::NewThread)))
-            .child(row("Keep / Undo a Change", format!("{} / {}", keys::hint(Id::KeepHunk), keys::hint(Id::UndoHunk))))
+            .child(row(
+                "Keep / Undo a Change",
+                format!(
+                    "{} / {}",
+                    keys::hint(Id::KeepHunk),
+                    keys::hint(Id::UndoHunk)
+                ),
+            ))
             .child(row("Show Terminal", keys::hint(Id::ToggleRightPanel)))
             .child(row("Toggle AI Side Bar", keys::hint(Id::ToggleAiBar)))
             .child(row("Switch to Agents", keys::hint(Id::SwitchMode)))
@@ -688,7 +988,11 @@ impl IdeWorkbench {
                         .outline()
                         .small()
                         .label("Back to Agents")
-                        .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.set_mode(crate::workspace::Mode::Agents, cx)))),
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.workspace.update(cx, |ws, cx| {
+                                ws.set_mode(crate::workspace::Mode::Agents, cx)
+                            })
+                        })),
                 ),
             )
     }
@@ -697,13 +1001,27 @@ impl IdeWorkbench {
     fn welcome(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
-        let folders: Vec<String> = ws.settings.ide.recent_folders.iter().chain(ws.settings.user_projects.iter()).cloned().fold(Vec::new(), |mut v, f| {
-            if !v.contains(&f) {
-                v.push(f);
-            }
-            v
-        });
-        let files: Vec<String> = ws.settings.ide.recent_files.iter().take(8).cloned().collect();
+        let folders: Vec<String> = ws
+            .settings
+            .ide
+            .recent_folders
+            .iter()
+            .chain(ws.settings.user_projects.iter())
+            .cloned()
+            .fold(Vec::new(), |mut v, f| {
+                if !v.contains(&f) {
+                    v.push(f);
+                }
+                v
+            });
+        let files: Vec<String> = ws
+            .settings
+            .ide
+            .recent_files
+            .iter()
+            .take(8)
+            .cloned()
+            .collect();
         // Capped at 340 but shrinks with the column: a narrower welcome must not clip rows.
         let mut list = v_flex().w_full().max_w(px(340.)).gap_1();
         let row = |id: SharedString, icon: AnyElement, name: String, path: &Path| {
@@ -720,68 +1038,141 @@ impl IdeWorkbench {
                 .hover(|s| s.bg(theme.list_hover))
                 .child(icon)
                 // The name stays whole; the path gives way first (`~/Code/…`).
-                .child(div().flex_none().max_w(relative(0.7)).truncate().text_sm().child(name))
-                .child(div().flex_1().min_w_0().text_xs().text_color(theme.muted_foreground).truncate().child(trek_core::paths::tildify(path)))
+                .child(
+                    div()
+                        .flex_none()
+                        .max_w(relative(0.7))
+                        .truncate()
+                        .text_sm()
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .truncate()
+                        .child(trek_core::paths::tildify(path)),
+                )
         };
         if !folders.is_empty() {
-            list = list.child(div().pt_4().pb_1().text_xs().text_color(theme.muted_foreground).child("Recent folders"));
+            list = list.child(
+                div()
+                    .pt_4()
+                    .pb_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Recent folders"),
+            );
             for f in folders.iter().take(6) {
                 let p = PathBuf::from(f);
-                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| f.clone());
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| f.clone());
                 let icon = crate::file_icon::folder(&name, false, px(15.), cx);
-                list = list.child(row(SharedString::from(format!("ide-recent-folder-{f}")), icon, name, &p).on_click(cx.listener(move |this, _, _, cx| {
-                    this.workspace.update(cx, |ws, cx| ws.set_ide_root(p.clone(), cx));
-                })));
+                list = list.child(
+                    row(
+                        SharedString::from(format!("ide-recent-folder-{f}")),
+                        icon,
+                        name,
+                        &p,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.workspace
+                            .update(cx, |ws, cx| ws.set_ide_root(p.clone(), cx));
+                    })),
+                );
             }
         }
         if !files.is_empty() {
-            list = list.child(div().pt_3().pb_1().text_xs().text_color(theme.muted_foreground).child("Recent files"));
+            list = list.child(
+                div()
+                    .pt_3()
+                    .pb_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Recent files"),
+            );
             for f in &files {
                 let p = PathBuf::from(f);
-                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| f.clone());
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| f.clone());
                 let icon = crate::file_icon::badge(&name, px(15.), cx);
-                list = list.child(row(SharedString::from(format!("ide-recent-file-{f}")), icon, name, &p).on_click(cx.listener(move |this, _, window, cx| {
-                    this.open(p.clone(), None, false, window, cx);
-                })));
+                list = list.child(
+                    row(
+                        SharedString::from(format!("ide-recent-file-{f}")),
+                        icon,
+                        name,
+                        &p,
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open(p.clone(), None, false, window, cx);
+                    })),
+                );
             }
         }
-        div().id("ide-welcome").size_full().overflow_y_scroll().child(
-            v_flex()
-                .w_full()
-                .min_h(relative(1.))
-                .items_center()
-                .justify_center()
-                .py(px(40.))
-                .gap_4()
-                .child(crate::brand::logo_mark(px(52.)))
-                .child(
-                    v_flex()
-                        .items_center()
-                        .gap_1()
-                        .child(div().text_lg().font_medium().child("Trek IDE"))
-                        .child(div().text_sm().text_color(theme.muted_foreground).child("A folder, a file, and the agents already signed in.")),
-                )
-                .child(
-                    h_flex()
-                        .gap_3()
-                        .justify_center()
-                        .flex_wrap()
-                        .child(
-                            Button::new("ide-open-folder")
-                                .outline()
-                                .icon(IconName::FolderOpen)
-                                .label("Open folder")
-                                .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.open_ide_folder(cx)))),
-                        )
-                        .child(Button::new("ide-open-file").outline().icon(IconName::File).label("Open file").on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |ws, cx| ws.open_ide_file(cx))))),
-                )
-                .child(list),
-        )
+        div()
+            .id("ide-welcome")
+            .size_full()
+            .overflow_y_scroll()
+            .child(
+                v_flex()
+                    .w_full()
+                    .min_h(relative(1.))
+                    .items_center()
+                    .justify_center()
+                    .py(px(40.))
+                    .gap_4()
+                    .child(crate::brand::logo_mark(px(52.)))
+                    .child(
+                        v_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(div().text_lg().font_medium().child("Trek IDE"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child("A folder, a file, and the agents already signed in."),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .justify_center()
+                            .flex_wrap()
+                            .child(
+                                Button::new("ide-open-folder")
+                                    .outline()
+                                    .icon(IconName::FolderOpen)
+                                    .label("Open folder")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.workspace.update(cx, |ws, cx| ws.open_ide_folder(cx))
+                                    })),
+                            )
+                            .child(
+                                Button::new("ide-open-file")
+                                    .outline()
+                                    .icon(IconName::File)
+                                    .label("Open file")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.workspace.update(cx, |ws, cx| ws.open_ide_file(cx))
+                                    })),
+                            ),
+                    )
+                    .child(list),
+            )
     }
 }
 
 fn file_name(path: &Path) -> String {
-    path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
 /// Whether a tab's × shows only while the pointer is over the tab: the tabs behind do, and one

@@ -33,8 +33,13 @@ impl Install {
     pub fn label(&self) -> String {
         match self {
             Install::Running(None) => "Starting…".into(),
-            Install::Running(Some(Progress::Downloading { done, total: Some(total) })) if *total > 0 => format!("Downloading {}%", (done * 100 / total).min(100)),
-            Install::Running(Some(Progress::Downloading { done, .. })) => format!("Downloading {:.1} MB", *done as f64 / 1e6),
+            Install::Running(Some(Progress::Downloading {
+                done,
+                total: Some(total),
+            })) if *total > 0 => format!("Downloading {}%", (done * 100 / total).min(100)),
+            Install::Running(Some(Progress::Downloading { done, .. })) => {
+                format!("Downloading {:.1} MB", *done as f64 / 1e6)
+            }
             Install::Running(Some(Progress::Unpacking)) => "Unpacking…".into(),
             Install::Running(Some(Progress::Fetching)) => "Fetching with npx…".into(),
             Install::Failed(e) => e.clone(),
@@ -60,14 +65,25 @@ impl Workspace {
         let list = self.settings.added_agents.clone();
         let (tx, rx) = async_channel::bounded(1);
         trek_core::runtime().spawn(async move {
-            let _ = tx.send(list.iter().map(trek_core::detect::added_agent).collect::<Vec<DetectedAgent>>()).await;
+            let _ = tx
+                .send(
+                    list.iter()
+                        .map(trek_core::detect::added_agent)
+                        .collect::<Vec<DetectedAgent>>(),
+                )
+                .await;
         });
         let task = cx.spawn(async move |this, cx| {
             let Ok(found) = rx.recv().await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.merge_added(found);
                 // Ask the ones that can start what they offer (not from a test process).
-                let ready: Vec<String> = this.agents.iter().filter(|a| a.availability == Availability::Ready && is_added(&a.agent)).map(|a| a.agent.key()).collect();
+                let ready: Vec<String> = this
+                    .agents
+                    .iter()
+                    .filter(|a| a.availability == Availability::Ready && is_added(&a.agent))
+                    .map(|a| a.agent.key())
+                    .collect();
                 for key in ready {
                     this.probe_acp_agent(&key, cx);
                 }
@@ -90,8 +106,13 @@ impl Workspace {
     /// Put what was found of the added agents in the agent list: after the built-in CLI agents,
     /// before the local model servers. Entries of agents no longer added go.
     fn merge_added(&mut self, found: Vec<DetectedAgent>) {
-        self.agents.retain(|a| !matches!(&a.agent, AgentId::Acp(id) if !builtin(id)));
-        let at = self.agents.iter().position(|a| matches!(a.agent, AgentId::Direct(_))).unwrap_or(self.agents.len());
+        self.agents
+            .retain(|a| !matches!(&a.agent, AgentId::Acp(id) if !builtin(id)));
+        let at = self
+            .agents
+            .iter()
+            .position(|a| matches!(a.agent, AgentId::Direct(_)))
+            .unwrap_or(self.agents.len());
         self.agents.splice(at..at, found);
     }
 
@@ -104,7 +125,10 @@ impl Workspace {
         }
         let read_cache = !a.cache_read;
         let have = a.registry.as_ref().map(|r| r.fetched_at);
-        if !read_cache && !refresh && have.is_some_and(|at| trek_core::store::now_ms() - at < registry::STALE_AFTER_MS) {
+        if !read_cache
+            && !refresh
+            && have.is_some_and(|at| trek_core::store::now_ms() - at < registry::STALE_AFTER_MS)
+        {
             return;
         }
         a.loading = true;
@@ -116,8 +140,14 @@ impl Workspace {
                 at = at.or(cached.as_ref().map(|r| r.fetched_at));
                 let _ = tx.send(Loaded::Cached(cached)).await;
             }
-            if refresh || at.is_none_or(|at| trek_core::store::now_ms() - at >= registry::STALE_AFTER_MS) {
-                let _ = tx.send(Loaded::Fetched(registry::fetch().await.map_err(|e| format!("{e:#}")))).await;
+            if refresh
+                || at.is_none_or(|at| trek_core::store::now_ms() - at >= registry::STALE_AFTER_MS)
+            {
+                let _ = tx
+                    .send(Loaded::Fetched(
+                        registry::fetch().await.map_err(|e| format!("{e:#}")),
+                    ))
+                    .await;
             }
         });
         let task = cx.spawn(async move |this, cx| {
@@ -151,18 +181,33 @@ impl Workspace {
 
     /// Install registry agent `id` (or update it to the registry's version) and add it.
     pub fn install_registry_agent(&mut self, id: &str, cx: &mut gpui_kit::Context<Self>) {
-        let Some(agent) = self.added_agents.registry.as_ref().and_then(|r| r.agent(id)).cloned() else { return };
-        if matches!(self.added_agents.installs.get(id), Some(Install::Running(_))) {
+        let Some(agent) = self
+            .added_agents
+            .registry
+            .as_ref()
+            .and_then(|r| r.agent(id))
+            .cloned()
+        else {
+            return;
+        };
+        if matches!(
+            self.added_agents.installs.get(id),
+            Some(Install::Running(_))
+        ) {
             return;
         }
-        self.added_agents.installs.insert(id.to_string(), Install::Running(None));
+        self.added_agents
+            .installs
+            .insert(id.to_string(), Install::Running(None));
         let (tx, rx) = async_channel::unbounded();
         trek_core::runtime().spawn(async move {
             let steps = tx.clone();
             let progress = move |p: Progress| {
                 let _ = steps.try_send(Step::Progress(p));
             };
-            let done = registry::install(&agent, &progress).await.map_err(|e| format!("{e:#}"));
+            let done = registry::install(&agent, &progress)
+                .await
+                .map_err(|e| format!("{e:#}"));
             let _ = tx.send(Step::Done(done)).await;
         });
         let id = id.to_string();
@@ -191,10 +236,19 @@ impl Workspace {
                 let name = added.name.clone();
                 let updated = self.settings.added_agents.iter().any(|a| a.id == added.id);
                 self.put_added(added, cx);
-                cx.emit(WorkspaceEvent::Toast { message: if updated { format!("{name} is up to date") } else { format!("{name} is ready in Trek") }, undo: None });
+                cx.emit(WorkspaceEvent::Toast {
+                    message: if updated {
+                        format!("{name} is up to date")
+                    } else {
+                        format!("{name} is ready in Trek")
+                    },
+                    undo: None,
+                });
             }
             Step::Done(Err(e)) => {
-                self.added_agents.installs.insert(id.to_string(), Install::Failed(e));
+                self.added_agents
+                    .installs
+                    .insert(id.to_string(), Install::Failed(e));
             }
         }
         cx.notify();
@@ -202,9 +256,19 @@ impl Workspace {
 
     /// Add an agent of the user's own. `secrets` go to the Keychain first: if one can't, nothing
     /// is added.
-    pub fn add_custom_agent(&mut self, agent: AddedAgent, secrets: Vec<(String, String)>, cx: &mut gpui_kit::Context<Self>) -> anyhow::Result<()> {
+    pub fn add_custom_agent(
+        &mut self,
+        agent: AddedAgent,
+        secrets: Vec<(String, String)>,
+        cx: &mut gpui_kit::Context<Self>,
+    ) -> anyhow::Result<()> {
         for (name, value) in &secrets {
-            registry::set_secret(&agent.id, name, value).map_err(|e| anyhow::anyhow!("Couldn't keep {name} in {}: {e}", crate::words::words().your_credential_store))?;
+            registry::set_secret(&agent.id, name, value).map_err(|e| {
+                anyhow::anyhow!(
+                    "Couldn't keep {name} in {}: {e}",
+                    crate::words::words().your_credential_store
+                )
+            })?;
         }
         self.put_added(agent, cx);
         Ok(())
@@ -214,7 +278,12 @@ impl Workspace {
     fn put_added(&mut self, agent: AddedAgent, cx: &mut gpui_kit::Context<Self>) {
         let agent_id = agent.id.clone();
         let key = AgentId::Acp(agent.id.clone()).key();
-        match self.settings.added_agents.iter_mut().find(|a| a.id == agent.id) {
+        match self
+            .settings
+            .added_agents
+            .iter_mut()
+            .find(|a| a.id == agent.id)
+        {
             Some(old) => *old = agent,
             None => self.settings.added_agents.push(agent),
         }
@@ -228,7 +297,9 @@ impl Workspace {
 
     /// Remove an added agent: from settings, and its download, icon and secrets from the Mac.
     pub fn remove_added_agent(&mut self, id: &str, cx: &mut gpui_kit::Context<Self>) {
-        let Some(at) = self.settings.added_agents.iter().position(|a| a.id == id) else { return };
+        let Some(at) = self.settings.added_agents.iter().position(|a| a.id == id) else {
+            return;
+        };
         let agent = self.settings.added_agents.remove(at);
         let key = AgentId::Acp(agent.id.clone()).key();
         self.settings.disabled_agents.retain(|k| *k != key);
@@ -238,14 +309,26 @@ impl Workspace {
         let name = agent.name.clone();
         trek_core::runtime().spawn_blocking(move || registry::remove(&agent));
         self.sync_added_agents(cx);
-        cx.emit(WorkspaceEvent::Toast { message: format!("Removed {name}"), undo: None });
+        cx.emit(WorkspaceEvent::Toast {
+            message: format!("Removed {name}"),
+            undo: None,
+        });
     }
 
     /// The registry's newer version of added agent `id`, when the index Trek has lists one.
     pub fn registry_update(&self, id: &str) -> Option<String> {
-        let added = self.settings.added_agents.iter().find(|a| a.id == id && a.source == registry::AgentSource::Registry)?;
+        let added = self
+            .settings
+            .added_agents
+            .iter()
+            .find(|a| a.id == id && a.source == registry::AgentSource::Registry)?;
         let listed = self.added_agents.registry.as_ref()?.agent(id)?;
-        (added.version.as_deref() != Some(listed.version.as_str()) && trek_core::agent_update::is_newer(&listed.version, added.version.as_deref().unwrap_or("0"))).then(|| listed.version.clone())
+        (added.version.as_deref() != Some(listed.version.as_str())
+            && trek_core::agent_update::is_newer(
+                &listed.version,
+                added.version.as_deref().unwrap_or("0"),
+            ))
+        .then(|| listed.version.clone())
     }
 }
 

@@ -38,7 +38,12 @@ pub enum Link {
 }
 
 impl Link {
-    pub const ALL: [Link; 4] = [Link::Started, Link::ContinuedIn, Link::StartedBy, Link::ContinuedFrom];
+    pub const ALL: [Link; 4] = [
+        Link::Started,
+        Link::ContinuedIn,
+        Link::StartedBy,
+        Link::ContinuedFrom,
+    ];
 
     pub fn key(self) -> &'static str {
         match self {
@@ -82,18 +87,34 @@ pub fn of_row(id: &str) -> Option<(Link, &str)> {
 
 /// The row for `link` to `thread`, titled `title` as it was then.
 pub fn row(link: Link, thread: &str, title: &str) -> Item {
-    Item::Tool { id: row_id(link, thread), title: link.label().into(), detail: title.into(), output: String::new(), status: ToolStatus::Done }
+    Item::Tool {
+        id: row_id(link, thread),
+        title: link.label().into(),
+        detail: title.into(),
+        output: String::new(),
+        status: ToolStatus::Done,
+    }
 }
 
 /// Whether an agent's tool row is a call to Trek's `start_thread` or `handoff`.
 pub fn is_thread_call(title: &str) -> bool {
-    crate::orchestrate::is_ours(title, "start_thread") || crate::orchestrate::is_ours(title, "handoff")
+    crate::orchestrate::is_ours(title, "start_thread")
+        || crate::orchestrate::is_ours(title, "handoff")
 }
 
 /// Whether an agent's tool row is a call to any of Trek's thread tools (`start_thread`,
 /// `handoff`, `list_threads`, `thread_status`, `read_thread`, `send_to_thread`).
 pub fn is_thread_tool(title: &str) -> bool {
-    ["start_thread", "handoff", "list_threads", "thread_status", "read_thread", "send_to_thread"].iter().any(|t| crate::orchestrate::is_ours(title, t))
+    [
+        "start_thread",
+        "handoff",
+        "list_threads",
+        "thread_status",
+        "read_thread",
+        "send_to_thread",
+    ]
+    .iter()
+    .any(|t| crate::orchestrate::is_ours(title, t))
 }
 
 /// The first message of a thread that takes over another's work: the brief its agent wrote,
@@ -120,8 +141,16 @@ mod tests {
     fn rows_name_their_link_and_thread() {
         for link in Link::ALL {
             assert_eq!(of_row(&row_id(link, "abc")), Some((link, "abc")));
-            let Item::Tool { id, title, status, .. } = row(link, "abc", "Fix it") else { panic!("a tool row") };
-            assert_eq!((of_row(&id), title.as_str(), status), (Some((link, "abc")), link.label(), ToolStatus::Done));
+            let Item::Tool {
+                id, title, status, ..
+            } = row(link, "abc", "Fix it")
+            else {
+                panic!("a tool row")
+            };
+            assert_eq!(
+                (of_row(&id), title.as_str(), status),
+                (Some((link, "abc")), link.label(), ToolStatus::Done)
+            );
         }
         assert_eq!(of_row("trek-lineage:started:"), None);
         assert_eq!(of_row("trek-lineage:adopted:abc"), None);
@@ -132,16 +161,29 @@ mod tests {
     #[test]
     fn thread_calls_are_trek_s_own() {
         assert!(is_thread_call("mcp__trek-orchestrate__start_thread"));
-        assert!(is_thread_call("trek-orchestrate_handoff"), "OpenCode's naming");
-        assert!(!is_thread_call("handoff"), "a bare name could be any server's");
+        assert!(
+            is_thread_call("trek-orchestrate_handoff"),
+            "OpenCode's naming"
+        );
+        assert!(
+            !is_thread_call("handoff"),
+            "a bare name could be any server's"
+        );
         assert!(!is_thread_call("mcp__trek-orchestrate__delegate_task"));
-        assert!(is_thread_tool("mcp__trek-orchestrate__read_thread") && is_thread_tool("mcp__trek-orchestrate__handoff"));
+        assert!(
+            is_thread_tool("mcp__trek-orchestrate__read_thread")
+                && is_thread_tool("mcp__trek-orchestrate__handoff")
+        );
         assert!(!is_thread_tool("mcp__trek-orchestrate__task_status"));
     }
 
     #[test]
     fn a_handoff_s_prompt_carries_the_brief() {
         let p = handoff_prompt("  Goal: fix it.\nNext: tests.  ");
-        assert!(p.starts_with("You're taking over") && p.ends_with("<brief>\nGoal: fix it.\nNext: tests.\n</brief>"), "{p}");
+        assert!(
+            p.starts_with("You're taking over")
+                && p.ends_with("<brief>\nGoal: fix it.\nNext: tests.\n</brief>"),
+            "{p}"
+        );
     }
 }

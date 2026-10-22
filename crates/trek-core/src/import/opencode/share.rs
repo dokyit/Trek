@@ -40,7 +40,9 @@ pub enum State {
 
 pub fn state(dir: &Path) -> State {
     // Read-only: a missing file isn't created.
-    let Some(conn) = super::open(&dir.join(MAIN_DB)) else { return State::Opens };
+    let Some(conn) = super::open(&dir.join(MAIN_DB)) else {
+        return State::Opens;
+    };
     match names(&conn, "main", "table") {
         Ok(tables) if !tables.is_empty() && !tables.contains("session") => State::Made2,
         _ => State::Opens,
@@ -87,15 +89,23 @@ fn failed(e: impl std::fmt::Display) -> Refused {
 /// too (see `merge_own`). `None`: there was nothing to do (1.x opens it already).
 pub fn share(dir: &Path, scratch: &Path, merge: bool) -> Result<Option<Changed>, Refused> {
     let mut conn = open_rw(&dir.join(MAIN_DB)).map_err(failed)?;
-    let one_x = Connection::open_with_flags(scratch, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(failed)?;
+    let one_x = Connection::open_with_flags(
+        scratch,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(failed)?;
     if plan(&conn, &one_x)?.is_none() {
         return Ok(None);
     }
     let backup = backup(&conn, dir).map_err(failed)?;
     {
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failed)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failed)?;
         // Again now that it's held: another process may have got there first.
-        let Some(statements) = plan(&tx, &one_x)? else { return Ok(None) };
+        let Some(statements) = plan(&tx, &one_x)? else {
+            return Ok(None);
+        };
         for sql in &statements {
             tx.execute_batch(sql).map_err(failed)?;
         }
@@ -106,7 +116,9 @@ pub fn share(dir: &Path, scratch: &Path, merge: bool) -> Result<Option<Changed>,
     let own = dir.join(DB_1X);
     let merged = match merge && own.is_file() {
         true => merge_into(conn, &own).unwrap_or_else(|e| {
-            tracing::warn!("opencode: couldn't move opencode-1x.db's sessions into opencode.db: {e}");
+            tracing::warn!(
+                "opencode: couldn't move opencode-1x.db's sessions into opencode.db: {e}"
+            );
             0
         }),
         false => 0,
@@ -125,13 +137,26 @@ pub fn merge_own(dir: &Path) -> Result<Option<Changed>, String> {
     }
     let err = |e: rusqlite::Error| e.to_string();
     let conn = open_rw(&main).map_err(err)?;
-    if !names(&conn, "main", "table").map_err(err)?.contains("session") {
+    if !names(&conn, "main", "table")
+        .map_err(err)?
+        .contains("session")
+    {
         return Ok(None);
     }
     // Nothing to move (it has nothing, or it's all there already): no copy needed.
-    conn.execute("ATTACH DATABASE ?1 AS own", [own.to_string_lossy()]).map_err(err)?;
-    let new = match names(&conn, "own", "table").map_err(err)?.contains("session") {
-        true => conn.query_row("SELECT COUNT(*) FROM own.session WHERE id NOT IN (SELECT id FROM main.session)", [], |r| r.get::<_, i64>(0)).map_err(err)?,
+    conn.execute("ATTACH DATABASE ?1 AS own", [own.to_string_lossy()])
+        .map_err(err)?;
+    let new = match names(&conn, "own", "table")
+        .map_err(err)?
+        .contains("session")
+    {
+        true => conn
+            .query_row(
+                "SELECT COUNT(*) FROM own.session WHERE id NOT IN (SELECT id FROM main.session)",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(err)?,
         false => 0,
     };
     conn.execute_batch("DETACH DATABASE own").map_err(err)?;
@@ -163,26 +188,44 @@ fn merge_into(mut conn: Connection, own: &Path) -> rusqlite::Result<usize> {
 
 fn open_rw(path: &Path) -> rusqlite::Result<Connection> {
     // Without CREATE: a missing file is an error, not a new empty database.
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
     conn.busy_timeout(BUSY)?;
     Ok(conn)
 }
 
 /// The names of `schema`'s tables or indexes.
 fn names(conn: &Connection, schema: &str, kind: &str) -> rusqlite::Result<HashSet<String>> {
-    let sql = format!("SELECT name FROM \"{schema}\".sqlite_master WHERE type = ?1 AND name NOT LIKE 'sqlite_%'");
-    conn.prepare(&sql)?.query_map([kind], |r| r.get(0))?.collect()
-}
-
-/// A table's columns as SQLite has them: name, type, not null, primary key.
-fn shape(conn: &Connection, schema: &str, table: &str) -> rusqlite::Result<Vec<(String, String, bool, i64)>> {
-    conn.prepare("SELECT name, upper(type), \"notnull\", pk FROM pragma_table_info(?1, ?2) ORDER BY cid")?
-        .query_map([table, schema], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+    let sql = format!(
+        "SELECT name FROM \"{schema}\".sqlite_master WHERE type = ?1 AND name NOT LIKE 'sqlite_%'"
+    );
+    conn.prepare(&sql)?
+        .query_map([kind], |r| r.get(0))?
         .collect()
 }
 
+/// A table's columns as SQLite has them: name, type, not null, primary key.
+fn shape(
+    conn: &Connection,
+    schema: &str,
+    table: &str,
+) -> rusqlite::Result<Vec<(String, String, bool, i64)>> {
+    conn.prepare(
+        "SELECT name, upper(type), \"notnull\", pk FROM pragma_table_info(?1, ?2) ORDER BY cid",
+    )?
+    .query_map([table, schema], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+    })?
+    .collect()
+}
+
 fn columns(conn: &Connection, schema: &str, table: &str) -> rusqlite::Result<Vec<String>> {
-    Ok(shape(conn, schema, table)?.into_iter().map(|c| c.0).collect())
+    Ok(shape(conn, schema, table)?
+        .into_iter()
+        .map(|c| c.0)
+        .collect())
 }
 
 /// The statements that add what 1.x needs to `conn`, as `one_x` has them. `None`: 1.x opens it
@@ -193,50 +236,87 @@ fn plan(conn: &Connection, one_x: &Connection) -> Result<Option<Vec<String>>, Re
         return Ok(None);
     }
     if !tables.contains("migration") {
-        return Err(Refused::Shape("opencode.db has no migration journal, so it isn't one OpenCode made".into()));
+        return Err(Refused::Shape(
+            "opencode.db has no migration journal, so it isn't one OpenCode made".into(),
+        ));
     }
     let indexes = names(conn, "main", "index").map_err(failed)?;
     let mut out = vec![];
     for table in TABLES_1X {
         let sql: Option<String> = one_x
-            .query_row("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |r| r.get(0))
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |r| r.get(0),
+            )
             .optional()
             .map_err(failed)?;
         let Some(sql) = sql else {
-            return Err(Refused::Shape(format!("this OpenCode 1.x has no `{table}` table, so it isn't the 1.x Trek knows")));
+            return Err(Refused::Shape(format!(
+                "this OpenCode 1.x has no `{table}` table, so it isn't the 1.x Trek knows"
+            )));
         };
         if tables.contains(table) {
-            if shape(conn, "main", table).map_err(failed)? != shape(one_x, "main", table).map_err(failed)? {
-                return Err(Refused::Shape(format!("opencode.db has a `{table}` table that isn't 1.x's")));
+            if shape(conn, "main", table).map_err(failed)?
+                != shape(one_x, "main", table).map_err(failed)?
+            {
+                return Err(Refused::Shape(format!(
+                    "opencode.db has a `{table}` table that isn't 1.x's"
+                )));
             }
             continue;
         }
         out.push(sql);
         let mut st = one_x.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ?1 AND sql IS NOT NULL").map_err(failed)?;
-        let made: Vec<(String, String)> = st.query_map([table], |r| Ok((r.get(0)?, r.get(1)?))).and_then(|rows| rows.collect()).map_err(failed)?;
+        let made: Vec<(String, String)> = st
+            .query_map([table], |r| Ok((r.get(0)?, r.get(1)?)))
+            .and_then(|rows| rows.collect())
+            .map_err(failed)?;
         for (name, sql) in made {
             if indexes.contains(&name) {
-                return Err(Refused::Shape(format!("opencode.db has an index `{name}` of its own, which 1.x's `{table}` needs")));
+                return Err(Refused::Shape(format!(
+                    "opencode.db has an index `{name}` of its own, which 1.x's `{table}` needs"
+                )));
             }
             out.push(sql);
         }
         // What it refers to must be there.
-        let mut st = one_x.prepare("SELECT DISTINCT \"table\" FROM pragma_foreign_key_list(?1)").map_err(failed)?;
-        let targets: Vec<String> = st.query_map([table], |r| r.get(0)).and_then(|rows| rows.collect()).map_err(failed)?;
-        if let Some(t) = targets.iter().find(|t| !TABLES_1X.contains(&t.as_str()) && !tables.contains(*t)) {
-            return Err(Refused::Shape(format!("opencode.db has no `{t}` table, which 1.x's `{table}` refers to")));
+        let mut st = one_x
+            .prepare("SELECT DISTINCT \"table\" FROM pragma_foreign_key_list(?1)")
+            .map_err(failed)?;
+        let targets: Vec<String> = st
+            .query_map([table], |r| r.get(0))
+            .and_then(|rows| rows.collect())
+            .map_err(failed)?;
+        if let Some(t) = targets
+            .iter()
+            .find(|t| !TABLES_1X.contains(&t.as_str()) && !tables.contains(*t))
+        {
+            return Err(Refused::Shape(format!(
+                "opencode.db has no `{t}` table, which 1.x's `{table}` refers to"
+            )));
         }
     }
     // 1.x makes the changes its journal lacks on start; ones already in what's copied would fail.
-    let journal = |c: &Connection| -> rusqlite::Result<HashSet<String>> { c.prepare("SELECT id FROM migration")?.query_map([], |r| r.get(0))?.collect() };
-    let theirs = journal(one_x).map_err(|_| Refused::Shape("this OpenCode 1.x keeps no migration journal Trek can read".into()))?;
+    let journal = |c: &Connection| -> rusqlite::Result<HashSet<String>> {
+        c.prepare("SELECT id FROM migration")?
+            .query_map([], |r| r.get(0))?
+            .collect()
+    };
+    let theirs = journal(one_x).map_err(|_| {
+        Refused::Shape("this OpenCode 1.x keeps no migration journal Trek can read".into())
+    })?;
     let ours = journal(conn).map_err(failed)?;
     let mut missing: Vec<&String> = theirs.difference(&ours).collect();
     if !missing.is_empty() {
         missing.sort();
         return Err(Refused::Shape(format!(
             "OpenCode 1.x has schema changes opencode.db's journal doesn't list ({})",
-            missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            missing
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         )));
     }
     Ok(Some(out))
@@ -247,7 +327,10 @@ fn plan(conn: &Connection, one_x: &Connection) -> Result<Option<Vec<String>>, Re
 /// way leaves the events: it copies the sessions there by then and notes it's done.
 fn note_copy(conn: &Connection) -> rusqlite::Result<()> {
     let cols = columns(conn, "main", "kv")?;
-    if !["key", "value", "time_created", "time_updated"].iter().all(|c| cols.iter().any(|k| k == c)) {
+    if !["key", "value", "time_created", "time_updated"]
+        .iter()
+        .all(|c| cols.iter().any(|k| k == c))
+    {
         return Ok(());
     }
     let now = crate::store::now_ms();
@@ -285,7 +368,11 @@ fn copy_rows(conn: &Connection) -> rusqlite::Result<usize> {
             continue;
         }
         let from = columns(conn, "own", table)?;
-        let cols: Vec<String> = columns(conn, "main", table)?.into_iter().filter(|c| from.contains(c)).map(|c| format!("\"{c}\"")).collect();
+        let cols: Vec<String> = columns(conn, "main", table)?
+            .into_iter()
+            .filter(|c| from.contains(c))
+            .map(|c| format!("\"{c}\""))
+            .collect();
         let cols = cols.join(", ");
         let n = conn.execute(&format!("INSERT OR IGNORE INTO main.\"{table}\" ({cols}) SELECT {cols} FROM own.\"{table}\" WHERE {filter}"), [])?;
         if table == "session" {
@@ -344,7 +431,8 @@ mod tests {
     const SESSION_2: &str = "ses_ede7c1be5ffePy3gmdS6lug9B9";
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("trek-opencode-share-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("trek-opencode-share-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -358,7 +446,10 @@ mod tests {
     fn made_by_2(name: &str) -> (PathBuf, PathBuf) {
         let dir = temp_dir(name);
         // In WAL mode, as OpenCode keeps it.
-        make(&dir.join(MAIN_DB), &format!("PRAGMA journal_mode = WAL; {FRESH_2}"));
+        make(
+            &dir.join(MAIN_DB),
+            &format!("PRAGMA journal_mode = WAL; {FRESH_2}"),
+        );
         let scratch = dir.join("scratch");
         std::fs::create_dir(&scratch).unwrap();
         make(&scratch.join("1x.db"), EMPTY_1X);
@@ -370,10 +461,17 @@ mod tests {
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let mut out = vec![];
         for t in tables {
-            let mut st = conn.prepare(&format!("SELECT * FROM \"{t}\" ORDER BY 1, 2")).unwrap();
+            let mut st = conn
+                .prepare(&format!("SELECT * FROM \"{t}\" ORDER BY 1, 2"))
+                .unwrap();
             let n = st.column_count();
             let found: Vec<String> = st
-                .query_map([], |r| Ok((0..n).map(|i| format!("{:?}", r.get::<_, rusqlite::types::Value>(i).unwrap())).collect::<Vec<_>>().join("|")))
+                .query_map([], |r| {
+                    Ok((0..n)
+                        .map(|i| format!("{:?}", r.get::<_, rusqlite::types::Value>(i).unwrap()))
+                        .collect::<Vec<_>>()
+                        .join("|"))
+                })
                 .unwrap()
                 .map(Result::unwrap)
                 .collect();
@@ -383,10 +481,21 @@ mod tests {
     }
 
     /// OpenCode 2's tables (and its journal).
-    const TABLES_2: [&str; 6] = ["session_v2", "session_message", "project", "migration", "event_sequence", "workspace"];
+    const TABLES_2: [&str; 6] = [
+        "session_v2",
+        "session_message",
+        "project",
+        "migration",
+        "event_sequence",
+        "workspace",
+    ];
 
     fn backups(dir: &Path) -> Vec<String> {
-        let mut found: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).filter(|n| n.contains(".backup-") || n.contains(".merged-")).collect();
+        let mut found: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".backup-") || n.contains(".merged-"))
+            .collect();
         found.sort();
         found
     }
@@ -395,10 +504,14 @@ mod tests {
     #[test]
     #[ignore = "reads TREK_OPENCODE_DATA"]
     fn list_trek_opencode_data() {
-        let dir = PathBuf::from(std::env::var_os("TREK_OPENCODE_DATA").expect("TREK_OPENCODE_DATA"));
+        let dir =
+            PathBuf::from(std::env::var_os("TREK_OPENCODE_DATA").expect("TREK_OPENCODE_DATA"));
         println!("{:?}", state(&dir));
         for t in scan_all(&dbs_in(&dir), 0, &HashSet::new()) {
-            println!("{} {:?} {:?} skip={:?}", t.native_id, t.title, t.model, t.skip);
+            println!(
+                "{} {:?} {:?} skip={:?}",
+                t.native_id, t.title, t.model, t.skip
+            );
         }
     }
 
@@ -415,21 +528,38 @@ mod tests {
         let one_x = Connection::open(&scratch).unwrap();
         // 1.x's tables and indexes, as 1.x makes them.
         for t in TABLES_1X {
-            assert_eq!(shape(&conn, "main", t).unwrap(), shape(&one_x, "main", t).unwrap(), "{t}");
+            assert_eq!(
+                shape(&conn, "main", t).unwrap(),
+                shape(&one_x, "main", t).unwrap(),
+                "{t}"
+            );
         }
         let indexes = names(&conn, "main", "index").unwrap();
-        for i in ["session_project_idx", "session_parent_idx", "message_session_time_created_id_idx", "part_session_idx", "todo_session_idx"] {
+        for i in [
+            "session_project_idx",
+            "session_parent_idx",
+            "message_session_time_created_id_idx",
+            "part_session_idx",
+            "todo_session_idx",
+        ] {
             assert!(indexes.contains(i), "{i}");
         }
         // OpenCode 2's own are as they were; it's told to copy 1.x's sessions without clearing its events.
         assert_eq!(rows(&main, &TABLES_2), before);
-        let copy: String = conn.query_row("SELECT value FROM kv WHERE key = ?1", [COPIED], |r| r.get(0)).unwrap();
+        let copy: String = conn
+            .query_row("SELECT value FROM kv WHERE key = ?1", [COPIED], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(copy, r#"{"phase":"sessions"}"#);
         drop(conn);
         // Once is enough.
         assert_eq!(share(&dir, &scratch, true).unwrap(), None);
         // The copy from before is OpenCode 2's database as it was: put back, 1.x refuses it again.
-        assert_eq!(backups(&dir), [done.backup.file_name().unwrap().to_string_lossy()]);
+        assert_eq!(
+            backups(&dir),
+            [done.backup.file_name().unwrap().to_string_lossy()]
+        );
         std::fs::copy(&done.backup, &main).unwrap();
         assert_eq!(state(&dir), State::Made2);
         assert_eq!(rows(&main, &TABLES_2), before);
@@ -441,14 +571,29 @@ mod tests {
         let (dir, scratch) = made_by_2("open");
         // OpenCode 2's background server, reading.
         let server = Connection::open(dir.join(MAIN_DB)).unwrap();
-        let count = |c: &Connection| c.query_row("SELECT COUNT(*) FROM session_v2", [], |r| r.get::<_, i64>(0)).unwrap();
+        let count = |c: &Connection| {
+            c.query_row("SELECT COUNT(*) FROM session_v2", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
         server.execute_batch("BEGIN").unwrap();
         assert_eq!(count(&server), 1);
         assert!(share(&dir, &scratch, false).unwrap().is_some());
         server.execute_batch("COMMIT").unwrap();
         // It sees the new tables, and goes on as before.
-        assert_eq!(server.query_row("SELECT COUNT(*) FROM session", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-        server.execute("UPDATE session_v2 SET title = 'renamed' WHERE id = ?1", [SESSION_2]).unwrap();
+        assert_eq!(
+            server
+                .query_row("SELECT COUNT(*) FROM session", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        server
+            .execute(
+                "UPDATE session_v2 SET title = 'renamed' WHERE id = ?1",
+                [SESSION_2],
+            )
+            .unwrap();
         assert_eq!(count(&server), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -460,7 +605,10 @@ mod tests {
         make(&scratch, EMPTY_1X);
         // Recorded with 1.x and then 2.0: what users who had 1.x first have.
         let main = dir.join(MAIN_DB);
-        make(&main, include_str!("../../../fixtures/opencode-1x-then-2.sql"));
+        make(
+            &main,
+            include_str!("../../../fixtures/opencode-1x-then-2.sql"),
+        );
         let bytes = std::fs::read(&main).unwrap();
         assert_eq!(state(&dir), State::Opens);
         assert_eq!(share(&dir, &scratch, true).unwrap(), None);
@@ -480,10 +628,16 @@ mod tests {
     fn a_table_of_another_shape_is_left_alone() {
         let (dir, scratch) = made_by_2("collision");
         let main = dir.join(MAIN_DB);
-        Connection::open(&main).unwrap().execute_batch("CREATE TABLE message (id TEXT PRIMARY KEY, body TEXT)").unwrap();
+        Connection::open(&main)
+            .unwrap()
+            .execute_batch("CREATE TABLE message (id TEXT PRIMARY KEY, body TEXT)")
+            .unwrap();
         let bytes = std::fs::read(&main).unwrap();
         let why = share(&dir, &scratch, true).unwrap_err();
-        assert_eq!(why, Refused::Shape("opencode.db has a `message` table that isn't 1.x's".into()));
+        assert_eq!(
+            why,
+            Refused::Shape("opencode.db has a `message` table that isn't 1.x's".into())
+        );
         assert_eq!(std::fs::read(&main).unwrap(), bytes);
         assert!(backups(&dir).is_empty());
         assert_eq!(state(&dir), State::Made2);
@@ -494,12 +648,25 @@ mod tests {
     fn a_newer_1x_is_left_alone() {
         let (dir, scratch) = made_by_2("journal");
         // 1.x has a schema change OpenCode 2 doesn't know of.
-        Connection::open(&scratch).unwrap().execute("INSERT INTO migration VALUES ('20991231000000_later', 0)", []).unwrap();
+        Connection::open(&scratch)
+            .unwrap()
+            .execute(
+                "INSERT INTO migration VALUES ('20991231000000_later', 0)",
+                [],
+            )
+            .unwrap();
         let why = share(&dir, &scratch, true).unwrap_err();
         assert_eq!(why, Refused::Shape("OpenCode 1.x has schema changes opencode.db's journal doesn't list (20991231000000_later)".into()));
         // And one with a table missing isn't the 1.x this knows.
-        Connection::open(&scratch).unwrap().execute_batch("DELETE FROM migration WHERE id = '20991231000000_later'; DROP TABLE session_share").unwrap();
-        assert!(matches!(share(&dir, &scratch, true), Err(Refused::Shape(why)) if why.contains("`session_share`")));
+        Connection::open(&scratch)
+            .unwrap()
+            .execute_batch(
+                "DELETE FROM migration WHERE id = '20991231000000_later'; DROP TABLE session_share",
+            )
+            .unwrap();
+        assert!(
+            matches!(share(&dir, &scratch, true), Err(Refused::Shape(why)) if why.contains("`session_share`"))
+        );
         assert!(backups(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -531,15 +698,35 @@ mod tests {
         assert_eq!(done.merged, 1);
         // Set aside, not deleted, and not read again.
         assert!(!dir.join(DB_1X).exists());
-        assert_eq!(backups(&dir).iter().filter(|n| n.starts_with("opencode-1x.db.merged-")).count(), 1);
+        assert_eq!(
+            backups(&dir)
+                .iter()
+                .filter(|n| n.starts_with("opencode-1x.db.merged-"))
+                .count(),
+            1
+        );
         let main = dir.join(MAIN_DB);
         assert_eq!(rows(&main, &["session"]).len(), 1);
-        assert_eq!((rows(&main, &["message"]).len(), rows(&main, &["part"]).len(), rows(&main, &["event"]).len()), (1, 1, 1));
-        assert!(rows(&main, &["project"]).iter().any(|r| r.contains("\"p1\"")));
+        assert_eq!(
+            (
+                rows(&main, &["message"]).len(),
+                rows(&main, &["part"]).len(),
+                rows(&main, &["event"]).len()
+            ),
+            (1, 1, 1)
+        );
+        assert!(
+            rows(&main, &["project"])
+                .iter()
+                .any(|r| r.contains("\"p1\""))
+        );
         // Trek lists both versions' sessions from the one file.
         let dbs = dbs_in(&dir);
         assert_eq!(dbs.len(), 1);
-        let ids: Vec<String> = scan_all(&dbs, 0, &HashSet::new()).into_iter().map(|t| t.native_id).collect();
+        let ids: Vec<String> = scan_all(&dbs, 0, &HashSet::new())
+            .into_iter()
+            .map(|t| t.native_id)
+            .collect();
         assert_eq!(ids, ["ses_1x", SESSION_2]);
         let _ = std::fs::remove_dir_all(&dir);
     }

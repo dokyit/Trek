@@ -54,17 +54,27 @@ impl CloneProjectRequest {
 }
 
 fn clone_url_ok(url: &str) -> bool {
-    if url.is_empty() || url.len() > 2048 || url.starts_with('-') || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+    if url.is_empty()
+        || url.len() > 2048
+        || url.starts_with('-')
+        || url.chars().any(|c| c.is_control() || c.is_whitespace())
+    {
         return false;
     }
     if let Some((scheme, rest)) = url.split_once("://") {
-        return matches!(scheme.to_ascii_lowercase().as_str(), "https" | "http" | "ssh" | "git") && !rest.is_empty() && !rest.starts_with('-');
+        return matches!(
+            scheme.to_ascii_lowercase().as_str(),
+            "https" | "http" | "ssh" | "git"
+        ) && !rest.is_empty()
+            && !rest.starts_with('-');
     }
     // scp-like: `[user@]host:path`, with no `/` before the colon (else git reads a local path)
     // and not `transport::address` (git's remote helpers, `ext::` among them).
     match url.split_once(':') {
         // A one-letter "host" is a Windows drive (`C:/repo`), a local path again.
-        Some((host, path)) => host.len() > 1 && !host.contains('/') && !path.is_empty() && !path.starts_with(':'),
+        Some((host, path)) => {
+            host.len() > 1 && !host.contains('/') && !path.is_empty() && !path.starts_with(':')
+        }
         None => false,
     }
 }
@@ -78,7 +88,11 @@ fn clone_folder_ok(folder: &str) -> bool {
         rest
     } else if folder.starts_with('/') {
         folder
-    } else if bytes.len() > 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\') {
+    } else if bytes.len() > 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
+    {
         // A Windows machine's `C:\Users\…`.
         &folder[3..]
     } else {
@@ -118,7 +132,11 @@ pub struct PutFile {
 impl PutFile {
     /// `bytes` at `path`, for the wire.
     pub fn new(path: impl Into<String>, bytes: &[u8], mode: Option<u32>) -> Self {
-        Self { path: path.into(), bytes_b64: super::base64(bytes), mode }
+        Self {
+            path: path.into(),
+            bytes_b64: super::base64(bytes),
+            mode,
+        }
     }
 }
 
@@ -150,12 +168,21 @@ impl PutFilesRequest {
             if !seen.insert(file.path.as_str()) {
                 return Err(format!("{:?} comes twice", file.path));
             }
-            let bytes = base64::engine::general_purpose::STANDARD.decode(file.bytes_b64.trim()).map_err(|e| format!("{:?}: not base64: {e}", file.path))?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(file.bytes_b64.trim())
+                .map_err(|e| format!("{:?}: not base64: {e}", file.path))?;
             total += bytes.len();
             if total > MAX_PUT_FILES {
-                return Err(format!("More than {} MiB in one message", MAX_PUT_FILES >> 20));
+                return Err(format!(
+                    "More than {} MiB in one message",
+                    MAX_PUT_FILES >> 20
+                ));
             }
-            out.push(FileUpload { path: file.path.clone(), bytes, mode: file.mode.unwrap_or(0o644) & 0o777 });
+            out.push(FileUpload {
+                path: file.path.clone(),
+                bytes,
+                mode: file.mode.unwrap_or(0o644) & 0o777,
+            });
         }
         Ok(out)
     }
@@ -168,10 +195,15 @@ pub fn safe_relative_path(path: &str) -> bool {
         return false;
     }
     let bytes = path.as_bytes();
-    if matches!(bytes[0], b'/' | b'\\') || std::path::Path::new(path).is_absolute() || (bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()) {
+    if matches!(bytes[0], b'/' | b'\\')
+        || std::path::Path::new(path).is_absolute()
+        || (bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic())
+    {
         return false;
     }
-    path.split(['/', '\\']).all(|part| !part.is_empty() && part != "." && part != ".." && !part.eq_ignore_ascii_case(".git"))
+    path.split(['/', '\\']).all(|part| {
+        !part.is_empty() && part != "." && part != ".." && !part.eq_ignore_ascii_case(".git")
+    })
 }
 
 #[cfg(test)]
@@ -180,34 +212,117 @@ mod tests {
 
     #[test]
     fn paths_stay_inside_the_project() {
-        for ok in [".env", "config/local.toml", "a/b/c.txt", "weird name.txt", "..env", "x..y/z"] {
+        for ok in [
+            ".env",
+            "config/local.toml",
+            "a/b/c.txt",
+            "weird name.txt",
+            "..env",
+            "x..y/z",
+        ] {
             assert!(safe_relative_path(ok), "{ok}");
         }
-        for bad in ["", "../x", "a/../../x", "..", "/etc/passwd", "\\x", "C:\\x", "c:x", "a//b", "./a", "a/./b", "a\\..\\b", ".git/config", "sub/.GIT/hooks/x", "a\0b", "a/"] {
+        for bad in [
+            "",
+            "../x",
+            "a/../../x",
+            "..",
+            "/etc/passwd",
+            "\\x",
+            "C:\\x",
+            "c:x",
+            "a//b",
+            "./a",
+            "a/./b",
+            "a\\..\\b",
+            ".git/config",
+            "sub/.GIT/hooks/x",
+            "a\0b",
+            "a/",
+        ] {
             assert!(!safe_relative_path(bad), "{bad:?}");
         }
     }
 
     #[test]
     fn put_files_decode_checks_every_file() {
-        let req = |files: Vec<PutFile>| PutFilesRequest { project_id: "p".into(), files };
-        let files = req(vec![PutFile::new(".env", b"KEY=1\n", None), PutFile::new("bin/run", b"#!/bin/sh\n", Some(0o4755))]).decode().unwrap();
-        assert_eq!(files[0], FileUpload { path: ".env".into(), bytes: b"KEY=1\n".to_vec(), mode: 0o644 });
+        let req = |files: Vec<PutFile>| PutFilesRequest {
+            project_id: "p".into(),
+            files,
+        };
+        let files = req(vec![
+            PutFile::new(".env", b"KEY=1\n", None),
+            PutFile::new("bin/run", b"#!/bin/sh\n", Some(0o4755)),
+        ])
+        .decode()
+        .unwrap();
+        assert_eq!(
+            files[0],
+            FileUpload {
+                path: ".env".into(),
+                bytes: b"KEY=1\n".to_vec(),
+                mode: 0o644
+            }
+        );
         assert_eq!(files[1].mode, 0o755, "setuid is dropped");
         assert!(req(vec![PutFile::new("../x", b"", None)]).decode().is_err());
-        assert!(req(vec![PutFile::new("a", b"", None), PutFile::new("a", b"", None)]).decode().is_err());
-        assert!(req(vec![PutFile { path: "a".into(), bytes_b64: "not base64!".into(), mode: None }]).decode().is_err());
+        assert!(
+            req(vec![
+                PutFile::new("a", b"", None),
+                PutFile::new("a", b"", None)
+            ])
+            .decode()
+            .is_err()
+        );
+        assert!(
+            req(vec![PutFile {
+                path: "a".into(),
+                bytes_b64: "not base64!".into(),
+                mode: None
+            }])
+            .decode()
+            .is_err()
+        );
         let big = vec![0u8; MAX_PUT_FILES / 2 + 1];
-        assert!(req(vec![PutFile::new("a", &big, None), PutFile::new("b", &big, None)]).decode().unwrap_err().contains("MiB"));
+        assert!(
+            req(vec![
+                PutFile::new("a", &big, None),
+                PutFile::new("b", &big, None)
+            ])
+            .decode()
+            .unwrap_err()
+            .contains("MiB")
+        );
     }
 
     #[test]
     fn clone_requests_take_only_fetchable_urls_and_plain_folders() {
-        let req = |url: &str, folder: &str| CloneProjectRequest { url: url.into(), folder: folder.into(), name: "trek".into() };
-        for url in ["https://github.com/dokyit/trek.git", "ssh://git@github.com/dokyit/trek", "git@github.com:dokyit/trek.git", "git://host/x"] {
+        let req = |url: &str, folder: &str| CloneProjectRequest {
+            url: url.into(),
+            folder: folder.into(),
+            name: "trek".into(),
+        };
+        for url in [
+            "https://github.com/dokyit/trek.git",
+            "ssh://git@github.com/dokyit/trek",
+            "git@github.com:dokyit/trek.git",
+            "git://host/x",
+        ] {
             assert_eq!(req(url, "~/trek").check(), Ok(()), "{url}");
         }
-        for url in ["", "-uhttps://x", "--upload-pack=touch /tmp/x", "ext::sh -c touch% /tmp/pwned", "file:///etc", "/tmp/repo", "./repo", "fd::17", "https://", "https://x y", "C:/repo"] {
+        for url in [
+            "",
+            "-uhttps://x",
+            "--upload-pack=touch /tmp/x",
+            "ext::sh -c touch% /tmp/pwned",
+            "file:///etc",
+            "/tmp/repo",
+            "./repo",
+            "fd::17",
+            "https://",
+            "https://x y",
+            "C:/repo",
+        ] {
             assert!(req(url, "~/trek").check().is_err(), "{url}");
         }
         for folder in ["/Users/me/trek", "~/code/trek", "C:\\Users\\me\\trek"] {
@@ -216,6 +331,13 @@ mod tests {
         for folder in ["", "trek", "~", "~/", "/", "~/../etc", "/tmp/../etc", "-x"] {
             assert!(req("https://h/r", folder).check().is_err(), "{folder}");
         }
-        assert!(CloneProjectRequest { name: " ".into(), ..req("https://h/r", "~/r") }.check().is_err());
+        assert!(
+            CloneProjectRequest {
+                name: " ".into(),
+                ..req("https://h/r", "~/r")
+            }
+            .check()
+            .is_err()
+        );
     }
 }

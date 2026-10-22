@@ -140,7 +140,12 @@ pub struct Pickup {
 impl Pickup {
     /// `seen` is the clipboard's sequence number from before the overlay opened.
     pub fn new(seen: u32, interval: Duration, timeout: Duration) -> Self {
-        Self { seen, waited: Duration::ZERO, interval, timeout }
+        Self {
+            seen,
+            waited: Duration::ZERO,
+            interval,
+            timeout,
+        }
     }
 
     /// One look, once an interval: a new image ends the wait with it; other changes to the
@@ -156,7 +161,11 @@ impl Pickup {
             }
         }
         self.waited += self.interval;
-        if self.waited >= self.timeout { Poll::TimedOut } else { Poll::Waiting }
+        if self.waited >= self.timeout {
+            Poll::TimedOut
+        } else {
+            Poll::Waiting
+        }
     }
 }
 
@@ -173,8 +182,10 @@ pub fn to_png(clip: Clip) -> Result<Vec<u8>> {
         Err(_) => return other_dib_to_png(&dib),
     };
     let mut png = Vec::new();
-    let image = image::RgbImage::from_raw(width, height, rgb).ok_or_else(|| anyhow::anyhow!("the image's size doesn't match its pixels"))?;
-    image::DynamicImage::ImageRgb8(image).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)?;
+    let image = image::RgbImage::from_raw(width, height, rgb)
+        .ok_or_else(|| anyhow::anyhow!("the image's size doesn't match its pixels"))?;
+    image::DynamicImage::ImageRgb8(image)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)?;
     Ok(png)
 }
 
@@ -194,9 +205,19 @@ fn le_u32(bytes: &[u8], at: usize) -> Option<u32> {
 /// Where a DIB's pixels start, after its header, bit masks and colour table.
 fn pixel_offset(dib: &[u8], header: u32, bits: u16, compression: u32) -> Option<usize> {
     // A 40-byte header keeps its three masks after it; the longer ones have them inside.
-    let masks = if compression == BI_BITFIELDS && header == 40 { 12 } else { 0 };
+    let masks = if compression == BI_BITFIELDS && header == 40 {
+        12
+    } else {
+        0
+    };
     let used = le_u32(dib, 32)?;
-    let colours = if used != 0 { used as usize } else if bits <= 8 { 1usize << bits } else { 0 };
+    let colours = if used != 0 {
+        used as usize
+    } else if bits <= 8 {
+        1usize << bits
+    } else {
+        0
+    };
     Some(header as usize + masks + colours * 4)
 }
 
@@ -205,23 +226,40 @@ fn pixel_offset(dib: &[u8], header: u32, bits: u16, compression: u32) -> Option<
 fn dib_pixels(dib: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
     let header = le_u32(dib, 0).unwrap_or(0);
     ensure!(header >= 40, "an old-style bitmap header");
-    let (width, height) = (le_u32(dib, 4).unwrap_or(0) as i32, le_u32(dib, 8).unwrap_or(0) as i32);
+    let (width, height) = (
+        le_u32(dib, 4).unwrap_or(0) as i32,
+        le_u32(dib, 8).unwrap_or(0) as i32,
+    );
     let bits = le_u16(dib, 14).unwrap_or(0);
     let compression = le_u32(dib, 16).unwrap_or(u32::MAX);
-    ensure!(matches!(bits, 24 | 32) && matches!(compression, BI_RGB | BI_BITFIELDS), "{bits} bit pixels, compression {compression}");
+    ensure!(
+        matches!(bits, 24 | 32) && matches!(compression, BI_RGB | BI_BITFIELDS),
+        "{bits} bit pixels, compression {compression}"
+    );
     ensure!(width > 0 && height != 0, "an empty image");
     let (w, h) = (width as u64, height.unsigned_abs() as u64);
-    ensure!(w <= MAX_SIDE && h <= MAX_SIDE, "an image {w}×{h} is too large");
+    ensure!(
+        w <= MAX_SIDE && h <= MAX_SIDE,
+        "an image {w}×{h} is too large"
+    );
     // Masks pick each colour out of a 32 bit pixel; 24 bit pixels are plain BGR.
     let masks = if bits == 32 && compression == BI_BITFIELDS {
-        [le_u32(dib, 40).unwrap_or(0), le_u32(dib, 44).unwrap_or(0), le_u32(dib, 48).unwrap_or(0)]
+        [
+            le_u32(dib, 40).unwrap_or(0),
+            le_u32(dib, 44).unwrap_or(0),
+            le_u32(dib, 48).unwrap_or(0),
+        ]
     } else {
         [0x00ff_0000, 0x0000_ff00, 0x0000_00ff]
     };
     ensure!(masks.iter().all(|m| *m != 0), "a colour mask is empty");
-    let start = pixel_offset(dib, header, bits, compression).ok_or_else(|| anyhow::anyhow!("a bitmap cut short"))?;
+    let start = pixel_offset(dib, header, bits, compression)
+        .ok_or_else(|| anyhow::anyhow!("a bitmap cut short"))?;
     let stride = (w * bits as u64).div_ceil(32) * 4;
-    ensure!(dib.len() as u64 >= start as u64 + stride * h, "a bitmap cut short");
+    ensure!(
+        dib.len() as u64 >= start as u64 + stride * h,
+        "a bitmap cut short"
+    );
     let channel = |pixel: u32, mask: u32| {
         let shift = mask.trailing_zeros();
         (((pixel & mask) >> shift) as u64 * 255 / (mask >> shift) as u64) as u8
@@ -235,8 +273,17 @@ fn dib_pixels(dib: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
             if bits == 24 {
                 rgb.extend_from_slice(&[line[x * 3 + 2], line[x * 3 + 1], line[x * 3]]);
             } else {
-                let pixel = u32::from_le_bytes([line[x * 4], line[x * 4 + 1], line[x * 4 + 2], line[x * 4 + 3]]);
-                rgb.extend_from_slice(&[channel(pixel, masks[0]), channel(pixel, masks[1]), channel(pixel, masks[2])]);
+                let pixel = u32::from_le_bytes([
+                    line[x * 4],
+                    line[x * 4 + 1],
+                    line[x * 4 + 2],
+                    line[x * 4 + 3],
+                ]);
+                rgb.extend_from_slice(&[
+                    channel(pixel, masks[0]),
+                    channel(pixel, masks[1]),
+                    channel(pixel, masks[2]),
+                ]);
             }
         }
     }
@@ -259,9 +306,12 @@ fn other_dib_to_png(dib: &[u8]) -> Result<Vec<u8>> {
     bmp.extend_from_slice(&[0; 4]);
     bmp.extend_from_slice(&(offset as u32).to_le_bytes());
     bmp.extend_from_slice(dib);
-    let decoded = image::load_from_memory_with_format(&bmp, image::ImageFormat::Bmp).map_err(|_| anyhow::anyhow!("its data couldn't be read"))?;
+    let decoded = image::load_from_memory_with_format(&bmp, image::ImageFormat::Bmp)
+        .map_err(|_| anyhow::anyhow!("its data couldn't be read"))?;
     let mut png = Vec::new();
-    decoded.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).map_err(|_| anyhow::anyhow!("it couldn't be converted to PNG"))?;
+    decoded
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|_| anyhow::anyhow!("it couldn't be converted to PNG"))?;
     Ok(png)
 }
 
@@ -272,10 +322,15 @@ mod real {
     use super::{Backend, Clip, Read, Source};
     use std::marker::PhantomData;
     use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND};
-    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable,
+        OpenClipboard, RegisterClipboardFormatW,
+    };
     use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
     use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, HWND_MESSAGE, SW_SHOWNORMAL, WINDOW_EX_STYLE, WINDOW_STYLE};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, HWND_MESSAGE, SW_SHOWNORMAL, WINDOW_EX_STYLE, WINDOW_STYLE,
+    };
     use windows::core::{PCWSTR, w};
 
     const CF_DIB: u32 = 8;
@@ -286,9 +341,22 @@ mod real {
     impl Backend for Snipping {
         fn launch(&self) -> Result<(), String> {
             // SAFETY: NUL-ended literals; the call hands the URI to the shell and returns.
-            let result = unsafe { ShellExecuteW(None, w!("open"), w!("ms-screenclip:"), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
+            let result = unsafe {
+                ShellExecuteW(
+                    None,
+                    w!("open"),
+                    w!("ms-screenclip:"),
+                    PCWSTR::null(),
+                    PCWSTR::null(),
+                    SW_SHOWNORMAL,
+                )
+            };
             // Success is any value above 32; the rest are the shell's error codes.
-            if result.0 as usize > 32 { Ok(()) } else { Err(format!("Windows answered {}", result.0 as usize)) }
+            if result.0 as usize > 32 {
+                Ok(())
+            } else {
+                Err(format!("Windows answered {}", result.0 as usize))
+            }
         }
 
         fn source(&self) -> Box<dyn Source> {
@@ -317,12 +385,29 @@ mod real {
             // `OpenClipboard` is paired with the `CloseClipboard` in `drop`. Opening with a window
             // doesn't make it the clipboard's owner (only emptying it would).
             unsafe {
-                let window = CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), None, WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, None, None).ok()?;
+                let window = CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    w!("STATIC"),
+                    None,
+                    WINDOW_STYLE(0),
+                    0,
+                    0,
+                    0,
+                    0,
+                    Some(HWND_MESSAGE),
+                    None,
+                    None,
+                    None,
+                )
+                .ok()?;
                 if OpenClipboard(Some(window)).is_err() {
                     let _ = DestroyWindow(window);
                     return None;
                 }
-                Some(Guard { window, _here: PhantomData })
+                Some(Guard {
+                    window,
+                    _here: PhantomData,
+                })
             }
         }
     }
@@ -363,12 +448,18 @@ mod real {
         }
 
         fn read(&mut self) -> Read {
-            let Some(open) = Guard::open() else { return Read::Busy };
+            let Some(open) = Guard::open() else {
+                return Read::Busy;
+            };
             // SAFETY: plain queries while the clipboard is open.
             let png = unsafe { RegisterClipboardFormatW(w!("PNG")) };
             let mut unreadable = false;
             // PNG is lossless and keeps what was picked as it is; the DIBs are what everything has.
-            for (format, wrap) in [(png, Clip::Png as fn(Vec<u8>) -> Clip), (CF_DIBV5, Clip::Dib), (CF_DIB, Clip::Dib)] {
+            for (format, wrap) in [
+                (png, Clip::Png as fn(Vec<u8>) -> Clip),
+                (CF_DIBV5, Clip::Dib),
+                (CF_DIB, Clip::Dib),
+            ] {
                 // SAFETY: as above.
                 if format == 0 || unsafe { IsClipboardFormatAvailable(format) }.is_err() {
                     continue;
@@ -386,7 +477,11 @@ mod real {
             }
             // An image that is there but wouldn't come out (the owner is slow to render it) is
             // asked for again; no image at all is a clipboard of something else.
-            if unreadable { Read::Busy } else { Read::NotAnImage }
+            if unreadable {
+                Read::Busy
+            } else {
+                Read::NotAnImage
+            }
         }
     }
 
@@ -414,7 +509,9 @@ mod real {
 
         /// Whether another thread, with a window of its own, gets the clipboard within `within`.
         fn opens_elsewhere(within: Duration) -> bool {
-            std::thread::spawn(move || guard(within).is_some()).join().unwrap()
+            std::thread::spawn(move || guard(within).is_some())
+                .join()
+                .unwrap()
         }
 
         #[test]
@@ -425,15 +522,23 @@ mod real {
                 let _ = clipboard.sequence();
                 let _ = clipboard.read();
             }
-            assert!(opens_elsewhere(Duration::from_secs(5)), "the clipboard stayed open after a read");
+            assert!(
+                opens_elsewhere(Duration::from_secs(5)),
+                "the clipboard stayed open after a read"
+            );
         }
 
         #[test]
         fn a_held_clipboard_is_closed_to_others() {
             // So the check above would notice one left open. (When another program has it for
             // seconds there is nothing to show.)
-            let Some(open) = guard(Duration::from_secs(5)) else { return };
-            assert!(!opens_elsewhere(Duration::from_millis(200)), "another window opened the clipboard while a Guard held it");
+            let Some(open) = guard(Duration::from_secs(5)) else {
+                return;
+            };
+            assert!(
+                !opens_elsewhere(Duration::from_millis(200)),
+                "another window opened the clipboard while a Guard held it"
+            );
             // Nor does a program opening it without a window get in, and close it under us.
             let without = std::thread::spawn(|| {
                 // SAFETY: closed again at once if it were let in.
@@ -445,7 +550,10 @@ mod real {
                     opened
                 }
             });
-            assert!(!without.join().unwrap(), "an OpenClipboard(NULL) got in while a Guard held the clipboard");
+            assert!(
+                !without.join().unwrap(),
+                "an OpenClipboard(NULL) got in while a Guard held the clipboard"
+            );
             drop(open);
         }
     }
@@ -464,7 +572,10 @@ mod tests {
 
     impl Fake {
         fn new(start: u32, steps: impl IntoIterator<Item = (u32, Read)>) -> Self {
-            Self { steps: steps.into_iter().collect(), last: (start, Read::NotAnImage) }
+            Self {
+                steps: steps.into_iter().collect(),
+                last: (start, Read::NotAnImage),
+            }
         }
     }
 
@@ -490,7 +601,14 @@ mod tests {
 
     #[test]
     fn a_new_image_ends_the_wait() {
-        let mut clipboard = Fake::new(7, [(7, Read::NotAnImage), (7, Read::NotAnImage), (8, Read::Image(png_clip()))]);
+        let mut clipboard = Fake::new(
+            7,
+            [
+                (7, Read::NotAnImage),
+                (7, Read::NotAnImage),
+                (8, Read::Image(png_clip())),
+            ],
+        );
         let mut wait = pickup(7);
         assert_eq!(wait.poll(&mut clipboard), Poll::Waiting);
         assert_eq!(wait.poll(&mut clipboard), Poll::Waiting);
@@ -506,7 +624,14 @@ mod tests {
 
     #[test]
     fn text_copied_meanwhile_is_waited_past() {
-        let mut clipboard = Fake::new(1, [(2, Read::NotAnImage), (2, Read::NotAnImage), (3, Read::Image(png_clip()))]);
+        let mut clipboard = Fake::new(
+            1,
+            [
+                (2, Read::NotAnImage),
+                (2, Read::NotAnImage),
+                (3, Read::Image(png_clip())),
+            ],
+        );
         let mut wait = pickup(1);
         assert_eq!(wait.poll(&mut clipboard), Poll::Waiting);
         assert_eq!(wait.poll(&mut clipboard), Poll::Waiting);
@@ -515,7 +640,14 @@ mod tests {
 
     #[test]
     fn a_clipboard_someone_else_holds_is_asked_again() {
-        let mut clipboard = Fake::new(1, [(2, Read::Busy), (2, Read::Busy), (2, Read::Image(png_clip()))]);
+        let mut clipboard = Fake::new(
+            1,
+            [
+                (2, Read::Busy),
+                (2, Read::Busy),
+                (2, Read::Image(png_clip())),
+            ],
+        );
         let mut wait = pickup(1);
         assert_eq!(wait.poll(&mut clipboard), Poll::Waiting);
         assert_eq!(wait.poll(&mut clipboard), Poll::Waiting);
@@ -556,8 +688,17 @@ mod tests {
         dib.extend_from_slice(&1u16.to_le_bytes());
         dib.extend_from_slice(&32u16.to_le_bytes());
         dib.extend_from_slice(&[0; 24]);
-        let (red, green, blue, white) = ([0, 0, 255, 0], [0, 255, 0, 0], [255, 0, 0, 0], [255, 255, 255, 0]);
-        let rows = if height > 0 { [[blue, white], [red, green]] } else { [[red, green], [blue, white]] };
+        let (red, green, blue, white) = (
+            [0, 0, 255, 0],
+            [0, 255, 0, 0],
+            [255, 0, 0, 0],
+            [255, 255, 255, 0],
+        );
+        let rows = if height > 0 {
+            [[blue, white], [red, green]]
+        } else {
+            [[red, green], [blue, white]]
+        };
         for row in rows {
             row.iter().for_each(|p| dib.extend_from_slice(p));
         }
@@ -565,16 +706,34 @@ mod tests {
     }
 
     fn pixels(png: &[u8]) -> (u32, u32, Vec<[u8; 3]>) {
-        let decoded = image::load_from_memory_with_format(png, image::ImageFormat::Png).unwrap().to_rgb8();
-        (decoded.width(), decoded.height(), decoded.pixels().map(|p| p.0).collect())
+        let decoded = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+            .unwrap()
+            .to_rgb8();
+        (
+            decoded.width(),
+            decoded.height(),
+            decoded.pixels().map(|p| p.0).collect(),
+        )
     }
 
     #[test]
     fn a_dib_becomes_a_png_the_right_way_up() {
         let picture = vec![[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]];
-        assert_eq!(pixels(&to_png(Clip::Dib(dib24())).unwrap()), (2, 2, picture.clone()), "24 bit, bottom-up");
-        assert_eq!(pixels(&to_png(Clip::Dib(dib32(2))).unwrap()), (2, 2, picture.clone()), "32 bit, bottom-up");
-        assert_eq!(pixels(&to_png(Clip::Dib(dib32(-2))).unwrap()), (2, 2, picture), "32 bit, top-down");
+        assert_eq!(
+            pixels(&to_png(Clip::Dib(dib24())).unwrap()),
+            (2, 2, picture.clone()),
+            "24 bit, bottom-up"
+        );
+        assert_eq!(
+            pixels(&to_png(Clip::Dib(dib32(2))).unwrap()),
+            (2, 2, picture.clone()),
+            "32 bit, bottom-up"
+        );
+        assert_eq!(
+            pixels(&to_png(Clip::Dib(dib32(-2))).unwrap()),
+            (2, 2, picture),
+            "32 bit, top-down"
+        );
     }
 
     #[test]
@@ -592,14 +751,20 @@ mod tests {
             dib.extend_from_slice(&mask.to_le_bytes());
         }
         dib.extend_from_slice(&0x1020_3000u32.to_le_bytes());
-        assert_eq!(pixels(&to_png(Clip::Dib(dib)).unwrap()), (1, 1, vec![[0x10, 0x20, 0x30]]));
+        assert_eq!(
+            pixels(&to_png(Clip::Dib(dib)).unwrap()),
+            (1, 1, vec![[0x10, 0x20, 0x30]])
+        );
     }
 
     #[test]
     fn a_png_is_kept_and_a_broken_dib_is_refused() {
         assert_eq!(to_png(png_clip()).unwrap(), PNG_SIGNATURE.to_vec());
         // Something else under the name "PNG" is not attached as one.
-        assert!(to_png(Clip::Png(b"GIF89a\x01\x00".to_vec())).is_err(), "not a PNG");
+        assert!(
+            to_png(Clip::Png(b"GIF89a\x01\x00".to_vec())).is_err(),
+            "not a PNG"
+        );
         assert!(to_png(Clip::Png(vec![])).is_err(), "nothing at all");
         let mut cut = dib24();
         cut.truncate(cut.len() - 4);
@@ -625,6 +790,9 @@ mod tests {
         dib.extend_from_slice(&[0; 4]);
         dib.extend_from_slice(&[255, 0, 0, 0, 0, 0, 255, 0]);
         dib.extend_from_slice(&[1, 0, 0, 0]);
-        assert_eq!(pixels(&to_png(Clip::Dib(dib)).unwrap()), (1, 1, vec![[255, 0, 0]]));
+        assert_eq!(
+            pixels(&to_png(Clip::Dib(dib)).unwrap()),
+            (1, 1, vec![[255, 0, 0]])
+        );
     }
 }

@@ -1,7 +1,9 @@
 //! Shared visual primitives so every surface uses the same quiet, consistent styling.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use trek_core::AgentId;
@@ -53,7 +55,13 @@ pub fn colours_changed(applied: &mut Option<GlassState>) {
 /// last asked of the window, so it's only told when that changes. The window's root paints the
 /// theme's background under everything; under glass it paints nothing, after this frame (it's
 /// drawing this one).
-pub fn apply_glass(window: &mut Window, on: bool, dark: bool, applied: &mut Option<GlassState>, cx: &mut App) {
+pub fn apply_glass(
+    window: &mut Window,
+    on: bool,
+    dark: bool,
+    applied: &mut Option<GlassState>,
+    cx: &mut App,
+) {
     // Only Windows' Mica follows the theme's tone; elsewhere a theme change leaves glass alone.
     let state = (on, dark && cfg!(windows));
     if *applied == Some(state) {
@@ -64,7 +72,16 @@ pub fn apply_glass(window: &mut Window, on: bool, dark: bool, applied: &mut Opti
     BACKDROP_ASKS.with(|n| n.set(n.get() + 1));
     let native = crate::system::native_glass(window, on);
     let mica = cfg!(windows) && on;
-    MATERIAL.store(if native { Material::Native } else if mica { Material::Mica } else { Material::Blur } as u8, std::sync::atomic::Ordering::Relaxed);
+    MATERIAL.store(
+        if native {
+            Material::Native
+        } else if mica {
+            Material::Mica
+        } else {
+            Material::Blur
+        } as u8,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     tracing::debug!("glass: on={on} dark={dark} native={native} mica={mica}");
     #[cfg(windows)]
     crate::winlook::set_backdrop(window, dark, on);
@@ -106,7 +123,8 @@ thread_local! {
 }
 
 /// What backs the windows now (`Material`, as a number so a window can set it from a frame).
-static MATERIAL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(Material::Blur as u8);
+static MATERIAL: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(Material::Blur as u8);
 
 fn material() -> Material {
     match MATERIAL.load(std::sync::atomic::Ordering::Relaxed) {
@@ -144,7 +162,9 @@ pub fn panel_bg(glass: Option<f32>, cx: &App) -> Hsla {
 pub fn panel_border(glass: Option<f32>, cx: &App) -> Hsla {
     let theme = cx.theme();
     match glass {
-        Some(_) => theme.foreground.opacity(if theme.mode.is_dark() { 0.1 } else { 0.14 }),
+        Some(_) => theme
+            .foreground
+            .opacity(if theme.mode.is_dark() { 0.1 } else { 0.14 }),
         None => theme.sidebar_border,
     }
 }
@@ -162,17 +182,37 @@ pub fn glass_sheen(glass: Option<f32>, cx: &App) -> Option<AnyElement> {
             .left_0()
             .right_0()
             .h(px(90.))
-            .child(div().absolute().top_0().left_0().right_0().h(px(1.)).bg(light.opacity(if dark { 0.16 } else { 0.7 })))
-            .child(div().size_full().bg(linear_gradient(180., linear_color_stop(light.opacity(if dark { 0.045 } else { 0.25 }), 0.), linear_color_stop(light.opacity(0.), 1.))))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(1.))
+                    .bg(light.opacity(if dark { 0.16 } else { 0.7 })),
+            )
+            .child(div().size_full().bg(linear_gradient(
+                180.,
+                linear_color_stop(light.opacity(if dark { 0.045 } else { 0.25 }), 0.),
+                linear_color_stop(light.opacity(0.), 1.),
+            )))
             .into_any_element(),
     )
 }
 
 /// Square ghost icon button with a tooltip.
-pub fn icon_button(id: impl Into<ElementId>, icon: impl Into<Icon>, tooltip: impl Into<SharedString>) -> Button {
+pub fn icon_button(
+    id: impl Into<ElementId>,
+    icon: impl Into<Icon>,
+    tooltip: impl Into<SharedString>,
+) -> Button {
     // Tooltips are written for a Mac ("Settings (⌘,)"); `keys::shared` spells them for the platform.
     let tooltip: SharedString = tooltip.into();
-    Button::new(id).ghost().small().icon(icon).tooltip(crate::keys::shared(&tooltip))
+    Button::new(id)
+        .ghost()
+        .small()
+        .icon(icon)
+        .tooltip(crate::keys::shared(&tooltip))
 }
 
 /// A plain sidebar row: icon, label, optional shortcut hint.
@@ -193,13 +233,31 @@ pub fn nav_row(
         .rounded(px(7.))
         .cursor_pointer()
         .text_size(px(13.))
-        .when(active, |el| el.bg(theme.foreground.opacity(0.08)).font_weight(FontWeight::MEDIUM))
-        .when(!active, |el| el.text_color(theme.foreground.opacity(0.82)).hover(|s| s.bg(theme.foreground.opacity(0.045)).text_color(theme.foreground)))
-        .child(icon.size(px(15.)).text_color(if active { theme.foreground } else { theme.muted_foreground }))
+        .when(active, |el| {
+            el.bg(theme.foreground.opacity(0.08))
+                .font_weight(FontWeight::MEDIUM)
+        })
+        .when(!active, |el| {
+            el.text_color(theme.foreground.opacity(0.82)).hover(|s| {
+                s.bg(theme.foreground.opacity(0.045))
+                    .text_color(theme.foreground)
+            })
+        })
+        .child(icon.size(px(15.)).text_color(if active {
+            theme.foreground
+        } else {
+            theme.muted_foreground
+        }))
         .child(div().flex_1().child(label))
-        .when_some(hint, |el, h| el.child(div().text_xs().text_color(theme.muted_foreground.opacity(0.7)).child(h)))
+        .when_some(hint, |el, h| {
+            el.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground.opacity(0.7))
+                    .child(h),
+            )
+        })
 }
-
 
 /// How a project shows: the icon and colour chosen for it, if any (its `ProjectPrefs`).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -212,7 +270,10 @@ pub struct ProjectLook {
 
 impl ProjectLook {
     pub fn of(prefs: &trek_core::settings::ProjectPrefs) -> Self {
-        Self { icon: prefs.icon.clone(), color: prefs.color }
+        Self {
+            icon: prefs.icon.clone(),
+            color: prefs.color,
+        }
     }
 }
 
@@ -220,7 +281,13 @@ impl ProjectLook {
 pub fn project_hue(name: &str, color: Option<u16>) -> f32 {
     match color {
         Some(deg) => (deg % 360) as f32 / 360.,
-        None => (name.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32) % 360) as f32 / 360.,
+        None => {
+            (name
+                .bytes()
+                .fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32)
+                % 360) as f32
+                / 360.
+        }
     }
 }
 
@@ -257,7 +324,10 @@ pub fn project_tint(name: &str, look: &ProjectLook, cx: &App) -> Hsla {
 /// Two-letter project badge (T3-style).
 fn monogram_in(name: &str, hue: f32, dark: bool) -> Div {
     let letters: String = {
-        let words: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+        let words: Vec<&str> = name
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .collect();
         match words.as_slice() {
             [] => "·".into(),
             [one] => one.chars().take(2).collect(),
@@ -285,12 +355,39 @@ fn monogram_in(name: &str, hue: f32, dark: bool) -> Div {
 pub const PROJECT_ICONS: &[(&str, crate::assets::Lucide)] = {
     use crate::assets::Lucide as L;
     &[
-        ("rocket", L::Rocket), ("star", L::Star), ("heart", L::Heart), ("flame", L::Flame), ("zap", L::Zap), ("leaf", L::Leaf),
-        ("mountain", L::Mountain), ("tent", L::Tent), ("compass", L::Compass), ("map", L::Map), ("globe", L::Globe), ("cloud", L::Cloud),
-        ("sun", L::Sun), ("moon", L::Moon), ("code", L::Code), ("terminal", L::Terminal), ("database", L::Database), ("server", L::Server),
-        ("smartphone", L::Smartphone), ("gamepad", L::Gamepad2), ("music", L::Music), ("camera", L::Camera), ("book", L::BookOpen), ("box", L::Box),
-        ("package", L::Package), ("bug", L::Bug), ("flask", L::FlaskConical), ("brain", L::Brain), ("lightbulb", L::Lightbulb), ("hammer", L::Hammer),
-        ("wrench", L::Wrench), ("shield", L::Shield), ("key", L::Key),
+        ("rocket", L::Rocket),
+        ("star", L::Star),
+        ("heart", L::Heart),
+        ("flame", L::Flame),
+        ("zap", L::Zap),
+        ("leaf", L::Leaf),
+        ("mountain", L::Mountain),
+        ("tent", L::Tent),
+        ("compass", L::Compass),
+        ("map", L::Map),
+        ("globe", L::Globe),
+        ("cloud", L::Cloud),
+        ("sun", L::Sun),
+        ("moon", L::Moon),
+        ("code", L::Code),
+        ("terminal", L::Terminal),
+        ("database", L::Database),
+        ("server", L::Server),
+        ("smartphone", L::Smartphone),
+        ("gamepad", L::Gamepad2),
+        ("music", L::Music),
+        ("camera", L::Camera),
+        ("book", L::BookOpen),
+        ("box", L::Box),
+        ("package", L::Package),
+        ("bug", L::Bug),
+        ("flask", L::FlaskConical),
+        ("brain", L::Brain),
+        ("lightbulb", L::Lightbulb),
+        ("hammer", L::Hammer),
+        ("wrench", L::Wrench),
+        ("shield", L::Shield),
+        ("key", L::Key),
     ]
 };
 
@@ -314,7 +411,10 @@ pub fn project_badge(name: &str, look: &ProjectLook, cx: &App) -> AnyElement {
                 .with_fallback(move || monogram_in(&name, hue, dark).into_any_element())
                 .into_any_element()
         }
-        Some(spec) => match PROJECT_ICONS.iter().find(|(k, _)| spec.strip_prefix("lucide:") == Some(k)) {
+        Some(spec) => match PROJECT_ICONS
+            .iter()
+            .find(|(k, _)| spec.strip_prefix("lucide:") == Some(k))
+        {
             Some((_, icon)) => div()
                 .flex_none()
                 .h(px(16.))
@@ -324,7 +424,11 @@ pub fn project_badge(name: &str, look: &ProjectLook, cx: &App) -> AnyElement {
                 .items_center()
                 .justify_center()
                 .bg(project_fill(hue, dark))
-                .child(Icon::new(*icon).size(px(11.)).text_color(project_ink(hue, dark)))
+                .child(
+                    Icon::new(*icon)
+                        .size(px(11.))
+                        .text_color(project_ink(hue, dark)),
+                )
                 .into_any_element(),
             None => monogram_in(name, hue, dark).into_any_element(),
         },
@@ -335,8 +439,30 @@ pub fn project_badge(name: &str, look: &ProjectLook, cx: &App) -> AnyElement {
 /// Logo file key for an agent or provider (assets/logos/{dark,light}/<key>.png).
 pub fn logo_key(agent: &AgentId) -> Option<&'static str> {
     const KEYS: &[&str] = &[
-        "claude-code", "codex", "opencode", "droid", "cursor", "github-copilot", "gemini", "kimi", "qwen-code", "grok", "devin", "goose", "amp",
-        "pi", "anthropic", "openai", "google", "openrouter", "deepseek", "xai", "mistral", "groq", "ollama", "lmstudio",
+        "claude-code",
+        "codex",
+        "opencode",
+        "droid",
+        "cursor",
+        "github-copilot",
+        "gemini",
+        "kimi",
+        "qwen-code",
+        "grok",
+        "devin",
+        "goose",
+        "amp",
+        "pi",
+        "anthropic",
+        "openai",
+        "google",
+        "openrouter",
+        "deepseek",
+        "xai",
+        "mistral",
+        "groq",
+        "ollama",
+        "lmstudio",
     ];
     let key = match agent {
         AgentId::ClaudeCode => "claude-code".to_string(),
@@ -353,22 +479,53 @@ pub fn logo_key(agent: &AgentId) -> Option<&'static str> {
 pub fn agent_logo(agent: &AgentId, size: Pixels, cx: &App) -> AnyElement {
     match (logo_key(agent), agent) {
         (Some(key), _) => {
-            let theme = if cx.theme().mode.is_dark() { "dark" } else { "light" };
-            img(SharedString::from(format!("logos/{theme}/{key}.png"))).size(size).flex_none().rounded(size * 0.22).into_any_element()
+            let theme = if cx.theme().mode.is_dark() {
+                "dark"
+            } else {
+                "light"
+            };
+            img(SharedString::from(format!("logos/{theme}/{key}.png")))
+                .size(size)
+                .flex_none()
+                .rounded(size * 0.22)
+                .into_any_element()
         }
-        (None, AgentId::Acp(id)) if let Some(a) = trek_core::catalog::added_agent(id) => registry_logo(&a.name, a.icon.as_deref().map(std::path::Path::new), size, cx),
-        (None, _) => Icon::new(IconName::Cpu).size(size).text_color(cx.theme().muted_foreground).into_any_element(),
+        (None, AgentId::Acp(id)) if let Some(a) = trek_core::catalog::added_agent(id) => {
+            registry_logo(
+                &a.name,
+                a.icon.as_deref().map(std::path::Path::new),
+                size,
+                cx,
+            )
+        }
+        (None, _) => Icon::new(IconName::Cpu)
+            .size(size)
+            .text_color(cx.theme().muted_foreground)
+            .into_any_element(),
     }
 }
 
 /// An ACP Registry agent's mark: its icon, a monochrome SVG drawn in the text colour as the
 /// registry intends, else a monogram of its name.
-pub fn registry_logo(name: &str, icon: Option<&std::path::Path>, size: Pixels, cx: &App) -> AnyElement {
+pub fn registry_logo(
+    name: &str,
+    icon: Option<&std::path::Path>,
+    size: Pixels,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     match icon {
-        Some(path) => svg().external_path(path.display().to_string()).size(size).flex_none().text_color(theme.foreground).into_any_element(),
+        Some(path) => svg()
+            .external_path(path.display().to_string())
+            .size(size)
+            .flex_none()
+            .text_color(theme.foreground)
+            .into_any_element(),
         None => {
-            let words: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+            let words: Vec<&str> = name
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .collect();
             let letters: String = match words.as_slice() {
                 [] => "·".into(),
                 [one] => one.chars().take(1).collect(),
@@ -383,7 +540,13 @@ pub fn registry_logo(name: &str, icon: Option<&std::path::Path>, size: Pixels, c
                 .justify_center()
                 .bg(theme.foreground.opacity(0.08))
                 .text_color(theme.foreground.opacity(0.75))
-                .text_size(size * if letters.chars().count() > 1 { 0.4 } else { 0.5 })
+                .text_size(
+                    size * if letters.chars().count() > 1 {
+                        0.4
+                    } else {
+                        0.5
+                    },
+                )
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(letters.to_uppercase())
                 .into_any_element()
@@ -419,24 +582,36 @@ pub fn segmented<T: Copy + PartialEq + 'static, L: Into<SharedString>>(
         .bg(theme.foreground.opacity(0.05))
         .border_1()
         .border_color(theme.foreground.opacity(0.06))
-        .children(options.into_iter().enumerate().map(move |(i, (value, label))| {
-            let selected = value == current;
-            let on_pick = on_pick.clone();
-            div()
-                .id((id, i))
-                .test_support()
-                .h_full()
-                .px(px(11.))
-                .flex()
-                .items_center()
-                .rounded(px(6.))
-                .text_size(px(12.5))
-                .cursor_pointer()
-                .when(selected, |el| el.bg(theme.foreground.opacity(0.12)).text_color(theme.foreground).font_weight(FontWeight::MEDIUM))
-                .when(!selected, |el| el.text_color(theme.muted_foreground).hover(|s| s.text_color(theme.foreground)))
-                .child(label.into())
-                .on_click(move |_, window, cx| on_pick(value, window, cx))
-        }))
+        .children(
+            options
+                .into_iter()
+                .enumerate()
+                .map(move |(i, (value, label))| {
+                    let selected = value == current;
+                    let on_pick = on_pick.clone();
+                    div()
+                        .id((id, i))
+                        .test_support()
+                        .h_full()
+                        .px(px(11.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(6.))
+                        .text_size(px(12.5))
+                        .cursor_pointer()
+                        .when(selected, |el| {
+                            el.bg(theme.foreground.opacity(0.12))
+                                .text_color(theme.foreground)
+                                .font_weight(FontWeight::MEDIUM)
+                        })
+                        .when(!selected, |el| {
+                            el.text_color(theme.muted_foreground)
+                                .hover(|s| s.text_color(theme.foreground))
+                        })
+                        .child(label.into())
+                        .on_click(move |_, window, cx| on_pick(value, window, cx))
+                }),
+        )
         .into_any_element()
 }
 
@@ -447,13 +622,21 @@ pub fn group(rows: Vec<AnyElement>, cx: &App) -> AnyElement {
         .w_full()
         .border_t_1()
         .border_color(line)
-        .children(rows.into_iter().map(move |r| div().border_b_1().border_color(line).child(r)))
+        .children(
+            rows.into_iter()
+                .map(move |r| div().border_b_1().border_color(line).child(r)),
+        )
         .into_any_element()
 }
 
 /// Several releases' notes, newest first, each under its version and date, in one scrolling
 /// column: what an update brings, or the release history. This copy's version says "Installed".
-pub fn releases_notes(id: &'static str, releases: &[trek_core::changelog::Release], max_height: Pixels, cx: &App) -> AnyElement {
+pub fn releases_notes(
+    id: &'static str,
+    releases: &[trek_core::changelog::Release],
+    max_height: Pixels,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let installed = trek_core::update::current_version();
     let many = releases.len() > 1;
@@ -462,29 +645,55 @@ pub fn releases_notes(id: &'static str, releases: &[trek_core::changelog::Releas
         .test_support()
         .max_h(max_height)
         .overflow_y_scroll()
-        .child(v_flex().gap(px(14.)).children(releases.iter().enumerate().map(|(i, r)| {
-            let date = chrono::DateTime::parse_from_rfc3339(&r.date).ok().map(|d| d.format("%B %-d").to_string());
+        .child(
             v_flex()
-                .gap(px(4.))
-                .when(i > 0, |el| el.pt(px(12.)).border_t_1().border_color(theme.foreground.opacity(0.07)))
-                .when(many || r.version == installed, |el| {
-                    el.child(
-                        h_flex()
-                            .gap(px(6.))
-                            .text_size(px(12.5))
-                            .child(div().font_semibold().child(format!("Trek {}", r.version)))
-                            .when_some(date, |el, d| el.child(div().text_color(theme.muted_foreground).child(d)))
-                            .when(r.version == installed, |el| el.child(div().text_color(theme.muted_foreground).child("· Installed"))),
-                    )
-                })
-                .child(
-                    div()
-                        .text_size(px(12.5))
-                        .line_height(relative(1.5))
-                        .text_color(theme.foreground.opacity(0.85))
-                        .child(gpui_kit::component::text::TextView::markdown((id, i), quiet_headings(&r.notes)).selectable(true)),
-                )
-        })))
+                .gap(px(14.))
+                .children(releases.iter().enumerate().map(|(i, r)| {
+                    let date = chrono::DateTime::parse_from_rfc3339(&r.date)
+                        .ok()
+                        .map(|d| d.format("%B %-d").to_string());
+                    v_flex()
+                        .gap(px(4.))
+                        .when(i > 0, |el| {
+                            el.pt(px(12.))
+                                .border_t_1()
+                                .border_color(theme.foreground.opacity(0.07))
+                        })
+                        .when(many || r.version == installed, |el| {
+                            el.child(
+                                h_flex()
+                                    .gap(px(6.))
+                                    .text_size(px(12.5))
+                                    .child(
+                                        div().font_semibold().child(format!("Trek {}", r.version)),
+                                    )
+                                    .when_some(date, |el, d| {
+                                        el.child(div().text_color(theme.muted_foreground).child(d))
+                                    })
+                                    .when(r.version == installed, |el| {
+                                        el.child(
+                                            div()
+                                                .text_color(theme.muted_foreground)
+                                                .child("· Installed"),
+                                        )
+                                    }),
+                            )
+                        })
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .line_height(relative(1.5))
+                                .text_color(theme.foreground.opacity(0.85))
+                                .child(
+                                    gpui_kit::component::text::TextView::markdown(
+                                        (id, i),
+                                        quiet_headings(&r.notes),
+                                    )
+                                    .selectable(true),
+                                ),
+                        )
+                })),
+        )
         .into_any_element()
 }
 
@@ -502,7 +711,12 @@ fn quiet_headings(notes: &str) -> String {
 }
 
 /// A quiet text link that opens `url` in the browser, with the external-link arrow.
-pub fn web_link(id: impl Into<ElementId>, label: impl Into<SharedString>, url: String, cx: &App) -> AnyElement {
+pub fn web_link(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    url: String,
+    cx: &App,
+) -> AnyElement {
     let color = cx.theme().muted_foreground;
     h_flex()
         .id(id.into())
@@ -533,7 +747,16 @@ pub struct Pill {
 
 impl Pill {
     pub fn new(id: impl Into<ElementId>) -> Self {
-        Self { id: id.into(), children: vec![], selected: false, ghost: false, flexible: false, small: false, tooltip: None, on_click: None }
+        Self {
+            id: id.into(),
+            children: vec![],
+            selected: false,
+            ghost: false,
+            flexible: false,
+            small: false,
+            tooltip: None,
+            on_click: None,
+        }
     }
 
     /// A side bar's size: shorter, with smaller text.
@@ -594,7 +817,13 @@ impl RenderOnce for Pill {
             .text_sm()
             .cursor_pointer()
             .when(self.ghost, |el| el.px(px(7.)))
-            .when(self.small, |el| el.h(px(22.)).px(px(7.)).gap(px(4.)).rounded(px(6.)).text_size(px(12.)))
+            .when(self.small, |el| {
+                el.h(px(22.))
+                    .px(px(7.))
+                    .gap(px(4.))
+                    .rounded(px(6.))
+                    .text_size(px(12.))
+            })
             .bg(theme.foreground.opacity(match (self.selected, self.ghost) {
                 (true, _) => 0.12,
                 (false, true) => 0.0,
@@ -605,8 +834,14 @@ impl RenderOnce for Pill {
             .when(!self.flexible, |el| el.flex_none())
             .overflow_hidden()
             .children(self.children)
-            .when_some(self.tooltip, |el, t| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(t.clone()).build(window, cx)))
-            .when_some(self.on_click, |el, f| el.on_click(move |e, w, cx| f(e, w, cx)))
+            .when_some(self.tooltip, |el, t| {
+                el.tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(t.clone()).build(window, cx)
+                })
+            })
+            .when_some(self.on_click, |el, f| {
+                el.on_click(move |e, w, cx| f(e, w, cx))
+            })
     }
 }
 
@@ -623,7 +858,13 @@ pub fn menu_surface(cx: &App) -> Div {
 }
 
 /// A checkbox and its label, as the question card draws its multiple-choice boxes.
-pub fn check_row(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool, disabled: bool, cx: &App) -> Stateful<Div> {
+pub fn check_row(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    on: bool,
+    disabled: bool,
+    cx: &App,
+) -> Stateful<Div> {
     let theme = cx.theme();
     let ember = crate::palette::ember(cx);
     h_flex()
@@ -638,11 +879,17 @@ pub fn check_row(id: impl Into<ElementId>, label: impl Into<SharedString>, on: b
                 .flex_none()
                 .rounded(px(3.))
                 .border_1()
-                .border_color(if on { ember } else { theme.foreground.opacity(0.3) })
+                .border_color(if on {
+                    ember
+                } else {
+                    theme.foreground.opacity(0.3)
+                })
                 .flex()
                 .items_center()
                 .justify_center()
-                .when(on, |el| el.child(div().size(px(7.)).rounded(px(1.)).bg(ember))),
+                .when(on, |el| {
+                    el.child(div().size(px(7.)).rounded(px(1.)).bg(ember))
+                }),
         )
         .child(label.into())
 }
@@ -665,10 +912,19 @@ pub fn menu_row(id: impl Into<ElementId>, active: bool, cx: &App) -> Stateful<Di
 /// Text with the parts a search matched brought forward: matches in the foreground colour at
 /// medium weight, the rest left to the caller's (muted) colour.
 pub fn match_text(text: &str, ranges: &[std::ops::Range<usize>], cx: &App) -> StyledText {
-    let style = HighlightStyle { color: Some(cx.theme().foreground), font_weight: Some(FontWeight::MEDIUM), ..Default::default() };
+    let style = HighlightStyle {
+        color: Some(cx.theme().foreground),
+        font_weight: Some(FontWeight::MEDIUM),
+        ..Default::default()
+    };
     let ranges: Vec<_> = ranges
         .iter()
-        .filter(|r| r.start < r.end && r.end <= text.len() && text.is_char_boundary(r.start) && text.is_char_boundary(r.end))
+        .filter(|r| {
+            r.start < r.end
+                && r.end <= text.len()
+                && text.is_char_boundary(r.start)
+                && text.is_char_boundary(r.end)
+        })
         .map(|r| (r.clone(), style))
         .collect();
     StyledText::new(text.to_string()).with_highlights(ranges)
@@ -678,12 +934,36 @@ pub fn match_text(text: &str, ranges: &[std::ops::Range<usize>], cx: &App) -> St
 /// before): the new one appears left to right behind a soft edge while the old one fades out
 /// ahead of it, a little trail dust where they meet. Otherwise just the title. `color` is the
 /// title's colour; the caller lays it out (and truncates it).
-pub fn title_text(id: impl Into<ElementId>, title: &str, reveal: Option<(f32, &str)>, color: Hsla, cx: &App) -> AnyElement {
-    let Some((t, old)) = reveal else { return div().min_w_0().truncate().text_color(color).child(title.to_string()).into_any_element() };
+pub fn title_text(
+    id: impl Into<ElementId>,
+    title: &str,
+    reveal: Option<(f32, &str)>,
+    color: Hsla,
+    cx: &App,
+) -> AnyElement {
+    let Some((t, old)) = reveal else {
+        return div()
+            .min_w_0()
+            .truncate()
+            .text_color(color)
+            .child(title.to_string())
+            .into_any_element();
+    };
     let (new_alpha, old_alpha) = reveal_alphas(title.chars().count(), old.chars().count(), t);
     // Highlight colours blend over the text's own, so opacity goes through `fade_out`.
     let ranges = |text: &str, alphas: &[f32]| -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
-        text.char_indices().zip(alphas).map(|((i, c), a)| (i..i + c.len_utf8(), HighlightStyle { fade_out: Some(1. - a), ..Default::default() })).collect()
+        text.char_indices()
+            .zip(alphas)
+            .map(|((i, c), a)| {
+                (
+                    i..i + c.len_utf8(),
+                    HighlightStyle {
+                        fade_out: Some(1. - a),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
     };
     let dust = cx.theme().foreground.opacity(0.5);
     let chars = title.chars().count().max(1) as f32;
@@ -693,7 +973,11 @@ pub fn title_text(id: impl Into<ElementId>, title: &str, reveal: Option<(f32, &s
         .test_support()
         .relative()
         .min_w_0()
-        .child(div().truncate().text_color(color).child(StyledText::new(title.to_string()).with_highlights(ranges(title, &new_alpha))))
+        .child(
+            div().truncate().text_color(color).child(
+                StyledText::new(title.to_string()).with_highlights(ranges(title, &new_alpha)),
+            ),
+        )
         .when(!old.is_empty(), |el| {
             el.child(
                 div()
@@ -703,32 +987,43 @@ pub fn title_text(id: impl Into<ElementId>, title: &str, reveal: Option<(f32, &s
                     .size_full()
                     .truncate()
                     .text_color(cx.theme().muted_foreground)
-                    .child(StyledText::new(old.to_string()).with_highlights(ranges(old, &old_alpha))),
+                    .child(
+                        StyledText::new(old.to_string()).with_highlights(ranges(old, &old_alpha)),
+                    ),
             )
         })
         .child(
-            canvas(|_, _, _| {}, move |b, _, window, _| {
-                // The edge sits about where the front character is; titles run in proportional
-                // type, so this is an estimate (and dust is forgiving).
-                let width = b.size.width.as_f32().min(chars * 7.4);
-                let x0 = b.origin.x.as_f32() + width * (front / chars).clamp(0., 1.);
-                let h = b.size.height.as_f32();
-                for i in 0..14u32 {
-                    // A fixed scatter: each speck's own pseudo-random numbers (a small integer hash).
-                    let r = |k: u32| {
-                        let mut h = i.wrapping_mul(0x9E37_79B9) ^ k.wrapping_mul(0x85EB_CA6B);
-                        h ^= h >> 15;
-                        h = h.wrapping_mul(0x2C1B_3C6D);
-                        h ^= h >> 12;
-                        (h % 1000) as f32 / 1000.
-                    };
-                    // Dust drifts back from the edge and thins out as the title settles.
-                    let x = x0 - r(1) * 22. * (0.4 + t);
-                    let y = b.origin.y.as_f32() + 2. + r(2) * (h - 4.);
-                    let a = (1. - t) * (0.35 + 0.65 * r(3));
-                    window.paint_quad(fill(Bounds::new(point(px(x.round()), px(y.round())), size(px(1.5), px(1.5))), dust.opacity(dust.a * a)));
-                }
-            })
+            canvas(
+                |_, _, _| {},
+                move |b, _, window, _| {
+                    // The edge sits about where the front character is; titles run in proportional
+                    // type, so this is an estimate (and dust is forgiving).
+                    let width = b.size.width.as_f32().min(chars * 7.4);
+                    let x0 = b.origin.x.as_f32() + width * (front / chars).clamp(0., 1.);
+                    let h = b.size.height.as_f32();
+                    for i in 0..14u32 {
+                        // A fixed scatter: each speck's own pseudo-random numbers (a small integer hash).
+                        let r = |k: u32| {
+                            let mut h = i.wrapping_mul(0x9E37_79B9) ^ k.wrapping_mul(0x85EB_CA6B);
+                            h ^= h >> 15;
+                            h = h.wrapping_mul(0x2C1B_3C6D);
+                            h ^= h >> 12;
+                            (h % 1000) as f32 / 1000.
+                        };
+                        // Dust drifts back from the edge and thins out as the title settles.
+                        let x = x0 - r(1) * 22. * (0.4 + t);
+                        let y = b.origin.y.as_f32() + 2. + r(2) * (h - 4.);
+                        let a = (1. - t) * (0.35 + 0.65 * r(3));
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(px(x.round()), px(y.round())),
+                                size(px(1.5), px(1.5)),
+                            ),
+                            dust.opacity(dust.a * a),
+                        ));
+                    }
+                },
+            )
             .absolute()
             .top_0()
             .left_0()
@@ -754,13 +1049,25 @@ fn reveal_alphas(n: usize, old: usize, t: f32) -> (Vec<f32>, Vec<f32>) {
     // The old one clears out ahead of the edge rather than under it, so the two never sit on top
     // of each other: the dust fills the gap.
     let old_alpha = |i: usize| ((i as f32 - front) / REVEAL_EDGE).clamp(0., 1.) * (1. - t) * 0.8;
-    ((0..n).map(new_alpha).collect(), (0..old).map(old_alpha).collect())
+    (
+        (0..n).map(new_alpha).collect(),
+        (0..old).map(old_alpha).collect(),
+    )
 }
 
 /// Trim the start of a one-line excerpt so its first match sits about `lead` characters in (at a
 /// word start), for rows too narrow to show the excerpt whole. Ranges move with the text.
-pub fn lead_to_match(text: &str, ranges: &[std::ops::Range<usize>], lead: usize) -> (String, Vec<std::ops::Range<usize>>) {
-    let Some(first) = ranges.iter().map(|r| r.start).min().filter(|s| *s <= text.len() && text.is_char_boundary(*s)) else {
+pub fn lead_to_match(
+    text: &str,
+    ranges: &[std::ops::Range<usize>],
+    lead: usize,
+) -> (String, Vec<std::ops::Range<usize>>) {
+    let Some(first) = ranges
+        .iter()
+        .map(|r| r.start)
+        .min()
+        .filter(|s| *s <= text.len() && text.is_char_boundary(*s))
+    else {
         return (text.to_string(), ranges.to_vec());
     };
     let before = &text[..first];
@@ -774,30 +1081,65 @@ pub fn lead_to_match(text: &str, ranges: &[std::ops::Range<usize>], lead: usize)
     }
     let out = format!("…{}", &text[cut..]);
     let shift = |i: usize| i - cut + '…'.len_utf8();
-    (out, ranges.iter().filter(|r| r.start >= cut).map(|r| shift(r.start)..shift(r.end)).collect())
+    (
+        out,
+        ranges
+            .iter()
+            .filter(|r| r.start >= cut)
+            .map(|r| shift(r.start)..shift(r.end))
+            .collect(),
+    )
 }
 
 /// Resolve the configured background (`builtin:<name>` or a file path) into an image source.
 pub fn background_source(spec: &str) -> ImageSource {
     match spec.strip_prefix("builtin:") {
         Some(name) => ImageSource::from(SharedString::from(format!("backgrounds/{name}.png"))),
-        None => ImageSource::from(std::sync::Arc::<std::path::Path>::from(std::path::Path::new(spec))),
+        None => ImageSource::from(std::sync::Arc::<std::path::Path>::from(
+            std::path::Path::new(spec),
+        )),
     }
 }
 
 /// Full-bleed background art that fades into the surface below (Capy-style hero).
 pub fn hero_background(spec: Option<&str>, dim: f32, cx: &App) -> Div {
     let bg = cx.theme().background;
-    let mut el = div().absolute().top_0().left_0().size_full().overflow_hidden();
+    let mut el = div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .overflow_hidden();
     if let Some(spec) = spec {
         el = el
-            .child(img(background_source(spec)).absolute().top_0().left_0().size_full().object_fit(ObjectFit::Cover))
-            .child(div().absolute().top_0().left_0().size_full().bg(bg.opacity(dim.clamp(0.0, 0.9))))
-            .child(div().absolute().top_0().left_0().size_full().bg(linear_gradient(
-                180.,
-                linear_color_stop(bg.opacity(0.0), 0.30),
-                linear_color_stop(bg, 0.78),
-            )));
+            .child(
+                img(background_source(spec))
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .bg(bg.opacity(dim.clamp(0.0, 0.9))),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .bg(linear_gradient(
+                        180.,
+                        linear_color_stop(bg.opacity(0.0), 0.30),
+                        linear_color_stop(bg, 0.78),
+                    )),
+            );
     }
     el
 }
@@ -814,8 +1156,15 @@ mod tests {
         assert!((0. ..1.).contains(&project_hue("Trek", None)));
         // Chosen: that hue, whatever the name.
         assert_eq!(project_hue("Trek", Some(212)), 212. / 360.);
-        assert_eq!(project_hue("website", Some(212)), project_hue("Trek", Some(212)));
-        assert_eq!(project_hue("Trek", Some(360 + 24)), 24. / 360., "wraps round");
+        assert_eq!(
+            project_hue("website", Some(212)),
+            project_hue("Trek", Some(212))
+        );
+        assert_eq!(
+            project_hue("Trek", Some(360 + 24)),
+            24. / 360.,
+            "wraps round"
+        );
         // The same hue, in each theme's ink: light on Night, dark on Paper.
         let hue = project_hue("Trek", None);
         assert!(project_ink(hue, true).l > 0.6 && project_ink(hue, false).l < 0.4);
@@ -836,14 +1185,23 @@ mod tests {
         assert!(new.iter().all(|a| *a == 0.), "nothing of the new title yet");
         assert!(old.iter().all(|a| *a > 0.5), "the old one still shows");
         let (new, old) = reveal_alphas(10, 8, 0.5);
-        assert!(new.windows(2).all(|w| w[0] >= w[1]), "in from the left: {new:?}");
+        assert!(
+            new.windows(2).all(|w| w[0] >= w[1]),
+            "in from the left: {new:?}"
+        );
         assert!(new[0] == 1. && new[9] == 0.);
-        assert!(old[0] == 0. && old[4] == 0. && old[7] > 0., "the old one is gone behind the edge, there ahead of it: {old:?}");
+        assert!(
+            old[0] == 0. && old[4] == 0. && old[7] > 0.,
+            "the old one is gone behind the edge, there ahead of it: {old:?}"
+        );
         let (_, old) = reveal_alphas(10, 30, 0.5);
         assert!(old[20] > 0., "and still there well ahead of it: {old:?}");
         // Where either is part-way, the other is out.
         let (new, old) = reveal_alphas(10, 10, 0.3);
-        assert!(new.iter().zip(&old).all(|(n, o)| *n == 0. || *o == 0.), "{new:?} {old:?}");
+        assert!(
+            new.iter().zip(&old).all(|(n, o)| *n == 0. || *o == 0.),
+            "{new:?} {old:?}"
+        );
         let (new, old) = reveal_alphas(10, 8, 1.);
         assert!(new.iter().all(|a| *a == 1.) && old.iter().all(|a| *a == 0.));
     }

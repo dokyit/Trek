@@ -11,7 +11,10 @@ use trek_core::{Effort, HandHolding, RunState};
 /// CPU time of the calling thread.
 #[cfg(unix)]
 fn thread_cpu() -> Duration {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     // SAFETY: plain syscall writing into a local.
     unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
     Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
@@ -29,8 +32,13 @@ fn process_cpu() -> Duration {
 
 /// Kernel + user time of a `GetThreadTimes`/`GetProcessTimes` result: FILETIMEs count 100 ns ticks.
 #[cfg(windows)]
-fn cpu_time(kernel: windows_sys::Win32::Foundation::FILETIME, user: windows_sys::Win32::Foundation::FILETIME) -> Duration {
-    let ticks = |t: windows_sys::Win32::Foundation::FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+fn cpu_time(
+    kernel: windows_sys::Win32::Foundation::FILETIME,
+    user: windows_sys::Win32::Foundation::FILETIME,
+) -> Duration {
+    let ticks = |t: windows_sys::Win32::Foundation::FILETIME| {
+        (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime)
+    };
     Duration::from_nanos((ticks(kernel) + ticks(user)) * 100)
 }
 
@@ -39,10 +47,21 @@ fn cpu_time(kernel: windows_sys::Win32::Foundation::FILETIME, user: windows_sys:
 fn thread_cpu() -> Duration {
     use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
-    let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
     let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
     // SAFETY: the pseudo-handle for this thread, and locals to write into.
-    unsafe { GetThreadTimes(GetCurrentThread(), &mut created, &mut exited, &mut kernel, &mut user) };
+    unsafe {
+        GetThreadTimes(
+            GetCurrentThread(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    };
     cpu_time(kernel, user)
 }
 
@@ -51,10 +70,21 @@ fn thread_cpu() -> Duration {
 fn process_cpu() -> Duration {
     use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
-    let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
     let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
     // SAFETY: the pseudo-handle for this process, and locals to write into.
-    unsafe { GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user) };
+    unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    };
     cpu_time(kernel, user)
 }
 
@@ -66,7 +96,16 @@ async fn busy_window(cx: &mut TestAppContext, settled: usize) -> (Trek, String) 
     cx.update(|cx| cx.set_reduce_motion(false));
     let id = trek.update(cx, |ws, cx| {
         populate(&ws.store, settled);
-        let t = ws.store.create_thread(Some(&trek.project), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
+        let t = ws
+            .store
+            .create_thread(
+                Some(&trek.project),
+                mock(),
+                None,
+                Effort::Medium,
+                HandHolding::Auto,
+            )
+            .expect("thread");
         store_items(&ws.store, &t.id, transcript(12));
         ws.reload(cx);
         ws.navigate(Route::Thread(t.id.clone()), cx);
@@ -76,8 +115,14 @@ async fn busy_window(cx: &mut TestAppContext, settled: usize) -> (Trek, String) 
     // behind it: nothing arrives in real time (the mock reports its context every ten seconds)
     // while a test counts what redraws.
     let events = vec![
-        trek_agents::AgentEvent::ReasoningDelta("This needs the full test suite; it takes a while.".into()),
-        trek_agents::AgentEvent::ToolStarted { id: "tool-1".into(), title: "Run command".into(), detail: "cargo test --workspace".into() },
+        trek_agents::AgentEvent::ReasoningDelta(
+            "This needs the full test suite; it takes a while.".into(),
+        ),
+        trek_agents::AgentEvent::ToolStarted {
+            id: "tool-1".into(),
+            title: "Run command".into(),
+            detail: "cargo test --workspace".into(),
+        },
     ];
     trek.update(cx, |ws, cx| ws.apply_events(&id, events, cx));
     assert_eq!(trek.run_state(cx, &id), RunState::Working);
@@ -110,9 +155,16 @@ fn frames(cx: &mut TestAppContext, n: usize, period: Duration) -> Frames {
         cx.executor().advance_clock(period);
         cx.run_until_parked();
     }
-    let mut renders: Vec<(&'static str, f32)> = super::take_renders().into_iter().map(|(k, v)| (k, v as f32 / n as f32)).collect();
+    let mut renders: Vec<(&'static str, f32)> = super::take_renders()
+        .into_iter()
+        .map(|(k, v)| (k, v as f32 / n as f32))
+        .collect();
     renders.sort_by(|a, b| a.0.cmp(b.0));
-    Frames { thread: (thread_cpu() - thread) / n as u32, process: (process_cpu() - process) / n as u32, renders }
+    Frames {
+        thread: (thread_cpu() - thread) / n as u32,
+        process: (process_cpu() - process) / n as u32,
+        renders,
+    }
 }
 
 /// Event batches a second while an agent streams: `Workspace::attach` applies at most one batch
@@ -124,7 +176,13 @@ const STREAM_RATE: u32 = 60;
 fn stream(cx: &mut TestAppContext, trek: &Trek, id: &str, batches: usize, chars: usize) -> Frames {
     let text: Vec<char> = transcript(batches * chars / 400 + 2)
         .into_iter()
-        .filter_map(|i| if let trek_core::store::Item::Assistant { text } = i { Some(text) } else { None })
+        .filter_map(|i| {
+            if let trek_core::store::Item::Assistant { text } = i {
+                Some(text)
+            } else {
+                None
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n\n")
         .chars()
@@ -136,14 +194,23 @@ fn stream(cx: &mut TestAppContext, trek: &Trek, id: &str, batches: usize, chars:
     let (thread, process) = (thread_cpu(), process_cpu());
     for _ in 0..batches {
         let delta = chunks.next().expect("enough text");
-        trek.ws.update(cx, |ws, cx| ws.apply_events(id, vec![trek_agents::AgentEvent::TextDelta(delta)], cx));
+        trek.ws.update(cx, |ws, cx| {
+            ws.apply_events(id, vec![trek_agents::AgentEvent::TextDelta(delta)], cx)
+        });
         cx.executor().advance_clock(period);
         cx.run_until_parked();
     }
     let n = batches as u32;
-    let mut renders: Vec<(&'static str, f32)> = super::take_renders().into_iter().map(|(k, v)| (k, v as f32 / batches as f32)).collect();
+    let mut renders: Vec<(&'static str, f32)> = super::take_renders()
+        .into_iter()
+        .map(|(k, v)| (k, v as f32 / batches as f32))
+        .collect();
     renders.sort_by(|a, b| a.0.cmp(b.0));
-    Frames { thread: (thread_cpu() - thread) / n, process: (process_cpu() - process) / n, renders }
+    Frames {
+        thread: (thread_cpu() - thread) / n,
+        process: (process_cpu() - process) / n,
+        renders,
+    }
 }
 
 /// Prints the cost of the working animation, foreground (15 fps) and background (1 fps), of streaming
@@ -164,7 +231,10 @@ fn rendering_cost() {
         VisualTestContext::from_window(trek.window, cx).deactivate_window();
         frames(cx, 2, Duration::from_secs(1));
         let background = frames(cx, 10, Duration::from_secs(1));
-        for (label, f, rate) in [("window active", &active, fps), ("window in background", &background, 1)] {
+        for (label, f, rate) in [
+            ("window active", &active, fps),
+            ("window in background", &background, 1),
+        ] {
             println!(
                 "working animation, {label} ({rate} fps): {:.2} ms CPU per frame on the UI thread, {:.2} ms in the process → {:.2}% CPU",
                 ms(f.thread),
@@ -188,17 +258,30 @@ fn rendering_cost() {
 
         // Opening a long thread.
         let long = trek.update(cx, |ws, cx| {
-            let t = ws.store.create_thread(Some(&trek.project), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
+            let t = ws
+                .store
+                .create_thread(
+                    Some(&trek.project),
+                    mock(),
+                    None,
+                    Effort::Medium,
+                    HandHolding::Auto,
+                )
+                .expect("thread");
             store_items(&ws.store, &t.id, transcript(400));
             ws.reload(cx);
             t.id
         });
         let start = Instant::now();
-        trek.ws.update(cx, |ws, cx| ws.navigate(Route::Thread(long.clone()), cx));
+        trek.ws
+            .update(cx, |ws, cx| ws.navigate(Route::Thread(long.clone()), cx));
         cx.run_until_parked();
         let open = start.elapsed();
         let states = cx.read(|cx| trek.root.read(cx).thread_view.read(cx).markdown_states());
-        println!("opening a 2,000-item thread: {:.1} ms to the first frame, {states} markdown documents built", ms(open));
+        println!(
+            "opening a 2,000-item thread: {:.1} ms to the first frame, {states} markdown documents built",
+            ms(open)
+        );
     });
 }
 
@@ -212,18 +295,52 @@ fn sub_agent_row_cost() {
         let (trek, id) = busy_window(cx, 280).await;
         use trek_agents::AgentEvent;
         // The turn sends a scout out in the background and ends; the scout works on.
-        let scout = trek_agents::BackgroundTask { id: "task-1".into(), kind: trek_agents::BackgroundKind::Agent, title: "Map the HTTP routes".into(), call: Some("task-1".into()), readable: false, stoppable: true };
+        let scout = trek_agents::BackgroundTask {
+            id: "task-1".into(),
+            kind: trek_agents::BackgroundKind::Agent,
+            title: "Map the HTTP routes".into(),
+            call: Some("task-1".into()),
+            readable: false,
+            stoppable: true,
+        };
         let mut events = vec![
-            AgentEvent::ToolFinished { id: "tool-1".into(), output: "ok".into(), ok: true },
-            AgentEvent::ToolStarted { id: "task-1".into(), title: "Subagent".into(), detail: "Map the HTTP routes".into() },
-            AgentEvent::Task { id: "task-1".into(), description: Some("Map the HTTP routes".into()), activity: Some("Reading src/routes.rs".into()), tool_uses: Some(4), done: None },
+            AgentEvent::ToolFinished {
+                id: "tool-1".into(),
+                output: "ok".into(),
+                ok: true,
+            },
+            AgentEvent::ToolStarted {
+                id: "task-1".into(),
+                title: "Subagent".into(),
+                detail: "Map the HTTP routes".into(),
+            },
+            AgentEvent::Task {
+                id: "task-1".into(),
+                description: Some("Map the HTTP routes".into()),
+                activity: Some("Reading src/routes.rs".into()),
+                tool_uses: Some(4),
+                done: None,
+            },
             AgentEvent::Background(vec![scout]),
-            AgentEvent::ToolFinished { id: "task-1".into(), output: "Async agent launched successfully.".into(), ok: true },
+            AgentEvent::ToolFinished {
+                id: "task-1".into(),
+                output: "Async agent launched successfully.".into(),
+                ok: true,
+            },
             AgentEvent::TextDelta("The scout is out.".into()),
             AgentEvent::TurnComplete { error: None },
         ];
-        for (title, detail) in [("Read", "src/routes.rs"), ("Search", "fn handler"), ("Read", "src/auth.rs"), ("Run command", "cargo check")] {
-            events.push(AgentEvent::TaskStep { task: "task-1".into(), title: title.into(), detail: detail.into() });
+        for (title, detail) in [
+            ("Read", "src/routes.rs"),
+            ("Search", "fn handler"),
+            ("Read", "src/auth.rs"),
+            ("Run command", "cargo check"),
+        ] {
+            events.push(AgentEvent::TaskStep {
+                task: "task-1".into(),
+                title: title.into(),
+                detail: detail.into(),
+            });
         }
         trek.update(cx, |ws, cx| ws.apply_events(&id, events, cx));
         trek.render(cx);
@@ -231,12 +348,20 @@ fn sub_agent_row_cost() {
             window.activate_window();
             window.blur(cx);
         });
-        let row = trek.item_ix(cx, &id, |i| matches!(i, trek_core::store::Item::Tool { id, .. } if id == "task-1"));
+        let row = trek.item_ix(
+            cx,
+            &id,
+            |i| matches!(i, trek_core::store::Item::Tool { id, .. } if id == "task-1"),
+        );
         let measure = |cx: &mut TestAppContext, label: &str, fps: u32| {
             let period = Duration::from_secs(1) / fps;
             frames(cx, fps as usize + 1, period);
             let f = frames(cx, 10 * fps as usize, period);
-            println!("sub-agent row {label} ({fps} fps): {:.2} ms CPU per frame in the process → {:.2}% CPU", ms(f.process), f.cpu(fps));
+            println!(
+                "sub-agent row {label} ({fps} fps): {:.2} ms CPU per frame in the process → {:.2}% CPU",
+                ms(f.process),
+                f.cpu(fps)
+            );
             println!("  renders per frame: {:?}", f.renders);
         };
         measure(cx, "closed", crate::mascot::FPS as u32);
@@ -254,26 +379,57 @@ fn working_bar_frames_rerender_only_the_bar() {
         let period = Duration::from_secs(1) / crate::mascot::FPS as u32;
         // With a tool open, so the panel is on screen (and cached) too.
         let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
-        trek.window(cx, |window, cx| panel.update(cx, |p, cx| p.open_tool(PanelTool::Git, window, cx)));
+        trek.window(cx, |window, cx| {
+            panel.update(cx, |p, cx| p.open_tool(PanelTool::Git, window, cx))
+        });
         cx.run_until_parked();
-        assert!(super::take_renders().get("RightPanel").is_some_and(|n| *n > 0), "the panel is drawn");
+        assert!(
+            super::take_renders()
+                .get("RightPanel")
+                .is_some_and(|n| *n > 0),
+            "the panel is drawn"
+        );
         trek.window(cx, |window, cx| {
             window.activate_window();
             // A focused composer blinks its cursor; that's the composer's own frame, not the bar's.
             window.blur(cx);
         });
         frames(cx, 2, period);
-        let renders = |name: &str, f: &Frames| f.renders.iter().find(|(n, _)| *n == name).map_or(0., |(_, r)| *r);
+        let renders = |name: &str, f: &Frames| {
+            f.renders
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map_or(0., |(_, r)| *r)
+        };
         let f = frames(cx, 10, period);
-        assert!(renders("WorkingBar", &f) >= 0.9, "the bar animates: {:?}", f.renders);
+        assert!(
+            renders("WorkingBar", &f) >= 0.9,
+            "the bar animates: {:?}",
+            f.renders
+        );
         for view in ["ThreadView", "Composer", "RightPanel", "WindowTitle"] {
-            assert_eq!(renders(view, &f), 0., "{view} re-rendered on the bar's frames: {:?}", f.renders);
+            assert_eq!(
+                renders(view, &f),
+                0.,
+                "{view} re-rendered on the bar's frames: {:?}",
+                f.renders
+            );
         }
         // The sidebar's "Working 12s" ticks once a second, on its own.
         assert!(renders("Sidebar", &f) * 10. <= 1., "{:?}", f.renders);
         let f = frames(cx, 3 * crate::mascot::FPS as usize, period);
-        assert!((2. ..=4.).contains(&(renders("Sidebar", &f) * 3. * crate::mascot::FPS as f32)), "{:?}", f.renders);
-        assert!(trek.working_bar(cx).is_some_and(|l| super::harness::trail_word(&l).is_some_and(|clock| clock.ends_with('s'))), "{:?}", trek.working_bar(cx));
+        assert!(
+            (2. ..=4.).contains(&(renders("Sidebar", &f) * 3. * crate::mascot::FPS as f32)),
+            "{:?}",
+            f.renders
+        );
+        assert!(
+            trek.working_bar(cx).is_some_and(
+                |l| super::harness::trail_word(&l).is_some_and(|clock| clock.ends_with('s'))
+            ),
+            "{:?}",
+            trek.working_bar(cx)
+        );
         // The build shimmers in the bar's live group, on the bar's own frames.
         assert!(trek.visible(cx, "live-group"));
     });
@@ -284,12 +440,28 @@ fn bar_frames_leave_the_settled_rows_alone() {
     run(async |cx| {
         let (trek, id) = busy_window(cx, 10).await;
         // Calls done before the one running now: they settle into a cached view of their own.
-        let mut events = vec![trek_agents::AgentEvent::ToolFinished { id: "tool-1".into(), output: "ok".into(), ok: true }];
+        let mut events = vec![trek_agents::AgentEvent::ToolFinished {
+            id: "tool-1".into(),
+            output: "ok".into(),
+            ok: true,
+        }];
         for n in 2..=4 {
-            events.push(trek_agents::AgentEvent::ToolStarted { id: format!("tool-{n}"), title: "Read".into(), detail: format!("src/{n}.rs") });
-            events.push(trek_agents::AgentEvent::ToolFinished { id: format!("tool-{n}"), output: "ok".into(), ok: true });
+            events.push(trek_agents::AgentEvent::ToolStarted {
+                id: format!("tool-{n}"),
+                title: "Read".into(),
+                detail: format!("src/{n}.rs"),
+            });
+            events.push(trek_agents::AgentEvent::ToolFinished {
+                id: format!("tool-{n}"),
+                output: "ok".into(),
+                ok: true,
+            });
         }
-        events.push(trek_agents::AgentEvent::ToolStarted { id: "tool-5".into(), title: "Run command".into(), detail: "cargo build".into() });
+        events.push(trek_agents::AgentEvent::ToolStarted {
+            id: "tool-5".into(),
+            title: "Run command".into(),
+            detail: "cargo build".into(),
+        });
         trek.update(cx, |ws, cx| ws.apply_events(&id, events, cx));
         trek.window(cx, |window, cx| {
             window.activate_window();
@@ -300,14 +472,44 @@ fn bar_frames_leave_the_settled_rows_alone() {
         std::thread::sleep(Duration::from_millis(200));
         frames(cx, 4, period);
         let f = frames(cx, 10, period);
-        let renders = |name: &str| f.renders.iter().find(|(n, _)| *n == name).map_or(0., |(_, r)| *r);
-        assert!(renders("WorkingBar") >= 0.9, "the bar animates: {:?}", f.renders);
-        assert_eq!(renders("SettledRows"), 0., "the settled rows were laid out again: {:?}", f.renders);
+        let renders = |name: &str| {
+            f.renders
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map_or(0., |(_, r)| *r)
+        };
+        assert!(
+            renders("WorkingBar") >= 0.9,
+            "the bar animates: {:?}",
+            f.renders
+        );
+        assert_eq!(
+            renders("SettledRows"),
+            0.,
+            "the settled rows were laid out again: {:?}",
+            f.renders
+        );
         assert_eq!(renders("ThreadView"), 0., "{:?}", f.renders);
-        assert_eq!(trek.live_group(cx).map(|g| g.len()), Some(6), "{:?}", trek.live_group(cx));
-        let read = trek.item_ix(cx, &id, |i| matches!(i, trek_core::store::Item::Tool { id, .. } if id == "tool-3"));
-        let row = trek.read(cx, |ws, _| ws.live[&id].items.id_at(read).map(str::to_string)).expect("row");
-        assert!(trek.visible(cx, format!("live-row-{row}")), "the cached rows are on screen");
+        assert_eq!(
+            trek.live_group(cx).map(|g| g.len()),
+            Some(6),
+            "{:?}",
+            trek.live_group(cx)
+        );
+        let read = trek.item_ix(
+            cx,
+            &id,
+            |i| matches!(i, trek_core::store::Item::Tool { id, .. } if id == "tool-3"),
+        );
+        let row = trek
+            .read(cx, |ws, _| {
+                ws.live[&id].items.id_at(read).map(str::to_string)
+            })
+            .expect("row");
+        assert!(
+            trek.visible(cx, format!("live-row-{row}")),
+            "the cached rows are on screen"
+        );
     });
 }
 
@@ -320,16 +522,35 @@ fn thread_window_frames_rerender_only_its_bar() {
         trek.update(cx, |ws, cx| ws.new_thread(cx));
         assert!(!trek.visible(cx, "working-bar"));
         trek.window(cx, |window, cx| window.blur(cx));
-        cx.update_window(own, |_, window, _| window.activate_window()).expect("window");
+        cx.update_window(own, |_, window, _| window.activate_window())
+            .expect("window");
         let period = Duration::from_secs(1) / crate::mascot::FPS as u32;
         frames(cx, 2, period);
         let f = frames(cx, 10, period);
-        let renders = |name: &str| f.renders.iter().find(|(n, _)| *n == name).map_or(0., |(_, r)| *r);
-        assert!(renders("WorkingBar") >= 0.9, "the bar animates: {:?}", f.renders);
-        assert_eq!(renders("ThreadView"), 0., "the transcript re-rendered on the bar's frames: {:?}", f.renders);
+        let renders = |name: &str| {
+            f.renders
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map_or(0., |(_, r)| *r)
+        };
+        assert!(
+            renders("WorkingBar") >= 0.9,
+            "the bar animates: {:?}",
+            f.renders
+        );
+        assert_eq!(
+            renders("ThreadView"),
+            0.,
+            "the transcript re-rendered on the bar's frames: {:?}",
+            f.renders
+        );
         // A thread window keeps its composer focused, so the cursor blinks (each blink draws the
         // composer, then fills its cache): a few renders, not one per frame.
-        assert!(renders("Composer") <= 0.4, "the composer re-rendered on the bar's frames: {:?}", f.renders);
+        assert!(
+            renders("Composer") <= 0.4,
+            "the composer re-rendered on the bar's frames: {:?}",
+            f.renders
+        );
         assert!(trek.visible_in(cx, own, "working-bar"));
     });
 }
@@ -346,18 +567,40 @@ fn streamed_text_redraws_only_the_transcript() {
         // The first batch starts a new answer row; later ones only extend it.
         stream(cx, &trek, &id, 20, 5);
         let answer = trek.item_ix(cx, &id, |i| matches!(i, trek_core::store::Item::Assistant { text } if text.starts_with("### Step 0") && !text.contains("All 40")));
-        let height = |cx: &mut TestAppContext| trek.window(cx, |window, _| window.find(("answer", answer)).bounds().size.height);
+        let height = |cx: &mut TestAppContext| {
+            trek.window(cx, |window, _| {
+                window.find(("answer", answer)).bounds().size.height
+            })
+        };
         let before = height(cx);
         let f = stream(cx, &trek, &id, 120, 5);
-        let renders = |name: &str| f.renders.iter().find(|(n, _)| *n == name).map_or(0., |(_, r)| *r);
+        let renders = |name: &str| {
+            f.renders
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map_or(0., |(_, r)| *r)
+        };
         // Drawn once its text is parsed, not also before (which showed the same text again).
-        assert!((0.9..2.).contains(&renders("ThreadView")), "{:?}", f.renders);
+        assert!(
+            (0.9..2.).contains(&renders("ThreadView")),
+            "{:?}",
+            f.renders
+        );
         for view in ["Composer", "WindowTitle"] {
-            assert_eq!(renders(view), 0., "{view} redrew for streamed text: {:?}", f.renders);
+            assert_eq!(
+                renders(view),
+                0.,
+                "{view} redrew for streamed text: {:?}",
+                f.renders
+            );
         }
         // The sidebar only ticks its clock (two seconds of batches).
         assert!(renders("Sidebar") * 120. <= 3., "{:?}", f.renders);
-        assert!(height(cx) > before, "the answer grew on screen: {before:?} → {:?}", height(cx));
+        assert!(
+            height(cx) > before,
+            "the answer grew on screen: {before:?} → {:?}",
+            height(cx)
+        );
     });
 }
 
@@ -366,29 +609,56 @@ fn the_cached_tools_panel_redraws_what_changes_inside_it() {
     run(async |cx| {
         let trek = open_with(cx, |_| {});
         let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
-        trek.window(cx, |window, cx| panel.update(cx, |p, cx| p.open_tool(PanelTool::SideChat, window, cx)));
+        trek.window(cx, |window, cx| {
+            panel.update(cx, |p, cx| p.open_tool(PanelTool::SideChat, window, cx))
+        });
         trek.click(cx, "side-input");
-        let height = |cx: &mut TestAppContext| trek.window(cx, |window, _| window.find("side-input").bounds().size.height);
+        let height = |cx: &mut TestAppContext| {
+            trek.window(cx, |window, _| {
+                window.find("side-input").bounds().size.height
+            })
+        };
         let one_line = height(cx);
         // GPUI redraws everything once when input switches from the mouse to the keyboard.
         trek.type_live(cx, "W");
         super::take_renders();
         // Typing redraws the panel (and nothing else) and its layout: the field grows as text wraps.
         // Enough to wrap past the field's two rows: Segoe UI sets narrower than SF Pro, so it takes more.
-        trek.type_live(cx, &"hich parsers here take untrusted input, and do they cap sizes? ".repeat(if cfg!(windows) { 4 } else { 2 }));
+        trek.type_live(
+            cx,
+            &"hich parsers here take untrusted input, and do they cap sizes? "
+                .repeat(if cfg!(windows) { 4 } else { 2 }),
+        );
         let renders = super::take_renders();
-        assert!(renders.get("RightPanel").is_some_and(|n| *n > 0), "{renders:?}");
+        assert!(
+            renders.get("RightPanel").is_some_and(|n| *n > 0),
+            "{renders:?}"
+        );
         for view in ["ThreadView", "Sidebar", "Composer", "WindowTitle"] {
-            assert!(!renders.contains_key(view), "{view} redrew for keys in the panel: {renders:?}");
+            assert!(
+                !renders.contains_key(view),
+                "{view} redrew for keys in the panel: {renders:?}"
+            );
         }
         assert!(height(cx) > one_line, "the field grew");
         // Sending clears the field; the answer streams into the side chat.
         trek.press_live(cx, "enter");
         trek.wait(cx, "the side chat's answer", |ws| {
-            ws.threads.iter().any(|t| t.side_of.is_some() && ws.live.get(&t.id).is_some_and(|l| l.items.iter().any(|i| matches!(i, trek_core::store::Item::TurnEnd { .. }))))
+            ws.threads.iter().any(|t| {
+                t.side_of.is_some()
+                    && ws.live.get(&t.id).is_some_and(|l| {
+                        l.items
+                            .iter()
+                            .any(|i| matches!(i, trek_core::store::Item::TurnEnd { .. }))
+                    })
+            })
         })
         .await;
-        assert!(super::take_renders().get("RightPanel").is_some_and(|n| *n > 0));
+        assert!(
+            super::take_renders()
+                .get("RightPanel")
+                .is_some_and(|n| *n > 0)
+        );
         assert_eq!(height(cx), one_line, "the field emptied");
     });
 }
@@ -403,7 +673,9 @@ fn the_cached_composer_lays_out_like_the_live_one() {
             window.blur(cx);
         });
         frames(cx, 2, period);
-        let pill = |cx: &mut TestAppContext| trek.window(cx, |window, _| window.find("model-pill").bounds());
+        let pill = |cx: &mut TestAppContext| {
+            trek.window(cx, |window, _| window.find("model-pill").bounds())
+        };
         // A change to the composer lays it out from its content…
         let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
         composer.update(cx, |_, cx| cx.notify());
@@ -412,11 +684,24 @@ fn the_cached_composer_lays_out_like_the_live_one() {
         // …the next frame caches it at the height it measured (drawing it once more to fill the
         // cache), and frames after that reuse it.
         let f = frames(cx, 1, period);
-        assert_eq!(f.renders.iter().find(|(n, _)| *n == "Composer").map(|(_, r)| *r), Some(1.));
+        assert_eq!(
+            f.renders
+                .iter()
+                .find(|(n, _)| *n == "Composer")
+                .map(|(_, r)| *r),
+            Some(1.)
+        );
         assert_eq!(pill(cx), live);
         let f = frames(cx, 5, period);
-        assert!(!f.renders.iter().any(|(n, _)| *n == "Composer"), "{:?}", f.renders);
-        assert!(live.bottom() <= gpui_kit::px(820.) && live.top() > gpui_kit::px(600.), "{live:?}");
+        assert!(
+            !f.renders.iter().any(|(n, _)| *n == "Composer"),
+            "{:?}",
+            f.renders
+        );
+        assert!(
+            live.bottom() <= gpui_kit::px(820.) && live.top() > gpui_kit::px(600.),
+            "{live:?}"
+        );
     });
 }
 
@@ -425,7 +710,16 @@ fn long_threads_build_markdown_only_for_what_is_drawn() {
     run(async |cx| {
         let trek = open_with(cx, |_| {});
         let id = trek.update(cx, |ws, cx| {
-            let t = ws.store.create_thread(Some(&trek.project), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
+            let t = ws
+                .store
+                .create_thread(
+                    Some(&trek.project),
+                    mock(),
+                    None,
+                    Effort::Medium,
+                    HandHolding::Auto,
+                )
+                .expect("thread");
             store_items(&ws.store, &t.id, transcript(400));
             ws.reload(cx);
             ws.navigate(Route::Thread(t.id.clone()), cx);
@@ -433,9 +727,18 @@ fn long_threads_build_markdown_only_for_what_is_drawn() {
         });
         cx.run_until_parked();
         assert_eq!(trek.items(cx, &id).len(), 2000);
-        let built = trek.thread_view(cx).read_with(cx, |v, _| v.markdown_states());
-        assert!((1..20).contains(&built), "{built} documents for a screenful of a 2,000-item thread");
-        assert_eq!(trek.rows(cx).last().map(String::as_str), Some("end"), "opens at the end");
+        let built = trek
+            .thread_view(cx)
+            .read_with(cx, |v, _| v.markdown_states());
+        assert!(
+            (1..20).contains(&built),
+            "{built} documents for a screenful of a 2,000-item thread"
+        );
+        assert_eq!(
+            trek.rows(cx).last().map(String::as_str),
+            Some("end"),
+            "opens at the end"
+        );
         assert!(trek.visible(cx, ("copy-turn", 1999usize)));
     });
 }
@@ -454,7 +757,16 @@ fn tab_switch_cost() {
         let ids = trek.update(cx, |ws, _cx| {
             (0..2)
                 .map(|_| {
-                    let t = ws.store.create_thread(Some(&trek.project), mock(), None, Effort::Medium, HandHolding::Auto).expect("thread");
+                    let t = ws
+                        .store
+                        .create_thread(
+                            Some(&trek.project),
+                            mock(),
+                            None,
+                            Effort::Medium,
+                            HandHolding::Auto,
+                        )
+                        .expect("thread");
                     store_items(&ws.store, &t.id, transcript(200));
                     t.id
                 })
@@ -483,7 +795,9 @@ fn tab_switch_cost() {
             let took = start.elapsed();
             let renders = super::take_renders();
             let docs = cx.read(|cx| trek.root.read(cx).thread_view.read(cx).markdown_states());
-            println!("switch {round}: {took:?} to next frame, {docs} markdown docs, renders {renders:?}");
+            println!(
+                "switch {round}: {took:?} to next frame, {docs} markdown docs, renders {renders:?}"
+            );
         }
     });
 }

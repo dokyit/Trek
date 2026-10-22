@@ -11,7 +11,9 @@ use crate::workspace::{Prefs, Route, Scope, Workspace};
 use gpui_kit::component::input::{InlineToken, Input, InputState, TextareaState};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::PathBuf;
@@ -80,7 +82,9 @@ impl Pickers {
 
     /// Enter just picked a row (so it doesn't also send).
     pub fn swallowed(&mut self) -> bool {
-        self.swallow_enter.take().is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(250))
+        self.swallow_enter
+            .take()
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(250))
     }
 }
 
@@ -120,11 +124,21 @@ pub(crate) fn context_ring(used: u64, window: u64, cx: &App) -> AnyElement {
     if frac < CONTEXT_QUIET {
         return div().into_any_element();
     }
-    let color = if frac >= 0.9 { palette::red(cx) } else if frac >= 0.75 { palette::amber(cx) } else { theme.foreground.opacity(0.75) };
+    let color = if frac >= 0.9 {
+        palette::red(cx)
+    } else if frac >= 0.75 {
+        palette::amber(cx)
+    } else {
+        theme.foreground.opacity(0.75)
+    };
     let track = theme.foreground.opacity(0.14);
     let percent = format!("{:.0}%", frac * 100.);
     let tip_title = format!("{percent} of the context used");
-    let tip_detail = format!("{} / {} tokens", crate::workspace::fmt_tokens(used), crate::workspace::fmt_tokens(window));
+    let tip_detail = format!(
+        "{} / {} tokens",
+        crate::workspace::fmt_tokens(used),
+        crate::workspace::fmt_tokens(window)
+    );
     let near = frac >= CONTEXT_NEAR;
     h_flex()
         .id("context-ring")
@@ -138,12 +152,31 @@ pub(crate) fn context_ring(used: u64, window: u64, cx: &App) -> AnyElement {
         .justify_center()
         .rounded(px(8.))
         // Near the limit the share is spelled out; before that it's on hover.
-        .when(near, |el| el.child(div().text_xs().text_color(if frac >= 0.75 { color } else { theme.muted_foreground }).child(percent)))
+        .when(near, |el| {
+            el.child(
+                div()
+                    .text_xs()
+                    .text_color(if frac >= 0.75 {
+                        color
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .child(percent),
+            )
+        })
         .hover(|s| s.bg(theme.foreground.opacity(0.065)))
         .tooltip(move |window, cx| {
             let (t, d) = (tip_title.clone(), tip_detail.clone());
             gpui_kit::component::tooltip::Tooltip::element(move |_, cx| {
-                v_flex().gap(px(2.)).child(div().text_sm().font_medium().child(t.clone())).child(div().text_xs().text_color(cx.theme().muted_foreground).child(d.clone()))
+                v_flex()
+                    .gap(px(2.))
+                    .child(div().text_sm().font_medium().child(t.clone()))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(d.clone()),
+                    )
             })
             .build(window, cx)
         })
@@ -160,7 +193,11 @@ pub(crate) fn context_ring(used: u64, window: u64, cx: &App) -> AnyElement {
                             let t = from + (to - from) * i as f32 / steps as f32;
                             let a = t * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
                             let p = point(c.x + r * a.cos(), c.y + r * a.sin());
-                            if i == 0 { path.move_to(p) } else { path.line_to(p) }
+                            if i == 0 {
+                                path.move_to(p)
+                            } else {
+                                path.line_to(p)
+                            }
                         }
                         if let Ok(p) = path.build() {
                             window.paint_path(p, color);
@@ -181,7 +218,13 @@ pub(crate) fn context_ring(used: u64, window: u64, cx: &App) -> AnyElement {
 
 /// The model pill (agent glyph, model, effort) and its menu. `narrow`: little room, the effort
 /// left out and the name cut shorter; `compact`: a narrow window; `small`: a side bar's pill.
-pub(crate) fn model_pill<H: PickerHost>(host: &H, narrow: bool, compact: bool, small: bool, cx: &mut Context<H>) -> AnyElement {
+pub(crate) fn model_pill<H: PickerHost>(
+    host: &H,
+    narrow: bool,
+    compact: bool,
+    small: bool,
+    cx: &mut Context<H>,
+) -> AnyElement {
     let ws = host.workspace().read(cx);
     let prefs = ws.prefs_in(host.scope());
     let models = ws.models_for(&prefs.agent);
@@ -213,10 +256,43 @@ pub(crate) fn model_pill<H: PickerHost>(host: &H, narrow: bool, compact: bool, s
                 .flexible()
                 .small(small)
                 .child(ui::agent_glyph(&prefs.agent, cx))
-                .child(div().min_w_0().max_w(px(if narrow { 92. } else if compact { 120. } else { 240. })).truncate().child(model_label))
-                .when(!narrow, |el| el.child(div().flex_none().text_color(theme.muted_foreground).child(prefs.effort.label())))
-                .when(prefs.fast, |el| el.child(Icon::new(crate::assets::Lucide::Zap).xsmall().text_color(palette::amber(cx))))
-                .child(Icon::new(if open { IconName::ChevronUp } else { IconName::ChevronDown }).xsmall().text_color(theme.muted_foreground)),
+                .child(
+                    div()
+                        .min_w_0()
+                        .max_w(px(if narrow {
+                            92.
+                        } else if compact {
+                            120.
+                        } else {
+                            240.
+                        }))
+                        .truncate()
+                        .child(model_label),
+                )
+                .when(!narrow, |el| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .text_color(theme.muted_foreground)
+                            .child(prefs.effort.label()),
+                    )
+                })
+                .when(prefs.fast, |el| {
+                    el.child(
+                        Icon::new(crate::assets::Lucide::Zap)
+                            .xsmall()
+                            .text_color(palette::amber(cx)),
+                    )
+                })
+                .child(
+                    Icon::new(if open {
+                        IconName::ChevronUp
+                    } else {
+                        IconName::ChevronDown
+                    })
+                    .xsmall()
+                    .text_color(theme.muted_foreground),
+                ),
         )
         .content(move |_, _, cx| me.update(cx, |h, cx| model_menu(h, cx)))
         .into_any_element()
@@ -241,8 +317,14 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
     let ws = host.workspace().read(cx);
     let prefs = ws.prefs_in(host.scope());
     let models = ws.models_for(&prefs.agent);
-    let current = prefs.model.clone().or_else(|| default_model(&models).map(|m| m.id.clone()));
-    let current_info = current.as_ref().and_then(|c| models.iter().find(|m| same_model(c, &m.id))).cloned();
+    let current = prefs
+        .model
+        .clone()
+        .or_else(|| default_model(&models).map(|m| m.id.clone()));
+    let current_info = current
+        .as_ref()
+        .and_then(|c| models.iter().find(|m| same_model(c, &m.id)))
+        .cloned();
     let fast_ok = current_info.as_ref().is_some_and(|m| m.fast.is_some());
     let theme = cx.theme().clone();
     let muted = theme.muted_foreground;
@@ -253,18 +335,31 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
         .when(fast_ok, |el| {
             el.child(
                 ui::menu_row("mm-fast", false, cx)
-                    .child(Icon::new(crate::assets::Lucide::Zap).small().text_color(muted))
+                    .child(
+                        Icon::new(crate::assets::Lucide::Zap)
+                            .small()
+                            .text_color(muted),
+                    )
                     .child(div().flex_1().child("Fast"))
-                    .child(Switch::new("mm-fast-switch").small().checked(prefs.fast).on_click(cx.listener(|this: &mut H, v: &bool, _, cx| {
-                        let v = *v;
-                        update_prefs(this, cx, |p| p.fast = v);
-                    }))),
+                    .child(
+                        Switch::new("mm-fast-switch")
+                            .small()
+                            .checked(prefs.fast)
+                            .on_click(cx.listener(|this: &mut H, v: &bool, _, cx| {
+                                let v = *v;
+                                update_prefs(this, cx, |p| p.fast = v);
+                            })),
+                    ),
             )
         })
         .child(
             ui::menu_row("mm-effort", sub == Some(Sub::Effort), cx)
                 .test_support()
-                .child(Icon::new(crate::assets::Lucide::Sparkle).small().text_color(muted))
+                .child(
+                    Icon::new(crate::assets::Lucide::Sparkle)
+                        .small()
+                        .text_color(muted),
+                )
                 .child(div().flex_1().child("Effort"))
                 .child(div().text_color(muted).child(prefs.effort.label()))
                 .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted))
@@ -284,7 +379,14 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
                 .test_support()
                 .child(ui::agent_glyph(&prefs.agent, cx))
                 .child(div().flex_1().child("Model"))
-                .child(div().text_color(muted).max_w(px(120.)).truncate().child(current.as_deref().map(|c| model_name(&models, c)).unwrap_or_default()))
+                .child(
+                    div().text_color(muted).max_w(px(120.)).truncate().child(
+                        current
+                            .as_deref()
+                            .map(|c| model_name(&models, c))
+                            .unwrap_or_default(),
+                    ),
+                )
                 .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted))
                 .on_hover(cx.listener(|this: &mut H, hovered: &bool, _, cx| {
                     if *hovered {
@@ -303,32 +405,66 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
         Some(Sub::Model) => Some(model_panel(host, &prefs, current.as_deref(), cx)),
         None => None,
     };
-    h_flex().id("model-menu-body").test_support().items_end().gap(px(6.)).child(main).children(panel).into_any_element()
+    h_flex()
+        .id("model-menu-body")
+        .test_support()
+        .items_end()
+        .gap(px(6.))
+        .child(main)
+        .children(panel)
+        .into_any_element()
 }
 
-fn effort_panel<H: PickerHost>(prefs: &Prefs, model: Option<&ModelInfo>, cx: &mut Context<H>) -> AnyElement {
+fn effort_panel<H: PickerHost>(
+    prefs: &Prefs,
+    model: Option<&ModelInfo>,
+    cx: &mut Context<H>,
+) -> AnyElement {
     let efforts: Vec<Effort> = model
         .map(|m| m.efforts.clone())
         .filter(|e| !e.is_empty())
-        .unwrap_or_else(|| vec![Effort::Low, Effort::Medium, Effort::High, Effort::XHigh, Effort::Max]);
+        .unwrap_or_else(|| {
+            vec![
+                Effort::Low,
+                Effort::Medium,
+                Effort::High,
+                Effort::XHigh,
+                Effort::Max,
+            ]
+        });
     let current = prefs.effort;
     ui::menu_surface(cx)
         .w(px(200.))
         .children(efforts.into_iter().map(|e| {
-            ui::menu_row(SharedString::from(format!("eff-{}", e.as_str())), e == current, cx)
-                .test_support()
-                .child(div().flex_1().child(e.label()))
-                .when(e == current, |el| el.child(Icon::new(IconName::Check).small()))
-                .on_click(cx.listener(move |this: &mut H, _, _, cx| {
-                    update_prefs(this, cx, |p| p.effort = e);
-                    close_model_menu(this, cx);
-                }))
+            ui::menu_row(
+                SharedString::from(format!("eff-{}", e.as_str())),
+                e == current,
+                cx,
+            )
+            .test_support()
+            .child(div().flex_1().child(e.label()))
+            .when(e == current, |el| {
+                el.child(Icon::new(IconName::Check).small())
+            })
+            .on_click(cx.listener(move |this: &mut H, _, _, cx| {
+                update_prefs(this, cx, |p| p.effort = e);
+                close_model_menu(this, cx);
+            }))
         }))
         .into_any_element()
 }
 
-fn model_panel<H: PickerHost>(host: &mut H, prefs: &Prefs, current: Option<&str>, cx: &mut Context<H>) -> AnyElement {
-    let rail = host.pickers_ref().rail.clone().unwrap_or_else(|| Rail::Agent(prefs.agent.clone()));
+fn model_panel<H: PickerHost>(
+    host: &mut H,
+    prefs: &Prefs,
+    current: Option<&str>,
+    cx: &mut Context<H>,
+) -> AnyElement {
+    let rail = host
+        .pickers_ref()
+        .rail
+        .clone()
+        .unwrap_or_else(|| Rail::Agent(prefs.agent.clone()));
     if let Rail::Agent(AgentId::Direct(ref p)) = rail {
         let should_fetch = {
             let ws = host.workspace().read(cx);
@@ -366,17 +502,29 @@ fn model_panel<H: PickerHost>(host: &mut H, prefs: &Prefs, current: Option<&str>
 
     // (agent, model) pairs for the selected rail entry.
     let list: Vec<(AgentId, ModelInfo)> = match &rail {
-        Rail::Agent(a) => ws.models_for(a).into_iter().map(|m| (a.clone(), m)).collect(),
+        Rail::Agent(a) => ws
+            .models_for(a)
+            .into_iter()
+            .map(|m| (a.clone(), m))
+            .collect(),
         Rail::Favorites => agents
             .iter()
             .flat_map(|a| ws.models_for(a).into_iter().map(move |m| (a.clone(), m)))
             .filter(|(a, m)| favorites.contains(&format!("{}/{}", a.key(), m.id)))
             .collect(),
     };
-    let list: Vec<(AgentId, ModelInfo)> =
-        list.into_iter().filter(|(_, m)| query.is_empty() || m.name.to_lowercase().contains(&query) || m.id.to_lowercase().contains(&query)).collect();
+    let list: Vec<(AgentId, ModelInfo)> = list
+        .into_iter()
+        .filter(|(_, m)| {
+            query.is_empty()
+                || m.name.to_lowercase().contains(&query)
+                || m.id.to_lowercase().contains(&query)
+        })
+        .collect();
 
-    let has_exact_match = list.iter().any(|(_, m)| m.id.eq_ignore_ascii_case(&query_clean));
+    let has_exact_match = list
+        .iter()
+        .any(|(_, m)| m.id.eq_ignore_ascii_case(&query_clean));
     let custom_target = if let Rail::Agent(ref a) = rail {
         if !query_clean.is_empty() && !has_exact_match {
             Some((a.clone(), query_clean.clone()))
@@ -390,28 +538,47 @@ fn model_panel<H: PickerHost>(host: &mut H, prefs: &Prefs, current: Option<&str>
     let custom_row = custom_target.map(|(agent, custom_id)| {
         let agent2 = agent.clone();
         let id2 = custom_id.clone();
-        ui::menu_row(SharedString::from(format!("m-custom-{}", custom_id)), false, cx)
-            .group("model-row")
-            .child(
-                h_flex()
-                    .gap(px(6.))
-                    .items_center()
-                    .child(Icon::new(IconName::Plus).xsmall().text_color(theme.muted_foreground))
-                    .child(div().flex_1().min_w_0().truncate().child(format!("Use \"{}\"", custom_id))),
-            )
-            .on_click(cx.listener(move |this: &mut H, _, _, cx| {
-                let (agent, id) = (agent2.clone(), id2.clone());
-                update_prefs(this, cx, |p| {
-                    p.agent = agent;
-                    p.model = Some(id);
-                });
-                close_model_menu(this, cx);
-            }))
+        ui::menu_row(
+            SharedString::from(format!("m-custom-{}", custom_id)),
+            false,
+            cx,
+        )
+        .group("model-row")
+        .child(
+            h_flex()
+                .gap(px(6.))
+                .items_center()
+                .child(
+                    Icon::new(IconName::Plus)
+                        .xsmall()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(format!("Use \"{}\"", custom_id)),
+                ),
+        )
+        .on_click(cx.listener(move |this: &mut H, _, _, cx| {
+            let (agent, id) = (agent2.clone(), id2.clone());
+            update_prefs(this, cx, |p| {
+                p.agent = agent;
+                p.model = Some(id);
+            });
+            close_model_menu(this, cx);
+        }))
     });
 
     let empty = list.is_empty() && custom_row.is_none();
 
-    let rail_button = |id: SharedString, active: bool, icon: AnyElement, tip: SharedString, target: Rail, cx: &mut Context<H>| {
+    let rail_button = |id: SharedString,
+                       active: bool,
+                       icon: AnyElement,
+                       tip: SharedString,
+                       target: Rail,
+                       cx: &mut Context<H>| {
         div()
             .id(id)
             .size(px(32.))
@@ -422,21 +589,31 @@ fn model_panel<H: PickerHost>(host: &mut H, prefs: &Prefs, current: Option<&str>
             .cursor_pointer()
             .when(active, |el| el.bg(theme.list_active))
             .hover(|s| s.bg(theme.list_active))
-            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            })
             .child(icon)
             .on_click(cx.listener(move |this: &mut H, _, _, cx| {
                 this.pickers().rail = Some(target.clone());
                 cx.notify();
             }))
     };
-    let mut rail_col = v_flex().gap_1().p(px(5.)).border_r_1().border_color(theme.border).child(rail_button(
-        "rail-fav".into(),
-        rail == Rail::Favorites,
-        Icon::new(IconName::Star).small().text_color(theme.muted_foreground).into_any_element(),
-        "Favorites".into(),
-        Rail::Favorites,
-        cx,
-    ));
+    let mut rail_col = v_flex()
+        .gap_1()
+        .p(px(5.))
+        .border_r_1()
+        .border_color(theme.border)
+        .child(rail_button(
+            "rail-fav".into(),
+            rail == Rail::Favorites,
+            Icon::new(IconName::Star)
+                .small()
+                .text_color(theme.muted_foreground)
+                .into_any_element(),
+            "Favorites".into(),
+            Rail::Favorites,
+            cx,
+        ));
     for a in &agents {
         rail_col = rail_col.child(rail_button(
             SharedString::from(format!("rail-{}", a.key())),
@@ -454,37 +631,51 @@ fn model_panel<H: PickerHost>(host: &mut H, prefs: &Prefs, current: Option<&str>
         let is_fav = favorites.contains(&fav_key);
         let id = m.id.clone();
         let agent2 = agent.clone();
-        ui::menu_row(SharedString::from(format!("m-{}-{}", agent.key(), m.id)), selected, cx)
-            .group("model-row")
-            .child(div().flex_1().min_w_0().truncate().child(m.name.clone()))
-            .child(
-                div()
-                    .id(SharedString::from(format!("fav-{fav_key}")))
-                    .when(!is_fav, |el| el.invisible().group_hover("model-row", |s| s.visible()))
-                    .child(Icon::new(if is_fav { IconName::StarFill } else { IconName::Star }).xsmall().text_color(theme.muted_foreground))
-                    .on_click(cx.listener(move |this: &mut H, _, _, cx| {
-                        cx.stop_propagation();
-                        let key = fav_key.clone();
-                        this.workspace().update(cx, |ws, cx| {
-                            let favs = &mut ws.settings.general.favorite_models;
-                            if let Some(i) = favs.iter().position(|f| *f == key) {
-                                favs.remove(i);
-                            } else {
-                                favs.push(key);
-                            }
-                            ws.save_settings(cx);
-                        });
-                    })),
-            )
-            .when(selected, |el| el.child(Icon::new(IconName::Check).small()))
-            .on_click(cx.listener(move |this: &mut H, _, _, cx| {
-                let (agent, id) = (agent2.clone(), id.clone());
-                update_prefs(this, cx, |p| {
-                    p.agent = agent;
-                    p.model = Some(id);
-                });
-                close_model_menu(this, cx);
-            }))
+        ui::menu_row(
+            SharedString::from(format!("m-{}-{}", agent.key(), m.id)),
+            selected,
+            cx,
+        )
+        .group("model-row")
+        .child(div().flex_1().min_w_0().truncate().child(m.name.clone()))
+        .child(
+            div()
+                .id(SharedString::from(format!("fav-{fav_key}")))
+                .when(!is_fav, |el| {
+                    el.invisible().group_hover("model-row", |s| s.visible())
+                })
+                .child(
+                    Icon::new(if is_fav {
+                        IconName::StarFill
+                    } else {
+                        IconName::Star
+                    })
+                    .xsmall()
+                    .text_color(theme.muted_foreground),
+                )
+                .on_click(cx.listener(move |this: &mut H, _, _, cx| {
+                    cx.stop_propagation();
+                    let key = fav_key.clone();
+                    this.workspace().update(cx, |ws, cx| {
+                        let favs = &mut ws.settings.general.favorite_models;
+                        if let Some(i) = favs.iter().position(|f| *f == key) {
+                            favs.remove(i);
+                        } else {
+                            favs.push(key);
+                        }
+                        ws.save_settings(cx);
+                    });
+                })),
+        )
+        .when(selected, |el| el.child(Icon::new(IconName::Check).small()))
+        .on_click(cx.listener(move |this: &mut H, _, _, cx| {
+            let (agent, id) = (agent2.clone(), id.clone());
+            update_prefs(this, cx, |p| {
+                p.agent = agent;
+                p.model = Some(id);
+            });
+            close_model_menu(this, cx);
+        }))
     });
 
     let search = host.pickers_ref().model_search.clone();
@@ -536,11 +727,24 @@ fn model_panel<H: PickerHost>(host: &mut H, prefs: &Prefs, current: Option<&str>
 
 /// The access (hand-holding) pill and its menu. `compact`: the icon alone, its name a tooltip;
 /// `small`: a side bar's pill.
-pub(crate) fn access_pill<H: PickerHost>(host: &H, compact: bool, small: bool, cx: &mut Context<H>) -> AnyElement {
-    let hh = host.workspace().read(cx).prefs_in(host.scope()).hand_holding;
+pub(crate) fn access_pill<H: PickerHost>(
+    host: &H,
+    compact: bool,
+    small: bool,
+    cx: &mut Context<H>,
+) -> AnyElement {
+    let hh = host
+        .workspace()
+        .read(cx)
+        .prefs_in(host.scope())
+        .hand_holding;
     let theme = cx.theme().clone();
     let open = host.pickers_ref().access_open;
-    let tint = if hh == HandHolding::FullAccess { palette::amber(cx) } else { theme.muted_foreground };
+    let tint = if hh == HandHolding::FullAccess {
+        palette::amber(cx)
+    } else {
+        theme.muted_foreground
+    };
     let me = cx.entity();
     Popover::new("access-menu")
         .anchor(Anchor::BottomLeft)
@@ -557,7 +761,15 @@ pub(crate) fn access_pill<H: PickerHost>(host: &H, compact: bool, small: bool, c
                 .when(compact, |p| p.tooltip(hh.label()))
                 .child(hand_icon(hh).small().text_color(tint))
                 .when(!compact, |p| p.child(hh.label()))
-                .child(Icon::new(if open { IconName::ChevronUp } else { IconName::ChevronDown }).xsmall().text_color(theme.muted_foreground)),
+                .child(
+                    Icon::new(if open {
+                        IconName::ChevronUp
+                    } else {
+                        IconName::ChevronDown
+                    })
+                    .xsmall()
+                    .text_color(theme.muted_foreground),
+                ),
         )
         .content(move |_, _, cx| me.update(cx, |h, cx| access_menu(h, cx)))
         .into_any_element()
@@ -572,36 +784,61 @@ fn access_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
         .w(px(340.))
         .children(HandHolding::ALL.into_iter().map(|level| {
             let locked = level == HandHolding::FullAccess && !unlocked;
-            let tint = if level == HandHolding::FullAccess { palette::amber(cx) } else { theme.muted_foreground };
-            ui::menu_row(SharedString::from(format!("hh-{level:?}")), level == current, cx)
-                .items_start()
-                .py(px(9.))
-                .child(div().pt(px(2.)).child(hand_icon(level).small().text_color(tint)))
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap(px(3.))
-                        .child(div().font_medium().child(level.label()))
-                        .child(div().text_xs().whitespace_normal().line_height(relative(1.4)).text_color(theme.muted_foreground).child(if locked {
-                            "Turn on in Settings → Permissions to use it."
+            let tint = if level == HandHolding::FullAccess {
+                palette::amber(cx)
+            } else {
+                theme.muted_foreground
+            };
+            ui::menu_row(
+                SharedString::from(format!("hh-{level:?}")),
+                level == current,
+                cx,
+            )
+            .items_start()
+            .py(px(9.))
+            .child(
+                div()
+                    .pt(px(2.))
+                    .child(hand_icon(level).small().text_color(tint)),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(3.))
+                    .child(div().font_medium().child(level.label()))
+                    .child(
+                        div()
+                            .text_xs()
+                            .whitespace_normal()
+                            .line_height(relative(1.4))
+                            .text_color(theme.muted_foreground)
+                            .child(if locked {
+                                "Turn on in Settings → Permissions to use it."
+                            } else {
+                                level.description()
+                            }),
+                    ),
+            )
+            .when(locked, |el| el.opacity(0.55))
+            .on_click(cx.listener(move |this: &mut H, _, _, cx| {
+                if locked {
+                    let route = Route::Settings(crate::workspace::SettingsPage::Permissions);
+                    let main = *this.scope() == Scope::Main;
+                    this.workspace().update(cx, |ws, cx| {
+                        if main {
+                            ws.navigate(route, cx)
                         } else {
-                            level.description()
-                        })),
-                )
-                .when(locked, |el| el.opacity(0.55))
-                .on_click(cx.listener(move |this: &mut H, _, _, cx| {
-                    if locked {
-                        let route = Route::Settings(crate::workspace::SettingsPage::Permissions);
-                        let main = *this.scope() == Scope::Main;
-                        this.workspace().update(cx, |ws, cx| if main { ws.navigate(route, cx) } else { ws.show_in_main(route, cx) });
-                    } else {
-                        update_prefs(this, cx, |p| p.hand_holding = level);
-                    }
-                    this.pickers().access_open = false;
-                    this.overlay_changed(cx);
-                    cx.notify();
-                }))
+                            ws.show_in_main(route, cx)
+                        }
+                    });
+                } else {
+                    update_prefs(this, cx, |p| p.hand_holding = level);
+                }
+                this.pickers().access_open = false;
+                this.overlay_changed(cx);
+                cx.notify();
+            }))
         }))
         .id("access-menu-body")
         .test_support()
@@ -612,7 +849,12 @@ fn access_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
 
 /// Type `ch` (`/`, `@` or `$`) to open its picker: `/` replaces the text, the others go at the
 /// cursor (after a space).
-pub(crate) fn insert_trigger<H: PickerHost>(host: &mut H, ch: &str, window: &mut Window, cx: &mut Context<H>) {
+pub(crate) fn insert_trigger<H: PickerHost>(
+    host: &mut H,
+    ch: &str,
+    window: &mut Window,
+    cx: &mut Context<H>,
+) {
     host.input().update(cx, |s, cx| {
         let v = s.value().to_string();
         let cursor = s.cursor();
@@ -621,7 +863,15 @@ pub(crate) fn insert_trigger<H: PickerHost>(host: &mut H, ch: &str, window: &mut
             s.set_value("/", window, cx);
             s.set_selected_range(1..1, cx);
         } else {
-            s.insert(if needs_space { format!(" {ch}") } else { ch.to_string() }, window, cx);
+            s.insert(
+                if needs_space {
+                    format!(" {ch}")
+                } else {
+                    ch.to_string()
+                },
+                window,
+                cx,
+            );
         }
     });
     let handle = host.input().read(cx).focus_handle(cx);
@@ -634,7 +884,8 @@ pub(crate) fn update_trigger<H: PickerHost>(host: &mut H, cx: &mut Context<H>) {
     let state = host.input().read(cx);
     let next = mentions::trigger_at(&state.value(), state.cursor());
     let p = host.pickers();
-    if next.as_ref().map(|t| (&t.kind, &t.query)) != p.trigger.as_ref().map(|t| (&t.kind, &t.query)) {
+    if next.as_ref().map(|t| (&t.kind, &t.query)) != p.trigger.as_ref().map(|t| (&t.kind, &t.query))
+    {
         p.picked = 0;
     }
     let mention = next.as_ref().is_some_and(|t| t.kind == PickKind::Mention);
@@ -647,20 +898,28 @@ pub(crate) fn update_trigger<H: PickerHost>(host: &mut H, cx: &mut Context<H>) {
 
 /// Index the folder's files for `@`, once per folder (in the background).
 pub(crate) fn ensure_file_index<H: PickerHost>(host: &mut H, cx: &mut Context<H>) {
-    let Some(root) = host.workspace().read(cx).cwd_in(host.scope()) else { return };
+    let Some(root) = host.workspace().read(cx).cwd_in(host.scope()) else {
+        return;
+    };
     let p = host.pickers_ref();
     if p.file_index.as_ref().is_some_and(|(r, _)| *r == root) || p.indexing.is_some() {
         return;
     }
     let r = root.clone();
     let task = cx.spawn(async move |this, cx| {
-        let files = cx.background_executor().spawn(async move { mentions::index_files(&r) }).await;
+        let files = cx
+            .background_executor()
+            .spawn(async move { mentions::index_files(&r) })
+            .await;
         let _ = this.update(cx, |this: &mut H, cx| {
             let p = this.pickers();
             p.file_index = Some((root, Arc::new(files)));
             p.indexing = None;
             // The folder on screen changed meanwhile: index that one too.
-            if p.trigger.as_ref().is_some_and(|t| t.kind == PickKind::Mention) {
+            if p.trigger
+                .as_ref()
+                .is_some_and(|t| t.kind == PickKind::Mention)
+            {
                 ensure_file_index(this, cx);
             }
             cx.notify();
@@ -678,31 +937,57 @@ pub(crate) fn picker_items<H: PickerHost>(host: &H, cx: &App) -> Vec<PickItem> {
     let agent = ws.prefs_in(scope).agent;
     let q = t.query.to_lowercase();
     let commands = ws.slash_commands(scope, &agent);
-    let matches = |name: &str, desc: &str| q.is_empty() || name.to_lowercase().contains(&q) || desc.to_lowercase().contains(&q);
-    let rank = |name: &str| if name.to_lowercase().starts_with(&q) { 0 } else { 1 };
+    let matches = |name: &str, desc: &str| {
+        q.is_empty() || name.to_lowercase().contains(&q) || desc.to_lowercase().contains(&q)
+    };
+    let rank = |name: &str| {
+        if name.to_lowercase().starts_with(&q) {
+            0
+        } else {
+            1
+        }
+    };
     let mut items: Vec<PickItem> = match t.kind {
         PickKind::Slash => {
-            let mut v: Vec<_> = commands.iter().filter(|c| c.kind != trek_agents::CommandKind::Agent && matches(&c.name, &c.description)).collect();
+            let mut v: Vec<_> = commands
+                .iter()
+                .filter(|c| {
+                    c.kind != trek_agents::CommandKind::Agent && matches(&c.name, &c.description)
+                })
+                .collect();
             v.sort_by_key(|c| rank(&c.name));
             v.into_iter()
                 .map(|c| PickItem {
                     label: format!("/{}", c.name),
                     detail: c.description.clone(),
                     insert: format!("/{}", c.name),
-                    icon: if c.kind == trek_agents::CommandKind::Skill { PickIcon::Skill } else { PickIcon::Command },
+                    icon: if c.kind == trek_agents::CommandKind::Skill {
+                        PickIcon::Skill
+                    } else {
+                        PickIcon::Command
+                    },
                 })
                 .collect()
         }
         PickKind::Skill => {
             let codex = agent == AgentId::Codex;
-            let mut v: Vec<_> = commands.iter().filter(|c| c.kind == trek_agents::CommandKind::Skill && matches(&c.name, &c.description)).collect();
+            let mut v: Vec<_> = commands
+                .iter()
+                .filter(|c| {
+                    c.kind == trek_agents::CommandKind::Skill && matches(&c.name, &c.description)
+                })
+                .collect();
             v.sort_by_key(|c| rank(&c.name));
             v.into_iter()
                 .map(|c| PickItem {
                     label: c.name.clone(),
                     detail: c.description.clone(),
                     // Codex invokes skills as $name; Claude Code as /name.
-                    insert: if codex { format!("${}", c.name) } else { format!("/{}", c.name) },
+                    insert: if codex {
+                        format!("${}", c.name)
+                    } else {
+                        format!("/{}", c.name)
+                    },
                     icon: PickIcon::Skill,
                 })
                 .collect()
@@ -710,23 +995,46 @@ pub(crate) fn picker_items<H: PickerHost>(host: &H, cx: &App) -> Vec<PickItem> {
         PickKind::Mention => {
             let mut v: Vec<PickItem> = commands
                 .iter()
-                .filter(|c| c.kind == trek_agents::CommandKind::Agent && matches(&c.name, &c.description))
+                .filter(|c| {
+                    c.kind == trek_agents::CommandKind::Agent && matches(&c.name, &c.description)
+                })
                 .take(6)
-                .map(|c| PickItem { label: format!("agent-{}", c.name), detail: c.description.clone(), insert: format!("@agent-{}", c.name), icon: PickIcon::Agent })
+                .map(|c| PickItem {
+                    label: format!("agent-{}", c.name),
+                    detail: c.description.clone(),
+                    insert: format!("@agent-{}", c.name),
+                    icon: PickIcon::Agent,
+                })
                 .collect();
             // Another folder's files (the window moved to a thread elsewhere) aren't offered.
-            if let Some((_, files)) = p.file_index.as_ref().filter(|(root, _)| ws.cwd_in(scope).as_ref() == Some(root)) {
-                v.extend(mentions::match_files(files, &t.query, 40).into_iter().map(|f| {
-                    let dir = f.ends_with('/');
-                    let trimmed = f.trim_end_matches('/');
-                    let (parent, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
-                    PickItem {
-                        label: if dir { format!("{name}/") } else { name.to_string() },
-                        detail: parent.to_string(),
-                        insert: format!("@{f}"),
-                        icon: if dir { PickIcon::Folder } else { PickIcon::File },
-                    }
-                }));
+            if let Some((_, files)) = p
+                .file_index
+                .as_ref()
+                .filter(|(root, _)| ws.cwd_in(scope).as_ref() == Some(root))
+            {
+                v.extend(
+                    mentions::match_files(files, &t.query, 40)
+                        .into_iter()
+                        .map(|f| {
+                            let dir = f.ends_with('/');
+                            let trimmed = f.trim_end_matches('/');
+                            let (parent, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
+                            PickItem {
+                                label: if dir {
+                                    format!("{name}/")
+                                } else {
+                                    name.to_string()
+                                },
+                                detail: parent.to_string(),
+                                insert: format!("@{f}"),
+                                icon: if dir {
+                                    PickIcon::Folder
+                                } else {
+                                    PickIcon::File
+                                },
+                            }
+                        }),
+                );
             }
             v
         }
@@ -740,7 +1048,9 @@ pub(crate) fn picker_items<H: PickerHost>(host: &H, cx: &App) -> Vec<PickItem> {
 pub(crate) fn slash_ghost<H: PickerHost>(host: &H, cx: &App) -> Option<String> {
     let t = host.pickers_ref().trigger.as_ref()?;
     let state = host.input().read(cx);
-    if t.kind != PickKind::Slash || t.query.is_empty() || !state.selected_range().is_empty()
+    if t.kind != PickKind::Slash
+        || t.query.is_empty()
+        || !state.selected_range().is_empty()
         || state.cursor() != state.value().len()
         || mentions::trigger_at(&state.value(), state.cursor()).as_ref() != Some(t)
     {
@@ -760,24 +1070,58 @@ pub(crate) fn slash_ghost_overlay<H: PickerHost>(host: &H, cx: &App) -> Option<A
     let input = host.input().clone();
     let color = cx.theme().muted_foreground;
     let family = cx.theme().font_family.clone();
-    Some(canvas(|_, _, _| {}, move |_, _, window, cx| {
-        let s = input.read(cx);
-        if !s.focus_handle(cx).is_focused(window) { return; }
-        let Some((caret, height)) = s.cursor_layout() else { return };
-        let bounds = s.input_bounds();
-        let origin = point(caret.right(), caret.top() - (height - caret.size.height) / 2. + s.scroll_offset().y);
-        let run = TextRun { len: ghost.len(), font: font(family.clone()), color, background_color: None, underline: None, strikethrough: None };
-        // Textarea's default (Medium) uses text_sm, i.e. 0.875 rem.
-        let line = window.text_system().shape_line(ghost.clone().into(), window.rem_size() * 0.875, &[run], None);
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            let _ = line.paint(origin, height, TextAlign::Left, None, window, cx);
-        });
-    }).absolute().size_full().into_any_element())
+    Some(
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, cx| {
+                let s = input.read(cx);
+                if !s.focus_handle(cx).is_focused(window) {
+                    return;
+                }
+                let Some((caret, height)) = s.cursor_layout() else {
+                    return;
+                };
+                let bounds = s.input_bounds();
+                let origin = point(
+                    caret.right(),
+                    caret.top() - (height - caret.size.height) / 2. + s.scroll_offset().y,
+                );
+                let run = TextRun {
+                    len: ghost.len(),
+                    font: font(family.clone()),
+                    color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                // Textarea's default (Medium) uses text_sm, i.e. 0.875 rem.
+                let line = window.text_system().shape_line(
+                    ghost.clone().into(),
+                    window.rem_size() * 0.875,
+                    &[run],
+                    None,
+                );
+                window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                    let _ = line.paint(origin, height, TextAlign::Left, None, window, cx);
+                });
+            },
+        )
+        .absolute()
+        .size_full()
+        .into_any_element(),
+    )
 }
 
 /// Put row `ix` in place of the token being completed.
-pub(crate) fn accept_pick<H: PickerHost>(host: &mut H, ix: usize, window: &mut Window, cx: &mut Context<H>) {
-    let Some(t) = host.pickers_ref().trigger.clone() else { return };
+pub(crate) fn accept_pick<H: PickerHost>(
+    host: &mut H,
+    ix: usize,
+    window: &mut Window,
+    cx: &mut Context<H>,
+) {
+    let Some(t) = host.pickers_ref().trigger.clone() else {
+        return;
+    };
     // The caret moved since the picker opened (a click, ←, Home) and no longer sits in the token
     // the rows are for: the picker catches up, and nothing is replaced.
     let stale = {
@@ -789,19 +1133,31 @@ pub(crate) fn accept_pick<H: PickerHost>(host: &mut H, ix: usize, window: &mut W
         cx.notify();
         return;
     }
-    let Some(item) = picker_items(host, cx).into_iter().nth(ix) else { return };
+    let Some(item) = picker_items(host, cx).into_iter().nth(ix) else {
+        return;
+    };
     let folder = item.icon == PickIcon::Folder;
     host.input().update(cx, |s, cx| {
         let cursor = s.cursor();
         if t.kind == PickKind::Slash {
             let token = InlineToken::new(item.insert.clone(), item.insert.clone());
-            if s.replace_range_with_token(t.start..cursor, token, window, cx).is_ok() {
+            if s.replace_range_with_token(t.start..cursor, token, window, cx)
+                .is_ok()
+            {
                 s.insert(" ", window, cx);
             }
         } else {
             s.set_selected_range(t.start..cursor, cx);
             // Folders keep the picker open so you can keep drilling down.
-            s.replace(if folder { item.insert.clone() } else { format!("{} ", item.insert) }, window, cx);
+            s.replace(
+                if folder {
+                    item.insert.clone()
+                } else {
+                    format!("{} ", item.insert)
+                },
+                window,
+                cx,
+            );
         }
     });
     host.pickers().picked = 0;
@@ -811,7 +1167,12 @@ pub(crate) fn accept_pick<H: PickerHost>(host: &mut H, ix: usize, window: &mut W
 
 /// A key the textarea turns into an action (↑ ↓ ⎋ ⇥ ↩) while the picker is open: it moves,
 /// closes or picks, and stops there. Otherwise it goes on to the textarea.
-pub(crate) fn picker_action<H: PickerHost>(host: &mut H, key: &str, window: &mut Window, cx: &mut Context<H>) {
+pub(crate) fn picker_action<H: PickerHost>(
+    host: &mut H,
+    key: &str,
+    window: &mut Window,
+    cx: &mut Context<H>,
+) {
     let n = picker_items(host, cx).len();
     if host.pickers_ref().trigger.is_none() || (n == 0 && key != "escape") {
         cx.propagate();
@@ -827,7 +1188,11 @@ pub(crate) fn picker_action<H: PickerHost>(host: &mut H, key: &str, window: &mut
         "down" => p.picked = (p.picked + 1) % n,
         _ => {
             let at = p.picked.min(n - 1);
-            let at = if key == "tab" && slash_ghost(host, cx).is_some() { 0 } else { at };
+            let at = if key == "tab" && slash_ghost(host, cx).is_some() {
+                0
+            } else {
+                at
+            };
             accept_pick(host, at, window, cx)
         }
     }
@@ -838,7 +1203,12 @@ pub(crate) fn picker_action<H: PickerHost>(host: &mut H, key: &str, window: &mut
 }
 
 /// Keys that reach the composer before the textarea while the picker is open.
-pub(crate) fn picker_key<H: PickerHost>(host: &mut H, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<H>) {
+pub(crate) fn picker_key<H: PickerHost>(
+    host: &mut H,
+    ev: &KeyDownEvent,
+    window: &mut Window,
+    cx: &mut Context<H>,
+) {
     if host.pickers_ref().trigger.is_none() {
         return;
     }
@@ -860,7 +1230,11 @@ pub(crate) fn picker_key<H: PickerHost>(host: &mut H, ev: &KeyDownEvent, window:
                 p.swallow_enter = Some(std::time::Instant::now());
             }
             let at = p.picked.min(n - 1);
-            let at = if ks.key == "tab" && slash_ghost(host, cx).is_some() { 0 } else { at };
+            let at = if ks.key == "tab" && slash_ghost(host, cx).is_some() {
+                0
+            } else {
+                at
+            };
             accept_pick(host, at, window, cx)
         }
         _ => return,
@@ -900,23 +1274,56 @@ pub(crate) fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<Any
                     .child(div().flex_1().child(title))
                     .child(crate::keys::shared("↑↓ to move · ↩ to pick · esc")),
             )
-            .when(items.is_empty(), |el| el.child(div().px(px(10.)).py(px(8.)).text_sm().text_color(theme.muted_foreground).child(empty)))
-            .child(v_flex().id("picker-list").test_support().max_h(px(280.)).overflow_y_scroll().track_scroll(&p.picker_scroll).children(items.into_iter().enumerate().map(|(i, item)| {
-                let icon = match item.icon {
-                    PickIcon::Command => Icon::new(IconName::SquareTerminal),
-                    PickIcon::Skill => Icon::new(crate::assets::Lucide::Sparkle),
-                    PickIcon::Agent => Icon::new(IconName::Bot),
-                    PickIcon::File => Icon::new(IconName::File),
-                    PickIcon::Folder => Icon::new(IconName::Folder),
-                };
-                ui::menu_row(("pick", i), false, cx)
-                    .min_h(px(30.))
-                    .when(i == picked, |el| el.bg(theme.foreground.opacity(0.09)))
-                    .child(icon.small().text_color(theme.muted_foreground))
-                    .child(div().flex_none().max_w(px(260.)).truncate().child(item.label))
-                    .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(item.detail))
-                    .on_click(cx.listener(move |this: &mut H, _, window, cx| accept_pick(this, i, window, cx)))
-            })))
+            .when(items.is_empty(), |el| {
+                el.child(
+                    div()
+                        .px(px(10.))
+                        .py(px(8.))
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(empty),
+                )
+            })
+            .child(
+                v_flex()
+                    .id("picker-list")
+                    .test_support()
+                    .max_h(px(280.))
+                    .overflow_y_scroll()
+                    .track_scroll(&p.picker_scroll)
+                    .children(items.into_iter().enumerate().map(|(i, item)| {
+                        let icon = match item.icon {
+                            PickIcon::Command => Icon::new(IconName::SquareTerminal),
+                            PickIcon::Skill => Icon::new(crate::assets::Lucide::Sparkle),
+                            PickIcon::Agent => Icon::new(IconName::Bot),
+                            PickIcon::File => Icon::new(IconName::File),
+                            PickIcon::Folder => Icon::new(IconName::Folder),
+                        };
+                        ui::menu_row(("pick", i), false, cx)
+                            .min_h(px(30.))
+                            .when(i == picked, |el| el.bg(theme.foreground.opacity(0.09)))
+                            .child(icon.small().text_color(theme.muted_foreground))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .max_w(px(260.))
+                                    .truncate()
+                                    .child(item.label),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(item.detail),
+                            )
+                            .on_click(cx.listener(move |this: &mut H, _, window, cx| {
+                                accept_pick(this, i, window, cx)
+                            }))
+                    })),
+            )
             .into_any_element(),
     )
 }

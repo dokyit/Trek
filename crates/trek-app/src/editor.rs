@@ -46,7 +46,11 @@ fn patch_marks(text: &str) -> Vec<(u32, u32, DiffMark)> {
         };
         // Runs of the same kind are one fill.
         match out.last_mut() {
-            Some((_, end, k)) if *end == row && std::mem::discriminant(k) == std::mem::discriminant(&kind) => *end = row + 1,
+            Some((_, end, k))
+                if *end == row && std::mem::discriminant(k) == std::mem::discriminant(&kind) =>
+            {
+                *end = row + 1
+            }
             _ => out.push((row, row + 1, kind)),
         }
     }
@@ -57,35 +61,76 @@ fn patch_marks(text: &str) -> Vec<(u32, u32, DiffMark)> {
 /// Untracked files count as all-added. Not a repo (or clean): empty. Runs git twice, so it's
 /// called off the main thread (`refresh_diff`).
 fn diff_line_ranges(path: &Path) -> Vec<(u32, u32, DiffMark)> {
-    let Some(dir) = path.parent() else { return vec![] };
+    let Some(dir) = path.parent() else {
+        return vec![];
+    };
     // Read-only: no optional locks (an agent's commit mustn't meet our index.lock), git found on
     // the login PATH, the user's diff settings kept out of what's parsed.
-    let status = crate::ide::git::command(dir).args(["status", "--porcelain", "--", &path.display().to_string()]).output().ok();
+    let status = crate::ide::git::command(dir)
+        .args(["status", "--porcelain", "--", &path.display().to_string()])
+        .output()
+        .ok();
     if let Some(out) = status.filter(|o| o.status.success()) {
         let s = String::from_utf8_lossy(&out.stdout);
         if s.starts_with("??") {
-            let n = std::fs::read_to_string(path).map(|t| t.lines().count() as u32).unwrap_or(0);
+            let n = std::fs::read_to_string(path)
+                .map(|t| t.lines().count() as u32)
+                .unwrap_or(0);
             return vec![(0, n, DiffMark::Added)];
         }
     }
-    let Ok(out) = crate::ide::git::command(dir).args(["diff", "--no-color", "--no-ext-diff", "--unified=0", "--", &path.display().to_string()]).output() else {
+    let Ok(out) = crate::ide::git::command(dir)
+        .args([
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--unified=0",
+            "--",
+            &path.display().to_string(),
+        ])
+        .output()
+    else {
         return vec![];
     };
     let mut marks = vec![];
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         // @@ -old_start[,old_count] +new_start[,new_count] @@
-        let Some(rest) = line.strip_prefix("@@ -") else { continue };
-        let Some((old, rest)) = rest.split_once(' ') else { continue };
-        let Some(new) = rest.strip_prefix('+').and_then(|r| r.split_once(' ')).map(|(n, _)| n) else { continue };
-        let num = |s: &str| s.split(',').next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
-        let cnt = |s: &str| s.split(',').nth(1).and_then(|v| v.parse::<u32>().ok()).unwrap_or(1);
+        let Some(rest) = line.strip_prefix("@@ -") else {
+            continue;
+        };
+        let Some((old, rest)) = rest.split_once(' ') else {
+            continue;
+        };
+        let Some(new) = rest
+            .strip_prefix('+')
+            .and_then(|r| r.split_once(' '))
+            .map(|(n, _)| n)
+        else {
+            continue;
+        };
+        let num = |s: &str| {
+            s.split(',')
+                .next()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0)
+        };
+        let cnt = |s: &str| {
+            s.split(',')
+                .nth(1)
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(1)
+        };
         let (_os, oc) = (num(old), cnt(old));
         let (ns, nc) = (num(new), cnt(new));
         let row = ns.saturating_sub(1);
         if nc == 0 {
             marks.push((row, row + 1, DiffMark::Deleted));
         } else {
-            let kind = if oc > 0 { DiffMark::Changed } else { DiffMark::Added };
+            let kind = if oc > 0 {
+                DiffMark::Changed
+            } else {
+                DiffMark::Added
+            };
             marks.push((row, row + nc, kind));
         }
     }
@@ -103,10 +148,13 @@ fn review_marks(diff: &FileDiff) -> Vec<(u32, u32, DiffMark)> {
         .collect()
 }
 
+use gpui_kit::base::input::{Point, RopeExt};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, Position, TabSize};
-use gpui_kit::base::input::{Point, RopeExt};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex,
+    v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -119,7 +167,18 @@ use trek_core::hunks::{FileDiff, Mark};
 /// What a too-big or unreadable file gets instead of an editor: a note and a way out.
 const MAX_FILE_BYTES: u64 = 2_000_000;
 
-actions!(trek_editor, [SaveFile, FormatDocument, InlineEdit, KeepHunk, UndoHunk, NextHunk, PreviousHunk]);
+actions!(
+    trek_editor,
+    [
+        SaveFile,
+        FormatDocument,
+        InlineEdit,
+        KeepHunk,
+        UndoHunk,
+        NextHunk,
+        PreviousHunk
+    ]
+);
 
 pub fn key_bindings() -> Vec<KeyBinding> {
     crate::keys::bindings(crate::keys::Group::Editor)
@@ -189,10 +248,19 @@ struct InlineCard {
 }
 
 impl EditorView {
-    pub fn new(workspace: Entity<Workspace>, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: Entity<Workspace>,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // The extension names the file's language to the language servers; the grammar that
         // colours it is the table's (`.h`, `.mjs`, `Makefile` have none under that name).
-        let lang = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_string();
+        let lang = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_string();
         let (grammar, hard_tabs) = {
             let language = crate::languages::of(&path);
             (language.grammar, language.hard_tabs)
@@ -206,7 +274,10 @@ impl EditorView {
                 .searchable(true)
                 // Code scrolls sideways: a wrap mid-identifier reads as two lines that aren't.
                 .soft_wrap(false)
-                .tab_size(TabSize { tab_size: 4, hard_tabs });
+                .tab_size(TabSize {
+                    tab_size: 4,
+                    hard_tabs,
+                });
             s.set_readonly(true, cx);
             s
         });
@@ -227,7 +298,8 @@ impl EditorView {
         let watch = vec![
             // The bars and the card sit over the text: they follow it as it scrolls.
             cx.observe(&state, |this, _, cx| {
-                if this.inline.is_some() || this.hunks.as_ref().is_some_and(|h| !h.hunks.is_empty()) {
+                if this.inline.is_some() || this.hunks.as_ref().is_some_and(|h| !h.hunks.is_empty())
+                {
                     cx.notify();
                 }
             }),
@@ -235,7 +307,9 @@ impl EditorView {
             // file started or stopped being pending in the chat in front: the fills follow.
             cx.subscribe(&workspace, |this, _, event: &WorkspaceEvent, cx| {
                 if let WorkspaceEvent::ReviewChanged { id } = event {
-                    if this.review.as_ref().is_some_and(|r| r.thread == *id) || this.workspace.read(cx).file_review(&this.path).is_some() {
+                    if this.review.as_ref().is_some_and(|r| r.thread == *id)
+                        || this.workspace.read(cx).file_review(&this.path).is_some()
+                    {
                         this.refresh_diff(cx);
                     }
                 }
@@ -286,7 +360,10 @@ impl EditorView {
             this.workspace.update(cx, |ws, _| ws.reveal_hunk = None);
         }
         cx.spawn_in(window, async move |this, cx| {
-            let (text, problem, instead) = cx.background_executor().spawn(async move { load_or_preview(&path) }).await;
+            let (text, problem, instead) = cx
+                .background_executor()
+                .spawn(async move { load_or_preview(&path) })
+                .await;
             // Not run if the editor has closed; logged if refused, as the file would never show.
             crate::logging::ran(this.update_in(cx, |this, window, cx| {
                 this.not_text = instead;
@@ -300,7 +377,14 @@ impl EditorView {
 
     /// The file is read: it shows, editable unless `problem` says why not, and a language
     /// server that covers it opens it.
-    fn loaded(&mut self, text: String, problem: Option<String>, lang: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn loaded(
+        &mut self,
+        text: String,
+        problem: Option<String>,
+        lang: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let readonly = problem.is_some();
         self.saved = text.clone();
         self.problem = problem;
@@ -313,18 +397,30 @@ impl EditorView {
         // A language server covers this file? Providers on the state, the doc opened, and a
         // watcher folding publishDiagnostics into the gutter.
         let path = self.path.clone();
-        tracing::info!("lsp: {} lang={lang} problem={:?}", path.display(), self.problem);
+        tracing::info!(
+            "lsp: {} lang={lang} problem={:?}",
+            path.display(),
+            self.problem
+        );
         let workspace = self.workspace.clone();
         let state = self.state.clone();
-        let lsp = self.problem.is_none().then(|| {
-            crate::lsp_client::uri_for(&path).and_then(|uri| {
-                workspace.update(cx, |ws, _| ws.lsp_for(&path, &lang)).map(|client| {
-                    state.update(cx, |s, _| *s.lsp_mut() = client.lsp_for(uri.clone(), workspace.clone()));
-                    client.did_open(&uri, &text);
-                    (client, uri)
+        let lsp = self
+            .problem
+            .is_none()
+            .then(|| {
+                crate::lsp_client::uri_for(&path).and_then(|uri| {
+                    workspace
+                        .update(cx, |ws, _| ws.lsp_for(&path, &lang))
+                        .map(|client| {
+                            state.update(cx, |s, _| {
+                                *s.lsp_mut() = client.lsp_for(uri.clone(), workspace.clone())
+                            });
+                            client.did_open(&uri, &text);
+                            (client, uri)
+                        })
                 })
             })
-        }).flatten();
+            .flatten();
         self._diag_watch = lsp.as_ref().map(|(client, uri)| {
             let rx = client.watch_diagnostics();
             let uri = uri.clone();
@@ -336,12 +432,19 @@ impl EditorView {
                     if u != uri {
                         continue;
                     }
-                    let (Some(state), Some(ws)) = (state.upgrade(), ws.upgrade()) else { break };
+                    let (Some(state), Some(ws)) = (state.upgrade(), ws.upgrade()) else {
+                        break;
+                    };
                     cx.update_entity(&state, |s, cx| {
                         let rope = s.text().clone();
                         if let Some(set) = s.diagnostics_mut() {
                             set.reset(&rope);
-                            set.extend(diags.iter().cloned().map(gpui_kit::base::input::Diagnostic::from));
+                            set.extend(
+                                diags
+                                    .iter()
+                                    .cloned()
+                                    .map(gpui_kit::base::input::Diagnostic::from),
+                            );
                         }
                         cx.notify();
                     });
@@ -350,7 +453,10 @@ impl EditorView {
                 }
             })
         });
-        self.lsp_name = lsp.as_ref().and_then(|_| crate::lsp_client::spec(&lang)).map(|(cmd, _, _)| cmd);
+        self.lsp_name = lsp
+            .as_ref()
+            .and_then(|_| crate::lsp_client::spec(&lang))
+            .map(|(cmd, _, _)| cmd);
         self.lsp = lsp;
         if let Some(line) = self.pending_line.take() {
             self.goto_line(line, window, cx);
@@ -367,9 +473,20 @@ impl EditorView {
 
     /// A read-only document that isn't a file (a Review's diff), its tab named `name` and its
     /// text highlighted as `language`.
-    pub fn scratch(workspace: Entity<Workspace>, name: &str, text: &str, language: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn scratch(
+        workspace: Entity<Workspace>,
+        name: &str,
+        text: &str,
+        language: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let state = cx.new(|cx| {
-            let mut s = EditorState::new(window, cx).language(language.to_string()).line_number(true).searchable(true).soft_wrap(false);
+            let mut s = EditorState::new(window, cx)
+                .language(language.to_string())
+                .line_number(true)
+                .searchable(true)
+                .soft_wrap(false);
             s.set_value(text.to_string(), window, cx);
             s.set_readonly(true, cx);
             s
@@ -411,7 +528,12 @@ impl EditorView {
     }
 
     /// A scratch document's text, replaced (a Review opened again).
-    pub(crate) fn set_scratch_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn set_scratch_text(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.saved = text.to_string();
         self.state.update(cx, |s, cx| {
             s.set_readonly(false, cx);
@@ -438,9 +560,19 @@ impl EditorView {
             return None;
         }
         let text = s.text();
-        let (from, to) = (text.offset_to_point(range.start), text.offset_to_point(range.end));
-        let last = if to.column == 0 && to.row > from.row { to.row - 1 } else { to.row };
-        Some(((from.row as u32 + 1, last as u32 + 1), s.selected_text().to_string()))
+        let (from, to) = (
+            text.offset_to_point(range.start),
+            text.offset_to_point(range.end),
+        );
+        let last = if to.column == 0 && to.row > from.row {
+            to.row - 1
+        } else {
+            to.row
+        };
+        Some((
+            (from.row as u32 + 1, last as u32 + 1),
+            s.selected_text().to_string(),
+        ))
     }
 
     /// Paint changed lines — added/modified fills, a marker where lines went away — against
@@ -460,7 +592,9 @@ impl EditorView {
                 .spawn(async move {
                     let hunks = against.and_then(|(top, base, rel)| {
                         let repo = trek_core::checkpoint::Repo::find(&top)?;
-                        repo.file_diff(&base, &rel).map_err(|e| tracing::warn!("review diff of {rel}: {e:#}")).ok()
+                        repo.file_diff(&base, &rel)
+                            .map_err(|e| tracing::warn!("review diff of {rel}: {e:#}"))
+                            .ok()
                     });
                     match hunks {
                         Some(h) => (review_marks(&h), Some(h)),
@@ -470,7 +604,11 @@ impl EditorView {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let review = hunks.is_some();
-                this.hunk = this.hunk.min(hunks.as_ref().map_or(0, |h| h.hunks.len().saturating_sub(1)));
+                this.hunk = this.hunk.min(
+                    hunks
+                        .as_ref()
+                        .map_or(0, |h| h.hunks.len().saturating_sub(1)),
+                );
                 this.hunks = hunks;
                 this.paint_diff(lines, review, cx);
                 cx.notify();
@@ -478,12 +616,28 @@ impl EditorView {
         }));
     }
 
-    fn paint_diff(&mut self, lines: Vec<(u32, u32, DiffMark)>, review: bool, cx: &mut Context<Self>) {
+    fn paint_diff(
+        &mut self,
+        lines: Vec<(u32, u32, DiffMark)>,
+        review: bool,
+        cx: &mut Context<Self>,
+    ) {
         #[cfg(test)]
         {
             self.painted = lines
                 .iter()
-                .map(|(a, b, k)| (*a, *b, match k { DiffMark::Added => "added", DiffMark::Changed => "changed", DiffMark::Deleted => "deleted", DiffMark::Removed => "removed" }))
+                .map(|(a, b, k)| {
+                    (
+                        *a,
+                        *b,
+                        match k {
+                            DiffMark::Added => "added",
+                            DiffMark::Changed => "changed",
+                            DiffMark::Deleted => "deleted",
+                            DiffMark::Removed => "removed",
+                        },
+                    )
+                })
                 .collect();
         }
         // The collection and the ranges are computed inside the state's update; the set
@@ -500,7 +654,13 @@ impl EditorView {
             let decs: Vec<_> = lines
                 .into_iter()
                 // A deletion at the very end marks the last line.
-                .map(|(a, b, kind)| if matches!(kind, DiffMark::Deleted) && a > last_row { (last_row, last_row + 1, kind) } else { (a, b, kind) })
+                .map(|(a, b, kind)| {
+                    if matches!(kind, DiffMark::Deleted) && a > last_row {
+                        (last_row, last_row + 1, kind)
+                    } else {
+                        (a, b, kind)
+                    }
+                })
                 .filter(|(a, _, _)| *a <= last_row)
                 .map(|(a, b, kind)| {
                     let b = b.min(last_row + 1);
@@ -579,7 +739,9 @@ impl EditorView {
             return;
         }
         let scrolled = -self.state.read(cx).scroll_offset().y;
-        self.state.update(cx, |s, cx| s.set_cursor_position(Position::new(line.saturating_sub(1), 0), window, cx));
+        self.state.update(cx, |s, cx| {
+            s.set_cursor_position(Position::new(line.saturating_sub(1), 0), window, cx)
+        });
         self.reveal = Some((line, scrolled));
         cx.notify();
     }
@@ -588,12 +750,17 @@ impl EditorView {
     /// when it's all on screen already, else centred (the top of the file when that's as high as
     /// it goes, the end when that's as low).
     fn reveal_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((line, shown)) = self.reveal else { return };
+        let Some((line, shown)) = self.reveal else {
+            return;
+        };
         if self.loading {
             return;
         }
         let state = self.state.read(cx);
-        let (Some(line_height), viewport) = (state.line_height(), state.input_bounds().size.height) else { return };
+        let (Some(line_height), viewport) = (state.line_height(), state.input_bounds().size.height)
+        else {
+            return;
+        };
         if viewport <= px(0.) || line_height <= px(0.) {
             return;
         }
@@ -609,7 +776,9 @@ impl EditorView {
         let to = point(px(0.), -centred);
         // After this frame: the offset is taken up at the next layout. (Through `this`, so the
         // closure holds no handle on the state to be left over if the app quits first.)
-        cx.defer_in(window, move |this, _, cx| this.state.update(cx, |s, cx| s.set_scroll_offset(to, cx)));
+        cx.defer_in(window, move |this, _, cx| {
+            this.state.update(cx, |s, cx| s.set_scroll_offset(to, cx))
+        });
     }
 
     /// Take the window's focus (the deferred focus call lands here).
@@ -619,7 +788,12 @@ impl EditorView {
 
     fn toast(&self, message: impl Into<String>, cx: &mut Context<Self>) {
         let message = message.into();
-        self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message, undo: None }));
+        self.workspace.update(cx, |_, cx| {
+            cx.emit(WorkspaceEvent::Toast {
+                message,
+                undo: None,
+            })
+        });
     }
 
     fn format_action(&mut self, _: &FormatDocument, window: &mut Window, cx: &mut Context<Self>) {
@@ -638,39 +812,71 @@ impl EditorView {
             return self.toast("This file is read-only, so there's nothing to format", cx);
         }
         let Some(formatter) = crate::format::formatter_for(&self.path) else {
-            return self.toast(format!("No formatter for {} on this computer", crate::format::kind_of(&self.path)), cx);
+            return self.toast(
+                format!(
+                    "No formatter for {} on this computer",
+                    crate::format::kind_of(&self.path)
+                ),
+                cx,
+            );
         };
         let Some((program, args)) = crate::format::resolve(&formatter) else {
-            return self.toast(format!("Format Document needs {} for {} files, and it isn't on this computer", formatter.program, crate::format::kind_of(&self.path)), cx);
+            return self.toast(
+                format!(
+                    "Format Document needs {} for {} files, and it isn't on this computer",
+                    formatter.program,
+                    crate::format::kind_of(&self.path)
+                ),
+                cx,
+            );
         };
         let (text, caret, scrolled) = {
             let s = self.state.read(cx);
             (s.value().to_string(), s.cursor(), s.scroll_offset())
         };
         // Where the project's own settings (`rustfmt.toml`, `.prettierrc`) are looked for from.
-        let cwd = self.path.parent().map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
+        let cwd = self
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir);
         self.formatting = true;
         let (tx, rx) = async_channel::bounded(1);
         let input = text.clone();
         trek_core::runtime().spawn(async move {
-            let _ = tx.send(crate::format::run(&program, &args, &cwd, input, crate::format::LIMIT).await).await;
+            let _ = tx
+                .send(crate::format::run(&program, &args, &cwd, input, crate::format::LIMIT).await)
+                .await;
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(result) = rx.recv().await else { return };
-            let _ = this.update_in(cx, |this, window, cx| this.formatted(&text, caret, scrolled, result, window, cx));
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.formatted(&text, caret, scrolled, result, window, cx)
+            });
         })
         .detach();
     }
 
     /// The formatter answered for `before` (the text it was given, the caret and scroll then).
-    fn formatted(&mut self, before: &str, caret: usize, scrolled: gpui_kit::Point<Pixels>, result: Result<String, String>, window: &mut Window, cx: &mut Context<Self>) {
+    fn formatted(
+        &mut self,
+        before: &str,
+        caret: usize,
+        scrolled: gpui_kit::Point<Pixels>,
+        result: Result<String, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.formatting = false;
         let after = match result {
             Ok(after) => crate::format::keep_line_endings(before, after),
             Err(message) => return self.toast(message, cx),
         };
         if self.state.read(cx).value().to_string() != before {
-            return self.toast("The file changed while it was being formatted, so nothing was replaced", cx);
+            return self.toast(
+                "The file changed while it was being formatted, so nothing was replaced",
+                cx,
+            );
         }
         if after == before {
             return self.toast("Already formatted", cx);
@@ -681,7 +887,10 @@ impl EditorView {
             s.set_selected_range(to..to, cx);
         });
         // The replacement scrolls to the top; the view stays where it was, the caret in it.
-        cx.defer_in(window, move |this, _, cx| this.state.update(cx, |s, cx| s.set_scroll_offset(scrolled, cx)));
+        cx.defer_in(window, move |this, _, cx| {
+            this.state
+                .update(cx, |s, cx| s.set_scroll_offset(scrolled, cx))
+        });
         cx.notify();
     }
 
@@ -701,10 +910,25 @@ impl EditorView {
         let seen = text_hash(on_disk.as_deref());
         if on_disk.as_deref() != Some(self.saved.as_str()) && self.overwrite_armed != Some(seen) {
             self.overwrite_armed = Some(seen);
-            let name = self.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let what = if on_disk.is_some() { "changed on disk" } else { "was removed from disk" };
-            let message = format!("{name} {what} since you opened it (another branch, a rewind or an agent). Save again to write your version over it.");
-            self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message, undo: None }));
+            let name = self
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let what = if on_disk.is_some() {
+                "changed on disk"
+            } else {
+                "was removed from disk"
+            };
+            let message = format!(
+                "{name} {what} since you opened it (another branch, a rewind or an agent). Save again to write your version over it."
+            );
+            self.workspace.update(cx, |_, cx| {
+                cx.emit(WorkspaceEvent::Toast {
+                    message,
+                    undo: None,
+                })
+            });
             return;
         }
         let text = self.state.read(cx).value().to_string();
@@ -720,7 +944,10 @@ impl EditorView {
                 self.refresh_diff(cx);
             }
             Err(e) => self.workspace.update(cx, |ws, cx| {
-                cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't save {}: {e}", self.path.display()).into(), undo: None });
+                cx.emit(WorkspaceEvent::Toast {
+                    message: format!("Couldn't save {}: {e}", self.path.display()).into(),
+                    undo: None,
+                });
                 let _ = ws;
             }),
         }
@@ -743,23 +970,39 @@ fn read_text(path: &Path) -> std::io::Result<String> {
     let mut file = options.open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a file"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a file",
+        ));
     }
     // A NUL or bytes that can't be UTF-8 near the start: not text, however big (the editor group
     // shows a preview of it instead).
     let mut bytes = vec![];
-    (&mut file).take(crate::ide::preview::SNIFF as u64).read_to_end(&mut bytes)?;
+    (&mut file)
+        .take(crate::ide::preview::SNIFF as u64)
+        .read_to_end(&mut bytes)?;
     if crate::ide::preview::kind(path, &bytes) == crate::ide::preview::Kind::Binary {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "not text"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "not text",
+        ));
     }
     if meta.len() > MAX_FILE_BYTES {
-        return Err(std::io::Error::new(std::io::ErrorKind::FileTooLarge, "too big"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            "too big",
+        ));
     }
-    file.take(MAX_FILE_BYTES + 1 - bytes.len() as u64).read_to_end(&mut bytes)?;
+    file.take(MAX_FILE_BYTES + 1 - bytes.len() as u64)
+        .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err(std::io::Error::new(std::io::ErrorKind::FileTooLarge, "too big"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            "too big",
+        ));
     }
-    String::from_utf8(bytes).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "not text"))
+    String::from_utf8(bytes)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "not text"))
 }
 
 /// A hash of what a file held (`None`: it was gone), to tell one version on disk from another.
@@ -776,12 +1019,25 @@ fn text_hash(text: Option<&str>) -> u64 {
 fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write as _;
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let dir = target.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let name = target.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let dir = target
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let temp = dir.join(format!(".{name}.trek-save-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let temp = dir.join(format!(
+        ".{name}.trek-save-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let written = (|| {
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
         if let Ok(meta) = std::fs::metadata(&target) {
             file.set_permissions(meta.permissions())?;
         }
@@ -810,14 +1066,20 @@ fn load_or_preview(path: &Path) -> (String, Option<String>, Option<crate::ide::p
         Ok(t) => (t, None, None),
         Err(e) => {
             let why = match e.kind() {
-                std::io::ErrorKind::FileTooLarge => "Too big to edit — open it in your editor.".to_string(),
+                std::io::ErrorKind::FileTooLarge => {
+                    "Too big to edit — open it in your editor.".to_string()
+                }
                 std::io::ErrorKind::InvalidData => "Not text — open it in another app.".to_string(),
-                std::io::ErrorKind::InvalidInput => "Not a file (a device, a pipe or a folder) — Trek edits files only.".to_string(),
+                std::io::ErrorKind::InvalidInput => {
+                    "Not a file (a device, a pipe or a folder) — Trek edits files only.".to_string()
+                }
                 _ => format!("Can't read it: {e}"),
             };
             let instead = match e.kind() {
                 std::io::ErrorKind::InvalidData => Some(NotText::Binary),
-                std::io::ErrorKind::FileTooLarge | std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound => None,
+                std::io::ErrorKind::FileTooLarge
+                | std::io::ErrorKind::InvalidInput
+                | std::io::ErrorKind::NotFound => None,
                 _ => Some(NotText::Unreadable(e)),
             };
             (String::new(), Some(why), instead)
@@ -837,7 +1099,10 @@ impl Drop for EditorView {
 impl EditorView {
     /// Hunks of this file pending review in the AI side bar's chat (none: the fills are HEAD's).
     pub fn pending_hunks(&self) -> usize {
-        self.review.as_ref().and(self.hunks.as_ref()).map_or(0, |h| h.hunks.len())
+        self.review
+            .as_ref()
+            .and(self.hunks.as_ref())
+            .map_or(0, |h| h.hunks.len())
     }
 
     /// The hunk the bar acts on: the caret's, else the one last stepped to.
@@ -847,12 +1112,24 @@ impl EditorView {
             return None;
         }
         let row = self.state.read(cx).cursor_position().line;
-        Some(hunks.iter().position(|h| (h.first_row()..=h.last_row()).contains(&row)).unwrap_or(self.hunk.min(hunks.len() - 1)))
+        Some(
+            hunks
+                .iter()
+                .position(|h| (h.first_row()..=h.last_row()).contains(&row))
+                .unwrap_or(self.hunk.min(hunks.len() - 1)),
+        )
     }
 
     /// Put the caret on hunk `ix` (scrolled into view).
     fn goto_hunk(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(row) = self.hunks.as_ref().and_then(|h| h.hunks.get(ix)).map(|h| h.first_row()) else { return };
+        let Some(row) = self
+            .hunks
+            .as_ref()
+            .and_then(|h| h.hunks.get(ix))
+            .map(|h| h.first_row())
+        else {
+            return;
+        };
         self.hunk = ix;
         self.state.update(cx, |s, cx| {
             s.set_cursor_position(Position::new(row, 0), window, cx);
@@ -870,37 +1147,74 @@ impl EditorView {
     /// ▲▼: the previous or next hunk, round the ends.
     pub(crate) fn step_hunk(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
         let n = self.pending_hunks();
-        let Some(at) = self.current_hunk(cx).filter(|_| n > 0) else { return };
-        self.goto_hunk((at as isize + step).rem_euclid(n as isize) as usize, window, cx);
+        let Some(at) = self.current_hunk(cx).filter(|_| n > 0) else {
+            return;
+        };
+        self.goto_hunk(
+            (at as isize + step).rem_euclid(n as isize) as usize,
+            window,
+            cx,
+        );
     }
 
     /// Keep (⌘Y) or undo (⌥⌘⌫) the hunk the bar is on.
     pub(crate) fn act_on_hunk(&mut self, keep: bool, cx: &mut Context<Self>) {
-        let (Some(review), Some(ix)) = (self.review.clone(), self.current_hunk(cx)) else { return };
-        let Some(patch) = self.hunks.as_ref().and_then(|h| h.patch(ix)) else { return };
+        let (Some(review), Some(ix)) = (self.review.clone(), self.current_hunk(cx)) else {
+            return;
+        };
+        let Some(patch) = self.hunks.as_ref().and_then(|h| h.patch(ix)) else {
+            return;
+        };
         if !keep && self.dirty {
             // The undo goes to the file on disk, which these edits aren't in yet.
-            let message = "Save or drop your edits to this file first: the undo works on the file as saved.".to_string();
-            self.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message, undo: None }));
+            let message =
+                "Save or drop your edits to this file first: the undo works on the file as saved."
+                    .to_string();
+            self.workspace.update(cx, |_, cx| {
+                cx.emit(WorkspaceEvent::Toast {
+                    message,
+                    undo: None,
+                })
+            });
             return;
         }
         self.hunk = ix;
-        self.workspace.update(cx, |ws, cx| if keep { ws.keep_hunk(&review.thread, &review.rel, patch, cx) } else { ws.undo_hunk(&review.thread, &review.rel, patch, cx) });
+        self.workspace.update(cx, |ws, cx| {
+            if keep {
+                ws.keep_hunk(&review.thread, &review.rel, patch, cx)
+            } else {
+                ws.undo_hunk(&review.thread, &review.rel, patch, cx)
+            }
+        });
     }
 
     /// Keep or undo this whole file of the chat's review (the file bar).
     fn act_on_file(&mut self, keep: bool, cx: &mut Context<Self>) {
-        let Some(review) = self.review.clone() else { return };
-        self.workspace.update(cx, |ws, cx| if keep { ws.keep_files(&review.thread, Some(vec![review.rel.clone()]), cx) } else { ws.undo_files(&review.thread, Some(vec![review.rel.clone()]), cx) });
+        let Some(review) = self.review.clone() else {
+            return;
+        };
+        self.workspace.update(cx, |ws, cx| {
+            if keep {
+                ws.keep_files(&review.thread, Some(vec![review.rel.clone()]), cx)
+            } else {
+                ws.undo_files(&review.thread, Some(vec![review.rel.clone()]), cx)
+            }
+        });
     }
 
     /// The file bar's ‹ ›: the review's previous or next pending file, on its first hunk.
     fn step_file(&mut self, step: isize, cx: &mut Context<Self>) {
-        let Some(review) = self.review.clone() else { return };
+        let Some(review) = self.review.clone() else {
+            return;
+        };
         let ws = self.workspace.read(cx);
         let files = ws.pending_files(&review.thread);
-        let Some(at) = files.iter().position(|f| f.path == review.rel) else { return };
-        let next = files[(at as isize + step).rem_euclid(files.len() as isize) as usize].path.clone();
+        let Some(at) = files.iter().position(|f| f.path == review.rel) else {
+            return;
+        };
+        let next = files[(at as isize + step).rem_euclid(files.len() as isize) as usize]
+            .path
+            .clone();
         if next == review.rel {
             return;
         }
@@ -934,18 +1248,31 @@ impl EditorView {
             let row = s.cursor_position().line;
             let rope = s.text();
             let from = rope.point_to_offset(Point::new(row as usize, 0));
-            let to = rope.point_to_offset(Point::new(row as usize + 1, 0)).max(from);
+            let to = rope
+                .point_to_offset(Point::new(row as usize + 1, 0))
+                .max(from);
             ((row + 1, row + 1), rope.slice(from..to).to_string())
         });
-        let which = if lines.0 == lines.1 { format!("line {}", lines.0) } else { format!("lines {}–{}", lines.0, lines.1) };
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder(format!("Edit {which}: say what to change…")));
+        let which = if lines.0 == lines.1 {
+            format!("line {}", lines.0)
+        } else {
+            format!("lines {}–{}", lines.0, lines.1)
+        };
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(format!("Edit {which}: say what to change…"))
+        });
         let sub = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 this.run_inline(window, cx);
             }
         });
         input.update(cx, |i, cx| i.focus(window, cx));
-        self.inline = Some(InlineCard { input, lines, text, _sub: sub });
+        self.inline = Some(InlineCard {
+            input,
+            lines,
+            text,
+            _sub: sub,
+        });
         cx.notify();
     }
 
@@ -955,14 +1282,18 @@ impl EditorView {
 
     /// Enter in the card: the request goes to the AI side bar's chat.
     fn run_inline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(card) = self.inline.take() else { return };
+        let Some(card) = self.inline.take() else {
+            return;
+        };
         let instruction = card.input.read(cx).value().trim().to_string();
         if instruction.is_empty() {
             self.inline = Some(card);
             return;
         }
         let path = self.path.clone();
-        self.workspace.update(cx, |ws, cx| ws.inline_edit(&path, card.lines, card.text, &instruction, cx));
+        self.workspace.update(cx, |ws, cx| {
+            ws.inline_edit(&path, card.lines, card.text, &instruction, cx)
+        });
         self.focus(window, cx);
         cx.notify();
     }
@@ -981,12 +1312,19 @@ impl EditorView {
 
     /// Type `text` into ⌘K's card and run it (tests, the shots harness).
     #[cfg(feature = "shots")]
-    pub fn type_inline(&mut self, text: &str, run: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn type_inline(
+        &mut self,
+        text: &str,
+        run: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.inline.is_none() {
             self.open_inline(window, cx);
         }
         let Some(card) = &self.inline else { return };
-        card.input.update(cx, |i, cx| i.set_value(text.to_string(), window, cx));
+        card.input
+            .update(cx, |i, cx| i.set_value(text.to_string(), window, cx));
         if run {
             self.run_inline(window, cx);
         }
@@ -1001,7 +1339,11 @@ impl EditorView {
         let offset = rope.point_to_offset(Point::new(row.min(last) as usize, 0));
         let b = s.range_to_bounds(&(offset..offset))?;
         let origin = s.input_bounds().origin;
-        Some(((b.origin.y - origin.y).as_f32(), (b.origin.y + b.size.height - origin.y).as_f32(), (b.origin.x - origin.x).as_f32()))
+        Some((
+            (b.origin.y - origin.y).as_f32(),
+            (b.origin.y + b.size.height - origin.y).as_f32(),
+            (b.origin.x - origin.x).as_f32(),
+        ))
     }
 
     /// The bar on the hunk in view: ▲▼, Undo ⌥⌘⌫, Keep ⌘Y. It sits at the right under the
@@ -1020,10 +1362,17 @@ impl EditorView {
             .row_bounds(hunk.last_row(), cx)
             .map(|(_, bottom, _)| bottom + 3.)
             .filter(fits)
-            .or_else(|| self.row_bounds(hunk.first_row(), cx).map(|(top, _, _)| top - 33.).filter(fits))
+            .or_else(|| {
+                self.row_bounds(hunk.first_row(), cx)
+                    .map(|(top, _, _)| top - 33.)
+                    .filter(fits)
+            })
             .unwrap_or(8.);
         let theme = cx.theme().clone();
-        let busy = self.review.as_ref().is_some_and(|r| self.workspace.read(cx).turn_running(&r.thread));
+        let busy = self
+            .review
+            .as_ref()
+            .is_some_and(|r| self.workspace.read(cx).turn_running(&r.thread));
         let ember = palette::ember(cx);
         let (added, removed) = hunk.counts();
         let removed_text = hunk.removed_text();
@@ -1059,8 +1408,26 @@ impl EditorView {
                 .child(
                     h_flex()
                         .gap(px(1.))
-                        .child(crate::ui::icon_button("editor-hunk-prev", IconName::ChevronUp, "Previous change").on_click(cx.listener(|this, _, window, cx| this.step_hunk(-1, window, cx))))
-                        .child(crate::ui::icon_button("editor-hunk-next", IconName::ChevronDown, "Next change").on_click(cx.listener(|this, _, window, cx| this.step_hunk(1, window, cx)))),
+                        .child(
+                            crate::ui::icon_button(
+                                "editor-hunk-prev",
+                                IconName::ChevronUp,
+                                "Previous change",
+                            )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.step_hunk(-1, window, cx)),
+                            ),
+                        )
+                        .child(
+                            crate::ui::icon_button(
+                                "editor-hunk-next",
+                                IconName::ChevronDown,
+                                "Next change",
+                            )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.step_hunk(1, window, cx)),
+                            ),
+                        ),
                 )
                 .child(
                     h_flex()
@@ -1072,18 +1439,34 @@ impl EditorView {
                         .text_size(px(11.5))
                         .font_family(theme.mono_font_family.clone())
                         .when(n > 1, |el| el.child(format!("{}/{n}", ix + 1)))
-                        .when(added > 0, |el| el.child(span(format!("+{added}"), palette::emerald(cx))))
-                        .when(removed > 0, |el| el.child(span(format!("−{removed}"), palette::red(cx))))
+                        .when(added > 0, |el| {
+                            el.child(span(format!("+{added}"), palette::emerald(cx)))
+                        })
+                        .when(removed > 0, |el| {
+                            el.child(span(format!("−{removed}"), palette::red(cx)))
+                        })
                         .when(!removed_text.is_empty(), |el| {
-                            el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(format!("Taken out:\n{}", removed_text.trim_end())).build(window, cx))
+                            el.tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(format!(
+                                    "Taken out:\n{}",
+                                    removed_text.trim_end()
+                                ))
+                                .build(window, cx)
+                            })
                         }),
                 )
                 .child(
                     button("editor-hunk-undo")
                         .when(busy, |el| el.opacity(0.45).cursor_default())
-                        .hover(|s| s.bg(theme.foreground.opacity(0.07)).text_color(theme.foreground))
+                        .hover(|s| {
+                            s.bg(theme.foreground.opacity(0.07))
+                                .text_color(theme.foreground)
+                        })
                         .child("Undo")
-                        .child(kbd(keys::hint(Id::UndoHunk), theme.muted_foreground.opacity(0.7)))
+                        .child(kbd(
+                            keys::hint(Id::UndoHunk),
+                            theme.muted_foreground.opacity(0.7),
+                        ))
                         .on_click(cx.listener(|this, _, _, cx| this.act_on_hunk(false, cx))),
                 )
                 .child(
@@ -1092,7 +1475,10 @@ impl EditorView {
                         .text_color(gpui_kit::white())
                         .hover(|s| s.opacity(0.9))
                         .child("Keep")
-                        .child(kbd(keys::hint(Id::KeepHunk), gpui_kit::white().opacity(0.75)))
+                        .child(kbd(
+                            keys::hint(Id::KeepHunk),
+                            gpui_kit::white().opacity(0.75),
+                        ))
                         .on_click(cx.listener(|this, _, _, cx| this.act_on_hunk(true, cx))),
                 )
                 .into_any_element(),
@@ -1109,7 +1495,11 @@ impl EditorView {
         let n = files.len();
         let busy = ws.turn_running(&review.thread);
         let theme = cx.theme().clone();
-        let name = self.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let name = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         let link = |id: &'static str| {
             h_flex()
                 .id(id)
@@ -1120,7 +1510,10 @@ impl EditorView {
                 .items_center()
                 .rounded(px(5.))
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.foreground.opacity(0.07)).text_color(theme.foreground))
+                .hover(|s| {
+                    s.bg(theme.foreground.opacity(0.07))
+                        .text_color(theme.foreground)
+                })
         };
         Some(
             h_flex()
@@ -1145,19 +1538,41 @@ impl EditorView {
                         .text_size(px(12.))
                         .text_color(theme.muted_foreground)
                         .whitespace_nowrap()
-                        .child(link("editor-file-prev").when(n < 2, |el| el.opacity(0.4)).child(Icon::new(IconName::ChevronLeft).size(px(13.))).on_click(cx.listener(|this, _, _, cx| this.step_file(-1, cx))))
+                        .child(
+                            link("editor-file-prev")
+                                .when(n < 2, |el| el.opacity(0.4))
+                                .child(Icon::new(IconName::ChevronLeft).size(px(13.)))
+                                .on_click(cx.listener(|this, _, _, cx| this.step_file(-1, cx))),
+                        )
                         .child(crate::file_icon::badge(&name, px(13.), cx))
-                        .child(div().text_color(theme.foreground).font_weight(FontWeight::MEDIUM).child(name))
+                        .child(
+                            div()
+                                .text_color(theme.foreground)
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(name),
+                        )
                         .child(div().px(px(4.)).child(format!("File {} of {n}", at + 1)))
-                        .child(link("editor-file-next").when(n < 2, |el| el.opacity(0.4)).child(Icon::new(IconName::ChevronRight).size(px(13.))).on_click(cx.listener(|this, _, _, cx| this.step_file(1, cx))))
+                        .child(
+                            link("editor-file-next")
+                                .when(n < 2, |el| el.opacity(0.4))
+                                .child(Icon::new(IconName::ChevronRight).size(px(13.)))
+                                .on_click(cx.listener(|this, _, _, cx| this.step_file(1, cx))),
+                        )
                         .child(div().w(px(1.)).h(px(14.)).mx(px(4.)).bg(theme.border))
                         .child(
                             link("editor-file-undo")
                                 .when(busy, |el| el.opacity(0.45).cursor_default())
                                 .child("Undo file")
-                                .on_click(cx.listener(|this, _, _, cx| this.act_on_file(false, cx))),
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.act_on_file(false, cx)),
+                                ),
                         )
-                        .child(link("editor-file-keep").text_color(palette::ember(cx)).child("Keep file").on_click(cx.listener(|this, _, _, cx| this.act_on_file(true, cx)))),
+                        .child(
+                            link("editor-file-keep")
+                                .text_color(palette::ember(cx))
+                                .child("Keep file")
+                                .on_click(cx.listener(|this, _, _, cx| this.act_on_file(true, cx))),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -1180,9 +1595,21 @@ impl EditorView {
         // Where it goes: the file's own ⌘K chat (made by the first edit), never the chat in front.
         let (chat, prefs) = self.workspace.read(cx).inline_target(&self.path);
         let (a, b) = card.lines;
-        let which = if a == b { format!("Edit line {a}") } else { format!("Edit lines {a}–{b}") };
-        let model = prefs.model.clone().unwrap_or_else(|| prefs.agent.display_name());
-        let kbd = |k: String, label: &'static str| h_flex().gap(px(4.)).child(div().text_color(theme.foreground.opacity(0.8)).child(k)).child(label);
+        let which = if a == b {
+            format!("Edit line {a}")
+        } else {
+            format!("Edit lines {a}–{b}")
+        };
+        let model = prefs
+            .model
+            .clone()
+            .unwrap_or_else(|| prefs.agent.display_name());
+        let kbd = |k: String, label: &'static str| {
+            h_flex()
+                .gap(px(4.))
+                .child(div().text_color(theme.foreground.opacity(0.8)).child(k))
+                .child(label)
+        };
         Some(
             v_flex()
                 .id("editor-inline")
@@ -1199,18 +1626,33 @@ impl EditorView {
                 .border_color(palette::ember(cx).opacity(0.55))
                 .bg(theme.popover)
                 .shadow_lg()
-                .capture_action(cx.listener(|this, _: &gpui_kit::component::input::Escape, window, cx| {
-                    cx.stop_propagation();
-                    this.close_inline(window, cx);
-                }))
+                .capture_action(cx.listener(
+                    |this, _: &gpui_kit::component::input::Escape, window, cx| {
+                        cx.stop_propagation();
+                        this.close_inline(window, cx);
+                    },
+                ))
                 .child(
                     h_flex()
                         .gap(px(6.))
                         .text_size(px(11.5))
                         .text_color(theme.muted_foreground)
                         .child(div().text_color(palette::ember(cx)).child("✦"))
-                        .child(div().text_color(theme.foreground).font_weight(FontWeight::MEDIUM).child(which))
-                        .child(div().id("editor-inline-chat").test_support().flex_1().min_w_0().truncate().child(format!("· in {chat}")))
+                        .child(
+                            div()
+                                .text_color(theme.foreground)
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(which),
+                        )
+                        .child(
+                            div()
+                                .id("editor-inline-chat")
+                                .test_support()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(format!("· in {chat}")),
+                        )
                         .child(crate::ui::agent_glyph(&prefs.agent, cx))
                         .child(div().flex_none().max_w(px(140.)).truncate().child(model)),
                 )
@@ -1269,9 +1711,17 @@ impl EditorView {
 impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let name = self.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let name = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         // ~ for home, since headers are tight; elsewhere the path as it is.
-        let dir = self.path.parent().map(trek_core::paths::tildify).unwrap_or_default();
+        let dir = self
+            .path
+            .parent()
+            .map(trek_core::paths::tildify)
+            .unwrap_or_default();
         let dirty = self.dirty;
         let path = self.path.clone();
         self.reveal_line(window, cx);
@@ -1284,26 +1734,55 @@ impl Render for EditorView {
                 cx.defer_in(window, |this, window, cx| this.goto_hunk(0, window, cx));
             }
             let hunks = self.pending_hunks() > 0;
-            let (hunk_bar, file_bar, card) = if self.scratch { (None, None, None) } else { (self.hunk_bar(cx), self.file_bar(cx), self.inline_card(cx)) };
+            let (hunk_bar, file_bar, card) = if self.scratch {
+                (None, None, None)
+            } else {
+                (self.hunk_bar(cx), self.file_bar(cx), self.inline_card(cx))
+            };
             return v_flex()
                 .size_full()
-                .key_context(if hunks { "TrekEditor IdeEditor hunks" } else { "TrekEditor IdeEditor" })
+                .key_context(if hunks {
+                    "TrekEditor IdeEditor hunks"
+                } else {
+                    "TrekEditor IdeEditor"
+                })
                 .on_action(cx.listener(Self::save))
                 .on_action(cx.listener(Self::format_action))
                 .on_action(cx.listener(Self::inline_action))
                 .on_action(cx.listener(Self::keep_hunk_action))
                 .on_action(cx.listener(Self::undo_hunk_action))
-                .on_action(cx.listener(|this, _: &NextHunk, window, cx| this.step_hunk(1, window, cx)))
-                .on_action(cx.listener(|this, _: &PreviousHunk, window, cx| this.step_hunk(-1, window, cx)))
+                .on_action(
+                    cx.listener(|this, _: &NextHunk, window, cx| this.step_hunk(1, window, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &PreviousHunk, window, cx| {
+                        this.step_hunk(-1, window, cx)
+                    }),
+                )
                 .when_some(self.problem.clone(), |el, p| {
-                    el.child(h_flex().px_3().h(px(26.)).flex_none().border_b_1().border_color(theme.border).text_xs().text_color(palette::red(cx)).child(p))
+                    el.child(
+                        h_flex()
+                            .px_3()
+                            .h(px(26.))
+                            .flex_none()
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .text_xs()
+                            .text_color(palette::red(cx))
+                            .child(p),
+                    )
                 })
                 .child(
                     div()
                         .flex_1()
                         .min_h_0()
                         .relative()
-                        .child(Editor::new(&self.state).appearance(false).bordered(false).h(relative(1.)))
+                        .child(
+                            Editor::new(&self.state)
+                                .appearance(false)
+                                .bordered(false)
+                                .h(relative(1.)),
+                        )
                         .children(hunk_bar)
                         .children(file_bar)
                         .children(card),
@@ -1324,28 +1803,70 @@ impl Render for EditorView {
                     .border_b_1()
                     .border_color(theme.border)
                     .text_sm()
-                    .child(Icon::new(crate::assets::Lucide::FilePen).small().text_color(theme.muted_foreground))
+                    .child(
+                        Icon::new(crate::assets::Lucide::FilePen)
+                            .small()
+                            .text_color(theme.muted_foreground),
+                    )
                     .child(div().min_w_0().truncate().font_medium().child(name))
-                    .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(dir))
-                    .when(dirty, |el| el.child(div().text_color(palette::ember(cx)).child("●")))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(dir),
+                    )
+                    .when(dirty, |el| {
+                        el.child(div().text_color(palette::ember(cx)).child("●"))
+                    })
                     .when_some(self.problem.clone(), |el, p| {
                         el.child(div().text_xs().text_color(palette::red(cx)).child(p))
                     })
                     .child(
-                        Button::new("editor-save").ghost().small().label("Save").tooltip(keys::shared("Save (⌘S)"))
+                        Button::new("editor-save")
+                            .ghost()
+                            .small()
+                            .label("Save")
+                            .tooltip(keys::shared("Save (⌘S)"))
                             .when(!dirty, |b| b.disabled(true))
-                            .on_click(cx.listener(|this, _, window, cx| this.save(&SaveFile, window, cx))),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.save(&SaveFile, window, cx)),
+                            ),
                     )
-                    .child(crate::ui::icon_button("editor-open-default", IconName::ExternalLink, "Open in default app").on_click(move |_, _, cx| {
-                        cx.open_with_system(&path);
-                    }))
+                    .child(
+                        crate::ui::icon_button(
+                            "editor-open-default",
+                            IconName::ExternalLink,
+                            "Open in default app",
+                        )
+                        .on_click(move |_, _, cx| {
+                            cx.open_with_system(&path);
+                        }),
+                    )
                     // The way out: this is the file on its own, nothing else on screen closes it.
                     .child(
-                        crate::ui::icon_button("editor-close", IconName::Close, format!("Close ({})", keys::hint(Id::CloseTab)))
-                            .on_click(cx.listener(|this, _, _, cx| this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::Editor(EditorCommand::Close))))),
+                        crate::ui::icon_button(
+                            "editor-close",
+                            IconName::Close,
+                            format!("Close ({})", keys::hint(Id::CloseTab)),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.workspace.update(cx, |_, cx| {
+                                cx.emit(WorkspaceEvent::Editor(EditorCommand::Close))
+                            })
+                        })),
                     ),
             )
-            .child(div().flex_1().min_h_0().child(Editor::new(&self.state).appearance(false).bordered(false).h(relative(1.))))
+            .child(
+                div().flex_1().min_h_0().child(
+                    Editor::new(&self.state)
+                        .appearance(false)
+                        .bordered(false)
+                        .h(relative(1.)),
+                ),
+            )
             .into_any_element()
     }
 }

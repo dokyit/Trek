@@ -25,7 +25,9 @@ use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM};
 use windows_sys::Win32::System::Threading::DETACHED_PROCESS;
-use windows_sys::Win32::UI::WindowsAndMessaging::{EnumWindows, GetClassNameW, GetWindowThreadProcessId, IsWindowVisible};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetClassNameW, GetWindowThreadProcessId, IsWindowVisible,
+};
 
 /// Set in the copy that runs the probe.
 const PROBE: &str = "TREK_QUIET_SPAWNS_PROBE";
@@ -47,7 +49,10 @@ struct Window {
 impl Window {
     /// A window a new console opens in.
     fn is_console(&self) -> bool {
-        matches!(self.class.as_str(), "ConsoleWindowClass" | "CASCADIA_HOSTING_WINDOW_CLASS")
+        matches!(
+            self.class.as_str(),
+            "ConsoleWindowClass" | "CASCADIA_HOSTING_WINDOW_CLASS"
+        )
     }
 }
 
@@ -64,7 +69,11 @@ fn windows() -> Vec<Window> {
             let mut pid = 0;
             // SAFETY: `pid` is a u32 to write to.
             unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
-            found.push(Window { hwnd: hwnd as isize, pid, class: String::from_utf16_lossy(&class[..n.max(0) as usize]) });
+            found.push(Window {
+                hwnd: hwnd as isize,
+                pid,
+                class: String::from_utf16_lossy(&class[..n.max(0) as usize]),
+            });
         }
         1
     }
@@ -91,7 +100,11 @@ fn opened_during(child: &mut Child, before: &HashSet<isize>) -> Opened {
     let mut exited = None;
     loop {
         for w in windows().into_iter().filter(|w| !before.contains(&w.hwnd)) {
-            let list = if w.is_console() { &mut opened.consoles } else { &mut opened.others };
+            let list = if w.is_console() {
+                &mut opened.consoles
+            } else {
+                &mut opened.others
+            };
             if !list.iter().any(|seen| seen.hwnd == w.hwnd) {
                 list.push(w);
             }
@@ -134,7 +147,12 @@ impl Way {
 /// git does when Trek feeds it, waits there), and report the windows that open for it.
 fn watch(mut command: Command) -> Opened {
     let before = known_windows();
-    let mut child = command.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("the program starts");
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the program starts");
     let opened = opened_during(&mut child, &before);
     drop(child.stdin.take());
     end_tree(&mut child);
@@ -144,7 +162,9 @@ fn watch(mut command: Command) -> Opened {
 /// End `child` and what it started (the program under `cmd /c` or a wrapper). `taskkill`, started
 /// Trek's way: the plain way it would open a window of its own.
 fn end_tree(child: &mut Child) {
-    let _ = trek_core::procs::command("taskkill").args(["/PID", &child.id().to_string(), "/T", "/F"]).output();
+    let _ = trek_core::procs::command("taskkill")
+        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .output();
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -164,7 +184,13 @@ fn cases(way: Way, fixture: &str, wrapper: &str) -> Vec<(&'static str, Command)>
     cmd.args(["/c", fixture, "sleep", LINGER]);
     let mut program = way.command(fixture);
     program.args(["sleep", LINGER]);
-    vec![("git --version", git), ("git waiting on stdin", git_waiting), ("a .cmd wrapper", script), ("cmd /c", cmd), ("a program that lingers", program)]
+    vec![
+        ("git --version", git),
+        ("git waiting on stdin", git_waiting),
+        ("a .cmd wrapper", script),
+        ("cmd /c", cmd),
+        ("a program that lingers", program),
+    ]
 }
 
 /// Runs in the copy without a console: panics, with what it saw, if Trek's way of starting things
@@ -174,7 +200,9 @@ fn probe_without_console() {
     if std::env::var_os(PROBE).is_none() {
         return;
     }
-    let fixture = trek_test_fixtures::bin("fixture").to_string_lossy().into_owned();
+    let fixture = trek_test_fixtures::bin("fixture")
+        .to_string_lossy()
+        .into_owned();
     let dir = std::env::temp_dir().join(format!("trek-quiet-spawns-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let wrapper = dir.join("wrapper.cmd");
@@ -187,10 +215,17 @@ fn probe_without_console() {
         let mut control = false;
         for (name, command) in cases(Way::Plain, &fixture, &wrapper) {
             let opened = watch(command);
-            eprintln!("plain Command::new, {name}: {} console window(s); other new windows: {:?}", opened.consoles.len(), opened.others);
+            eprintln!(
+                "plain Command::new, {name}: {} console window(s); other new windows: {:?}",
+                opened.consoles.len(),
+                opened.others
+            );
             control |= !opened.consoles.is_empty();
         }
-        assert!(control, "the plain way opened no console window from a process with no console, so the check below would prove nothing here");
+        assert!(
+            control,
+            "the plain way opened no console window from a process with no console, so the check below would prove nothing here"
+        );
     } else {
         eprintln!("(the control runs with {CONTROL}=1)");
     }
@@ -198,8 +233,16 @@ fn probe_without_console() {
     // Windowless changes nothing else: a `.cmd` run through `cmd.exe` still hands back what it
     // printed on each stream and its exit code.
     let says = dir.join("says.cmd");
-    std::fs::write(&says, "@echo off\r\necho out %1\r\necho err 1>&2\r\nexit /b 3\r\n").unwrap();
-    let out = trek_core::procs::command(&says).arg("there").stdin(Stdio::null()).output().unwrap();
+    std::fs::write(
+        &says,
+        "@echo off\r\necho out %1\r\necho err 1>&2\r\nexit /b 3\r\n",
+    )
+    .unwrap();
+    let out = trek_core::procs::command(&says)
+        .arg("there")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "out there");
     assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), "err");
     assert_eq!(out.status.code(), Some(3));
@@ -207,22 +250,38 @@ fn probe_without_console() {
     let mut wrong = Vec::new();
     for (name, command) in cases(Way::Trek, &fixture, &wrapper) {
         let opened = watch(command);
-        eprintln!("trek_core::procs::command, {name}: {} console window(s)", opened.consoles.len());
+        eprintln!(
+            "trek_core::procs::command, {name}: {} console window(s)",
+            opened.consoles.len()
+        );
         if !opened.consoles.is_empty() {
             wrong.push(format!("{name}: {:?}", opened.consoles));
         }
     }
 
     // The async twin, which agent CLIs and update commands go through.
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let windows = runtime.block_on(async {
         let before = known_windows();
         let mut command = trek_core::procs::async_command(&fixture);
-        let mut child = command.args(["sleep", LINGER]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true).spawn().unwrap();
+        let mut child = command
+            .args(["sleep", LINGER])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
         let start = Instant::now();
         let mut found: Vec<Window> = Vec::new();
         while start.elapsed() < WATCH {
-            for w in windows().into_iter().filter(|w| w.is_console() && !before.contains(&w.hwnd)) {
+            for w in windows()
+                .into_iter()
+                .filter(|w| w.is_console() && !before.contains(&w.hwnd))
+            {
                 if !found.iter().any(|f| f.hwnd == w.hwnd) {
                     found.push(w);
                 }
@@ -232,12 +291,18 @@ fn probe_without_console() {
         let _ = child.kill().await;
         found
     });
-    eprintln!("trek_core::procs::async_command, a program that lingers: {} console window(s)", windows.len());
+    eprintln!(
+        "trek_core::procs::async_command, a program that lingers: {} console window(s)",
+        windows.len()
+    );
     if !windows.is_empty() {
         wrong.push(format!("async_command: {windows:?}"));
     }
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(wrong.is_empty(), "Trek's way of starting a process opened console windows: {wrong:#?}");
+    assert!(
+        wrong.is_empty(),
+        "Trek's way of starting a process opened console windows: {wrong:#?}"
+    );
 }
 
 #[test]
@@ -248,10 +313,18 @@ fn trek_spawns_open_no_console_window() {
     // Its output goes to a file, not a pipe: a console window that opened (in Windows Terminal, a
     // process of Terminal's) can hold a pipe's write end long after the probe is gone, and
     // reading to the end of the pipe would then wait for it.
-    let log = std::env::temp_dir().join(format!("trek-quiet-spawns-probe-{}.log", std::process::id()));
+    let log = std::env::temp_dir().join(format!(
+        "trek-quiet-spawns-probe-{}.log",
+        std::process::id()
+    ));
     let file = std::fs::File::create(&log).unwrap();
     let mut probe = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "probe_without_console", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "probe_without_console",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(PROBE, "1")
         .stdin(Stdio::null())
         .stdout(file.try_clone().unwrap())
@@ -273,6 +346,9 @@ fn trek_spawns_open_no_console_window() {
     let said = std::fs::read_to_string(&log).unwrap_or_default();
     let _ = std::fs::remove_file(&log);
     println!("{said}");
-    assert!(status.is_some_and(|s| s.success()), "the probe in a process with no console failed or hung ({status:?}):\n{said}");
+    assert!(
+        status.is_some_and(|s| s.success()),
+        "the probe in a process with no console failed or hung ({status:?}):\n{said}"
+    );
     assert!(said.contains("1 passed"), "the probe didn't run:\n{said}");
 }

@@ -119,7 +119,9 @@ impl Review {
 
     /// Lines added and removed over the pending files.
     pub fn totals(&self) -> (u32, u32) {
-        self.pending.iter().fold((0, 0), |(a, r), f| (a + f.added, r + f.removed))
+        self.pending
+            .iter()
+            .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed))
     }
 
     pub fn is_pending(&self, path: &str) -> bool {
@@ -128,7 +130,8 @@ impl Review {
 
     /// Undo all was asked for once, and asking again at `now` (the app's clock) does it.
     pub fn undo_all_armed(&self, now: Instant) -> bool {
-        self.undo_all_asked.is_some_and(|at| now.saturating_duration_since(at) <= UNDO_ALL_CONFIRM)
+        self.undo_all_asked
+            .is_some_and(|at| now.saturating_duration_since(at) <= UNDO_ALL_CONFIRM)
     }
 }
 
@@ -168,25 +171,44 @@ impl Workspace {
     /// Whether an agent changed `path` (absolute) and the change hasn't been kept or undone:
     /// its editor tab says so.
     pub fn agent_edited(&self, path: &Path) -> bool {
-        self.reviews.values().any(|r| r.root.as_deref().and_then(|root| path.strip_prefix(root).ok()).is_some_and(|rel| r.is_pending(&rel.to_string_lossy())))
+        self.reviews.values().any(|r| {
+            r.root
+                .as_deref()
+                .and_then(|root| path.strip_prefix(root).ok())
+                .is_some_and(|rel| r.is_pending(&rel.to_string_lossy()))
+        })
     }
 
     /// A turn started on `id` with message `item`: a review opens at it when the thread is in
     /// the AI side bar and has none open (a later turn joins the open one).
     pub(super) fn review_turn_started(&mut self, id: &str, item: &str, cx: &mut Context<Self>) {
-        if self.reviews.contains_key(id) || !self.ide_chat.tabs.iter().any(|t| matches!(t, super::IdeTab::Thread(t) if t == id)) {
+        if self.reviews.contains_key(id)
+            || !self
+                .ide_chat
+                .tabs
+                .iter()
+                .any(|t| matches!(t, super::IdeTab::Thread(t) if t == id))
+        {
             return;
         }
         let git = in_repo(self.thread(id).and_then(|t| t.cwd.as_deref()));
-        self.reviews.insert(id.to_string(), Review::new(item.to_string(), git));
+        self.reviews
+            .insert(id.to_string(), Review::new(item.to_string(), git));
         self.save_review(id);
         self.review_moved(id, cx);
     }
 
     /// The store keeps `id`'s review as it is now.
     fn save_review(&self, id: &str) {
-        let Some(r) = self.reviews.get(id) else { return };
-        let saved = Saved { start: r.start.clone(), git: r.git, base: r.base.clone(), kept_edits: r.kept_edits.clone() };
+        let Some(r) = self.reviews.get(id) else {
+            return;
+        };
+        let saved = Saved {
+            start: r.start.clone(),
+            git: r.git,
+            base: r.base.clone(),
+            kept_edits: r.kept_edits.clone(),
+        };
         if let Ok(data) = serde_json::to_string(&saved) {
             if let Err(e) = self.store.set_review(id, Some(&data)) {
                 tracing::warn!("save the review of {id}: {e:#}");
@@ -197,7 +219,9 @@ impl Workspace {
     /// Reviews left open when the app last quit come back, their pending files worked out again.
     pub(super) fn restore_reviews(&mut self, cx: &mut Context<Self>) {
         for (id, data) in self.store.reviews().unwrap_or_default() {
-            let Ok(saved) = serde_json::from_str::<Saved>(&data) else { continue };
+            let Ok(saved) = serde_json::from_str::<Saved>(&data) else {
+                continue;
+            };
             if self.thread(&id).is_none_or(|t| t.archived_at.is_some()) {
                 let _ = self.store.set_review(&id, None);
                 continue;
@@ -213,7 +237,9 @@ impl Workspace {
     /// `id`'s files may have moved (the agent edited, a turn ended, a checkpoint came in, files
     /// were put back): its pending files are worked out again once things settle.
     pub(crate) fn review_moved(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(review) = self.reviews.get_mut(id) else { return };
+        let Some(review) = self.reviews.get_mut(id) else {
+            return;
+        };
         review.run += 1;
         review.settling = true;
         let run = review.run;
@@ -248,7 +274,13 @@ impl Workspace {
         let mut start_sha = None;
         let mut spans = vec![];
         if git {
-            let taken: HashMap<String, String> = self.store.checkpoints(id).unwrap_or_default().into_iter().map(|c| (c.item_id, c.sha)).collect();
+            let taken: HashMap<String, String> = self
+                .store
+                .checkpoints(id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| (c.item_id, c.sha))
+                .collect();
             if !taken.contains_key(&start) {
                 if live.checkpoint_failed.contains_key(&start) {
                     // No baseline to be had: the agent's edits are what there is.
@@ -286,12 +318,31 @@ impl Workspace {
         let mut edits: Vec<(String, usize)> = vec![];
         let mut lines: HashMap<String, Option<(u32, u32)>> = HashMap::new();
         for item in &live.items[from..] {
-            let Item::Tool { id: call, title, detail, status, .. } = item else { continue };
-            if matches!(status, ToolStatus::Failed | ToolStatus::Denied) || (tool_kind(title) != ToolKind::Edit && title != "Delete") {
+            let Item::Tool {
+                id: call,
+                title,
+                detail,
+                status,
+                ..
+            } = item
+            else {
+                continue;
+            };
+            if matches!(status, ToolStatus::Failed | ToolStatus::Denied)
+                || (tool_kind(title) != ToolKind::Edit && title != "Delete")
+            {
                 continue;
             }
-            let paths: Vec<&str> = detail.split(", ").map(str::trim).filter(|p| !p.is_empty()).collect();
-            let counted = if paths.len() == 1 { live.lines.get(call).copied() } else { None };
+            let paths: Vec<&str> = detail
+                .split(", ")
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .collect();
+            let counted = if paths.len() == 1 {
+                live.lines.get(call).copied()
+            } else {
+                None
+            };
             for p in paths {
                 match edits.iter_mut().find(|(e, _)| e == p) {
                     Some((_, n)) => *n += 1,
@@ -304,7 +355,13 @@ impl Workspace {
                 };
             }
         }
-        Some(Inputs { cwd, start: start_sha, spans, edits, lines })
+        Some(Inputs {
+            cwd,
+            start: start_sha,
+            spans,
+            edits,
+            lines,
+        })
     }
 
     /// Work out `id`'s pending files (run `run` of `review_moved`).
@@ -312,8 +369,12 @@ impl Workspace {
         if self.reviews.get(id).is_none_or(|r| r.run != run || r.busy) {
             return;
         }
-        let Some(inputs) = self.review_inputs(id, cx) else { return };
-        let Some(review) = self.reviews.get_mut(id) else { return };
+        let Some(inputs) = self.review_inputs(id, cx) else {
+            return;
+        };
+        let Some(review) = self.reviews.get_mut(id) else {
+            return;
+        };
         if !review.git {
             // From the agent's edit tools: what it edited, less what was kept since its last edit.
             let cwd = inputs.cwd.clone();
@@ -321,9 +382,22 @@ impl Workspace {
             review.pending = inputs
                 .edits
                 .iter()
-                .map(|(p, n)| (relative(p, &cwd), *n, inputs.lines.get(p).copied().flatten()))
+                .map(|(p, n)| {
+                    (
+                        relative(p, &cwd),
+                        *n,
+                        inputs.lines.get(p).copied().flatten(),
+                    )
+                })
                 .filter(|(p, n, _)| review.kept_edits.get(p).is_none_or(|k| n > k))
-                .map(|(path, _, lines)| FileChange { path, status: FileStatus::Modified, added: lines.map_or(0, |l| l.0), removed: lines.map_or(0, |l| l.1), binary: false, lines_known: lines.is_some() })
+                .map(|(path, _, lines)| FileChange {
+                    path,
+                    status: FileStatus::Modified,
+                    added: lines.map_or(0, |l| l.0),
+                    removed: lines.map_or(0, |l| l.1),
+                    binary: false,
+                    lines_known: lines.is_some(),
+                })
                 .collect();
             review.pending.sort_by(|a, b| a.path.cmp(&b.path));
             review.counted = true;
@@ -335,9 +409,15 @@ impl Workspace {
         let task = cx.spawn({
             let id = id.to_string();
             async move |this, cx| {
-                let counted = cx.background_executor().spawn(async move { count(inputs, base) }).await;
+                let counted = cx
+                    .background_executor()
+                    .spawn(async move { count(inputs, base) })
+                    .await;
                 let _ = this.update(cx, |ws, cx| {
-                    let Some(review) = ws.reviews.get_mut(&id).filter(|r| r.run == run && !r.busy) else { return };
+                    let Some(review) = ws.reviews.get_mut(&id).filter(|r| r.run == run && !r.busy)
+                    else {
+                        return;
+                    };
                     review.settling = false;
                     match counted {
                         Ok((top, base, pending, ends)) => {
@@ -364,7 +444,11 @@ impl Workspace {
 
     /// The pending files are in: with none left and no turn running, the review is over.
     fn review_counted(&mut self, id: &str, cx: &mut Context<Self>) {
-        let done = self.reviews.get(id).is_some_and(|r| r.counted && r.pending.is_empty()) && !self.turn_running(id);
+        let done = self
+            .reviews
+            .get(id)
+            .is_some_and(|r| r.counted && r.pending.is_empty())
+            && !self.turn_running(id);
         if done {
             self.close_review(id, cx);
         } else {
@@ -380,7 +464,8 @@ impl Workspace {
                 let thread = id.to_string();
                 cx.background_executor()
                     .spawn(async move {
-                        if let Some(Err(e)) = Repo::find(&top).map(|r| r.pin_review(&thread, None)) {
+                        if let Some(Err(e)) = Repo::find(&top).map(|r| r.pin_review(&thread, None))
+                        {
                             tracing::warn!("unpin review of {thread}: {e:#}");
                         }
                     })
@@ -394,8 +479,11 @@ impl Workspace {
     /// Keep `paths` of `id`'s pending files (all of them with `None`): their contents now become
     /// the baseline. Allowed while a turn runs: a later edit makes a file pending again.
     pub fn keep_files(&mut self, id: &str, paths: Option<Vec<String>>, cx: &mut Context<Self>) {
-        let Some(review) = self.reviews.get_mut(id).filter(|r| !r.busy) else { return };
-        let paths = paths.unwrap_or_else(|| review.pending.iter().map(|f| f.path.clone()).collect());
+        let Some(review) = self.reviews.get_mut(id).filter(|r| !r.busy) else {
+            return;
+        };
+        let paths =
+            paths.unwrap_or_else(|| review.pending.iter().map(|f| f.path.clone()).collect());
         let paths: Vec<String> = paths.into_iter().filter(|p| review.is_pending(p)).collect();
         if paths.is_empty() {
             return;
@@ -403,17 +491,26 @@ impl Workspace {
         // Off the list right away; the next count says what's left.
         review.pending.retain(|f| !paths.contains(&f.path));
         if !review.git {
-            let edits = self.live.get(id).map(|l| edit_counts(&l.items, l.items.position(&review.start).unwrap_or(0))).unwrap_or_default();
+            let edits = self
+                .live
+                .get(id)
+                .map(|l| edit_counts(&l.items, l.items.position(&review.start).unwrap_or(0)))
+                .unwrap_or_default();
             let cwd = review.root.clone().unwrap_or_default();
             for p in paths {
-                let n = edits.iter().find(|(e, _)| relative(e, &cwd) == p).map_or(0, |(_, n)| *n);
+                let n = edits
+                    .iter()
+                    .find(|(e, _)| relative(e, &cwd) == p)
+                    .map_or(0, |(_, n)| *n);
                 review.kept_edits.insert(p, n);
             }
             self.save_review(id);
             self.review_counted(id, cx);
             return;
         }
-        let (Some(top), Some(base)) = (review.root.clone(), review.base.clone()) else { return };
+        let (Some(top), Some(base)) = (review.root.clone(), review.base.clone()) else {
+            return;
+        };
         review.busy = true;
         review.run += 1;
         let tid = id.to_string();
@@ -422,7 +519,9 @@ impl Workspace {
             let kept = cx
                 .background_executor()
                 .spawn(async move {
-                    let r = Repo::find(&top).ok_or_else(|| anyhow::anyhow!("{} isn't a git repository any more", top.display()))?;
+                    let r = Repo::find(&top).ok_or_else(|| {
+                        anyhow::anyhow!("{} isn't a git repository any more", top.display())
+                    })?;
                     let now = r.tree_now()?;
                     let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
                     let tree = r.tree_with(&base, &now, &refs)?;
@@ -431,7 +530,9 @@ impl Workspace {
                 })
                 .await;
             let _ = this.update(cx, |ws, cx| {
-                let Some(review) = ws.reviews.get_mut(&tid) else { return };
+                let Some(review) = ws.reviews.get_mut(&tid) else {
+                    return;
+                };
                 review.busy = false;
                 match kept {
                     Ok(tree) => {
@@ -440,7 +541,10 @@ impl Workspace {
                         ws.review_counted(&tid, cx);
                     }
                     // Not kept: they're still pending (the count puts them back on the list).
-                    Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't keep the changes: {e:#}"), undo: None }),
+                    Err(e) => cx.emit(WorkspaceEvent::Toast {
+                        message: format!("Couldn't keep the changes: {e:#}"),
+                        undo: None,
+                    }),
                 }
                 ws.review_moved(&tid, cx);
             });
@@ -459,13 +563,18 @@ impl Workspace {
     /// runs, and outside git (there's nothing to put back from).
     pub fn undo_files(&mut self, id: &str, paths: Option<Vec<String>>, cx: &mut Context<Self>) {
         if self.turn_running(id) {
-            cx.emit(WorkspaceEvent::Toast { message: "Stop the running turn to undo its changes.".into(), undo: None });
+            cx.emit(WorkspaceEvent::Toast {
+                message: "Stop the running turn to undo its changes.".into(),
+                undo: None,
+            });
             return;
         }
         // The executor's clock, as the rest of the app's timers read it: the confirm window is
         // the user's time between two clicks, not CPU time a loaded machine takes drawing them.
         let now = cx.background_executor().now();
-        let Some(review) = self.reviews.get_mut(id).filter(|r| !r.busy && r.git) else { return };
+        let Some(review) = self.reviews.get_mut(id).filter(|r| !r.busy && r.git) else {
+            return;
+        };
         let all = paths.is_none();
         if all && !review.undo_all_armed(now) {
             let n = review.pending.len();
@@ -473,14 +582,22 @@ impl Workspace {
                 return;
             }
             review.undo_all_asked = Some(now);
-            let what = if n == 1 { "the 1 file".to_string() } else { format!("all {n} files") };
-            cx.emit(WorkspaceEvent::Toast { message: format!("Undo all again to put back {what} this chat changed."), undo: None });
+            let what = if n == 1 {
+                "the 1 file".to_string()
+            } else {
+                format!("all {n} files")
+            };
+            cx.emit(WorkspaceEvent::Toast {
+                message: format!("Undo all again to put back {what} this chat changed."),
+                undo: None,
+            });
             cx.emit(WorkspaceEvent::ReviewChanged { id: id.to_string() });
             cx.notify();
             return;
         }
         review.undo_all_asked = None;
-        let paths = paths.unwrap_or_else(|| review.pending.iter().map(|f| f.path.clone()).collect());
+        let paths =
+            paths.unwrap_or_else(|| review.pending.iter().map(|f| f.path.clone()).collect());
         // A rename goes back whole: the new name goes, the old one comes back.
         let mut targets: Vec<String> = vec![];
         for f in review.pending.iter().filter(|f| paths.contains(&f.path)) {
@@ -489,11 +606,16 @@ impl Workspace {
                 targets.push(from.clone());
             }
         }
-        let (Some(top), Some(base)) = (review.root.clone(), review.base.clone()) else { return };
+        let (Some(top), Some(base)) = (review.root.clone(), review.base.clone()) else {
+            return;
+        };
         if targets.is_empty() {
             return;
         }
-        let ends: Vec<(String, Option<String>)> = targets.iter().map(|t| (t.clone(), review.ends.get(t).cloned())).collect();
+        let ends: Vec<(String, Option<String>)> = targets
+            .iter()
+            .map(|t| (t.clone(), review.ends.get(t).cloned()))
+            .collect();
         review.pending.retain(|f| !paths.contains(&f.path));
         review.busy = true;
         review.run += 1;
@@ -568,14 +690,23 @@ impl Workspace {
         let r = self.reviews.get(id).filter(|r| r.git)?;
         let (top, base) = (r.root.clone()?, r.base.clone()?);
         let rel = path.strip_prefix(&top).ok()?.to_string_lossy().to_string();
-        r.is_pending(&rel).then(|| FileReview { thread: id.to_string(), top, rel, base })
+        r.is_pending(&rel).then(|| FileReview {
+            thread: id.to_string(),
+            top,
+            rel,
+            base,
+        })
     }
 
     /// Keep one hunk of `id`'s pending file `rel` (`patch`: the file's header and that hunk, as
     /// `checkpoint::Repo::file_diff` cut it): the baseline takes it in, the rest stays pending.
     pub fn keep_hunk(&mut self, id: &str, rel: &str, patch: String, cx: &mut Context<Self>) {
-        let Some(review) = self.reviews.get_mut(id).filter(|r| !r.busy && r.git) else { return };
-        let (Some(top), Some(base)) = (review.root.clone(), review.base.clone()) else { return };
+        let Some(review) = self.reviews.get_mut(id).filter(|r| !r.busy && r.git) else {
+            return;
+        };
+        let (Some(top), Some(base)) = (review.root.clone(), review.base.clone()) else {
+            return;
+        };
         review.busy = true;
         review.run += 1;
         let (tid, rel) = (id.to_string(), rel.to_string());
@@ -584,21 +715,28 @@ impl Workspace {
             let kept = cx
                 .background_executor()
                 .spawn(async move {
-                    let r = Repo::find(&top).ok_or_else(|| anyhow::anyhow!("{} isn't a git repository any more", top.display()))?;
+                    let r = Repo::find(&top).ok_or_else(|| {
+                        anyhow::anyhow!("{} isn't a git repository any more", top.display())
+                    })?;
                     let tree = r.keep_hunk(&base, &patch)?;
                     r.pin_review(&thread, Some(&tree))?;
                     Ok::<_, anyhow::Error>(tree)
                 })
                 .await;
             let _ = this.update(cx, |ws, cx| {
-                let Some(review) = ws.reviews.get_mut(&tid) else { return };
+                let Some(review) = ws.reviews.get_mut(&tid) else {
+                    return;
+                };
                 review.busy = false;
                 match kept {
                     Ok(tree) => {
                         review.base = Some(tree);
                         ws.save_review(&tid);
                     }
-                    Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't keep that change to {rel}: {e:#}"), undo: None }),
+                    Err(e) => cx.emit(WorkspaceEvent::Toast {
+                        message: format!("Couldn't keep that change to {rel}: {e:#}"),
+                        undo: None,
+                    }),
                 }
                 ws.review_moved(&tid, cx);
                 cx.emit(WorkspaceEvent::ReviewChanged { id: tid.clone() });
@@ -616,11 +754,18 @@ impl Workspace {
     /// by itself (the file is left as it was).
     pub fn undo_hunk(&mut self, id: &str, rel: &str, patch: String, cx: &mut Context<Self>) {
         if self.turn_running(id) {
-            cx.emit(WorkspaceEvent::Toast { message: "Stop the running turn to undo its changes.".into(), undo: None });
+            cx.emit(WorkspaceEvent::Toast {
+                message: "Stop the running turn to undo its changes.".into(),
+                undo: None,
+            });
             return;
         }
-        let Some(review) = self.reviews.get_mut(id).filter(|r| !r.busy && r.git) else { return };
-        let Some(top) = review.root.clone() else { return };
+        let Some(review) = self.reviews.get_mut(id).filter(|r| !r.busy && r.git) else {
+            return;
+        };
+        let Some(top) = review.root.clone() else {
+            return;
+        };
         review.busy = true;
         review.run += 1;
         let (tid, rel) = (id.to_string(), rel.to_string());
@@ -630,7 +775,9 @@ impl Workspace {
             let undone = cx
                 .background_executor()
                 .spawn(async move {
-                    let r = Repo::find(&top).ok_or_else(|| anyhow::anyhow!("{} isn't a git repository any more", top.display()))?;
+                    let r = Repo::find(&top).ok_or_else(|| {
+                        anyhow::anyhow!("{} isn't a git repository any more", top.display())
+                    })?;
                     let undo = r.save_undo(&thread)?;
                     r.undo_hunk(&path, &patch).map(|()| (undo, r.top))
                 })
@@ -641,14 +788,27 @@ impl Workspace {
                 }
                 match undone {
                     Ok((undo, top)) => {
-                        let name = Path::new(&rel).file_name().map_or(rel.clone(), |n| n.to_string_lossy().to_string());
-                        let undo = super::UndoAction::Unrestore { thread: tid.clone(), repo: top.clone(), sha: undo, paths: vec![rel.clone()] };
-                        cx.emit(WorkspaceEvent::Toast { message: format!("Undid a change to {name}"), undo: Some(undo) });
+                        let name = Path::new(&rel)
+                            .file_name()
+                            .map_or(rel.clone(), |n| n.to_string_lossy().to_string());
+                        let undo = super::UndoAction::Unrestore {
+                            thread: tid.clone(),
+                            repo: top.clone(),
+                            sha: undo,
+                            paths: vec![rel.clone()],
+                        };
+                        cx.emit(WorkspaceEvent::Toast {
+                            message: format!("Undid a change to {name}"),
+                            undo: Some(undo),
+                        });
                         ws.files_epoch += 1;
                         ws.refresh_git_at(top, cx);
                         ws.forget_turn_changes(&tid, false, cx);
                     }
-                    Err(e) => cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't undo that change to {rel}: {e:#}"), undo: None }),
+                    Err(e) => cx.emit(WorkspaceEvent::Toast {
+                        message: format!("Couldn't undo that change to {rel}: {e:#}"),
+                        undo: None,
+                    }),
                 }
                 ws.review_moved(&tid, cx);
                 cx.notify();
@@ -662,15 +822,23 @@ impl Workspace {
     /// Show `id`'s pending changes in the editor's Review tab (`ide::diff_view`), which reads
     /// each file's hunks against the baseline itself.
     pub fn open_review(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.reviews.get(id).is_some_and(|r| r.git && !r.pending.is_empty()) {
-            cx.emit(WorkspaceEvent::OpenReview { thread: id.to_string() });
+        if self
+            .reviews
+            .get(id)
+            .is_some_and(|r| r.git && !r.pending.is_empty())
+        {
+            cx.emit(WorkspaceEvent::OpenReview {
+                thread: id.to_string(),
+            });
         }
     }
 
     /// The pending files are being worked out (or kept, or undone) now.
     #[cfg(test)]
     pub fn review_settled(&self, id: &str) -> bool {
-        self.reviews.get(id).is_none_or(|r| r.counted && !r.busy && !r.settling)
+        self.reviews
+            .get(id)
+            .is_none_or(|r| r.counted && !r.busy && !r.settling)
     }
 
     /// What `undo_files` looks at, for a test's failure message.
@@ -690,7 +858,9 @@ impl Workspace {
                     live.map(|l| l.git_busy),
                     live.map(|l| l.git_jobs.len()),
                     live.map(|l| l.checkpoint_failed.clone()),
-                    self.store.checkpoints(id).map(|c| c.into_iter().map(|c| c.item_id).collect::<Vec<_>>()),
+                    self.store
+                        .checkpoints(id)
+                        .map(|c| c.into_iter().map(|c| c.item_id).collect::<Vec<_>>()),
                     r.start,
                 )
             }
@@ -701,7 +871,11 @@ impl Workspace {
 
 /// "notes.md", "notes.md and lib.rs", "3 files": what a toast calls `paths`.
 fn files_named(paths: &[String]) -> String {
-    let name = |p: &String| Path::new(p).file_name().map_or(p.clone(), |n| n.to_string_lossy().to_string());
+    let name = |p: &String| {
+        Path::new(p)
+            .file_name()
+            .map_or(p.clone(), |n| n.to_string_lossy().to_string())
+    };
     match paths {
         [one] => name(one),
         [a, b] => format!("{} and {}", name(a), name(b)),
@@ -713,8 +887,18 @@ fn files_named(paths: &[String]) -> String {
 fn edit_counts(items: &trek_core::transcript::Transcript, from: usize) -> Vec<(String, usize)> {
     let mut out: Vec<(String, usize)> = vec![];
     for item in &items[from.min(items.len())..] {
-        let Item::Tool { title, detail, status, .. } = item else { continue };
-        if matches!(status, ToolStatus::Failed | ToolStatus::Denied) || (tool_kind(title) != ToolKind::Edit && title != "Delete") {
+        let Item::Tool {
+            title,
+            detail,
+            status,
+            ..
+        } = item
+        else {
+            continue;
+        };
+        if matches!(status, ToolStatus::Failed | ToolStatus::Denied)
+            || (tool_kind(title) != ToolKind::Edit && title != "Delete")
+        {
             continue;
         }
         for p in detail.split(", ").map(str::trim).filter(|p| !p.is_empty()) {
@@ -731,26 +915,50 @@ fn edit_counts(items: &trek_core::transcript::Transcript, from: usize) -> Vec<(S
 /// as `/private/tmp`.
 fn relative(path: &str, root: &Path) -> String {
     let p = Path::new(path);
-    let p = if p.is_absolute() { p.to_path_buf() } else { root.join(p) };
-    let alt = root.strip_prefix("/").ok().map(|r| Path::new("/private").join(r));
-    p.strip_prefix(root).ok().or_else(|| alt.as_deref().and_then(|a| p.strip_prefix(a).ok())).map_or_else(|| path.to_string(), |r| r.display().to_string())
+    let p = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        root.join(p)
+    };
+    let alt = root
+        .strip_prefix("/")
+        .ok()
+        .map(|r| Path::new("/private").join(r));
+    p.strip_prefix(root)
+        .ok()
+        .or_else(|| alt.as_deref().and_then(|a| p.strip_prefix(a).ok()))
+        .map_or_else(|| path.to_string(), |r| r.display().to_string())
 }
 
 /// The pending files: what changed from the baseline (`base`, else the start checkpoint's
 /// tree) to the files now, among those the thread touched. Returns the repository's top folder,
 /// the baseline, the pending files, and for each file a turn's checkpoints changed, where it stood
 /// as the last of them ended. Blocks on git.
-fn count(inputs: Inputs, base: Option<String>) -> anyhow::Result<(PathBuf, String, Vec<FileChange>, HashMap<String, String>)> {
-    let r = Repo::find(&inputs.cwd).ok_or_else(|| anyhow::anyhow!("{} isn't a git repository any more", inputs.cwd.display()))?;
+fn count(
+    inputs: Inputs,
+    base: Option<String>,
+) -> anyhow::Result<(PathBuf, String, Vec<FileChange>, HashMap<String, String>)> {
+    let r = Repo::find(&inputs.cwd).ok_or_else(|| {
+        anyhow::anyhow!("{} isn't a git repository any more", inputs.cwd.display())
+    })?;
     let base = match base {
         Some(b) => b,
-        None => r.tree_of(inputs.start.as_deref().ok_or_else(|| anyhow::anyhow!("no checkpoint to start from"))?)?,
+        None => r.tree_of(
+            inputs
+                .start
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("no checkpoint to start from"))?,
+        )?,
     };
     let now = r.tree_now()?;
     // What the thread touched: its edit tools' files, and what changed over its turns' spans
     // (from each one's start to its end, the running one's to now; not between them).
     // Paths reported relative to the thread's folder, which may be below the top folder.
-    let mut touched: HashSet<String> = inputs.edits.iter().map(|(p, _)| relative(&inputs.cwd.join(p).display().to_string(), &r.top)).collect();
+    let mut touched: HashSet<String> = inputs
+        .edits
+        .iter()
+        .map(|(p, _)| relative(&inputs.cwd.join(p).display().to_string(), &r.top))
+        .collect();
     let mut ends: HashMap<String, String> = HashMap::new();
     for (from, to) in &inputs.spans {
         let to = to.as_deref().unwrap_or(now.as_str());
@@ -762,7 +970,10 @@ fn count(inputs: Inputs, base: Option<String>) -> anyhow::Result<(PathBuf, Strin
     let pending = r
         .diff_stat(&base, &now)?
         .into_iter()
-        .filter(|f| touched.contains(&f.path) || matches!(&f.status, FileStatus::Renamed { from } if touched.contains(from)))
+        .filter(|f| {
+            touched.contains(&f.path)
+                || matches!(&f.status, FileStatus::Renamed { from } if touched.contains(from))
+        })
         .collect();
     Ok((as_given(&r.top, &inputs.cwd), base, pending, ends))
 }
@@ -772,9 +983,14 @@ fn count(inputs: Inputs, base: Option<String>) -> anyhow::Result<(PathBuf, Strin
 /// rather than `C:/Users/runneradmin/…`), so paths built on it match the ones the editor and the
 /// Explorer use.
 pub fn as_given(top: &Path, cwd: &Path) -> PathBuf {
-    let canon = std::fs::canonicalize(cwd).map(|p| plain(&p)).unwrap_or_else(|_| cwd.to_path_buf());
+    let canon = std::fs::canonicalize(cwd)
+        .map(|p| plain(&p))
+        .unwrap_or_else(|_| cwd.to_path_buf());
     match below(&canon, top) {
-        Some(n) => cwd.ancestors().nth(n).map_or_else(|| top.to_path_buf(), Path::to_path_buf),
+        Some(n) => cwd
+            .ancestors()
+            .nth(n)
+            .map_or_else(|| top.to_path_buf(), Path::to_path_buf),
         None => top.to_path_buf(),
     }
 }
@@ -785,7 +1001,13 @@ fn below(path: &Path, top: &Path) -> Option<usize> {
     let mut rest = path.components();
     for t in top.components() {
         let p = rest.next()?;
-        let same = if cfg!(windows) { p.as_os_str().to_string_lossy().eq_ignore_ascii_case(&t.as_os_str().to_string_lossy()) } else { p == t };
+        let same = if cfg!(windows) {
+            p.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&t.as_os_str().to_string_lossy())
+        } else {
+            p == t
+        };
         if !same {
             return None;
         }
@@ -818,7 +1040,13 @@ mod tests {
         assert_eq!(below(Path::new("/q/a"), Path::new("/p")), None);
         assert_eq!(below(Path::new("/p"), Path::new("/p/a")), None);
         if cfg!(windows) {
-            assert_eq!(below(Path::new(r"C:\Users\RUNNERADMIN\Temp\x"), Path::new("c:/users/runneradmin")), Some(2));
+            assert_eq!(
+                below(
+                    Path::new(r"C:\Users\RUNNERADMIN\Temp\x"),
+                    Path::new("c:/users/runneradmin")
+                ),
+                Some(2)
+            );
         } else {
             assert_eq!(below(Path::new("/P/a"), Path::new("/p")), None);
         }
@@ -826,8 +1054,14 @@ mod tests {
 
     #[test]
     fn the_verbatim_prefix_comes_off_a_canonical_windows_path() {
-        assert_eq!(plain(Path::new(r"\\?\C:\Users\x")), PathBuf::from(r"C:\Users\x"));
-        assert_eq!(plain(Path::new(r"\\?\UNC\srv\share\x")), PathBuf::from(r"\\srv\share\x"));
+        assert_eq!(
+            plain(Path::new(r"\\?\C:\Users\x")),
+            PathBuf::from(r"C:\Users\x")
+        );
+        assert_eq!(
+            plain(Path::new(r"\\?\UNC\srv\share\x")),
+            PathBuf::from(r"\\srv\share\x")
+        );
         assert_eq!(plain(Path::new("/tmp/x")), PathBuf::from("/tmp/x"));
     }
 
@@ -841,10 +1075,23 @@ mod tests {
         let real = plain(&std::fs::canonicalize(&tmp).unwrap());
         // As git prints it: `/` throughout; the thread's folder as the user typed it.
         let git_top = PathBuf::from(real.join("Project").to_string_lossy().replace('\\', "/"));
-        let given = if cfg!(windows) { PathBuf::from(tmp.join("PROJECT").join("SUB").to_string_lossy().to_lowercase()) } else { project.clone() };
+        let given = if cfg!(windows) {
+            PathBuf::from(
+                tmp.join("PROJECT")
+                    .join("SUB")
+                    .to_string_lossy()
+                    .to_lowercase(),
+            )
+        } else {
+            project.clone()
+        };
         assert_eq!(as_given(&git_top, &given), given.parent().unwrap());
         assert_eq!(as_given(&real, &given), given.ancestors().nth(2).unwrap());
-        assert_eq!(as_given(Path::new("/elsewhere"), &given), Path::new("/elsewhere"), "not below: git's name stays");
+        assert_eq!(
+            as_given(Path::new("/elsewhere"), &given),
+            Path::new("/elsewhere"),
+            "not below: git's name stays"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -853,6 +1100,9 @@ mod tests {
         assert_eq!(relative("/p/src/a.rs", Path::new("/p")), "src/a.rs");
         assert_eq!(relative("src/a.rs", Path::new("/p")), "src/a.rs");
         assert_eq!(relative("/private/tmp/x/a.rs", Path::new("/tmp/x")), "a.rs");
-        assert_eq!(relative("/elsewhere/a.rs", Path::new("/p")), "/elsewhere/a.rs");
+        assert_eq!(
+            relative("/elsewhere/a.rs", Path::new("/p")),
+            "/elsewhere/a.rs"
+        );
     }
 }

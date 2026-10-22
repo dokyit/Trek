@@ -8,12 +8,16 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 use crate::protocol::{
-    AnswerRequest, Attachment, AttachmentRequest, BackgroundOutput, Basecamp, BasecampRange, CommandInfo, ErrorCode, GitBranches, GitCommitRequest, GitDiff, GitDiffRequest,
-    GitStatus, GitSwitchRequest, GitTarget, Icon, IconRequest, Item, MacSettings, NewThreadRequest, Note, NoteSummary, Open, PrefsRequest,
-    QueueActionRequest, SaveNoteRequest, SearchRequest, SearchResults, SendRequest, SettingsChange, Snapshot, ThreadActionRequest, ThreadSummary, Transcript, TranscriptPage,
-    TurnActionDone, TurnActionRequest, Usage, WorktreeRemoveRequest,
+    AddNoteImageRequest, NoteAsset, NoteAssetRequest, NoteFileChunk, NoteFileRequest, NoteImage,
 };
-use crate::protocol::{AddNoteImageRequest, NoteAsset, NoteAssetRequest, NoteFileChunk, NoteFileRequest, NoteImage};
+use crate::protocol::{
+    AnswerRequest, Attachment, AttachmentRequest, BackgroundOutput, Basecamp, BasecampRange,
+    CommandInfo, ErrorCode, GitBranches, GitCommitRequest, GitDiff, GitDiffRequest, GitStatus,
+    GitSwitchRequest, GitTarget, Icon, IconRequest, Item, MacSettings, NewThreadRequest, Note,
+    NoteSummary, Open, PrefsRequest, QueueActionRequest, SaveNoteRequest, SearchRequest,
+    SearchResults, SendRequest, SettingsChange, Snapshot, ThreadActionRequest, ThreadSummary,
+    Transcript, TranscriptPage, TurnActionDone, TurnActionRequest, Usage, WorktreeRemoveRequest,
+};
 use crate::protocol::{CloneProjectRequest, FileUpload, MachineInfo, ServerMessage};
 
 pub type HostResult<T> = Result<T, HostError>;
@@ -28,7 +32,10 @@ pub struct HostError {
 
 impl HostError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self {
+            code,
+            message: message.into(),
+        }
     }
 
     /// No such thread, project, agent or request.
@@ -69,8 +76,14 @@ pub struct CloneProgress {
 impl CloneProgress {
     /// Progress for a clone into `folder`, handed to `sink` as `clone_progress` messages (the
     /// server makes these; tests and other drivers may too).
-    pub fn new(folder: impl Into<String>, sink: impl Fn(ServerMessage) + Send + Sync + 'static) -> Self {
-        Self { folder: folder.into(), sink: Arc::new(sink) }
+    pub fn new(
+        folder: impl Into<String>,
+        sink: impl Fn(ServerMessage) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            folder: folder.into(),
+            sink: Arc::new(sink),
+        }
     }
 
     /// The folder being cloned into, as the request named it.
@@ -80,13 +93,18 @@ impl CloneProgress {
 
     /// One line of git's output (`Receiving objects:  42% (420/1000)`).
     pub fn line(&self, line: impl Into<String>) {
-        (self.sink)(ServerMessage::CloneProgress { folder: self.folder.clone(), line: line.into() });
+        (self.sink)(ServerMessage::CloneProgress {
+            folder: self.folder.clone(),
+            line: line.into(),
+        });
     }
 }
 
 impl std::fmt::Debug for CloneProgress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CloneProgress").field("folder", &self.folder).finish_non_exhaustive()
+        f.debug_struct("CloneProgress")
+            .field("folder", &self.folder)
+            .finish_non_exhaustive()
     }
 }
 
@@ -113,10 +131,17 @@ pub trait RemoteHost: Send + Sync + 'static {
     /// Change a thread's agent, model, effort, access or plan mode.
     fn set_prefs(&self, req: PrefsRequest) -> impl Future<Output = HostResult<()>> + Send {
         let _ = req;
-        async { Err(HostError::bad_request("This Mac can't change a thread's settings")) }
+        async {
+            Err(HostError::bad_request(
+                "This Mac can't change a thread's settings",
+            ))
+        }
     }
     /// Pin, settle, archive or rename a thread.
-    fn thread_action(&self, req: ThreadActionRequest) -> impl Future<Output = HostResult<()>> + Send {
+    fn thread_action(
+        &self,
+        req: ThreadActionRequest,
+    ) -> impl Future<Output = HostResult<()>> + Send {
         let _ = req;
         async { Err(HostError::bad_request("This Mac can't do that to a thread")) }
     }
@@ -170,7 +195,10 @@ pub trait RemoteHost: Send + Sync + 'static {
         let _ = target;
         unsupported("push")
     }
-    fn git_branches(&self, target: GitTarget) -> impl Future<Output = HostResult<GitBranches>> + Send {
+    fn git_branches(
+        &self,
+        target: GitTarget,
+    ) -> impl Future<Output = HostResult<GitBranches>> + Send {
         let _ = target;
         unsupported("list branches")
     }
@@ -182,12 +210,18 @@ pub trait RemoteHost: Send + Sync + 'static {
         let _ = thread_id;
         unsupported("merge worktrees")
     }
-    fn worktree_remove(&self, req: WorktreeRemoveRequest) -> impl Future<Output = HostResult<()>> + Send {
+    fn worktree_remove(
+        &self,
+        req: WorktreeRemoveRequest,
+    ) -> impl Future<Output = HostResult<()>> + Send {
         let _ = req;
         unsupported("remove worktrees")
     }
     /// The slash commands a thread offers.
-    fn commands(&self, thread_id: &str) -> impl Future<Output = HostResult<Vec<CommandInfo>>> + Send {
+    fn commands(
+        &self,
+        thread_id: &str,
+    ) -> impl Future<Output = HostResult<Vec<CommandInfo>>> + Send {
         let _ = thread_id;
         unsupported("list commands")
     }
@@ -195,7 +229,10 @@ pub trait RemoteHost: Send + Sync + 'static {
         unsupported("show its settings")
     }
     /// Change the settings a phone may; returns them as they are now.
-    fn set_settings(&self, change: SettingsChange) -> impl Future<Output = HostResult<MacSettings>> + Send {
+    fn set_settings(
+        &self,
+        change: SettingsChange,
+    ) -> impl Future<Output = HostResult<MacSettings>> + Send {
         let _ = change;
         unsupported("change its settings")
     }
@@ -203,20 +240,35 @@ pub trait RemoteHost: Send + Sync + 'static {
     /// `limit` items of a full one. A host may serve just that (the server cuts it to fit either
     /// way): only items newer than `after_seq` when `base <= after_seq <= seq`, else the last
     /// `limit` items with `more` set when it left any out. By default, the whole transcript.
-    fn transcript_for(&self, thread_id: &str, after_seq: Option<u64>, limit: Option<u32>) -> impl Future<Output = HostResult<Transcript>> + Send {
+    fn transcript_for(
+        &self,
+        thread_id: &str,
+        after_seq: Option<u64>,
+        limit: Option<u32>,
+    ) -> impl Future<Output = HostResult<Transcript>> + Send {
         let _ = (after_seq, limit);
         self.transcript(thread_id)
     }
     /// The items just before item `before` (at most `limit`, already capped at `MAX_PAGE`). By
     /// default cut from the whole transcript.
-    fn transcript_before(&self, thread_id: &str, before: &str, limit: u32) -> impl Future<Output = HostResult<TranscriptPage>> + Send {
+    fn transcript_before(
+        &self,
+        thread_id: &str,
+        before: &str,
+        limit: u32,
+    ) -> impl Future<Output = HostResult<TranscriptPage>> + Send {
         async move {
             let transcript = self.transcript(thread_id).await?;
-            transcript.page_before(before, limit).ok_or_else(|| HostError::not_found("No such item"))
+            transcript
+                .page_before(before, limit)
+                .ok_or_else(|| HostError::not_found("No such item"))
         }
     }
     /// Undo, retry, fork or rewind a turn, as the Mac's buttons do.
-    fn turn_action(&self, req: TurnActionRequest) -> impl Future<Output = HostResult<TurnActionDone>> + Send {
+    fn turn_action(
+        &self,
+        req: TurnActionRequest,
+    ) -> impl Future<Output = HostResult<TurnActionDone>> + Send {
         let _ = req;
         unsupported("undo, retry or fork turns")
     }
@@ -231,21 +283,35 @@ pub trait RemoteHost: Send + Sync + 'static {
         unsupported("use resets")
     }
     /// Change or drop a queued follow-up; a dropped one's text comes back.
-    fn queue_action(&self, req: QueueActionRequest) -> impl Future<Output = HostResult<Option<String>>> + Send {
+    fn queue_action(
+        &self,
+        req: QueueActionRequest,
+    ) -> impl Future<Output = HostResult<Option<String>>> + Send {
         let _ = req;
         unsupported("change queued messages")
     }
     /// One of a message's images, scaled down.
-    fn attachment(&self, req: AttachmentRequest) -> impl Future<Output = HostResult<Attachment>> + Send {
+    fn attachment(
+        &self,
+        req: AttachmentRequest,
+    ) -> impl Future<Output = HostResult<Attachment>> + Send {
         let _ = req;
         unsupported("send images")
     }
     /// The end of a background task's output.
-    fn background_output(&self, thread_id: &str, task_id: &str) -> impl Future<Output = HostResult<BackgroundOutput>> + Send {
+    fn background_output(
+        &self,
+        thread_id: &str,
+        task_id: &str,
+    ) -> impl Future<Output = HostResult<BackgroundOutput>> + Send {
         let _ = (thread_id, task_id);
         unsupported("show background tasks")
     }
-    fn stop_background(&self, thread_id: &str, task_id: &str) -> impl Future<Output = HostResult<()>> + Send {
+    fn stop_background(
+        &self,
+        thread_id: &str,
+        task_id: &str,
+    ) -> impl Future<Output = HostResult<()>> + Send {
         let _ = (thread_id, task_id);
         unsupported("stop background tasks")
     }
@@ -255,17 +321,26 @@ pub trait RemoteHost: Send + Sync + 'static {
         unsupported("send icons")
     }
     /// One of a note's pictures, scaled down.
-    fn note_asset(&self, req: NoteAssetRequest) -> impl Future<Output = HostResult<NoteAsset>> + Send {
+    fn note_asset(
+        &self,
+        req: NoteAssetRequest,
+    ) -> impl Future<Output = HostResult<NoteAsset>> + Send {
         let _ = req;
         unsupported("send notes' pictures")
     }
     /// Keep a photo with the notes; its link comes back.
-    fn add_note_image(&self, req: AddNoteImageRequest) -> impl Future<Output = HostResult<NoteImage>> + Send {
+    fn add_note_image(
+        &self,
+        req: AddNoteImageRequest,
+    ) -> impl Future<Output = HostResult<NoteImage>> + Send {
         let _ = req;
         unsupported("add pictures to notes")
     }
     /// A piece of a file kept with the notes, as it is on disk.
-    fn note_file(&self, req: NoteFileRequest) -> impl Future<Output = HostResult<NoteFileChunk>> + Send {
+    fn note_file(
+        &self,
+        req: NoteFileRequest,
+    ) -> impl Future<Output = HostResult<NoteFileChunk>> + Send {
         let _ = req;
         unsupported("send notes' files")
     }
@@ -280,7 +355,11 @@ pub trait RemoteHost: Send + Sync + 'static {
     /// expanding a leading `~/`; refuse (`conflict`) a folder that exists and isn't empty; report
     /// git's output through `progress`; register the folder as a project named `req.name` and
     /// return its id (then push a `Snapshot`). A failed clone is [`HostError::clone_failed`].
-    fn clone_project(&self, req: CloneProjectRequest, progress: CloneProgress) -> impl Future<Output = HostResult<String>> + Send {
+    fn clone_project(
+        &self,
+        req: CloneProjectRequest,
+        progress: CloneProgress,
+    ) -> impl Future<Output = HostResult<String>> + Send {
         let _ = (req, progress);
         unsupported("clone projects")
     }
@@ -288,7 +367,11 @@ pub trait RemoteHost: Send + Sync + 'static {
     /// ([`crate::protocol::safe_relative_path`]) and the size; the host still writes under the
     /// folder only, creating parent folders, replacing a file but never following a symbolic link
     /// out of it, with each file's `mode`.
-    fn put_files(&self, project_id: &str, files: Vec<FileUpload>) -> impl Future<Output = HostResult<()>> + Send {
+    fn put_files(
+        &self,
+        project_id: &str,
+        files: Vec<FileUpload>,
+    ) -> impl Future<Output = HostResult<()>> + Send {
         let _ = (project_id, files);
         unsupported("receive files")
     }
@@ -302,7 +385,9 @@ pub trait RemoteHost: Send + Sync + 'static {
 }
 
 fn unsupported<T>(what: &str) -> std::future::Ready<HostResult<T>> {
-    std::future::ready(Err(HostError::bad_request(format!("This Mac can't {what}"))))
+    std::future::ready(Err(HostError::bad_request(format!(
+        "This Mac can't {what}"
+    ))))
 }
 
 /// A change the app pushes to connected phones through [`crate::RemoteHandle::push`].
@@ -335,55 +420,186 @@ pub type Reply<T> = oneshot::Sender<HostResult<T>>;
 /// reply sends `host_error` to the phone).
 #[derive(Debug)]
 pub enum HostRequest {
-    Snapshot { reply: Reply<Snapshot> },
+    Snapshot {
+        reply: Reply<Snapshot>,
+    },
     /// See [`RemoteHost::transcript_for`].
-    Transcript { thread_id: String, after_seq: Option<u64>, limit: Option<u32>, reply: Reply<Transcript> },
-    TranscriptBefore { thread_id: String, before: String, limit: u32, reply: Reply<TranscriptPage> },
-    TurnAction { req: TurnActionRequest, reply: Reply<TurnActionDone> },
+    Transcript {
+        thread_id: String,
+        after_seq: Option<u64>,
+        limit: Option<u32>,
+        reply: Reply<Transcript>,
+    },
+    TranscriptBefore {
+        thread_id: String,
+        before: String,
+        limit: u32,
+        reply: Reply<TranscriptPage>,
+    },
+    TurnAction {
+        req: TurnActionRequest,
+        reply: Reply<TurnActionDone>,
+    },
     /// No phone has the thread open any more (nothing to reply).
-    Unwatch { thread_id: String },
-    Send { req: SendRequest, reply: Reply<Option<Open>> },
-    NewThread { req: NewThreadRequest, reply: Reply<String> },
-    Answer { req: AnswerRequest, reply: Reply<()> },
-    Interrupt { thread_id: String, reply: Reply<()> },
-    MarkSeen { thread_id: String, reply: Reply<()> },
-    SetPrefs { req: PrefsRequest, reply: Reply<()> },
-    ThreadAction { req: ThreadActionRequest, reply: Reply<()> },
-    Usage { reply: Reply<Usage> },
-    Basecamp { range: BasecampRange, reply: Reply<Basecamp> },
-    Notes { reply: Reply<Vec<NoteSummary>> },
-    Note { note_id: String, reply: Reply<Note> },
-    CreateNote { body: String, reply: Reply<Note> },
-    SaveNote { req: SaveNoteRequest, reply: Reply<Note> },
-    DeleteNote { note_id: String, reply: Reply<()> },
-    GitStatus { target: GitTarget, reply: Reply<GitStatus> },
-    GitDiff { req: GitDiffRequest, reply: Reply<GitDiff> },
-    GitCommit { req: GitCommitRequest, reply: Reply<()> },
-    GitPush { target: GitTarget, reply: Reply<()> },
-    GitBranches { target: GitTarget, reply: Reply<GitBranches> },
-    GitSwitch { req: GitSwitchRequest, reply: Reply<()> },
-    WorktreeMerge { thread_id: String, reply: Reply<()> },
-    WorktreeRemove { req: WorktreeRemoveRequest, reply: Reply<()> },
-    Commands { thread_id: String, reply: Reply<Vec<CommandInfo>> },
-    Settings { reply: Reply<MacSettings> },
-    SetSettings { change: SettingsChange, reply: Reply<MacSettings> },
-    Search { req: SearchRequest, reply: Reply<SearchResults> },
-    UseReset { credit_id: String, reply: Reply<()> },
-    QueueAction { req: QueueActionRequest, reply: Reply<Option<String>> },
-    Attachment { req: AttachmentRequest, reply: Reply<Attachment> },
-    BackgroundOutput { thread_id: String, task_id: String, reply: Reply<BackgroundOutput> },
-    StopBackground { thread_id: String, task_id: String, reply: Reply<()> },
-    Icon { req: IconRequest, reply: Reply<Icon> },
-    NoteAsset { req: NoteAssetRequest, reply: Reply<NoteAsset> },
-    AddNoteImage { req: AddNoteImageRequest, reply: Reply<NoteImage> },
-    NoteFile { req: NoteFileRequest, reply: Reply<NoteFileChunk> },
+    Unwatch {
+        thread_id: String,
+    },
+    Send {
+        req: SendRequest,
+        reply: Reply<Option<Open>>,
+    },
+    NewThread {
+        req: NewThreadRequest,
+        reply: Reply<String>,
+    },
+    Answer {
+        req: AnswerRequest,
+        reply: Reply<()>,
+    },
+    Interrupt {
+        thread_id: String,
+        reply: Reply<()>,
+    },
+    MarkSeen {
+        thread_id: String,
+        reply: Reply<()>,
+    },
+    SetPrefs {
+        req: PrefsRequest,
+        reply: Reply<()>,
+    },
+    ThreadAction {
+        req: ThreadActionRequest,
+        reply: Reply<()>,
+    },
+    Usage {
+        reply: Reply<Usage>,
+    },
+    Basecamp {
+        range: BasecampRange,
+        reply: Reply<Basecamp>,
+    },
+    Notes {
+        reply: Reply<Vec<NoteSummary>>,
+    },
+    Note {
+        note_id: String,
+        reply: Reply<Note>,
+    },
+    CreateNote {
+        body: String,
+        reply: Reply<Note>,
+    },
+    SaveNote {
+        req: SaveNoteRequest,
+        reply: Reply<Note>,
+    },
+    DeleteNote {
+        note_id: String,
+        reply: Reply<()>,
+    },
+    GitStatus {
+        target: GitTarget,
+        reply: Reply<GitStatus>,
+    },
+    GitDiff {
+        req: GitDiffRequest,
+        reply: Reply<GitDiff>,
+    },
+    GitCommit {
+        req: GitCommitRequest,
+        reply: Reply<()>,
+    },
+    GitPush {
+        target: GitTarget,
+        reply: Reply<()>,
+    },
+    GitBranches {
+        target: GitTarget,
+        reply: Reply<GitBranches>,
+    },
+    GitSwitch {
+        req: GitSwitchRequest,
+        reply: Reply<()>,
+    },
+    WorktreeMerge {
+        thread_id: String,
+        reply: Reply<()>,
+    },
+    WorktreeRemove {
+        req: WorktreeRemoveRequest,
+        reply: Reply<()>,
+    },
+    Commands {
+        thread_id: String,
+        reply: Reply<Vec<CommandInfo>>,
+    },
+    Settings {
+        reply: Reply<MacSettings>,
+    },
+    SetSettings {
+        change: SettingsChange,
+        reply: Reply<MacSettings>,
+    },
+    Search {
+        req: SearchRequest,
+        reply: Reply<SearchResults>,
+    },
+    UseReset {
+        credit_id: String,
+        reply: Reply<()>,
+    },
+    QueueAction {
+        req: QueueActionRequest,
+        reply: Reply<Option<String>>,
+    },
+    Attachment {
+        req: AttachmentRequest,
+        reply: Reply<Attachment>,
+    },
+    BackgroundOutput {
+        thread_id: String,
+        task_id: String,
+        reply: Reply<BackgroundOutput>,
+    },
+    StopBackground {
+        thread_id: String,
+        task_id: String,
+        reply: Reply<()>,
+    },
+    Icon {
+        req: IconRequest,
+        reply: Reply<Icon>,
+    },
+    NoteAsset {
+        req: NoteAssetRequest,
+        reply: Reply<NoteAsset>,
+    },
+    AddNoteImage {
+        req: AddNoteImageRequest,
+        reply: Reply<NoteImage>,
+    },
+    NoteFile {
+        req: NoteFileRequest,
+        reply: Reply<NoteFileChunk>,
+    },
     /// See [`RemoteHost::machine_info`].
-    MachineInfo { reply: Reply<MachineInfo> },
+    MachineInfo {
+        reply: Reply<MachineInfo>,
+    },
     /// See [`RemoteHost::clone_project`]: git's output goes to `progress` while it runs; the
     /// reply is the new project's id.
-    CloneProject { req: CloneProjectRequest, progress: CloneProgress, reply: Reply<String> },
+    CloneProject {
+        req: CloneProjectRequest,
+        progress: CloneProgress,
+        reply: Reply<String>,
+    },
     /// See [`RemoteHost::put_files`].
-    PutFiles { project_id: String, files: Vec<FileUpload>, reply: Reply<()> },
+    PutFiles {
+        project_id: String,
+        files: Vec<FileUpload>,
+        reply: Reply<()>,
+    },
 }
 
 /// A [`RemoteHost`] that forwards every call as a [`HostRequest`] over an `async_channel`.
@@ -410,8 +626,12 @@ impl ChannelHost {
 
     async fn call<T>(&self, make: impl FnOnce(Reply<T>) -> HostRequest) -> HostResult<T> {
         let (reply, rx) = oneshot::channel();
-        self.tx.send(make(reply)).await.map_err(|_| HostError::other("Trek isn't answering remote requests"))?;
-        rx.await.map_err(|_| HostError::other("Trek dropped the request"))?
+        self.tx
+            .send(make(reply))
+            .await
+            .map_err(|_| HostError::other("Trek isn't answering remote requests"))?;
+        rx.await
+            .map_err(|_| HostError::other("Trek dropped the request"))?
     }
 }
 
@@ -424,23 +644,48 @@ impl RemoteHost for ChannelHost {
         self.transcript_for(thread_id, None, None).await
     }
 
-    async fn transcript_for(&self, thread_id: &str, after_seq: Option<u64>, limit: Option<u32>) -> HostResult<Transcript> {
+    async fn transcript_for(
+        &self,
+        thread_id: &str,
+        after_seq: Option<u64>,
+        limit: Option<u32>,
+    ) -> HostResult<Transcript> {
         let thread_id = thread_id.to_string();
-        self.call(|reply| HostRequest::Transcript { thread_id, after_seq, limit, reply }).await
+        self.call(|reply| HostRequest::Transcript {
+            thread_id,
+            after_seq,
+            limit,
+            reply,
+        })
+        .await
     }
 
-    async fn transcript_before(&self, thread_id: &str, before: &str, limit: u32) -> HostResult<TranscriptPage> {
+    async fn transcript_before(
+        &self,
+        thread_id: &str,
+        before: &str,
+        limit: u32,
+    ) -> HostResult<TranscriptPage> {
         let (thread_id, before) = (thread_id.to_string(), before.to_string());
-        self.call(|reply| HostRequest::TranscriptBefore { thread_id, before, limit, reply }).await
+        self.call(|reply| HostRequest::TranscriptBefore {
+            thread_id,
+            before,
+            limit,
+            reply,
+        })
+        .await
     }
 
     async fn turn_action(&self, req: TurnActionRequest) -> HostResult<TurnActionDone> {
-        self.call(|reply| HostRequest::TurnAction { req, reply }).await
+        self.call(|reply| HostRequest::TurnAction { req, reply })
+            .await
     }
 
     fn unwatch(&self, thread_id: &str) {
         // Unbounded: queued at once, ahead of any request made after it.
-        let _ = self.tx.try_send(HostRequest::Unwatch { thread_id: thread_id.to_string() });
+        let _ = self.tx.try_send(HostRequest::Unwatch {
+            thread_id: thread_id.to_string(),
+        });
     }
 
     async fn send(&self, req: SendRequest) -> HostResult<Option<Open>> {
@@ -448,7 +693,8 @@ impl RemoteHost for ChannelHost {
     }
 
     async fn new_thread(&self, req: NewThreadRequest) -> HostResult<String> {
-        self.call(|reply| HostRequest::NewThread { req, reply }).await
+        self.call(|reply| HostRequest::NewThread { req, reply })
+            .await
     }
 
     async fn answer(&self, req: AnswerRequest) -> HostResult<()> {
@@ -457,20 +703,24 @@ impl RemoteHost for ChannelHost {
 
     async fn interrupt(&self, thread_id: &str) -> HostResult<()> {
         let thread_id = thread_id.to_string();
-        self.call(|reply| HostRequest::Interrupt { thread_id, reply }).await
+        self.call(|reply| HostRequest::Interrupt { thread_id, reply })
+            .await
     }
 
     async fn mark_seen(&self, thread_id: &str) -> HostResult<()> {
         let thread_id = thread_id.to_string();
-        self.call(|reply| HostRequest::MarkSeen { thread_id, reply }).await
+        self.call(|reply| HostRequest::MarkSeen { thread_id, reply })
+            .await
     }
 
     async fn set_prefs(&self, req: PrefsRequest) -> HostResult<()> {
-        self.call(|reply| HostRequest::SetPrefs { req, reply }).await
+        self.call(|reply| HostRequest::SetPrefs { req, reply })
+            .await
     }
 
     async fn thread_action(&self, req: ThreadActionRequest) -> HostResult<()> {
-        self.call(|reply| HostRequest::ThreadAction { req, reply }).await
+        self.call(|reply| HostRequest::ThreadAction { req, reply })
+            .await
     }
 
     async fn usage(&self) -> HostResult<Usage> {
@@ -478,7 +728,8 @@ impl RemoteHost for ChannelHost {
     }
 
     async fn basecamp(&self, range: BasecampRange) -> HostResult<Basecamp> {
-        self.call(|reply| HostRequest::Basecamp { range, reply }).await
+        self.call(|reply| HostRequest::Basecamp { range, reply })
+            .await
     }
 
     async fn notes(&self) -> HostResult<Vec<NoteSummary>> {
@@ -487,24 +738,29 @@ impl RemoteHost for ChannelHost {
 
     async fn note(&self, note_id: &str) -> HostResult<Note> {
         let note_id = note_id.to_string();
-        self.call(|reply| HostRequest::Note { note_id, reply }).await
+        self.call(|reply| HostRequest::Note { note_id, reply })
+            .await
     }
 
     async fn create_note(&self, body: String) -> HostResult<Note> {
-        self.call(|reply| HostRequest::CreateNote { body, reply }).await
+        self.call(|reply| HostRequest::CreateNote { body, reply })
+            .await
     }
 
     async fn save_note(&self, req: SaveNoteRequest) -> HostResult<Note> {
-        self.call(|reply| HostRequest::SaveNote { req, reply }).await
+        self.call(|reply| HostRequest::SaveNote { req, reply })
+            .await
     }
 
     async fn delete_note(&self, note_id: &str) -> HostResult<()> {
         let note_id = note_id.to_string();
-        self.call(|reply| HostRequest::DeleteNote { note_id, reply }).await
+        self.call(|reply| HostRequest::DeleteNote { note_id, reply })
+            .await
     }
 
     async fn git_status(&self, target: GitTarget) -> HostResult<GitStatus> {
-        self.call(|reply| HostRequest::GitStatus { target, reply }).await
+        self.call(|reply| HostRequest::GitStatus { target, reply })
+            .await
     }
 
     async fn git_diff(&self, req: GitDiffRequest) -> HostResult<GitDiff> {
@@ -512,33 +768,40 @@ impl RemoteHost for ChannelHost {
     }
 
     async fn git_commit(&self, req: GitCommitRequest) -> HostResult<()> {
-        self.call(|reply| HostRequest::GitCommit { req, reply }).await
+        self.call(|reply| HostRequest::GitCommit { req, reply })
+            .await
     }
 
     async fn git_push(&self, target: GitTarget) -> HostResult<()> {
-        self.call(|reply| HostRequest::GitPush { target, reply }).await
+        self.call(|reply| HostRequest::GitPush { target, reply })
+            .await
     }
 
     async fn git_branches(&self, target: GitTarget) -> HostResult<GitBranches> {
-        self.call(|reply| HostRequest::GitBranches { target, reply }).await
+        self.call(|reply| HostRequest::GitBranches { target, reply })
+            .await
     }
 
     async fn git_switch(&self, req: GitSwitchRequest) -> HostResult<()> {
-        self.call(|reply| HostRequest::GitSwitch { req, reply }).await
+        self.call(|reply| HostRequest::GitSwitch { req, reply })
+            .await
     }
 
     async fn worktree_merge(&self, thread_id: &str) -> HostResult<()> {
         let thread_id = thread_id.to_string();
-        self.call(|reply| HostRequest::WorktreeMerge { thread_id, reply }).await
+        self.call(|reply| HostRequest::WorktreeMerge { thread_id, reply })
+            .await
     }
 
     async fn worktree_remove(&self, req: WorktreeRemoveRequest) -> HostResult<()> {
-        self.call(|reply| HostRequest::WorktreeRemove { req, reply }).await
+        self.call(|reply| HostRequest::WorktreeRemove { req, reply })
+            .await
     }
 
     async fn commands(&self, thread_id: &str) -> HostResult<Vec<CommandInfo>> {
         let thread_id = thread_id.to_string();
-        self.call(|reply| HostRequest::Commands { thread_id, reply }).await
+        self.call(|reply| HostRequest::Commands { thread_id, reply })
+            .await
     }
 
     async fn settings(&self) -> HostResult<MacSettings> {
@@ -546,7 +809,8 @@ impl RemoteHost for ChannelHost {
     }
 
     async fn set_settings(&self, change: SettingsChange) -> HostResult<MacSettings> {
-        self.call(|reply| HostRequest::SetSettings { change, reply }).await
+        self.call(|reply| HostRequest::SetSettings { change, reply })
+            .await
     }
 
     async fn search(&self, req: SearchRequest) -> HostResult<SearchResults> {
@@ -555,25 +819,42 @@ impl RemoteHost for ChannelHost {
 
     async fn use_reset(&self, credit_id: &str) -> HostResult<()> {
         let credit_id = credit_id.to_string();
-        self.call(|reply| HostRequest::UseReset { credit_id, reply }).await
+        self.call(|reply| HostRequest::UseReset { credit_id, reply })
+            .await
     }
 
     async fn queue_action(&self, req: QueueActionRequest) -> HostResult<Option<String>> {
-        self.call(|reply| HostRequest::QueueAction { req, reply }).await
+        self.call(|reply| HostRequest::QueueAction { req, reply })
+            .await
     }
 
     async fn attachment(&self, req: AttachmentRequest) -> HostResult<Attachment> {
-        self.call(|reply| HostRequest::Attachment { req, reply }).await
+        self.call(|reply| HostRequest::Attachment { req, reply })
+            .await
     }
 
-    async fn background_output(&self, thread_id: &str, task_id: &str) -> HostResult<BackgroundOutput> {
+    async fn background_output(
+        &self,
+        thread_id: &str,
+        task_id: &str,
+    ) -> HostResult<BackgroundOutput> {
         let (thread_id, task_id) = (thread_id.to_string(), task_id.to_string());
-        self.call(|reply| HostRequest::BackgroundOutput { thread_id, task_id, reply }).await
+        self.call(|reply| HostRequest::BackgroundOutput {
+            thread_id,
+            task_id,
+            reply,
+        })
+        .await
     }
 
     async fn stop_background(&self, thread_id: &str, task_id: &str) -> HostResult<()> {
         let (thread_id, task_id) = (thread_id.to_string(), task_id.to_string());
-        self.call(|reply| HostRequest::StopBackground { thread_id, task_id, reply }).await
+        self.call(|reply| HostRequest::StopBackground {
+            thread_id,
+            task_id,
+            reply,
+        })
+        .await
     }
 
     async fn icon(&self, req: IconRequest) -> HostResult<Icon> {
@@ -581,27 +862,44 @@ impl RemoteHost for ChannelHost {
     }
 
     async fn note_asset(&self, req: NoteAssetRequest) -> HostResult<NoteAsset> {
-        self.call(|reply| HostRequest::NoteAsset { req, reply }).await
+        self.call(|reply| HostRequest::NoteAsset { req, reply })
+            .await
     }
 
     async fn add_note_image(&self, req: AddNoteImageRequest) -> HostResult<NoteImage> {
-        self.call(|reply| HostRequest::AddNoteImage { req, reply }).await
+        self.call(|reply| HostRequest::AddNoteImage { req, reply })
+            .await
     }
 
     async fn note_file(&self, req: NoteFileRequest) -> HostResult<NoteFileChunk> {
-        self.call(|reply| HostRequest::NoteFile { req, reply }).await
+        self.call(|reply| HostRequest::NoteFile { req, reply })
+            .await
     }
 
     async fn machine_info(&self) -> HostResult<MachineInfo> {
         self.call(|reply| HostRequest::MachineInfo { reply }).await
     }
 
-    async fn clone_project(&self, req: CloneProjectRequest, progress: CloneProgress) -> HostResult<String> {
-        self.call(|reply| HostRequest::CloneProject { req, progress, reply }).await
+    async fn clone_project(
+        &self,
+        req: CloneProjectRequest,
+        progress: CloneProgress,
+    ) -> HostResult<String> {
+        self.call(|reply| HostRequest::CloneProject {
+            req,
+            progress,
+            reply,
+        })
+        .await
     }
 
     async fn put_files(&self, project_id: &str, files: Vec<FileUpload>) -> HostResult<()> {
         let project_id = project_id.to_string();
-        self.call(|reply| HostRequest::PutFiles { project_id, files, reply }).await
+        self.call(|reply| HostRequest::PutFiles {
+            project_id,
+            files,
+            reply,
+        })
+        .await
     }
 }

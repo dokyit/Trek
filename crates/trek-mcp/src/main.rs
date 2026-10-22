@@ -66,15 +66,16 @@ fn main() {
             }
         },
         "orchestrate" => {
-            eprintln!("trek-mcp {} (orchestrate) ready on stdio", env!("CARGO_PKG_VERSION"));
+            eprintln!(
+                "trek-mcp {} (orchestrate) ready on stdio",
+                env!("CARGO_PKG_VERSION")
+            );
             orchestrate::serve(orchestrate::Orchestrate::from_env());
         }
         "--version" | "-V" => println!("trek-mcp {}", env!("CARGO_PKG_VERSION")),
         "--help" | "-h" | "help" => print!("{USAGE}"),
         other => {
-            eprintln!(
-                "trek-mcp: unknown or missing tool family {other:?}\n\n{USAGE}"
-            );
+            eprintln!("trek-mcp: unknown or missing tool family {other:?}\n\n{USAGE}");
             std::process::exit(2);
         }
     }
@@ -108,7 +109,10 @@ fn serve(mut tools: Box<dyn rpc::ToolSet>) {
         }
         if let Some(response) = server.handle_line(&line, tools.as_mut()) {
             let mut out = stdout.lock();
-            if writeln!(out, "{response}").and_then(|_| out.flush()).is_err() {
+            if writeln!(out, "{response}")
+                .and_then(|_| out.flush())
+                .is_err()
+            {
                 break;
             }
         }

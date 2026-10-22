@@ -11,7 +11,11 @@ const CLOSE: &str = "</trek-inline-edit>";
 /// read it: relative to its folder).
 pub fn block(path: &str, lines: (u32, u32)) -> String {
     let (a, b) = lines;
-    let which = if a == b { format!("line {a}") } else { format!("lines {a}-{b}") };
+    let which = if a == b {
+        format!("line {a}")
+    } else {
+        format!("lines {a}-{b}")
+    };
     format!(
         "{OPEN} path=\"{path}\" lines=\"{a}-{b}\">Inline edit: change {which} of {path} as asked above, editing the file in place. Leave the rest of the file as it is. The lines as they are now are attached. Make the edit directly rather than showing it, then reply with one short sentence.{CLOSE}"
     )
@@ -33,7 +37,10 @@ pub fn parse(text: &str) -> Option<(String, (u32, u32))> {
         Some(&head[from..from + head[from..].find('"')?])
     };
     let (a, b) = attr("lines")?.split_once('-')?;
-    Some((attr("path")?.to_string(), (a.parse().ok()?, b.parse().ok()?)))
+    Some((
+        attr("path")?.to_string(),
+        (a.parse().ok()?, b.parse().ok()?),
+    ))
 }
 
 /// A message without its block, and whether it had one.
@@ -50,9 +57,16 @@ mod tests {
 
     #[test]
     fn the_block_names_the_lines_and_comes_off_again() {
-        let text = with_block("make it async\n\n<trek-context>…</trek-context>", "src/a.rs", (3, 8));
+        let text = with_block(
+            "make it async\n\n<trek-context>…</trek-context>",
+            "src/a.rs",
+            (3, 8),
+        );
         assert_eq!(parse(&text), Some(("src/a.rs".to_string(), (3, 8))));
-        assert_eq!(split(&text), ("make it async\n\n<trek-context>…</trek-context>", true));
+        assert_eq!(
+            split(&text),
+            ("make it async\n\n<trek-context>…</trek-context>", true)
+        );
         assert!(block("a.rs", (4, 4)).contains("change line 4 of a.rs"));
         assert_eq!(split("plain"), ("plain", false));
         assert_eq!(parse("plain"), None);

@@ -24,13 +24,19 @@ pub struct SideChatPanel {
 impl SideChatPanel {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cmd_enter = workspace.read(cx).settings.general.send_with_cmd_enter;
-        let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 8).submit_on_enter(!cmd_enter).placeholder("Ask on the side…"));
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(2, 8)
+                .submit_on_enter(!cmd_enter)
+                .placeholder("Ask on the side…")
+        });
         let subs = vec![
             cx.observe(&workspace, |this, ws, cx| {
                 let cmd_enter = ws.read(cx).settings.general.send_with_cmd_enter;
                 if cmd_enter != this.cmd_enter {
                     this.cmd_enter = cmd_enter;
-                    this.input.update(cx, |s, cx| s.set_submit_on_enter(!cmd_enter, cx));
+                    this.input
+                        .update(cx, |s, cx| s.set_submit_on_enter(!cmd_enter, cx));
                 }
                 this.scroll.scroll_to_bottom();
                 cx.notify();
@@ -43,21 +49,38 @@ impl SideChatPanel {
                     cx.notify();
                 }
             }),
-            cx.subscribe_in(&input, window, |this, state, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::Change) {
-                    cx.notify();
-                }
-                if let InputEvent::PressEnter { shift, secondary } = event {
-                    if if this.cmd_enter { *secondary } else { !*shift } {
-                        this.submit(state.clone(), window, cx);
+            cx.subscribe_in(
+                &input,
+                window,
+                |this, state, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        cx.notify();
                     }
-                }
-            }),
+                    if let InputEvent::PressEnter { shift, secondary } = event {
+                        if if this.cmd_enter { *secondary } else { !*shift } {
+                            this.submit(state.clone(), window, cx);
+                        }
+                    }
+                },
+            ),
         ];
-        Self { workspace, thread_id: None, input, scroll: ScrollHandle::new(), outbox: Outbox::default(), cmd_enter, _subscriptions: subs }
+        Self {
+            workspace,
+            thread_id: None,
+            input,
+            scroll: ScrollHandle::new(),
+            outbox: Outbox::default(),
+            cmd_enter,
+            _subscriptions: subs,
+        }
     }
 
-    fn submit(&mut self, state: Entity<TextareaState>, window: &mut Window, cx: &mut Context<Self>) {
+    fn submit(
+        &mut self,
+        state: Entity<TextareaState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let target = self.target(cx);
         if self.outbox.hold_send(target) {
             cx.notify();
@@ -77,7 +100,8 @@ impl SideChatPanel {
             self.thread_id = self.workspace.update(cx, |ws, cx| ws.create_side_chat(cx));
         }
         if let Some(id) = self.thread_id.clone() {
-            self.workspace.update(cx, |ws, cx| ws.send_to(&id, text, images, cx));
+            self.workspace
+                .update(cx, |ws, cx| ws.send_to(&id, text, images, cx));
         }
     }
 }
@@ -113,7 +137,12 @@ impl Render for SideChatPanel {
         let items: Vec<Item> = live.map(|l| l.items.to_vec()).unwrap_or_default();
         let streaming = live.and_then(|l| l.streaming);
         // While it answers, a trail word ("Breaking trail…") rather than a plain "Working…".
-        let working = live.and_then(|l| l.turn_started).map(|t| crate::working_bar::trail_word(self.thread_id.as_deref().unwrap_or_default(), Some(t.elapsed())));
+        let working = live.and_then(|l| l.turn_started).map(|t| {
+            crate::working_bar::trail_word(
+                self.thread_id.as_deref().unwrap_or_default(),
+                Some(t.elapsed()),
+            )
+        });
         let now = ws.now();
         let amber = crate::palette::amber(cx);
         let prefs = ws.prefs();
@@ -124,11 +153,17 @@ impl Render for SideChatPanel {
         let folder = thread.and_then(|t| ws.thread_project_tint(t, cx));
         let text_size = px(ws.settings.appearance.transcript_font_size()) * 0.93;
         let answering = working.is_some();
-        let empty = self.input.read(cx).value().trim().is_empty() && self.outbox.paths.is_empty() && self.outbox.saving == 0;
+        let empty = self.input.read(cx).value().trim().is_empty()
+            && self.outbox.paths.is_empty()
+            && self.outbox.saving == 0;
         let none_yet = items.is_empty();
         // The box says where to type: lit while the keys go to it, and plainly a box when not.
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
-        let send_key = crate::keys::shared(if self.cmd_enter { "⌘↩ to send" } else { "↩ to send, ⇧↩ for a new line" });
+        let send_key = crate::keys::shared(if self.cmd_enter {
+            "⌘↩ to send"
+        } else {
+            "↩ to send, ⇧↩ for a new line"
+        });
         v_flex()
             .size_full()
             .child(

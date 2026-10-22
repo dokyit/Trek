@@ -18,12 +18,18 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 /// public key line.
 pub fn keygen(dir: &Path) -> std::io::Result<String> {
     let mut secret = [0u8; 40];
-    ring::rand::SystemRandom::new().fill(&mut secret).map_err(|_| std::io::Error::other("no randomness"))?;
+    ring::rand::SystemRandom::new()
+        .fill(&mut secret)
+        .map_err(|_| std::io::Error::other("no randomness"))?;
     let (id, seed) = secret.split_at(8);
-    let pair = Ed25519KeyPair::from_seed_unchecked(seed).map_err(|_| std::io::Error::other("bad seed"))?;
+    let pair =
+        Ed25519KeyPair::from_seed_unchecked(seed).map_err(|_| std::io::Error::other("bad seed"))?;
     let line = B64.encode([b"Ed".as_slice(), id, pair.public_key().as_ref()].concat());
     std::fs::create_dir_all(dir)?;
-    std::fs::write(dir.join("test.pub"), format!("untrusted comment: Trek update test key\n{line}\n"))?;
+    std::fs::write(
+        dir.join("test.pub"),
+        format!("untrusted comment: Trek update test key\n{line}\n"),
+    )?;
     std::fs::write(dir.join("test.seed"), format!("{}\n", hex(&secret)))?;
     Ok(line)
 }
@@ -32,9 +38,12 @@ pub fn keygen(dir: &Path) -> std::io::Result<String> {
 /// signature file's text.
 pub fn sign(seed_file: &Path, file: &Path, trusted_comment: &str) -> std::io::Result<String> {
     let text = std::fs::read_to_string(seed_file)?;
-    let secret = unhex(text.trim()).filter(|s| s.len() == 40).ok_or_else(|| std::io::Error::other("not a key from minisign-keygen"))?;
+    let secret = unhex(text.trim())
+        .filter(|s| s.len() == 40)
+        .ok_or_else(|| std::io::Error::other("not a key from minisign-keygen"))?;
     let (id, seed) = secret.split_at(8);
-    let pair = Ed25519KeyPair::from_seed_unchecked(seed).map_err(|_| std::io::Error::other("bad seed"))?;
+    let pair =
+        Ed25519KeyPair::from_seed_unchecked(seed).map_err(|_| std::io::Error::other("bad seed"))?;
     let mut hash = Blake2b::new();
     hash.update(&std::fs::read(file)?);
     let signature = pair.sign(&hash.finalize());
@@ -56,7 +65,10 @@ fn hex(bytes: &[u8]) -> String {
 
 fn unhex(s: &str) -> Option<Vec<u8>> {
     (s.len() % 2 == 0).then_some(())?;
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
 }
 
 /// BLAKE2b with a 64-byte digest and no key (RFC 7693).
@@ -102,7 +114,12 @@ impl Blake2b {
         let mut h = IV;
         // Parameter block: digest length 64, no key, fanout and depth 1.
         h[0] ^= 0x0101_0000 ^ 64;
-        Blake2b { h, t: 0, buf: [0; 128], len: 0 }
+        Blake2b {
+            h,
+            t: 0,
+            buf: [0; 128],
+            len: 0,
+        }
     }
 
     pub fn update(&mut self, mut data: &[u8]) {
@@ -135,7 +152,9 @@ impl Blake2b {
     }
 
     fn compress(&mut self, block: &[u8; 128], last: bool) {
-        let m: [u64; 16] = std::array::from_fn(|i| u64::from_le_bytes(block[i * 8..i * 8 + 8].try_into().unwrap()));
+        let m: [u64; 16] = std::array::from_fn(|i| {
+            u64::from_le_bytes(block[i * 8..i * 8 + 8].try_into().unwrap())
+        });
         let mut v = [0u64; 16];
         v[..8].copy_from_slice(&self.h);
         v[8..].copy_from_slice(&IV);
@@ -183,8 +202,14 @@ mod tests {
 
     #[test]
     fn blake2b_matches_the_reference_vectors() {
-        assert_eq!(digest(b""), "786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce");
-        assert_eq!(digest(b"abc"), "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923");
+        assert_eq!(
+            digest(b""),
+            "786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce"
+        );
+        assert_eq!(
+            digest(b"abc"),
+            "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923"
+        );
         // Across block boundaries, fed whole or in pieces.
         let long: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
         let mut pieces = Blake2b::new();
@@ -197,13 +222,17 @@ mod tests {
 
     #[test]
     fn signatures_verify_as_trek_verifies_them() {
-        let dir = std::env::temp_dir().join(format!("trek-fixture-minisign-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("trek-fixture-minisign-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let line = keygen(&dir).unwrap();
         let file = dir.join("Trek-0.4.1.zip");
         std::fs::write(&file, vec![7u8; 300]).unwrap();
         let sig = sign(&dir.join("test.seed"), &file, "Trek 0.4.1 windows-x86_64").unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join("Trek-0.4.1.zip.minisig")).unwrap(), sig);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("Trek-0.4.1.zip.minisig")).unwrap(),
+            sig
+        );
 
         let key = minisign_verify::PublicKey::from_base64(&line).unwrap();
         let signature = minisign_verify::Signature::decode(&sig).unwrap();

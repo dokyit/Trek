@@ -39,7 +39,12 @@ pub(crate) struct Mover {
 
 impl Default for Mover {
     fn default() -> Self {
-        Mover { copy: relocate::copy_out, start: relocate::start_copy, remove: remove_here, shortcuts: shortcuts::retarget_user_shortcuts }
+        Mover {
+            copy: relocate::copy_out,
+            start: relocate::start_copy,
+            remove: remove_here,
+            shortcuts: shortcuts::retarget_user_shortcuts,
+        }
     }
 }
 
@@ -47,7 +52,9 @@ impl Default for Mover {
 fn remove_here(old: &Path) -> Removal {
     match relocate::running_from() {
         Some(here) => relocate::remove_old_copy(old, &here),
-        None => Removal::Kept("Trek can't tell which folder it runs from, so it left the old copy alone.".into()),
+        None => Removal::Kept(
+            "Trek can't tell which folder it runs from, so it left the old copy alone.".into(),
+        ),
     }
 }
 
@@ -56,9 +63,18 @@ impl Workspace {
     pub(super) fn moving_view(&self, view: UpdateView) -> UpdateView {
         match &self.moving {
             Moving::No => view,
-            Moving::Copying => UpdateView { line: format!("Copying Trek to {}…", relocate::destination_hint()), action: None, secondary: None, busy: true, progress: None },
+            Moving::Copying => UpdateView {
+                line: format!("Copying Trek to {}…", relocate::destination_hint()),
+                action: None,
+                secondary: None,
+                busy: true,
+                progress: None,
+            },
             Moving::Waiting(p) | Moving::Starting(p, _) => UpdateView {
-                line: format!("Trek moves to {} when your agents finish their turns. Moving now stops them.", p.to.display()),
+                line: format!(
+                    "Trek moves to {} when your agents finish their turns. Moving now stops them.",
+                    p.to.display()
+                ),
                 action: Some(UpdateAction::MoveNow),
                 secondary: None,
                 busy: false,
@@ -70,7 +86,9 @@ impl Workspace {
     /// The Updates page's offer to remove the copy Trek left behind in its last folder, while it
     /// stands.
     pub fn old_copy_view(&self) -> Option<UpdateView> {
-        self.old_copy.as_ref().map(crate::updater::describe_old_copy)
+        self.old_copy
+            .as_ref()
+            .map(crate::updater::describe_old_copy)
     }
 
     /// At launch, from the copy of a Trek that moved: say where it runs now (a toast, with the
@@ -79,11 +97,22 @@ impl Workspace {
     pub(crate) fn arrived(&mut self, relocated: Relocated, cx: &mut Context<Self>) {
         let Relocated { moved, fresh } = relocated;
         // The page has it at once; the toast follows once the shortcuts have been looked through.
-        self.old_copy = relocate::old_copy_remains(&moved.from).then(|| OldCopy { from: moved.from.clone(), to: moved.to.clone(), shortcuts: Report::default(), refused: false });
+        self.old_copy = relocate::old_copy_remains(&moved.from).then(|| OldCopy {
+            from: moved.from.clone(),
+            to: moved.to.clone(),
+            shortcuts: Report::default(),
+            refused: false,
+        });
         let shortcuts = self.mover.shortcuts;
         let (old_exe, new_exe) = (relocate::exe_in(&moved.from), relocate::exe_in(&moved.to));
         let task = cx.spawn(async move |this, cx| {
-            let report = if fresh { cx.background_executor().spawn(async move { shortcuts(&old_exe, &new_exe) }).await } else { Report::default() };
+            let report = if fresh {
+                cx.background_executor()
+                    .spawn(async move { shortcuts(&old_exe, &new_exe) })
+                    .await
+            } else {
+                Report::default()
+            };
             let _ = this.update(cx, |this, cx| {
                 let (message, undo) = moved_note(&moved, &report);
                 if let Some(old) = this.old_copy.as_mut().filter(|o| o.from == moved.from) {
@@ -98,10 +127,15 @@ impl Workspace {
 
     /// Opening the Updates page: the old copy may have been deleted by hand since Trek last looked.
     pub(super) fn recheck_old_copy(&mut self, cx: &mut Context<Self>) {
-        let Some(from) = self.old_copy.as_ref().map(|o| o.from.clone()) else { return };
+        let Some(from) = self.old_copy.as_ref().map(|o| o.from.clone()) else {
+            return;
+        };
         let task = cx.spawn(async move |this, cx| {
             let checked = from.clone();
-            let remains = cx.background_executor().spawn(async move { relocate::old_copy_remains(&checked) }).await;
+            let remains = cx
+                .background_executor()
+                .spawn(async move { relocate::old_copy_remains(&checked) })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if !remains && this.old_copy.as_ref().is_some_and(|o| o.from == from) {
                     this.forget_old_copy(cx);
@@ -125,7 +159,12 @@ impl Workspace {
 
     /// "Remove old copy" on the Updates page.
     pub(super) fn remove_offered_old_copy(&mut self, cx: &mut Context<Self>) {
-        if let Some(old) = self.old_copy.as_ref().filter(|o| !o.refused).map(|o| o.from.clone()) {
+        if let Some(old) = self
+            .old_copy
+            .as_ref()
+            .filter(|o| !o.refused)
+            .map(|o| o.from.clone())
+        {
             self.remove_old_copy(old, cx);
         }
     }
@@ -140,7 +179,10 @@ impl Workspace {
         cx.notify();
         let copy = self.mover.copy;
         let task = cx.spawn(async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { copy().map_err(|e| format!("{e:#}")) }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move { copy().map_err(|e| format!("{e:#}")) })
+                .await;
             let _ = this.update(cx, |this, cx| this.copied(result, cx));
         });
         self.keep(task);
@@ -151,12 +193,20 @@ impl Workspace {
             Err(e) => {
                 tracing::warn!("relocation: {e}");
                 self.moving = Moving::No;
-                cx.emit(WorkspaceEvent::Toast { message: format!("Trek couldn't move itself to its own folder: {e}. Nothing was changed."), undo: None });
+                cx.emit(WorkspaceEvent::Toast {
+                    message: format!(
+                        "Trek couldn't move itself to its own folder: {e}. Nothing was changed."
+                    ),
+                    undo: None,
+                });
                 cx.notify();
             }
             Ok(prepared) if self.work_in_flight() => {
                 cx.emit(WorkspaceEvent::Toast {
-                    message: format!("Trek is copied to {}. It moves there when your agents finish their turns.", prepared.to.display()),
+                    message: format!(
+                        "Trek is copied to {}. It moves there when your agents finish their turns.",
+                        prepared.to.display()
+                    ),
                     undo: None,
                 });
                 self.moving = Moving::Waiting(prepared);
@@ -169,17 +219,28 @@ impl Workspace {
     /// Agents are done and a move was waiting: it goes, after a few seconds the toast can call off.
     /// (Housekeeping and every finished turn ask, as for an update's restart.)
     pub(super) fn maybe_move(&mut self, cx: &mut Context<Self>) {
-        let Moving::Waiting(prepared) = &self.moving else { return };
+        let Moving::Waiting(prepared) = &self.moving else {
+            return;
+        };
         if self.work_in_flight() {
             return;
         }
-        let message = format!("Trek moves to {} in {} seconds.", prepared.to.display(), RESTART_GRACE.as_secs());
-        cx.emit(WorkspaceEvent::Toast { message, undo: Some(UndoAction::CancelMove) });
+        let message = format!(
+            "Trek moves to {} in {} seconds.",
+            prepared.to.display(),
+            RESTART_GRACE.as_secs()
+        );
+        cx.emit(WorkspaceEvent::Toast {
+            message,
+            undo: Some(UndoAction::CancelMove),
+        });
         let prepared = prepared.clone();
         let countdown = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(RESTART_GRACE).await;
             let _ = this.update(cx, |this, cx| match std::mem::take(&mut this.moving) {
-                Moving::Starting(prepared, _) if !this.work_in_flight() => this.finish_move(prepared, cx),
+                Moving::Starting(prepared, _) if !this.work_in_flight() => {
+                    this.finish_move(prepared, cx)
+                }
                 // Work that started meanwhile is waited for again.
                 Moving::Starting(prepared, _) => {
                     this.moving = Moving::Waiting(prepared);
@@ -201,7 +262,9 @@ impl Workspace {
 
     /// "Move now" while agents work: the user's call, what's running stops.
     pub(super) fn move_now(&mut self, cx: &mut Context<Self>) {
-        if let Moving::Waiting(prepared) | Moving::Starting(prepared, _) = std::mem::take(&mut self.moving) {
+        if let Moving::Waiting(prepared) | Moving::Starting(prepared, _) =
+            std::mem::take(&mut self.moving)
+        {
             self.finish_move(prepared, cx);
         }
     }
@@ -224,10 +287,16 @@ impl Workspace {
         let remove = self.mover.remove;
         let task = cx.spawn(async move |this, cx| {
             let shown = old.clone();
-            let removal = cx.background_executor().spawn(async move { remove(&old) }).await;
+            let removal = cx
+                .background_executor()
+                .spawn(async move { remove(&old) })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.old_copy_dealt_with(&shown, &removal, cx);
-                cx.emit(WorkspaceEvent::Toast { message: removal_message(&shown, &removal), undo: None });
+                cx.emit(WorkspaceEvent::Toast {
+                    message: removal_message(&shown, &removal),
+                    undo: None,
+                });
             });
         });
         self.keep(task);
@@ -236,7 +305,9 @@ impl Workspace {
     /// What the page offers follows what became of the old copy: gone (or not Trek's to delete) is
     /// done with; what Windows refused is the user's, and says so.
     fn old_copy_dealt_with(&mut self, old: &Path, removal: &Removal, cx: &mut Context<Self>) {
-        let Some(offer) = self.old_copy.as_mut().filter(|o| o.from == old) else { return };
+        let Some(offer) = self.old_copy.as_mut().filter(|o| o.from == old) else {
+            return;
+        };
         match removal {
             Removal::Refused => {
                 offer.refused = true;
@@ -254,7 +325,10 @@ pub(crate) fn removal_message(old: &Path, removal: &Removal) -> String {
         Removal::Gone => format!("The old copy in {} is gone already.", old.display()),
         Removal::Kept(why) => why.clone(),
         // The one thing left to the user, and only when Windows refuses.
-        Removal::Refused => format!("Windows wouldn't let Trek remove it; delete {} yourself when convenient.", old.display()),
+        Removal::Refused => format!(
+            "Windows wouldn't let Trek remove it; delete {} yourself when convenient.",
+            old.display()
+        ),
     }
 }
 
@@ -265,14 +339,25 @@ pub(crate) fn moved_note(moved: &Moved, shortcuts: &Report) -> (String, Option<U
     if !relocate::old_copy_remains(&moved.from) {
         return (with_shortcuts(&runs, shortcuts), None);
     }
-    let message = with_shortcuts(&format!("{runs}. The copy in {} isn't needed any more", moved.from.display()), shortcuts);
+    let message = with_shortcuts(
+        &format!(
+            "{runs}. The copy in {} isn't needed any more",
+            moved.from.display()
+        ),
+        shortcuts,
+    );
     (message, Some(UndoAction::RemoveOldCopy(moved.from.clone())))
 }
 
 /// At launch, from a folder Windows's ransomware protection guards: the offer to move, every
 /// launch (it is a real problem every time).
-pub(crate) fn guarded_offer(blocker: Option<Blocker>, windows: bool) -> Option<(String, UndoAction)> {
-    let Some(Blocker::GuardedFolder(folder)) = blocker.filter(|_| windows) else { return None };
+pub(crate) fn guarded_offer(
+    blocker: Option<Blocker>,
+    windows: bool,
+) -> Option<(String, UndoAction)> {
+    let Some(Blocker::GuardedFolder(folder)) = blocker.filter(|_| windows) else {
+        return None;
+    };
     let message = format!(
         "Trek is in {}, which Windows's ransomware protection guards, so it can't update itself there. It can move itself to {} and start from there.",
         folder.name(),

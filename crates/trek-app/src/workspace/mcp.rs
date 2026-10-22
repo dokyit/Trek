@@ -22,7 +22,12 @@ pub enum McpCheck {
 pub fn mcp_server_of(s: &McpServerConfig) -> McpServer {
     match &s.url {
         Some(url) => McpServer::http(s.name.clone(), url.clone(), s.resolved_headers()),
-        None => McpServer::stdio(s.name.clone(), s.command.clone(), s.args.clone(), s.resolved_env()),
+        None => McpServer::stdio(
+            s.name.clone(),
+            s.command.clone(),
+            s.args.clone(),
+            s.resolved_env(),
+        ),
     }
 }
 
@@ -31,9 +36,19 @@ impl Workspace {
     /// tools, off the main thread; `mcp_checks` has the outcome.
     pub fn check_mcp_server(&mut self, name: &str, cx: &mut Context<Self>) {
         static NEXT: AtomicU64 = AtomicU64::new(1);
-        let Some(config) = self.settings.tools.mcp_servers.iter().find(|s| s.name == name).cloned() else { return };
+        let Some(config) = self
+            .settings
+            .tools
+            .mcp_servers
+            .iter()
+            .find(|s| s.name == name)
+            .cloned()
+        else {
+            return;
+        };
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        self.mcp_checks.insert(name.to_string(), McpCheck::Checking(id));
+        self.mcp_checks
+            .insert(name.to_string(), McpCheck::Checking(id));
         cx.notify();
         let (tx, rx) = async_channel::bounded(1);
         trek_core::runtime().spawn(async move {
@@ -51,7 +66,8 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 // Only the latest check of a server that's still there counts.
                 if this.mcp_checks.get(&name) == Some(&McpCheck::Checking(id)) {
-                    this.mcp_checks.insert(name, found.map_or_else(McpCheck::Failed, McpCheck::Works));
+                    this.mcp_checks
+                        .insert(name, found.map_or_else(McpCheck::Failed, McpCheck::Works));
                     cx.notify();
                 }
             });

@@ -3,21 +3,30 @@
 //! streaming tool-call accumulation, including fallback XML tool-call parsing for fine-tuned models.
 
 use crate::{AgentEvent, Billing, Command, Decision, SessionConfig, load_image};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
-use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use futures::StreamExt;
 use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use trek_core::catalog::{DirectProvider, ModelInfo, Wire, direct_provider};
 use trek_core::settings::secrets;
 use trek_core::{AgentId, Effort, HandHolding, TokenUsage, UsageCost};
 
 /// The error for a failed request: a usage limit for a 429 (said with `AgentEvent::LimitReached`),
 /// else `message` as it is.
-fn request_error(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap, message: String) -> anyhow::Error {
+fn request_error(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    message: String,
+) -> anyhow::Error {
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        return crate::limits::LimitError(crate::limits::from_response(headers, message, trek_core::store::now_ms())).into();
+        return crate::limits::LimitError(crate::limits::from_response(
+            headers,
+            message,
+            trek_core::store::now_ms(),
+        ))
+        .into();
     }
     anyhow::anyhow!(message)
 }
@@ -155,6 +164,9 @@ pub struct AccumulatedToolCall {
 pub struct TurnResponse {
     pub text: String,
     pub content: Option<Value>,
+    /// OpenRouter's `reasoning_details` parts, kept to echo back with the next request: some
+    /// providers route a turn through a model that wants its own thinking returned.
+    pub reasoning_details: Vec<Value>,
     pub tool_calls: Vec<AccumulatedToolCall>,
 }
 
@@ -165,11 +177,17 @@ pub async fn run(
     commands: async_channel::Receiver<Command>,
     events: async_channel::Sender<AgentEvent>,
 ) -> Result<()> {
-    let AgentId::Direct(provider_id) = &config.agent else { unreachable!() };
-    let provider = direct_provider(provider_id).with_context(|| format!("unknown provider {provider_id}"))?;
+    let AgentId::Direct(provider_id) = &config.agent else {
+        unreachable!()
+    };
+    let provider =
+        direct_provider(provider_id).with_context(|| format!("unknown provider {provider_id}"))?;
     let key = secrets::api_key(provider.id);
     if !provider.local && key.is_none() {
-        bail!("No API key for {}. Add one in Settings → API Keys.", provider.name);
+        bail!(
+            "No API key for {}. Add one in Settings → API Keys.",
+            provider.name
+        );
     }
     let url = match provider.wire {
         Wire::Anthropic => ANTHROPIC_MESSAGES_URL,
@@ -194,11 +212,24 @@ async fn session(
     let mut allowed_for_session = HashSet::new();
     let client = reqwest::Client::new();
     events
-        .send(AgentEvent::Started { native_id: config.resume.clone().unwrap_or_default(), model: Some(model.clone()) })
+        .send(AgentEvent::Started {
+            native_id: config.resume.clone().unwrap_or_default(),
+            model: Some(model.clone()),
+        })
         .await?;
-    events.send(AgentEvent::Billing(if provider.local { Billing::Local } else { Billing::Metered })).await?;
+    events
+        .send(AgentEvent::Billing(if provider.local {
+            Billing::Local
+        } else {
+            Billing::Metered
+        }))
+        .await?;
 
-    let system = system_prompt(&config.cwd, config.read_only, config.instructions.as_deref());
+    let system = system_prompt(
+        &config.cwd,
+        config.read_only,
+        config.instructions.as_deref(),
+    );
     let mut history: Vec<Value> = Vec::new();
     let mut kept = VecDeque::new();
     let mut shutdown = false;
@@ -218,7 +249,9 @@ async fn session(
                 while let Some((text, images)) = next.take() {
                     let (message, skipped) = user_message(provider.wire, &text, &images);
                     for e in skipped {
-                        events.send(AgentEvent::Notice(format!("Image left out: {e}"))).await?;
+                        events
+                            .send(AgentEvent::Notice(format!("Image left out: {e}")))
+                            .await?;
                     }
                     // Where this message starts in `history`: a failed first request takes it back
                     // out, so the next message doesn't carry one that was never answered.
@@ -232,7 +265,20 @@ async fn session(
                         turn_count += 1;
                         let result = match provider.wire {
                             Wire::Anthropic => {
-                                anthropic_turn(&client, url, key.as_deref().unwrap_or_default(), &model, effort, &system, &history, &events, &commands, &mut kept, &mut shutdown).await
+                                anthropic_turn(
+                                    &client,
+                                    url,
+                                    key.as_deref().unwrap_or_default(),
+                                    &model,
+                                    effort,
+                                    &system,
+                                    &history,
+                                    &events,
+                                    &commands,
+                                    &mut kept,
+                                    &mut shutdown,
+                                )
+                                .await
                             }
                             _ => {
                                 let usage = REPORTS_USAGE.contains(&provider.id);
@@ -260,21 +306,33 @@ async fn session(
                                 let anthropic = resp.content.is_some();
                                 match resp.content {
                                     Some(content) => history.push(content),
-                                    None if resp.tool_calls.is_empty() => history.push(json!({ "role": "assistant", "content": resp.text })),
+                                    None if resp.tool_calls.is_empty() => history
+                                        .push(json!({ "role": "assistant", "content": resp.text })),
                                     None => {
-                                        let tool_calls_json: Vec<Value> = resp.tool_calls.iter().map(|c| json!({
-                                            "id": c.id,
-                                            "type": "function",
-                                            "function": {
-                                                "name": c.name,
-                                                "arguments": c.arguments
-                                            }
-                                        })).collect();
-                                        history.push(json!({
+                                        let tool_calls_json: Vec<Value> = resp
+                                            .tool_calls
+                                            .iter()
+                                            .map(|c| {
+                                                json!({
+                                                    "id": c.id,
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": c.name,
+                                                        "arguments": c.arguments
+                                                    }
+                                                })
+                                            })
+                                            .collect();
+                                        let mut message = json!({
                                             "role": "assistant",
                                             "content": if resp.text.is_empty() { Value::Null } else { Value::String(resp.text.clone()) },
                                             "tool_calls": tool_calls_json
-                                        }));
+                                        });
+                                        if !resp.reasoning_details.is_empty() {
+                                            message["reasoning_details"] =
+                                                json!(resp.reasoning_details);
+                                        }
+                                        history.push(message);
                                     }
                                 }
                                 if resp.tool_calls.is_empty() {
@@ -287,11 +345,13 @@ async fn session(
                                 let mut stopped = None;
                                 for (i, call) in resp.tool_calls.iter().enumerate() {
                                     let (title, detail) = tool_display(&call.name, &call.arguments);
-                                    events.send(AgentEvent::ToolStarted {
-                                        id: call.id.clone(),
-                                        title: title.to_string(),
-                                        detail: detail.clone(),
-                                    }).await?;
+                                    events
+                                        .send(AgentEvent::ToolStarted {
+                                            id: call.id.clone(),
+                                            title: title.to_string(),
+                                            detail: detail.clone(),
+                                        })
+                                        .await?;
 
                                     let ran = execute_tool(
                                         &call.name,
@@ -304,7 +364,8 @@ async fn session(
                                         &commands,
                                         &mut kept,
                                         &mut shutdown,
-                                    ).await;
+                                    )
+                                    .await;
                                     let (output, ok, lines, stop) = match ran {
                                         Ok((output, ok, lines)) => (output, ok, lines, None),
                                         // A Stop (or shutdown) while the tool ran or waited for
@@ -313,23 +374,31 @@ async fn session(
                                     };
 
                                     if let Some((added, removed)) = lines {
-                                        events.send(AgentEvent::ToolLines {
-                                            id: call.id.clone(),
-                                            added,
-                                            removed,
-                                        }).await?;
+                                        events
+                                            .send(AgentEvent::ToolLines {
+                                                id: call.id.clone(),
+                                                added,
+                                                removed,
+                                            })
+                                            .await?;
                                     }
 
-                                    events.send(AgentEvent::ToolFinished {
-                                        id: call.id.clone(),
-                                        output: output.clone(),
-                                        ok,
-                                    }).await?;
+                                    events
+                                        .send(AgentEvent::ToolFinished {
+                                            id: call.id.clone(),
+                                            output: output.clone(),
+                                            ok,
+                                        })
+                                        .await?;
                                     results.push((call.id.clone(), output, ok));
 
                                     if let Some(e) = stop {
                                         for rest in &resp.tool_calls[i + 1..] {
-                                            results.push((rest.id.clone(), "Not run: the turn was stopped".to_string(), false));
+                                            results.push((
+                                                rest.id.clone(),
+                                                "Not run: the turn was stopped".to_string(),
+                                                false,
+                                            ));
                                         }
                                         stopped = Some(e);
                                         break;
@@ -341,6 +410,14 @@ async fn session(
                                     break;
                                 }
                                 if shutdown {
+                                    break;
+                                }
+                                if turn_count >= 30 {
+                                    // The runaway guard ends the loop next check; say so, or the
+                                    // answer looks like it just stopped mid-work.
+                                    events.send(AgentEvent::Notice(
+                                        "Stopped at 30 tool-call rounds in one answer — send a message and it picks up where it left off.".into(),
+                                    )).await?;
                                     break;
                                 }
                             }
@@ -368,7 +445,10 @@ async fn session(
                                 next = Some((text, images));
                                 break;
                             }
-                            Command::SetModel { model: m, effort: e } => {
+                            Command::SetModel {
+                                model: m,
+                                effort: e,
+                            } => {
                                 model = m;
                                 effort = e;
                             }
@@ -394,7 +474,10 @@ async fn session(
                     break;
                 }
             }
-            Command::SetModel { model: m, effort: e } => {
+            Command::SetModel {
+                model: m,
+                effort: e,
+            } => {
                 model = m;
                 effort = e;
             }
@@ -402,7 +485,10 @@ async fn session(
             Command::SetHandHolding(h) => hand_holding = h,
             Command::Answer { .. } => {}
             Command::Shutdown => break,
-            Command::Interrupt | Command::Respond { .. } | Command::ReadTask { .. } | Command::StopTask { .. } => {}
+            Command::Interrupt
+            | Command::Respond { .. }
+            | Command::ReadTask { .. }
+            | Command::StopTask { .. } => {}
         }
     }
     Ok(())
@@ -410,7 +496,11 @@ async fn session(
 
 /// The results of one answer's tool calls, `(id, output, ok)`, in the shape the wire wants:
 /// one user message of `tool_result` blocks for Anthropic, a `tool` message each otherwise.
-fn push_tool_results(history: &mut Vec<Value>, anthropic: bool, results: Vec<(String, String, bool)>) {
+fn push_tool_results(
+    history: &mut Vec<Value>,
+    anthropic: bool,
+    results: Vec<(String, String, bool)>,
+) {
     if anthropic {
         let blocks: Vec<Value> = results
             .into_iter()
@@ -436,27 +526,80 @@ fn is_safe_command(cmd: &str) -> bool {
         return false;
     }
     let safe_prefixes = [
-        "git status", "git diff", "git log", "git show", "git branch",
-        "cargo check", "cargo test", "cargo clippy",
-        "ls", "cat", "head", "tail", "grep", "rg", "find", "fd",
-        "pwd", "which", "echo", "wc", "stat", "file"
+        "git status",
+        "git diff",
+        "git log",
+        "git show",
+        "git branch",
+        "cargo check",
+        "cargo test",
+        "cargo clippy",
+        "ls",
+        "cat",
+        "head",
+        "tail",
+        "grep",
+        "rg",
+        "find",
+        "fd",
+        "pwd",
+        "which",
+        "echo",
+        "wc",
+        "stat",
+        "file",
     ];
-    let Some(prefix) = safe_prefixes.iter().find(|p| trimmed == **p || trimmed.starts_with(&format!("{p} "))) else {
+    let Some(prefix) = safe_prefixes
+        .iter()
+        .find(|p| trimmed == **p || trimmed.starts_with(&format!("{p} ")))
+    else {
         return false;
     };
     // The arguments as the shell will see them, near enough: quotes and backslashes go, so
     // `'-delete'` or `-de''lete` reads as `-delete`.
-    let args: Vec<String> = trimmed[prefix.len()..].split_whitespace().map(|a| a.replace(['\'', '"', '\\'], "")).collect();
+    let args: Vec<String> = trimmed[prefix.len()..]
+        .split_whitespace()
+        .map(|a| a.replace(['\'', '"', '\\'], ""))
+        .collect();
     // A cluster of short flags (`-df`) holding any of `letters`.
-    let short = |a: &str, letters: &str| a.starts_with('-') && !a.starts_with("--") && a.chars().skip(1).any(|c| letters.contains(c));
+    let short = |a: &str, letters: &str| {
+        a.starts_with('-') && !a.starts_with("--") && a.chars().skip(1).any(|c| letters.contains(c))
+    };
     !args.iter().any(|a| {
         let a = a.as_str();
         match *prefix {
-            "find" => matches!(a, "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-fprint" | "-fprint0" | "-fprintf" | "-fls"),
+            "find" => matches!(
+                a,
+                "-delete"
+                    | "-exec"
+                    | "-execdir"
+                    | "-ok"
+                    | "-okdir"
+                    | "-fprint"
+                    | "-fprint0"
+                    | "-fprintf"
+                    | "-fls"
+            ),
             "fd" => short(a, "xX") || a.starts_with("--exec"),
             // Listing only: a name creates a branch, and these flags delete, move, copy or
             // retarget one.
-            "git branch" => !a.starts_with('-') || short(a, "dDmMcCfu") || ["--delete", "--move", "--copy", "--force", "--set-upstream", "--unset-upstream", "--edit-description", "--track", "--no-track"].iter().any(|f| a.starts_with(f)),
+            "git branch" => {
+                !a.starts_with('-')
+                    || short(a, "dDmMcCfu")
+                    || [
+                        "--delete",
+                        "--move",
+                        "--copy",
+                        "--force",
+                        "--set-upstream",
+                        "--unset-upstream",
+                        "--edit-description",
+                        "--track",
+                        "--no-track",
+                    ]
+                    .iter()
+                    .any(|f| a.starts_with(f))
+            }
             "git diff" | "git log" | "git show" => a.starts_with("--output"),
             "rg" => a.starts_with("--pre"),
             "cargo check" | "cargo test" | "cargo clippy" => a == "--fix",
@@ -469,19 +612,31 @@ fn tool_display(name: &str, args_json: &str) -> (&'static str, String) {
     let parsed: Value = serde_json::from_str(args_json).unwrap_or(Value::Null);
     match name {
         "bash" => {
-            let cmd = parsed.get("command").and_then(|c| c.as_str()).unwrap_or(args_json);
+            let cmd = parsed
+                .get("command")
+                .and_then(|c| c.as_str())
+                .unwrap_or(args_json);
             ("Run command", cmd.to_string())
         }
         "read_file" => {
-            let path = parsed.get("path").and_then(|p| p.as_str()).unwrap_or(args_json);
+            let path = parsed
+                .get("path")
+                .and_then(|p| p.as_str())
+                .unwrap_or(args_json);
             ("Read", path.to_string())
         }
         "write_file" => {
-            let path = parsed.get("path").and_then(|p| p.as_str()).unwrap_or(args_json);
+            let path = parsed
+                .get("path")
+                .and_then(|p| p.as_str())
+                .unwrap_or(args_json);
             ("Write", path.to_string())
         }
         "edit_file" => {
-            let path = parsed.get("path").and_then(|p| p.as_str()).unwrap_or(args_json);
+            let path = parsed
+                .get("path")
+                .and_then(|p| p.as_str())
+                .unwrap_or(args_json);
             ("Edit", path.to_string())
         }
         _ => ("Tool", args_json.to_string()),
@@ -518,16 +673,25 @@ async fn ask_permission(
             },
         };
         match cmd {
-            Command::Respond { request_id: id, decision } if id == request_id => {
-                events.send(AgentEvent::PermissionResolved { request_id }).await?;
+            Command::Respond {
+                request_id: id,
+                decision,
+            } if id == request_id => {
+                events
+                    .send(AgentEvent::PermissionResolved { request_id })
+                    .await?;
                 return Ok(decision);
             }
             Command::Interrupt => {
-                events.send(AgentEvent::PermissionResolved { request_id }).await?;
+                events
+                    .send(AgentEvent::PermissionResolved { request_id })
+                    .await?;
                 bail!("Interrupted");
             }
             Command::Shutdown => {
-                events.send(AgentEvent::PermissionResolved { request_id }).await?;
+                events
+                    .send(AgentEvent::PermissionResolved { request_id })
+                    .await?;
                 *shutdown = true;
                 bail!("Shutdown");
             }
@@ -551,24 +715,39 @@ async fn execute_tool(
     match name {
         "bash" => {
             if read_only {
-                return Ok(("Permission denied: commands are disabled in read-only mode".into(), false, None));
+                return Ok((
+                    "Permission denied: commands are disabled in read-only mode".into(),
+                    false,
+                    None,
+                ));
             }
-            let parsed: Value = serde_json::from_str(args_json).unwrap_or_else(|_| json!({ "command": args_json }));
-            let command = parsed.get("command").and_then(|c| c.as_str()).unwrap_or(args_json).trim();
+            let parsed: Value =
+                serde_json::from_str(args_json).unwrap_or_else(|_| json!({ "command": args_json }));
+            let command = parsed
+                .get("command")
+                .and_then(|c| c.as_str())
+                .unwrap_or(args_json)
+                .trim();
             if command.is_empty() {
                 return Ok(("Error: empty command".into(), false, None));
             }
             let need_ask = match hand_holding {
                 HandHolding::FullAccess => false,
-                HandHolding::Auto => !is_safe_command(command) && !allowed_for_session.contains(command),
-                HandHolding::AutoAcceptEdits | HandHolding::Supervised => !allowed_for_session.contains(command),
+                HandHolding::Auto => {
+                    !is_safe_command(command) && !allowed_for_session.contains(command)
+                }
+                HandHolding::AutoAcceptEdits | HandHolding::Supervised => {
+                    !allowed_for_session.contains(command)
+                }
             };
             if need_ask {
-                match ask_permission("Run command", command, events, commands, kept, shutdown).await? {
-                    Decision::Allow => {},
+                match ask_permission("Run command", command, events, commands, kept, shutdown)
+                    .await?
+                {
+                    Decision::Allow => {}
                     Decision::AllowForSession => {
                         allowed_for_session.insert(command.to_string());
-                    },
+                    }
                     Decision::Deny => {
                         return Ok(("Permission denied by user".into(), false, None));
                     }
@@ -579,22 +758,41 @@ async fn execute_tool(
         }
         "read_file" => {
             let parsed: Value = serde_json::from_str(args_json).unwrap_or(Value::Null);
-            let path_str = parsed.get("path").and_then(|p| p.as_str()).unwrap_or_default();
+            let path_str = parsed
+                .get("path")
+                .and_then(|p| p.as_str())
+                .unwrap_or_default();
             if path_str.is_empty() {
                 return Ok(("Error: path parameter is required".into(), false, None));
             }
-            let start = parsed.get("start_line").and_then(|s| s.as_u64()).map(|s| s as usize);
-            let end = parsed.get("end_line").and_then(|e| e.as_u64()).map(|e| e as usize);
+            let start = parsed
+                .get("start_line")
+                .and_then(|s| s.as_u64())
+                .map(|s| s as usize);
+            let end = parsed
+                .get("end_line")
+                .and_then(|e| e.as_u64())
+                .map(|e| e as usize);
             let (out, ok) = run_read_file(path_str, start, end, cwd).await?;
             Ok((out, ok, None))
         }
         "write_file" => {
             if read_only {
-                return Ok(("Permission denied: session is in read-only mode".into(), false, None));
+                return Ok((
+                    "Permission denied: session is in read-only mode".into(),
+                    false,
+                    None,
+                ));
             }
             let parsed: Value = serde_json::from_str(args_json).unwrap_or(Value::Null);
-            let path_str = parsed.get("path").and_then(|p| p.as_str()).unwrap_or_default();
-            let content = parsed.get("content").and_then(|c| c.as_str()).unwrap_or_default();
+            let path_str = parsed
+                .get("path")
+                .and_then(|p| p.as_str())
+                .unwrap_or_default();
+            let content = parsed
+                .get("content")
+                .and_then(|c| c.as_str())
+                .unwrap_or_default();
             if path_str.is_empty() {
                 return Ok(("Error: path parameter is required".into(), false, None));
             }
@@ -603,11 +801,13 @@ async fn execute_tool(
                 _ => false,
             };
             if need_ask {
-                match ask_permission("Write file", path_str, events, commands, kept, shutdown).await? {
-                    Decision::Allow => {},
+                match ask_permission("Write file", path_str, events, commands, kept, shutdown)
+                    .await?
+                {
+                    Decision::Allow => {}
                     Decision::AllowForSession => {
                         allowed_for_session.insert("write_file".into());
-                    },
+                    }
                     Decision::Deny => {
                         return Ok(("Permission denied by user".into(), false, None));
                     }
@@ -617,25 +817,44 @@ async fn execute_tool(
         }
         "edit_file" => {
             if read_only {
-                return Ok(("Permission denied: session is in read-only mode".into(), false, None));
+                return Ok((
+                    "Permission denied: session is in read-only mode".into(),
+                    false,
+                    None,
+                ));
             }
             let parsed: Value = serde_json::from_str(args_json).unwrap_or(Value::Null);
-            let path_str = parsed.get("path").and_then(|p| p.as_str()).unwrap_or_default();
-            let old_str = parsed.get("old_str").and_then(|o| o.as_str()).unwrap_or_default();
-            let new_str = parsed.get("new_str").and_then(|n| n.as_str()).unwrap_or_default();
+            let path_str = parsed
+                .get("path")
+                .and_then(|p| p.as_str())
+                .unwrap_or_default();
+            let old_str = parsed
+                .get("old_str")
+                .and_then(|o| o.as_str())
+                .unwrap_or_default();
+            let new_str = parsed
+                .get("new_str")
+                .and_then(|n| n.as_str())
+                .unwrap_or_default();
             if path_str.is_empty() || old_str.is_empty() {
-                return Ok(("Error: path and old_str parameters are required".into(), false, None));
+                return Ok((
+                    "Error: path and old_str parameters are required".into(),
+                    false,
+                    None,
+                ));
             }
             let need_ask = match hand_holding {
                 HandHolding::Supervised => !allowed_for_session.contains("edit_file"),
                 _ => false,
             };
             if need_ask {
-                match ask_permission("Edit file", path_str, events, commands, kept, shutdown).await? {
-                    Decision::Allow => {},
+                match ask_permission("Edit file", path_str, events, commands, kept, shutdown)
+                    .await?
+                {
+                    Decision::Allow => {}
                     Decision::AllowForSession => {
                         allowed_for_session.insert("edit_file".into());
-                    },
+                    }
                     Decision::Deny => {
                         return Ok(("Permission denied by user".into(), false, None));
                     }
@@ -643,9 +862,13 @@ async fn execute_tool(
             }
             run_edit_file(path_str, old_str, new_str, cwd).await
         }
-        unknown => {
-            Ok((format!("Unknown tool: {unknown}. Available tools: bash, read_file, write_file, edit_file"), false, None))
-        }
+        unknown => Ok((
+            format!(
+                "Unknown tool: {unknown}. Available tools: bash, read_file, write_file, edit_file"
+            ),
+            false,
+            None,
+        )),
     }
 }
 
@@ -664,7 +887,11 @@ async fn run_bash_command(
     let mut shell = trek_core::procs::async_command("cmd.exe");
     #[cfg(windows)]
     shell.arg("/c");
-    shell.arg(command).current_dir(cwd).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    shell
+        .arg(command)
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     // In a group of its own, so a Stop ends what the command started too, not just the shell.
     // A command that finishes may leave something running on purpose (a server it started in
     // the background), so nothing is ended then.
@@ -758,7 +985,14 @@ async fn run_read_file(
     let start = start_line.unwrap_or(1).max(1) - 1;
     let end = end_line.unwrap_or(lines.len()).min(lines.len());
     if start >= lines.len() {
-        return Ok((format!("Start line {} is beyond end of file ({} lines)", start + 1, lines.len()), false));
+        return Ok((
+            format!(
+                "Start line {} is beyond end of file ({} lines)",
+                start + 1,
+                lines.len()
+            ),
+            false,
+        ));
     }
     let mut out = String::new();
     for (idx, line) in lines[start..end].iter().enumerate() {
@@ -767,7 +1001,11 @@ async fn run_read_file(
     Ok((out, true))
 }
 
-async fn run_write_file(path_str: &str, content: &str, cwd: &Path) -> Result<(String, bool, Option<(u32, u32)>)> {
+async fn run_write_file(
+    path_str: &str,
+    content: &str,
+    cwd: &Path,
+) -> Result<(String, bool, Option<(u32, u32)>)> {
     let path = if Path::new(path_str).is_absolute() {
         PathBuf::from(path_str)
     } else {
@@ -778,12 +1016,21 @@ async fn run_write_file(path_str: &str, content: &str, cwd: &Path) -> Result<(St
     }
     let added = content.lines().count() as u32;
     match tokio::fs::write(&path, content).await {
-        Ok(_) => Ok((format!("Successfully wrote {added} lines to {path_str}"), true, Some((added, 0)))),
+        Ok(_) => Ok((
+            format!("Successfully wrote {added} lines to {path_str}"),
+            true,
+            Some((added, 0)),
+        )),
         Err(e) => Ok((format!("Error writing {path_str}: {e}"), false, None)),
     }
 }
 
-async fn run_edit_file(path_str: &str, old_str: &str, new_str: &str, cwd: &Path) -> Result<(String, bool, Option<(u32, u32)>)> {
+async fn run_edit_file(
+    path_str: &str,
+    old_str: &str,
+    new_str: &str,
+    cwd: &Path,
+) -> Result<(String, bool, Option<(u32, u32)>)> {
     let path = if Path::new(path_str).is_absolute() {
         PathBuf::from(path_str)
     } else {
@@ -798,19 +1045,39 @@ async fn run_edit_file(path_str: &str, old_str: &str, new_str: &str, cwd: &Path)
     };
     let count = content.matches(old_str).count();
     if count == 0 {
-        return Ok((format!("Error: old_str was not found in {path_str}. Please provide the exact text to match."), false, None));
+        return Ok((
+            format!(
+                "Error: old_str was not found in {path_str}. Please provide the exact text to match."
+            ),
+            false,
+            None,
+        ));
     }
     if count > 1 {
-        return Ok((format!("Error: old_str matched {count} times in {path_str}. Please provide more surrounding context to uniquely identify the location."), false, None));
+        return Ok((
+            format!(
+                "Error: old_str matched {count} times in {path_str}. Please provide more surrounding context to uniquely identify the location."
+            ),
+            false,
+            None,
+        ));
     }
     let updated = content.replacen(old_str, new_str, 1);
     match tokio::fs::write(&path, &updated).await {
         Ok(_) => {
             let removed = old_str.lines().count() as u32;
             let added = new_str.lines().count() as u32;
-            Ok((format!("Successfully edited {path_str}"), true, Some((added, removed))))
+            Ok((
+                format!("Successfully edited {path_str}"),
+                true,
+                Some((added, removed)),
+            ))
         }
-        Err(e) => Ok((format!("Error writing edits to {path_str}: {e}"), false, None)),
+        Err(e) => Ok((
+            format!("Error writing edits to {path_str}: {e}"),
+            false,
+            None,
+        )),
     }
 }
 
@@ -834,7 +1101,10 @@ pub fn parse_xml_tool_calls(text: &str) -> (Vec<AccumulatedToolCall>, String) {
             let (name, args_part) = if let Some(bracket_end) = after_func.find('>') {
                 let name = after_func[..bracket_end].trim();
                 let remaining = after_func[bracket_end + 1..].trim();
-                let args = remaining.strip_suffix("</function>").unwrap_or(remaining).trim();
+                let args = remaining
+                    .strip_suffix("</function>")
+                    .unwrap_or(remaining)
+                    .trim();
                 (name, args)
             } else {
                 ("", "")
@@ -901,7 +1171,10 @@ fn anthropic_usage(v: &Value, usage: &mut TokenUsage, long_writes: &mut u64) {
     set(&u["output_tokens"], &mut usage.output);
     set(&u["cache_read_input_tokens"], &mut usage.cache_read);
     set(&u["cache_creation_input_tokens"], &mut usage.cache_write);
-    set(&u["cache_creation"]["ephemeral_1h_input_tokens"], long_writes);
+    set(
+        &u["cache_creation"]["ephemeral_1h_input_tokens"],
+        long_writes,
+    );
 }
 
 /// An OpenAI-style chunk's `usage` (the last chunk, when asked for), and its cost when the
@@ -913,10 +1186,23 @@ fn openai_usage(v: &Value) -> Option<(TokenUsage, Option<f64>)> {
     let prompt = u["prompt_tokens"].as_u64().unwrap_or(0);
     let details = &u["prompt_tokens_details"];
     let cached = details["cached_tokens"].as_u64().unwrap_or(0).min(prompt);
-    let written = details["cache_write_tokens"].as_u64().unwrap_or(0).min(prompt - cached);
+    let written = details["cache_write_tokens"]
+        .as_u64()
+        .unwrap_or(0)
+        .min(prompt - cached);
     let completion = u["completion_tokens"].as_u64().unwrap_or(0);
-    let output = completion.max(u["total_tokens"].as_u64().unwrap_or(0).saturating_sub(prompt));
-    let t = TokenUsage { input: prompt - cached - written, output, cache_read: cached, cache_write: written };
+    let output = completion.max(
+        u["total_tokens"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_sub(prompt),
+    );
+    let t = TokenUsage {
+        input: prompt - cached - written,
+        output,
+        cache_read: cached,
+        cache_write: written,
+    };
     (!t.is_empty()).then_some((t, u["cost"].as_f64()))
 }
 
@@ -956,13 +1242,21 @@ fn sse_events(buf: &mut Vec<u8>) -> Vec<String> {
     let mut out = Vec::new();
     loop {
         let lf = buf.windows(2).position(|w| w == b"\n\n").map(|i| (i, 2));
-        let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| (i, 4));
-        let Some((pos, end)) = lf.into_iter().chain(crlf).min_by_key(|(i, _)| *i) else { break };
+        let crlf = buf
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|i| (i, 4));
+        let Some((pos, end)) = lf.into_iter().chain(crlf).min_by_key(|(i, _)| *i) else {
+            break;
+        };
         let block: Vec<u8> = buf.drain(..pos + end).collect();
         let text = String::from_utf8_lossy(&block[..pos]);
         let data = text
             .lines()
-            .filter_map(|line| line.strip_prefix("data:").map(|s| s.strip_prefix(' ').unwrap_or(s)))
+            .filter_map(|line| {
+                line.strip_prefix("data:")
+                    .map(|s| s.strip_prefix(' ').unwrap_or(s))
+            })
             .collect::<Vec<_>>()
             .join("\n");
         if !data.is_empty() {
@@ -972,7 +1266,11 @@ fn sse_events(buf: &mut Vec<u8>) -> Vec<String> {
     out
 }
 
-fn keep_command(cmd: Result<Command, async_channel::RecvError>, kept: &mut VecDeque<Command>, shutdown: &mut bool) -> Result<()> {
+fn keep_command(
+    cmd: Result<Command, async_channel::RecvError>,
+    kept: &mut VecDeque<Command>,
+    shutdown: &mut bool,
+) -> Result<()> {
     match cmd {
         Ok(Command::Interrupt) => bail!("Interrupted"),
         Ok(Command::Shutdown) | Err(_) => {
@@ -1037,7 +1335,13 @@ fn anthropic_body(model: &str, effort: Effort, system: &str, history: &[Value]) 
         }
     } else {
         body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
-        let e = effort.clamp_to(&[Effort::Low, Effort::Medium, Effort::High, Effort::XHigh, Effort::Max]);
+        let e = effort.clamp_to(&[
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::XHigh,
+            Effort::Max,
+        ]);
         body["output_config"] = json!({ "effort": e.as_str() });
         body["fallbacks"] = json!("default");
     }
@@ -1075,7 +1379,11 @@ async fn anthropic_turn(
             .ok()
             .and_then(|v| v["error"]["message"].as_str().map(String::from))
             .unwrap_or(text);
-        return Err(request_error(status, &headers, format!("Anthropic API {status}: {msg}")));
+        return Err(request_error(
+            status,
+            &headers,
+            format!("Anthropic API {status}: {msg}"),
+        ));
     }
     let mut stream = resp.bytes_stream();
     let mut buf = Vec::new();
@@ -1131,8 +1439,20 @@ async fn anthropic_turn(
         bail!("The connection closed before the answer finished");
     }
     if !usage.is_empty() {
-        let cost = trek_core::pricing::request(model, &AgentId::Direct("anthropic".into()), &usage, long_writes, false);
-        events.send(AgentEvent::Usage { model: Some(model.to_string()), tokens: usage, cost }).await?;
+        let cost = trek_core::pricing::request(
+            model,
+            &AgentId::Direct("anthropic".into()),
+            &usage,
+            long_writes,
+            false,
+        );
+        events
+            .send(AgentEvent::Usage {
+                model: Some(model.to_string()),
+                tokens: usage,
+                cost,
+            })
+            .await?;
     }
     if stop_reason.as_deref() == Some("refusal") {
         bail!("The model declined this request.");
@@ -1156,8 +1476,39 @@ async fn anthropic_turn(
     Ok(TurnResponse {
         text,
         content: Some(json!({ "role": "assistant", "content": blocks })),
+        reasoning_details: vec![],
         tool_calls,
     })
+}
+
+/// A delta's reasoning as text: the `reasoning_content`/`reasoning` strings most providers
+/// send, or OpenRouter's `reasoning_details` array (`reasoning.text` parts carry `text`,
+/// summaries carry `summary`). Anything else can't be shown.
+fn reasoning_text(delta: &Value) -> Option<String> {
+    if let Some(s) = delta["reasoning_content"]
+        .as_str()
+        .or(delta["reasoning"].as_str())
+    {
+        return (!s.is_empty()).then(|| s.to_string());
+    }
+    let parts = delta["reasoning_details"].as_array()?;
+    let text: String = parts
+        .iter()
+        .filter_map(|p| p["text"].as_str().or(p["summary"].as_str()))
+        .collect();
+    (!text.is_empty()).then_some(text)
+}
+
+/// A delta's `content` as text: a string for most providers, an array of parts
+/// (`[{"type":"text","text":"…"}]`) for a few.
+fn content_text(delta: &Value) -> Option<String> {
+    let v = &delta["content"];
+    if let Some(s) = v.as_str() {
+        return Some(s.to_string());
+    }
+    let parts = v.as_array()?;
+    let text: String = parts.iter().filter_map(|p| p["text"].as_str()).collect();
+    (!text.is_empty()).then_some(text)
 }
 
 fn append(blocks: &mut [Value], index: usize, field: &str, s: &str) {
@@ -1200,9 +1551,17 @@ async fn openai_turn(
     }
     if !local && effort != Effort::Off {
         let e = effort.clamp_to(&[Effort::Low, Effort::Medium, Effort::High]);
-        body["reasoning_effort"] = json!(e.as_str());
+        if matches!(agent, AgentId::Direct(p) if p == "openrouter") {
+            // OpenRouter's unified switch; a raw `reasoning_effort` only reaches providers
+            // that take it themselves, others ignore or reject it.
+            body["reasoning"] = json!({ "effort": e.as_str() });
+        } else {
+            body["reasoning_effort"] = json!(e.as_str());
+        }
     }
-    let mut req = client.post(format!("{base_url}/chat/completions")).json(&body);
+    let mut req = client
+        .post(format!("{base_url}/chat/completions"))
+        .json(&body);
     if let Some(k) = key {
         req = req.bearer_auth(k);
     }
@@ -1210,11 +1569,14 @@ async fn openai_turn(
     let resp = if !resp.status().is_success() && resp.status() == reqwest::StatusCode::BAD_REQUEST {
         // Fallback: retry without tools if rejected
         body.as_object_mut().unwrap().remove("tools");
-        let mut retry_req = client.post(format!("{base_url}/chat/completions")).json(&body);
+        let mut retry_req = client
+            .post(format!("{base_url}/chat/completions"))
+            .json(&body);
         if let Some(k) = key {
             retry_req = retry_req.bearer_auth(k);
         }
-        let retry_resp = send_request(retry_req, commands, kept, shutdown, Duration::from_secs(60)).await?;
+        let retry_resp =
+            send_request(retry_req, commands, kept, shutdown, Duration::from_secs(60)).await?;
         if retry_resp.status().is_success() {
             retry_resp
         } else {
@@ -1228,13 +1590,17 @@ async fn openai_turn(
         let status = resp.status();
         let headers = resp.headers().clone();
         let text = resp.text().await.unwrap_or_default();
-        let msg = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["error"]["message"].as_str().map(String::from)).unwrap_or(text);
+        let msg = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v["error"]["message"].as_str().map(String::from))
+            .unwrap_or(text);
         return Err(request_error(status, &headers, format!("{status}: {msg}")));
     }
     let mut stream = resp.bytes_stream();
     let mut buf = Vec::new();
     let mut text = String::new();
     let mut tool_calls: Vec<AccumulatedToolCall> = Vec::new();
+    let mut reasoning_details: Vec<Value> = Vec::new();
     let mut usage = None;
     let mut terminal = false;
     loop {
@@ -1248,28 +1614,48 @@ async fn openai_turn(
                         continue;
                     }
                     let Ok(v) = serde_json::from_str::<Value>(&data) else { continue };
+                    // A mid-stream `{"error": …}` frame carries no choices: without this it is
+                    // skipped and the real reason dies as "connection closed early".
+                    if let Some(e) = v.get("error") {
+                        let msg = e["message"].as_str().unwrap_or("the provider reported an error");
+                        bail!("{msg}");
+                    }
                     usage = openai_usage(&v).or(usage);
                     terminal |= v["choices"].as_array().into_iter().flatten().any(|c| !c["finish_reason"].is_null());
                     let d = &v["choices"][0]["delta"];
-                    if let Some(r) = d["reasoning_content"].as_str().or(d["reasoning"].as_str()) {
-                        events.send(AgentEvent::ReasoningDelta(r.into())).await?;
+                    if let Some(details) = d.get("reasoning_details").and_then(|r| r.as_array()) {
+                        reasoning_details.extend(details.iter().cloned());
                     }
-                    if let Some(t) = d["content"].as_str() {
-                        text.push_str(t);
-                        events.send(AgentEvent::TextDelta(t.into())).await?;
+                    if let Some(r) = reasoning_text(d) {
+                        events.send(AgentEvent::ReasoningDelta(r)).await?;
+                    }
+                    // Empty content deltas say nothing but still break a reasoning span on the
+                    // other end of this channel (MiMo sends one between reasoning deltas), and a
+                    // few providers send content parts, not a string.
+                    if let Some(t) = content_text(d).filter(|t| !t.is_empty()) {
+                        text.push_str(&t);
+                        events.send(AgentEvent::TextDelta(t)).await?;
                     }
                     if let Some(calls) = d.get("tool_calls").and_then(|t| t.as_array()) {
-                        for call in calls {
-                            let idx = call.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                        for (pos, call) in calls.iter().enumerate() {
+                            // `index` missing: a single-call chunk is pos 0; several in one chunk
+                            // keep their order rather than all merging into slot 0.
+                            let idx = call.get("index").and_then(|i| i.as_u64()).map(|i| i as usize).unwrap_or(pos);
                             if tool_calls.len() <= idx {
                                 tool_calls.resize_with(idx + 1, AccumulatedToolCall::default);
                             }
+                            // id and name may stream in pieces or repeat whole each chunk:
+                            // `ends_with` takes either without doubling the repeat.
                             if let Some(id) = call.get("id").and_then(|i| i.as_str()) {
-                                tool_calls[idx].id.push_str(id);
+                                if !tool_calls[idx].id.ends_with(id) {
+                                    tool_calls[idx].id.push_str(id);
+                                }
                             }
                             if let Some(f) = call.get("function") {
                                 if let Some(n) = f.get("name").and_then(|n| n.as_str()) {
-                                    tool_calls[idx].name.push_str(n);
+                                    if !tool_calls[idx].name.ends_with(n) {
+                                        tool_calls[idx].name.push_str(n);
+                                    }
                                 }
                                 if let Some(a) = f.get("arguments").and_then(|a| a.as_str()) {
                                     tool_calls[idx].arguments.push_str(a);
@@ -1290,7 +1676,13 @@ async fn openai_turn(
             Some(usd) => Some(UsageCost::reported(usd)),
             None => trek_core::pricing::request(model, agent, &tokens, 0, false),
         };
-        events.send(AgentEvent::Usage { model: Some(model.to_string()), tokens, cost }).await?;
+        events
+            .send(AgentEvent::Usage {
+                model: Some(model.to_string()),
+                tokens,
+                cost,
+            })
+            .await?;
     }
 
     // Fallback: if no native tool calls accumulated, check if text has XML tool calls
@@ -1313,19 +1705,26 @@ async fn openai_turn(
         text,
         content: None,
         tool_calls,
+        reasoning_details,
     })
 }
 
 /// Query live models from a direct provider (OpenRouter, DeepSeek, Ollama, etc.).
-pub async fn direct_provider_models(provider_id: &str, api_key: Option<String>) -> Result<Vec<ModelInfo>> {
-    let provider = direct_provider(provider_id).with_context(|| format!("unknown provider {provider_id}"))?;
+pub async fn direct_provider_models(
+    provider_id: &str,
+    api_key: Option<String>,
+) -> Result<Vec<ModelInfo>> {
+    let provider =
+        direct_provider(provider_id).with_context(|| format!("unknown provider {provider_id}"))?;
     let key = api_key.or_else(|| secrets::api_key(provider.id));
 
     if !provider.local && provider.id != "openrouter" && key.is_none() {
         return Ok(vec![]);
     }
 
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).build()?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
 
     if provider.id == "ollama" {
         let url = provider.base_url.trim_end_matches("/v1").to_string() + "/api/tags";
@@ -1338,13 +1737,15 @@ pub async fn direct_provider_models(provider_id: &str, api_key: Option<String>) 
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|m| m["name"].as_str().map(|name| ModelInfo {
-                id: name.to_string(),
-                name: name.to_string(),
-                efforts: vec![],
-                tier: 0,
-                fast: None,
-            }))
+            .filter_map(|m| {
+                m["name"].as_str().map(|name| ModelInfo {
+                    id: name.to_string(),
+                    name: name.to_string(),
+                    efforts: vec![],
+                    tier: 0,
+                    fast: None,
+                })
+            })
             .collect();
         return Ok(models);
     }
@@ -1419,7 +1820,9 @@ pub fn cached_direct_models(provider_id: &str) -> Vec<ModelInfo> {
     if trek_core::paths::isolated() {
         return vec![];
     }
-    let file = trek_core::paths::data_dir().join("direct-models").join(format!("{provider_id}.json"));
+    let file = trek_core::paths::data_dir()
+        .join("direct-models")
+        .join(format!("{provider_id}.json"));
     std::fs::read_to_string(file)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -1460,7 +1863,10 @@ mod tests {
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             read_request_head(&mut socket).await;
-            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
             socket.write_all(response.as_bytes()).await.unwrap();
             let _ = socket.shutdown().await;
         });
@@ -1471,23 +1877,46 @@ mod tests {
     fn a_429_is_a_limit_and_other_failures_are_not() {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("retry-after", "30".parse().unwrap());
-        let e = request_error(reqwest::StatusCode::TOO_MANY_REQUESTS, &headers, "429 Too Many Requests: Rate limit exceeded".into());
-        let Some(crate::limits::LimitError(limit)) = e.downcast_ref() else { panic!("{e:#}") };
-        assert!(limit.resets_at.is_some_and(|at| (at - trek_core::store::now_ms() - 30_000).abs() < 5_000));
-        assert_eq!(format!("{e:#}"), "429 Too Many Requests: Rate limit exceeded");
-        let e = request_error(reqwest::StatusCode::BAD_REQUEST, &headers, "400 Bad Request: no such model".into());
+        let e = request_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            &headers,
+            "429 Too Many Requests: Rate limit exceeded".into(),
+        );
+        let Some(crate::limits::LimitError(limit)) = e.downcast_ref() else {
+            panic!("{e:#}")
+        };
+        assert!(
+            limit
+                .resets_at
+                .is_some_and(|at| (at - trek_core::store::now_ms() - 30_000).abs() < 5_000)
+        );
+        assert_eq!(
+            format!("{e:#}"),
+            "429 Too Many Requests: Rate limit exceeded"
+        );
+        let e = request_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            &headers,
+            "400 Bad Request: no such model".into(),
+        );
         assert!(e.downcast_ref::<crate::limits::LimitError>().is_none());
     }
 
     #[test]
     fn sse_splits_complete_events_with_either_line_ending() {
         let mut buf = b"data: {\"a\":1}\n\ndata: [DONE]\r\n\r\ndata: {\"b\"".to_vec();
-        assert_eq!(sse_events(&mut buf), vec!["{\"a\":1}".to_string(), "[DONE]".to_string()]);
+        assert_eq!(
+            sse_events(&mut buf),
+            vec!["{\"a\":1}".to_string(), "[DONE]".to_string()]
+        );
         assert_eq!(buf, b"data: {\"b\"");
         buf.extend_from_slice(b":\"\xc3");
         assert!(sse_events(&mut buf).is_empty());
         buf.extend_from_slice(b"\xa9\"}\r\ndata: second line\r\n\r\n");
-        assert_eq!(sse_events(&mut buf), vec!["{\"b\":\"\u{e9}\"}\nsecond line".to_string()]);
+        assert_eq!(
+            sse_events(&mut buf),
+            vec!["{\"b\":\"\u{e9}\"}\nsecond line".to_string()]
+        );
     }
 
     #[test]
@@ -1509,15 +1938,36 @@ mod tests {
         let mut shutdown = false;
         for command in [
             Command::SetHandHolding(trek_core::HandHolding::Supervised),
-            Command::SetModel { model: "next".into(), effort: Effort::Medium },
-            Command::SetModes { plan: true, fast: Some("fast".into()), effort: Effort::High },
-            Command::Prompt { text: "steer".into(), images: vec![] },
+            Command::SetModel {
+                model: "next".into(),
+                effort: Effort::Medium,
+            },
+            Command::SetModes {
+                plan: true,
+                fast: Some("fast".into()),
+                effort: Effort::High,
+            },
+            Command::Prompt {
+                text: "steer".into(),
+                images: vec![],
+            },
         ] {
             keep_command(Ok(command), &mut kept, &mut shutdown).unwrap();
         }
-        assert!(matches!(kept.pop_front(), Some(Command::SetHandHolding(trek_core::HandHolding::Supervised))));
-        assert!(matches!(kept.pop_front(), Some(Command::SetModel { model, .. }) if model == "next"));
-        assert!(matches!(kept.pop_front(), Some(Command::SetModes { effort: Effort::High, .. })));
+        assert!(matches!(
+            kept.pop_front(),
+            Some(Command::SetHandHolding(trek_core::HandHolding::Supervised))
+        ));
+        assert!(
+            matches!(kept.pop_front(), Some(Command::SetModel { model, .. }) if model == "next")
+        );
+        assert!(matches!(
+            kept.pop_front(),
+            Some(Command::SetModes {
+                effort: Effort::High,
+                ..
+            })
+        ));
         assert!(matches!(kept.pop_front(), Some(Command::Prompt { text, .. }) if text == "steer"));
         assert!(!shutdown && kept.is_empty());
     }
@@ -1531,14 +1981,42 @@ mod tests {
             read_request_head(&mut socket).await;
             tokio::time::sleep(Duration::from_millis(30)).await;
             use tokio::io::AsyncWriteExt as _;
-            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
         });
         let (tx, rx) = async_channel::unbounded();
-        tx.send(Command::SetModes { plan: true, fast: None, effort: Effort::High }).await.unwrap();
-        tx.send(Command::Prompt { text: "steer".into(), images: vec![] }).await.unwrap();
+        tx.send(Command::SetModes {
+            plan: true,
+            fast: None,
+            effort: Effort::High,
+        })
+        .await
+        .unwrap();
+        tx.send(Command::Prompt {
+            text: "steer".into(),
+            images: vec![],
+        })
+        .await
+        .unwrap();
         let (mut kept, mut shutdown) = (VecDeque::new(), false);
-        send_request(reqwest::Client::new().get(&url), &rx, &mut kept, &mut shutdown, Duration::from_secs(1)).await.unwrap();
-        assert!(matches!(kept.pop_front(), Some(Command::SetModes { effort: Effort::High, .. })));
+        send_request(
+            reqwest::Client::new().get(&url),
+            &rx,
+            &mut kept,
+            &mut shutdown,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            kept.pop_front(),
+            Some(Command::SetModes {
+                effort: Effort::High,
+                ..
+            })
+        ));
         assert!(matches!(kept.pop_front(), Some(Command::Prompt { text, .. }) if text == "steer"));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1547,8 +2025,20 @@ mod tests {
             let (_socket, _) = listener.accept().await.unwrap();
             tokio::time::sleep(Duration::from_secs(1)).await;
         });
-        let e = send_request(reqwest::Client::new().get(&url), &rx, &mut kept, &mut shutdown, Duration::from_millis(20)).await.unwrap_err();
-        assert!(e.to_string().contains("Timed out waiting for response headers"), "{e:#}");
+        let e = send_request(
+            reqwest::Client::new().get(&url),
+            &rx,
+            &mut kept,
+            &mut shutdown,
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("Timed out waiting for response headers"),
+            "{e:#}"
+        );
     }
 
     #[tokio::test]
@@ -1557,13 +2047,185 @@ mod tests {
         let (_tx, commands) = async_channel::unbounded();
         let (events, _rx) = async_channel::unbounded();
         let (mut kept, mut shutdown) = (VecDeque::new(), false);
-        let complete = sse_server("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n").await;
-        let answer = openai_turn(&client, &AgentId::Direct("local".into()), &complete, None, true, false, "m", Effort::Off, "sys", &[], &events, &commands, &mut kept, &mut shutdown).await.unwrap();
+        let complete = sse_server(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+        )
+        .await;
+        let answer = openai_turn(
+            &client,
+            &AgentId::Direct("local".into()),
+            &complete,
+            None,
+            true,
+            false,
+            "m",
+            Effort::Off,
+            "sys",
+            &[],
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
         assert_eq!(answer.text, "ok");
 
         let incomplete = sse_server("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n").await;
-        let e = openai_turn(&client, &AgentId::Direct("local".into()), &incomplete, None, true, false, "m", Effort::Off, "sys", &[], &events, &commands, &mut kept, &mut shutdown).await.unwrap_err();
-        assert!(e.to_string().contains("connection closed before the answer finished"), "{e:#}");
+        let e = openai_turn(
+            &client,
+            &AgentId::Direct("local".into()),
+            &incomplete,
+            None,
+            true,
+            false,
+            "m",
+            Effort::Off,
+            "sys",
+            &[],
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("connection closed before the answer finished"),
+            "{e:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_stream_skips_empty_content_and_reads_reasoning() {
+        let client = reqwest::Client::new();
+        let (_tx, commands) = async_channel::unbounded();
+        let (events, rx) = async_channel::unbounded();
+        let (mut kept, mut shutdown) = (VecDeque::new(), false);
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning\":\"think\",\"content\":\"\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\" more\"}],\"content\":\"\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n",
+        );
+        let url = sse_server(body).await;
+        let answer = openai_turn(
+            &client,
+            &AgentId::Direct("local".into()),
+            &url,
+            None,
+            true,
+            false,
+            "m",
+            Effort::Off,
+            "sys",
+            &[],
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer.text, "hi");
+        assert_eq!(answer.reasoning_details.len(), 1);
+        let (mut reasoning, mut text_deltas) = (String::new(), Vec::new());
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AgentEvent::ReasoningDelta(t) => reasoning.push_str(&t),
+                AgentEvent::TextDelta(t) => text_deltas.push(t),
+                _ => {}
+            }
+        }
+        assert_eq!(reasoning, "think more");
+        assert_eq!(text_deltas, ["hi"]);
+    }
+
+    #[tokio::test]
+    async fn openai_stream_reads_content_parts_and_reports_stream_errors() {
+        let client = reqwest::Client::new();
+        let (_tx, commands) = async_channel::unbounded();
+        let (events, _rx) = async_channel::unbounded();
+        let (mut kept, mut shutdown) = (VecDeque::new(), false);
+        let parts = sse_server("data: {\"choices\":[{\"delta\":{\"content\":[{\"type\":\"text\",\"text\":\"arr\"},{\"type\":\"text\",\"text\":\"ay\"}]},\"finish_reason\":\"stop\"}]}\n\n").await;
+        let answer = openai_turn(
+            &client,
+            &AgentId::Direct("local".into()),
+            &parts,
+            None,
+            true,
+            false,
+            "m",
+            Effort::Off,
+            "sys",
+            &[],
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer.text, "array");
+
+        let failed = sse_server("data: {\"choices\":[{\"delta\":{\"content\":\"part\"}}]}\n\ndata: {\"error\":{\"message\":\"provider exploded\"}}\n\n").await;
+        let e = openai_turn(
+            &client,
+            &AgentId::Direct("local".into()),
+            &failed,
+            None,
+            true,
+            false,
+            "m",
+            Effort::Off,
+            "sys",
+            &[],
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.to_string().contains("provider exploded"), "{e:#}");
+    }
+
+    #[tokio::test]
+    async fn openai_stream_keeps_indexless_tool_calls_apart() {
+        let client = reqwest::Client::new();
+        let (_tx, commands) = async_channel::unbounded();
+        let (events, _rx) = async_channel::unbounded();
+        let (mut kept, mut shutdown) = (VecDeque::new(), false);
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"a\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}},{\"id\":\"b\",\"function\":{\"name\":\"bash\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"b\",\"function\":{\"name\":\"bash\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        );
+        let url = sse_server(body).await;
+        let answer = openai_turn(
+            &client,
+            &AgentId::Direct("local".into()),
+            &url,
+            None,
+            true,
+            false,
+            "m",
+            Effort::Off,
+            "sys",
+            &[],
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer.tool_calls.len(), 2);
+        assert_eq!(answer.tool_calls[0].id, "a");
+        assert_eq!(answer.tool_calls[0].name, "read_file");
+        // The resent full id/name doesn't double; its arguments stay the first chunk's.
+        assert_eq!(answer.tool_calls[1].id, "b");
+        assert_eq!(answer.tool_calls[1].name, "bash");
+        assert_eq!(answer.tool_calls[1].arguments, "{}");
     }
 
     #[tokio::test]
@@ -1576,7 +2238,21 @@ mod tests {
             "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n",
         )
         .await;
-        let answer = anthropic_turn(&client, &complete, "key", "m", Effort::Off, "sys", &[], &events, &commands, &mut kept, &mut shutdown).await.unwrap();
+        let answer = anthropic_turn(
+            &client,
+            &complete,
+            "key",
+            "m",
+            Effort::Off,
+            "sys",
+            &[],
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
         assert_eq!(answer.text, "ok");
     }
 
@@ -1593,7 +2269,8 @@ mod tests {
 
     #[tokio::test]
     async fn tool_execution_file_ops() {
-        let temp_dir = std::env::temp_dir().join(format!("trek_test_direct_{}", trek_core::store::now_ms()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("trek_test_direct_{}", trek_core::store::now_ms()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let cwd = &temp_dir;
 
@@ -1607,9 +2284,23 @@ mod tests {
         let write_args = json!({
             "path": "test.txt",
             "content": "line 1\nline 2\nline 3"
-        }).to_string();
+        })
+        .to_string();
 
-        let (_out, ok, lines) = execute_tool("write_file", &write_args, cwd, false, HandHolding::Auto, &mut allowed, &tx_events, &rx_cmd, &mut kept, &mut shutdown).await.unwrap();
+        let (_out, ok, lines) = execute_tool(
+            "write_file",
+            &write_args,
+            cwd,
+            false,
+            HandHolding::Auto,
+            &mut allowed,
+            &tx_events,
+            &rx_cmd,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
         assert!(ok);
         assert_eq!(lines, Some((3, 0)));
 
@@ -1618,9 +2309,23 @@ mod tests {
             "path": "test.txt",
             "start_line": 2,
             "end_line": 3
-        }).to_string();
+        })
+        .to_string();
 
-        let (out, ok, _) = execute_tool("read_file", &read_args, cwd, false, HandHolding::Auto, &mut allowed, &tx_events, &rx_cmd, &mut kept, &mut shutdown).await.unwrap();
+        let (out, ok, _) = execute_tool(
+            "read_file",
+            &read_args,
+            cwd,
+            false,
+            HandHolding::Auto,
+            &mut allowed,
+            &tx_events,
+            &rx_cmd,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
         assert!(ok);
         assert!(out.contains("line 2"));
         assert!(!out.contains("line 1"));
@@ -1630,9 +2335,23 @@ mod tests {
             "path": "test.txt",
             "old_str": "line 2",
             "new_str": "line two replacement"
-        }).to_string();
+        })
+        .to_string();
 
-        let (_out, ok, lines) = execute_tool("edit_file", &edit_args, cwd, false, HandHolding::Auto, &mut allowed, &tx_events, &rx_cmd, &mut kept, &mut shutdown).await.unwrap();
+        let (_out, ok, lines) = execute_tool(
+            "edit_file",
+            &edit_args,
+            cwd,
+            false,
+            HandHolding::Auto,
+            &mut allowed,
+            &tx_events,
+            &rx_cmd,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
         assert!(ok);
         assert_eq!(lines, Some((1, 1)));
 
@@ -1696,10 +2415,20 @@ mod tests {
     #[test]
     fn anthropic_requests_carry_the_tools() {
         let body = anthropic_body("claude-sonnet-4-5", Effort::Medium, "sys", &[]);
-        let names: Vec<&str> = body["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
         assert_eq!(names, ["bash", "read_file", "write_file", "edit_file"]);
-        assert_eq!(body["tools"][1]["input_schema"]["required"], json!(["path"]));
-        assert!(body["tools"][0].get("function").is_none() && body["tools"][0].get("type").is_none());
+        assert_eq!(
+            body["tools"][1]["input_schema"]["required"],
+            json!(["path"])
+        );
+        assert!(
+            body["tools"][0].get("function").is_none() && body["tools"][0].get("type").is_none()
+        );
     }
 
     #[tokio::test]
@@ -1718,18 +2447,46 @@ mod tests {
             "data: {\"type\":\"message_stop\"}\n\n",
         ))
         .await;
-        let answer = anthropic_turn(&client, &url, "key", "m", Effort::Off, "sys", &[], &events, &commands, &mut kept, &mut shutdown).await.unwrap();
+        let answer = anthropic_turn(
+            &client,
+            &url,
+            "key",
+            "m",
+            Effort::Off,
+            "sys",
+            &[],
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
         assert_eq!(answer.text, "Looking.");
         assert_eq!(answer.tool_calls.len(), 1);
-        assert_eq!((answer.tool_calls[0].id.as_str(), answer.tool_calls[0].name.as_str()), ("toolu_1", "read_file"));
-        assert_eq!(serde_json::from_str::<Value>(&answer.tool_calls[0].arguments).unwrap(), json!({ "path": "src/main.rs" }));
+        assert_eq!(
+            (
+                answer.tool_calls[0].id.as_str(),
+                answer.tool_calls[0].name.as_str()
+            ),
+            ("toolu_1", "read_file")
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&answer.tool_calls[0].arguments).unwrap(),
+            json!({ "path": "src/main.rs" })
+        );
         let content = answer.content.unwrap();
-        assert_eq!(content["content"][1]["input"], json!({ "path": "src/main.rs" }));
+        assert_eq!(
+            content["content"][1]["input"],
+            json!({ "path": "src/main.rs" })
+        );
     }
 
     /// A server that answers request n with `responses[n]` (status, SSE body), one connection
     /// each, and keeps every request body it was sent.
-    async fn script_server(responses: Vec<(u16, String)>) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+    async fn script_server(
+        responses: Vec<(u16, String)>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -1749,13 +2506,18 @@ mod tests {
                     request.extend_from_slice(&buf[..n]);
                 };
                 let head = String::from_utf8_lossy(&request[..body_start]).to_lowercase();
-                let length: usize = head.lines().find_map(|l| l.strip_prefix("content-length:")).map_or(0, |v| v.trim().parse().unwrap());
+                let length: usize = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .map_or(0, |v| v.trim().parse().unwrap());
                 while request.len() < body_start + length {
                     let n = socket.read(&mut buf).await.unwrap();
                     assert!(n > 0, "the request body ended early");
                     request.extend_from_slice(&buf[..n]);
                 }
-                seen.lock().unwrap().push(serde_json::from_slice(&request[body_start..body_start + length]).unwrap());
+                seen.lock().unwrap().push(
+                    serde_json::from_slice(&request[body_start..body_start + length]).unwrap(),
+                );
                 let response = format!(
                     "HTTP/1.1 {status} X\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
                     body.len()
@@ -1768,12 +2530,24 @@ mod tests {
     }
 
     fn openai_text(text: &str) -> (u16, String) {
-        (200, format!("data: {}\n\ndata: [DONE]\n\n", json!({ "choices": [{ "delta": { "content": text }, "finish_reason": "stop" }] })))
+        (
+            200,
+            format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                json!({ "choices": [{ "delta": { "content": text }, "finish_reason": "stop" }] })
+            ),
+        )
     }
 
     fn openai_tool_call(id: &str, name: &str, arguments: Value) -> (u16, String) {
         let call = json!({ "index": 0, "id": id, "type": "function", "function": { "name": name, "arguments": arguments.to_string() } });
-        (200, format!("data: {}\n\ndata: [DONE]\n\n", json!({ "choices": [{ "delta": { "tool_calls": [call] }, "finish_reason": "tool_calls" }] })))
+        (
+            200,
+            format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                json!({ "choices": [{ "delta": { "tool_calls": [call] }, "finish_reason": "tool_calls" }] })
+            ),
+        )
     }
 
     struct TestSession {
@@ -1785,7 +2559,11 @@ mod tests {
     }
 
     impl TestSession {
-        async fn start(provider: &'static str, hand_holding: HandHolding, responses: Vec<(u16, String)>) -> TestSession {
+        async fn start(
+            provider: &'static str,
+            hand_holding: HandHolding,
+            responses: Vec<(u16, String)>,
+        ) -> TestSession {
             let (url, bodies) = script_server(responses).await;
             let cwd = std::env::temp_dir().join(format!("trek_test_direct_session_{}", next_id()));
             std::fs::create_dir_all(&cwd).unwrap();
@@ -1809,8 +2587,24 @@ mod tests {
             let (commands, commands_rx) = async_channel::unbounded();
             let (events_tx, events) = async_channel::unbounded();
             let provider = direct_provider(provider).unwrap();
-            let task = tokio::spawn(async move { session(config, provider, &url, Some("key".into()), commands_rx, events_tx).await });
-            TestSession { commands, events, bodies, cwd, task }
+            let task = tokio::spawn(async move {
+                session(
+                    config,
+                    provider,
+                    &url,
+                    Some("key".into()),
+                    commands_rx,
+                    events_tx,
+                )
+                .await
+            });
+            TestSession {
+                commands,
+                events,
+                bodies,
+                cwd,
+                task,
+            }
         }
 
         async fn send(&self, command: Command) {
@@ -1818,17 +2612,27 @@ mod tests {
         }
 
         async fn prompt(&self, text: &str) {
-            self.send(Command::Prompt { text: text.into(), images: vec![] }).await;
+            self.send(Command::Prompt {
+                text: text.into(),
+                images: vec![],
+            })
+            .await;
         }
 
         /// The next event `pick` takes, failing on an error or the session's end on the way.
         async fn until<T>(&self, mut pick: impl FnMut(&AgentEvent) -> Option<T>) -> T {
             loop {
-                let event = tokio::time::timeout(Duration::from_secs(20), self.events.recv()).await.expect("an event in time").expect("the session is running");
+                let event = tokio::time::timeout(Duration::from_secs(20), self.events.recv())
+                    .await
+                    .expect("an event in time")
+                    .expect("the session is running");
                 if let Some(found) = pick(&event) {
                     return found;
                 }
-                assert!(!matches!(event, AgentEvent::Error(_) | AgentEvent::Exited), "{event:?}");
+                assert!(
+                    !matches!(event, AgentEvent::Error(_) | AgentEvent::Exited),
+                    "{event:?}"
+                );
             }
         }
 
@@ -1854,7 +2658,11 @@ mod tests {
 
         async fn finish(self) {
             drop(self.commands);
-            tokio::time::timeout(Duration::from_secs(10), self.task).await.unwrap().unwrap().unwrap();
+            tokio::time::timeout(Duration::from_secs(10), self.task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
             let _ = std::fs::remove_dir_all(&self.cwd);
         }
     }
@@ -1864,14 +2672,21 @@ mod tests {
         for (i, m) in messages.iter().enumerate() {
             for call in m["tool_calls"].as_array().into_iter().flatten() {
                 let id = &call["id"];
-                let answered = messages[i + 1..].iter().take_while(|r| r["role"] == "tool").any(|r| &r["tool_call_id"] == id);
+                let answered = messages[i + 1..]
+                    .iter()
+                    .take_while(|r| r["role"] == "tool")
+                    .any(|r| &r["tool_call_id"] == id);
                 assert!(answered, "call {id} has no reply in {messages:#?}");
             }
         }
     }
 
     fn user_texts(messages: &[Value]) -> Vec<&str> {
-        messages.iter().filter(|m| m["role"] == "user").filter_map(|m| m["content"].as_str()).collect()
+        messages
+            .iter()
+            .filter(|m| m["role"] == "user")
+            .filter_map(|m| m["content"].as_str())
+            .collect()
     }
 
     #[cfg(unix)]
@@ -1880,18 +2695,32 @@ mod tests {
         let s = TestSession::start(
             "ollama",
             HandHolding::FullAccess,
-            vec![openai_tool_call("call_1", "bash", json!({ "command": "sleep 30 & echo $! > bg.pid; wait" })), openai_text("next")],
+            vec![
+                openai_tool_call(
+                    "call_1",
+                    "bash",
+                    json!({ "command": "sleep 30 & echo $! > bg.pid; wait" }),
+                ),
+                openai_text("next"),
+            ],
         )
         .await;
         s.prompt("one").await;
-        s.until(|e| matches!(e, AgentEvent::ToolStarted { .. }).then_some(())).await;
+        s.until(|e| matches!(e, AgentEvent::ToolStarted { .. }).then_some(()))
+            .await;
         let pid_file = s.cwd.join("bg.pid");
         let started = std::time::Instant::now();
         let pid: i32 = loop {
-            if let Some(pid) = std::fs::read_to_string(&pid_file).ok().and_then(|p| p.trim().parse().ok()) {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|p| p.trim().parse().ok())
+            {
                 break pid;
             }
-            assert!(started.elapsed() < Duration::from_secs(10), "the command didn't start");
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the command didn't start"
+            );
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
         s.send(Command::Interrupt).await;
@@ -1901,7 +2730,10 @@ mod tests {
         // The background `sleep` went with the shell. SAFETY: signal 0 only checks the pid.
         let started = std::time::Instant::now();
         while unsafe { libc::kill(pid, 0) } == 0 {
-            assert!(started.elapsed() < Duration::from_secs(5), "the command's background process outlived the Stop");
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the command's background process outlived the Stop"
+            );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
@@ -1920,11 +2752,15 @@ mod tests {
         let s = TestSession::start(
             "ollama",
             HandHolding::Supervised,
-            vec![openai_tool_call("call_1", "bash", json!({ "command": "touch made" })), openai_text("next")],
+            vec![
+                openai_tool_call("call_1", "bash", json!({ "command": "touch made" })),
+                openai_text("next"),
+            ],
         )
         .await;
         s.prompt("one").await;
-        s.until(|e| matches!(e, AgentEvent::PermissionRequest { .. }).then_some(())).await;
+        s.until(|e| matches!(e, AgentEvent::PermissionRequest { .. }).then_some(()))
+            .await;
         s.send(Command::Interrupt).await;
         let (_, ok) = s.tool_finished().await;
         assert!(!ok);
@@ -1942,12 +2778,22 @@ mod tests {
         let s = TestSession::start(
             "ollama",
             HandHolding::FullAccess,
-            vec![openai_tool_call("call_1", "bash", json!({ "command": "sleep 1; echo finished" })), openai_text("a"), openai_text("b")],
+            vec![
+                openai_tool_call(
+                    "call_1",
+                    "bash",
+                    json!({ "command": "sleep 1; echo finished" }),
+                ),
+                openai_text("a"),
+                openai_text("b"),
+            ],
         )
         .await;
         s.prompt("one").await;
-        s.until(|e| matches!(e, AgentEvent::ToolStarted { .. }).then_some(())).await;
-        s.send(Command::SetHandHolding(HandHolding::Supervised)).await;
+        s.until(|e| matches!(e, AgentEvent::ToolStarted { .. }).then_some(()))
+            .await;
+        s.send(Command::SetHandHolding(HandHolding::Supervised))
+            .await;
         s.prompt("steer").await;
         let (output, ok) = s.tool_finished().await;
         assert!(ok && output.contains("finished"), "{output}");
@@ -1999,7 +2845,12 @@ mod tests {
             "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}\n\n",
             "data: {\"type\":\"message_stop\"}\n\n",
         );
-        let s = TestSession::start("anthropic", HandHolding::FullAccess, vec![(200, tool_use.into()), (200, text.into())]).await;
+        let s = TestSession::start(
+            "anthropic",
+            HandHolding::FullAccess,
+            vec![(200, tool_use.into()), (200, text.into())],
+        )
+        .await;
         std::fs::write(s.cwd.join("notes.txt"), "hello from notes").unwrap();
         s.prompt("read it").await;
         let (output, ok) = s.tool_finished().await;
@@ -2008,10 +2859,57 @@ mod tests {
         assert!(s.body(0)["tools"].as_array().is_some_and(|t| t.len() == 4));
         let messages = s.body(1)["messages"].as_array().unwrap().clone();
         assert_eq!(messages.len(), 3, "{messages:#?}");
-        assert_eq!(messages[1]["content"][0]["input"], json!({ "path": "notes.txt" }));
+        assert_eq!(
+            messages[1]["content"][0]["input"],
+            json!({ "path": "notes.txt" })
+        );
         let result = &messages[2]["content"][0];
-        assert_eq!((messages[2]["role"].as_str(), result["type"].as_str(), result["tool_use_id"].as_str()), (Some("user"), Some("tool_result"), Some("toolu_1")));
-        assert!(result["content"].as_str().unwrap().contains("hello from notes"));
+        assert_eq!(
+            (
+                messages[2]["role"].as_str(),
+                result["type"].as_str(),
+                result["tool_use_id"].as_str()
+            ),
+            (Some("user"), Some("tool_result"), Some("toolu_1"))
+        );
+        assert!(
+            result["content"]
+                .as_str()
+                .unwrap()
+                .contains("hello from notes")
+        );
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn thirty_tool_rounds_say_why_the_answer_stopped() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            (0..30)
+                .map(|i| {
+                    openai_tool_call(
+                        &format!("call_{i}"),
+                        "read_file",
+                        json!({ "path": "notes.txt" }),
+                    )
+                })
+                .collect(),
+        )
+        .await;
+        std::fs::write(s.cwd.join("notes.txt"), "hello from notes").unwrap();
+        s.prompt("keep reading").await;
+        let notice = s
+            .until(|e| match e {
+                AgentEvent::Notice(text) => Some(text.clone()),
+                _ => None,
+            })
+            .await;
+        assert!(notice.contains("30 tool-call rounds"), "{notice}");
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(s.bodies.lock().unwrap().len(), 30);
+        let messages = s.body(29)["messages"].as_array().unwrap().clone();
+        assert_tool_calls_answered(&messages);
         s.finish().await;
     }
 }

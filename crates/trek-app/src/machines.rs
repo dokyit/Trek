@@ -75,9 +75,14 @@ impl PairLink {
         let text = text.trim();
         let query = ["trek://pair?", "trek://pair/?"]
             .iter()
-            .find_map(|p| text.get(..p.len()).filter(|head| head.eq_ignore_ascii_case(p)).map(|_| &text[p.len()..]))
+            .find_map(|p| {
+                text.get(..p.len())
+                    .filter(|head| head.eq_ignore_ascii_case(p))
+                    .map(|_| &text[p.len()..])
+            })
             .ok_or_else(|| "That isn't a pairing link: it starts with trek://pair?".to_string())?;
-        let (mut host, mut code, mut fp, mut name, mut hid, mut alt) = (None, None, None, None, None, vec![]);
+        let (mut host, mut code, mut fp, mut name, mut hid, mut alt) =
+            (None, None, None, None, None, vec![]);
         for part in query.split('&') {
             let (key, raw) = part.split_once('=').unwrap_or((part, ""));
             match key {
@@ -87,20 +92,41 @@ impl PairLink {
                 "name" => name = Some(percent_decode(raw)).filter(|n| !n.trim().is_empty()),
                 "hid" => hid = Some(percent_decode(raw)).filter(|n| !n.trim().is_empty()),
                 // Routes are separated by bare commas; a comma inside one would be encoded.
-                "alt" => alt = raw.split(',').map(percent_decode).map(|r| r.trim().to_string()).filter(|r| !r.is_empty()).collect(),
+                "alt" => {
+                    alt = raw
+                        .split(',')
+                        .map(percent_decode)
+                        .map(|r| r.trim().to_string())
+                        .filter(|r| !r.is_empty())
+                        .collect()
+                }
                 _ => {}
             }
         }
-        let host = host.map(|h| h.trim().to_string()).filter(|h| !h.is_empty()).ok_or("The link names no address (host=)")?;
-        let code = code.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).ok_or("The link has no pairing code (code=)")?;
-        let fingerprint = full_fingerprint(&fp.ok_or("The link has no fingerprint (fp=): the other machine's server runs without TLS")?)?;
+        let host = host
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty())
+            .ok_or("The link names no address (host=)")?;
+        let code = code
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .ok_or("The link has no pairing code (code=)")?;
+        let fingerprint = full_fingerprint(&fp.ok_or(
+            "The link has no fingerprint (fp=): the other machine's server runs without TLS",
+        )?)?;
         let mut routes = vec![with_port(&host)];
         for r in alt.iter().map(|r| with_port(r)) {
             if !routes.contains(&r) {
                 routes.push(r);
             }
         }
-        Ok(Self { routes, code, fingerprint, name, host_id: hid })
+        Ok(Self {
+            routes,
+            code,
+            fingerprint,
+            name,
+            host_id: hid,
+        })
     }
 
     /// What was typed instead of a link: the address (`192.168.1.20` or `studio.local:7420`), the
@@ -114,14 +140,24 @@ impl PairLink {
         if code.is_empty() {
             return Err("Type the pairing code the other machine shows".into());
         }
-        Ok(Self { routes: vec![with_port(host)], code: code.to_string(), fingerprint: full_fingerprint(fingerprint)?, name: None, host_id: None })
+        Ok(Self {
+            routes: vec![with_port(host)],
+            code: code.to_string(),
+            fingerprint: full_fingerprint(fingerprint)?,
+            name: None,
+            host_id: None,
+        })
     }
 }
 
 /// A fingerprint as typed or linked (any case, spaces, colons or dashes between), as the client
 /// pins it.
 fn full_fingerprint(text: &str) -> Result<String, String> {
-    let hex: String = text.chars().filter(|c| !matches!(c, ' ' | ':' | '-')).collect::<String>().to_ascii_lowercase();
+    let hex: String = text
+        .chars()
+        .filter(|c| !matches!(c, ' ' | ':' | '-'))
+        .collect::<String>()
+        .to_ascii_lowercase();
     if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Ok(hex);
     }
@@ -134,13 +170,22 @@ fn full_fingerprint(text: &str) -> Result<String, String> {
 /// `host` with the phone server's usual port when it names none.
 fn with_port(host: &str) -> String {
     let host = host.trim().trim_end_matches('/');
-    let host = ["wss://", "ws://", "https://", "http://"].iter().find_map(|s| host.strip_prefix(s)).unwrap_or(host);
+    let host = ["wss://", "ws://", "https://", "http://"]
+        .iter()
+        .find_map(|s| host.strip_prefix(s))
+        .unwrap_or(host);
     let has_port = match host.rsplit_once(':') {
         // `[fd7a::1]:7420`, or `host:7420`; a bare IPv6 address has colons but no port.
-        Some((left, port)) => port.parse::<u16>().is_ok() && (left.ends_with(']') || !left.contains(':')),
+        Some((left, port)) => {
+            port.parse::<u16>().is_ok() && (left.ends_with(']') || !left.contains(':'))
+        }
         None => false,
     };
-    if has_port { host.to_string() } else { format!("{host}:{}", tr::DEFAULT_PORT) }
+    if has_port {
+        host.to_string()
+    } else {
+        format!("{host}:{}", tr::DEFAULT_PORT)
+    }
 }
 
 fn percent_decode(s: &str) -> String {
@@ -149,7 +194,11 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         let hex = |b: u8| (b as char).to_digit(16);
-        match (bytes[i], bytes.get(i + 1).copied().and_then(hex), bytes.get(i + 2).copied().and_then(hex)) {
+        match (
+            bytes[i],
+            bytes.get(i + 1).copied().and_then(hex),
+            bytes.get(i + 2).copied().and_then(hex),
+        ) {
             (b'%', Some(h), Some(l)) => {
                 out.push((h * 16 + l) as u8);
                 i += 3;
@@ -217,12 +266,24 @@ pub fn load() -> (String, Vec<MachineEntry>) {
             tracing::warn!("machines.json: {e}; keeping the entries that read");
             let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
             MachinesFile {
-                device_id: value.get("device_id").and_then(|v| v.as_str()).map(str::to_string),
-                machines: value.get("machines").and_then(|v| v.as_array()).into_iter().flatten().filter_map(|m| serde_json::from_value(m.clone()).ok()).collect(),
+                device_id: value
+                    .get("device_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                machines: value
+                    .get("machines")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|m| serde_json::from_value(m.clone()).ok())
+                    .collect(),
             }
         }
     };
-    let device_id = file.device_id.filter(|d| !d.is_empty()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let device_id = file
+        .device_id
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     (device_id, file.machines)
 }
 
@@ -232,7 +293,10 @@ pub fn save(device_id: &str, machines: &[MachineEntry]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let file = MachinesFile { device_id: Some(device_id.to_string()), machines: machines.to_vec() };
+    let file = MachinesFile {
+        device_id: Some(device_id.to_string()),
+        machines: machines.to_vec(),
+    };
     let text = serde_json::to_string_pretty(&file).map_err(std::io::Error::other)?;
     let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     std::fs::write(&tmp, text)?;
@@ -295,8 +359,16 @@ impl Machine {
 
     /// The threads the sidebar lists under its name: those not settled, newest first.
     pub fn listed(&self) -> Vec<&Thread> {
-        let mut out: Vec<&Thread> = self.threads.iter().filter(|t| t.settled_at.is_none() && t.archived_at.is_none() && t.parent_id.is_none()).collect();
-        out.sort_by(|a, b| b.needs_you().cmp(&a.needs_you()).then(b.updated_at.cmp(&a.updated_at)));
+        let mut out: Vec<&Thread> = self
+            .threads
+            .iter()
+            .filter(|t| t.settled_at.is_none() && t.archived_at.is_none() && t.parent_id.is_none())
+            .collect();
+        out.sort_by(|a, b| {
+            b.needs_you()
+                .cmp(&a.needs_you())
+                .then(b.updated_at.cmp(&a.updated_at))
+        });
         out
     }
 
@@ -306,8 +378,15 @@ impl Machine {
         if let Some(id) = self.entry.projects.get(&path.display().to_string()) {
             return Some(id.clone());
         }
-        let folder = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        self.projects.iter().find(|p| p.name == name).or_else(|| self.projects.iter().find(|p| p.name == folder)).map(|p| p.id.clone())
+        let folder = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        self.projects
+            .iter()
+            .find(|p| p.name == name)
+            .or_else(|| self.projects.iter().find(|p| p.name == folder))
+            .map(|p| p.id.clone())
     }
 }
 
@@ -398,8 +477,15 @@ pub fn thread_of(host: &str, s: &tr::ThreadSummary) -> Thread {
         title: s.title.clone(),
         agent: AgentId::from_key(&s.agent.key),
         model: s.model.clone(),
-        effort: s.effort.as_deref().and_then(Effort::parse).unwrap_or_default(),
-        hand_holding: s.access.map(hand_holding_of).unwrap_or(HandHolding::Supervised),
+        effort: s
+            .effort
+            .as_deref()
+            .and_then(Effort::parse)
+            .unwrap_or_default(),
+        hand_holding: s
+            .access
+            .map(hand_holding_of)
+            .unwrap_or(HandHolding::Supervised),
         source: ThreadSource::Trek,
         native_id: None,
         cwd: None,
@@ -459,16 +545,30 @@ pub struct Mapped {
 /// The machine's items as Trek's. What they can't carry is left out (a turn's changed files, the
 /// images a message had) or said in a notice (another thread it links to, a handoff).
 pub fn map_items(items: &[tr::Item]) -> Mapped {
-    let mut out = Mapped { rows: Vec::with_capacity(items.len()), requests: vec![], streaming: None };
+    let mut out = Mapped {
+        rows: Vec::with_capacity(items.len()),
+        requests: vec![],
+        streaming: None,
+    };
     for it in items {
         let item = match &it.body {
-            tr::ItemBody::User { text, images, aside } => {
+            tr::ItemBody::User {
+                text,
+                images,
+                aside,
+            } => {
                 let text = match images {
                     0 => text.clone(),
                     1 => format!("{text}\n\n(1 image)"),
                     n => format!("{text}\n\n({n} images)"),
                 };
-                Item::User { text, images: vec![], at: it.at, resume: None, aside: *aside }
+                Item::User {
+                    text,
+                    images: vec![],
+                    at: it.at,
+                    resume: None,
+                    aside: *aside,
+                }
             }
             tr::ItemBody::Assistant { text, streaming } => {
                 if *streaming {
@@ -477,8 +577,19 @@ pub fn map_items(items: &[tr::Item]) -> Mapped {
                 Item::Assistant { text: text.clone() }
             }
             tr::ItemBody::Reasoning { text } => Item::Reasoning { text: text.clone() },
-            tr::ItemBody::Tool { call_id, title, detail, status, output, .. } => Item::Tool {
-                id: if call_id.is_empty() { it.id.clone() } else { call_id.clone() },
+            tr::ItemBody::Tool {
+                call_id,
+                title,
+                detail,
+                status,
+                output,
+                ..
+            } => Item::Tool {
+                id: if call_id.is_empty() {
+                    it.id.clone()
+                } else {
+                    call_id.clone()
+                },
                 title: title.clone(),
                 detail: detail.clone(),
                 output: output.clone(),
@@ -489,27 +600,58 @@ pub fn map_items(items: &[tr::Item]) -> Mapped {
                     tr::ToolStatus::Denied => ToolStatus::Denied,
                 },
             },
-            tr::ItemBody::TurnEnd { took_secs } => Item::TurnEnd { at: it.at.unwrap_or_else(now_ms), took_secs: *took_secs },
+            tr::ItemBody::TurnEnd { took_secs } => Item::TurnEnd {
+                at: it.at.unwrap_or_else(now_ms),
+                took_secs: *took_secs,
+            },
             tr::ItemBody::Notice { text } => Item::Notice { text: text.clone() },
             tr::ItemBody::Error { text } => Item::Error { text: text.clone() },
-            tr::ItemBody::Limit { text, resets_at } => Item::Limit { text: text.clone(), resets_at: *resets_at, scope: Default::default() },
-            tr::ItemBody::Handoff { from, to } => Item::Notice { text: format!("Handed over from {from} to {to}") },
-            tr::ItemBody::ThreadLink { link, title, .. } => Item::Notice { text: format!("{} “{title}”", link.label()) },
+            tr::ItemBody::Limit { text, resets_at } => Item::Limit {
+                text: text.clone(),
+                resets_at: *resets_at,
+                scope: Default::default(),
+            },
+            tr::ItemBody::Handoff { from, to } => Item::Notice {
+                text: format!("Handed over from {from} to {to}"),
+            },
+            tr::ItemBody::ThreadLink { link, title, .. } => Item::Notice {
+                text: format!("{} “{title}”", link.label()),
+            },
             tr::ItemBody::Changes { .. } => continue,
-            tr::ItemBody::Approval { request_id, title, detail, state } => {
+            tr::ItemBody::Approval {
+                request_id,
+                title,
+                detail,
+                state,
+            } => {
                 if *state == tr::ApprovalState::Pending {
-                    out.requests.push(PendingPermission { request_id: request_id.clone(), title: title.clone(), detail: detail.clone(), prompt: None, after_turn: false });
+                    out.requests.push(PendingPermission {
+                        request_id: request_id.clone(),
+                        title: title.clone(),
+                        detail: detail.clone(),
+                        prompt: None,
+                        after_turn: false,
+                    });
                 }
                 continue;
             }
-            tr::ItemBody::Question { request_id, questions, state, .. } => {
+            tr::ItemBody::Question {
+                request_id,
+                questions,
+                state,
+                ..
+            } => {
                 if *state == tr::QuestionState::Pending {
                     let questions = questions
                         .iter()
                         .map(|q| trek_agents::Question {
                             question: q.question.clone(),
                             header: q.header.clone(),
-                            options: q.options.iter().map(|o| (o.label.clone(), o.description.clone())).collect(),
+                            options: q
+                                .options
+                                .iter()
+                                .map(|o| (o.label.clone(), o.description.clone()))
+                                .collect(),
                             multi: q.multi,
                             secret: q.secret,
                         })
@@ -524,7 +666,11 @@ pub fn map_items(items: &[tr::Item]) -> Mapped {
                 }
                 continue;
             }
-            tr::ItemBody::Plan { request_id, markdown, state } => {
+            tr::ItemBody::Plan {
+                request_id,
+                markdown,
+                state,
+            } => {
                 if *state == tr::PlanState::Pending {
                     out.requests.push(PendingPermission {
                         request_id: request_id.clone(),
@@ -554,7 +700,12 @@ fn upsert(items: &mut Vec<tr::Item>, item: tr::Item) {
 fn this_name() -> String {
     #[cfg(target_os = "macos")]
     {
-        let name = trek_core::procs::command("scutil").args(["--get", "ComputerName"]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).map(|s| s.trim().to_string());
+        let name = trek_core::procs::command("scutil")
+            .args(["--get", "ComputerName"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string());
         if let Some(name) = name.filter(|n| !n.is_empty()) {
             return name;
         }
@@ -588,7 +739,12 @@ impl Workspace {
 
     /// Keep `entry` (in place of one with the same id) and connect to it: on `client` when
     /// pairing just made one, else with its token.
-    fn add_machine(&mut self, entry: MachineEntry, client: Option<(Client, tokio::sync::mpsc::UnboundedReceiver<Event>)>, cx: &mut Context<Self>) {
+    fn add_machine(
+        &mut self,
+        entry: MachineEntry,
+        client: Option<(Client, tokio::sync::mpsc::UnboundedReceiver<Event>)>,
+        cx: &mut Context<Self>,
+    ) {
         let host = entry.id().to_string();
         if let Some(old) = self.machines.list.iter().position(|m| m.id() == host) {
             let old = self.machines.list.remove(old);
@@ -606,7 +762,11 @@ impl Workspace {
         };
         let mut machine = Machine {
             entry,
-            reach: if connected { Reach::Connected } else { Reach::Connecting },
+            reach: if connected {
+                Reach::Connected
+            } else {
+                Reach::Connecting
+            },
             client: None,
             info: None,
             projects: vec![],
@@ -634,7 +794,11 @@ impl Workspace {
 
     /// Ask machine `host` what it is (its home folder defaults where clones go).
     fn fetch_machine_info(&mut self, host: &str, client: Arc<Client>, cx: &mut Context<Self>) {
-        if self.machines.get(host).is_some_and(|m| m.info.is_some() || !m.entry.paired.serves(tr::feature::MACHINES)) {
+        if self
+            .machines
+            .get(host)
+            .is_some_and(|m| m.info.is_some() || !m.entry.paired.serves(tr::feature::MACHINES))
+        {
             return;
         }
         let host = host.to_string();
@@ -657,7 +821,9 @@ impl Workspace {
     pub(crate) fn machine_event(&mut self, host: &str, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::Connected { paired, .. } => {
-                let Some(m) = self.machines.get_mut(host) else { return };
+                let Some(m) = self.machines.get_mut(host) else {
+                    return;
+                };
                 m.reach = Reach::Connected;
                 m.entry.name = paired.host.name.clone();
                 m.entry.paired = paired;
@@ -669,7 +835,9 @@ impl Workspace {
                 }
             }
             Event::Disconnected { .. } => {
-                let Some(m) = self.machines.get_mut(host) else { return };
+                let Some(m) = self.machines.get_mut(host) else {
+                    return;
+                };
                 if m.reach == Reach::Connected {
                     m.entry.last_seen = Some(now_ms());
                     self.machines.save();
@@ -695,7 +863,9 @@ impl Workspace {
     }
 
     fn machine_message(&mut self, host: &str, msg: tr::ServerMessage, cx: &mut Context<Self>) {
-        let Some(m) = self.machines.get_mut(host) else { return };
+        let Some(m) = self.machines.get_mut(host) else {
+            return;
+        };
         let mut touched: Vec<String> = vec![];
         match msg {
             tr::ServerMessage::Snapshot(s) => {
@@ -715,7 +885,13 @@ impl Workspace {
                 m.rows.retain(|r| r.id != thread_id);
                 touched.push(thread_id);
             }
-            tr::ServerMessage::Transcript { thread_id, reset, items, more, .. } => {
+            tr::ServerMessage::Transcript {
+                thread_id,
+                reset,
+                items,
+                more,
+                ..
+            } => {
                 let f = m.followed.entry(thread_id.clone()).or_default();
                 if reset {
                     f.items = items;
@@ -741,7 +917,12 @@ impl Workspace {
                 return;
             }
             tr::ServerMessage::CloneProgress { folder, line } => {
-                if let Some(run) = self.machines.clone.as_mut().filter(|r| r.host == host && r.folder == folder) {
+                if let Some(run) = self
+                    .machines
+                    .clone
+                    .as_mut()
+                    .filter(|r| r.host == host && r.folder == folder)
+                {
                     run.lines.push(line);
                     let extra = run.lines.len().saturating_sub(200);
                     run.lines.drain(..extra);
@@ -762,17 +943,23 @@ impl Workspace {
     /// Bring the thread view's copy of a machine's thread (`live`) in line with what it sent.
     fn machine_live(&mut self, host: &str, tid: &str, cx: &mut Context<Self>) {
         let local = local_id(host, tid);
-        let Some(m) = self.machines.get(host) else { return };
+        let Some(m) = self.machines.get(host) else {
+            return;
+        };
         let Some(f) = m.followed.get(tid) else { return };
         let row = m.rows.iter().find(|r| r.id == tid);
         let working = row.is_some_and(|r| r.run_state == tr::RunState::Working);
         let since = row.and_then(|r| r.working_since);
         let plan = row.is_some_and(|r| r.plan);
-        let context = row.and_then(|r| r.context.as_ref()).map(|c| (c.used, c.window));
+        let context = row
+            .and_then(|r| r.context.as_ref())
+            .map(|c| (c.used, c.window));
         let mapped = map_items(&f.items);
         let loaded = f.loaded;
         let live = self.live.entry(local.clone()).or_default();
-        let reasoning = (working && matches!(mapped.rows.last(), Some((_, Item::Reasoning { .. })))).then(|| mapped.rows.len() - 1);
+        let reasoning = (working
+            && matches!(mapped.rows.last(), Some((_, Item::Reasoning { .. }))))
+        .then(|| mapped.rows.len() - 1);
         live.items = Transcript::stored(mapped.rows);
         live.permissions = mapped.requests;
         live.streaming = mapped.streaming;
@@ -784,19 +971,32 @@ impl Workspace {
         live.turn_started = match (working, live.turn_started) {
             (false, _) => None,
             (true, Some(at)) => Some(at),
-            (true, None) => Some(since.map_or_else(Instant::now, |s| Instant::now().checked_sub(Duration::from_millis((now_ms() - s).max(0) as u64)).unwrap_or_else(Instant::now))),
+            (true, None) => Some(since.map_or_else(Instant::now, |s| {
+                Instant::now()
+                    .checked_sub(Duration::from_millis((now_ms() - s).max(0) as u64))
+                    .unwrap_or_else(Instant::now)
+            })),
         };
         live.revision += 1;
-        cx.emit(WorkspaceEvent::Transcript { id: local, appended: false });
+        cx.emit(WorkspaceEvent::Transcript {
+            id: local,
+            appended: false,
+        });
         cx.notify();
     }
 
     /// Open a machine's thread here: subscribe to its transcript (once; the connection subscribes
     /// again after a reconnect) and tell the machine it's been seen.
     pub(crate) fn follow_machine_thread(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some((host, tid)) = split_id(id).map(|(h, t)| (h.to_string(), t.to_string())) else { return };
-        let Some(m) = self.machines.get_mut(&host) else { return };
-        let Some(client) = m.client.clone() else { return };
+        let Some((host, tid)) = split_id(id).map(|(h, t)| (h.to_string(), t.to_string())) else {
+            return;
+        };
+        let Some(m) = self.machines.get_mut(&host) else {
+            return;
+        };
+        let Some(client) = m.client.clone() else {
+            return;
+        };
         if m.followed.contains_key(&tid) {
             return;
         }
@@ -805,11 +1005,21 @@ impl Workspace {
         live.loading = !live.loaded;
         let local = id.to_string();
         cx.spawn(async move |this, cx| {
-            let seen = client.request(tr::ClientMessage::MarkSeen { thread_id: tid.clone() });
-            let reply = client.request(tr::ClientMessage::Subscribe { thread_id: tid.clone(), after_seq: None, limit: Some(OPEN_LIMIT) }).await;
+            let seen = client.request(tr::ClientMessage::MarkSeen {
+                thread_id: tid.clone(),
+            });
+            let reply = client
+                .request(tr::ClientMessage::Subscribe {
+                    thread_id: tid.clone(),
+                    after_seq: None,
+                    limit: Some(OPEN_LIMIT),
+                })
+                .await;
             let _ = seen.await;
             let _ = this.update(cx, |ws, cx| match reply {
-                Ok(msg @ tr::ServerMessage::Transcript { .. }) => ws.machine_message(&host, msg, cx),
+                Ok(msg @ tr::ServerMessage::Transcript { .. }) => {
+                    ws.machine_message(&host, msg, cx)
+                }
                 other => {
                     let why = match other {
                         Err(e) => e.to_string(),
@@ -821,7 +1031,12 @@ impl Workspace {
                     let live = ws.live.entry(local.clone()).or_default();
                     live.loading = false;
                     live.loaded = true;
-                    live.items = Transcript::stored(vec![("error".into(), Item::Error { text: format!("Couldn't open this thread: {why}") })]);
+                    live.items = Transcript::stored(vec![(
+                        "error".into(),
+                        Item::Error {
+                            text: format!("Couldn't open this thread: {why}"),
+                        },
+                    )]);
                     live.revision += 1;
                     cx.notify();
                 }
@@ -832,25 +1047,50 @@ impl Workspace {
 
     /// Send `msg` (made from the thread's id on its machine) for the machine's thread `id`; a
     /// refusal is said in a toast that names `what` was tried.
-    fn machine_request(&mut self, id: &str, what: &'static str, msg: impl FnOnce(String) -> tr::ClientMessage, cx: &mut Context<Self>) {
-        let Some((host, tid)) = split_id(id) else { return };
-        let Some(m) = self.machines.get(host) else { return };
+    fn machine_request(
+        &mut self,
+        id: &str,
+        what: &'static str,
+        msg: impl FnOnce(String) -> tr::ClientMessage,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((host, tid)) = split_id(id) else {
+            return;
+        };
+        let Some(m) = self.machines.get(host) else {
+            return;
+        };
         let name = m.entry.name.clone();
         let Some(client) = m.client.clone() else {
-            cx.emit(WorkspaceEvent::Toast { message: format!("{name} isn't connected."), undo: None });
+            cx.emit(WorkspaceEvent::Toast {
+                message: format!("{name} isn't connected."),
+                undo: None,
+            });
             return;
         };
         let msg = msg(tid.to_string());
         cx.spawn(async move |this, cx| {
             if let Err(e) = client.request(msg).await {
-                let _ = this.update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't {what} on {name}: {e}"), undo: None }));
+                let _ = this.update(cx, |_, cx| {
+                    cx.emit(WorkspaceEvent::Toast {
+                        message: format!("Couldn't {what} on {name}: {e}"),
+                        undo: None,
+                    })
+                });
             }
         })
         .detach();
     }
 
     /// A message to a machine's thread (the composer of a thread on another machine).
-    pub(crate) fn machine_send(&mut self, id: &str, text: String, images: Vec<PathBuf>, follow: Option<trek_core::settings::FollowUp>, cx: &mut Context<Self>) {
+    pub(crate) fn machine_send(
+        &mut self,
+        id: &str,
+        text: String,
+        images: Vec<PathBuf>,
+        follow: Option<trek_core::settings::FollowUp>,
+        cx: &mut Context<Self>,
+    ) {
         if text.trim().is_empty() && images.is_empty() {
             return;
         }
@@ -859,31 +1099,80 @@ impl Workspace {
             trek_core::settings::FollowUp::Queue => tr::SendMode::Queue,
         });
         let images = uploads(&images);
-        self.machine_request(id, "send the message", move |thread_id| tr::ClientMessage::Send(tr::SendRequest { thread_id, text, mode, images }), cx);
+        self.machine_request(
+            id,
+            "send the message",
+            move |thread_id| {
+                tr::ClientMessage::Send(tr::SendRequest {
+                    thread_id,
+                    text,
+                    mode,
+                    images,
+                })
+            },
+            cx,
+        );
     }
 
     pub(crate) fn machine_interrupt(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.machine_request(id, "stop it", |thread_id| tr::ClientMessage::Interrupt { thread_id }, cx);
+        self.machine_request(
+            id,
+            "stop it",
+            |thread_id| tr::ClientMessage::Interrupt { thread_id },
+            cx,
+        );
     }
 
     /// Answer a card in a machine's thread; it leaves the screen at once (the machine says so too).
-    pub(crate) fn machine_answer(&mut self, id: &str, request_id: &str, response: tr::AnswerResponse, cx: &mut Context<Self>) {
+    pub(crate) fn machine_answer(
+        &mut self,
+        id: &str,
+        request_id: &str,
+        response: tr::AnswerResponse,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(live) = self.live.get_mut(id) {
             live.permissions.retain(|p| p.request_id != request_id);
             live.revision += 1;
         }
         let request_id = request_id.to_string();
-        self.machine_request(id, "answer", move |thread_id| tr::ClientMessage::Answer(tr::AnswerRequest { thread_id, request_id, response }), cx);
+        self.machine_request(
+            id,
+            "answer",
+            move |thread_id| {
+                tr::ClientMessage::Answer(tr::AnswerRequest {
+                    thread_id,
+                    request_id,
+                    response,
+                })
+            },
+            cx,
+        );
         cx.notify();
     }
 
     /// `respond` in a machine's thread: an approval's decision, or a plan kept planning, or
     /// questions skipped.
-    pub(crate) fn machine_respond(&mut self, id: &str, request_id: &str, decision: trek_agents::Decision, cx: &mut Context<Self>) {
-        let prompt = self.live.get(id).and_then(|l| l.permissions.iter().find(|p| p.request_id == request_id)).map(|p| p.prompt.clone());
+    pub(crate) fn machine_respond(
+        &mut self,
+        id: &str,
+        request_id: &str,
+        decision: trek_agents::Decision,
+        cx: &mut Context<Self>,
+    ) {
+        let prompt = self
+            .live
+            .get(id)
+            .and_then(|l| l.permissions.iter().find(|p| p.request_id == request_id))
+            .map(|p| p.prompt.clone());
         let response = match prompt.flatten() {
-            Some(trek_agents::Prompt::Plan(_)) => tr::AnswerResponse::Plan { approve: decision != trek_agents::Decision::Deny, feedback: None },
-            Some(trek_agents::Prompt::Questions(_)) => tr::AnswerResponse::Questions { answers: vec![] },
+            Some(trek_agents::Prompt::Plan(_)) => tr::AnswerResponse::Plan {
+                approve: decision != trek_agents::Decision::Deny,
+                feedback: None,
+            },
+            Some(trek_agents::Prompt::Questions(_)) => {
+                tr::AnswerResponse::Questions { answers: vec![] }
+            }
             None => tr::AnswerResponse::Approval {
                 decision: match decision {
                     trek_agents::Decision::Allow => tr::Decision::Allow,
@@ -897,20 +1186,35 @@ impl Workspace {
 
     /// The composer's model, effort, access or plan changed on a machine's thread: what changed
     /// goes to the machine (it may refuse an agent or model it doesn't have).
-    pub(crate) fn machine_set_prefs(&mut self, id: &str, prefs: crate::workspace::Prefs, cx: &mut Context<Self>) {
-        let Some(before) = self.thread(id).cloned() else { return };
+    pub(crate) fn machine_set_prefs(
+        &mut self,
+        id: &str,
+        prefs: crate::workspace::Prefs,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(before) = self.thread(id).cloned() else {
+            return;
+        };
         let plan_before = self.live.get(id).is_some_and(|l| l.plan);
-        let req = |thread_id: String| tr::ClientMessage::SetPrefs(tr::PrefsRequest {
-            thread_id,
-            agent: (prefs.agent != before.agent).then(|| prefs.agent.key()),
-            model: (prefs.model != before.model).then(|| prefs.model.clone()).flatten(),
-            effort: (prefs.effort != before.effort).then(|| prefs.effort.as_str().to_string()),
-            access: (prefs.hand_holding != before.hand_holding).then(|| access_of(prefs.hand_holding)),
-            plan: (prefs.plan != plan_before).then_some(prefs.plan),
-        });
+        let req = |thread_id: String| {
+            tr::ClientMessage::SetPrefs(tr::PrefsRequest {
+                thread_id,
+                agent: (prefs.agent != before.agent).then(|| prefs.agent.key()),
+                model: (prefs.model != before.model)
+                    .then(|| prefs.model.clone())
+                    .flatten(),
+                effort: (prefs.effort != before.effort).then(|| prefs.effort.as_str().to_string()),
+                access: (prefs.hand_holding != before.hand_holding)
+                    .then(|| access_of(prefs.hand_holding)),
+                plan: (prefs.plan != plan_before).then_some(prefs.plan),
+            })
+        };
         // Shown at once; the machine's row confirms it (or puts it back).
         if let Some((host, _)) = split_id(id)
-            && let Some(t) = self.machines.get_mut(host).and_then(|m| m.threads.iter_mut().find(|t| t.id == id))
+            && let Some(t) = self
+                .machines
+                .get_mut(host)
+                .and_then(|m| m.threads.iter_mut().find(|t| t.id == id))
         {
             t.agent = prefs.agent.clone();
             t.model = prefs.model.clone();
@@ -925,17 +1229,36 @@ impl Workspace {
     }
 
     /// Pin, settle, archive or rename a machine's thread.
-    pub(crate) fn machine_thread_action(&mut self, id: &str, action: tr::ThreadAction, cx: &mut Context<Self>) {
-        self.machine_request(id, "do that", move |thread_id| tr::ClientMessage::ThreadAction(tr::ThreadActionRequest { thread_id, action }), cx);
+    pub(crate) fn machine_thread_action(
+        &mut self,
+        id: &str,
+        action: tr::ThreadAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.machine_request(
+            id,
+            "do that",
+            move |thread_id| {
+                tr::ClientMessage::ThreadAction(tr::ThreadActionRequest { thread_id, action })
+            },
+            cx,
+        );
     }
 
     /// The machine the main window's draft in `project` starts its thread on (`None`: this Mac).
     pub fn draft_machine(&self, project: &Path) -> Option<String> {
-        self.project_prefs(project).machine.filter(|m| self.machines.get(m).is_some())
+        self.project_prefs(project)
+            .machine
+            .filter(|m| self.machines.get(m).is_some())
     }
 
     /// Where new threads in `project` start: on machine `host`, or on this Mac (`None`).
-    pub fn set_draft_machine(&mut self, project: &Path, host: Option<String>, cx: &mut Context<Self>) {
+    pub fn set_draft_machine(
+        &mut self,
+        project: &Path,
+        host: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.update_project_prefs(project, |p| p.machine = host, cx);
         cx.notify();
     }
@@ -943,29 +1266,78 @@ impl Workspace {
     /// Start a thread on machine `host` in its copy of `project`, with the draft's choices and
     /// `text`, and open it. Said in a toast (and the message goes back to the composer) when the
     /// machine has no copy of the project or refuses.
-    pub(crate) fn machine_start_thread(&mut self, host: &str, project: PathBuf, text: String, images: Vec<PathBuf>, cx: &mut Context<Self>) {
+    pub(crate) fn machine_start_thread(
+        &mut self,
+        host: &str,
+        project: PathBuf,
+        text: String,
+        images: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         let text = text.trim().to_string();
         if text.is_empty() && images.is_empty() {
             return;
         }
         let give_back = |ws: &mut Self, why: String, text: String, cx: &mut Context<Self>| {
-            cx.emit(WorkspaceEvent::Toast { message: why, undo: None });
+            cx.emit(WorkspaceEvent::Toast {
+                message: why,
+                undo: None,
+            });
             cx.emit(WorkspaceEvent::InsertIntoComposer(text));
             let _ = ws;
         };
-        let Some(m) = self.machines.get(host) else { return give_back(self, "That machine isn't paired any more.".into(), text, cx) };
+        let Some(m) = self.machines.get(host) else {
+            return give_back(self, "That machine isn't paired any more.".into(), text, cx);
+        };
         let machine = m.entry.name.clone();
-        let Some(client) = m.client.clone() else { return give_back(self, format!("{machine} isn't connected."), text, cx) };
-        let name = self.projects.iter().find(|p| p.path == project).map(|p| p.name.clone()).unwrap_or_else(|| project.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+        let Some(client) = m.client.clone() else {
+            return give_back(self, format!("{machine} isn't connected."), text, cx);
+        };
+        let name = self
+            .projects
+            .iter()
+            .find(|p| p.path == project)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| {
+                project
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            });
         let Some(project_id) = m.project_for(&project, &name) else {
-            return give_back(self, format!("{name} isn't on {machine} yet. Choose “Add to another machine…” to clone it there."), text, cx);
+            return give_back(
+                self,
+                format!(
+                    "{name} isn't on {machine} yet. Choose “Add to another machine…” to clone it there."
+                ),
+                text,
+                cx,
+            );
         };
         let prefs = self.draft_prefs.clone();
         // The draft's agent and model when the machine has them; its default agent otherwise.
-        let agent = m.agents.iter().find(|a| a.key == prefs.agent.key()).or_else(|| m.agents.first());
-        let model = prefs.model.clone().filter(|id| agent.is_some_and(|a| a.models.iter().any(|m| crate::composer::same_model(id, &m.id))));
-        let agent_key = agent.map(|a| a.key.clone()).unwrap_or_else(|| prefs.agent.key());
-        let agent_ref = tr::AgentRef::new(agent_key.clone(), agent.map(|a| a.name.clone()).unwrap_or_else(|| prefs.agent.display_name()), agent.and_then(|a| a.logo.as_deref()));
+        let agent = m
+            .agents
+            .iter()
+            .find(|a| a.key == prefs.agent.key())
+            .or_else(|| m.agents.first());
+        let model = prefs.model.clone().filter(|id| {
+            agent.is_some_and(|a| {
+                a.models
+                    .iter()
+                    .any(|m| crate::composer::same_model(id, &m.id))
+            })
+        });
+        let agent_key = agent
+            .map(|a| a.key.clone())
+            .unwrap_or_else(|| prefs.agent.key());
+        let agent_ref = tr::AgentRef::new(
+            agent_key.clone(),
+            agent
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| prefs.agent.display_name()),
+            agent.and_then(|a| a.logo.as_deref()),
+        );
         let req = tr::NewThreadRequest {
             project_id: project_id.clone(),
             agent: agent_key,
@@ -981,7 +1353,10 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let reply = client.request(tr::ClientMessage::NewThread(req)).await;
             let _ = this.update(cx, |ws, cx| match reply {
-                Ok(tr::ServerMessage::Ack { thread_id: Some(tid), .. }) => {
+                Ok(tr::ServerMessage::Ack {
+                    thread_id: Some(tid),
+                    ..
+                }) => {
                     // Its row may come after the reply: one to show until it does.
                     if let Some(m) = ws.machines.get_mut(&host)
                         && !m.rows.iter().any(|r| r.id == tid)
@@ -989,7 +1364,11 @@ impl Workspace {
                         m.rows.push(tr::ThreadSummary {
                             id: tid.clone(),
                             title: trek_core::import_title(&text),
-                            project: tr::ProjectRef { id: project_id, name: name.clone(), ..Default::default() },
+                            project: tr::ProjectRef {
+                                id: project_id,
+                                name: name.clone(),
+                                ..Default::default()
+                            },
                             agent: agent_ref,
                             model,
                             run_state: tr::RunState::Working,
@@ -1003,8 +1382,18 @@ impl Workspace {
                     }
                     ws.navigate(Route::Thread(local_id(&host, &tid)), cx);
                 }
-                Ok(other) => give_back(ws, format!("{machine} didn't start the thread ({})", tr_kind(&other)), text, cx),
-                Err(e) => give_back(ws, format!("Couldn't start the thread on {machine}: {e}"), text, cx),
+                Ok(other) => give_back(
+                    ws,
+                    format!("{machine} didn't start the thread ({})", tr_kind(&other)),
+                    text,
+                    cx,
+                ),
+                Err(e) => give_back(
+                    ws,
+                    format!("Couldn't start the thread on {machine}: {e}"),
+                    text,
+                    cx,
+                ),
             });
         })
         .detach();
@@ -1015,7 +1404,11 @@ impl Workspace {
         if self.machines.pairing == Some(Pairing::Busy) {
             return;
         }
-        let auth = Auth::Pair { code: link.code.clone(), device_id: self.machines.device_id.clone(), device_name: this_name() };
+        let auth = Auth::Pair {
+            code: link.code.clone(),
+            device_id: self.machines.device_id.clone(),
+            device_name: this_name(),
+        };
         let client = match Client::connect(link.routes.clone(), &link.fingerprint, auth) {
             Ok(c) => c,
             Err(e) => {
@@ -1024,7 +1417,9 @@ impl Workspace {
                 return;
             }
         };
-        let Some(events) = client.events() else { return };
+        let Some(events) = client.events() else {
+            return;
+        };
         self.machines.pairing = Some(Pairing::Busy);
         cx.notify();
         let state = client.state();
@@ -1090,7 +1485,9 @@ impl Workspace {
     /// Forget machine `host`: its connection closes, its threads go from here, and it's out of
     /// `machines.json`. (The machine still lists this Mac among its devices until it's unpaired there.)
     pub fn forget_machine(&mut self, host: &str, cx: &mut Context<Self>) {
-        let Some(ix) = self.machines.list.iter().position(|m| m.id() == host) else { return };
+        let Some(ix) = self.machines.list.iter().position(|m| m.id() == host) else {
+            return;
+        };
         let m = self.machines.list.remove(ix);
         if let Some(c) = &m.client {
             c.close();
@@ -1113,19 +1510,51 @@ impl Workspace {
 
     /// Clone this Mac's `project` to machine `host` (`url` into `folder` there), copy `files`
     /// (paths in the project) into the clone, then start new threads in it there.
-    pub fn clone_to_machine(&mut self, host: &str, project: PathBuf, url: String, folder: String, files: Vec<String>, cx: &mut Context<Self>) {
-        let Some(m) = self.machines.get(host) else { return };
+    pub fn clone_to_machine(
+        &mut self,
+        host: &str,
+        project: PathBuf,
+        url: String,
+        folder: String,
+        files: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(m) = self.machines.get(host) else {
+            return;
+        };
         let Some(client) = m.client.clone() else {
-            self.machines.clone = Some(CloneRun { host: host.into(), folder, lines: vec![], stage: CloneStage::Failed(format!("{} isn't connected.", m.entry.name)) });
+            self.machines.clone = Some(CloneRun {
+                host: host.into(),
+                folder,
+                lines: vec![],
+                stage: CloneStage::Failed(format!("{} isn't connected.", m.entry.name)),
+            });
             cx.notify();
             return;
         };
-        let name = self.projects.iter().find(|p| p.path == project).map(|p| p.name.clone()).unwrap_or_else(|| project.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
-        self.machines.clone = Some(CloneRun { host: host.into(), folder: folder.clone(), lines: vec![], stage: CloneStage::Cloning });
+        let name = self
+            .projects
+            .iter()
+            .find(|p| p.path == project)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| {
+                project
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            });
+        self.machines.clone = Some(CloneRun {
+            host: host.into(),
+            folder: folder.clone(),
+            lines: vec![],
+            stage: CloneStage::Cloning,
+        });
         cx.notify();
         let host = host.to_string();
         cx.spawn(async move |this, cx| {
-            let fail = |this: &gpui_kit::WeakEntity<Workspace>, cx: &mut gpui_kit::AsyncApp, why: String| {
+            let fail = |this: &gpui_kit::WeakEntity<Workspace>,
+                        cx: &mut gpui_kit::AsyncApp,
+                        why: String| {
                 let _ = this.update(cx, |ws, cx| {
                     if let Some(run) = ws.machines.clone.as_mut() {
                         run.stage = CloneStage::Failed(why);
@@ -1133,7 +1562,10 @@ impl Workspace {
                     cx.notify();
                 });
             };
-            let project_id = match client.clone_project(tr::CloneProjectRequest { url, folder, name }).await {
+            let project_id = match client
+                .clone_project(tr::CloneProjectRequest { url, folder, name })
+                .await
+            {
                 Ok(id) => id,
                 Err(e) => return fail(&this, cx, e.to_string()),
             };
@@ -1145,18 +1577,33 @@ impl Workspace {
                     cx.notify();
                 });
                 let root = project.clone();
-                let read = cx.background_executor().spawn(async move { clone::read_uploads(&root, &files) }).await;
+                let read = cx
+                    .background_executor()
+                    .spawn(async move { clone::read_uploads(&root, &files) })
+                    .await;
                 let uploads = match read {
                     Ok(u) => u,
-                    Err(e) => return fail(&this, cx, format!("Cloned, but the ignored files couldn't be read: {e}")),
+                    Err(e) => {
+                        return fail(
+                            &this,
+                            cx,
+                            format!("Cloned, but the ignored files couldn't be read: {e}"),
+                        );
+                    }
                 };
                 if let Err(e) = client.put_files(&project_id, &uploads).await {
-                    return fail(&this, cx, format!("Cloned, but copying the ignored files failed: {e}"));
+                    return fail(
+                        &this,
+                        cx,
+                        format!("Cloned, but copying the ignored files failed: {e}"),
+                    );
                 }
             }
             let _ = this.update(cx, |ws, cx| {
                 if let Some(m) = ws.machines.get_mut(&host) {
-                    m.entry.projects.insert(project.display().to_string(), project_id.clone());
+                    m.entry
+                        .projects
+                        .insert(project.display().to_string(), project_id.clone());
                 }
                 ws.machines.save();
                 if let Some(run) = ws.machines.clone.as_mut() {
@@ -1174,30 +1621,50 @@ impl Workspace {
     /// What can't be done to a thread on another machine yet (rewind, fork, retry, delete,
     /// snooze): said in a toast. True when `id` is such a thread.
     pub(crate) fn machine_refuses(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
-        let Some((host, _)) = split_id(id) else { return false };
-        let name = self.machines.get(host).map_or_else(|| "the other machine".to_string(), |m| m.entry.name.clone());
+        let Some((host, _)) = split_id(id) else {
+            return false;
+        };
+        let name = self
+            .machines
+            .get(host)
+            .map_or_else(|| "the other machine".to_string(), |m| m.entry.name.clone());
         cx.emit(WorkspaceEvent::Toast { message: format!("Do that in Trek on {name}. From here, its threads can be followed, sent to, stopped, answered, pinned, settled and archived."), undo: None });
         true
     }
 
     /// The machine's home folder, as it said (`machine_info`).
     pub fn machine_home(&self, host: &str) -> Option<String> {
-        self.machines.get(host).and_then(|m| m.info.as_ref()).map(|i| i.home.clone())
+        self.machines
+            .get(host)
+            .and_then(|m| m.info.as_ref())
+            .map(|i| i.home.clone())
     }
 
     /// Whether `scope` shows a thread living on another machine.
     pub fn on_machine_in(&self, scope: &Scope) -> Option<String> {
         let id = self.thread_id_in(scope)?;
         let (host, _) = split_id(id)?;
-        Some(self.machines.get(host).map_or_else(|| host.to_string(), |m| m.entry.name.clone()))
+        Some(
+            self.machines
+                .get(host)
+                .map_or_else(|| host.to_string(), |m| m.entry.name.clone()),
+        )
     }
 }
 
 /// Machine `host`'s events, handed to the workspace as they come; then why it stopped.
-fn pump(host: String, mut events: tokio::sync::mpsc::UnboundedReceiver<Event>, state: tokio::sync::watch::Receiver<State>, cx: &mut Context<Workspace>) -> Task<()> {
+fn pump(
+    host: String,
+    mut events: tokio::sync::mpsc::UnboundedReceiver<Event>,
+    state: tokio::sync::watch::Receiver<State>,
+    cx: &mut Context<Workspace>,
+) -> Task<()> {
     cx.spawn(async move |this, cx| {
         while let Some(event) = events.recv().await {
-            if this.update(cx, |ws, cx| ws.machine_event(&host, event, cx)).is_err() {
+            if this
+                .update(cx, |ws, cx| ws.machine_event(&host, event, cx))
+                .is_err()
+            {
                 return;
             }
         }
@@ -1219,13 +1686,19 @@ fn uploads(images: &[PathBuf]) -> Vec<tr::ImageUpload> {
             } else {
                 return None;
             };
-            Some(tr::ImageUpload { mime: mime.into(), data: tr::base64(&bytes) })
+            Some(tr::ImageUpload {
+                mime: mime.into(),
+                data: tr::base64(&bytes),
+            })
         })
         .collect()
 }
 
 fn tr_kind(msg: &tr::ServerMessage) -> String {
-    serde_json::to_value(msg).ok().and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string)).unwrap_or_default()
+    serde_json::to_value(msg)
+        .ok()
+        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

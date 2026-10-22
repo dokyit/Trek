@@ -32,7 +32,9 @@ impl Workspace {
         let found = verification::find(project);
         let before = self.verification(project);
         let same = match (&found, &before) {
-            (Some(f), Some(b)) => b.skill == f.dir.display().to_string() && b.name == f.name && b.cli == f.cli,
+            (Some(f), Some(b)) => {
+                b.skill == f.dir.display().to_string() && b.name == f.name && b.cli == f.cli
+            }
             (None, None) => true,
             _ => false,
         };
@@ -48,12 +50,20 @@ impl Workspace {
     /// One that's gone from a project folder that's there is put away with the user's choices
     /// for it, which come back with it (a branch without it checked out); a folder that isn't
     /// there (a drive not mounted, a project moved) says nothing about the skill.
-    fn record_verification(&mut self, project: &Path, found: Option<(verification::Found, Option<verification::Changed>)>, cx: &mut Context<Self>) {
+    fn record_verification(
+        &mut self,
+        project: &Path,
+        found: Option<(verification::Found, Option<verification::Changed>)>,
+        cx: &mut Context<Self>,
+    ) {
         let prefs = self.project_prefs(project);
         let before = prefs.verification.clone();
         match found {
             Some((f, changed)) => {
-                let away = prefs.verification_away.clone().filter(|a| a.skill == f.dir.display().to_string());
+                let away = prefs
+                    .verification_away
+                    .clone()
+                    .filter(|a| a.skill == f.dir.display().to_string());
                 let after = verification::record(&f, before.as_ref().or(away.as_ref()), changed);
                 if Some(&after) != before.as_ref() || prefs.verification_away.is_some() {
                     self.update_project_prefs(
@@ -111,7 +121,11 @@ impl Workspace {
     /// Look through every project for its skill (at launch, and on Settings → Project: a skill
     /// made outside Trek is told to agents too).
     pub(super) fn refresh_all_verification(&mut self, cx: &mut Context<Self>) {
-        let projects: Vec<PathBuf> = self.workspace_projects().into_iter().map(|p| p.path.clone()).collect();
+        let projects: Vec<PathBuf> = self
+            .workspace_projects()
+            .into_iter()
+            .map(|p| p.path.clone())
+            .collect();
         self.scan_verification(projects, cx);
     }
 
@@ -123,11 +137,18 @@ impl Workspace {
             self.navigate(Route::Thread(id), cx);
             return;
         }
-        let guide = skills::shipped(if maintain { skills::MAINTAIN_VERIFICATION } else { skills::CREATE_VERIFICATION });
+        let guide = skills::shipped(if maintain {
+            skills::MAINTAIN_VERIFICATION
+        } else {
+            skills::CREATE_VERIFICATION
+        });
         let guide = match guide {
             Ok(g) => g,
             Err(e) => {
-                cx.emit(WorkspaceEvent::Toast { message: format!("Couldn't write Trek's verification guide: {e}"), undo: None });
+                cx.emit(WorkspaceEvent::Toast {
+                    message: format!("Couldn't write Trek's verification guide: {e}"),
+                    undo: None,
+                });
                 return;
             }
         };
@@ -135,13 +156,19 @@ impl Workspace {
             Some(v) => verification::maintain_prompt(&guide, Path::new(&v.skill), v.cli.is_some()),
             None => verification::setup_prompt(&guide),
         };
-        self.navigate(Route::Draft { project: Some(project.clone()) }, cx);
+        self.navigate(
+            Route::Draft {
+                project: Some(project.clone()),
+            },
+            cx,
+        );
         self.use_verification_agent();
         self.draft_prefs.worktree = false;
         self.draft_prefs.plan = false;
         self.send(text, vec![], cx);
         if let Route::Thread(id) = &self.route {
-            self.verify_runs.insert(id.clone(), VerifyRun { project, maintain });
+            self.verify_runs
+                .insert(id.clone(), VerifyRun { project, maintain });
         }
     }
 
@@ -149,7 +176,8 @@ impl Workspace {
     /// the project's if the default can't work on files (a direct model only chats), or else
     /// the first agent on offer that can.
     fn use_verification_agent(&mut self) {
-        let works = |a: &AgentId| !matches!(a, AgentId::Direct(p) if !trek_core::catalog::is_mock(p));
+        let works =
+            |a: &AgentId| !matches!(a, AgentId::Direct(p) if !trek_core::catalog::is_mock(p));
         let ready = self.ready_agents();
         let default = AgentId::from_key(&self.settings.general.default_agent);
         let p = &mut self.draft_prefs;
@@ -171,17 +199,30 @@ impl Workspace {
         self.verify_runs
             .iter()
             .filter(|(_, r)| r.project == project)
-            .find(|(id, _)| self.thread(id).is_some_and(|t| matches!(t.run_state, RunState::Working | RunState::NeedsYou)))
+            .find(|(id, _)| {
+                self.thread(id)
+                    .is_some_and(|t| matches!(t.run_state, RunState::Working | RunState::NeedsYou))
+            })
             .map(|(id, r)| (id.clone(), r.maintain))
     }
 
     /// A turn in `id` is over (`completed`: not stopped, nor paused at a usage limit): if it was
     /// setting up or maintaining a verification skill, see what the project has now. A maintenance
     /// run counts once it has run or changed the skill; a setup run, once there's a skill.
-    pub(super) fn verification_turn_ended(&mut self, id: &str, completed: bool, cx: &mut Context<Self>) {
-        let Some(run) = self.verify_runs.get(id) else { return };
+    pub(super) fn verification_turn_ended(
+        &mut self,
+        id: &str,
+        completed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(run) = self.verify_runs.get(id) else {
+            return;
+        };
         let (project, maintain) = (run.project.clone(), run.maintain);
-        let ok = completed && self.thread(id).is_some_and(|t| t.run_state != RunState::Failed);
+        let ok = completed
+            && self
+                .thread(id)
+                .is_some_and(|t| t.run_state != RunState::Failed);
         let had = self.verification(&project).is_some();
         self.refresh_verification(&project, cx);
         let now = self.verification(&project);
@@ -194,11 +235,24 @@ impl Workspace {
             self.verify_runs.remove(id);
             if maintain {
                 let at = now_ms();
-                self.update_project_prefs(&project, |p| p.verification.iter_mut().for_each(|v| v.maintained_at = Some(at)), cx);
+                self.update_project_prefs(
+                    &project,
+                    |p| {
+                        p.verification
+                            .iter_mut()
+                            .for_each(|v| v.maintained_at = Some(at))
+                    },
+                    cx,
+                );
             }
         }
         if let (false, Some(v)) = (had, now) {
-            let name = self.projects.iter().find(|p| p.path == project).map(|p| p.name.clone()).unwrap_or_default();
+            let name = self
+                .projects
+                .iter()
+                .find(|p| p.path == project)
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
             cx.emit(WorkspaceEvent::Toast { message: format!("{name} has a verification skill now: “{}”. Every agent working there will use it.", v.name), undo: None });
         }
     }
@@ -206,23 +260,40 @@ impl Workspace {
     /// Whether `id`'s last turn changed something in the skill `v` of `project`, or ran its CLI
     /// and the run passed. Reading it isn't maintaining it.
     fn worked_on(&self, id: &str, project: &Path, v: &Verification) -> bool {
-        let Some(live) = self.live.get(id) else { return false };
-        let from = live.items.iter().rposition(|i| matches!(i, Item::User { .. })).unwrap_or(0);
+        let Some(live) = self.live.get(id) else {
+            return false;
+        };
+        let from = live
+            .items
+            .iter()
+            .rposition(|i| matches!(i, Item::User { .. }))
+            .unwrap_or(0);
         let turn = &live.items[from..];
-        let folder = Path::new(&v.skill).strip_prefix(project).unwrap_or(Path::new(&v.skill)).display().to_string();
+        let folder = Path::new(&v.skill)
+            .strip_prefix(project)
+            .unwrap_or(Path::new(&v.skill))
+            .display()
+            .to_string();
         let changed = turn.iter().any(|i| {
             matches!(i, Item::Tool { title, detail, status: ToolStatus::Done, .. } if matches!(title.as_str(), "Edit" | "Write" | "Delete" | "Move") && detail.contains(&folder))
         });
         let ran = || {
             let needle = v.cli.as_deref().and_then(verification::needle);
-            needle.is_some_and(|needle| verification::verdict(turn, &verification::Probe { needle, main: None }).is_some_and(|r| r.passed))
+            needle.is_some_and(|needle| {
+                verification::verdict(turn, &verification::Probe { needle, main: None })
+                    .is_some_and(|r| r.passed)
+            })
         };
         changed || ran()
     }
 
     /// Turn the weekly reminder for `project`'s skill on or off.
     pub fn set_verification_reminder(&mut self, project: &Path, on: bool, cx: &mut Context<Self>) {
-        self.update_project_prefs(project, |p| p.verification.iter_mut().for_each(|v| v.remind_weekly = on), cx);
+        self.update_project_prefs(
+            project,
+            |p| p.verification.iter_mut().for_each(|v| v.remind_weekly = on),
+            cx,
+        );
     }
 
     /// Remind the user of skills a week past their last maintenance, once a week at most.
@@ -230,12 +301,29 @@ impl Workspace {
         let due: Vec<(PathBuf, String, Option<i64>)> = self
             .workspace_projects()
             .into_iter()
-            .filter_map(|p| self.verification(&p.path).filter(|v| verification::remind_now(v, now)).map(|v| (p.path.clone(), p.name.clone(), v.maintained_at)))
+            .filter_map(|p| {
+                self.verification(&p.path)
+                    .filter(|v| verification::remind_now(v, now))
+                    .map(|v| (p.path.clone(), p.name.clone(), v.maintained_at))
+            })
             .collect();
         for (project, name, at) in due {
-            self.update_project_prefs(&project, |p| p.verification.iter_mut().for_each(|v| v.reminded_at = Some(now)), cx);
-            let when = at.map(|at| format!(" was last maintained {}", ago(at, now))).unwrap_or_else(|| " hasn't been maintained yet".into());
-            cx.emit(WorkspaceEvent::Toast { message: format!("{name}'s verification skill{when}."), undo: Some(UndoAction::MaintainVerification(project)) });
+            self.update_project_prefs(
+                &project,
+                |p| {
+                    p.verification
+                        .iter_mut()
+                        .for_each(|v| v.reminded_at = Some(now))
+                },
+                cx,
+            );
+            let when = at
+                .map(|at| format!(" was last maintained {}", ago(at, now)))
+                .unwrap_or_else(|| " hasn't been maintained yet".into());
+            cx.emit(WorkspaceEvent::Toast {
+                message: format!("{name}'s verification skill{when}."),
+                undo: Some(UndoAction::MaintainVerification(project)),
+            });
         }
     }
 
@@ -244,7 +332,10 @@ impl Workspace {
     pub(super) fn project_notes(&self, project: Option<&Path>, cwd: &Path) -> Option<String> {
         let project = project?;
         let v = self.verification(project)?;
-        Path::new(&v.skill).join("SKILL.md").exists().then(|| verification::instructions(&v, project, cwd))
+        Path::new(&v.skill)
+            .join("SKILL.md")
+            .exists()
+            .then(|| verification::instructions(&v, project, cwd))
     }
 
     /// How to tell a turn in `t` ran its project's verification CLI (`verification::verdict`).
@@ -253,7 +344,11 @@ impl Workspace {
         let v = self.verification(&project)?;
         let needle = verification::needle(v.cli.as_deref()?)?;
         // A thread working outside the main checkout checks its own folder, not the checkout.
-        let main = t.cwd.as_ref().filter(|c| !c.starts_with(&project)).map(|_| project.clone());
+        let main = t
+            .cwd
+            .as_ref()
+            .filter(|c| !c.starts_with(&project))
+            .map(|_| project.clone());
         Some(verification::Probe { needle, main })
     }
 }
@@ -268,8 +363,15 @@ fn verifiable(project: &Path) -> bool {
 /// (`SessionConfig::instructions`): all of them when they go in its system prompt; in a message,
 /// unless it resumes a session its thread was told just these in (`told`). A thread that
 /// started before the skill was set up, or since it changed, is told with its next message.
-pub(super) fn notes_to_give(notes: Option<String>, agent: &trek_core::AgentId, resuming: bool, told: Option<&str>) -> Option<String> {
-    notes.filter(|n| trek_agents::notes_in_system_prompt(agent) || !resuming || told != Some(n.as_str()))
+pub(super) fn notes_to_give(
+    notes: Option<String>,
+    agent: &trek_core::AgentId,
+    resuming: bool,
+    told: Option<&str>,
+) -> Option<String> {
+    notes.filter(|n| {
+        trek_agents::notes_in_system_prompt(agent) || !resuming || told != Some(n.as_str())
+    })
 }
 
 /// "3 days ago", "today": how long since `at`, for the reminder and Settings.
@@ -291,12 +393,34 @@ mod tests {
     fn a_session_is_told_the_notes_its_thread_hasn_t_heard() {
         let notes = || Some("Verify with ./app check.".to_string());
         // A new session hears them; one that resumes, only if they're news to its thread.
-        assert_eq!(notes_to_give(notes(), &AgentId::Codex, false, notes().as_deref()), notes());
-        assert_eq!(notes_to_give(notes(), &AgentId::Codex, true, notes().as_deref()), None);
-        assert_eq!(notes_to_give(notes(), &AgentId::OpenCode, true, None), notes(), "started before the skill was set up");
-        assert_eq!(notes_to_give(notes(), &AgentId::Codex, true, Some("Verify with make check.")), notes(), "the skill changed");
+        assert_eq!(
+            notes_to_give(notes(), &AgentId::Codex, false, notes().as_deref()),
+            notes()
+        );
+        assert_eq!(
+            notes_to_give(notes(), &AgentId::Codex, true, notes().as_deref()),
+            None
+        );
+        assert_eq!(
+            notes_to_give(notes(), &AgentId::OpenCode, true, None),
+            notes(),
+            "started before the skill was set up"
+        );
+        assert_eq!(
+            notes_to_give(
+                notes(),
+                &AgentId::Codex,
+                true,
+                Some("Verify with make check.")
+            ),
+            notes(),
+            "the skill changed"
+        );
         // Claude Code has them in its system prompt, every session.
-        assert_eq!(notes_to_give(notes(), &AgentId::ClaudeCode, true, notes().as_deref()), notes());
+        assert_eq!(
+            notes_to_give(notes(), &AgentId::ClaudeCode, true, notes().as_deref()),
+            notes()
+        );
         assert_eq!(notes_to_give(None, &AgentId::Codex, false, None), None);
     }
 

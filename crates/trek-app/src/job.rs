@@ -9,7 +9,8 @@ use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::process::Child;
 use std::sync::{Mutex, PoisonError};
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
@@ -32,15 +33,25 @@ pub fn prepare(command: &mut std::process::Command) {
 pub fn adopt(child: &Child) {
     match make(child) {
         Ok(job) => {
-            JOBS.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_with(HashMap::new).insert(child.id(), job);
+            JOBS.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get_or_insert_with(HashMap::new)
+                .insert(child.id(), job);
         }
-        Err(e) => tracing::warn!("couldn't put process {} in a job; what it starts may outlive it: {e}", child.id()),
+        Err(e) => tracing::warn!(
+            "couldn't put process {} in a job; what it starts may outlive it: {e}",
+            child.id()
+        ),
     }
 }
 
 /// End everything in the job of the child `pid`, if it has one.
 pub fn terminate(pid: u32) {
-    let job = JOBS.lock().unwrap_or_else(PoisonError::into_inner).as_mut().and_then(|jobs| jobs.remove(&pid));
+    let job = JOBS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_mut()
+        .and_then(|jobs| jobs.remove(&pid));
     if let Some(Job(handle)) = job {
         // SAFETY: a job handle this owns, with all access.
         unsafe { TerminateJobObject(handle.as_raw_handle(), 1) };
@@ -51,7 +62,9 @@ pub fn terminate(pid: u32) {
 /// child and everything it started (a `.cmd` shim's `node.exe`, which ending the shim alone
 /// leaves running).
 pub fn hold(child: &tokio::process::Child) -> std::io::Result<Job> {
-    let process = child.raw_handle().ok_or_else(|| std::io::Error::other("the process has ended"))?;
+    let process = child
+        .raw_handle()
+        .ok_or_else(|| std::io::Error::other("the process has ended"))?;
     make_for(process)
 }
 
@@ -72,7 +85,15 @@ fn make_for(process: std::os::windows::io::RawHandle) -> std::io::Result<Job> {
     info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     let size = std::mem::size_of_val(&info) as u32;
     // SAFETY: `info` is the structure the class names, `size` long.
-    if unsafe { SetInformationJobObject(h, JobObjectExtendedLimitInformation, &info as *const _ as *const _, size) } == 0 {
+    if unsafe {
+        SetInformationJobObject(
+            h,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const _,
+            size,
+        )
+    } == 0
+    {
         return Err(std::io::Error::last_os_error());
     }
     // SAFETY: both handles are open: the job is this one's, the process the child's (not waited

@@ -12,7 +12,9 @@
 use crate::workspace::{Scope, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Selectable, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::{Duration, Instant};
@@ -79,7 +81,12 @@ struct TaskRow {
 }
 
 impl BackgroundStrip {
-    pub fn new(workspace: Entity<Workspace>, scope: Scope, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: Entity<Workspace>,
+        scope: Scope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subscriptions = vec![
             cx.observe(&workspace, |this, _, cx| this.sync(cx)),
             cx.subscribe(&workspace, |this, ws, event: &WorkspaceEvent, cx| {
@@ -130,7 +137,9 @@ impl BackgroundStrip {
                 stopping: b.stopping,
                 file: b.task.call.as_ref().and_then(|call| {
                     live.items.iter().rev().find_map(|i| match i {
-                        trek_core::store::Item::Tool { id, output, .. } if id == call => output_file(output),
+                        trek_core::store::Item::Tool { id, output, .. } if id == call => {
+                            output_file(output)
+                        }
                         _ => None,
                     })
                 }),
@@ -138,7 +147,10 @@ impl BackgroundStrip {
             .collect();
         (!rows.is_empty()).then(|| Shown {
             thread: id.to_string(),
-            agent: ws.thread(id).map(|t| t.agent.clone()).unwrap_or(trek_core::AgentId::ClaudeCode),
+            agent: ws
+                .thread(id)
+                .map(|t| t.agent.clone())
+                .unwrap_or(trek_core::AgentId::ClaudeCode),
             rows,
             width: ws.column(),
         })
@@ -151,7 +163,12 @@ impl BackgroundStrip {
             (Some(s), old) => s
                 .rows
                 .iter()
-                .filter(|r| r.readable && old.as_ref().is_none_or(|o| o.thread != s.thread || !o.rows.iter().any(|x| x.id == r.id)))
+                .filter(|r| {
+                    r.readable
+                        && old.as_ref().is_none_or(|o| {
+                            o.thread != s.thread || !o.rows.iter().any(|x| x.id == r.id)
+                        })
+                })
                 .map(|r| (s.thread.clone(), r.id.clone()))
                 .collect(),
             (None, _) => vec![],
@@ -162,7 +179,9 @@ impl BackgroundStrip {
             self.output = None;
         }
         if let Some(open) = &self.output
-            && shown.as_ref().is_none_or(|s| !s.rows.iter().any(|r| r.id == *open))
+            && shown
+                .as_ref()
+                .is_none_or(|s| !s.rows.iter().any(|r| r.id == *open))
         {
             self.output = None;
         }
@@ -172,7 +191,10 @@ impl BackgroundStrip {
         }
         if self.review && self.output.is_none() {
             self.expanded = true;
-            self.output = shown.as_ref().and_then(|s| s.rows.first()).map(|r| r.id.clone());
+            self.output = shown
+                .as_ref()
+                .and_then(|s| s.rows.first())
+                .map(|r| r.id.clone());
         }
         if shown != self.shown {
             self.shown = shown;
@@ -190,28 +212,42 @@ impl BackgroundStrip {
 
     /// Tick while there's something on show (not put away) and the window is in front.
     fn tick(&mut self, cx: &mut Context<Self>) {
-        if self.shown.as_ref().is_none_or(|s| self.hidden.contains(&s.thread)) || !self.active {
+        if self
+            .shown
+            .as_ref()
+            .is_none_or(|s| self.hidden.contains(&s.thread))
+            || !self.active
+        {
             self._ticker = None;
             return;
         }
         if self._ticker.is_some() {
             return;
         }
-        self._ticker = Some(cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(TICK).await;
-            let Ok(()) = this.update(cx, |this, cx| {
-                cx.notify();
-                this.poll(cx);
-            }) else {
-                break;
-            };
+        self._ticker = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(TICK).await;
+                let Ok(()) = this.update(cx, |this, cx| {
+                    cx.notify();
+                    this.poll(cx);
+                }) else {
+                    break;
+                };
+            }
         }));
     }
 
     /// Ask the agent for the end of each task's output.
     fn poll(&mut self, cx: &mut Context<Self>) {
         let Some(s) = &self.shown else { return };
-        let (thread, tasks): (String, Vec<String>) = (s.thread.clone(), s.rows.iter().filter(|r| r.readable).map(|r| r.id.clone()).collect());
+        let (thread, tasks): (String, Vec<String>) = (
+            s.thread.clone(),
+            s.rows
+                .iter()
+                .filter(|r| r.readable)
+                .map(|r| r.id.clone())
+                .collect(),
+        );
         self.workspace.update(cx, |ws, _| {
             for task in tasks {
                 ws.read_background(&thread, &task);
@@ -230,7 +266,9 @@ impl BackgroundStrip {
 
     /// Put the strip away to its slim line, or bring it back.
     fn set_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
-        let Some(thread) = self.shown.as_ref().map(|s| s.thread.clone()) else { return };
+        let Some(thread) = self.shown.as_ref().map(|s| s.thread.clone()) else {
+            return;
+        };
         if hidden {
             self.hidden.insert(thread);
             if self.output.is_some() {
@@ -259,7 +297,10 @@ impl BackgroundStrip {
             .text_size(px(12.5))
             .text_color(muted)
             .cursor_pointer()
-            .hover(|s| s.bg(theme.foreground.opacity(0.05)).text_color(theme.foreground))
+            .hover(|s| {
+                s.bg(theme.foreground.opacity(0.05))
+                    .text_color(theme.foreground)
+            })
             .child(Icon::new(crate::assets::Lucide::Activity).size(px(14.)))
             .child("Background")
             .child(div().text_xs().child(format!("· {n} running")))
@@ -294,8 +335,11 @@ impl BackgroundStrip {
     }
 
     fn stop(&mut self, task: &str, cx: &mut Context<Self>) {
-        let Some(thread) = self.shown.as_ref().map(|s| s.thread.clone()) else { return };
-        self.workspace.update(cx, |ws, cx| ws.stop_background(&thread, task, cx));
+        let Some(thread) = self.shown.as_ref().map(|s| s.thread.clone()) else {
+            return;
+        };
+        self.workspace
+            .update(cx, |ws, cx| ws.stop_background(&thread, task, cx));
     }
 
     /// What a row shows of a task: its icon, what it is, its last line, how long it has run.
@@ -330,9 +374,19 @@ impl BackgroundStrip {
                 .text_xs()
                 .text_color(muted)
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.foreground.opacity(0.07)).text_color(theme.foreground))
+                .hover(|s| {
+                    s.bg(theme.foreground.opacity(0.07))
+                        .text_color(theme.foreground)
+                })
                 .when(!self.expanded, |el| el.child(format!("+{more}")))
-                .child(Icon::new(if self.expanded { IconName::ChevronDown } else { IconName::ChevronUp }).xsmall())
+                .child(
+                    Icon::new(if self.expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronUp
+                    })
+                    .xsmall(),
+                )
                 .on_click(cx.listener(|this, _, _, cx| {
                     cx.stop_propagation();
                     this.expanded = !this.expanded;
@@ -351,7 +405,13 @@ impl BackgroundStrip {
                     this.set_hidden(true, cx);
                 }))
         });
-        let line = r.line.clone().unwrap_or_else(|| if r.readable { String::new() } else { "running".into() });
+        let line = r.line.clone().unwrap_or_else(|| {
+            if r.readable {
+                String::new()
+            } else {
+                "running".into()
+            }
+        });
         let trigger = Trigger {
             open,
             el: h_flex()
@@ -367,11 +427,42 @@ impl BackgroundStrip {
                 .when(open, |el| el.bg(theme.foreground.opacity(0.07)))
                 .hover(|s| s.bg(theme.foreground.opacity(0.05)))
                 .child(kind_icon(r.kind).size(px(14.)).text_color(muted))
-                .child(div().flex_none().max_w(relative(0.42)).truncate().font_family(theme.mono_font_family.clone()).text_color(theme.foreground.opacity(0.85)).child(r.title.clone()))
-                .child(div().flex_1().min_w_0().truncate().font_family(theme.mono_font_family.clone()).text_xs().text_color(muted).child(line))
-                .child(div().flex_none().text_xs().text_color(muted).child(crate::time::elapsed(r.started.elapsed())))
+                .child(
+                    div()
+                        .flex_none()
+                        .max_w(relative(0.42))
+                        .truncate()
+                        .font_family(theme.mono_font_family.clone())
+                        .text_color(theme.foreground.opacity(0.85))
+                        .child(r.title.clone()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(theme.mono_font_family.clone())
+                        .text_xs()
+                        .text_color(muted)
+                        .child(line),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(crate::time::elapsed(r.started.elapsed())),
+                )
                 .child(div().flex_none().w(px(STOP_W)).children(stop))
-                .child(h_flex().flex_none().w(px(CONTROLS_W)).justify_end().gap(px(4.)).children(toggle).children(hide))
+                .child(
+                    h_flex()
+                        .flex_none()
+                        .w(px(CONTROLS_W))
+                        .justify_end()
+                        .gap(px(4.))
+                        .children(toggle)
+                        .children(hide),
+                )
                 .into_any_element(),
         };
         let entity = cx.entity();
@@ -380,7 +471,9 @@ impl BackgroundStrip {
             .anchor(Anchor::BottomLeft)
             .appearance(false)
             .open(open)
-            .on_open_change(cx.listener(move |this, open: &bool, _, cx| this.set_output(open.then(|| task.clone()), cx)))
+            .on_open_change(cx.listener(move |this, open: &bool, _, cx| {
+                this.set_output(open.then(|| task.clone()), cx)
+            }))
             .trigger(trigger)
             .content(move |_, _, cx| entity.update(cx, |this, cx| this.output_card(cx)))
             .into_any_element()
@@ -388,14 +481,28 @@ impl BackgroundStrip {
 
     /// The popover over a task: what it is, the end of what it printed, and Stop.
     fn output_card(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let Some((r, agent, thread)) = self.shown.as_ref().and_then(|s| Some((s.rows.iter().find(|r| Some(&r.id) == self.output.as_ref())?.clone(), s.agent.clone(), s.thread.clone()))) else {
+        let Some((r, agent, thread)) = self.shown.as_ref().and_then(|s| {
+            Some((
+                s.rows
+                    .iter()
+                    .find(|r| Some(&r.id) == self.output.as_ref())?
+                    .clone(),
+                s.agent.clone(),
+                s.thread.clone(),
+            ))
+        }) else {
             return div().into_any_element();
         };
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let text = r.read.then(|| {
             let ws = self.workspace.read(cx);
-            let output = ws.live.get(&thread).and_then(|l| l.background.iter().find(|b| b.task.id == r.id)).and_then(|b| b.output.as_deref()).unwrap_or_default();
+            let output = ws
+                .live
+                .get(&thread)
+                .and_then(|l| l.background.iter().find(|b| b.task.id == r.id))
+                .and_then(|b| b.output.as_deref())
+                .unwrap_or_default();
             let lines: Vec<&str> = output.lines().collect();
             lines[lines.len().saturating_sub(OUTPUT_LINES)..].join("\n")
         });
@@ -419,7 +526,11 @@ impl BackgroundStrip {
                 .tooltip(file.display().to_string())
                 .on_click(move |_, _, _| {
                     // A text editor, as `open -t` is: output files have no extension Windows knows.
-                    let mut editor = trek_core::procs::command(if cfg!(windows) { "notepad.exe" } else { "/usr/bin/open" });
+                    let mut editor = trek_core::procs::command(if cfg!(windows) {
+                        "notepad.exe"
+                    } else {
+                        "/usr/bin/open"
+                    });
                     if !cfg!(windows) {
                         editor.arg("-t");
                     }
@@ -427,7 +538,10 @@ impl BackgroundStrip {
                 })
         });
         let note = if !r.readable {
-            format!("{} doesn't share this task's output while it runs.", agent.display_name())
+            format!(
+                "{} doesn't share this task's output while it runs.",
+                agent.display_name()
+            )
         } else if text.as_deref().is_some_and(|t| !t.trim().is_empty()) {
             "The end of its output, read every few seconds.".to_string()
         } else if text.is_some() {
@@ -446,8 +560,19 @@ impl BackgroundStrip {
                     .gap(px(8.))
                     .text_size(px(13.))
                     .child(kind_icon(r.kind).size(px(15.)).text_color(muted))
-                    .child(div().min_w_0().flex_1().truncate().font_family(theme.mono_font_family.clone()).child(r.title.clone()))
-                    .child(div().flex_none().text_xs().text_color(muted).child(format!("{} · {}", kind_label(r.kind), crate::time::elapsed(r.started.elapsed()))))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .font_family(theme.mono_font_family.clone())
+                            .child(r.title.clone()),
+                    )
+                    .child(div().flex_none().text_xs().text_color(muted).child(format!(
+                        "{} · {}",
+                        kind_label(r.kind),
+                        crate::time::elapsed(r.started.elapsed())
+                    )))
                     .children(full)
                     .children(stop),
             )
@@ -477,7 +602,8 @@ impl BackgroundStrip {
 /// /private/tmp/claude-501/…/tasks/b1x2.output"; Trek's mock agent says it the same way).
 fn output_file(result: &str) -> Option<std::path::PathBuf> {
     let path = output_path(result, cfg!(windows))?;
-    (path.starts_with('/') || std::path::Path::new(path).is_absolute()).then(|| std::path::PathBuf::from(path))
+    (path.starts_with('/') || std::path::Path::new(path).is_absolute())
+        .then(|| std::path::PathBuf::from(path))
 }
 
 /// The path the sentence "Output is being written to[:] <path>[.|;…]" names. It runs to a `;` or
@@ -486,7 +612,11 @@ fn output_file(result: &str) -> Option<std::path::PathBuf> {
 /// at its closing ". " or the end. `windows` is whether to read paths that way.
 fn output_path(result: &str, windows: bool) -> Option<&str> {
     const MARK: &str = "Output is being written to";
-    let rest = result.split(MARK).nth(1)?.trim_start_matches(':').trim_start();
+    let rest = result
+        .split(MARK)
+        .nth(1)?
+        .trim_start_matches(':')
+        .trim_start();
     let sentence = rest.lines().next()?.split(';').next()?;
     let path = if windows && is_windows_path(sentence) {
         sentence.split_once(". ").map_or(sentence, |(path, _)| path)
@@ -499,7 +629,11 @@ fn output_path(result: &str, windows: bool) -> Option<&str> {
 /// `C:\…`, `C:/…` or `\\server\…`.
 fn is_windows_path(s: &str) -> bool {
     let b = s.as_bytes();
-    s.starts_with(r"\\") || (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/'))
+    s.starts_with(r"\\")
+        || (b.len() >= 3
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && matches!(b[2], b'\\' | b'/'))
 }
 
 /// The icon a task's kind wears.
@@ -548,12 +682,20 @@ impl Render for BackgroundStrip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         crate::tests::rendered("BackgroundStrip");
-        let Some(shown) = self.shown.clone() else { return div().into_any_element() };
+        let Some(shown) = self.shown.clone() else {
+            return div().into_any_element();
+        };
         let more = shown.rows.len() - 1;
         let rows: Vec<AnyElement> = if self.hidden.contains(&shown.thread) {
             vec![self.slim(shown.rows.len(), cx)]
         } else {
-            shown.rows.iter().enumerate().take(if self.expanded { shown.rows.len() } else { 1 }).map(|(ix, r)| self.row(ix, r, more, cx)).collect()
+            shown
+                .rows
+                .iter()
+                .enumerate()
+                .take(if self.expanded { shown.rows.len() } else { 1 })
+                .map(|(ix, r)| self.row(ix, r, more, cx))
+                .collect()
         };
         h_flex()
             .id("background-strip")
@@ -570,7 +712,10 @@ impl Render for BackgroundStrip {
 /// The strip as a window lays it out: cached at its height (zero while there's nothing to show).
 pub fn cached(strip: &Entity<BackgroundStrip>, cx: &App) -> AnyElement {
     let h = strip.read(cx).height();
-    strip.clone().cached(StyleRefinement::default().w_full().flex_none().h(px(h))).into_any_element()
+    strip
+        .clone()
+        .cached(StyleRefinement::default().w_full().flex_none().h(px(h)))
+        .into_any_element()
 }
 
 #[cfg(test)]
@@ -581,41 +726,88 @@ mod tests {
     #[test]
     fn where_a_command_s_whole_output_goes() {
         let claude = "Command running in background with ID: b1x2. Output is being written to: /private/tmp/claude-501/-Users-me-app/9f/tasks/b1x2.output.";
-        assert_eq!(output_file(claude), Some(PathBuf::from("/private/tmp/claude-501/-Users-me-app/9f/tasks/b1x2.output")));
+        assert_eq!(
+            output_file(claude),
+            Some(PathBuf::from(
+                "/private/tmp/claude-501/-Users-me-app/9f/tasks/b1x2.output"
+            ))
+        );
         let monitor = "Monitor started. Output is being written to /tmp/claude-501/x/tasks/m7.output; use Read on that path for interim output.";
-        assert_eq!(output_file(monitor), Some(PathBuf::from("/tmp/claude-501/x/tasks/m7.output")));
-        assert_eq!(output_file("Command running in background with ID: b1x2."), None);
-        assert_eq!(output_file("Output is being written to: somewhere"), None, "only a path");
+        assert_eq!(
+            output_file(monitor),
+            Some(PathBuf::from("/tmp/claude-501/x/tasks/m7.output"))
+        );
+        assert_eq!(
+            output_file("Command running in background with ID: b1x2."),
+            None
+        );
+        assert_eq!(
+            output_file("Output is being written to: somewhere"),
+            None,
+            "only a path"
+        );
     }
 
     #[test]
     fn a_unix_path_stops_at_its_first_space_or_semicolon() {
         let said = "Output is being written to: /tmp/claude-501/x/tasks/b1.output. Read it later.";
-        assert_eq!(output_path(said, false), Some("/tmp/claude-501/x/tasks/b1.output"));
-        assert_eq!(output_path("Output is being written to /tmp/a b/c.output; see it", false), Some("/tmp/a"));
+        assert_eq!(
+            output_path(said, false),
+            Some("/tmp/claude-501/x/tasks/b1.output")
+        );
+        assert_eq!(
+            output_path(
+                "Output is being written to /tmp/a b/c.output; see it",
+                false
+            ),
+            Some("/tmp/a")
+        );
         // Where a Windows path can't be one, nothing about it changes.
-        assert_eq!(output_path(r"Output is being written to: C:\Temp\a b\c.output.", false), Some(r"C:\Temp\a"));
+        assert_eq!(
+            output_path(r"Output is being written to: C:\Temp\a b\c.output.", false),
+            Some(r"C:\Temp\a")
+        );
     }
 
     #[test]
     fn a_windows_path_keeps_its_spaces() {
         let said = r"Command running in background with ID: b1x2. Output is being written to: C:\Users\Toby J\AppData\Local\Temp\claude\tasks\b1x2.output.";
-        assert_eq!(output_path(said, true), Some(r"C:\Users\Toby J\AppData\Local\Temp\claude\tasks\b1x2.output"));
+        assert_eq!(
+            output_path(said, true),
+            Some(r"C:\Users\Toby J\AppData\Local\Temp\claude\tasks\b1x2.output")
+        );
         let monitor = r"Monitor started. Output is being written to D:/My Tasks/m7.output; use Read on that path for interim output.";
         assert_eq!(output_path(monitor, true), Some("D:/My Tasks/m7.output"));
-        let unc = r"Output is being written to: \\nas\team share\tasks\b.output. It is still running.";
-        assert_eq!(output_path(unc, true), Some(r"\\nas\team share\tasks\b.output"));
-        assert_eq!(output_path(r"Output is being written to C:\a b.output", true), Some(r"C:\a b.output"), "the end of the line ends it");
+        let unc =
+            r"Output is being written to: \\nas\team share\tasks\b.output. It is still running.";
+        assert_eq!(
+            output_path(unc, true),
+            Some(r"\\nas\team share\tasks\b.output")
+        );
+        assert_eq!(
+            output_path(r"Output is being written to C:\a b.output", true),
+            Some(r"C:\a b.output"),
+            "the end of the line ends it"
+        );
         // A Unix path on Windows is still cut at the first space, and a bare word isn't a drive.
-        assert_eq!(output_path("Output is being written to: /tmp/x.output. Done.", true), Some("/tmp/x.output"));
-        assert_eq!(output_path("Output is being written to: c:foo bar", true), Some("c:foo"));
+        assert_eq!(
+            output_path("Output is being written to: /tmp/x.output. Done.", true),
+            Some("/tmp/x.output")
+        );
+        assert_eq!(
+            output_path("Output is being written to: c:foo bar", true),
+            Some("c:foo")
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn on_windows_a_spaced_path_comes_back_whole() {
         let said = r"Output is being written to: C:\Users\Toby J\Temp\b1x2.output.";
-        assert_eq!(output_file(said), Some(PathBuf::from(r"C:\Users\Toby J\Temp\b1x2.output")));
+        assert_eq!(
+            output_file(said),
+            Some(PathBuf::from(r"C:\Users\Toby J\Temp\b1x2.output"))
+        );
     }
 }
 
@@ -636,7 +828,14 @@ impl BackgroundStrip {
         s.rows
             .iter()
             .take(if self.expanded { s.rows.len() } else { 1 })
-            .map(|r| format!("{} — {}{}", r.title, r.line.clone().unwrap_or_default(), if r.stoppable { " (stop)" } else { "" }))
+            .map(|r| {
+                format!(
+                    "{} — {}{}",
+                    r.title,
+                    r.line.clone().unwrap_or_default(),
+                    if r.stoppable { " (stop)" } else { "" }
+                )
+            })
             .collect()
     }
 }

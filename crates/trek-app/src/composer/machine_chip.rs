@@ -5,8 +5,8 @@
 
 use super::Composer;
 use crate::palette;
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::button::ButtonVariants as _;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -14,7 +14,15 @@ use std::path::PathBuf;
 
 /// A reachable machine's dot, or a quiet one.
 pub(crate) fn reach_dot(reachable: bool, cx: &App) -> Div {
-    div().flex_none().size(px(7.)).rounded_full().bg(if reachable { palette::emerald(cx) } else { cx.theme().foreground.opacity(0.22) })
+    div()
+        .flex_none()
+        .size(px(7.))
+        .rounded_full()
+        .bg(if reachable {
+            palette::emerald(cx)
+        } else {
+            cx.theme().foreground.opacity(0.22)
+        })
 }
 
 impl Composer {
@@ -29,8 +37,16 @@ impl Composer {
         let ws = self.workspace.read(cx);
         let this = crate::words::words().this_computer;
         let chosen = ws.draft_machine(&project);
-        let machines: Vec<(String, String, bool)> = ws.machines.list.iter().map(|m| (m.id().to_string(), m.entry.name.clone(), m.reachable())).collect();
-        let (label, dot) = match chosen.as_ref().and_then(|c| machines.iter().find(|(id, ..)| id == c)) {
+        let machines: Vec<(String, String, bool)> = ws
+            .machines
+            .list
+            .iter()
+            .map(|m| (m.id().to_string(), m.entry.name.clone(), m.reachable()))
+            .collect();
+        let (label, dot) = match chosen
+            .as_ref()
+            .and_then(|c| machines.iter().find(|(id, ..)| id == c))
+        {
             Some((_, name, reachable)) => (format!("On {name}"), Some(*reachable)),
             None => (format!("On {this}"), None),
         };
@@ -46,10 +62,17 @@ impl Composer {
                     .text_color(theme.foreground.opacity(0.82))
                     .child(match dot {
                         Some(reachable) => reach_dot(reachable, cx).into_any_element(),
-                        None => Icon::new(crate::assets::Lucide::Laptop).small().text_color(theme.muted_foreground).into_any_element(),
+                        None => Icon::new(crate::assets::Lucide::Laptop)
+                            .small()
+                            .text_color(theme.muted_foreground)
+                            .into_any_element(),
                     })
                     .child(label)
-                    .child(Icon::new(IconName::ChevronDown).xsmall().text_color(theme.muted_foreground)),
+                    .child(
+                        Icon::new(IconName::ChevronDown)
+                            .xsmall()
+                            .text_color(theme.muted_foreground),
+                    ),
             )
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
                 let pick = |host: Option<String>| {
@@ -66,25 +89,51 @@ impl Composer {
                     .check_side(gpui_kit::component::Side::Right)
                     .label("New thread runs on")
                     .item(
-                        PopupMenuItem::element(move |_, _| div().id("machine-pick-here").test_support().child(here.clone()))
-                            .icon(crate::assets::Lucide::Laptop)
-                            .checked(chosen.is_none())
-                            .on_click(pick(None)),
+                        PopupMenuItem::element(move |_, _| {
+                            div()
+                                .id("machine-pick-here")
+                                .test_support()
+                                .child(here.clone())
+                        })
+                        .icon(crate::assets::Lucide::Laptop)
+                        .checked(chosen.is_none())
+                        .on_click(pick(None)),
                     );
                 for (id, name, reachable) in machines.clone() {
                     let checked = chosen.as_deref() == Some(id.as_str());
                     let pick_id = SharedString::from(format!("machine-pick-{id}"));
                     menu = menu.item(
-                        PopupMenuItem::element(move |_, cx| h_flex().id(pick_id.clone()).test_support().gap(px(8.)).child(reach_dot(reachable, cx)).child(name.clone()))
-                            .checked(checked)
-                            .on_click(pick(Some(id.clone()))),
+                        PopupMenuItem::element(move |_, cx| {
+                            h_flex()
+                                .id(pick_id.clone())
+                                .test_support()
+                                .gap(px(8.))
+                                .child(reach_dot(reachable, cx))
+                                .child(name.clone())
+                        })
+                        .checked(checked)
+                        .on_click(pick(Some(id.clone()))),
                     );
                 }
                 let (c, project) = (composer.clone(), project.clone());
                 menu.separator().item(
-                    PopupMenuItem::element(|_, _| div().id("machine-add-to").test_support().child("Add to another machine…")).icon(IconName::Plus).on_click(move |_, window, cx| {
+                    PopupMenuItem::element(|_, _| {
+                        div()
+                            .id("machine-add-to")
+                            .test_support()
+                            .child("Add to another machine…")
+                    })
+                    .icon(IconName::Plus)
+                    .on_click(move |_, window, cx| {
                         let project = project.clone();
-                        c.update(cx, |c, cx| crate::machines::sheets::open_clone(c.workspace.clone(), project, window, cx))
+                        c.update(cx, |c, cx| {
+                            crate::machines::sheets::open_clone(
+                                c.workspace.clone(),
+                                project,
+                                window,
+                                cx,
+                            )
+                        })
                     }),
                 )
             })
@@ -111,7 +160,14 @@ impl Composer {
                 .text_color(theme.foreground.opacity(0.82))
                 .child(reach_dot(reachable, cx))
                 .child(format!("On {name}"))
-                .when(!reachable, |el| el.child(div().text_xs().text_color(theme.muted_foreground).child("reconnecting…")))
+                .when(!reachable, |el| {
+                    el.child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("reconnecting…"),
+                    )
+                })
                 .into_any_element(),
         )
     }

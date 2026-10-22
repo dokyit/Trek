@@ -37,23 +37,41 @@ pub struct Toast {
 
 impl Toast {
     pub fn new(message: impl Into<SharedString>) -> Self {
-        Toast { key: Self::new_key(), message: Some(message.into()), error: false, content: None, on_click: None, lifetime: LIFETIME }
+        Toast {
+            key: Self::new_key(),
+            message: Some(message.into()),
+            error: false,
+            content: None,
+            on_click: None,
+            lifetime: LIFETIME,
+        }
     }
 
     /// A key no toast has had yet.
     pub fn new_key() -> SharedString {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        format!("toast-{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)).into()
+        format!(
+            "toast-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        )
+        .into()
     }
 
     /// Something went wrong: the message with the error icon.
     pub fn error(message: impl Into<SharedString>) -> Self {
-        Toast { error: true, ..Toast::new(message) }
+        Toast {
+            error: true,
+            ..Toast::new(message)
+        }
     }
 
     /// One drawn by `content` rather than a message.
     pub fn content(content: impl Fn(&mut Window, &mut App) -> AnyElement + 'static) -> Self {
-        Toast { message: None, content: Some(Rc::new(content)), ..Toast::new("") }
+        Toast {
+            message: None,
+            content: Some(Rc::new(content)),
+            ..Toast::new("")
+        }
     }
 
     /// What it goes by (`dismiss`); a toast put up under the key of one still up replaces it.
@@ -68,7 +86,10 @@ impl Toast {
     }
 
     /// A click on it does this, and takes it down.
-    pub fn on_click(mut self, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+    pub fn on_click(
+        mut self,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
         self.on_click = Some(Rc::new(on_click));
         self
     }
@@ -94,7 +115,11 @@ impl From<SharedString> for Toast {
 
 /// Every window gets a toast layer. Call once, before any window opens.
 pub fn init(cx: &mut App) {
-    Root::register_plugin::<Toasts>(cx, |_, _| Toasts { items: Vec::new(), stack: ToastStackState::default(), bottom: px(24.) });
+    Root::register_plugin::<Toasts>(cx, |_, _| Toasts {
+        items: Vec::new(),
+        stack: ToastStackState::default(),
+        bottom: px(24.),
+    });
 }
 
 fn layer(window: &Window, cx: &App) -> Option<Entity<Toasts>> {
@@ -168,7 +193,10 @@ impl Toasts {
         // Its time runs out unless the pointer is on the toasts; then a moment after it leaves.
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(lifetime).await;
-            while this.read_with(cx, |t, _| t.stack.is_expanded()).unwrap_or(false) {
+            while this
+                .read_with(cx, |t, _| t.stack.is_expanded())
+                .unwrap_or(false)
+            {
                 cx.background_executor().timer(HOLD).await;
             }
             let _ = this.update(cx, |t, cx| t.dismiss(&key, cx));
@@ -179,7 +207,9 @@ impl Toasts {
 
     fn dismiss(&mut self, key: &str, cx: &mut Context<Self>) {
         let (motion, now) = (moving(cx), motion::now(cx));
-        let Some(item) = self.items.iter_mut().find(|i| i.toast.key == key) else { return };
+        let Some(item) = self.items.iter_mut().find(|i| i.toast.key == key) else {
+            return;
+        };
         item.shown.exit(motion, now);
         // Without motion it's gone at once.
         self.items.retain(|i| i.shown.item().is_some());
@@ -187,7 +217,13 @@ impl Toasts {
     }
 
     /// One toast, `t` of the way in. One on its way out takes no pointer at all.
-    fn toast(&self, item: &Item, t: f32, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn toast(
+        &self,
+        item: &Item,
+        t: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let toast = &item.toast;
         let theme = cx.theme().clone();
         let this = cx.entity().downgrade();
@@ -211,22 +247,44 @@ impl Toasts {
             .py_3p5()
             .px_4()
             .gap_3()
-            .when(toast.error, |el| el.child(div().absolute().top(px(18.)).left_4().child(Icon::new(IconName::CircleX).text_color(theme.danger))))
+            .when(toast.error, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .top(px(18.))
+                        .left_4()
+                        .child(Icon::new(IconName::CircleX).text_color(theme.danger)),
+                )
+            })
             .child(
                 v_flex()
                     .flex_1()
                     .overflow_hidden()
                     .when(toast.error, |el| el.pl_6())
-                    .when_some(toast.message.clone(), |el, m| el.child(div().text_sm().child(m)))
+                    .when_some(toast.message.clone(), |el, m| {
+                        el.child(div().text_sm().child(m))
+                    })
                     .when_some(content, |el, c| el.child(c)),
             )
-            .child(div().absolute().top_1().right_1().invisible().group_hover("", |el| el.visible()).child({
-                let dismiss = dismiss.clone();
-                Button::new("toast-close").icon(IconName::Close).ghost().xsmall().on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    dismiss(cx);
-                })
-            }))
+            .child(
+                div()
+                    .absolute()
+                    .top_1()
+                    .right_1()
+                    .invisible()
+                    .group_hover("", |el| el.visible())
+                    .child({
+                        let dismiss = dismiss.clone();
+                        Button::new("toast-close")
+                            .icon(IconName::Close)
+                            .ghost()
+                            .xsmall()
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                dismiss(cx);
+                            })
+                    }),
+            )
             .when_some(toast.on_click.clone(), |el, on_click| {
                 let dismiss = dismiss.clone();
                 el.on_click(move |event, window, cx| {
@@ -244,14 +302,25 @@ impl Toasts {
             .top(px(SLIDE * (1. - t)))
             .opacity(t)
             .shadow(toast_shadow(t.powi(3)));
-        if item.shown.is_present() { face.into_any_element() } else { motion::inert(face).into_any_element() }
+        if item.shown.is_present() {
+            face.into_any_element()
+        } else {
+            motion::inert(face).into_any_element()
+        }
     }
 }
 
 /// gpui-component's toast shadow, `strength` of the way in.
 fn toast_shadow(strength: f32) -> Vec<BoxShadow> {
     let ink = hsla(0., 0., 0., 0.1 * strength.clamp(0., 1.));
-    vec![BoxShadow::new(px(0.), px(10.), ink).blur_radius(px(7.5)).spread_radius(px(-3.)), BoxShadow::new(px(0.), px(4.), ink).blur_radius(px(3.)).spread_radius(px(-4.))]
+    vec![
+        BoxShadow::new(px(0.), px(10.), ink)
+            .blur_radius(px(7.5))
+            .spread_radius(px(-3.)),
+        BoxShadow::new(px(0.), px(4.), ink)
+            .blur_radius(px(3.))
+            .spread_radius(px(-4.)),
+    ]
 }
 
 impl Render for Toasts {
@@ -259,7 +328,8 @@ impl Render for Toasts {
         let now = motion::now(cx);
         // How far in each is; the ones all the way out unmount.
         let mut shown = Vec::new();
-        self.items.retain_mut(|i| i.shown.sample(now, window).map(|t| shown.push(t)).is_some());
+        self.items
+            .retain_mut(|i| i.shown.sample(now, window).map(|t| shown.push(t)).is_some());
         let layer = div().absolute().inset_0();
         if self.items.is_empty() {
             // The next toasts start a stack of their own: the pointer over the last one, which
@@ -267,13 +337,25 @@ impl Render for Toasts {
             self.stack = ToastStackState::default();
             return layer;
         }
-        let (width, max) = (cx.theme().notification.width, cx.theme().notification.max_items);
-        let mut stack = ToastStack::new("toasts", self.stack.clone()).placement(Anchor::BottomCenter);
+        let (width, max) = (
+            cx.theme().notification.width,
+            cx.theme().notification.max_items,
+        );
+        let mut stack =
+            ToastStack::new("toasts", self.stack.clone()).placement(Anchor::BottomCenter);
         if !moving(cx) {
-            stack = stack.motion(ToastMotion { duration: Duration::ZERO, ..ToastMotion::sonner() });
+            stack = stack.motion(ToastMotion {
+                duration: Duration::ZERO,
+                ..ToastMotion::sonner()
+            });
         }
         // The newest `max` that are up, and all that are going.
-        let mut older = self.items.iter().filter(|i| i.shown.is_present()).count().saturating_sub(max);
+        let mut older = self
+            .items
+            .iter()
+            .filter(|i| i.shown.is_present())
+            .count()
+            .saturating_sub(max);
         for (item, t) in self.items.iter().zip(shown) {
             if item.shown.is_present() && older > 0 {
                 older -= 1;
@@ -283,6 +365,15 @@ impl Render for Toasts {
             stack = stack.item(item.toast.key.clone(), face);
         }
         let size = window.viewport_size();
-        layer.child(stack.v_flex().w(width).max_h(size.height).absolute().bottom(self.bottom).left(relative(0.5)).ml(-width / 2.))
+        layer.child(
+            stack
+                .v_flex()
+                .w(width)
+                .max_h(size.height)
+                .absolute()
+                .bottom(self.bottom)
+                .left(relative(0.5))
+                .ml(-width / 2.),
+        )
     }
 }

@@ -64,7 +64,10 @@ pub fn claim() -> Claim {
     #[cfg(windows)]
     if std::env::var_os("TREK_SHOT_DIR").is_none() {
         let cwd = std::env::current_dir().unwrap_or_default();
-        let open = Open { args: launch_args(std::env::args_os().skip(1), &cwd), background: background() };
+        let open = Open {
+            args: launch_args(std::env::args_os().skip(1), &cwd),
+            background: background(),
+        };
         return claim_in(&trek_core::paths::data_dir(), open, WAIT);
     }
     Claim::Primary(Primary::default())
@@ -94,21 +97,30 @@ pub fn launch_args(args: impl IntoIterator<Item = OsString>, cwd: &Path) -> Vec<
             [link] if is_link(&link.to_string_lossy()) => vec![link.to_string_lossy().into_owned()],
             // Not the arguments themselves: a link may carry code.
             rest => {
-                tracing::warn!("single instance: a link's launch with {} argument(s) rather than one link: nothing opened", rest.len());
+                tracing::warn!(
+                    "single instance: a link's launch with {} argument(s) rather than one link: nothing opened",
+                    rest.len()
+                );
                 Vec::new()
             }
         };
     }
     args.filter_map(|a| {
         let s = a.to_string_lossy();
-        if s.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("trek://")) {
+        if s.get(..7)
+            .is_some_and(|p| p.eq_ignore_ascii_case("trek://"))
+        {
             return Some(s.into_owned());
         }
         if s.is_empty() || s.starts_with('-') {
             return None;
         }
         let p = PathBuf::from(&a);
-        let p = if p.is_absolute() { p } else { std::path::absolute(cwd.join(&p)).unwrap_or_else(|_| cwd.join(&p)) };
+        let p = if p.is_absolute() {
+            p
+        } else {
+            std::path::absolute(cwd.join(&p)).unwrap_or_else(|_| cwd.join(&p))
+        };
         Some(p.to_string_lossy().into_owned())
     })
     .take(trek_ipc::instance::MAX_ARGS)
@@ -128,26 +140,42 @@ pub(crate) fn claim_in(dir: &Path, open: Open, wait: Duration) -> Claim {
             // As the workspace does when it can't lock: carry on without.
             Err(e) => {
                 tracing::warn!("lock the data folder: {e}");
-                return Claim::Primary(Primary { own: open.args, ..Primary::default() });
+                return Claim::Primary(Primary {
+                    own: open.args,
+                    ..Primary::default()
+                });
             }
         }
         if let Some(address) = published(dir) {
             if !open.background {
                 allow_foreground(&address);
             }
-            let left = deadline.saturating_duration_since(std::time::Instant::now()).max(Duration::from_millis(500));
+            let left = deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .max(Duration::from_millis(500));
             match trek_ipc::instance::forward(&address, &open, left) {
                 Ok(()) => {
-                    tracing::info!("single instance: handed {} argument(s) to the running Trek (pid {:?})", open.args.len(), trek_ipc::instance::served_by(&address));
+                    tracing::info!(
+                        "single instance: handed {} argument(s) to the running Trek (pid {:?})",
+                        open.args.len(),
+                        trek_ipc::instance::served_by(&address)
+                    );
                     return Claim::Forwarded;
                 }
                 // Not listening yet (or any more), or a pipe that isn't the running Trek's.
                 Err(ForwardError::Unreachable(e)) => why = e,
-                Err(e) => return Claim::Failed(format!("Trek is already running with this data folder, but {e}.")),
+                Err(e) => {
+                    return Claim::Failed(format!(
+                        "Trek is already running with this data folder, but {e}."
+                    ));
+                }
             }
         }
         if std::time::Instant::now() >= deadline {
-            return Claim::Failed(format!("Trek is already running with this data folder ({}), but it isn't answering: {why}.", dir.display()));
+            return Claim::Failed(format!(
+                "Trek is already running with this data folder ({}), but it isn't answering: {why}.",
+                dir.display()
+            ));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -159,7 +187,11 @@ fn published(dir: &Path) -> Option<PathBuf> {
     use std::io::Read as _;
     // A pipe's name is short: read no more than that, whatever the file has become.
     let mut name = String::new();
-    std::fs::File::open(dir.join(PIPE_FILE)).ok()?.take(512).read_to_string(&mut name).ok()?;
+    std::fs::File::open(dir.join(PIPE_FILE))
+        .ok()?
+        .take(512)
+        .read_to_string(&mut name)
+        .ok()?;
     let name = name.trim();
     (!name.is_empty() && name.len() < 512).then(|| PathBuf::from(name))
 }
@@ -186,7 +218,11 @@ fn listen(dir: &Path, lock: std::fs::File, own: Vec<String>) -> Primary {
             None
         }
     };
-    Primary { lock: Some(lock), forwarded, own }
+    Primary {
+        lock: Some(lock),
+        forwarded,
+        own,
+    }
 }
 
 #[cfg(windows)]
@@ -204,7 +240,11 @@ fn start_listening(dir: &Path, tx: async_channel::Sender<Forwarded>) -> std::io:
             match listener.accept().await {
                 Ok(stream) => {
                     let tx = tx.clone();
-                    tokio::spawn(trek_ipc::server::serve_open(stream, REQUEST_WITHIN, move |open| hand_over(tx, open)));
+                    tokio::spawn(trek_ipc::server::serve_open(
+                        stream,
+                        REQUEST_WITHIN,
+                        move |open| hand_over(tx, open),
+                    ));
                 }
                 // The error comes straight back: pause rather than spin.
                 Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
@@ -217,8 +257,13 @@ fn start_listening(dir: &Path, tx: async_channel::Sender<Forwarded>) -> std::io:
 /// Pass `open` to the main thread and wait for it to take it.
 async fn hand_over(tx: async_channel::Sender<Forwarded>, open: Open) -> Result<(), String> {
     let (done, answer) = async_channel::bounded(1);
-    tx.send(Forwarded { open, done }).await.map_err(|_| "Trek is quitting".to_string())?;
-    answer.recv().await.unwrap_or_else(|_| Err("Trek is quitting".into()))
+    tx.send(Forwarded { open, done })
+        .await
+        .map_err(|_| "Trek is quitting".to_string())?;
+    answer
+        .recv()
+        .await
+        .unwrap_or_else(|_| Err("Trek is quitting".into()))
 }
 
 /// Write the pipe's name where a second launch looks, whole or not at all.
@@ -248,15 +293,33 @@ pub fn tell(why: &str) {
     if !background() {
         use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONWARNING, MB_OK, MessageBoxW};
         let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
-        let (text, title) = (wide(&format!("{why}\n\nClose it (from Task Manager if need be) and open Trek again.")), wide("Trek"));
+        let (text, title) = (
+            wide(&format!(
+                "{why}\n\nClose it (from Task Manager if need be) and open Trek again."
+            )),
+            wide("Trek"),
+        );
         // SAFETY: NUL-terminated strings that outlive the call; no owner window.
-        unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), MB_OK | MB_ICONWARNING) };
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONWARNING,
+            )
+        };
     }
 }
 
 /// Once the main window is up: open what this launch was started with, then take what later
 /// launches hand over, on the main thread, as macOS's `on_open_urls` and `on_reopen` would.
-pub fn hear(primary_forwarded: Option<async_channel::Receiver<Forwarded>>, own: Vec<String>, ws: Entity<Workspace>, links: async_channel::Sender<String>, cx: &mut App) {
+pub fn hear(
+    primary_forwarded: Option<async_channel::Receiver<Forwarded>>,
+    own: Vec<String>,
+    ws: Entity<Workspace>,
+    links: async_channel::Sender<String>,
+    cx: &mut App,
+) {
     for arg in own {
         dispatch(arg, &ws, &links, cx);
     }
@@ -279,13 +342,22 @@ pub fn hear(primary_forwarded: Option<async_channel::Receiver<Forwarded>>, own: 
 
 /// Another launch's arguments: Trek comes forward (unless that launch was in the background),
 /// then each opens.
-pub(crate) fn take(open: Open, ws: &Entity<Workspace>, links: &async_channel::Sender<String>, cx: &mut App) {
+pub(crate) fn take(
+    open: Open,
+    ws: &Entity<Workspace>,
+    links: &async_channel::Sender<String>,
+    cx: &mut App,
+) {
     let links_n = open.args.iter().filter(|a| is_link(a)).count();
     tracing::info!(
         "single instance: another launch handed over {} link(s) and {} path(s){}",
         links_n,
         open.args.len() - links_n,
-        if open.background { ", in the background" } else { "" }
+        if open.background {
+            ", in the background"
+        } else {
+            ""
+        }
     );
     if !open.background {
         crate::root::show_main(ws.clone(), cx);
@@ -296,7 +368,8 @@ pub(crate) fn take(open: Open, ws: &Entity<Workspace>, links: &async_channel::Se
 }
 
 fn is_link(arg: &str) -> bool {
-    arg.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("trek://"))
+    arg.get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case("trek://"))
 }
 
 /// The longest link acted on. A link carries a path and perhaps a selection of code (`trek://ask`),
@@ -351,7 +424,12 @@ pub(crate) fn classify(arg: &str) -> Arg {
 /// A link goes where macOS's `on_open_urls` sends links; a file opens in the editor as a
 /// `trek://edit` link to it would (asking first when it's outside the user's projects); a folder
 /// opens as a project, as "Open Folder…" opens one. Anything else is ignored, and logged.
-fn dispatch(arg: String, ws: &Entity<Workspace>, links: &async_channel::Sender<String>, cx: &mut App) {
+fn dispatch(
+    arg: String,
+    ws: &Entity<Workspace>,
+    links: &async_channel::Sender<String>,
+    cx: &mut App,
+) {
     match classify(&arg) {
         Arg::Link(link) => {
             let _ = links.try_send(link);
@@ -359,7 +437,10 @@ fn dispatch(arg: String, ws: &Entity<Workspace>, links: &async_channel::Sender<S
         Arg::File(path) => crate::deep_link::open_file(path, cx),
         Arg::Folder(path) => ws.update(cx, |ws, cx| ws.add_project(path, cx)),
         // Not the argument itself: a link may carry code.
-        Arg::Ignored(what) => tracing::warn!("single instance: ignored {what} ({} characters)", arg.chars().count()),
+        Arg::Ignored(what) => tracing::warn!(
+            "single instance: ignored {what} ({} characters)",
+            arg.chars().count()
+        ),
     }
 }
 
@@ -370,14 +451,31 @@ mod tests {
     #[test]
     fn links_go_as_they_are_and_paths_are_made_absolute() {
         let cwd = std::env::temp_dir();
-        let args = ["trek://edit?path=%2Fx&line=2", "TREK://ask?path=%2Fy", "notes.md", "-flag", "", "sub/dir"].map(OsString::from);
+        let args = [
+            "trek://edit?path=%2Fx&line=2",
+            "TREK://ask?path=%2Fy",
+            "notes.md",
+            "-flag",
+            "",
+            "sub/dir",
+        ]
+        .map(OsString::from);
         let got = launch_args(args, &cwd);
-        assert_eq!(got[..2], ["trek://edit?path=%2Fx&line=2", "TREK://ask?path=%2Fy"]);
+        assert_eq!(
+            got[..2],
+            ["trek://edit?path=%2Fx&line=2", "TREK://ask?path=%2Fy"]
+        );
         assert_eq!(got.len(), 4, "no flags, no empty arguments: {got:?}");
-        assert_eq!(PathBuf::from(&got[2]), std::path::absolute(cwd.join("notes.md")).unwrap());
+        assert_eq!(
+            PathBuf::from(&got[2]),
+            std::path::absolute(cwd.join("notes.md")).unwrap()
+        );
         assert!(PathBuf::from(&got[3]).is_absolute() && got[3].ends_with("dir"));
         let abs = cwd.join("already.rs");
-        assert_eq!(launch_args([abs.clone().into_os_string()], Path::new("/elsewhere")), [abs.to_string_lossy().into_owned()]);
+        assert_eq!(
+            launch_args([abs.clone().into_os_string()], Path::new("/elsewhere")),
+            [abs.to_string_lossy().into_owned()]
+        );
     }
 
     /// More files than the running Trek takes in one hand-over: the first ones go, rather than
@@ -387,8 +485,24 @@ mod tests {
         let files = (0..100).map(|i| OsString::from(format!("f{i}.rs")));
         let got = launch_args(files, &std::env::temp_dir());
         assert_eq!(got.len(), trek_ipc::instance::MAX_ARGS);
-        assert!(got[0].ends_with("f0.rs") && got.last().unwrap().ends_with(&format!("f{}.rs", trek_ipc::instance::MAX_ARGS - 1)));
-        assert!(trek_ipc::instance::Open::parse(&Open { args: got, background: false }.to_frame()).is_some(), "the running Trek accepts them");
+        assert!(
+            got[0].ends_with("f0.rs")
+                && got
+                    .last()
+                    .unwrap()
+                    .ends_with(&format!("f{}.rs", trek_ipc::instance::MAX_ARGS - 1))
+        );
+        assert!(
+            trek_ipc::instance::Open::parse(
+                &Open {
+                    args: got,
+                    background: false
+                }
+                .to_frame()
+            )
+            .is_some(),
+            "the running Trek accepts them"
+        );
     }
 
     /// A link's launch (`LINK_ARG`, put there by the protocol's command) hands over its one link.
@@ -399,8 +513,17 @@ mod tests {
         let cwd = std::env::temp_dir();
         let tmp = cwd.display().to_string();
         let got = |args: &[&str]| launch_args(args.iter().map(OsString::from), &cwd);
-        assert_eq!(got(&[LINK_ARG, "trek://ask?path=%2Fx"]), ["trek://ask?path=%2Fx"]);
-        for broken in [&[LINK_ARG, "trek://ask?x", &tmp][..], &[LINK_ARG, &tmp], &[LINK_ARG, "trek://a", "trek://b"], &[LINK_ARG, "notes.md"], &[LINK_ARG]] {
+        assert_eq!(
+            got(&[LINK_ARG, "trek://ask?path=%2Fx"]),
+            ["trek://ask?path=%2Fx"]
+        );
+        for broken in [
+            &[LINK_ARG, "trek://ask?x", &tmp][..],
+            &[LINK_ARG, &tmp],
+            &[LINK_ARG, "trek://a", "trek://b"],
+            &[LINK_ARG, "notes.md"],
+            &[LINK_ARG],
+        ] {
             assert_eq!(got(broken), Vec::<String>::new(), "{broken:?}");
         }
         // Typed by the user: a folder and a link both go.
@@ -415,21 +538,41 @@ mod tests {
         let s = |p: PathBuf| p.to_string_lossy().into_owned();
 
         // Links, whatever the case of the scheme, with it as `deep_link` reads it.
-        assert_eq!(classify("trek://edit?path=%2Fx"), Arg::Link("trek://edit?path=%2Fx".into()));
-        assert_eq!(classify("TREK://ask?path=%2FX"), Arg::Link("trek://ask?path=%2FX".into()));
+        assert_eq!(
+            classify("trek://edit?path=%2Fx"),
+            Arg::Link("trek://edit?path=%2Fx".into())
+        );
+        assert_eq!(
+            classify("TREK://ask?path=%2FX"),
+            Arg::Link("trek://ask?path=%2FX".into())
+        );
         assert_eq!(classify("Trek://edit"), Arg::Link("trek://edit".into()));
         // The folder, the file; a path that isn't there is not acted on.
         assert_eq!(classify(&s(dir.join("sub"))), Arg::Folder(dir.join("sub")));
         assert_eq!(classify(&s(dir.join("a.rs"))), Arg::File(dir.join("a.rs")));
         assert!(matches!(classify(&s(dir.join("gone"))), Arg::Ignored(_)));
         // Not links, not paths: other schemes, empty, relative, a link with a NUL, one too long.
-        for junk in ["https://example.com/", "file:///C:/x", "", "relative/dir", "..", "trek:/edit", "trek://edit\0x"] {
+        for junk in [
+            "https://example.com/",
+            "file:///C:/x",
+            "",
+            "relative/dir",
+            "..",
+            "trek:/edit",
+            "trek://edit\0x",
+        ] {
             assert!(matches!(classify(junk), Arg::Ignored(_)), "{junk:?}");
         }
         let long = format!("trek://ask?selection={}", "x".repeat(MAX_LINK));
         assert!(matches!(classify(&long), Arg::Ignored(_)));
-        let just = format!("trek://ask?selection={}", "x".repeat(MAX_LINK - "trek://ask?selection=".len()));
-        assert!(matches!(classify(&just), Arg::Link(_)), "a link at the limit goes");
+        let just = format!(
+            "trek://ask?selection={}",
+            "x".repeat(MAX_LINK - "trek://ask?selection=".len())
+        );
+        assert!(
+            matches!(classify(&just), Arg::Link(_)),
+            "a link at the limit goes"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -439,8 +582,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         publish(&dir, Path::new(r"\\.\pipe\trek-1-0-ab")).unwrap();
         publish(&dir, Path::new(r"\\.\pipe\trek-2-0-cd")).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join(PIPE_FILE)).unwrap(), r"\\.\pipe\trek-2-0-cd", "the newer replaces the older");
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no temporary file left behind");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(PIPE_FILE)).unwrap(),
+            r"\\.\pipe\trek-2-0-cd",
+            "the newer replaces the older"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "no temporary file left behind"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -455,18 +606,28 @@ mod tests {
             std::fs::write(dir.join(PIPE_FILE), vec![b'x'; 8 << 20]).unwrap();
             assert_eq!(published(&dir), None);
             std::fs::write(dir.join(PIPE_FILE), "  \\\\.\\pipe\\trek-1-0-ab\r\n").unwrap();
-            assert_eq!(published(&dir), Some(PathBuf::from(r"\\.\pipe\trek-1-0-ab")));
+            assert_eq!(
+                published(&dir),
+                Some(PathBuf::from(r"\\.\pipe\trek-1-0-ab"))
+            );
             let _ = std::fs::remove_dir_all(dir);
         }
 
         fn data_dir(tag: &str) -> PathBuf {
-            let dir = std::env::temp_dir().join(format!("trek-si-{tag}-{}-{}", std::process::id(), &trek_ipc::token().unwrap()[..8]));
+            let dir = std::env::temp_dir().join(format!(
+                "trek-si-{tag}-{}-{}",
+                std::process::id(),
+                &trek_ipc::token().unwrap()[..8]
+            ));
             std::fs::create_dir_all(&dir).unwrap();
             dir
         }
 
         fn open(args: &[&str]) -> Open {
-            Open { args: args.iter().map(|a| a.to_string()).collect(), background: true }
+            Open {
+                args: args.iter().map(|a| a.to_string()).collect(),
+                background: true,
+            }
         }
 
         /// The first launch takes the folder and listens; a second hands its arguments to the first
@@ -474,9 +635,19 @@ mod tests {
         #[test]
         fn a_second_launch_hands_over_to_the_first() {
             let dir = data_dir("pair");
-            let Claim::Primary(first) = claim_in(&dir, open(&["trek://edit?path=%2Fown"]), Duration::from_secs(2)) else { panic!("the folder was free") };
+            let Claim::Primary(first) = claim_in(
+                &dir,
+                open(&["trek://edit?path=%2Fown"]),
+                Duration::from_secs(2),
+            ) else {
+                panic!("the folder was free")
+            };
             assert!(first.lock.is_some());
-            assert_eq!(first.own, ["trek://edit?path=%2Fown"], "its own arguments wait for the window");
+            assert_eq!(
+                first.own,
+                ["trek://edit?path=%2Fown"],
+                "its own arguments wait for the window"
+            );
             let rx = first.forwarded.expect("listening");
             let main = std::thread::spawn(move || {
                 let f = rx.recv_blocking().unwrap();
@@ -484,9 +655,23 @@ mod tests {
                 f.open
             });
             let started = Instant::now();
-            assert!(matches!(claim_in(&dir, open(&["trek://ask?path=%2Fa", r"C:\src\b.rs"]), Duration::from_secs(10)), Claim::Forwarded));
-            assert!(started.elapsed() < Duration::from_secs(5), "quickly: {:?}", started.elapsed());
-            assert_eq!(main.join().unwrap(), open(&["trek://ask?path=%2Fa", r"C:\src\b.rs"]));
+            assert!(matches!(
+                claim_in(
+                    &dir,
+                    open(&["trek://ask?path=%2Fa", r"C:\src\b.rs"]),
+                    Duration::from_secs(10)
+                ),
+                Claim::Forwarded
+            ));
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "quickly: {:?}",
+                started.elapsed()
+            );
+            assert_eq!(
+                main.join().unwrap(),
+                open(&["trek://ask?path=%2Fa", r"C:\src\b.rs"])
+            );
             let _ = std::fs::remove_dir_all(dir);
         }
 
@@ -501,7 +686,9 @@ mod tests {
                 drop(lock);
             });
             let started = Instant::now();
-            let Claim::Primary(p) = claim_in(&dir, open(&[]), Duration::from_secs(10)) else { panic!("should start once the lock is free") };
+            let Claim::Primary(p) = claim_in(&dir, open(&[]), Duration::from_secs(10)) else {
+                panic!("should start once the lock is free")
+            };
             assert!(p.lock.is_some() && started.elapsed() >= Duration::from_millis(350));
             freed.join().unwrap();
             drop(p);
@@ -515,16 +702,26 @@ mod tests {
             let dir = data_dir("hung");
             let _lock = crate::workspace::lock_folder(&dir).unwrap().unwrap();
             let started = Instant::now();
-            let Claim::Failed(why) = claim_in(&dir, open(&["trek://edit?path=%2Fx"]), Duration::from_millis(600)) else { panic!("must not start") };
+            let Claim::Failed(why) = claim_in(
+                &dir,
+                open(&["trek://edit?path=%2Fx"]),
+                Duration::from_millis(600),
+            ) else {
+                panic!("must not start")
+            };
             assert!(started.elapsed() < Duration::from_secs(3));
             assert!(why.contains("isn't answering"), "{why}");
 
             // Listening, but its main thread never takes the arguments: hung, not starting.
             let other = data_dir("hung2");
-            let Claim::Primary(first) = claim_in(&other, open(&[]), Duration::from_secs(2)) else { panic!() };
+            let Claim::Primary(first) = claim_in(&other, open(&[]), Duration::from_secs(2)) else {
+                panic!()
+            };
             let _rx = first.forwarded;
             let started = Instant::now();
-            let Claim::Failed(why) = claim_in(&other, open(&[]), Duration::from_millis(800)) else { panic!("must not start") };
+            let Claim::Failed(why) = claim_in(&other, open(&[]), Duration::from_millis(800)) else {
+                panic!("must not start")
+            };
             assert!(started.elapsed() < Duration::from_secs(4));
             assert!(why.contains("didn't answer in time"), "{why}");
             let _ = std::fs::remove_dir_all(dir);
@@ -539,17 +736,32 @@ mod tests {
             let dir = data_dir("stale");
             let gone = trek_ipc::pipe_name(5).unwrap();
             publish(&dir, &gone).unwrap();
-            let Claim::Primary(p) = claim_in(&dir, open(&[]), Duration::from_secs(2)) else { panic!("the folder was free") };
+            let Claim::Primary(p) = claim_in(&dir, open(&[]), Duration::from_secs(2)) else {
+                panic!("the folder was free")
+            };
             let now = published(&dir).unwrap();
             assert_ne!(now, gone);
-            assert!(trek_ipc::Stream::connect(&now).is_ok(), "the new name has a Trek behind it");
+            assert!(
+                trek_ipc::Stream::connect(&now).is_ok(),
+                "the new name has a Trek behind it"
+            );
             drop(p);
 
             let locked = data_dir("stale2");
             let _lock = crate::workspace::lock_folder(&locked).unwrap().unwrap();
-            for name in [gone.to_string_lossy().into_owned(), r"\\.\pipe\not-trek".into(), "garbage".into()] {
+            for name in [
+                gone.to_string_lossy().into_owned(),
+                r"\\.\pipe\not-trek".into(),
+                "garbage".into(),
+            ] {
                 std::fs::write(locked.join(PIPE_FILE), &name).unwrap();
-                assert!(matches!(claim_in(&locked, open(&[]), Duration::from_millis(300)), Claim::Failed(_)), "{name}");
+                assert!(
+                    matches!(
+                        claim_in(&locked, open(&[]), Duration::from_millis(300)),
+                        Claim::Failed(_)
+                    ),
+                    "{name}"
+                );
             }
             let _ = std::fs::remove_dir_all(dir);
             let _ = std::fs::remove_dir_all(locked);

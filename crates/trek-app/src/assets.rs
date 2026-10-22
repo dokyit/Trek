@@ -28,7 +28,10 @@ impl AssetSource for Assets {
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        let mut paths: Vec<SharedString> = Embedded::iter().filter(|p| p.starts_with(path)).map(|p| p.to_string().into()).collect();
+        let mut paths: Vec<SharedString> = Embedded::iter()
+            .filter(|p| p.starts_with(path))
+            .map(|p| p.to_string().into())
+            .collect();
         paths.extend(gpui_kit::assets::Assets.list(path)?);
         paths.extend(TrekIcons.list(path)?);
         paths.sort();
@@ -38,7 +41,9 @@ impl AssetSource for Assets {
 }
 
 pub fn theme_json() -> String {
-    Embedded::get("themes/trek.json").map(|f| String::from_utf8_lossy(&f.data).to_string()).unwrap_or_default()
+    Embedded::get("themes/trek.json")
+        .map(|f| String::from_utf8_lossy(&f.data).to_string())
+        .unwrap_or_default()
 }
 
 pub fn brand_bytes(path: &str) -> Option<Vec<u8>> {
@@ -55,7 +60,10 @@ mod tests {
         let mut prev: Option<char> = None;
         for c in name.chars() {
             let starts = match prev {
-                Some(p) => c.is_ascii_uppercase() || (c.is_ascii_digit() && p.is_ascii_alphabetic() && p != 'x'),
+                Some(p) => {
+                    c.is_ascii_uppercase()
+                        || (c.is_ascii_digit() && p.is_ascii_alphabetic() && p != 'x')
+                }
                 None => false,
             };
             if starts {
@@ -73,16 +81,24 @@ mod tests {
     fn every_icon_used_is_embedded() {
         let catalog = gpui_kit::assets::AllAssets;
         let mut missing = vec![];
-        let mut files = vec![std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/src"))];
+        let mut files = vec![std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src"
+        ))];
         while let Some(at) = files.pop() {
             if at.is_dir() {
                 files.extend(std::fs::read_dir(&at).unwrap().map(|e| e.unwrap().path()));
                 continue;
             }
-            let Ok(text) = std::fs::read_to_string(&at) else { continue };
+            let Ok(text) = std::fs::read_to_string(&at) else {
+                continue;
+            };
             for prefix in ["Lucide::", "IconName::"] {
                 for (i, _) in text.match_indices(prefix) {
-                    let name: String = text[i + prefix.len()..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+                    let name: String = text[i + prefix.len()..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric())
+                        .collect();
                     let path = format!("icons/{}.svg", file_name(&name));
                     // Not a Lucide file name (the guess is wrong, or it isn't an icon): skipped.
                     if name.is_empty() || !catalog.load(&path).is_ok_and(|f| f.is_some()) {
@@ -96,6 +112,9 @@ mod tests {
         }
         missing.sort();
         missing.dedup();
-        assert!(missing.is_empty(), "not embedded (add to TrekIcons): {missing:#?}");
+        assert!(
+            missing.is_empty(),
+            "not embedded (add to TrekIcons): {missing:#?}"
+        );
     }
 }

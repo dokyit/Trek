@@ -18,7 +18,9 @@ pub struct Orchestrate {
 
 impl Orchestrate {
     pub fn from_env() -> Self {
-        Self { client: trek_ipc::Client::from_env() }
+        Self {
+            client: trek_ipc::Client::from_env(),
+        }
     }
 }
 
@@ -32,7 +34,14 @@ impl ToolSet for Orchestrate {
     }
 
     fn tools(&self) -> Vec<ToolDef> {
-        trek_ipc::tools().into_iter().map(|(name, description, input_schema)| ToolDef { name, description, input_schema }).collect()
+        trek_ipc::tools()
+            .into_iter()
+            .map(|(name, description, input_schema)| ToolDef {
+                name,
+                description,
+                input_schema,
+            })
+            .collect()
     }
 
     fn call(&mut self, name: &str, args: &Value) -> rpc::ToolResult {
@@ -42,7 +51,12 @@ impl ToolSet for Orchestrate {
 
 /// Run one tool call against Trek. `keep` receives a handle on the connection as soon as it's
 /// open, so a cancel can shut it down.
-fn call(client: Option<&trek_ipc::Client>, name: &str, args: &Value, keep: Option<&dyn Fn(trek_ipc::Handle)>) -> rpc::ToolResult {
+fn call(
+    client: Option<&trek_ipc::Client>,
+    name: &str,
+    args: &Value,
+    keep: Option<&dyn Fn(trek_ipc::Handle)>,
+) -> rpc::ToolResult {
     let client = client.ok_or("These tools work only in agents that Trek started (Trek's connection details are missing).")?;
     let mut conn = client.connect()?;
     if let (Some(keep), Ok(handle)) = (keep, conn.handle()) {
@@ -61,7 +75,8 @@ fn call(client: Option<&trek_ipc::Client>, name: &str, args: &Value, keep: Optio
 pub fn serve(tools: Orchestrate) {
     let out = Arc::new(Mutex::new(std::io::stdout()));
     // Calls in flight, by request id (as JSON): whether the client cancelled it, and its connection.
-    let inflight: Arc<Mutex<HashMap<String, (bool, Option<trek_ipc::Handle>)>>> = Default::default();
+    let inflight: Arc<Mutex<HashMap<String, (bool, Option<trek_ipc::Handle>)>>> =
+        Default::default();
     let client = Arc::new(tools.client.clone());
     let mut tools = tools;
     let mut server = rpc::Server::new();
@@ -76,7 +91,10 @@ pub fn serve(tools: Orchestrate) {
         }
         let msg: Option<Value> = serde_json::from_str(&line).ok();
         // A cancelled call: drop its connection; Trek stops waiting on its behalf.
-        if let Some(m) = msg.as_ref().filter(|m| m["method"] == "notifications/cancelled") {
+        if let Some(m) = msg
+            .as_ref()
+            .filter(|m| m["method"] == "notifications/cancelled")
+        {
             let key = m["params"]["requestId"].to_string();
             if let Some((cancelled, handle)) = inflight.lock().unwrap().get_mut(&key) {
                 *cancelled = true;
@@ -86,7 +104,10 @@ pub fn serve(tools: Orchestrate) {
             }
             continue;
         }
-        let call_of = msg.as_ref().filter(|m| m["method"] == "tools/call" && m.get("id").is_some()).map(|m| (m["id"].clone(), m["params"].clone()));
+        let call_of = msg
+            .as_ref()
+            .filter(|m| m["method"] == "tools/call" && m.get("id").is_some())
+            .map(|m| (m["id"].clone(), m["params"].clone()));
         let Some((id, params)) = call_of else {
             if let Some(response) = server.handle_line(&line, &mut tools) {
                 let mut o = out.lock().unwrap_or_else(|e| e.into_inner());
@@ -98,14 +119,24 @@ pub fn serve(tools: Orchestrate) {
         };
         let name = params["name"].as_str().unwrap_or_default().to_string();
         if !tools.tools().iter().any(|t| t.name == name) {
-            write(&out, &rpc::error_response(id, rpc::INVALID_PARAMS, &format!("Unknown tool: {name}")));
+            write(
+                &out,
+                &rpc::error_response(id, rpc::INVALID_PARAMS, &format!("Unknown tool: {name}")),
+            );
             continue;
         }
         let args = match params.get("arguments") {
             None | Some(Value::Null) => json!({}),
             Some(v @ Value::Object(_)) => v.clone(),
             Some(_) => {
-                write(&out, &rpc::error_response(id, rpc::INVALID_PARAMS, "params.arguments must be an object"));
+                write(
+                    &out,
+                    &rpc::error_response(
+                        id,
+                        rpc::INVALID_PARAMS,
+                        "params.arguments must be an object",
+                    ),
+                );
                 continue;
             }
         };
@@ -124,11 +155,18 @@ pub fn serve(tools: Orchestrate) {
             };
             let result = call(client.as_ref().as_ref(), &name, &args, Some(&keep));
             // A cancelled request gets no answer (MCP).
-            if inflight.lock().unwrap().remove(&key).is_some_and(|(cancelled, _)| cancelled) {
+            if inflight
+                .lock()
+                .unwrap()
+                .remove(&key)
+                .is_some_and(|(cancelled, _)| cancelled)
+            {
                 return;
             }
             let response = match result {
-                Ok(content) => json!({ "jsonrpc": "2.0", "id": id, "result": { "content": content } }),
+                Ok(content) => {
+                    json!({ "jsonrpc": "2.0", "id": id, "result": { "content": content } })
+                }
                 Err(message) => {
                     eprintln!("trek-mcp: {name} failed");
                     json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [rpc::text(message)], "isError": true } })
@@ -149,10 +187,24 @@ mod tests {
         let tools = Orchestrate { client: None };
         let names: Vec<&str> = tools.tools().iter().map(|t| t.name).collect();
         assert_eq!(names, trek_ipc::TOOL_NAMES);
-        for word in ["delegate_task", "start_thread", "handoff", "read_thread", "send_to_thread"] {
-            assert!(tools.instructions().contains(word), "the instructions say when to use {word}");
+        for word in [
+            "delegate_task",
+            "start_thread",
+            "handoff",
+            "read_thread",
+            "send_to_thread",
+        ] {
+            assert!(
+                tools.instructions().contains(word),
+                "the instructions say when to use {word}"
+            );
         }
-        assert!(tools.tools().iter().all(|t| t.to_json()["inputSchema"]["type"] == "object"));
+        assert!(
+            tools
+                .tools()
+                .iter()
+                .all(|t| t.to_json()["inputSchema"]["type"] == "object")
+        );
     }
 
     #[test]
@@ -171,7 +223,10 @@ mod tests {
         let path = std::env::temp_dir().join(format!("trek-mcp-orch-{}.sock", std::process::id()));
         #[cfg(windows)]
         let path = trek_ipc::pipe_name(0).unwrap();
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let mut listener = {
             let _enter = rt.enter();
             trek_ipc::server::Listener::bind(&path).unwrap()
@@ -182,16 +237,32 @@ mod tests {
                 let mut r = tokio::io::BufReader::new(rd);
                 let mut line = String::new();
                 r.read_line(&mut line).await.unwrap();
-                w.write_all(trek_ipc::encode(&json!({"ok": true})).as_bytes()).await.unwrap();
+                w.write_all(trek_ipc::encode(&json!({"ok": true})).as_bytes())
+                    .await
+                    .unwrap();
                 line.clear();
                 r.read_line(&mut line).await.unwrap();
                 let req: Value = serde_json::from_str(&line).unwrap();
                 assert_eq!(req["method"], "task_status");
                 assert_eq!(req["params"]["id"], "abc");
-                w.write_all(trek_ipc::encode(&trek_ipc::reply(&req["id"], Ok(json!({"id": "abc", "status": "done"})))).as_bytes()).await.unwrap();
+                w.write_all(
+                    trek_ipc::encode(&trek_ipc::reply(
+                        &req["id"],
+                        Ok(json!({"id": "abc", "status": "done"})),
+                    ))
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
             })
         });
-        let mut tools = Orchestrate { client: Some(trek_ipc::Client { socket: path.clone(), token: "t".into(), session: "s".into() }) };
+        let mut tools = Orchestrate {
+            client: Some(trek_ipc::Client {
+                socket: path.clone(),
+                token: "t".into(),
+                session: "s".into(),
+            }),
+        };
         let out = tools.call("task_status", &json!({"id": "abc"})).unwrap();
         let text = out[0]["text"].as_str().unwrap();
         assert!(text.contains("\"status\": \"done\""), "{text}");

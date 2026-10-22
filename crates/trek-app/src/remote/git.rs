@@ -41,7 +41,14 @@ fn status_of(code: &str) -> tr::FileStatus {
 }
 
 fn changed(f: &FileChange) -> tr::ChangedFile {
-    tr::ChangedFile { path: f.path.clone(), status: status_of(&f.status), from: None, added: f.additions.max(0) as u32, removed: f.deletions.max(0) as u32, binary: false }
+    tr::ChangedFile {
+        path: f.path.clone(),
+        status: status_of(&f.status),
+        from: None,
+        added: f.additions.max(0) as u32,
+        removed: f.deletions.max(0) as u32,
+        binary: false,
+    }
 }
 
 /// `text` cut to what a phone gets, at a line's end.
@@ -71,7 +78,13 @@ fn read_status(place: &Place, switch_blocked: Option<String>) -> tr::HostResult<
     match &place.worktree {
         Some((project, wt)) => {
             let removal = worktree::removal(project, wt);
-            let mut w = tr::WorktreeStatus { branch: wt.branch.clone(), base: wt.base.clone(), unmerged: removal.unmerged as u32, missing: removal.missing, ..Default::default() };
+            let mut w = tr::WorktreeStatus {
+                branch: wt.branch.clone(),
+                base: wt.base.clone(),
+                unmerged: removal.unmerged as u32,
+                missing: removal.missing,
+                ..Default::default()
+            };
             status.is_repo = true;
             status.branch = Some(wt.branch.clone());
             if !removal.missing {
@@ -122,47 +135,87 @@ fn read_diff(place: &Place, path: &str) -> tr::HostResult<tr::GitDiff> {
     let text = match &place.worktree {
         Some((_, wt)) => {
             let review = worktree::review(wt).map_err(other)?;
-            let change = review.files.iter().find(|c| c.path == path).ok_or_else(not_changed)?;
+            let change = review
+                .files
+                .iter()
+                .find(|c| c.path == path)
+                .ok_or_else(not_changed)?;
             worktree::file_diff(wt, &review.merge_base, change)
         }
         None => {
             let snap = panel::snapshot(&place.cwd);
-            let file = snap.files.iter().find(|f| f.path == path).ok_or_else(not_changed)?;
+            let file = snap
+                .files
+                .iter()
+                .find(|f| f.path == path)
+                .ok_or_else(not_changed)?;
             local_diff(&place.cwd, file)
         }
     };
     let (diff, truncated) = capped(text);
-    Ok(tr::GitDiff { path: path.to_string(), diff, truncated })
+    Ok(tr::GitDiff {
+        path: path.to_string(),
+        diff,
+        truncated,
+    })
 }
 
 /// As the Git panel reads a file's diff: an untracked file is all added.
 fn local_diff(cwd: &Path, file: &FileChange) -> String {
     if file.status == "??" {
         return match std::fs::read_to_string(cwd.join(&file.path)) {
-            Ok(s) => s.lines().map(|l| format!("+{l}")).collect::<Vec<_>>().join("\n"),
+            Ok(s) => s
+                .lines()
+                .map(|l| format!("+{l}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
             Err(_) => "Binary or unreadable file".into(),
         };
     }
-    trek_core::git::read(cwd, &["diff", "HEAD", "--", &file.path]).or_else(|| trek_core::git::read(cwd, &["diff", "--", &file.path])).unwrap_or_default()
+    trek_core::git::read(cwd, &["diff", "HEAD", "--", &file.path])
+        .or_else(|| trek_core::git::read(cwd, &["diff", "--", &file.path]))
+        .unwrap_or_default()
 }
 
 impl Workspace {
     /// Where `target` is: a thread's folder (its worktree, for one in a worktree), else a project's.
     fn git_place(&self, target: &tr::GitTarget) -> tr::HostResult<Place> {
         if let Some(id) = &target.thread_id {
-            let t = self.thread(id).ok_or_else(|| tr::HostError::not_found("No such thread"))?;
-            let cwd = t.cwd.clone().filter(|c| !trek_core::paths::is_chat_dir(c)).ok_or_else(|| tr::HostError::bad_request("This thread has no folder of its own"))?;
-            return Ok(Place { cwd, worktree: self.worktree_of(id) });
+            let t = self
+                .thread(id)
+                .ok_or_else(|| tr::HostError::not_found("No such thread"))?;
+            let cwd = t
+                .cwd
+                .clone()
+                .filter(|c| !trek_core::paths::is_chat_dir(c))
+                .ok_or_else(|| {
+                    tr::HostError::bad_request("This thread has no folder of its own")
+                })?;
+            return Ok(Place {
+                cwd,
+                worktree: self.worktree_of(id),
+            });
         }
-        let id = target.project_id.as_deref().ok_or_else(|| tr::HostError::bad_request("Name a thread or a project"))?;
-        let p = self.project(id).ok_or_else(|| tr::HostError::not_found("No such project"))?;
-        Ok(Place { cwd: p.path.clone(), worktree: None })
+        let id = target
+            .project_id
+            .as_deref()
+            .ok_or_else(|| tr::HostError::bad_request("Name a thread or a project"))?;
+        let p = self
+            .project(id)
+            .ok_or_else(|| tr::HostError::not_found("No such project"))?;
+        Ok(Place {
+            cwd: p.path.clone(),
+            worktree: None,
+        })
     }
 
     /// Why another branch can't be checked out in `place` now, if it can't.
     fn place_switch_blocked(&self, place: &Place) -> Option<String> {
         if let Some((_, wt)) = &place.worktree {
-            return Some(format!("This thread works in a worktree: {} stays checked out there. Merge it into {} instead.", wt.branch, wt.base));
+            return Some(format!(
+                "This thread works in a worktree: {} stays checked out there. Merge it into {} instead.",
+                wt.branch, wt.base
+            ));
         }
         self.switch_blocked(&place.cwd)
     }
@@ -178,14 +231,22 @@ impl Workspace {
     ) {
         cx.spawn(async move |this, cx| {
             let cwd = place.cwd.clone();
-            let result = cx.background_executor().spawn(async move { work(&place) }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move { work(&place) })
+                .await;
             let _ = this.update(cx, |ws, cx| ws.refresh_git_at(cwd, cx));
             let _ = reply.send(result);
         })
         .detach();
     }
 
-    pub(super) fn remote_git_status(&mut self, target: tr::GitTarget, reply: tr::Reply<tr::GitStatus>, cx: &mut Context<Self>) {
+    pub(super) fn remote_git_status(
+        &mut self,
+        target: tr::GitTarget,
+        reply: tr::Reply<tr::GitStatus>,
+        cx: &mut Context<Self>,
+    ) {
         let place = match self.git_place(&target) {
             Ok(p) => p,
             Err(e) => return drop(reply.send(Err(e))),
@@ -194,41 +255,73 @@ impl Workspace {
         self.git_job(place, reply, cx, move |place| read_status(place, blocked));
     }
 
-    pub(super) fn remote_git_diff(&mut self, req: tr::GitDiffRequest, reply: tr::Reply<tr::GitDiff>, cx: &mut Context<Self>) {
+    pub(super) fn remote_git_diff(
+        &mut self,
+        req: tr::GitDiffRequest,
+        reply: tr::Reply<tr::GitDiff>,
+        cx: &mut Context<Self>,
+    ) {
         match self.git_place(&req.target) {
             Ok(place) => self.git_job(place, reply, cx, move |place| read_diff(place, &req.path)),
             Err(e) => drop(reply.send(Err(e))),
         }
     }
 
-    pub(super) fn remote_git_commit(&mut self, req: tr::GitCommitRequest, reply: tr::Reply<()>, cx: &mut Context<Self>) {
+    pub(super) fn remote_git_commit(
+        &mut self,
+        req: tr::GitCommitRequest,
+        reply: tr::Reply<()>,
+        cx: &mut Context<Self>,
+    ) {
         if req.message.trim().is_empty() {
-            return drop(reply.send(Err(tr::HostError::bad_request("Write a commit message first."))));
+            return drop(reply.send(Err(tr::HostError::bad_request(
+                "Write a commit message first.",
+            ))));
         }
         match self.git_place(&req.target) {
             // Everything, as the panel's Commit does (in a worktree, the worktree's).
-            Ok(place) => self.git_job(place, reply, cx, move |place| worktree::commit(&place.cwd, &req.message).map_err(|e| tr::HostError::conflict(git_error(&format!("{e:#}"))))),
+            Ok(place) => self.git_job(place, reply, cx, move |place| {
+                worktree::commit(&place.cwd, &req.message)
+                    .map_err(|e| tr::HostError::conflict(git_error(&format!("{e:#}"))))
+            }),
             Err(e) => drop(reply.send(Err(e))),
         }
     }
 
-    pub(super) fn remote_git_push(&mut self, target: tr::GitTarget, reply: tr::Reply<()>, cx: &mut Context<Self>) {
+    pub(super) fn remote_git_push(
+        &mut self,
+        target: tr::GitTarget,
+        reply: tr::Reply<()>,
+        cx: &mut Context<Self>,
+    ) {
         let place = match self.git_place(&target) {
             Ok(p) => p,
             Err(e) => return drop(reply.send(Err(e))),
         };
         self.git_job(place, reply, cx, |place| match &place.worktree {
-            Some((_, wt)) => worktree::push(wt).map_err(|e| tr::HostError::conflict(git_error(&format!("{e:#}")))),
+            Some((_, wt)) => worktree::push(wt)
+                .map_err(|e| tr::HostError::conflict(git_error(&format!("{e:#}")))),
             None => {
                 // A branch without an upstream gets one, as the panel's Push does.
                 let upstream = panel::snapshot(&place.cwd).upstream.is_some();
-                let args: &[&str] = if upstream { &["push"] } else { &["push", "-u", "origin", "HEAD"] };
-                panel::git(&place.cwd, args).map(|_| ()).map_err(|e: String| tr::HostError::conflict(git_error(&e)))
+                let args: &[&str] = if upstream {
+                    &["push"]
+                } else {
+                    &["push", "-u", "origin", "HEAD"]
+                };
+                panel::git(&place.cwd, args)
+                    .map(|_| ())
+                    .map_err(|e: String| tr::HostError::conflict(git_error(&e)))
             }
         });
     }
 
-    pub(super) fn remote_git_branches(&mut self, target: tr::GitTarget, reply: tr::Reply<tr::GitBranches>, cx: &mut Context<Self>) {
+    pub(super) fn remote_git_branches(
+        &mut self,
+        target: tr::GitTarget,
+        reply: tr::Reply<tr::GitBranches>,
+        cx: &mut Context<Self>,
+    ) {
         let place = match self.git_place(&target) {
             Ok(p) => p,
             Err(e) => return drop(reply.send(Err(e))),
@@ -236,16 +329,27 @@ impl Workspace {
         self.git_job(place, reply, cx, |place| {
             let info = crate::workspace::read_git_info(&place.cwd);
             if !info.is_repo {
-                return Err(tr::HostError::bad_request("This folder isn't a git repository"));
+                return Err(tr::HostError::bad_request(
+                    "This folder isn't a git repository",
+                ));
             }
-            Ok(tr::GitBranches { current: info.branch, default_branch: info.default_branch, branches: info.branches })
+            Ok(tr::GitBranches {
+                current: info.branch,
+                default_branch: info.default_branch,
+                branches: info.branches,
+            })
         });
     }
 
     /// Check out another local branch: not in a worktree thread (its branch is the point of it),
     /// nor under an agent that's working. While it runs, the checkout counts as switching, as for
     /// the Mac's own switch: nothing else switches it or starts a turn in it.
-    pub(super) fn remote_git_switch(&mut self, req: tr::GitSwitchRequest, reply: tr::Reply<()>, cx: &mut Context<Self>) {
+    pub(super) fn remote_git_switch(
+        &mut self,
+        req: tr::GitSwitchRequest,
+        reply: tr::Reply<()>,
+        cx: &mut Context<Self>,
+    ) {
         let place = match self.git_place(&req.target) {
             Ok(p) => p,
             Err(e) => return drop(reply.send(Err(e))),
@@ -260,14 +364,24 @@ impl Workspace {
         self.git_job(place, done, cx, move |place| {
             // Only a branch the switch menu would list: never an option, never a remote ref.
             let info = crate::workspace::read_git_info(&place.cwd);
-            let listed = git_lines(&place.cwd, &["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
+            let listed = git_lines(
+                &place.cwd,
+                &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+            );
             if !info.branches.contains(&req.branch) && !listed.contains(&req.branch) {
-                return Err(tr::HostError::not_found(format!("There's no local branch called {}", req.branch)));
+                return Err(tr::HostError::not_found(format!(
+                    "There's no local branch called {}",
+                    req.branch
+                )));
             }
-            panel::git(&place.cwd, &["switch", "--no-guess", "--", &req.branch]).map(|_| ()).map_err(|e: String| tr::HostError::conflict(git_error(&e)))
+            panel::git(&place.cwd, &["switch", "--no-guess", "--", &req.branch])
+                .map(|_| ())
+                .map_err(|e: String| tr::HostError::conflict(git_error(&e)))
         });
         cx.spawn(async move |this, cx| {
-            let result = switched.await.unwrap_or_else(|_| Err(tr::HostError::other("Trek is closing")));
+            let result = switched
+                .await
+                .unwrap_or_else(|_| Err(tr::HostError::other("Trek is closing")));
             let _ = this.update(cx, |ws, cx| {
                 ws.switching.remove(&root);
                 if result.is_ok() {
@@ -282,9 +396,18 @@ impl Workspace {
 
     /// Merge a worktree thread's branch into its base in the project folder, as the panel's
     /// Merge does (it settles the thread when the settings say so).
-    pub(super) fn remote_worktree_merge(&mut self, id: &str, reply: tr::Reply<()>, cx: &mut Context<Self>) {
+    pub(super) fn remote_worktree_merge(
+        &mut self,
+        id: &str,
+        reply: tr::Reply<()>,
+        cx: &mut Context<Self>,
+    ) {
         let Some((_, wt)) = self.worktree_of(id) else {
-            let err = if self.thread(id).is_none() { tr::HostError::not_found("No such thread") } else { tr::HostError::bad_request("This thread has no worktree.") };
+            let err = if self.thread(id).is_none() {
+                tr::HostError::not_found("No such thread")
+            } else {
+                tr::HostError::bad_request("This thread has no worktree.")
+            };
             return drop(reply.send(Err(err)));
         };
         let task = self.merge_worktree(id, cx);
@@ -302,29 +425,52 @@ impl Workspace {
     /// Remove a worktree thread's worktree, as the panel's Remove does once confirmed. Without
     /// `force`, anything it would lose (uncommitted changes; with `delete_branch`, commits the
     /// base doesn't have) is a refusal saying what, as the Mac's confirmation would.
-    pub(super) fn remote_worktree_remove(&mut self, req: tr::WorktreeRemoveRequest, reply: tr::Reply<()>, cx: &mut Context<Self>) {
+    pub(super) fn remote_worktree_remove(
+        &mut self,
+        req: tr::WorktreeRemoveRequest,
+        reply: tr::Reply<()>,
+        cx: &mut Context<Self>,
+    ) {
         let id = req.thread_id.clone();
         if self.thread(&id).is_none() {
             return drop(reply.send(Err(tr::HostError::not_found("No such thread"))));
         }
         if self.worktree_of(&id).is_none() {
-            return drop(reply.send(Err(tr::HostError::bad_request("This thread has no worktree."))));
+            return drop(reply.send(Err(tr::HostError::bad_request(
+                "This thread has no worktree.",
+            ))));
         }
         let check = self.worktree_removal(&id, cx);
         cx.spawn(async move |this, cx| {
-            let Some(r) = check.await else { return drop(reply.send(Err(tr::HostError::bad_request("This thread has no worktree.")))) };
+            let Some(r) = check.await else {
+                return drop(reply.send(Err(tr::HostError::bad_request(
+                    "This thread has no worktree.",
+                ))));
+            };
             let removed = this.update(cx, |ws, cx| {
                 let (_, wt) = ws.worktree_of(&id)?;
                 let loses = r.uncommitted > 0 || (req.delete_branch && r.unmerged > 0);
                 if loses && !req.force {
-                    let lines = crate::worktree_ui::losses(&wt, &r, req.delete_branch.then_some(true));
-                    return Some(Err(lines.into_iter().map(|(l, _)| l).collect::<Vec<_>>().join(" ")));
+                    let lines =
+                        crate::worktree_ui::losses(&wt, &r, req.delete_branch.then_some(true));
+                    return Some(Err(lines
+                        .into_iter()
+                        .map(|(l, _)| l)
+                        .collect::<Vec<_>>()
+                        .join(" ")));
                 }
                 // No more uncommitted changes go than were counted just now.
-                Some(Ok(ws.remove_worktree(&id, r.uncommitted, req.delete_branch, cx)))
+                Some(Ok(ws.remove_worktree(
+                    &id,
+                    r.uncommitted,
+                    req.delete_branch,
+                    cx,
+                )))
             });
             let result = match removed {
-                Ok(Some(Ok(task))) => task.await.map(|_| ()).map_err(|e| tr::HostError::conflict(format!("Couldn't remove the worktree: {e:#}"))),
+                Ok(Some(Ok(task))) => task.await.map(|_| ()).map_err(|e| {
+                    tr::HostError::conflict(format!("Couldn't remove the worktree: {e:#}"))
+                }),
                 Ok(Some(Err(losses))) => Err(tr::HostError::conflict(losses)),
                 Ok(None) => Err(tr::HostError::bad_request("This thread has no worktree.")),
                 Err(_) => Err(tr::HostError::other("Trek is closing")),
@@ -336,5 +482,7 @@ impl Workspace {
 }
 
 fn git_lines(cwd: &Path, args: &[&str]) -> Vec<String> {
-    trek_core::git::read(cwd, args).map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default()
+    trek_core::git::read(cwd, args)
+        .map(|s| s.lines().map(str::to_string).collect())
+        .unwrap_or_default()
 }

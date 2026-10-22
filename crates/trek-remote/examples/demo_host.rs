@@ -100,23 +100,39 @@ impl Shared {
                     existing.clone()
                 }
                 None => {
-                    let item = Item { id: id.to_string(), seq, at: Some(now_ms()), body };
+                    let item = Item {
+                        id: id.to_string(),
+                        seq,
+                        at: Some(now_ms()),
+                        body,
+                    };
                     log.items.push(item.clone());
                     item
                 }
             }
         };
-        self.push(HostEvent::Item { thread_id: thread_id.to_string(), item });
+        self.push(HostEvent::Item {
+            thread_id: thread_id.to_string(),
+            item,
+        });
     }
 
     fn find_item(&self, thread_id: &str, pred: impl Fn(&Item) -> bool) -> Option<Item> {
-        self.lock().logs.get(thread_id)?.items.iter().find(|i| pred(i)).cloned()
+        self.lock()
+            .logs
+            .get(thread_id)?
+            .items
+            .iter()
+            .find(|i| pred(i))
+            .cloned()
     }
 
     fn update(&self, thread_id: &str, f: impl FnOnce(&mut ThreadSummary)) {
         let thread = {
             let mut st = self.lock();
-            let Some(t) = st.threads.iter_mut().find(|t| t.id == thread_id) else { return };
+            let Some(t) = st.threads.iter_mut().find(|t| t.id == thread_id) else {
+                return;
+            };
             f(t);
             t.updated_at = now_ms();
             t.clone()
@@ -125,7 +141,11 @@ impl Shared {
     }
 
     fn thread(&self, thread_id: &str) -> Option<ThreadSummary> {
-        self.lock().threads.iter().find(|t| t.id == thread_id).cloned()
+        self.lock()
+            .threads
+            .iter()
+            .find(|t| t.id == thread_id)
+            .cloned()
     }
 
     fn start_turn(&self, thread_id: &str, activity: &str) -> u64 {
@@ -141,7 +161,11 @@ impl Shared {
             t.needs = None;
             t.activity = Some(activity);
             t.working_since = Some(now_ms());
-            t.section = if t.pinned { Section::Pinned } else { Section::Working };
+            t.section = if t.pinned {
+                Section::Pinned
+            } else {
+                Section::Working
+            };
         });
         generation
     }
@@ -149,7 +173,10 @@ impl Shared {
     fn alive(&self, thread_id: &str, generation: u64) -> bool {
         let st = self.lock();
         st.turns.get(thread_id) == Some(&generation)
-            && st.threads.iter().any(|t| t.id == thread_id && t.run_state == RunState::Working)
+            && st
+                .threads
+                .iter()
+                .any(|t| t.id == thread_id && t.run_state == RunState::Working)
     }
 
     fn activity(&self, thread_id: &str, activity: &str) {
@@ -173,7 +200,11 @@ impl Shared {
             t.activity = None;
             t.working_since = None;
             t.unseen = true;
-            t.section = if t.pinned { Section::Pinned } else { Section::Inbox };
+            t.section = if t.pinned {
+                Section::Pinned
+            } else {
+                Section::Inbox
+            };
         });
     }
 
@@ -188,12 +219,18 @@ impl Shared {
             t.needs = Some(Needs { kind, text });
             t.activity = None;
             t.unseen = true;
-            t.section = if t.pinned { Section::Pinned } else { Section::Inbox };
+            t.section = if t.pinned {
+                Section::Pinned
+            } else {
+                Section::Inbox
+            };
         });
     }
 
     fn interrupt_turn(&self, thread_id: &str) -> bool {
-        let Some(thread) = self.thread(thread_id) else { return false };
+        let Some(thread) = self.thread(thread_id) else {
+            return false;
+        };
         if thread.run_state != RunState::Working {
             return false;
         }
@@ -206,27 +243,66 @@ impl Shared {
             .map(|log| {
                 log.items
                     .iter()
-                    .filter(|i| matches!(i.body, ItemBody::Tool { status: ToolStatus::Running, .. } | ItemBody::Assistant { streaming: true, .. }))
+                    .filter(|i| {
+                        matches!(
+                            i.body,
+                            ItemBody::Tool {
+                                status: ToolStatus::Running,
+                                ..
+                            } | ItemBody::Assistant {
+                                streaming: true,
+                                ..
+                            }
+                        )
+                    })
                     .cloned()
                     .collect()
             })
             .unwrap_or_default();
         for item in running {
             let body = match item.body {
-                ItemBody::Tool { call_id, tool, title, detail, output, added, removed, .. } => {
-                    ItemBody::Tool { call_id, tool, title, detail, status: ToolStatus::Failed, output, added, removed }
-                }
-                ItemBody::Assistant { text, .. } => ItemBody::Assistant { text, streaming: false },
+                ItemBody::Tool {
+                    call_id,
+                    tool,
+                    title,
+                    detail,
+                    output,
+                    added,
+                    removed,
+                    ..
+                } => ItemBody::Tool {
+                    call_id,
+                    tool,
+                    title,
+                    detail,
+                    status: ToolStatus::Failed,
+                    output,
+                    added,
+                    removed,
+                },
+                ItemBody::Assistant { text, .. } => ItemBody::Assistant {
+                    text,
+                    streaming: false,
+                },
                 other => other,
             };
             self.put(thread_id, &item.id, body);
         }
-        self.add(thread_id, ItemBody::Error { text: "Interrupted".into() });
+        self.add(
+            thread_id,
+            ItemBody::Error {
+                text: "Interrupted".into(),
+            },
+        );
         self.update(thread_id, |t| {
             t.run_state = RunState::Idle;
             t.activity = None;
             t.working_since = None;
-            t.section = if t.pinned { Section::Pinned } else { Section::Inbox };
+            t.section = if t.pinned {
+                Section::Pinned
+            } else {
+                Section::Inbox
+            };
         });
         true
     }
@@ -273,7 +349,11 @@ impl DemoHost {
             _ => "Using",
         };
         self.activity(thread_id, &format!("{verb} {detail}"));
-        self.put(thread_id, &id, body(ToolStatus::Running, String::new(), false));
+        self.put(
+            thread_id,
+            &id,
+            body(ToolStatus::Running, String::new(), false),
+        );
         let mut out = String::new();
         for line in output {
             if !self.step(thread_id, generation, 900).await {
@@ -281,7 +361,11 @@ impl DemoHost {
             }
             out.push_str(line);
             out.push('\n');
-            self.put(thread_id, &id, body(ToolStatus::Running, out.clone(), false));
+            self.put(
+                thread_id,
+                &id,
+                body(ToolStatus::Running, out.clone(), false),
+            );
         }
         if !self.step(thread_id, generation, 1200).await {
             return false;
@@ -300,7 +384,14 @@ impl DemoHost {
             }
             text.push_str(chunk);
             let streaming = n + 1 < chunks.len();
-            self.put(thread_id, &id, ItemBody::Assistant { text: text.clone(), streaming });
+            self.put(
+                thread_id,
+                &id,
+                ItemBody::Assistant {
+                    text: text.clone(),
+                    streaming,
+                },
+            );
         }
         true
     }
@@ -320,8 +411,18 @@ impl DemoHost {
         let g = generation;
         let id = thread_id.as_str();
         let short: String = text.chars().take(60).collect();
-        let ok = self.think(id, g, &format!("The user wants: \u{201c}{short}\u{201d}. Let me check the relevant code first.")).await
-            && self.tool(id, g, "Search", "\"TODO\" in src/", &[], None).await
+        let ok = self
+            .think(
+                id,
+                g,
+                &format!(
+                    "The user wants: \u{201c}{short}\u{201d}. Let me check the relevant code first."
+                ),
+            )
+            .await
+            && self
+                .tool(id, g, "Search", "\"TODO\" in src/", &[], None)
+                .await
             && self
                 .say(
                     id,
@@ -348,13 +449,19 @@ impl DemoHost {
             // Wait until the thread is idle (an answer or a phone turn may be running), then pause.
             loop {
                 sleep(Duration::from_secs(3)).await;
-                if self.thread(id).is_some_and(|t| t.run_state == RunState::Idle) {
+                if self
+                    .thread(id)
+                    .is_some_and(|t| t.run_state == RunState::Idle)
+                {
                     break;
                 }
             }
             if round > 0 {
                 sleep(Duration::from_secs(12)).await;
-                if self.thread(id).is_none_or(|t| t.run_state != RunState::Idle) {
+                if self
+                    .thread(id)
+                    .is_none_or(|t| t.run_state != RunState::Idle)
+                {
                     continue;
                 }
                 let prompts = [
@@ -363,7 +470,14 @@ impl DemoHost {
                     "Add a test for the theme persistence",
                 ];
                 let prompt = prompts[(round as usize - 1) % prompts.len()];
-                self.add(id, ItemBody::User { text: prompt.into(), images: 0, aside: false });
+                self.add(
+                    id,
+                    ItemBody::User {
+                        text: prompt.into(),
+                        images: 0,
+                        aside: false,
+                    },
+                );
             }
             round += 1;
             let g = self.start_turn(id, "Thinking");
@@ -403,7 +517,12 @@ impl DemoHost {
                         state: ApprovalState::Pending,
                     },
                 );
-                self.needs_you(id, g, NeedsKind::Approval, "Run `pnpm add -D @testing-library/user-event`");
+                self.needs_you(
+                    id,
+                    g,
+                    NeedsKind::Approval,
+                    "Run `pnpm add -D @testing-library/user-event`",
+                );
                 continue;
             }
             let ok = self
@@ -429,10 +548,30 @@ impl DemoHost {
         let id = thread_id.as_str();
         let g = self.start_turn(id, "Thinking");
         let ok = if allowed {
-            self.tool(id, g, "Run", &command, &["done in 2.1s"], None).await
-                && self.say(id, g, &["That worked. ", "Continuing from where I stopped; ", "everything is green now."]).await
+            self.tool(id, g, "Run", &command, &["done in 2.1s"], None)
+                .await
+                && self
+                    .say(
+                        id,
+                        g,
+                        &[
+                            "That worked. ",
+                            "Continuing from where I stopped; ",
+                            "everything is green now.",
+                        ],
+                    )
+                    .await
         } else {
-            self.say(id, g, &["Understood, ", "I won't run that. ", "I'll leave it for you to do by hand."]).await
+            self.say(
+                id,
+                g,
+                &[
+                    "Understood, ",
+                    "I won't run that. ",
+                    "I'll leave it for you to do by hand.",
+                ],
+            )
+            .await
         };
         if ok {
             self.finish_turn(id, g);
@@ -442,9 +581,30 @@ impl DemoHost {
     async fn after_answer(self, thread_id: String, summary: String) {
         let id = thread_id.as_str();
         let g = self.start_turn(id, "Thinking");
-        let ok = self.think(id, g, &format!("The user chose: {summary}.")).await
-            && self.tool(id, g, "Edit", "src/middleware/rate_limit.rs", &[], Some((58, 4))).await
-            && self.say(id, g, &[&format!("Going with **{summary}**. "), "The limiter is in place; ", "`/login` now allows 5 attempts per minute per IP."]).await;
+        let ok = self
+            .think(id, g, &format!("The user chose: {summary}."))
+            .await
+            && self
+                .tool(
+                    id,
+                    g,
+                    "Edit",
+                    "src/middleware/rate_limit.rs",
+                    &[],
+                    Some((58, 4)),
+                )
+                .await
+            && self
+                .say(
+                    id,
+                    g,
+                    &[
+                        &format!("Going with **{summary}**. "),
+                        "The limiter is in place; ",
+                        "`/login` now allows 5 attempts per minute per IP.",
+                    ],
+                )
+                .await;
         if ok {
             self.finish_turn(id, g);
         }
@@ -460,29 +620,62 @@ impl RemoteHost for DemoHost {
         let st = self.lock();
         let mut threads = st.threads.clone();
         threads.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
-        Ok(Snapshot { threads, projects: st.projects.clone(), agents: st.agents.clone(), full_access: true, unlisted: vec![] })
+        Ok(Snapshot {
+            threads,
+            projects: st.projects.clone(),
+            agents: st.agents.clone(),
+            full_access: true,
+            unlisted: vec![],
+        })
     }
 
     async fn transcript(&self, thread_id: &str) -> HostResult<Transcript> {
         let st = self.lock();
-        let log = st.logs.get(thread_id).ok_or_else(|| HostError::not_found(format!("No thread {thread_id}")))?;
-        Ok(Transcript { seq: log.seq, items: log.items.clone(), ..Default::default() })
+        let log = st
+            .logs
+            .get(thread_id)
+            .ok_or_else(|| HostError::not_found(format!("No thread {thread_id}")))?;
+        Ok(Transcript {
+            seq: log.seq,
+            items: log.items.clone(),
+            ..Default::default()
+        })
     }
 
     async fn send(&self, req: SendRequest) -> HostResult<Option<Open>> {
-        let thread = self.thread(&req.thread_id).ok_or_else(|| HostError::not_found(format!("No thread {}", req.thread_id)))?;
+        let thread = self
+            .thread(&req.thread_id)
+            .ok_or_else(|| HostError::not_found(format!("No thread {}", req.thread_id)))?;
         if req.text.trim().is_empty() {
             return Err(HostError::bad_request("Empty message"));
         }
         // Trek's own commands: `/new` opens the phone's new-thread sheet; the rest are answered
         // with a notice, as the Mac answers them.
-        if let Some(cmd) = req.text.trim().strip_prefix('/').and_then(|c| c.split_whitespace().next()) {
+        if let Some(cmd) = req
+            .text
+            .trim()
+            .strip_prefix('/')
+            .and_then(|c| c.split_whitespace().next())
+        {
             match cmd {
-                "new" | "clear" => return Ok(Some(Open::NewThread { project_id: Some(thread.project.id.clone()) })),
+                "new" | "clear" => {
+                    return Ok(Some(Open::NewThread {
+                        project_id: Some(thread.project.id.clone()),
+                    }));
+                }
                 "usage" | "context" | "cost" | "model" | "permissions" => {
-                    self.add(&req.thread_id, ItemBody::User { text: req.text.clone(), images: 0, aside: false });
+                    self.add(
+                        &req.thread_id,
+                        ItemBody::User {
+                            text: req.text.clone(),
+                            images: 0,
+                            aside: false,
+                        },
+                    );
                     let reply = match cmd {
-                        "usage" => "**Claude Code** · Claude Max\n- 5-hour limit: 42% used, resets in 2h 10m\n- Weekly limit: 18% used, resets in 4d",
+                        "usage" => {
+                            "**Claude Code** · Claude Max\n- 5-hour limit: 42% used, resets in 2h 10m\n- Weekly limit: 18% used, resets in 4d"
+                        }
                         "context" => "61.2K of 200K tokens in context (31%).",
                         "cost" => "≈ $1.84 at API prices (included in your Claude Max plan).",
                         "model" => "Claude Code · claude-opus-5-5",
@@ -494,15 +687,32 @@ impl RemoteHost for DemoHost {
                 _ => {}
             }
         }
-        self.add(&req.thread_id, ItemBody::User { text: req.text.clone(), images: 0, aside: false });
+        self.add(
+            &req.thread_id,
+            ItemBody::User {
+                text: req.text.clone(),
+                images: 0,
+                aside: false,
+            },
+        );
         self.update(&req.thread_id, |t| t.unseen = false);
         if thread.run_state == RunState::Working {
             match req.mode.unwrap_or(SendMode::Steer) {
                 SendMode::Steer => {
-                    self.add(&req.thread_id, ItemBody::Notice { text: "Steered the running turn".into() });
+                    self.add(
+                        &req.thread_id,
+                        ItemBody::Notice {
+                            text: "Steered the running turn".into(),
+                        },
+                    );
                 }
                 SendMode::Queue => {
-                    self.add(&req.thread_id, ItemBody::Notice { text: "Queued for after this turn".into() });
+                    self.add(
+                        &req.thread_id,
+                        ItemBody::Notice {
+                            text: "Queued for after this turn".into(),
+                        },
+                    );
                 }
             }
             return Ok(None);
@@ -518,13 +728,17 @@ impl RemoteHost for DemoHost {
             let agent = st.agents.iter().find(|a| a.key == req.agent).cloned();
             (project, agent)
         };
-        let project = project.ok_or_else(|| HostError::not_found(format!("No project {}", req.project_id)))?;
+        let project = project
+            .ok_or_else(|| HostError::not_found(format!("No project {}", req.project_id)))?;
         let agent = agent.ok_or_else(|| HostError::not_found(format!("No agent {}", req.agent)))?;
         if req.text.trim().is_empty() {
             return Err(HostError::bad_request("Empty message"));
         }
         let model = req.model.clone().or(agent.default_model.clone());
-        let model_label = model.as_ref().and_then(|m| agent.models.iter().find(|o| &o.id == m)).map(|o| o.label.clone());
+        let model_label = model
+            .as_ref()
+            .and_then(|m| agent.models.iter().find(|o| &o.id == m))
+            .map(|o| o.label.clone());
         let id = self.new_id("t-");
         let worktree = req.worktree && project.is_repo;
         let mut title: String = req.text.chars().take(48).collect();
@@ -535,10 +749,19 @@ impl RemoteHost for DemoHost {
             id: id.clone(),
             title,
             project: project.to_ref(),
-            agent: AgentRef { key: agent.key.clone(), name: agent.name.clone(), logo: agent.logo.clone(), icon: None },
+            agent: AgentRef {
+                key: agent.key.clone(),
+                name: agent.name.clone(),
+                logo: agent.logo.clone(),
+                icon: None,
+            },
             model,
             model_label,
-            branch: if worktree { Some(format!("trek/{id}")) } else { project.branch.clone() },
+            branch: if worktree {
+                Some(format!("trek/{id}"))
+            } else {
+                project.branch.clone()
+            },
             worktree,
             base: worktree.then(|| project.branch.clone()).flatten(),
             updated_at: now_ms(),
@@ -553,21 +776,52 @@ impl RemoteHost for DemoHost {
             st.logs.insert(id.clone(), Log::default());
         }
         self.push(HostEvent::Thread(thread));
-        self.add(&id, ItemBody::User { text: req.text.clone(), images: 0, aside: false });
+        self.add(
+            &id,
+            ItemBody::User {
+                text: req.text.clone(),
+                images: 0,
+                aside: false,
+            },
+        );
         tokio::spawn(self.clone().echo_turn(id.clone(), req.text));
         Ok(id)
     }
 
     async fn turn_action(&self, req: TurnActionRequest) -> HostResult<TurnActionDone> {
-        let thread = self.thread(&req.thread_id).ok_or_else(|| HostError::not_found(format!("No thread {}", req.thread_id)))?;
-        let items = self.lock().logs.get(&req.thread_id).map(|l| l.items.clone()).unwrap_or_default();
-        let pos = items.iter().position(|i| i.id == req.item_id).ok_or_else(|| HostError::not_found("No such item"))?;
+        let thread = self
+            .thread(&req.thread_id)
+            .ok_or_else(|| HostError::not_found(format!("No thread {}", req.thread_id)))?;
+        let items = self
+            .lock()
+            .logs
+            .get(&req.thread_id)
+            .map(|l| l.items.clone())
+            .unwrap_or_default();
+        let pos = items
+            .iter()
+            .position(|i| i.id == req.item_id)
+            .ok_or_else(|| HostError::not_found("No such item"))?;
         let busy = matches!(thread.run_state, RunState::Working | RunState::NeedsYou);
-        let ends_turn = matches!(items[pos].body, ItemBody::TurnEnd { .. } | ItemBody::Error { .. } | ItemBody::Limit { .. });
+        let ends_turn = matches!(
+            items[pos].body,
+            ItemBody::TurnEnd { .. } | ItemBody::Error { .. } | ItemBody::Limit { .. }
+        );
         // The message that started the turn ending at `pos`.
         let start = || {
-            let from = items[..pos].iter().rposition(|i| matches!(i.body, ItemBody::TurnEnd { .. } | ItemBody::Error { .. } | ItemBody::Limit { .. })).map_or(0, |b| b + 1);
-            items[from..pos].iter().position(|i| matches!(i.body, ItemBody::User { .. })).map(|p| from + p)
+            let from = items[..pos]
+                .iter()
+                .rposition(|i| {
+                    matches!(
+                        i.body,
+                        ItemBody::TurnEnd { .. } | ItemBody::Error { .. } | ItemBody::Limit { .. }
+                    )
+                })
+                .map_or(0, |b| b + 1);
+            items[from..pos]
+                .iter()
+                .position(|i| matches!(i.body, ItemBody::User { .. }))
+                .map(|p| from + p)
         };
         let text_at = |at: usize| match &items[at].body {
             ItemBody::User { text, .. } => text.clone(),
@@ -578,22 +832,48 @@ impl RemoteHost for DemoHost {
                 let (keep, text) = match &items[pos].body {
                     ItemBody::User { text, .. } => (pos, Some(text.clone())),
                     _ if ends_turn => (pos + 1, None),
-                    _ => return Err(HostError::bad_request("Fork from one of your messages or the end of a turn")),
+                    _ => {
+                        return Err(HostError::bad_request(
+                            "Fork from one of your messages or the end of a turn",
+                        ));
+                    }
                 };
                 let id = self.new_id("t-");
-                let fork = ThreadSummary { id: id.clone(), title: format!("{} (fork)", thread.title), run_state: RunState::Idle, needs: None, updated_at: now_ms(), ..thread };
+                let fork = ThreadSummary {
+                    id: id.clone(),
+                    title: format!("{} (fork)", thread.title),
+                    run_state: RunState::Idle,
+                    needs: None,
+                    updated_at: now_ms(),
+                    ..thread
+                };
                 {
                     let mut st = self.lock();
-                    let kept: Vec<Item> = items[..keep].iter().filter(|i| !i.body.is_request()).cloned().collect();
-                    st.logs.insert(id.clone(), Log { seq: kept.iter().map(|i| i.seq).max().unwrap_or(0), items: kept });
+                    let kept: Vec<Item> = items[..keep]
+                        .iter()
+                        .filter(|i| !i.body.is_request())
+                        .cloned()
+                        .collect();
+                    st.logs.insert(
+                        id.clone(),
+                        Log {
+                            seq: kept.iter().map(|i| i.seq).max().unwrap_or(0),
+                            items: kept,
+                        },
+                    );
                     st.threads.push(fork.clone());
                 }
                 self.push(HostEvent::Thread(fork));
-                return Ok(TurnActionDone { thread_id: Some(id), text });
+                return Ok(TurnActionDone {
+                    thread_id: Some(id),
+                    text,
+                });
             }
             TurnAction::Rewind => {
                 if !matches!(items[pos].body, ItemBody::User { .. }) {
-                    return Err(HostError::bad_request("Only your own messages can be rewound to"));
+                    return Err(HostError::bad_request(
+                        "Only your own messages can be rewound to",
+                    ));
                 }
                 if busy {
                     return Err(HostError::bad_request("Stop the running turn to rewind"));
@@ -605,10 +885,18 @@ impl RemoteHost for DemoHost {
                     return Err(HostError::bad_request("That item doesn't end a turn"));
                 }
                 if busy {
-                    let what = if req.action == TurnAction::Undo { "undo" } else { "retry" };
-                    return Err(HostError::bad_request(format!("Stop the running turn to {what}")));
+                    let what = if req.action == TurnAction::Undo {
+                        "undo"
+                    } else {
+                        "retry"
+                    };
+                    return Err(HostError::bad_request(format!(
+                        "Stop the running turn to {what}"
+                    )));
                 }
-                let at = start().ok_or_else(|| HostError::bad_request("This turn didn't start from a message of yours"))?;
+                let at = start().ok_or_else(|| {
+                    HostError::bad_request("This turn didn't start from a message of yours")
+                })?;
                 (at, text_at(at))
             }
         };
@@ -617,15 +905,29 @@ impl RemoteHost for DemoHost {
         }
         self.push(HostEvent::TranscriptReset(req.thread_id.clone()));
         if req.action == TurnAction::Retry {
-            self.add(&req.thread_id, ItemBody::User { text: text.clone(), images: 0, aside: false });
+            self.add(
+                &req.thread_id,
+                ItemBody::User {
+                    text: text.clone(),
+                    images: 0,
+                    aside: false,
+                },
+            );
             tokio::spawn(self.clone().echo_turn(req.thread_id, text));
             return Ok(TurnActionDone::default());
         }
-        Ok(TurnActionDone { thread_id: None, text: Some(text) })
+        Ok(TurnActionDone {
+            thread_id: None,
+            text: Some(text),
+        })
     }
 
     async fn answer(&self, req: AnswerRequest) -> HostResult<()> {
-        let AnswerRequest { thread_id, request_id, response } = req;
+        let AnswerRequest {
+            thread_id,
+            request_id,
+            response,
+        } = req;
         let item = self
             .find_item(&thread_id, |i| match &i.body {
                 ItemBody::Approval { request_id: r, .. }
@@ -633,9 +935,19 @@ impl RemoteHost for DemoHost {
                 | ItemBody::Plan { request_id: r, .. } => *r == request_id,
                 _ => false,
             })
-            .ok_or_else(|| HostError::not_found(format!("No request {request_id} in {thread_id}")))?;
+            .ok_or_else(|| {
+                HostError::not_found(format!("No request {request_id} in {thread_id}"))
+            })?;
         match (item.body, response) {
-            (ItemBody::Approval { request_id, title, detail, state }, AnswerResponse::Approval { decision }) => {
+            (
+                ItemBody::Approval {
+                    request_id,
+                    title,
+                    detail,
+                    state,
+                },
+                AnswerResponse::Approval { decision },
+            ) => {
                 if state != ApprovalState::Pending {
                     return Err(HostError::conflict("Already answered"));
                 }
@@ -644,34 +956,98 @@ impl RemoteHost for DemoHost {
                     Decision::AllowForSession => ApprovalState::AllowedForSession,
                     Decision::Deny => ApprovalState::Denied,
                 };
-                self.put(&thread_id, &item.id, ItemBody::Approval { request_id, title, detail: detail.clone(), state });
-                tokio::spawn(self.clone().after_approval(thread_id, detail, decision != Decision::Deny));
-            }
-            (ItemBody::Question { request_id, questions, state, .. }, AnswerResponse::Questions { answers }) => {
-                if state != QuestionState::Pending {
-                    return Err(HostError::conflict("Already answered"));
-                }
-                let summary = answers.iter().map(|a| a.answer.clone()).collect::<Vec<_>>().join(", ");
                 self.put(
                     &thread_id,
                     &item.id,
-                    ItemBody::Question { request_id, questions, state: QuestionState::Answered, answers: Some(answers) },
+                    ItemBody::Approval {
+                        request_id,
+                        title,
+                        detail: detail.clone(),
+                        state,
+                    },
+                );
+                tokio::spawn(self.clone().after_approval(
+                    thread_id,
+                    detail,
+                    decision != Decision::Deny,
+                ));
+            }
+            (
+                ItemBody::Question {
+                    request_id,
+                    questions,
+                    state,
+                    ..
+                },
+                AnswerResponse::Questions { answers },
+            ) => {
+                if state != QuestionState::Pending {
+                    return Err(HostError::conflict("Already answered"));
+                }
+                let summary = answers
+                    .iter()
+                    .map(|a| a.answer.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.put(
+                    &thread_id,
+                    &item.id,
+                    ItemBody::Question {
+                        request_id,
+                        questions,
+                        state: QuestionState::Answered,
+                        answers: Some(answers),
+                    },
                 );
                 tokio::spawn(self.clone().after_answer(thread_id, summary));
             }
-            (ItemBody::Plan { request_id, markdown, state }, AnswerResponse::Plan { approve, feedback }) => {
+            (
+                ItemBody::Plan {
+                    request_id,
+                    markdown,
+                    state,
+                },
+                AnswerResponse::Plan { approve, feedback },
+            ) => {
                 if state != PlanState::Pending {
                     return Err(HostError::conflict("Already answered"));
                 }
-                let state = if approve { PlanState::Approved } else { PlanState::Rejected };
-                self.put(&thread_id, &item.id, ItemBody::Plan { request_id, markdown, state });
+                let state = if approve {
+                    PlanState::Approved
+                } else {
+                    PlanState::Rejected
+                };
+                self.put(
+                    &thread_id,
+                    &item.id,
+                    ItemBody::Plan {
+                        request_id,
+                        markdown,
+                        state,
+                    },
+                );
                 if let Some(feedback) = feedback.filter(|f| !f.trim().is_empty()) {
-                    self.add(&thread_id, ItemBody::User { text: feedback, images: 0, aside: false });
+                    self.add(
+                        &thread_id,
+                        ItemBody::User {
+                            text: feedback,
+                            images: 0,
+                            aside: false,
+                        },
+                    );
                 }
-                let summary = if approve { "the plan as written".to_string() } else { "a revised plan".to_string() };
+                let summary = if approve {
+                    "the plan as written".to_string()
+                } else {
+                    "a revised plan".to_string()
+                };
                 tokio::spawn(self.clone().after_answer(thread_id, summary));
             }
-            _ => return Err(HostError::bad_request("The answer doesn't match the request")),
+            _ => {
+                return Err(HostError::bad_request(
+                    "The answer doesn't match the request",
+                ));
+            }
         }
         Ok(())
     }
@@ -700,14 +1076,31 @@ impl RemoteHost for DemoHost {
             return Err(HostError::not_found(format!("No thread {}", req.thread_id)));
         }
         self.update(&req.thread_id, |t| {
-            if let Some(a) = req.agent.as_ref().and_then(|k| agents.iter().find(|a| &a.key == k)) {
-                t.agent = AgentRef { key: a.key.clone(), name: a.name.clone(), logo: a.logo.clone(), icon: None };
+            if let Some(a) = req
+                .agent
+                .as_ref()
+                .and_then(|k| agents.iter().find(|a| &a.key == k))
+            {
+                t.agent = AgentRef {
+                    key: a.key.clone(),
+                    name: a.name.clone(),
+                    logo: a.logo.clone(),
+                    icon: None,
+                };
                 t.model = a.default_model.clone();
-                t.model_label = a.models.iter().find(|o| Some(&o.id) == a.default_model.as_ref()).map(|o| o.label.clone());
+                t.model_label = a
+                    .models
+                    .iter()
+                    .find(|o| Some(&o.id) == a.default_model.as_ref())
+                    .map(|o| o.label.clone());
             }
             if let Some(m) = &req.model {
                 t.model = Some(m.clone());
-                t.model_label = agents.iter().flat_map(|a| &a.models).find(|o| &o.id == m).map(|o| o.label.clone());
+                t.model_label = agents
+                    .iter()
+                    .flat_map(|a| &a.models)
+                    .find(|o| &o.id == m)
+                    .map(|o| o.label.clone());
             }
             if let Some(e) = &req.effort {
                 t.effort = Some(e.clone());
@@ -729,10 +1122,17 @@ impl RemoteHost for DemoHost {
             .threads
             .iter()
             .filter(|t| !q.is_empty() && t.title.to_lowercase().contains(&q))
-            .map(|t| SearchResult { thread: t.clone(), snippet: None, ranges: vec![] })
+            .map(|t| SearchResult {
+                thread: t.clone(),
+                snippet: None,
+                ranges: vec![],
+            })
             .take(req.limit.unwrap_or(50).min(MAX_SEARCH) as usize)
             .collect();
-        Ok(SearchResults { query: req.query, results })
+        Ok(SearchResults {
+            query: req.query,
+            results,
+        })
     }
 
     async fn thread_action(&self, req: ThreadActionRequest) -> HostResult<()> {
@@ -741,7 +1141,9 @@ impl RemoteHost for DemoHost {
         };
         match req.action {
             ThreadAction::Delete { confirmed: false } => {
-                return Err(HostError::conflict("The thread and its transcript are deleted from Trek. This can't be undone."));
+                return Err(HostError::conflict(
+                    "The thread and its transcript are deleted from Trek. This can't be undone.",
+                ));
             }
             ThreadAction::Delete { confirmed: true } => {
                 self.lock().threads.retain(|t| t.id != thread.id);
@@ -787,20 +1189,37 @@ impl RemoteHost for DemoHost {
 
     async fn usage(&self) -> HostResult<Usage> {
         let hours = |h: i64| Some(now_ms() + h * 3_600_000);
-        let limit = |label: &str, percent: f32, resets_at: Option<i64>, window: &str| UsageLimit { label: label.into(), percent, resets_at, window: window.into() };
+        let limit = |label: &str, percent: f32, resets_at: Option<i64>, window: &str| UsageLimit {
+            label: label.into(),
+            percent,
+            resets_at,
+            window: window.into(),
+        };
         Ok(Usage {
             providers: vec![
                 ProviderUsage {
                     agent: AgentRef::new("claude-code", "Claude Code", Some("claude-code")),
                     plan: Some("Claude Max".into()),
-                    limits: vec![limit("5-hour limit", 42.0, hours(2), "5h"), limit("Weekly limit", 18.0, hours(96), "7d"), limit("Weekly · Opus", 64.0, hours(96), "7d")],
+                    limits: vec![
+                        limit("5-hour limit", 42.0, hours(2), "5h"),
+                        limit("Weekly limit", 18.0, hours(96), "7d"),
+                        limit("Weekly · Opus", 64.0, hours(96), "7d"),
+                    ],
                     ..Default::default()
                 },
                 ProviderUsage {
                     agent: AgentRef::new("codex", "Codex", Some("codex")),
                     plan: Some("ChatGPT Pro".into()),
-                    limits: vec![limit("5-hour limit", 91.0, hours(1), "5h"), limit("Weekly limit", 33.0, hours(130), "7d")],
-                    resets: vec![ResetCredit { id: "rc-1".into(), title: "Full reset (Weekly + 5 hr)".into(), description: None, expires_at: hours(24 * 9) }],
+                    limits: vec![
+                        limit("5-hour limit", 91.0, hours(1), "5h"),
+                        limit("Weekly limit", 33.0, hours(130), "7d"),
+                    ],
+                    resets: vec![ResetCredit {
+                        id: "rc-1".into(),
+                        title: "Full reset (Weekly + 5 hr)".into(),
+                        description: None,
+                        expires_at: hours(24 * 9),
+                    }],
                     ..Default::default()
                 },
             ],
@@ -816,26 +1235,57 @@ impl RemoteHost for DemoHost {
     async fn notes(&self) -> HostResult<Vec<NoteSummary>> {
         let mut notes = self.lock().notes.clone();
         notes.sort_by_key(|n| std::cmp::Reverse(n.modified));
-        let preview = |body: &str| body.lines().skip(1).filter(|l| !l.trim().is_empty()).take(3).collect::<Vec<_>>().join(" ");
-        Ok(notes.into_iter().map(|n| NoteSummary { preview: preview(&n.body), id: n.id, title: n.title, modified: n.modified }).collect())
+        let preview = |body: &str| {
+            body.lines()
+                .skip(1)
+                .filter(|l| !l.trim().is_empty())
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        Ok(notes
+            .into_iter()
+            .map(|n| NoteSummary {
+                preview: preview(&n.body),
+                id: n.id,
+                title: n.title,
+                modified: n.modified,
+            })
+            .collect())
     }
 
     async fn note(&self, note_id: &str) -> HostResult<Note> {
-        self.lock().notes.iter().find(|n| n.id == note_id).cloned().ok_or_else(|| HostError::not_found("No such note"))
+        self.lock()
+            .notes
+            .iter()
+            .find(|n| n.id == note_id)
+            .cloned()
+            .ok_or_else(|| HostError::not_found("No such note"))
     }
 
     async fn create_note(&self, body: String) -> HostResult<Note> {
         let id = self.new_id("n");
-        let note = Note { id, title: note_title(&body), body, modified: now_ms() };
+        let note = Note {
+            id,
+            title: note_title(&body),
+            body,
+            modified: now_ms(),
+        };
         self.lock().notes.push(note.clone());
         Ok(note)
     }
 
     async fn save_note(&self, req: SaveNoteRequest) -> HostResult<Note> {
         let mut st = self.lock();
-        let note = st.notes.iter_mut().find(|n| n.id == req.note_id).ok_or_else(|| HostError::not_found("No such note"))?;
+        let note = st
+            .notes
+            .iter_mut()
+            .find(|n| n.id == req.note_id)
+            .ok_or_else(|| HostError::not_found("No such note"))?;
         if req.modified.is_some_and(|m| m != note.modified) {
-            return Err(HostError::conflict("This note changed on the Mac since you opened it"));
+            return Err(HostError::conflict(
+                "This note changed on the Mac since you opened it",
+            ));
         }
         note.title = note_title(&req.body);
         note.body = req.body;
@@ -855,10 +1305,20 @@ impl RemoteHost for DemoHost {
 
     async fn git_status(&self, target: GitTarget) -> HostResult<GitStatus> {
         let thread = self.git_thread(&target)?;
-        let file = |path: &str, status: FileStatus, added: u32, removed: u32| ChangedFile { path: path.into(), status, from: None, added, removed, binary: false };
+        let file = |path: &str, status: FileStatus, added: u32, removed: u32| ChangedFile {
+            path: path.into(),
+            status,
+            from: None,
+            added,
+            removed,
+            binary: false,
+        };
         let mut status = GitStatus {
             is_repo: true,
-            branch: thread.as_ref().and_then(|t| t.branch.clone()).or(Some("main".into())),
+            branch: thread
+                .as_ref()
+                .and_then(|t| t.branch.clone())
+                .or(Some("main".into())),
             default_branch: Some("main".into()),
             ..Default::default()
         };
@@ -870,13 +1330,17 @@ impl RemoteHost for DemoHost {
                     file("tests/auth/fixtures.rs", FileStatus::Untracked, 18, 0),
                 ];
                 status.ahead = 1;
-                status.switch_blocked = Some("This thread works in a worktree: its branch stays checked out there.".into());
+                status.switch_blocked = Some(
+                    "This thread works in a worktree: its branch stays checked out there.".into(),
+                );
                 status.worktree = Some(WorktreeStatus {
                     branch: t.branch.clone().unwrap_or_default(),
                     base: t.base.clone().unwrap_or_else(|| "main".into()),
                     uncommitted: 2,
                     unpushed: None,
-                    merge_blocked: Some("2 files aren't committed yet. Commit or revert them first.".into()),
+                    merge_blocked: Some(
+                        "2 files aren't committed yet. Commit or revert them first.".into(),
+                    ),
                     unmerged: 1,
                     missing: false,
                 });
@@ -885,7 +1349,9 @@ impl RemoteHost for DemoHost {
                 status.files = vec![file("README.md", FileStatus::Modified, 31, 54)];
                 status.has_upstream = true;
                 status.behind = 2;
-                status.can_switch = thread.as_ref().is_none_or(|t| t.run_state != RunState::Working);
+                status.can_switch = thread
+                    .as_ref()
+                    .is_none_or(|t| t.run_state != RunState::Working);
             }
         }
         Ok(status)
@@ -897,7 +1363,11 @@ impl RemoteHost for DemoHost {
         let diff = format!(
             "diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -84,9 +84,14 @@ impl Session {{\n     pub async fn refresh(&self) -> Result<Token> {{\n-        let expired = self.token.expires_at < now();\n-        let mut guard = self.lock.lock().await;\n+        let mut guard = self.lock.lock().await;\n+        // Checked under the lock: another refresh may have just finished.\n+        if guard.expires_at > now() {{\n+            return Ok(guard.clone());\n+        }}\n         let fresh = self.client.refresh(&guard.refresh_token).await?;\n"
         );
-        Ok(GitDiff { path: req.path, diff, truncated: false })
+        Ok(GitDiff {
+            path: req.path,
+            diff,
+            truncated: false,
+        })
     }
 
     async fn git_commit(&self, req: GitCommitRequest) -> HostResult<()> {
@@ -913,18 +1383,36 @@ impl RemoteHost for DemoHost {
     }
 
     async fn git_branches(&self, target: GitTarget) -> HostResult<GitBranches> {
-        let current = self.git_thread(&target)?.and_then(|t| t.branch).or(Some("main".into()));
-        let branches = ["main", "fix/auth-flake", "feat/dark-settings", "release/2.4"].map(String::from).to_vec();
-        Ok(GitBranches { current, default_branch: Some("main".into()), branches })
+        let current = self
+            .git_thread(&target)?
+            .and_then(|t| t.branch)
+            .or(Some("main".into()));
+        let branches = [
+            "main",
+            "fix/auth-flake",
+            "feat/dark-settings",
+            "release/2.4",
+        ]
+        .map(String::from)
+        .to_vec();
+        Ok(GitBranches {
+            current,
+            default_branch: Some("main".into()),
+            branches,
+        })
     }
 
     async fn git_switch(&self, req: GitSwitchRequest) -> HostResult<()> {
         if let Some(t) = self.git_thread(&req.target)? {
             if t.worktree {
-                return Err(HostError::conflict("This thread works in a worktree: its branch stays checked out there."));
+                return Err(HostError::conflict(
+                    "This thread works in a worktree: its branch stays checked out there.",
+                ));
             }
             if t.run_state == RunState::Working {
-                return Err(HostError::conflict("The thread is working: switch once it's done."));
+                return Err(HostError::conflict(
+                    "The thread is working: switch once it's done.",
+                ));
             }
             self.update(&t.id, |t| t.branch = Some(req.branch.clone()));
         }
@@ -932,20 +1420,28 @@ impl RemoteHost for DemoHost {
     }
 
     async fn worktree_merge(&self, thread_id: &str) -> HostResult<()> {
-        let t = self.thread(thread_id).ok_or_else(|| HostError::not_found("No such thread"))?;
+        let t = self
+            .thread(thread_id)
+            .ok_or_else(|| HostError::not_found("No such thread"))?;
         if !t.worktree {
             return Err(HostError::bad_request("This thread has no worktree."));
         }
-        Err(HostError::conflict("2 files aren't committed yet. Commit or revert them first."))
+        Err(HostError::conflict(
+            "2 files aren't committed yet. Commit or revert them first.",
+        ))
     }
 
     async fn worktree_remove(&self, req: WorktreeRemoveRequest) -> HostResult<()> {
-        let t = self.thread(&req.thread_id).ok_or_else(|| HostError::not_found("No such thread"))?;
+        let t = self
+            .thread(&req.thread_id)
+            .ok_or_else(|| HostError::not_found("No such thread"))?;
         if !t.worktree {
             return Err(HostError::bad_request("This thread has no worktree."));
         }
         if !req.force {
-            return Err(HostError::conflict("2 uncommitted changes in the worktree would be lost."));
+            return Err(HostError::conflict(
+                "2 uncommitted changes in the worktree would be lost.",
+            ));
         }
         self.update(&req.thread_id, |t| {
             t.worktree = false;
@@ -957,22 +1453,93 @@ impl RemoteHost for DemoHost {
     }
 
     async fn commands(&self, thread_id: &str) -> HostResult<Vec<CommandInfo>> {
-        self.thread(thread_id).ok_or_else(|| HostError::not_found("No such thread"))?;
-        let c = |name: &str, description: &str, kind: CommandKind, trek: bool| CommandInfo { name: name.into(), description: description.into(), kind, trek };
+        self.thread(thread_id)
+            .ok_or_else(|| HostError::not_found("No such thread"))?;
+        let c = |name: &str, description: &str, kind: CommandKind, trek: bool| CommandInfo {
+            name: name.into(),
+            description: description.into(),
+            kind,
+            trek,
+        };
         Ok(vec![
-            c("new", "Start a new thread in this project", CommandKind::Command, true),
-            c("usage", "Show plan usage and reset times", CommandKind::Command, true),
-            c("context", "Show how much of the context window is used", CommandKind::Command, true),
-            c("cost", "Show this session's estimated cost", CommandKind::Command, true),
-            c("model", "Show the model this thread uses", CommandKind::Command, true),
-            c("permissions", "Show or change how much the agent asks first", CommandKind::Command, true),
-            c("permissions full", "No prompts and no sandbox", CommandKind::Command, true),
-            c("consult", "Ask other models first: /consult sol high, opus max: your message", CommandKind::Command, true),
-            c("restate", "Have the agent say back what you asked before it starts", CommandKind::Command, true),
-            c("compact", "Clear the conversation but keep a summary in context", CommandKind::Command, false),
-            c("review", "Review a pull request", CommandKind::Command, false),
-            c("frontend-design", "Create distinctive, production-grade frontend interfaces", CommandKind::Skill, false),
-            c("code-reviewer", "Reviews code for bugs and style", CommandKind::Agent, false),
+            c(
+                "new",
+                "Start a new thread in this project",
+                CommandKind::Command,
+                true,
+            ),
+            c(
+                "usage",
+                "Show plan usage and reset times",
+                CommandKind::Command,
+                true,
+            ),
+            c(
+                "context",
+                "Show how much of the context window is used",
+                CommandKind::Command,
+                true,
+            ),
+            c(
+                "cost",
+                "Show this session's estimated cost",
+                CommandKind::Command,
+                true,
+            ),
+            c(
+                "model",
+                "Show the model this thread uses",
+                CommandKind::Command,
+                true,
+            ),
+            c(
+                "permissions",
+                "Show or change how much the agent asks first",
+                CommandKind::Command,
+                true,
+            ),
+            c(
+                "permissions full",
+                "No prompts and no sandbox",
+                CommandKind::Command,
+                true,
+            ),
+            c(
+                "consult",
+                "Ask other models first: /consult sol high, opus max: your message",
+                CommandKind::Command,
+                true,
+            ),
+            c(
+                "restate",
+                "Have the agent say back what you asked before it starts",
+                CommandKind::Command,
+                true,
+            ),
+            c(
+                "compact",
+                "Clear the conversation but keep a summary in context",
+                CommandKind::Command,
+                false,
+            ),
+            c(
+                "review",
+                "Review a pull request",
+                CommandKind::Command,
+                false,
+            ),
+            c(
+                "frontend-design",
+                "Create distinctive, production-grade frontend interfaces",
+                CommandKind::Skill,
+                false,
+            ),
+            c(
+                "code-reviewer",
+                "Reviews code for bugs and style",
+                CommandKind::Agent,
+                false,
+            ),
         ])
     }
 
@@ -984,7 +1551,9 @@ impl RemoteHost for DemoHost {
         let mut st = self.lock();
         let s = &mut st.settings;
         if change.default_access == Some(Access::FullAccess) && !s.full_access {
-            return Err(HostError::bad_request("Full access is locked on this Mac: unlock it in Trek's Permissions settings first."));
+            return Err(HostError::bad_request(
+                "Full access is locked on this Mac: unlock it in Trek's Permissions settings first.",
+            ));
         }
         if let Some(a) = change.default_agent {
             s.default_agent = a;
@@ -1018,7 +1587,10 @@ impl RemoteHost for DemoHost {
             s.push.server = server;
         }
         if change.push_test {
-            println!("demo: a test notification would go to {}/{}", s.push.server, s.push.topic);
+            println!(
+                "demo: a test notification would go to {}/{}",
+                s.push.server, s.push.topic
+            );
         }
         if change.new_push_topic {
             s.push.topic = format!("trek-demo{}", now_ms());
@@ -1038,7 +1610,10 @@ impl DemoHost {
     /// The thread a git request names (`None` for a project), or why there's none.
     fn git_thread(&self, target: &GitTarget) -> HostResult<Option<ThreadSummary>> {
         match (&target.thread_id, &target.project_id) {
-            (Some(id), _) => self.thread(id).map(Some).ok_or_else(|| HostError::not_found("No such thread")),
+            (Some(id), _) => self
+                .thread(id)
+                .map(Some)
+                .ok_or_else(|| HostError::not_found("No such thread")),
             (None, Some(p)) if self.lock().projects.iter().any(|x| &x.id == p) => Ok(None),
             (None, Some(_)) => Err(HostError::not_found("No such project")),
             (None, None) => Err(HostError::bad_request("Name a thread or a project")),
@@ -1063,15 +1638,27 @@ fn project(id: &str, name: &str, hue: Option<u16>, branch: &str, is_repo: bool) 
 }
 
 fn agents() -> Vec<AgentOption> {
-    let efforts = || ["low", "medium", "high", "xhigh", "max"].map(String::from).to_vec();
-    let m = |id: &str, label: &str| ModelOption { id: id.into(), label: label.into(), efforts: efforts() };
+    let efforts = || {
+        ["low", "medium", "high", "xhigh", "max"]
+            .map(String::from)
+            .to_vec()
+    };
+    let m = |id: &str, label: &str| ModelOption {
+        id: id.into(),
+        label: label.into(),
+        efforts: efforts(),
+    };
     vec![
         AgentOption {
             key: "claude-code".into(),
             name: "Claude Code".into(),
             logo: Some("claude-code".into()),
             default_model: Some("claude-opus-5-5".into()),
-            models: vec![m("claude-opus-5-5", "Opus 5.5"), m("claude-sonnet-5-5", "Sonnet 5.5"), m("claude-haiku-5", "Haiku 5")],
+            models: vec![
+                m("claude-opus-5-5", "Opus 5.5"),
+                m("claude-sonnet-5-5", "Sonnet 5.5"),
+                m("claude-haiku-5", "Haiku 5"),
+            ],
             icon: None,
         },
         AgentOption {
@@ -1087,7 +1674,10 @@ fn agents() -> Vec<AgentOption> {
             name: "OpenCode".into(),
             logo: Some("opencode".into()),
             default_model: None,
-            models: vec![m("anthropic/claude-sonnet-5-5", "Sonnet 5.5"), m("openai/gpt-6", "GPT-6")],
+            models: vec![
+                m("anthropic/claude-sonnet-5-5", "Sonnet 5.5"),
+                m("openai/gpt-6", "GPT-6"),
+            ],
             icon: None,
         },
     ]
@@ -1098,7 +1688,13 @@ struct Seed {
     items: Vec<ItemBody>,
 }
 
-fn tool(title: &str, detail: &str, status: ToolStatus, output: &str, diff: Option<(u32, u32)>) -> ItemBody {
+fn tool(
+    title: &str,
+    detail: &str,
+    status: ToolStatus,
+    output: &str,
+    diff: Option<(u32, u32)>,
+) -> ItemBody {
     ItemBody::Tool {
         call_id: format!("toolu_{}", detail.len() * 7 + title.len()),
         tool: ToolKind::from_title(title),
@@ -1112,11 +1708,18 @@ fn tool(title: &str, detail: &str, status: ToolStatus, output: &str, diff: Optio
 }
 
 fn user(text: &str) -> ItemBody {
-    ItemBody::User { text: text.into(), images: 0, aside: false }
+    ItemBody::User {
+        text: text.into(),
+        images: 0,
+        aside: false,
+    }
 }
 
 fn assistant(text: &str) -> ItemBody {
-    ItemBody::Assistant { text: text.into(), streaming: false }
+    ItemBody::Assistant {
+        text: text.into(),
+        streaming: false,
+    }
 }
 
 fn reasoning(text: &str) -> ItemBody {
@@ -1148,7 +1751,12 @@ fn summary(
         effort: Some("high".into()),
         effort_label: Some("High".into()),
         access: Some(Access::AutoAcceptEdits),
-        git: Some(GitSummary { changed: 0, ahead: 0, behind: 0, default_branch: Some("main".into()) }),
+        git: Some(GitSummary {
+            changed: 0,
+            ahead: 0,
+            behind: 0,
+            default_branch: Some("main".into()),
+        }),
         ..Default::default()
     }
 }
@@ -1167,15 +1775,31 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
     let mut seeds = Vec::new();
 
     // 1. Needs an approval.
-    let mut t = summary("t-auth", "Fix the flaky auth test", &api, claude, opus, RunState::NeedsYou, Section::Inbox, 2);
-    t.needs = Some(Needs { kind: NeedsKind::Approval, text: "Run `rm -rf target/`".into() });
+    let mut t = summary(
+        "t-auth",
+        "Fix the flaky auth test",
+        &api,
+        claude,
+        opus,
+        RunState::NeedsYou,
+        Section::Inbox,
+        2,
+    );
+    t.needs = Some(Needs {
+        kind: NeedsKind::Approval,
+        text: "Run `rm -rf target/`".into(),
+    });
     t.unseen = true;
     t.branch = Some("fix/auth-flake".into());
     t.worktree = true;
     t.base = Some("main".into());
     t.additions = 42;
     t.deletions = 7;
-    t.context = Some(ContextUse { used: 61_200, window: 200_000, percent: 31 });
+    t.context = Some(ContextUse {
+        used: 61_200,
+        window: 200_000,
+        percent: 31,
+    });
     t.cost = Some(Cost {
         label: "≈ $1.84 at API prices".into(),
         billing: Some(Billing::Plan),
@@ -1184,7 +1808,12 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
         cached: Some("92% cached".into()),
         cached_detail: Some("56.3K of 61.2K prompt tokens came from the prompt cache, cheaper and faster than sending them again.".into()),
     });
-    t.git = Some(GitSummary { changed: 2, ahead: 1, behind: 0, default_branch: Some("main".into()) });
+    t.git = Some(GitSummary {
+        changed: 2,
+        ahead: 1,
+        behind: 0,
+        default_branch: Some("main".into()),
+    });
     seeds.push(Seed {
         thread: t,
         items: vec![
@@ -1214,11 +1843,34 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
     });
 
     // 2. Needs an answer.
-    let mut t = summary("t-rate", "Add rate limiting to /login", &api, codex, gpt, RunState::NeedsYou, Section::Inbox, 9);
-    t.needs = Some(Needs { kind: NeedsKind::Question, text: "Per IP or per account?".into() });
+    let mut t = summary(
+        "t-rate",
+        "Add rate limiting to /login",
+        &api,
+        codex,
+        gpt,
+        RunState::NeedsYou,
+        Section::Inbox,
+        9,
+    );
+    t.needs = Some(Needs {
+        kind: NeedsKind::Question,
+        text: "Per IP or per account?".into(),
+    });
     t.unseen = true;
-    t.context = Some(ContextUse { used: 22_400, window: 272_000, percent: 8 });
-    t.cost = Some(Cost { label: "$0.41".into(), billing: Some(Billing::Metered), plan: None, detail: Some("Billed per token by your API provider".into()), cached: None, cached_detail: None });
+    t.context = Some(ContextUse {
+        used: 22_400,
+        window: 272_000,
+        percent: 8,
+    });
+    t.cost = Some(Cost {
+        label: "$0.41".into(),
+        billing: Some(Billing::Metered),
+        plan: None,
+        detail: Some("Billed per token by your API provider".into()),
+        cached: None,
+        cached_detail: None,
+    });
     seeds.push(Seed {
         thread: t,
         items: vec![
@@ -1247,24 +1899,71 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
     });
 
     // 3. Working (driven by the background task).
-    let mut t = summary("t-dark", "Dark mode for the settings page", &web, claude, sonnet, RunState::Idle, Section::Inbox, 1);
+    let mut t = summary(
+        "t-dark",
+        "Dark mode for the settings page",
+        &web,
+        claude,
+        sonnet,
+        RunState::Idle,
+        Section::Inbox,
+        1,
+    );
     t.branch = Some("feat/dark-settings".into());
     t.worktree = true;
     t.base = Some("main".into());
     t.additions = 65;
     t.deletions = 8;
-    t.context = Some(ContextUse { used: 171_000, window: 200_000, percent: 85 });
+    t.context = Some(ContextUse {
+        used: 171_000,
+        window: 200_000,
+        percent: 85,
+    });
     t.sub_agents = vec![
-        SubAgent { agent: AgentRef::new("codex", "Codex", Some("codex")), model: Some("Sol".into()), title: "Review the theme tokens".into(), state: SubAgentState::Running, since: Some(now_ms() - 95_000), thread_id: None },
-        SubAgent { agent: AgentRef::new("claude-code", "Claude Code", Some("claude-code")), model: None, title: "Find every hard-coded colour".into(), state: SubAgentState::Running, since: Some(now_ms() - 40_000), thread_id: None },
+        SubAgent {
+            agent: AgentRef::new("codex", "Codex", Some("codex")),
+            model: Some("Sol".into()),
+            title: "Review the theme tokens".into(),
+            state: SubAgentState::Running,
+            since: Some(now_ms() - 95_000),
+            thread_id: None,
+        },
+        SubAgent {
+            agent: AgentRef::new("claude-code", "Claude Code", Some("claude-code")),
+            model: None,
+            title: "Find every hard-coded colour".into(),
+            state: SubAgentState::Running,
+            since: Some(now_ms() - 40_000),
+            thread_id: None,
+        },
     ];
     t.background = vec!["pnpm dev".into()];
-    t.git = Some(GitSummary { changed: 5, ahead: 0, behind: 2, default_branch: Some("main".into()) });
-    seeds.push(Seed { thread: t, items: vec![user("Add dark mode to the settings page")] });
+    t.git = Some(GitSummary {
+        changed: 5,
+        ahead: 0,
+        behind: 2,
+        default_branch: Some("main".into()),
+    });
+    seeds.push(Seed {
+        thread: t,
+        items: vec![user("Add dark mode to the settings page")],
+    });
 
     // 4. Needs a plan approval.
-    let mut t = summary("t-ci", "Migrate CI caching to GitHub Actions cache v4", &infra, opencode, ("anthropic/claude-sonnet-5-5", "Sonnet 5.5"), RunState::NeedsYou, Section::Inbox, 25);
-    t.needs = Some(Needs { kind: NeedsKind::Plan, text: "Plan ready: 4 steps".into() });
+    let mut t = summary(
+        "t-ci",
+        "Migrate CI caching to GitHub Actions cache v4",
+        &infra,
+        opencode,
+        ("anthropic/claude-sonnet-5-5", "Sonnet 5.5"),
+        RunState::NeedsYou,
+        Section::Inbox,
+        25,
+    );
+    t.needs = Some(Needs {
+        kind: NeedsKind::Plan,
+        text: "Plan ready: 4 steps".into(),
+    });
     seeds.push(Seed {
         thread: t,
         items: vec![
@@ -1280,7 +1979,16 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
     });
 
     // 5. Done, unseen.
-    let mut t = summary("t-readme", "Rewrite the README quick start", &web, codex, gpt, RunState::Idle, Section::Inbox, 48);
+    let mut t = summary(
+        "t-readme",
+        "Rewrite the README quick start",
+        &web,
+        codex,
+        gpt,
+        RunState::Idle,
+        Section::Inbox,
+        48,
+    );
     t.unseen = true;
     t.additions = 31;
     t.deletions = 54;
@@ -1307,8 +2015,20 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
     });
 
     // 6. Hit a usage limit.
-    let mut t = summary("t-perf", "Profile the slow dashboard query", &api, claude, opus, RunState::Idle, Section::Inbox, 70);
-    t.needs = Some(Needs { kind: NeedsKind::Limit, text: "5-hour limit reached".into() });
+    let mut t = summary(
+        "t-perf",
+        "Profile the slow dashboard query",
+        &api,
+        claude,
+        opus,
+        RunState::Idle,
+        Section::Inbox,
+        70,
+    );
+    t.needs = Some(Needs {
+        kind: NeedsKind::Limit,
+        text: "5-hour limit reached".into(),
+    });
     seeds.push(Seed {
         thread: t,
         items: vec![
@@ -1320,7 +2040,16 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
     });
 
     // 7. Pinned, settled.
-    let mut t = summary("t-release", "Release checklist for 2.4", &infra, opencode, ("openai/gpt-6", "GPT-6"), RunState::Idle, Section::Pinned, 60 * 26);
+    let mut t = summary(
+        "t-release",
+        "Release checklist for 2.4",
+        &infra,
+        opencode,
+        ("openai/gpt-6", "GPT-6"),
+        RunState::Idle,
+        Section::Pinned,
+        60 * 26,
+    );
     t.pinned = true;
     seeds.push(Seed {
         thread: t,
@@ -1335,16 +2064,41 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
     });
 
     // A long one (2,500 items), for opening at the end and paging back.
-    let t = summary("t-history", "Harden the request parser", &api, claude, opus, RunState::Idle, Section::Settled, 60 * 24);
+    let t = summary(
+        "t-history",
+        "Harden the request parser",
+        &api,
+        claude,
+        opus,
+        RunState::Idle,
+        Section::Settled,
+        60 * 24,
+    );
     let mut items = Vec::new();
     for n in 1..=500 {
-        items.push(user(&format!("Step {n}: make `parse_header` reject case {n} with a typed error")));
-        items.push(tool("Read", "src/parser.rs", ToolStatus::Done, "fn parse_header(line: &str) -> Result<Header> { … }", None));
-        items.push(tool("Edit", "src/parser.rs", ToolStatus::Done, "Applied 1 edit", Some((3 + n % 7, n % 3))));
+        items.push(user(&format!(
+            "Step {n}: make `parse_header` reject case {n} with a typed error"
+        )));
+        items.push(tool(
+            "Read",
+            "src/parser.rs",
+            ToolStatus::Done,
+            "fn parse_header(line: &str) -> Result<Header> { … }",
+            None,
+        ));
+        items.push(tool(
+            "Edit",
+            "src/parser.rs",
+            ToolStatus::Done,
+            "Applied 1 edit",
+            Some((3 + n % 7, n % 3)),
+        ));
         items.push(assistant(&format!(
             "### Step {n}\n\n`parse_header` now returns `ParseError::BadHeader` for case {n}:\n\n```rust\nErr(ParseError::BadHeader) => reply(400, \"bad header ({n})\"),\n```\n\n| Case | Before | After |\n| --- | --- | --- |\n| {n} | panic | 400 |"
         )));
-        items.push(ItemBody::TurnEnd { took_secs: 20 + n % 40 });
+        items.push(ItemBody::TurnEnd {
+            took_secs: 20 + n % 40,
+        });
     }
     seeds.push(Seed { thread: t, items });
 
@@ -1352,14 +2106,33 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
 }
 
 fn note_title(body: &str) -> String {
-    body.lines().map(|l| l.trim_start_matches(['#', '-', '*', ' ']).trim()).find(|l| !l.is_empty()).unwrap_or("Untitled").chars().take(80).collect()
+    body.lines()
+        .map(|l| l.trim_start_matches(['#', '-', '*', ' ']).trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or("Untitled")
+        .chars()
+        .take(80)
+        .collect()
 }
 
 fn notes() -> Vec<Note> {
-    let note = |id: &str, body: &str, minutes_ago: i64| Note { id: id.into(), title: note_title(body), body: body.into(), modified: now_ms() - minutes_ago * 60_000 };
+    let note = |id: &str, body: &str, minutes_ago: i64| Note {
+        id: id.into(),
+        title: note_title(body),
+        body: body.into(),
+        modified: now_ms() - minutes_ago * 60_000,
+    };
     vec![
-        note("n-release", "# 2.4 release\n\n- [x] Migrations reviewed\n- [ ] Changelog\n- [ ] Tag and publish\n\nAsk **Mara** about the <mark>pricing page</mark> copy.", 35),
-        note("n-ideas", "Ideas\n\n- Rate limit per account *and* per IP\n- Cache the dashboard query for 30 s\n- <span style=\"color: #e5484d\">Drop</span> the Docker image", 60 * 20),
+        note(
+            "n-release",
+            "# 2.4 release\n\n- [x] Migrations reviewed\n- [ ] Changelog\n- [ ] Tag and publish\n\nAsk **Mara** about the <mark>pricing page</mark> copy.",
+            35,
+        ),
+        note(
+            "n-ideas",
+            "Ideas\n\n- Rate limit per account *and* per IP\n- Cache the dashboard query for 30 s\n- <span style=\"color: #e5484d\">Drop</span> the Docker image",
+            60 * 20,
+        ),
     ]
 }
 
@@ -1372,7 +2145,14 @@ fn settings() -> MacSettings {
         default_access: Access::AutoAcceptEdits,
         follow_up: SendMode::Steer,
         notifications: NotifyMode::BannerAndSound,
-        push: PushSettings { enabled: false, when: PushWhen::Away, server: "https://ntfy.sh".into(), topic: String::new(), topic_url, subscribe_url },
+        push: PushSettings {
+            enabled: false,
+            when: PushWhen::Away,
+            server: "https://ntfy.sh".into(),
+            topic: String::new(),
+            topic_url,
+            subscribe_url,
+        },
         auto_settle_days: 3,
         theme: Theme::System,
         full_access: true,
@@ -1383,25 +2163,74 @@ fn settings() -> MacSettings {
 /// A recap like the Mac's, made up: today by the hour, a week by three hours, all time by day.
 fn demo_basecamp(range: BasecampRange, threads: &[ThreadSummary]) -> Basecamp {
     let (n, title, label): (usize, &str, fn(usize) -> String) = match range {
-        BasecampRange::Today => (24, "Today's trek", |i| format!("{}–{} {}", (i + 11) % 12 + 1, (i + 12) % 12 + 1, if i < 12 { "AM" } else { "PM" })),
-        BasecampRange::Week => (56, "This week's trek", |i| format!("{} {}", ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][i / 8], ["12–3 AM", "3–6 AM", "6–9 AM", "9 AM–12 PM", "12–3 PM", "3–6 PM", "6–9 PM", "9 PM–12 AM"][i % 8])),
+        BasecampRange::Today => (24, "Today's trek", |i| {
+            format!(
+                "{}–{} {}",
+                (i + 11) % 12 + 1,
+                (i + 12) % 12 + 1,
+                if i < 12 { "AM" } else { "PM" }
+            )
+        }),
+        BasecampRange::Week => (56, "This week's trek", |i| {
+            format!(
+                "{} {}",
+                ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][i / 8],
+                [
+                    "12–3 AM",
+                    "3–6 AM",
+                    "6–9 AM",
+                    "9 AM–12 PM",
+                    "12–3 PM",
+                    "3–6 PM",
+                    "6–9 PM",
+                    "9 PM–12 AM"
+                ][i % 8]
+            )
+        }),
         BasecampRange::All => (60, "Your trek so far", |i| format!("Day {}", i + 1)),
     };
-    let shape = |i: usize| ((i as f32 * 0.7).sin() * 0.5 + 0.5) * if range == BasecampRange::Today && !(9..20).contains(&i) { 0.0 } else { 1.0 };
+    let shape = |i: usize| {
+        ((i as f32 * 0.7).sin() * 0.5 + 0.5)
+            * if range == BasecampRange::Today && !(9..20).contains(&i) {
+                0.0
+            } else {
+                1.0
+            }
+    };
     let buckets: Vec<ProfileBucket> = (0..n)
         .map(|i| {
             let prompts = (shape(i) * 6.0).round() as u32;
             let agent_secs = (shape(i) * 1_500.0) as u64;
             let label = label(i);
-            let line = if prompts == 0 { format!("{label} · quiet") } else { format!("{label} · {prompts} prompts · {}m of agent time", agent_secs / 60) };
-            ProfileBucket { value: agent_secs as f32 / 60.0, label, line, prompts, agent_secs, tokens: agent_secs * 900 }
+            let line = if prompts == 0 {
+                format!("{label} · quiet")
+            } else {
+                format!(
+                    "{label} · {prompts} prompts · {}m of agent time",
+                    agent_secs / 60
+                )
+            };
+            ProfileBucket {
+                value: agent_secs as f32 / 60.0,
+                label,
+                line,
+                prompts,
+                agent_secs,
+                tokens: agent_secs * 900,
+            }
         })
         .collect();
     let summit = (0..n).max_by(|a, b| buckets[*a].value.total_cmp(&buckets[*b].value));
     let prompts: u32 = buckets.iter().map(|b| b.prompts).sum();
     let agent_secs: u64 = buckets.iter().map(|b| b.agent_secs).sum();
     let tokens: u64 = buckets.iter().map(|b| b.tokens).sum();
-    let api = ProjectRef { id: "p-api".into(), name: "trek-api".into(), hue: 212, monogram: "TA".into(), icon: None };
+    let api = ProjectRef {
+        id: "p-api".into(),
+        name: "trek-api".into(),
+        hue: 212,
+        monogram: "TA".into(),
+        icon: None,
+    };
     let opus = AgentRef::new("claude-code", "Claude Code", Some("claude-code"));
     let codex = AgentRef::new("codex", "Codex", Some("codex"));
     let text = |t: &str| Span::Text { text: t.into() };
@@ -1419,16 +2248,36 @@ fn demo_basecamp(range: BasecampRange, threads: &[ThreadSummary]) -> Basecamp {
         .filter(|t| t.needs.is_some() || t.unseen)
         .map(|t| {
             let (status, label) = match (&t.needs, t.run_state) {
-                (Some(n), _) if n.kind == NeedsKind::Limit => (ReviewStatus::Paused, Some("Paused until 4 PM".to_string())),
+                (Some(n), _) if n.kind == NeedsKind::Limit => {
+                    (ReviewStatus::Paused, Some("Paused until 4 PM".to_string()))
+                }
                 (_, RunState::Failed) => (ReviewStatus::Failed, Some("Failed".to_string())),
-                (Some(n), _) => (ReviewStatus::NeedsYou, Some(match n.kind {
-                    NeedsKind::Question => "Question",
-                    NeedsKind::Plan => "Plan to review",
-                    _ => "Approval",
-                }.to_string())),
+                (Some(n), _) => (
+                    ReviewStatus::NeedsYou,
+                    Some(
+                        match n.kind {
+                            NeedsKind::Question => "Question",
+                            NeedsKind::Plan => "Plan to review",
+                            _ => "Approval",
+                        }
+                        .to_string(),
+                    ),
+                ),
                 _ => (ReviewStatus::Done, None),
             };
-            ReviewRow { thread_id: t.id.clone(), title: t.title.clone(), status, label, agent: t.agent.clone(), project: Some(t.project.clone()), additions: t.additions, deletions: t.deletions, updated_at: t.updated_at, unseen: t.unseen, needs_you: matches!(status, ReviewStatus::NeedsYou | ReviewStatus::Failed) }
+            ReviewRow {
+                thread_id: t.id.clone(),
+                title: t.title.clone(),
+                status,
+                label,
+                agent: t.agent.clone(),
+                project: Some(t.project.clone()),
+                additions: t.additions,
+                deletions: t.deletions,
+                updated_at: t.updated_at,
+                unseen: t.unseen,
+                needs_you: matches!(status, ReviewStatus::NeedsYou | ReviewStatus::Failed),
+            }
         })
         .collect();
     Basecamp {
@@ -1452,15 +2301,28 @@ fn demo_basecamp(range: BasecampRange, threads: &[ThreadSummary]) -> Basecamp {
             text(" across "),
             strong("7 threads".into()),
             text(". Most of it went into "),
-            Span::Project { text: "trek-api".into(), project: Some(api.clone()) },
+            Span::Project {
+                text: "trek-api".into(),
+                project: Some(api.clone()),
+            },
             text(", with "),
-            Span::Model { text: "Claude Opus 5.5".into(), agent: opus.clone() },
+            Span::Model {
+                text: "Claude Opus 5.5".into(),
+                agent: opus.clone(),
+            },
             text(" carrying "),
             strong("77%".into()),
             text(" of the tokens, ahead of "),
-            Span::Model { text: "GPT-6".into(), agent: codex },
+            Span::Model {
+                text: "GPT-6".into(),
+                agent: codex,
+            },
             text(". Your agents were on the trail for "),
-            strong(format!("{}h {}m", agent_secs / 3600, agent_secs % 3600 / 60)),
+            strong(format!(
+                "{}h {}m",
+                agent_secs / 3600,
+                agent_secs % 3600 / 60
+            )),
             text("."),
         ],
         summary: Some(RecapSummary {
@@ -1471,27 +2333,107 @@ fn demo_basecamp(range: BasecampRange, threads: &[ThreadSummary]) -> Basecamp {
             agent_time: format!("{}h {}m", agent_secs / 3600, agent_secs % 3600 / 60),
             tokens,
             failed: 1,
-            top_project: Some(ProjectShare { project: api.clone(), prompts: prompts * 2 / 3, tokens: tokens / 2 }),
-            best_model: Some(ModelShare { agent: opus.clone(), label: "Claude Opus 5.5".into(), tokens: tokens * 77 / 100, turns: 9, share: Some(77) }),
+            top_project: Some(ProjectShare {
+                project: api.clone(),
+                prompts: prompts * 2 / 3,
+                tokens: tokens / 2,
+            }),
+            best_model: Some(ModelShare {
+                agent: opus.clone(),
+                label: "Claude Opus 5.5".into(),
+                tokens: tokens * 77 / 100,
+                turns: 9,
+                share: Some(77),
+            }),
         }),
         profile: Some(Profile {
             summit,
             now: Some(n * 3 / 4),
             now_at: 0.75,
-            line: summit.map(|i| format!("Summit {}", buckets[i].label)).unwrap_or_else(|| "A flat trail so far".into()),
+            line: summit
+                .map(|i| format!("Summit {}", buckets[i].label))
+                .unwrap_or_else(|| "A flat trail so far".into()),
             total: format!("{prompts} prompts"),
             ticks: match range {
-                BasecampRange::Today => [(0.25, "6 AM"), (0.5, "Noon"), (0.75, "6 PM")].map(|(at, l)| Tick { at, label: l.into() }).to_vec(),
-                _ => vec![Tick { at: 0.1, label: "Sep 14".into() }, Tick { at: 0.5, label: "Sep 21".into() }, Tick { at: 0.9, label: "Oct 1".into() }],
+                BasecampRange::Today => [(0.25, "6 AM"), (0.5, "Noon"), (0.75, "6 PM")]
+                    .map(|(at, l)| Tick {
+                        at,
+                        label: l.into(),
+                    })
+                    .to_vec(),
+                _ => vec![
+                    Tick {
+                        at: 0.1,
+                        label: "Sep 14".into(),
+                    },
+                    Tick {
+                        at: 0.5,
+                        label: "Sep 21".into(),
+                    },
+                    Tick {
+                        at: 0.9,
+                        label: "Oct 1".into(),
+                    },
+                ],
             },
             buckets,
         }),
         tiles: vec![
-            Tile { kind: TileKind::BestModel, label: "Your best model".into(), figure: "Claude Opus 5.5".into(), note: "77% of tokens · 9 turns".into(), agent: Some(opus.clone()), project: None, sparkline: vec![], percent: None, resets_at: None },
-            Tile { kind: TileKind::WorkedMostOn, label: "You worked most on".into(), figure: "trek-api".into(), note: format!("{} prompts · 1.2M tokens", prompts * 2 / 3), agent: None, project: Some(api), sparkline: vec![], percent: None, resets_at: None },
-            Tile { kind: TileKind::Tokens, label: "You used".into(), figure: format!("{:.1}M tokens", tokens as f64 / 1e6), note: "≈ $14.20 at API prices today".into(), agent: None, project: None, sparkline, percent: None, resets_at: None },
-            Tile { kind: TileKind::AgentTime, label: "Your agents worked for".into(), figure: format!("{}h {}m", agent_secs / 3600, agent_secs % 3600 / 60), note: "1 turn failed today".into(), agent: None, project: None, sparkline: vec![], percent: None, resets_at: None },
-            Tile { kind: TileKind::PlanLeft, label: "Left on Claude Max".into(), figure: "36%".into(), note: "Weekly · Opus · resets in 4d".into(), agent: Some(opus), project: None, sparkline: vec![], percent: Some(36.0), resets_at: Some(now_ms() + 96 * 3_600_000) },
+            Tile {
+                kind: TileKind::BestModel,
+                label: "Your best model".into(),
+                figure: "Claude Opus 5.5".into(),
+                note: "77% of tokens · 9 turns".into(),
+                agent: Some(opus.clone()),
+                project: None,
+                sparkline: vec![],
+                percent: None,
+                resets_at: None,
+            },
+            Tile {
+                kind: TileKind::WorkedMostOn,
+                label: "You worked most on".into(),
+                figure: "trek-api".into(),
+                note: format!("{} prompts · 1.2M tokens", prompts * 2 / 3),
+                agent: None,
+                project: Some(api),
+                sparkline: vec![],
+                percent: None,
+                resets_at: None,
+            },
+            Tile {
+                kind: TileKind::Tokens,
+                label: "You used".into(),
+                figure: format!("{:.1}M tokens", tokens as f64 / 1e6),
+                note: "≈ $14.20 at API prices today".into(),
+                agent: None,
+                project: None,
+                sparkline,
+                percent: None,
+                resets_at: None,
+            },
+            Tile {
+                kind: TileKind::AgentTime,
+                label: "Your agents worked for".into(),
+                figure: format!("{}h {}m", agent_secs / 3600, agent_secs % 3600 / 60),
+                note: "1 turn failed today".into(),
+                agent: None,
+                project: None,
+                sparkline: vec![],
+                percent: None,
+                resets_at: None,
+            },
+            Tile {
+                kind: TileKind::PlanLeft,
+                label: "Left on Claude Max".into(),
+                figure: "36%".into(),
+                note: "Weekly · Opus · resets in 4d".into(),
+                agent: Some(opus),
+                project: None,
+                sparkline: vec![],
+                percent: Some(36.0),
+                resets_at: Some(now_ms() + 96 * 3_600_000),
+            },
         ],
         // This host doesn't list `basecamp_v2`: the phone draws the recap above.
         totals: None,
@@ -1516,7 +2458,8 @@ fn lan_ip() -> Option<std::net::IpAddr> {
 async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,trek_remote=debug".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,trek_remote=debug".into()),
         )
         .init();
 
@@ -1525,10 +2468,16 @@ async fn main() -> std::io::Result<()> {
         .map(|a| a.parse().expect("TREK_REMOTE_ADDR must be ip:port"))
         .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)));
     let code = std::env::var("TREK_REMOTE_CODE").unwrap_or_else(|_| "K7Q2-9XMV".into());
-    let advertise = std::env::var("TREK_REMOTE_ADVERTISE").ok().unwrap_or_else(|| {
-        let ip = if bind.ip().is_unspecified() { lan_ip().unwrap_or(bind.ip()) } else { bind.ip() };
-        SocketAddr::new(ip, bind.port()).to_string()
-    });
+    let advertise = std::env::var("TREK_REMOTE_ADVERTISE")
+        .ok()
+        .unwrap_or_else(|| {
+            let ip = if bind.ip().is_unspecified() {
+                lan_ip().unwrap_or(bind.ip())
+            } else {
+                bind.ip()
+            };
+            SocketAddr::new(ip, bind.port()).to_string()
+        });
     let devices_path = std::env::var("TREK_REMOTE_DEVICES")
         .map(Into::into)
         .unwrap_or_else(|_| std::env::temp_dir().join("trek-remote-demo-devices.json"));
@@ -1549,14 +2498,23 @@ async fn main() -> std::io::Result<()> {
         let mut log = Log::default();
         for (n, body) in items.into_iter().enumerate() {
             log.seq += 1;
-            let at = matches!(body, ItemBody::User { .. } | ItemBody::TurnEnd { .. }).then_some(base + n as i64 * 20_000);
-            log.items.push(Item { id: format!("{}-{}", thread.id, n + 1), seq: log.seq, at, body });
+            let at = matches!(body, ItemBody::User { .. } | ItemBody::TurnEnd { .. })
+                .then_some(base + n as i64 * 20_000);
+            log.items.push(Item {
+                id: format!("{}-{}", thread.id, n + 1),
+                seq: log.seq,
+                at,
+                body,
+            });
         }
         state.logs.insert(thread.id.clone(), log);
         state.threads.push(thread);
     }
 
-    let host = DemoHost(Arc::new(Shared { state: Mutex::new(state), handle: OnceLock::new() }));
+    let host = DemoHost(Arc::new(Shared {
+        state: Mutex::new(state),
+        handle: OnceLock::new(),
+    }));
     let mut config = ServerConfig::new(HostInfo {
         id: "demo-host-7f3c".into(),
         name: "Trek Demo Mac".into(),
@@ -1565,12 +2523,26 @@ async fn main() -> std::io::Result<()> {
     config.bind = bind;
     config.advertise = Some(advertise.clone());
     config.devices_path = Some(devices_path.clone());
-    config.features = [feature::SEARCH, feature::SNOOZE, feature::MARK_UNREAD, feature::DELETE].map(String::from).to_vec();
+    config.features = [
+        feature::SEARCH,
+        feature::SNOOZE,
+        feature::MARK_UNREAD,
+        feature::DELETE,
+    ]
+    .map(String::from)
+    .to_vec();
     if std::env::var_os("TREK_REMOTE_PLAIN").is_none() {
-        let dir = devices_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(std::env::temp_dir);
-        config.tls = Some(TlsIdentity::load_or_create(&dir, "Trek Demo Mac").expect("TLS identity"));
+        let dir = devices_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(std::env::temp_dir);
+        config.tls =
+            Some(TlsIdentity::load_or_create(&dir, "Trek Demo Mac").expect("TLS identity"));
     }
-    let fp = config.tls.as_ref().map(|t| (t.fingerprint.clone(), t.short_fingerprint()));
+    let fp = config
+        .tls
+        .as_ref()
+        .map(|t| (t.fingerprint.clone(), t.short_fingerprint()));
     let handle = RemoteServer::start(config, Arc::new(host.clone())).await?;
     let _ = host.handle.set(handle.clone());
 
@@ -1582,7 +2554,13 @@ async fn main() -> std::io::Result<()> {
     println!("  Pairing URL   {}", offer.url);
     println!(
         "  Simulator     {}",
-        trek_remote::pairing::pairing_url(&format!("127.0.0.1:{port}"), &offer.code, "Trek Demo Mac", "demo-host-7f3c", fp.as_ref().map(|(f, _)| f.as_str()))
+        trek_remote::pairing::pairing_url(
+            &format!("127.0.0.1:{port}"),
+            &offer.code,
+            "Trek Demo Mac",
+            "demo-host-7f3c",
+            fp.as_ref().map(|(f, _)| f.as_str())
+        )
     );
     match &fp {
         Some((full, short)) => println!("  TLS           wss://, fingerprint {short} ({full})"),

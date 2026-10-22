@@ -23,26 +23,38 @@ pub struct TlsIdentity {
 
 impl std::fmt::Debug for TlsIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TlsIdentity").field("fingerprint", &self.fingerprint).finish_non_exhaustive()
+        f.debug_struct("TlsIdentity")
+            .field("fingerprint", &self.fingerprint)
+            .finish_non_exhaustive()
     }
 }
 
 /// SHA-256 of a DER certificate, as lowercase hex.
 pub fn fingerprint(cert_der: &[u8]) -> String {
-    Sha256::digest(cert_der).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(cert_der)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 impl TlsIdentity {
     /// A new self-signed certificate and key.
     pub fn generate(host_name: &str) -> io::Result<Self> {
         let mut names = vec!["trek.local".to_string(), "localhost".to_string()];
-        let clean: String = host_name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+        let clean: String = host_name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
         if !clean.is_empty() {
             names.push(format!("{clean}.local"));
         }
         let cert = rcgen::generate_simple_self_signed(names).map_err(io::Error::other)?;
         let cert_der = cert.cert.der().to_vec();
-        Ok(Self { fingerprint: fingerprint(&cert_der), cert_der, key_der: cert.signing_key.serialize_der() })
+        Ok(Self {
+            fingerprint: fingerprint(&cert_der),
+            cert_der,
+            key_der: cert.signing_key.serialize_der(),
+        })
     }
 
     /// The identity kept in `dir` (`identity.der` and `identity.key`, the key readable by the user
@@ -51,7 +63,11 @@ impl TlsIdentity {
         let (cert_path, key_path) = (dir.join("identity.der"), dir.join("identity.key"));
         if let (Ok(cert_der), Ok(key_der)) = (std::fs::read(&cert_path), std::fs::read(&key_path)) {
             private_permissions(&key_path)?;
-            let identity = Self { fingerprint: fingerprint(&cert_der), cert_der, key_der };
+            let identity = Self {
+                fingerprint: fingerprint(&cert_der),
+                cert_der,
+                key_der,
+            };
             // A damaged pair is replaced (phones pair again) rather than served.
             if identity.acceptor().is_ok() {
                 return Ok(identity);
@@ -77,7 +93,10 @@ impl TlsIdentity {
             .with_safe_default_protocol_versions()
             .map_err(io::Error::other)?
             .with_no_client_auth()
-            .with_single_cert(vec![CertificateDer::from(self.cert_der.clone())], PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key_der.clone())))
+            .with_single_cert(
+                vec![CertificateDer::from(self.cert_der.clone())],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key_der.clone())),
+            )
             .map_err(io::Error::other)?;
         Ok(TlsAcceptor::from(Arc::new(config)))
     }
@@ -131,32 +150,53 @@ mod tests {
         assert_eq!(a.fingerprint.len(), 64);
         assert_eq!(a.fingerprint, fingerprint(&a.cert_der));
         assert_eq!(a.short_fingerprint().len(), 19);
-        assert!(a.fingerprint.to_uppercase().starts_with(&a.short_fingerprint().replace('-', "")));
+        assert!(
+            a.fingerprint
+                .to_uppercase()
+                .starts_with(&a.short_fingerprint().replace('-', ""))
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(dir.join("identity.key"), std::fs::Permissions::from_mode(0o400)).unwrap();
+            std::fs::set_permissions(
+                dir.join("identity.key"),
+                std::fs::Permissions::from_mode(0o400),
+            )
+            .unwrap();
         }
         let b = TlsIdentity::load_or_create(&dir, "Tobias's MacBook").unwrap();
         assert_eq!(a.fingerprint, b.fingerprint, "loaded, not made again");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let mode = std::fs::metadata(dir.join("identity.key")).unwrap().permissions().mode();
+            let mode = std::fs::metadata(dir.join("identity.key"))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600, "the key is the user's alone");
         }
         std::fs::remove_file(dir.join("identity.der")).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(dir.join("identity.key"), std::fs::Permissions::from_mode(0o644)).unwrap();
+            std::fs::set_permissions(
+                dir.join("identity.key"),
+                std::fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
         }
         let c = TlsIdentity::load_or_create(&dir, "Tobias's MacBook").unwrap();
-        assert_ne!(b.fingerprint, c.fingerprint, "the incomplete identity was replaced");
+        assert_ne!(
+            b.fingerprint, c.fingerprint,
+            "the incomplete identity was replaced"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let mode = std::fs::metadata(dir.join("identity.key")).unwrap().permissions().mode();
+            let mode = std::fs::metadata(dir.join("identity.key"))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600, "a replaced key is private too");
         }
         let _ = std::fs::remove_dir_all(dir);

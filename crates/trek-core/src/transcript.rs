@@ -24,7 +24,14 @@ pub struct Transcript {
 
 impl Default for Transcript {
     fn default() -> Self {
-        Transcript { items: vec![], ids: vec![], unsaved: HashSet::new(), changed: HashSet::new(), removed: vec![], edited_from: Some(0) }
+        Transcript {
+            items: vec![],
+            ids: vec![],
+            unsaved: HashSet::new(),
+            changed: HashSet::new(),
+            removed: vec![],
+            edited_from: Some(0),
+        }
     }
 }
 
@@ -58,14 +65,23 @@ impl Transcript {
     /// Rows as loaded from the store: nothing to save.
     pub fn stored(rows: Vec<(String, Item)>) -> Self {
         let (ids, items) = rows.into_iter().unzip();
-        Transcript { items, ids, ..Default::default() }
+        Transcript {
+            items,
+            ids,
+            ..Default::default()
+        }
     }
 
     /// Items that aren't in the store (history read from another agent): each gets a fresh id
     /// and is written on the first save.
     pub fn unsaved(items: Vec<Item>) -> Self {
         let ids: Vec<String> = items.iter().map(|_| new_id()).collect();
-        Transcript { unsaved: ids.iter().cloned().collect(), items, ids, ..Default::default() }
+        Transcript {
+            unsaved: ids.iter().cloned().collect(),
+            items,
+            ids,
+            ..Default::default()
+        }
     }
 
     pub fn ids(&self) -> &[String] {
@@ -86,7 +102,10 @@ impl Transcript {
     /// yet: rows are appended in transcript order, after the thread's last stored one.
     pub fn prepend_unsaved(&mut self, history: Vec<Item>) {
         self.edited(0);
-        debug_assert!(self.ids.iter().all(|id| self.unsaved.contains(id)) && self.removed.is_empty(), "stored rows would end up out of order");
+        debug_assert!(
+            self.ids.iter().all(|id| self.unsaved.contains(id)) && self.removed.is_empty(),
+            "stored rows would end up out of order"
+        );
         let ids: Vec<String> = history.iter().map(|_| new_id()).collect();
         self.unsaved.extend(ids.iter().cloned());
         self.ids.splice(0..0, ids);
@@ -159,7 +178,10 @@ impl Transcript {
     pub fn retain(&mut self, mut keep: impl FnMut(&Item) -> bool) {
         let mut kept_items = Vec::with_capacity(self.items.len());
         let mut kept_ids = Vec::with_capacity(self.ids.len());
-        for (item, id) in std::mem::take(&mut self.items).into_iter().zip(std::mem::take(&mut self.ids)) {
+        for (item, id) in std::mem::take(&mut self.items)
+            .into_iter()
+            .zip(std::mem::take(&mut self.ids))
+        {
             if keep(&item) {
                 kept_items.push(item);
                 kept_ids.push(id);
@@ -200,7 +222,10 @@ impl Transcript {
     }
 
     pub fn changes(&self) -> Changes<'_> {
-        let mut out = Changes { removed: &self.removed, ..Default::default() };
+        let mut out = Changes {
+            removed: &self.removed,
+            ..Default::default()
+        };
         for (id, item) in self.ids.iter().zip(&self.items) {
             if self.unsaved.contains(id) {
                 out.appended.push((id, item));
@@ -228,7 +253,11 @@ mod tests {
     }
 
     fn appended(t: &Transcript) -> Vec<Item> {
-        t.changes().appended.into_iter().map(|(_, i)| i.clone()).collect()
+        t.changes()
+            .appended
+            .into_iter()
+            .map(|(_, i)| i.clone())
+            .collect()
     }
 
     #[test]
@@ -262,11 +291,22 @@ mod tests {
     #[test]
     fn retain_keeps_ids_aligned_and_records_removed_rows() {
         let mut t = Transcript::stored(vec![
-            ("u".into(), Item::User { text: "hi".into(), images: vec![], at: None, resume: None, aside: false }),
+            (
+                "u".into(),
+                Item::User {
+                    text: "hi".into(),
+                    images: vec![],
+                    at: None,
+                    resume: None,
+                    aside: false,
+                },
+            ),
             ("r".into(), Item::Reasoning { text: " ".into() }),
             ("a".into(), text("answer")),
         ]);
-        t.push(Item::Reasoning { text: String::new() });
+        t.push(Item::Reasoning {
+            text: String::new(),
+        });
         let tail = t.push(text("more"));
         let tail_id = t.id_at(tail).unwrap().to_string();
         t.retain(|i| !matches!(i, Item::Reasoning { text } if text.trim().is_empty()));
@@ -281,7 +321,11 @@ mod tests {
 
     #[test]
     fn truncate_after_drops_later_rows() {
-        let mut t = Transcript::stored(vec![("a".into(), text("1")), ("b".into(), text("2")), ("c".into(), text("3"))]);
+        let mut t = Transcript::stored(vec![
+            ("a".into(), text("1")),
+            ("b".into(), text("2")),
+            ("c".into(), text("3")),
+        ]);
         let _ = t.get_mut(2);
         t.push(text("4"));
         assert!(t.truncate_after("a"));
@@ -294,7 +338,11 @@ mod tests {
 
     #[test]
     fn the_first_position_changed_is_told_once() {
-        let mut t = Transcript::stored(vec![("a".into(), text("1")), ("b".into(), text("2")), ("c".into(), text("3"))]);
+        let mut t = Transcript::stored(vec![
+            ("a".into(), text("1")),
+            ("b".into(), text("2")),
+            ("c".into(), text("3")),
+        ]);
         assert_eq!(t.take_edited_from(), Some(0), "new: all of it");
         assert_eq!(t.take_edited_from(), None);
         let _ = t.get_mut(1);
@@ -327,6 +375,9 @@ mod tests {
         t.prepend_unsaved(vec![text("old 1"), text("old 2")]);
         assert_eq!(t.position(&id), Some(2));
         assert_eq!(t.ids().len(), 3);
-        assert_eq!(appended(&t), vec![text("old 1"), text("old 2"), text("arrived while loading")]);
+        assert_eq!(
+            appended(&t),
+            vec![text("old 1"), text("old 2"), text("arrived while loading")]
+        );
     }
 }

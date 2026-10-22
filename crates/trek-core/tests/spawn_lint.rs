@@ -13,7 +13,11 @@
 use std::path::{Path, PathBuf};
 
 fn workspace() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2).expect("the workspace root").to_path_buf()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("the workspace root")
+        .to_path_buf()
 }
 
 /// The sources that ship: each crate's `src` and `examples`, except the test fixtures' crate and
@@ -73,7 +77,10 @@ fn offenders(text: &str) -> Vec<(usize, String)> {
             while let Some(at) = rest.find("Command::new(") {
                 let after = &rest[at + "Command::new(".len()..];
                 // The part before is a path (`std::process::`), not another name (`UpdateCommand::`).
-                let named = rest[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_');
+                let named = rest[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
                 if !named && !after.starts_with("\"/") {
                     found.push((i + 1, line.trim().to_string()));
                 }
@@ -88,7 +95,10 @@ fn offenders(text: &str) -> Vec<(usize, String)> {
 #[test]
 fn every_process_is_started_through_the_helper() {
     let mut files = Vec::new();
-    for entry in std::fs::read_dir(workspace().join("crates")).unwrap().flatten() {
+    for entry in std::fs::read_dir(workspace().join("crates"))
+        .unwrap()
+        .flatten()
+    {
         if entry.file_name() == "test-fixtures" {
             continue;
         }
@@ -96,12 +106,19 @@ fn every_process_is_started_through_the_helper() {
             sources(&entry.path().join(sub), &mut files);
         }
     }
-    assert!(files.len() > 50, "the scan found only {} sources: has the layout changed?", files.len());
+    assert!(
+        files.len() > 50,
+        "the scan found only {} sources: has the layout changed?",
+        files.len()
+    );
     let mut wrong = Vec::new();
     for file in &files {
         let text = std::fs::read_to_string(file).unwrap();
         for (line, code) in offenders(&text) {
-            wrong.push(format!("{}:{line}: {code}", file.strip_prefix(workspace()).unwrap().display()));
+            wrong.push(format!(
+                "{}:{line}: {code}",
+                file.strip_prefix(workspace()).unwrap().display()
+            ));
         }
     }
     assert!(

@@ -82,8 +82,12 @@ pub mod protocol;
 pub mod server;
 pub mod tls;
 
-pub use host::{ChannelHost, CloneProgress, HostError, HostEvent, HostRequest, HostResult, RemoteHost, Reply};
+pub use host::{
+    ChannelHost, CloneProgress, HostError, HostEvent, HostRequest, HostResult, RemoteHost, Reply,
+};
 pub use pairing::{DeviceInfo, DeviceRegistry, PairingError, PairingOffer};
 pub use protocol::*;
-pub use server::{Admission, DEFAULT_PORT, LastConnection, RemoteHandle, RemoteServer, ServerConfig, ServerNotice};
+pub use server::{
+    Admission, DEFAULT_PORT, LastConnection, RemoteHandle, RemoteServer, ServerConfig, ServerNotice,
+};
 pub use tls::TlsIdentity;

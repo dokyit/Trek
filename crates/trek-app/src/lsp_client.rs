@@ -12,7 +12,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak, mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
-use gpui_kit::base::input::{CompletionProvider, DefinitionProvider, HoverProvider, Lsp, Point, RopeExt};
+use gpui_kit::base::input::{
+    CompletionProvider, DefinitionProvider, HoverProvider, Lsp, Point, RopeExt,
+};
 use ropey::Rope;
 use serde_json::{Value, json};
 
@@ -22,8 +24,12 @@ pub fn spec(ext: &str) -> Option<(&'static str, &'static [&'static str], &'stati
     match ext {
         "rs" | "rust" => Some(("rust-analyzer", &[], "rust")),
         "swift" => Some(("sourcekit-lsp", &[], "swift")),
-        "ts" | "tsx" | "mts" | "cts" | "typescript" | "typescriptreact" => Some(("typescript-language-server", &["--stdio"], "typescript")),
-        "js" | "jsx" | "mjs" | "cjs" | "javascript" | "javascriptreact" => Some(("typescript-language-server", &["--stdio"], "javascript")),
+        "ts" | "tsx" | "mts" | "cts" | "typescript" | "typescriptreact" => {
+            Some(("typescript-language-server", &["--stdio"], "typescript"))
+        }
+        "js" | "jsx" | "mjs" | "cjs" | "javascript" | "javascriptreact" => {
+            Some(("typescript-language-server", &["--stdio"], "javascript"))
+        }
         "py" | "python" => Some(("pyright-langserver", &["--stdio"], "python")),
         "go" => Some(("gopls", &[], "go")),
         "c" | "h" => Some(("clangd", &[], "c")),
@@ -41,15 +47,21 @@ fn uri_of(path: &Path) -> Option<String> {
 /// `X:` or `X:` + a separator at the start of `p`: a Windows drive path.
 fn has_drive(p: &str) -> bool {
     let b = p.as_bytes();
-    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && b.get(2).is_none_or(|c| matches!(c, b'\\' | b'/'))
+    b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && b.get(2).is_none_or(|c| matches!(c, b'\\' | b'/'))
 }
 
 /// The URI of a path string. Windows shapes get the `file:///C:/dir/file` form (drive colon
 /// bare, separators flipped, upper-case drive letter so equal paths give equal URIs) and
 /// `\\host\share` the `file://host/share` one; a POSIX path is just encoded after `file://`.
 fn uri_of_str(path: &str) -> String {
-    const UNRESERVED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~/";
-    let unc = path.strip_prefix(r"\\?\UNC\").or_else(|| path.strip_prefix(r"\\").filter(|r| !r.starts_with(r"?\")));
+    const UNRESERVED: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~/";
+    let unc = path
+        .strip_prefix(r"\\?\UNC\")
+        .or_else(|| path.strip_prefix(r"\\").filter(|r| !r.starts_with(r"?\")));
     let (host, body) = if let Some(rest) = unc {
         let (host, dir) = rest.split_once('\\').unwrap_or((rest, ""));
         (host, format!("/{}", dir.replace('\\', "/")))
@@ -57,7 +69,14 @@ fn uri_of_str(path: &str) -> String {
         let p = path.strip_prefix(r"\\?\").unwrap_or(path);
         if has_drive(p) {
             let (drive, tail) = p.split_at(2);
-            ("", format!("/{}:{}", drive[..1].to_ascii_uppercase(), tail.replace('\\', "/")))
+            (
+                "",
+                format!(
+                    "/{}:{}",
+                    drive[..1].to_ascii_uppercase(),
+                    tail.replace('\\', "/")
+                ),
+            )
         } else {
             ("", p.to_string())
         }
@@ -117,7 +136,9 @@ fn path_string_of_uri(uri: &str) -> Option<String> {
 /// A server-sent URI in the form [`uri_of`] builds, so equal files compare equal as strings
 /// (servers differ on `%3A` vs `:`, drive-letter case, and which bytes they escape).
 fn canonical_uri(uri: &str) -> String {
-    path_string_of_uri(uri).map(|p| uri_of_str(&p)).unwrap_or_else(|| uri.to_string())
+    path_string_of_uri(uri)
+        .map(|p| uri_of_str(&p))
+        .unwrap_or_else(|| uri.to_string())
 }
 
 /// The `languageId` a document opens with: one server covers `ts` and `tsx` (or `js` and
@@ -136,8 +157,13 @@ fn position_of(text: &Rope, offset: usize) -> lsp_types::Position {
     let end = offset.min(text.len());
     let point = text.offset_to_point(end);
     let line_start = text.point_to_offset(Point::new(point.row, 0));
-    let cu = text.offset_to_offset_utf16(end).saturating_sub(text.offset_to_offset_utf16(line_start));
-    lsp_types::Position { line: point.row as u32, character: cu as u32 }
+    let cu = text
+        .offset_to_offset_utf16(end)
+        .saturating_sub(text.offset_to_offset_utf16(line_start));
+    lsp_types::Position {
+        line: point.row as u32,
+        character: cu as u32,
+    }
 }
 
 /// The longest message a server may send: a bigger `Content-Length` means a broken stream.
@@ -190,7 +216,9 @@ impl Client {
         };
         tracing::info!("lsp: starting {binary} for {lang} at {}", root.display());
         let mut command = trek_core::procs::command(program);
-        command.args(args).env("PATH", trek_core::detect::login_path());
+        command
+            .args(args)
+            .env("PATH", trek_core::detect::login_path());
         Self::spawn(command, &root, language_id)
     }
 
@@ -221,7 +249,13 @@ impl Client {
     }
 
     /// A client talking over `input`/`output`, sending `initialize` right away.
-    fn with_io(input: impl Read + Send + 'static, output: impl Write + Send + 'static, child: Option<Child>, root: &Path, lang: &'static str) -> Arc<Self> {
+    fn with_io(
+        input: impl Read + Send + 'static,
+        output: impl Write + Send + 'static,
+        child: Option<Child>,
+        root: &Path,
+        lang: &'static str,
+    ) -> Arc<Self> {
         // The writer: whole documents go down the pipe here, never on the caller's thread.
         let (tx, frames) = mpsc::channel::<Vec<u8>>();
         std::thread::spawn(move || write_frames(output, frames));
@@ -306,8 +340,11 @@ impl Client {
             Kind::Notification if msg["method"] == "textDocument/publishDiagnostics" => {
                 let p = &msg["params"];
                 let uri = canonical_uri(p["uri"].as_str().unwrap_or_default());
-                let diags = serde_json::from_value::<Vec<lsp_types::Diagnostic>>(p["diagnostics"].clone()).unwrap_or_default();
-                lock(&self.diag_senders).retain(|tx| tx.try_send((uri.clone(), diags.clone())).is_ok());
+                let diags =
+                    serde_json::from_value::<Vec<lsp_types::Diagnostic>>(p["diagnostics"].clone())
+                        .unwrap_or_default();
+                lock(&self.diag_senders)
+                    .retain(|tx| tx.try_send((uri.clone(), diags.clone())).is_ok());
             }
             _ => {}
         }
@@ -367,7 +404,9 @@ impl Client {
         std::thread::spawn(move || {
             if let Some(w) = writer {
                 if let Some((id, rx)) = shutdown {
-                    let _ = w.send(frame(&json!({ "jsonrpc": "2.0", "id": id, "method": "shutdown" })));
+                    let _ = w.send(frame(
+                        &json!({ "jsonrpc": "2.0", "id": id, "method": "shutdown" }),
+                    ));
                     recv_timeout(&rx, SHUTDOWN_GRACE);
                 }
                 let _ = w.send(frame(&json!({ "jsonrpc": "2.0", "method": "exit" })));
@@ -380,7 +419,9 @@ impl Client {
     }
 
     /// Newest diagnostics for every open doc; watchers filter to their URI.
-    pub fn watch_diagnostics(&self) -> async_channel::Receiver<(String, Vec<lsp_types::Diagnostic>)> {
+    pub fn watch_diagnostics(
+        &self,
+    ) -> async_channel::Receiver<(String, Vec<lsp_types::Diagnostic>)> {
         let (tx, rx) = async_channel::unbounded();
         lock(&self.diag_senders).push(tx);
         rx
@@ -417,7 +458,10 @@ impl Client {
     }
 
     pub fn did_close(&self, uri: &str) {
-        self.notify("textDocument/didClose", json!({ "textDocument": { "uri": uri } }));
+        self.notify(
+            "textDocument/didClose",
+            json!({ "textDocument": { "uri": uri } }),
+        );
     }
 
     fn doc(&self, uri: &str) -> Value {
@@ -425,8 +469,16 @@ impl Client {
     }
 
     /// The provider bundle one editor installs on its `EditorState`.
-    pub fn lsp_for(self: &Arc<Self>, uri: String, workspace: gpui_kit::Entity<crate::workspace::Workspace>) -> Lsp {
-        let doc = std::rc::Rc::new(DocProviders { client: self.clone(), uri, workspace: workspace.downgrade() });
+    pub fn lsp_for(
+        self: &Arc<Self>,
+        uri: String,
+        workspace: gpui_kit::Entity<crate::workspace::Workspace>,
+    ) -> Lsp {
+        let doc = std::rc::Rc::new(DocProviders {
+            client: self.clone(),
+            uri,
+            workspace: workspace.downgrade(),
+        });
         let mut lsp = Lsp::default();
         lsp.completion_provider = Some(doc.clone());
         lsp.hover_provider = Some(doc.clone());
@@ -434,9 +486,13 @@ impl Client {
         lsp.show_document = Some(std::rc::Rc::new({
             let doc = doc.clone();
             move |params: &lsp_types::ShowDocumentParams, _window, cx| {
-                let Some(path) = path_of_uri(params.uri.as_str()) else { return false };
+                let Some(path) = path_of_uri(params.uri.as_str()) else {
+                    return false;
+                };
                 let line = params.selection.map(|r| r.start.line + 1);
-                doc.workspace.update(cx, |ws, cx| ws.open_editor(path, line, cx)).is_ok()
+                doc.workspace
+                    .update(cx, |ws, cx| ws.open_editor(path, line, cx))
+                    .is_ok()
             }
         }));
         lsp
@@ -530,13 +586,22 @@ fn answer(request: &Value) -> Value {
     let method = request["method"].as_str().unwrap_or_default();
     let result = match method {
         // Nothing configured: one null per item asked for, so the server keeps its defaults.
-        "workspace/configuration" => Some(Value::Array(vec![Value::Null; request["params"]["items"].as_array().map_or(0, Vec::len)])),
-        "window/workDoneProgress/create" | "client/registerCapability" | "client/unregisterCapability" => Some(Value::Null),
+        "workspace/configuration" => Some(Value::Array(vec![
+            Value::Null;
+            request["params"]["items"]
+                .as_array()
+                .map_or(0, Vec::len)
+        ])),
+        "window/workDoneProgress/create"
+        | "client/registerCapability"
+        | "client/unregisterCapability" => Some(Value::Null),
         _ => None,
     };
     match result {
         Some(result) => json!({ "jsonrpc": "2.0", "id": request["id"], "result": result }),
-        None => json!({ "jsonrpc": "2.0", "id": request["id"], "error": { "code": -32601, "message": format!("{method} isn't supported") } }),
+        None => {
+            json!({ "jsonrpc": "2.0", "id": request["id"], "error": { "code": -32601, "message": format!("{method} isn't supported") } })
+        }
     }
 }
 
@@ -548,7 +613,9 @@ fn recv_timeout(rx: &async_channel::Receiver<Value>, limit: Duration) -> Option<
             Ok(msg) => return Some(msg),
             Err(async_channel::TryRecvError::Closed) => return None,
             Err(async_channel::TryRecvError::Empty) if Instant::now() >= deadline => return None,
-            Err(async_channel::TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(20)),
+            Err(async_channel::TryRecvError::Empty) => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
         }
     }
 }
@@ -580,7 +647,10 @@ pub struct Servers {
 
 impl Default for Servers {
     fn default() -> Self {
-        Self { by_key: HashMap::new(), roots: RecentRoots::new(LIVE_ROOTS) }
+        Self {
+            by_key: HashMap::new(),
+            roots: RecentRoots::new(LIVE_ROOTS),
+        }
     }
 }
 
@@ -656,7 +726,12 @@ struct DocProviders {
 
 impl DocProviders {
     /// Await the init handshake, then send the request and unwrap `result`.
-    async fn call(client: &Arc<Client>, executor: &gpui_kit::BackgroundExecutor, method: &'static str, params: Value) -> anyhow::Result<Value> {
+    async fn call(
+        client: &Arc<Client>,
+        executor: &gpui_kit::BackgroundExecutor,
+        method: &'static str,
+        params: Value,
+    ) -> anyhow::Result<Value> {
         // The first request may beat the handshake — give it a moment.
         for _ in 0..100 {
             if client.ready.load(Ordering::SeqCst) {
@@ -667,22 +742,34 @@ impl DocProviders {
         let rx = client.request(method, params);
         let msg = rx.recv().await.map_err(|_| anyhow!("server closed"))?;
         if let Some(err) = msg.get("error") {
-            return Err(anyhow!("{method}: {}", err.get("message").and_then(|m| m.as_str()).unwrap_or("error")));
+            return Err(anyhow!(
+                "{method}: {}",
+                err.get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("error")
+            ));
         }
         Ok(msg["result"].clone())
     }
 }
 
 impl HoverProvider for DocProviders {
-    fn hover(&self, text: &Rope, offset: usize, _window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) -> gpui_kit::Task<anyhow::Result<Option<lsp_types::Hover>>> {
+    fn hover(
+        &self,
+        text: &Rope,
+        offset: usize,
+        _window: &mut gpui_kit::Window,
+        cx: &mut gpui_kit::App,
+    ) -> gpui_kit::Task<anyhow::Result<Option<lsp_types::Hover>>> {
         let position = position_of(text, offset);
         let params = json!({ "textDocument": self.client.doc(&self.uri), "position": position });
         let client = self.client.clone();
         cx.spawn(move |cx: &mut gpui_kit::AsyncApp| {
             let executor = cx.background_executor().clone();
             async move {
-            let v = DocProviders::call(&client, &executor, "textDocument/hover", params).await?;
-            Ok(serde_json::from_value::<Option<lsp_types::Hover>>(v).unwrap_or(None))
+                let v =
+                    DocProviders::call(&client, &executor, "textDocument/hover", params).await?;
+                Ok(serde_json::from_value::<Option<lsp_types::Hover>>(v).unwrap_or(None))
             }
         })
     }
@@ -690,8 +777,15 @@ impl HoverProvider for DocProviders {
 
 impl CompletionProvider for DocProviders {
     /// Any typed character can start a completion — the server decides what it has to offer.
-    fn is_completion_trigger(&self, _offset: usize, new_text: &str, _cx: &mut gpui_kit::App) -> bool {
-        new_text.chars().last().is_some_and(|c| c.is_alphanumeric() || matches!(c, '.' | '>' | ':' | '"' | '/' | '@' | '#'))
+    fn is_completion_trigger(
+        &self,
+        _offset: usize,
+        new_text: &str,
+        _cx: &mut gpui_kit::App,
+    ) -> bool {
+        new_text.chars().last().is_some_and(|c| {
+            c.is_alphanumeric() || matches!(c, '.' | '>' | ':' | '"' | '/' | '@' | '#')
+        })
     }
 
     fn completions(
@@ -708,47 +802,60 @@ impl CompletionProvider for DocProviders {
         cx.spawn(move |cx: &mut gpui_kit::AsyncApp| {
             let executor = cx.background_executor().clone();
             async move {
-            let v = DocProviders::call(&client, &executor, "textDocument/completion", params).await?;
-            Ok(serde_json::from_value::<Option<lsp_types::CompletionResponse>>(v)
-                .ok()
-                .flatten()
-                .unwrap_or(lsp_types::CompletionResponse::Array(vec![])))
+                let v = DocProviders::call(&client, &executor, "textDocument/completion", params)
+                    .await?;
+                Ok(
+                    serde_json::from_value::<Option<lsp_types::CompletionResponse>>(v)
+                        .ok()
+                        .flatten()
+                        .unwrap_or(lsp_types::CompletionResponse::Array(vec![])),
+                )
             }
         })
     }
 }
 
 impl DefinitionProvider for DocProviders {
-    fn definitions(&self, text: &Rope, offset: usize, _window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) -> gpui_kit::Task<anyhow::Result<Vec<lsp_types::LocationLink>>> {
+    fn definitions(
+        &self,
+        text: &Rope,
+        offset: usize,
+        _window: &mut gpui_kit::Window,
+        cx: &mut gpui_kit::App,
+    ) -> gpui_kit::Task<anyhow::Result<Vec<lsp_types::LocationLink>>> {
         let position = position_of(text, offset);
         let params = json!({ "textDocument": self.client.doc(&self.uri), "position": position });
         let client = self.client.clone();
         cx.spawn(move |cx: &mut gpui_kit::AsyncApp| {
             let executor = cx.background_executor().clone();
             async move {
-            let v = DocProviders::call(&client, &executor, "textDocument/definition", params).await?;
-            // Servers answer Location or LocationLink — normalize to links.
-            if let Ok(links) = serde_json::from_value::<Option<Vec<lsp_types::LocationLink>>>(v.clone()) {
-                return Ok(links.unwrap_or_default());
-            }
-            let locs: Vec<lsp_types::Location> = serde_json::from_value::<Option<lsp_types::GotoDefinitionResponse>>(v)
-                .ok()
-                .flatten()
-                .map(|r| match r {
-                    lsp_types::GotoDefinitionResponse::Scalar(l) => vec![l],
-                    lsp_types::GotoDefinitionResponse::Array(v) => v,
-                    lsp_types::GotoDefinitionResponse::Link(_) => vec![],
-                })
-                .unwrap_or_default();
-            Ok(locs
-                .into_iter()
-                .map(|l| lsp_types::LocationLink {
-                    origin_selection_range: None,
-                    target_uri: l.uri,
-                    target_range: l.range,
-                    target_selection_range: l.range,
-                })
-                .collect())
+                let v = DocProviders::call(&client, &executor, "textDocument/definition", params)
+                    .await?;
+                // Servers answer Location or LocationLink — normalize to links.
+                if let Ok(links) =
+                    serde_json::from_value::<Option<Vec<lsp_types::LocationLink>>>(v.clone())
+                {
+                    return Ok(links.unwrap_or_default());
+                }
+                let locs: Vec<lsp_types::Location> =
+                    serde_json::from_value::<Option<lsp_types::GotoDefinitionResponse>>(v)
+                        .ok()
+                        .flatten()
+                        .map(|r| match r {
+                            lsp_types::GotoDefinitionResponse::Scalar(l) => vec![l],
+                            lsp_types::GotoDefinitionResponse::Array(v) => v,
+                            lsp_types::GotoDefinitionResponse::Link(_) => vec![],
+                        })
+                        .unwrap_or_default();
+                Ok(locs
+                    .into_iter()
+                    .map(|l| lsp_types::LocationLink {
+                        origin_selection_range: None,
+                        target_uri: l.uri,
+                        target_range: l.range,
+                        target_selection_range: l.range,
+                    })
+                    .collect())
             }
         })
     }
@@ -789,8 +896,16 @@ mod tests {
     /// A client wired to an in-process "server": what it writes, and a handle to write back.
     fn fake() -> (Arc<Client>, Socket, BufReader<Socket>) {
         let (ours, theirs) = socket_pair();
-        theirs.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let client = Client::with_io(ours.try_clone().unwrap(), ours, None, Path::new("/tmp"), "rust");
+        theirs
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let client = Client::with_io(
+            ours.try_clone().unwrap(),
+            ours,
+            None,
+            Path::new("/tmp"),
+            "rust",
+        );
         let from_client = BufReader::new(theirs.try_clone().unwrap());
         (client, theirs, from_client)
     }
@@ -821,19 +936,47 @@ mod tests {
 
         let huge = format!("Content-Length: {}\r\n\r\n{{}}", MAX_MESSAGE + 1);
         assert_eq!(read_frame(&mut Cursor::new(huge.into_bytes())), Frame::End);
-        assert_eq!(read_frame(&mut Cursor::new(b"Content-Length: 99999999999999999999999\r\n\r\n".to_vec())), Frame::End);
-        assert_eq!(read_frame(&mut Cursor::new(b"Content-Length: lots\r\n\r\n{}".to_vec())), Frame::End);
-        assert_eq!(read_frame(&mut Cursor::new(vec![b'a'; 10_000])), Frame::End, "a header line without end");
-        assert_eq!(read_frame(&mut Cursor::new(b"Content-Length: 10\r\n\r\n{}".to_vec())), Frame::End, "short body");
+        assert_eq!(
+            read_frame(&mut Cursor::new(
+                b"Content-Length: 99999999999999999999999\r\n\r\n".to_vec()
+            )),
+            Frame::End
+        );
+        assert_eq!(
+            read_frame(&mut Cursor::new(b"Content-Length: lots\r\n\r\n{}".to_vec())),
+            Frame::End
+        );
+        assert_eq!(
+            read_frame(&mut Cursor::new(vec![b'a'; 10_000])),
+            Frame::End,
+            "a header line without end"
+        );
+        assert_eq!(
+            read_frame(&mut Cursor::new(b"Content-Length: 10\r\n\r\n{}".to_vec())),
+            Frame::End,
+            "short body"
+        );
     }
 
     #[test]
     fn lsp_messages_are_told_apart_by_shape() {
-        assert_eq!(kind(&json!({ "id": 3, "result": null })), Kind::Reply(Some(3)));
+        assert_eq!(
+            kind(&json!({ "id": 3, "result": null })),
+            Kind::Reply(Some(3))
+        );
         assert_eq!(kind(&json!({ "id": "x", "error": {} })), Kind::Reply(None));
-        assert_eq!(kind(&json!({ "id": 3, "method": "workspace/configuration" })), Kind::Request);
-        assert_eq!(kind(&json!({ "method": "window/logMessage" })), Kind::Notification);
-        assert_eq!(kind(&json!({ "id": null, "method": "x" })), Kind::Notification);
+        assert_eq!(
+            kind(&json!({ "id": 3, "method": "workspace/configuration" })),
+            Kind::Request
+        );
+        assert_eq!(
+            kind(&json!({ "method": "window/logMessage" })),
+            Kind::Notification
+        );
+        assert_eq!(
+            kind(&json!({ "id": null, "method": "x" })),
+            Kind::Notification
+        );
         assert_eq!(kind(&json!({})), Kind::Invalid);
     }
 
@@ -845,23 +988,37 @@ mod tests {
         let id = init["id"].clone();
 
         // The server asks something with the same id as Trek's pending `initialize`.
-        server.write_all(&frame(&json!({ "jsonrpc": "2.0", "id": id, "method": "workspace/diagnostic/refresh" }))).unwrap();
+        server
+            .write_all(&frame(
+                &json!({ "jsonrpc": "2.0", "id": id, "method": "workspace/diagnostic/refresh" }),
+            ))
+            .unwrap();
         let reply = next(&mut from_client);
         assert_eq!(reply["id"], id);
         assert_eq!(reply["error"]["code"], -32601);
         std::thread::sleep(Duration::from_millis(100));
-        assert!(!client.ready.load(Ordering::SeqCst), "not mistaken for the initialize reply");
+        assert!(
+            !client.ready.load(Ordering::SeqCst),
+            "not mistaken for the initialize reply"
+        );
 
         server.write_all(&frame(&json!({ "jsonrpc": "2.0", "id": "cfg", "method": "workspace/configuration", "params": { "items": [{}, {}] } }))).unwrap();
         let reply = next(&mut from_client);
-        assert_eq!((reply["id"].clone(), reply["result"].clone()), (json!("cfg"), json!([null, null])));
+        assert_eq!(
+            (reply["id"].clone(), reply["result"].clone()),
+            (json!("cfg"), json!([null, null]))
+        );
         server.write_all(&frame(&json!({ "jsonrpc": "2.0", "id": 7, "method": "window/workDoneProgress/create", "params": {} }))).unwrap();
         let reply = next(&mut from_client);
         assert_eq!(reply.get("result"), Some(&Value::Null));
         assert!(reply.get("error").is_none());
 
         // The real reply completes the handshake.
-        server.write_all(&frame(&json!({ "jsonrpc": "2.0", "id": id, "result": { "capabilities": {} } }))).unwrap();
+        server
+            .write_all(&frame(
+                &json!({ "jsonrpc": "2.0", "id": id, "result": { "capabilities": {} } }),
+            ))
+            .unwrap();
         assert_eq!(next(&mut from_client)["method"], "initialized");
         wait_until("ready", || client.ready.load(Ordering::SeqCst));
     }
@@ -871,7 +1028,9 @@ mod tests {
         let (client, mut server, mut from_client) = fake();
         let id = next(&mut from_client)["id"].clone();
         client.did_open("file:///tmp/a.rs", "fn main() {}");
-        server.write_all(&frame(&json!({ "jsonrpc": "2.0", "id": id, "result": {} }))).unwrap();
+        server
+            .write_all(&frame(&json!({ "jsonrpc": "2.0", "id": id, "result": {} })))
+            .unwrap();
         assert_eq!(next(&mut from_client)["method"], "initialized");
         assert_eq!(next(&mut from_client)["method"], "textDocument/didOpen");
     }
@@ -879,25 +1038,56 @@ mod tests {
     #[test]
     fn lsp_file_uris_cover_posix_and_windows_paths() {
         // POSIX: encoded after `file://`, a backslash is just a file name character.
-        assert_eq!(uri_of_str("/Users/me/a b/\u{e9}.rs"), "file:///Users/me/a%20b/%C3%A9.rs");
+        assert_eq!(
+            uri_of_str("/Users/me/a b/\u{e9}.rs"),
+            "file:///Users/me/a%20b/%C3%A9.rs"
+        );
         assert_eq!(uri_of_str("/tmp/a\\b"), "file:///tmp/a%5Cb");
-        assert_eq!(path_string_of_uri("file:///Users/me/a%20b/%C3%A9.rs").unwrap(), "/Users/me/a b/\u{e9}.rs");
-        assert_eq!(path_string_of_uri("file://localhost/tmp/a.rs").unwrap(), "/tmp/a.rs");
+        assert_eq!(
+            path_string_of_uri("file:///Users/me/a%20b/%C3%A9.rs").unwrap(),
+            "/Users/me/a b/\u{e9}.rs"
+        );
+        assert_eq!(
+            path_string_of_uri("file://localhost/tmp/a.rs").unwrap(),
+            "/tmp/a.rs"
+        );
         assert_eq!(path_string_of_uri("https://x/y"), None);
         // Windows drive paths: `file:///C:/...`, never the drive in the host part.
-        assert_eq!(uri_of_str(r"C:\Users\me\a b.rs"), "file:///C:/Users/me/a%20b.rs");
+        assert_eq!(
+            uri_of_str(r"C:\Users\me\a b.rs"),
+            "file:///C:/Users/me/a%20b.rs"
+        );
         assert_eq!(uri_of_str("c:/Users/me/a.rs"), "file:///C:/Users/me/a.rs");
         assert_eq!(uri_of_str(r"\\?\D:\src"), "file:///D:/src");
         assert_eq!(uri_of_str(r"\\srv\share\a.rs"), "file://srv/share/a.rs");
-        assert_eq!(path_string_of_uri("file:///C:/Users/me/a%20b.rs").unwrap(), "C:/Users/me/a b.rs");
-        assert_eq!(path_string_of_uri("file:///c%3A/Users/me/a.rs").unwrap(), "c:/Users/me/a.rs");
-        assert_eq!(path_string_of_uri("file://srv/share/a.rs").unwrap(), r"\\srv\share\a.rs");
+        assert_eq!(
+            path_string_of_uri("file:///C:/Users/me/a%20b.rs").unwrap(),
+            "C:/Users/me/a b.rs"
+        );
+        assert_eq!(
+            path_string_of_uri("file:///c%3A/Users/me/a.rs").unwrap(),
+            "c:/Users/me/a.rs"
+        );
+        assert_eq!(
+            path_string_of_uri("file://srv/share/a.rs").unwrap(),
+            r"\\srv\share\a.rs"
+        );
         // Round trip, and servers' spellings of the same file meet in one form.
-        for uri in ["file:///C:/Users/me/a%20b.rs", "file://srv/share/a.rs", "file:///tmp/a%20b.rs"] {
+        for uri in [
+            "file:///C:/Users/me/a%20b.rs",
+            "file://srv/share/a.rs",
+            "file:///tmp/a%20b.rs",
+        ] {
             assert_eq!(uri_of_str(&path_string_of_uri(uri).unwrap()), uri);
         }
-        assert_eq!(canonical_uri("file:///c%3A/Users/me/a.rs"), "file:///C:/Users/me/a.rs");
-        assert_eq!(canonical_uri("file:///tmp/a+b@c.rs"), "file:///tmp/a%2Bb%40c.rs");
+        assert_eq!(
+            canonical_uri("file:///c%3A/Users/me/a.rs"),
+            "file:///C:/Users/me/a.rs"
+        );
+        assert_eq!(
+            canonical_uri("file:///tmp/a+b@c.rs"),
+            "file:///tmp/a%2Bb%40c.rs"
+        );
         assert_eq!(canonical_uri("untitled:Untitled-1"), "untitled:Untitled-1");
     }
 
@@ -905,7 +1095,9 @@ mod tests {
     fn lsp_diagnostics_reach_watchers_under_the_editors_uri() {
         let (client, mut server, mut from_client) = fake();
         let id = next(&mut from_client)["id"].clone();
-        server.write_all(&frame(&json!({ "jsonrpc": "2.0", "id": id, "result": {} }))).unwrap();
+        server
+            .write_all(&frame(&json!({ "jsonrpc": "2.0", "id": id, "result": {} })))
+            .unwrap();
         let rx = client.watch_diagnostics();
         let publish = json!({ "jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
             "params": { "uri": "file:///c%3A/Users/me/a.rs", "diagnostics": [] } });
@@ -916,24 +1108,49 @@ mod tests {
 
     #[test]
     fn lsp_jsx_documents_open_with_the_react_language_ids() {
-        assert_eq!(language_id("typescript", "file:///src/App.tsx"), "typescriptreact");
-        assert_eq!(language_id("javascript", "file:///src/App.JSX"), "javascriptreact");
-        assert_eq!(language_id("typescript", "file:///src/app.ts"), "typescript");
-        assert_eq!(language_id("javascript", "file:///src/app.mjs"), "javascript");
+        assert_eq!(
+            language_id("typescript", "file:///src/App.tsx"),
+            "typescriptreact"
+        );
+        assert_eq!(
+            language_id("javascript", "file:///src/App.JSX"),
+            "javascriptreact"
+        );
+        assert_eq!(
+            language_id("typescript", "file:///src/app.ts"),
+            "typescript"
+        );
+        assert_eq!(
+            language_id("javascript", "file:///src/app.mjs"),
+            "javascript"
+        );
         assert_eq!(language_id("rust", "file:///src/lib.rs"), "rust");
 
         let (client, mut server, mut from_client) = {
             let (ours, theirs) = socket_pair();
-            theirs.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            let client = Client::with_io(ours.try_clone().unwrap(), ours, None, Path::new("/tmp"), "typescript");
+            theirs
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let client = Client::with_io(
+                ours.try_clone().unwrap(),
+                ours,
+                None,
+                Path::new("/tmp"),
+                "typescript",
+            );
             (client, theirs.try_clone().unwrap(), BufReader::new(theirs))
         };
         let id = next(&mut from_client)["id"].clone();
-        server.write_all(&frame(&json!({ "jsonrpc": "2.0", "id": id, "result": {} }))).unwrap();
+        server
+            .write_all(&frame(&json!({ "jsonrpc": "2.0", "id": id, "result": {} })))
+            .unwrap();
         assert_eq!(next(&mut from_client)["method"], "initialized");
         client.did_open("file:///src/App.tsx", "export const A = () => <div />;");
         let open = next(&mut from_client);
-        assert_eq!(open["params"]["textDocument"]["languageId"], "typescriptreact");
+        assert_eq!(
+            open["params"]["textDocument"]["languageId"],
+            "typescriptreact"
+        );
     }
 
     #[test]
@@ -946,7 +1163,11 @@ mod tests {
             client.did_change("file:///tmp/a.rs", &doc);
             client.send(&json!({ "text": doc }));
         }
-        assert!(started.elapsed() < Duration::from_secs(2), "send blocked for {:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "send blocked for {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -954,7 +1175,12 @@ mod tests {
         let (client, _server, _from_client) = fake();
         client.stop();
         assert!(client.stopped());
-        assert!(client.request("textDocument/hover", json!({})).recv_blocking().is_err());
+        assert!(
+            client
+                .request("textDocument/hover", json!({}))
+                .recv_blocking()
+                .is_err()
+        );
     }
 
     #[test]
@@ -980,7 +1206,9 @@ mod tests {
     #[cfg(windows)]
     fn gone(pid: i32) -> bool {
         use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
-        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
         // SAFETY: plain calls; the handle is closed before returning.
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
@@ -1002,15 +1230,22 @@ mod tests {
         let pid = lock(&client.child).as_ref().unwrap().id() as i32;
         assert!(trek_core::procs::live().contains(&pid));
         drop(client);
-        wait_until("the server's group ended and reaped", || gone(pid) && !trek_core::procs::live().contains(&pid));
+        wait_until("the server's group ended and reaped", || {
+            gone(pid) && !trek_core::procs::live().contains(&pid)
+        });
     }
 
     #[test]
     fn rust_analyzer_answers_initialize_and_stops() {
         // rustup puts a rust-analyzer on the PATH even where the component isn't installed (CI's
         // toolchain): it starts, says so and exits, and would never answer.
-        let works = Command::new("rust-analyzer").arg("--version").output().is_ok_and(|o| o.status.success());
-        let Some(client) = Client::spawn(Command::new("rust-analyzer"), Path::new("/tmp"), "rust").filter(|_| works) else {
+        let works = Command::new("rust-analyzer")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        let Some(client) = Client::spawn(Command::new("rust-analyzer"), Path::new("/tmp"), "rust")
+            .filter(|_| works)
+        else {
             eprintln!("rust-analyzer isn't installed; skipped");
             return;
         };
@@ -1022,6 +1257,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         client.stop();
-        wait_until("rust-analyzer stopped", || gone(pid) && !trek_core::procs::live().contains(&pid));
+        wait_until("rust-analyzer stopped", || {
+            gone(pid) && !trek_core::procs::live().contains(&pid)
+        });
     }
 }

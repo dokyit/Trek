@@ -33,9 +33,9 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
 #[cfg(unix)]
 use std::path::Path;
+use std::path::PathBuf;
 
 pub mod instance;
 #[cfg(any(feature = "server", test))]
@@ -102,9 +102,14 @@ pub fn read_frame(r: &mut impl BufRead, max: usize) -> std::io::Result<Option<St
     if buf.last() == Some(&b'\n') {
         buf.pop();
     } else if buf.len() > max {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("frame longer than {max} bytes")));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("frame longer than {max} bytes"),
+        ));
     }
-    String::from_utf8(buf).map(Some).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "frame isn't UTF-8"))
+    String::from_utf8(buf)
+        .map(Some)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "frame isn't UTF-8"))
 }
 
 /// A frame as written: the JSON on one line, then a newline.
@@ -121,7 +126,11 @@ pub fn hello(token: &str, session: &str) -> Value {
 /// `(version, token, session)` from a hello frame.
 pub fn parse_hello(v: &Value) -> Option<(u64, &str, &str)> {
     let h = v.get("hello")?;
-    Some((h.get("version")?.as_u64()?, h.get("token")?.as_str()?, h.get("session")?.as_str()?))
+    Some((
+        h.get("version")?.as_u64()?,
+        h.get("token")?.as_str()?,
+        h.get("session")?.as_str()?,
+    ))
 }
 
 pub fn request(id: u64, method: &str, params: &Value) -> Value {
@@ -173,11 +182,21 @@ pub fn socket_dir(preferred: &Path, name: &str) -> std::io::Result<PathBuf> {
     use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
     // sockaddr_un holds 104 bytes on macOS, the terminating NUL included.
     let fits = |dir: &Path| dir.join(name).as_os_str().len() < 100;
-    let dir = if fits(preferred) { preferred.to_path_buf() } else { PathBuf::from(format!("/tmp/trek-{}", my_uid())) };
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+    let dir = if fits(preferred) {
+        preferred.to_path_buf()
+    } else {
+        PathBuf::from(format!("/tmp/trek-{}", my_uid()))
+    };
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)?;
     let meta = std::fs::symlink_metadata(&dir)?;
     if !meta.is_dir() || meta.uid() != my_uid() {
-        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, format!("{} isn't a folder of this user's", dir.display())));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{} isn't a folder of this user's", dir.display()),
+        ));
     }
     if meta.permissions().mode() & 0o077 != 0 {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
@@ -198,13 +217,21 @@ impl Client {
     /// From `ENV_*`, as Trek sets them for the session.
     pub fn from_env() -> Option<Client> {
         let var = |k| std::env::var(k).ok().filter(|v| !v.is_empty());
-        Some(Client { socket: var(ENV_SOCKET)?.into(), token: var(ENV_TOKEN)?, session: var(ENV_SESSION)? })
+        Some(Client {
+            socket: var(ENV_SOCKET)?.into(),
+            token: var(ENV_TOKEN)?,
+            session: var(ENV_SESSION)?,
+        })
     }
 
     /// From an MCP server's environment as Trek hands it to a session (`(name, value)` pairs).
     pub fn from_pairs(env: &[(String, String)]) -> Option<Client> {
         let var = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        Some(Client { socket: var(ENV_SOCKET)?.into(), token: var(ENV_TOKEN)?, session: var(ENV_SESSION)? })
+        Some(Client {
+            socket: var(ENV_SOCKET)?.into(),
+            token: var(ENV_TOKEN)?,
+            session: var(ENV_SESSION)?,
+        })
     }
 
     /// Connect and introduce ourselves. The stream can be shut down from another thread (a
@@ -212,13 +239,22 @@ impl Client {
     pub fn connect(&self) -> Result<Connection, String> {
         let stream = Stream::connect(&self.socket).map_err(|e| {
             // On Windows, a pipe the client won't trust with the token (see `PipeStream::connect`).
-            if cfg!(windows) && matches!(e.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput) {
+            if cfg!(windows)
+                && matches!(
+                    e.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput
+                )
+            {
                 format!("Didn't connect to Trek: {e}.")
             } else {
                 format!("Trek isn't reachable ({e}). Is it still running?")
             }
         })?;
-        let mut conn = Connection { reader: BufReader::new(stream.try_clone().map_err(|e| e.to_string())?), writer: stream, next: 0 };
+        let mut conn = Connection {
+            reader: BufReader::new(stream.try_clone().map_err(|e| e.to_string())?),
+            writer: stream,
+            next: 0,
+        };
         conn.send(&hello(&self.token, &self.session))?;
         let answer = conn.receive()?;
         match answer.get("error").and_then(Value::as_str) {
@@ -247,11 +283,14 @@ impl Connection {
     }
 
     fn send(&mut self, v: &Value) -> Result<(), String> {
-        self.writer.write_all(encode(v).as_bytes()).map_err(|e| format!("Lost the connection to Trek: {e}"))
+        self.writer
+            .write_all(encode(v).as_bytes())
+            .map_err(|e| format!("Lost the connection to Trek: {e}"))
     }
 
     fn receive(&mut self) -> Result<Value, String> {
-        let line = read_frame(&mut self.reader, MAX_FRAME).map_err(|e| format!("Lost the connection to Trek: {e}"))?;
+        let line = read_frame(&mut self.reader, MAX_FRAME)
+            .map_err(|e| format!("Lost the connection to Trek: {e}"))?;
         let line = line.ok_or("Trek closed the connection")?;
         serde_json::from_str(&line).map_err(|e| format!("Trek sent something that isn't JSON: {e}"))
     }
@@ -265,7 +304,10 @@ impl Connection {
             return Err("Trek answered another request".into());
         }
         match (answer.get("result"), answer.get("error")) {
-            (_, Some(e)) => Err(e.as_str().map(str::to_string).unwrap_or_else(|| e.to_string())),
+            (_, Some(e)) => Err(e
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| e.to_string())),
             (Some(r), None) => Ok(r.clone()),
             (None, None) => Err("Trek's answer has no result".into()),
         }
@@ -300,7 +342,11 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
                 "required": ["title", "prompt"]
             }),
         ),
-        ("task_status", "How a sub-agent you started is doing (running, needs approval, done, failed or cancelled), how long it has run, and a preview of its answer once done.", id.clone()),
+        (
+            "task_status",
+            "How a sub-agent you started is doing (running, needs approval, done, failed or cancelled), how long it has run, and a preview of its answer once done.",
+            id.clone(),
+        ),
         (
             "task_result",
             "A sub-agent's final answer in full (very long answers are cut short). wait=true blocks until it finishes (after timeout_seconds it returns its status \"running\" instead): start several with delegate_task wait=false, then collect each with task_result wait=true, and they run side by side meanwhile. An answer read here isn't sent to you again in a message.",
@@ -314,7 +360,11 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
                 "required": ["id"]
             }),
         ),
-        ("cancel_task", "Stop a sub-agent you started. Its thread stays, for the user to read.", id),
+        (
+            "cancel_task",
+            "Stop a sub-agent you started. Its thread stays, for the user to read.",
+            id,
+        ),
         (
             "start_thread",
             "Start a new thread of the user's own in Trek: it shows in their sidebar like one they started, runs on its own, and is theirs to read, steer and finish. Use it for separate work the user will want to follow by itself (another feature, a long investigation, work in another project), not for a quick answer you need back (use delegate_task for that). It sees only the prompt you give it, so make it self-contained. It runs with this thread's access level at most. Returns its id. With notify (the default) Trek sends you a message when it finishes, fails or needs the user's approval, so end your turn rather than polling; thread_status / read_thread follow it meanwhile, and send_to_thread sends it more. The user is told when it finishes too.",
@@ -387,7 +437,19 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
 }
 
 /// The tools' names, as `tools` lists them.
-pub const TOOL_NAMES: [&str; 11] = ["list_models", "delegate_task", "task_status", "task_result", "cancel_task", "start_thread", "handoff", "list_threads", "thread_status", "read_thread", "send_to_thread"];
+pub const TOOL_NAMES: [&str; 11] = [
+    "list_models",
+    "delegate_task",
+    "task_status",
+    "task_result",
+    "cancel_task",
+    "start_thread",
+    "handoff",
+    "list_threads",
+    "thread_status",
+    "read_thread",
+    "send_to_thread",
+];
 
 #[cfg(test)]
 mod tests {
@@ -397,18 +459,35 @@ mod tests {
     #[test]
     fn frames_are_lines_with_a_size_limit() {
         let mut r = Cursor::new(b"{\"a\":1}\n{\"b\":2}\nlast".to_vec());
-        assert_eq!(read_frame(&mut r, 64).unwrap().as_deref(), Some("{\"a\":1}"));
-        assert_eq!(read_frame(&mut r, 64).unwrap().as_deref(), Some("{\"b\":2}"));
-        assert_eq!(read_frame(&mut r, 64).unwrap().as_deref(), Some("last"), "a last frame without its newline still counts");
+        assert_eq!(
+            read_frame(&mut r, 64).unwrap().as_deref(),
+            Some("{\"a\":1}")
+        );
+        assert_eq!(
+            read_frame(&mut r, 64).unwrap().as_deref(),
+            Some("{\"b\":2}")
+        );
+        assert_eq!(
+            read_frame(&mut r, 64).unwrap().as_deref(),
+            Some("last"),
+            "a last frame without its newline still counts"
+        );
         assert_eq!(read_frame(&mut r, 64).unwrap(), None);
         let mut long = Cursor::new(vec![b'x'; 100]);
         assert!(read_frame(&mut long, 64).is_err());
         // Exactly the limit, newline after it, is fine.
         let mut edge = Cursor::new([vec![b'y'; 64], vec![b'\n']].concat());
-        assert_eq!(read_frame(&mut edge, 64).unwrap().map(|l| l.len()), Some(64));
+        assert_eq!(
+            read_frame(&mut edge, 64).unwrap().map(|l| l.len()),
+            Some(64)
+        );
         let mut bad = Cursor::new(vec![0xff, 0xfe, b'\n']);
         assert!(read_frame(&mut bad, 64).is_err());
-        assert!(encode(&json!({"x": "a\nb"})).ends_with("}\n") && encode(&json!({"x": "a\nb"})).matches('\n').count() == 1, "newlines inside strings are escaped");
+        assert!(
+            encode(&json!({"x": "a\nb"})).ends_with("}\n")
+                && encode(&json!({"x": "a\nb"})).matches('\n').count() == 1,
+            "newlines inside strings are escaped"
+        );
     }
 
     #[test]
@@ -432,8 +511,19 @@ mod tests {
 
     #[test]
     fn clients_come_from_the_session_environment() {
-        let env = vec![(ENV_SOCKET.to_string(), "/tmp/s.sock".to_string()), (ENV_TOKEN.into(), "t".into()), (ENV_SESSION.into(), "s".into())];
-        assert_eq!(Client::from_pairs(&env), Some(Client { socket: "/tmp/s.sock".into(), token: "t".into(), session: "s".into() }));
+        let env = vec![
+            (ENV_SOCKET.to_string(), "/tmp/s.sock".to_string()),
+            (ENV_TOKEN.into(), "t".into()),
+            (ENV_SESSION.into(), "s".into()),
+        ];
+        assert_eq!(
+            Client::from_pairs(&env),
+            Some(Client {
+                socket: "/tmp/s.sock".into(),
+                token: "t".into(),
+                session: "s".into()
+            })
+        );
         assert_eq!(Client::from_pairs(&env[..2]), None);
     }
 
@@ -446,23 +536,51 @@ mod tests {
             assert_eq!(schema["type"], "object", "{name}");
             assert!(description.len() > 40, "{name} says what it does");
             for req in schema["required"].as_array().into_iter().flatten() {
-                assert!(schema["properties"].get(req.as_str().unwrap()).is_some(), "{name}: {req} is described");
+                assert!(
+                    schema["properties"].get(req.as_str().unwrap()).is_some(),
+                    "{name}: {req} is described"
+                );
             }
         }
         let delegate = &tools[1].2;
         assert_eq!(delegate["required"], json!(["title", "prompt"]));
-        assert_eq!(delegate["properties"]["mode"]["enum"], json!(["advise", "implement"]));
-        let schema = |name: &str| tools.iter().find(|t| t.0 == name).map(|t| t.2.clone()).unwrap();
+        assert_eq!(
+            delegate["properties"]["mode"]["enum"],
+            json!(["advise", "implement"])
+        );
+        let schema = |name: &str| {
+            tools
+                .iter()
+                .find(|t| t.0 == name)
+                .map(|t| t.2.clone())
+                .unwrap()
+        };
         assert_eq!(schema("start_thread")["required"], json!(["prompt"]));
-        assert_eq!(schema("start_thread")["properties"]["worktree"]["type"], "boolean");
-        assert_eq!(schema("start_thread")["properties"]["notify"]["type"], "boolean");
-        assert!(schema("start_thread")["properties"].get("project").is_some());
+        assert_eq!(
+            schema("start_thread")["properties"]["worktree"]["type"],
+            "boolean"
+        );
+        assert_eq!(
+            schema("start_thread")["properties"]["notify"]["type"],
+            "boolean"
+        );
+        assert!(
+            schema("start_thread")["properties"]
+                .get("project")
+                .is_some()
+        );
         assert_eq!(schema("handoff")["required"], json!(["brief"]));
         for name in ["thread_status", "read_thread"] {
             assert_eq!(schema(name)["required"], json!(["id"]), "{name}");
         }
-        assert_eq!(schema("send_to_thread")["required"], json!(["id", "prompt"]));
-        assert_eq!(schema("read_thread")["properties"]["wait"]["type"], "boolean");
+        assert_eq!(
+            schema("send_to_thread")["required"],
+            json!(["id", "prompt"])
+        );
+        assert_eq!(
+            schema("read_thread")["properties"]["wait"]["type"],
+            "boolean"
+        );
     }
 
     #[cfg(windows)]
@@ -472,22 +590,40 @@ mod tests {
         let name = pipe_name(3).unwrap();
         assert_eq!(windows::named_for(&name), Some(std::process::id()));
         assert_ne!(name, pipe_name(3).unwrap(), "random in part");
-        assert_eq!(windows::named_for(Path::new(&windows::name_for(1234, 0, "ab12"))), Some(1234));
-        for other in [r"\\.\pipe\trek-ipc-x-1-ab", r"\\.\pipe\trek-12-0-", r"\\.\pipe\trek-12-x-ab", r"\\.\pipe\other-12-0-ab", "/tmp/trek-12-0.sock"] {
+        assert_eq!(
+            windows::named_for(Path::new(&windows::name_for(1234, 0, "ab12"))),
+            Some(1234)
+        );
+        for other in [
+            r"\\.\pipe\trek-ipc-x-1-ab",
+            r"\\.\pipe\trek-12-0-",
+            r"\\.\pipe\trek-12-x-ab",
+            r"\\.\pipe\other-12-0-ab",
+            "/tmp/trek-12-0.sock",
+        ] {
             assert_eq!(windows::named_for(Path::new(other)), None, "{other}");
         }
         let err = Stream::connect(r"\\.\pipe\not-trek").err().unwrap();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "refused without opening it: {err}");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "refused without opening it: {err}"
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn long_socket_paths_move_to_a_short_private_folder() {
-        let deep = std::env::temp_dir().join("trek-ipc-test").join("x".repeat(90));
+        let deep = std::env::temp_dir()
+            .join("trek-ipc-test")
+            .join("x".repeat(90));
         let dir = socket_dir(&deep, "trek-1.sock").unwrap();
         assert!(dir.join("trek-1.sock").as_os_str().len() < 100);
         use std::os::unix::fs::PermissionsExt as _;
-        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         let short = std::env::temp_dir().join(format!("trek-ipc-short-{}", std::process::id()));
         assert_eq!(socket_dir(&short, "t.sock").unwrap(), short);
         let _ = std::fs::remove_dir_all(short);
@@ -505,28 +641,65 @@ mod tests {
         let server = std::thread::spawn(move || {
             for _ in 0..2 {
                 let (stream, _) = listener.accept().unwrap();
-                assert_eq!(peer_uid(std::os::fd::AsRawFd::as_raw_fd(&stream)).unwrap(), my_uid());
+                assert_eq!(
+                    peer_uid(std::os::fd::AsRawFd::as_raw_fd(&stream)).unwrap(),
+                    my_uid()
+                );
                 let mut r = BufReader::new(stream.try_clone().unwrap());
                 let mut w = stream;
-                let h: Value = serde_json::from_str(&read_frame(&mut r, MAX_FRAME).unwrap().unwrap()).unwrap();
+                let h: Value =
+                    serde_json::from_str(&read_frame(&mut r, MAX_FRAME).unwrap().unwrap()).unwrap();
                 let (_, token, _) = parse_hello(&h).unwrap();
                 if token != "good" {
-                    w.write_all(encode(&json!({"error": "bad token"})).as_bytes()).unwrap();
+                    w.write_all(encode(&json!({"error": "bad token"})).as_bytes())
+                        .unwrap();
                     continue;
                 }
-                w.write_all(encode(&json!({"ok": true})).as_bytes()).unwrap();
-                let req: Value = serde_json::from_str(&read_frame(&mut r, MAX_FRAME).unwrap().unwrap()).unwrap();
+                w.write_all(encode(&json!({"ok": true})).as_bytes())
+                    .unwrap();
+                let req: Value =
+                    serde_json::from_str(&read_frame(&mut r, MAX_FRAME).unwrap().unwrap()).unwrap();
                 let echo = req["params"].clone();
-                w.write_all(encode(&reply(&req["id"], if req["method"] == "echo" { Ok(echo) } else { Err("no such method".into()) })).as_bytes()).unwrap();
+                w.write_all(
+                    encode(&reply(
+                        &req["id"],
+                        if req["method"] == "echo" {
+                            Ok(echo)
+                        } else {
+                            Err("no such method".into())
+                        },
+                    ))
+                    .as_bytes(),
+                )
+                .unwrap();
             }
         });
-        let bad = Client { socket: path.clone(), token: "bad".into(), session: "s".into() };
+        let bad = Client {
+            socket: path.clone(),
+            token: "bad".into(),
+            session: "s".into(),
+        };
         assert_eq!(bad.call("echo", &json!({})).unwrap_err(), "bad token");
-        let good = Client { socket: path.clone(), token: "good".into(), session: "s".into() };
-        assert_eq!(good.call("echo", &json!({"x": 1})).unwrap(), json!({"x": 1}));
+        let good = Client {
+            socket: path.clone(),
+            token: "good".into(),
+            session: "s".into(),
+        };
+        assert_eq!(
+            good.call("echo", &json!({"x": 1})).unwrap(),
+            json!({"x": 1})
+        );
         server.join().unwrap();
-        let gone = Client { socket: dir.join("nothing.sock"), token: "t".into(), session: "s".into() };
-        assert!(gone.call("echo", &json!({})).unwrap_err().contains("isn't reachable"));
+        let gone = Client {
+            socket: dir.join("nothing.sock"),
+            token: "t".into(),
+            session: "s".into(),
+        };
+        assert!(
+            gone.call("echo", &json!({}))
+                .unwrap_err()
+                .contains("isn't reachable")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

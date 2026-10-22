@@ -20,7 +20,9 @@ fn echo_argv() {
     if std::env::var_os(ECHO).is_none() {
         return;
     }
-    let args: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
+    let args: Vec<String> = std::env::args_os()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "{}", serde_json::to_string(&args).unwrap());
     let _ = out.flush();
@@ -51,7 +53,8 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\..\pk
 "#;
 
 /// The short form older npm versions (and hand-written wrappers) use.
-const SIMPLE_SHIM: &str = "@SET \"TREK_TEST_ARGV_ECHO=1\"\r\n@\"%~dp0\\node.exe\" \"%~dp0\\..\\pkg\\bin\\x.js\" %*\r\n";
+const SIMPLE_SHIM: &str =
+    "@SET \"TREK_TEST_ARGV_ECHO=1\"\r\n@\"%~dp0\\node.exe\" \"%~dp0\\..\\pkg\\bin\\x.js\" %*\r\n";
 
 /// A folder (with a space in its name, as under `C:\Users\First Last`) holding the stand-in as
 /// `node.exe` and the two shims; removed when dropped.
@@ -61,7 +64,8 @@ impl Shims {
     pub(crate) fn new(label: &str) -> Self {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("trek cmd args {label} {}-{n}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("trek cmd args {label} {}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let node = dir.join("node.exe");
@@ -70,7 +74,11 @@ impl Shims {
             std::fs::copy(&exe, &node).unwrap();
         }
         // CRLF, as cmd.exe expects of a batch file.
-        std::fs::write(dir.join("npm.cmd"), NPM_SHIM.replace("\r\n", "\n").replace('\n', "\r\n")).unwrap();
+        std::fs::write(
+            dir.join("npm.cmd"),
+            NPM_SHIM.replace("\r\n", "\n").replace('\n', "\r\n"),
+        )
+        .unwrap();
         std::fs::write(dir.join("simple.cmd"), SIMPLE_SHIM).unwrap();
         Self(dir)
     }
@@ -125,12 +133,21 @@ fn outcome(program: &Path, result: std::io::Result<std::process::Output>) -> Out
 }
 
 fn run_std(program: &Path, args: &[&str]) -> Outcome {
-    let result = std::process::Command::new(program).args(args).env(ECHO, "1").stdin(Stdio::null()).output();
+    let result = std::process::Command::new(program)
+        .args(args)
+        .env(ECHO, "1")
+        .stdin(Stdio::null())
+        .output();
     outcome(program, result)
 }
 
 async fn run_tokio(program: &Path, args: &[&str]) -> Outcome {
-    let result = tokio::process::Command::new(program).args(args).env(ECHO, "1").stdin(Stdio::null()).output().await;
+    let result = tokio::process::Command::new(program)
+        .args(args)
+        .env(ECHO, "1")
+        .stdin(Stdio::null())
+        .output()
+        .await;
     outcome(program, result)
 }
 
@@ -173,7 +190,11 @@ fn cases() -> Vec<(&'static str, String, Expect)> {
         s("parentheses", "(a) ((b)", Same),
         s("bang", "!PATH! wow!", Same),
         s("quote then ampersand", r#"" & echo pwned & ""#, Same),
-        s("JSON", r#"{"sandbox":{"filesystem":{"denyWrite":["C:\\a b\\"]}},"x":"%TEMP% & ^"}"#, Same),
+        s(
+            "JSON",
+            r#"{"sandbox":{"filesystem":{"denyWrite":["C:\\a b\\"]}},"x":"%TEMP% & ^"}"#,
+            Same,
+        ),
         s("tab", "a\tb", Same),
         s("umlauts", "Grüße, Jürgen", Same),
         s("emoji", "ship it 🚀👍🏽", Same),
@@ -191,9 +212,13 @@ fn cases() -> Vec<(&'static str, String, Expect)> {
 
 fn expected(arg: &str, expect: Expect) -> Box<dyn Fn(&Outcome) -> bool + '_> {
     match expect {
-        Expect::Same => Box::new(move |o| *o == Outcome::Arrived(vec!["before".into(), arg.into(), "after".into()])),
+        Expect::Same => Box::new(move |o| {
+            *o == Outcome::Arrived(vec!["before".into(), arg.into(), "after".into()])
+        }),
         Expect::Refused => Box::new(|o| *o == Outcome::Refused),
-        Expect::TooLong => Box::new(|o| matches!(o, Outcome::CmdFailed(said) if said.contains("too long"))),
+        Expect::TooLong => {
+            Box::new(|o| matches!(o, Outcome::CmdFailed(said) if said.contains("too long")))
+        }
     }
 }
 
@@ -201,7 +226,11 @@ fn short(o: &Outcome) -> String {
     match o {
         Outcome::Arrived(argv) if argv.len() == 3 => {
             let a = &argv[1];
-            if a.chars().count() > 40 { format!("arrived ({} chars)", a.chars().count()) } else { format!("arrived {a:?}") }
+            if a.chars().count() > 40 {
+                format!("arrived ({} chars)", a.chars().count())
+            } else {
+                format!("arrived {a:?}")
+            }
         }
         Outcome::Arrived(argv) => format!("arrived MANGLED {argv:?}"),
         Outcome::Refused => "refused (InvalidInput)".into(),
@@ -221,12 +250,23 @@ fn what_a_cmd_shim_receives_from_std() {
         let direct = run_std(&shims.node(), &args);
         let simple = run_std(&shims.simple(), &args);
         let npm = run_std(&shims.npm(), &args);
-        println!("| {name} | {} | {} | {} |", short(&direct), short(&simple), short(&npm));
+        println!(
+            "| {name} | {} | {} | {} |",
+            short(&direct),
+            short(&simple),
+            short(&npm)
+        );
         // Straight to a program, only NUL is refused: the shims are what's being tested.
-        let direct_ok = if arg.contains('\0') { direct == Outcome::Refused } else { expected(&arg, Expect::Same)(&direct) };
+        let direct_ok = if arg.contains('\0') {
+            direct == Outcome::Refused
+        } else {
+            expected(&arg, Expect::Same)(&direct)
+        };
         let ok = expected(&arg, expect);
         if !direct_ok || !ok(&simple) || !ok(&npm) {
-            wrong.push(format!("{name}: expected {expect:?}; direct {direct:?}, simple {simple:?}, npm {npm:?}"));
+            wrong.push(format!(
+                "{name}: expected {expect:?}; direct {direct:?}, simple {simple:?}, npm {npm:?}"
+            ));
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
@@ -243,7 +283,10 @@ async fn tokio_passes_arguments_to_a_cmd_shim_as_std_does() {
         for shim in [shims.simple(), shims.npm()] {
             let (s, t) = (run_std(&shim, &args), run_tokio(&shim, &args).await);
             if s != t {
-                differ.push(format!("{name} via {}: std {s:?}, tokio {t:?}", shim.display()));
+                differ.push(format!(
+                    "{name} via {}: std {s:?}, tokio {t:?}",
+                    shim.display()
+                ));
             }
         }
     }
@@ -261,7 +304,11 @@ fn the_check_before_starting_agrees_with_the_table() {
         // NUL is refused for any program, by std; it's not the shim's to say.
         let objects = matches!(expect, Expect::Refused | Expect::TooLong) && !arg.contains('\0');
         assert_eq!(problem.is_some(), objects, "{name}: {problem:?}");
-        assert_eq!(trek_core::detect::batch_args_problem(&shims.node(), args), None, "{name}");
+        assert_eq!(
+            trek_core::detect::batch_args_problem(&shims.node(), args),
+            None,
+            "{name}"
+        );
     }
 }
 
@@ -271,7 +318,12 @@ fn the_check_before_starting_agrees_with_the_table() {
 fn a_shim_in_a_folder_with_a_non_ascii_name_runs() {
     let shims = Shims::new("Jürgen 日本");
     for shim in [shims.simple(), shims.npm()] {
-        assert_eq!(run_std(&shim, &["a b", "%PATH%"]), Outcome::Arrived(vec!["a b".into(), "%PATH%".into()]), "{}", shim.display());
+        assert_eq!(
+            run_std(&shim, &["a b", "%PATH%"]),
+            Outcome::Arrived(vec!["a b".into(), "%PATH%".into()]),
+            "{}",
+            shim.display()
+        );
     }
 }
 
@@ -280,10 +332,22 @@ fn a_shim_in_a_folder_with_a_non_ascii_name_runs() {
 fn a_bare_name_never_finds_a_cmd() {
     let shims = Shims::new("bare");
     let path = std::env::join_paths([&shims.0]).unwrap();
-    let err = std::process::Command::new("simple").env("PATH", &path).env(ECHO, "1").stdin(Stdio::null()).output().unwrap_err();
+    let err = std::process::Command::new("simple")
+        .env("PATH", &path)
+        .env(ECHO, "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
-    let found = std::process::Command::new("simple.cmd").env("PATH", &path).env(ECHO, "1").stdin(Stdio::null()).output();
-    assert_eq!(outcome(Path::new("simple.cmd"), found), Outcome::Arrived(vec![]));
+    let found = std::process::Command::new("simple.cmd")
+        .env("PATH", &path)
+        .env(ECHO, "1")
+        .stdin(Stdio::null())
+        .output();
+    assert_eq!(
+        outcome(Path::new("simple.cmd"), found),
+        Outcome::Arrived(vec![])
+    );
 }
 
 /// An MCP server the user typed as a `.cmd` with an argument cmd.exe can't take is told so in
@@ -293,12 +357,28 @@ fn a_bare_name_never_finds_a_cmd() {
 async fn an_mcp_check_says_why_a_cmd_can_t_take_its_arguments() {
     let shims = Shims::new("mcp");
     let npm = shims.npm().display().to_string();
-    let server = crate::McpServer::stdio("x", npm.clone(), vec!["--note".into(), "two\nlines".into()], vec![]);
+    let server = crate::McpServer::stdio(
+        "x",
+        npm.clone(),
+        vec!["--note".into(), "two\nlines".into()],
+        vec![],
+    );
     let said = crate::mcp_check::list_tools(&server).await.unwrap_err();
-    assert!(said.contains("line break") && said.contains("argument 2"), "{said}");
-    let server = crate::McpServer::stdio("x", npm, vec!["-y".into(), "@scope/server & more".into()], vec![]);
+    assert!(
+        said.contains("line break") && said.contains("argument 2"),
+        "{said}"
+    );
+    let server = crate::McpServer::stdio(
+        "x",
+        npm,
+        vec!["-y".into(), "@scope/server & more".into()],
+        vec![],
+    );
     let said = crate::mcp_check::list_tools(&server).await.unwrap_err();
-    assert!(!said.contains("line break") && !said.contains("couldn't start"), "{said}");
+    assert!(
+        !said.contains("line break") && !said.contains("couldn't start"),
+        "{said}"
+    );
 }
 
 /// An MCP server (or an npx-run agent) typed as a bare name (`npx`) is found as the `.cmd` it is on
@@ -307,15 +387,31 @@ async fn an_mcp_check_says_why_a_cmd_can_t_take_its_arguments() {
 #[tokio::test]
 async fn an_mcp_check_finds_a_bare_name_as_its_cmd() {
     let shims = Shims::new("mcp-bare");
-    let path = std::env::join_paths([&shims.0]).unwrap().to_string_lossy().into_owned();
-    let on_path = |args: Vec<String>| crate::McpServer::stdio("x", "simple", args, vec![("PATH".into(), path.clone())]);
+    let path = std::env::join_paths([&shims.0])
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let on_path = |args: Vec<String>| {
+        crate::McpServer::stdio("x", "simple", args, vec![("PATH".into(), path.clone())])
+    };
     // Started (the stand-in isn't a server: it ends, which is what the check then says).
-    let said = crate::mcp_check::list_tools(&on_path(vec!["-y".into(), "@scope/server & more".into()])).await.unwrap_err();
+    let said =
+        crate::mcp_check::list_tools(&on_path(vec!["-y".into(), "@scope/server & more".into()]))
+            .await
+            .unwrap_err();
     assert!(said.starts_with("It stopped"), "{said}");
     // Not started: the arguments can't reach a `.cmd`.
-    let said = crate::mcp_check::list_tools(&on_path(vec!["-y".into(), "two\nlines".into()])).await.unwrap_err();
-    assert_eq!(said, "simple.cmd is a batch script, which Windows runs through cmd.exe, and cmd.exe can't be given an argument with a line break in it (argument 2 has one).");
+    let said = crate::mcp_check::list_tools(&on_path(vec!["-y".into(), "two\nlines".into()]))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        said,
+        "simple.cmd is a batch script, which Windows runs through cmd.exe, and cmd.exe can't be given an argument with a line break in it (argument 2 has one)."
+    );
     // A name that isn't there is said as typed.
     let none = crate::McpServer::stdio("x", "nothing-here", vec![], vec![("PATH".into(), path)]);
-    assert_eq!(crate::mcp_check::list_tools(&none).await.unwrap_err(), "nothing-here isn't installed, or isn't on your PATH.");
+    assert_eq!(
+        crate::mcp_check::list_tools(&none).await.unwrap_err(),
+        "nothing-here isn't installed, or isn't on your PATH."
+    );
 }

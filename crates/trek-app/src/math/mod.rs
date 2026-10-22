@@ -18,7 +18,10 @@ mod layout;
 mod parse;
 mod tables;
 
-use gpui_kit::component::text::{InlineElement, InlineRenderContext, MarkdownNode, MarkdownParseContext, MarkdownPlugin, markdown_ast};
+use gpui_kit::component::text::{
+    InlineElement, InlineRenderContext, MarkdownNode, MarkdownParseContext, MarkdownPlugin,
+    markdown_ast,
+};
 use gpui_kit::*;
 use layout::{Face, Item, MBox, Measure, Shape};
 use std::collections::HashMap;
@@ -45,13 +48,21 @@ impl Formula {
         let tex = region.tex(source);
         // Huge "formulas" are more likely a mistake than math: shown as written.
         let nodes = (region.closed && tex.len() <= 20_000).then(|| Arc::new(parse::parse(&tex)));
-        Some(Formula { source: source.to_string(), display: region.delim.display(), tex, nodes })
+        Some(Formula {
+            source: source.to_string(),
+            display: region.delim.display(),
+            tex,
+            nodes,
+        })
     }
 
     fn node(self, name: &'static str) -> MarkdownNode {
         let source = self.source.clone();
         let label = self.tex.trim().to_string();
-        MarkdownNode::new(name, self).text(source.clone()).markdown(source).accessibility_label(label)
+        MarkdownNode::new(name, self)
+            .text(source.clone())
+            .markdown(source)
+            .accessibility_label(label)
     }
 }
 
@@ -73,14 +84,24 @@ impl MarkdownPlugin for InlineMath {
         detect::mask(source)
     }
 
-    fn parse(&self, node: &markdown_ast::Node, cx: &MarkdownParseContext<'_>) -> Option<MarkdownNode> {
+    fn parse(
+        &self,
+        node: &markdown_ast::Node,
+        cx: &MarkdownParseContext<'_>,
+    ) -> Option<MarkdownNode> {
         if !masked(node) {
             return None;
         }
         Some(Formula::of(cx.node_source(node)?)?.node(INLINE))
     }
 
-    fn render_inline(&self, node: &MarkdownNode, context: &InlineRenderContext, window: &mut Window, _: &mut App) -> Option<InlineElement> {
+    fn render_inline(
+        &self,
+        node: &MarkdownNode,
+        context: &InlineRenderContext,
+        window: &mut Window,
+        _: &mut App,
+    ) -> Option<InlineElement> {
         let formula = node.data::<Formula>()?;
         // Still open: the plain-text fallback, which is its source.
         let nodes = formula.nodes.as_ref()?;
@@ -107,7 +128,11 @@ impl MarkdownPlugin for DisplayMath {
         DISPLAY
     }
 
-    fn parse(&self, node: &markdown_ast::Node, cx: &MarkdownParseContext<'_>) -> Option<MarkdownNode> {
+    fn parse(
+        &self,
+        node: &markdown_ast::Node,
+        cx: &MarkdownParseContext<'_>,
+    ) -> Option<MarkdownNode> {
         let source = cx.node_source(node)?;
         match node {
             markdown_ast::Node::InlineMath(_) if masked(node) => {
@@ -116,7 +141,12 @@ impl MarkdownPlugin for DisplayMath {
             }
             // A `$$` block Markdown found on its own: one that never closed. As written.
             markdown_ast::Node::Math(_) => {
-                let formula = Formula::of(source).unwrap_or(Formula { source: source.to_string(), display: true, tex: String::new(), nodes: None });
+                let formula = Formula::of(source).unwrap_or(Formula {
+                    source: source.to_string(),
+                    display: true,
+                    tex: String::new(),
+                    nodes: None,
+                });
                 Some(formula.node(DISPLAY))
             }
             _ => None,
@@ -124,10 +154,18 @@ impl MarkdownPlugin for DisplayMath {
     }
 
     fn render(&self, node: &MarkdownNode, window: &mut Window, _: &mut App) -> impl IntoElement {
-        let Some(formula) = node.data::<Formula>() else { return div().into_any_element() };
+        let Some(formula) = node.data::<Formula>() else {
+            return div().into_any_element();
+        };
         let Some(nodes) = formula.nodes.as_ref() else {
             // Still being written: plain text until it closes.
-            return div().w_full().text_color(self.ink).text_size(self.size).whitespace_normal().child(formula.source.clone()).into_any_element();
+            return div()
+                .w_full()
+                .text_color(self.ink)
+                .text_size(self.size)
+                .whitespace_normal()
+                .child(formula.source.clone())
+                .into_any_element();
         };
         let em = self.size * SCALE;
         let b = typeset(&formula.tex, nodes, true, em, window);
@@ -158,16 +196,36 @@ struct Shaper<'a> {
 
 impl Measure for Shaper<'_> {
     fn width(&self, text: &str, face: Face) -> Option<f32> {
-        let run = TextRun { len: text.len(), font: font_of(face), color: black(), background_color: None, underline: None, strikethrough: None };
-        let line = self.window.text_system().shape_line(SharedString::from(text.to_string()), self.em, &[run], None);
+        let run = TextRun {
+            len: text.len(),
+            font: font_of(face),
+            color: black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let line = self.window.text_system().shape_line(
+            SharedString::from(text.to_string()),
+            self.em,
+            &[run],
+            None,
+        );
         Some(line.width / self.em)
     }
 }
 
 fn font_of(face: Face) -> Font {
     let mut f = font(face.family());
-    f.weight = if face.bold() { FontWeight::BOLD } else { FontWeight::NORMAL };
-    f.style = if face.italic() { FontStyle::Italic } else { FontStyle::Normal };
+    f.weight = if face.bold() {
+        FontWeight::BOLD
+    } else {
+        FontWeight::NORMAL
+    };
+    f.style = if face.italic() {
+        FontStyle::Italic
+    } else {
+        FontStyle::Normal
+    };
     f
 }
 
@@ -175,7 +233,13 @@ fn font_of(face: Face) -> Font {
 type LaidOut = HashMap<(String, bool, u32), Arc<MBox>>;
 static LAID_OUT: LazyLock<Mutex<LaidOut>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn typeset(tex: &str, nodes: &[parse::Node], display: bool, em: Pixels, window: &Window) -> Arc<MBox> {
+fn typeset(
+    tex: &str,
+    nodes: &[parse::Node],
+    display: bool,
+    em: Pixels,
+    window: &Window,
+) -> Arc<MBox> {
     let key = (tex.to_string(), display, em.as_f32().to_bits());
     if let Some(b) = LAID_OUT.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return b.clone();
@@ -195,10 +259,23 @@ fn typeset(tex: &str, nodes: &[parse::Node], display: bool, em: Pixels, window: 
 /// and the text view would show its source instead.
 fn draw(b: Arc<MBox>, em: Pixels, color: Hsla) -> impl IntoElement {
     let (w, h) = (em * b.w.max(0.01), em * (b.h + b.d).max(0.01) + px(1.));
-    canvas(|_, _, _| {}, move |bounds, _, window, cx| paint(&b, bounds.origin, em, color, window, cx)).w(w).h(h).flex_none()
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, cx| paint(&b, bounds.origin, em, color, window, cx),
+    )
+    .w(w)
+    .h(h)
+    .flex_none()
 }
 
-fn paint(b: &MBox, origin: Point<Pixels>, em: Pixels, color: Hsla, window: &mut Window, cx: &mut App) {
+fn paint(
+    b: &MBox,
+    origin: Point<Pixels>,
+    em: Pixels,
+    color: Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let scale = window.scale_factor();
     // Box coordinates are ems up from the baseline; the window's are pixels down from the top.
     let baseline = origin.y + em * b.h;
@@ -213,23 +290,67 @@ fn paint(b: &MBox, origin: Point<Pixels>, em: Pixels, color: Hsla, window: &mut 
     };
     for item in &b.items {
         match item {
-            Item::Glyph { x, y, text, face, size } => {
+            Item::Glyph {
+                x,
+                y,
+                text,
+                face,
+                size,
+            } => {
                 let font_size = em * *size;
-                let run = TextRun { len: text.len(), font: font_of(*face), color, background_color: None, underline: None, strikethrough: None };
-                let line = window.text_system().shape_line(SharedString::from(text.clone()), font_size, &[run], None);
+                let run = TextRun {
+                    len: text.len(),
+                    font: font_of(*face),
+                    color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let line = window.text_system().shape_line(
+                    SharedString::from(text.clone()),
+                    font_size,
+                    &[run],
+                    None,
+                );
                 let p = at(*x, *y);
-                let _ = line.paint(point(p.x, p.y - line.ascent), line.ascent + line.descent, TextAlign::Left, None, window, cx);
+                let _ = line.paint(
+                    point(p.x, p.y - line.ascent),
+                    line.ascent + line.descent,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
             }
             Item::Rule { x, y, w, h } => rule(*x, *y, *w, *h, window),
             Item::Frame { x, y, w, h, t } => {
                 rule(*x, *y, *w, *t, window);
                 rule(*x, *y + *h - *t, *w, *t, window);
-                let left = Bounds::new(at(*x, *y + *h), size(px(((em * *t).as_f32() * scale).round().max(1.) / scale), em * *h));
+                let left = Bounds::new(
+                    at(*x, *y + *h),
+                    size(
+                        px(((em * *t).as_f32() * scale).round().max(1.) / scale),
+                        em * *h,
+                    ),
+                );
                 window.paint_quad(fill(left, color));
-                let right = Bounds::new(at(*x + *w - *t, *y + *h), size(px(((em * *t).as_f32() * scale).round().max(1.) / scale), em * *h));
+                let right = Bounds::new(
+                    at(*x + *w - *t, *y + *h),
+                    size(
+                        px(((em * *t).as_f32() * scale).round().max(1.) / scale),
+                        em * *h,
+                    ),
+                );
                 window.paint_quad(fill(right, color));
             }
-            Item::Shape { x, y, w, h, t, shape: Shape::Strike { forward } } => {
+            Item::Shape {
+                x,
+                y,
+                w,
+                h,
+                t,
+                shape: Shape::Strike { forward },
+            } => {
                 // A diagonal as a run of device-pixel squares: quads only, no paths (GPUI's
                 // path pipeline stalls the GPU drawn this many times in a text view).
                 let (x0, top) = (at(*x, *y + *h), em * *h);
@@ -240,7 +361,13 @@ fn paint(b: &MBox, origin: Point<Pixels>, em: Pixels, color: Hsla, window: &mut 
                     let f = i as f32 / steps as f32;
                     let fy = if *forward { 1. - f } else { f };
                     let p = point(x0.x + width * f, x0.y + top * fy);
-                    window.paint_quad(fill(Bounds::new(point(p.x - thick / 2., p.y - thick / 2.), size(thick, thick)), color));
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(p.x - thick / 2., p.y - thick / 2.),
+                            size(thick, thick),
+                        ),
+                        color,
+                    ));
                 }
             }
         }

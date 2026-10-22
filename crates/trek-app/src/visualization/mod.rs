@@ -22,7 +22,9 @@ use std::collections::{BTreeSet, HashMap};
 use std::hash::{Hash as _, Hasher as _};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
-use trek_core::visualization::{MockNode, SemanticTone, TableCell, TimePoint, Visualization, VisualizationContent};
+use trek_core::visualization::{
+    MockNode, SemanticTone, TableCell, TimePoint, Visualization, VisualizationContent,
+};
 
 use crate::assets::Lucide;
 
@@ -42,7 +44,10 @@ pub(super) const NARROW: f32 = 460.;
 #[derive(Clone)]
 enum Block {
     /// Closed and valid.
-    Drawn { visualization: Visualization, ident: u64 },
+    Drawn {
+        visualization: Visualization,
+        ident: u64,
+    },
     /// Its fence hasn't closed: what's been written so far.
     Arriving {
         kind: Option<String>,
@@ -68,10 +73,13 @@ fn ident(visualization: &Visualization) -> u64 {
 /// `source`, a fenced block as Markdown found it, ends in its closing fence. An open fence runs to
 /// the end of the answer, so while an agent is still writing the block its last line is JSON.
 fn fence_closed(source: &str) -> bool {
-    source.trim_end().rsplit_once('\n').is_some_and(|(_, last)| {
-        let last = last.trim();
-        last.len() >= 3 && last.bytes().all(|b| b == b'`')
-    })
+    source
+        .trim_end()
+        .rsplit_once('\n')
+        .is_some_and(|(_, last)| {
+            let last = last.trim();
+            last.len() >= 3 && last.bytes().all(|b| b == b'`')
+        })
 }
 
 /// The assistant-answer Markdown extension: claims every `trek-viz` fence. `live`: the answer
@@ -111,23 +119,56 @@ impl MarkdownPlugin for VisualizationPlugin {
             match trek_core::visualization::parse_fenced(source) {
                 Ok(visualization) => {
                     let text = accessible_description(&visualization);
-                    (Block::Drawn { ident: ident(&visualization), visualization }, text)
+                    (
+                        Block::Drawn {
+                            ident: ident(&visualization),
+                            visualization,
+                        },
+                        text,
+                    )
                 }
-                Err(error) => (Block::Invalid { reason: error.reason(), source: source.to_string() }, source.to_string()),
+                Err(error) => (
+                    Block::Invalid {
+                        reason: error.reason(),
+                        source: source.to_string(),
+                    },
+                    source.to_string(),
+                ),
             }
         } else {
             let partial = trek_core::visualization::parse_partial(&code.value);
             let text = match &partial.drawable {
                 Some(visualization) => accessible_description(visualization),
-                None => format!("Visualization{}, being drawn", partial.title.as_deref().map(|t| format!(": {t}")).unwrap_or_default()),
+                None => format!(
+                    "Visualization{}, being drawn",
+                    partial
+                        .title
+                        .as_deref()
+                        .map(|t| format!(": {t}"))
+                        .unwrap_or_default()
+                ),
             };
             let drawable = partial.drawable.map(|v| {
                 let id = ident(&v);
                 (v, id)
             });
-            (Block::Arriving { kind: partial.kind, title: partial.title, drawable, complete: partial.complete, source: source.to_string() }, text)
+            (
+                Block::Arriving {
+                    kind: partial.kind,
+                    title: partial.title,
+                    drawable,
+                    complete: partial.complete,
+                    source: source.to_string(),
+                },
+                text,
+            )
         };
-        Some(MarkdownNode::new(PLUGIN, block).text(text.clone()).markdown(source.to_string()).accessibility_label(text))
+        Some(
+            MarkdownNode::new(PLUGIN, block)
+                .text(text.clone())
+                .markdown(source.to_string())
+                .accessibility_label(text),
+        )
     }
 
     fn render(&self, node: &MarkdownNode, window: &mut Window, cx: &mut App) -> impl IntoElement {
@@ -135,12 +176,32 @@ impl MarkdownPlugin for VisualizationPlugin {
         // Padding, not margin: a margin here collapses through the Markdown block it sits in,
         // and the answer would be measured shorter than it draws.
         let shown = match node.data::<Block>() {
-            Some(Block::Drawn { visualization, ident }) => artifact(visualization, key, *ident, false, window, cx),
-            Some(Block::Arriving { drawable: Some((visualization, ident)), complete, .. }) if self.live || *complete => {
-                artifact(visualization, key, *ident, self.live && !complete, window, cx)
+            Some(Block::Drawn {
+                visualization,
+                ident,
+            }) => artifact(visualization, key, *ident, false, window, cx),
+            Some(Block::Arriving {
+                drawable: Some((visualization, ident)),
+                complete,
+                ..
+            }) if self.live || *complete => artifact(
+                visualization,
+                key,
+                *ident,
+                self.live && !complete,
+                window,
+                cx,
+            ),
+            Some(Block::Arriving { kind, title, .. }) if self.live => {
+                pending(kind.as_deref(), title.as_deref(), key, window, cx)
             }
-            Some(Block::Arriving { kind, title, .. }) if self.live => pending(kind.as_deref(), title.as_deref(), key, window, cx),
-            Some(Block::Arriving { source, .. }) => invalid("the answer ended before the block was finished", source, key, self.size, cx),
+            Some(Block::Arriving { source, .. }) => invalid(
+                "the answer ended before the block was finished",
+                source,
+                key,
+                self.size,
+                cx,
+            ),
             Some(Block::Invalid { reason, source }) => invalid(reason, source, key, self.size, cx),
             None => return div().into_any_element(),
         };
@@ -179,7 +240,8 @@ pub(crate) fn relayout(cx: &mut App) {
 
 /// When each visualization first appeared, so its entrance plays once — not again on every
 /// re-render, nor when a window drops and rebuilds its state.
-static ENTERED: LazyLock<Mutex<HashMap<u64, Instant>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static ENTERED: LazyLock<Mutex<HashMap<u64, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// How far the entrance of `hash` has played, 0 to 1 (1 at once without motion).
 fn entrance(hash: u64, motion: bool, window: &mut Window) -> f32 {
@@ -234,8 +296,16 @@ impl Look {
             muted: theme.muted_foreground,
             hairline: theme.foreground.opacity(if dark { 0.10 } else { 0.11 }),
             grid: theme.foreground.opacity(if dark { 0.06 } else { 0.07 }),
-            inset: if dark { theme.background.opacity(0.6) } else { theme.muted.opacity(0.55) },
-            gap: if dark { theme.background } else { theme.muted.blend(theme.background.opacity(0.45)) },
+            inset: if dark {
+                theme.background.opacity(0.6)
+            } else {
+                theme.muted.opacity(0.55)
+            },
+            gap: if dark {
+                theme.background
+            } else {
+                theme.muted.blend(theme.background.opacity(0.45))
+            },
             popover: theme.popover,
             mono: theme.mono_font_family.clone(),
         }
@@ -326,7 +396,11 @@ impl Frame {
     }
 
     /// A click listener that switches series or part `ix` on or off — never all of them off.
-    pub fn toggle(&self, ix: usize, count: usize) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+    pub fn toggle(
+        &self,
+        ix: usize,
+        count: usize,
+    ) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
         let state = self.state.clone();
         move |_, _, cx| {
             state.update(cx, |s, cx| {
@@ -345,7 +419,11 @@ pub(crate) fn arrive(enter: f32, ix: usize, n: usize) -> f32 {
     if enter >= 1. {
         return 1.;
     }
-    let delay = if n > 1 { ix as f32 / (n - 1) as f32 * 0.35 } else { 0. };
+    let delay = if n > 1 {
+        ix as f32 / (n - 1) as f32 * 0.35
+    } else {
+        0.
+    };
     ease_out(((enter - delay) / 0.65).clamp(0., 1.))
 }
 
@@ -383,7 +461,11 @@ pub(super) fn format_number(value: f64) -> String {
     let abs = value.abs();
     let compact = |div: f64, suffix: &str| {
         let v = value / div;
-        let s = if (v * 10.).round() % 10. == 0. { format!("{v:.0}") } else { format!("{v:.1}") };
+        let s = if (v * 10.).round() % 10. == 0. {
+            format!("{v:.0}")
+        } else {
+            format!("{v:.1}")
+        };
         format!("{s}{suffix}")
     };
     if abs >= 1e12 {
@@ -412,7 +494,11 @@ pub(super) fn format_exact(value: f64) -> String {
         group_thousands(&format!("{value:.0}"))
     } else {
         let text = format!("{value}");
-        if text.contains('e') { text } else { group_thousands(&text) }
+        if text.contains('e') {
+            text
+        } else {
+            group_thousands(&text)
+        }
     }
 }
 
@@ -422,13 +508,17 @@ pub(super) fn format_tick(value: f64, step: f64) -> String {
         return format_number(value);
     }
     // As many decimals as the step has: 0.25 needs two, 0.5 one, 200 none.
-    let decimals = (0..6).find(|d| (step * 10f64.powi(*d as i32)).fract().abs() < 1e-6).unwrap_or(6);
+    let decimals = (0..6)
+        .find(|d| (step * 10f64.powi(*d as i32)).fract().abs() < 1e-6)
+        .unwrap_or(6);
     group_thousands(&format!("{value:.decimals$}"))
 }
 
 fn group_thousands(s: &str) -> String {
     let (sign, rest) = s.strip_prefix('-').map_or(("", s), |r| ("-", r));
-    let (int, frac) = rest.split_once('.').map_or((rest, None), |(i, f)| (i, Some(f)));
+    let (int, frac) = rest
+        .split_once('.')
+        .map_or((rest, None), |(i, f)| (i, Some(f)));
     let mut out = String::new();
     for (i, c) in int.chars().enumerate() {
         if i > 0 && (int.len() - i) % 3 == 0 {
@@ -493,19 +583,55 @@ pub(crate) fn shell(id: SharedString, look: &Look, cx: &App) -> Stateful<Div> {
         .border_1()
         .border_color(look.hairline)
         // Raised off the column: a step lighter at night, the paper itself by day.
-        .bg(if look.dark { theme.foreground.opacity(0.022) } else { theme.background })
+        .bg(if look.dark {
+            theme.foreground.opacity(0.022)
+        } else {
+            theme.background
+        })
         .when(!look.dark, |el| {
-            el.shadow(vec![BoxShadow { color: gpui_kit::black().opacity(0.04), offset: point(px(0.), px(1.)), blur_radius: px(2.), spread_radius: px(0.), inset: false }])
+            el.shadow(vec![BoxShadow {
+                color: gpui_kit::black().opacity(0.04),
+                offset: point(px(0.), px(1.)),
+                blur_radius: px(2.),
+                spread_radius: px(0.),
+                inset: false,
+            }])
         })
         .overflow_hidden()
         // The light a glass pane catches: a bright rim and a sheen fading down from it.
-        .child(div().absolute().top_0().left_0().right_0().h(px(1.)).bg(sheen_top))
-        .child(div().absolute().top_0().left_0().right_0().h(px(64.)).bg(linear_gradient(180., linear_color_stop(sheen, 0.), linear_color_stop(sheen.opacity(0.), 1.))))
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(px(1.))
+                .bg(sheen_top),
+        )
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(px(64.))
+                .bg(linear_gradient(
+                    180.,
+                    linear_color_stop(sheen, 0.),
+                    linear_color_stop(sheen.opacity(0.), 1.),
+                )),
+        )
 }
 
 /// The title row: what it is, its name, and what can be done with it; the summary runs the full
 /// width beneath, so a narrow column doesn't squeeze it beside the actions.
-pub(crate) fn header(icon: Lucide, title: AnyElement, actions: AnyElement, summary: AnyElement, look: &Look) -> Div {
+pub(crate) fn header(
+    icon: Lucide,
+    title: AnyElement,
+    actions: AnyElement,
+    summary: AnyElement,
+    look: &Look,
+) -> Div {
     v_flex()
         .w_full()
         .gap(px(4.))
@@ -537,11 +663,23 @@ pub(crate) fn header(icon: Lucide, title: AnyElement, actions: AnyElement, summa
 }
 
 pub(crate) fn title_text(title: impl Into<SharedString>, look: &Look) -> AnyElement {
-    div().line_clamp(2).text_size(px(13.5)).line_height(relative(1.3)).font_semibold().text_color(look.fg).child(title.into()).into_any_element()
+    div()
+        .line_clamp(2)
+        .text_size(px(13.5))
+        .line_height(relative(1.3))
+        .font_semibold()
+        .text_color(look.fg)
+        .child(title.into())
+        .into_any_element()
 }
 
 pub(crate) fn summary_text(summary: impl Into<SharedString>, look: &Look) -> AnyElement {
-    div().text_size(px(12.)).line_height(relative(1.45)).text_color(look.muted).child(summary.into()).into_any_element()
+    div()
+        .text_size(px(12.))
+        .line_height(relative(1.45))
+        .text_color(look.muted)
+        .child(summary.into())
+        .into_any_element()
 }
 
 /// 0 to 1 and round again, once per `SHIMMER`, for everything still being drawn; it keeps
@@ -571,13 +709,31 @@ fn drawing_label(key: usize, phase: f32, look: &Look) -> AnyElement {
         .into_any_element()
 }
 
-fn artifact(viz: &Visualization, key: usize, ident: u64, drawing: bool, window: &mut Window, cx: &mut App) -> AnyElement {
-    let state = window.use_keyed_state(SharedString::from(format!("trek-viz-state-{key}")), cx, |_, _| VizState::default());
+fn artifact(
+    viz: &Visualization,
+    key: usize,
+    ident: u64,
+    drawing: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let state = window.use_keyed_state(
+        SharedString::from(format!("trek-viz-state-{key}")),
+        cx,
+        |_, _| VizState::default(),
+    );
     let motion = motion(cx);
     let enter = entrance(ident ^ key as u64, motion, window);
     let (hover, hover_at, cursor, hidden, showing_data, width) = {
         let s = state.read(cx);
-        (s.hover, s.hover_at, s.cursor, s.hidden.clone(), s.data, s.width)
+        (
+            s.hover,
+            s.hover_at,
+            s.cursor,
+            s.hidden.clone(),
+            s.data,
+            s.width,
+        )
     };
     let lift = match hover_at {
         Some(at) if motion => {
@@ -590,23 +746,74 @@ fn artifact(viz: &Visualization, key: usize, ident: u64, drawing: bool, window: 
         _ => 1.,
     };
     let look = Look::of(cx);
-    let frame = Frame { key, state: state.clone(), hover, lift, cursor, hidden, width: width.unwrap_or(ASSUMED_WIDTH), enter, look: look.clone() };
+    let frame = Frame {
+        key,
+        state: state.clone(),
+        hover,
+        lift,
+        cursor,
+        hidden,
+        width: width.unwrap_or(ASSUMED_WIDTH),
+        enter,
+        look: look.clone(),
+    };
     let data = data_table(viz);
     let body = if showing_data && let Some(data) = &data {
-        charts::table_view(&data.columns, &data.rows.iter().map(|r| (r.clone(), None)).collect::<Vec<_>>(), &frame, "datatable", cx)
+        charts::table_view(
+            &data.columns,
+            &data
+                .rows
+                .iter()
+                .map(|r| (r.clone(), None))
+                .collect::<Vec<_>>(),
+            &frame,
+            "datatable",
+            cx,
+        )
     } else {
         match &viz.content {
-            VisualizationContent::Bar { bars, x_label, y_label } => charts::bars(bars, x_label.as_deref(), y_label.as_deref(), &frame, cx),
-            VisualizationContent::Line { x_labels, series, area, y_label, unit } => charts::line(x_labels, series, *area, y_label.as_deref(), unit.as_deref(), &frame, cx),
-            VisualizationContent::Donut { parts, unit } => charts::donut(parts, unit.as_deref(), &frame, cx),
+            VisualizationContent::Bar {
+                bars,
+                x_label,
+                y_label,
+            } => charts::bars(bars, x_label.as_deref(), y_label.as_deref(), &frame, cx),
+            VisualizationContent::Line {
+                x_labels,
+                series,
+                area,
+                y_label,
+                unit,
+            } => charts::line(
+                x_labels,
+                series,
+                *area,
+                y_label.as_deref(),
+                unit.as_deref(),
+                &frame,
+                cx,
+            ),
+            VisualizationContent::Donut { parts, unit } => {
+                charts::donut(parts, unit.as_deref(), &frame, cx)
+            }
             VisualizationContent::Stats { tiles } => charts::stats(tiles, &frame, cx),
             VisualizationContent::Table { columns, rows } => {
-                let rows: Vec<(Vec<TableCell>, Option<SemanticTone>)> = rows.iter().map(|r| (r.cells().to_vec(), r.tone())).collect();
+                let rows: Vec<(Vec<TableCell>, Option<SemanticTone>)> = rows
+                    .iter()
+                    .map(|r| (r.cells().to_vec(), r.tone()))
+                    .collect();
                 charts::table_view(columns, &rows, &frame, "table", cx)
             }
-            VisualizationContent::Heatmap { x_labels, y_labels, values } => charts::heatmap(x_labels, y_labels, values, &frame, cx),
+            VisualizationContent::Heatmap {
+                x_labels,
+                y_labels,
+                values,
+            } => charts::heatmap(x_labels, y_labels, values, &frame, cx),
             VisualizationContent::Treemap { items } => charts::treemap(items, &frame, cx),
-            VisualizationContent::Timeline { events, ticks, unit } => diagrams::timeline(events, ticks.as_deref(), unit.as_deref(), &frame, cx),
+            VisualizationContent::Timeline {
+                events,
+                ticks,
+                unit,
+            } => diagrams::timeline(events, ticks.as_deref(), unit.as_deref(), &frame, cx),
             VisualizationContent::Flow { nodes, edges } => diagrams::flow(nodes, edges, &frame, cx),
             VisualizationContent::Layers { layers } => diagrams::layers(layers, &frame, cx),
             VisualizationContent::Mockup { nodes } => mockup::mockup(nodes, &frame, cx),
@@ -651,9 +858,30 @@ fn artifact(viz: &Visualization, key: usize, ident: u64, drawing: bool, window: 
             .opacity(0.72)
             .group_hover(group.clone(), |s| s.opacity(1.))
             // A table is its own data: no second view of it.
-            .when(data.is_some() && !matches!(viz.content, VisualizationContent::Table { .. }), |el| el.child(view_switch(&frame, showing_data, cx)))
-            .when_some(markdown, |el, markdown| el.child(copy_button(frame.id("copy", 0), Lucide::Sheet, "Copy as Markdown table", markdown, "Table copied", None, &look)))
-            .child(copy_button(frame.id("json", 0), Lucide::Braces, "Copy data as JSON", json, "Visualization data copied", None, &look))
+            .when(
+                data.is_some() && !matches!(viz.content, VisualizationContent::Table { .. }),
+                |el| el.child(view_switch(&frame, showing_data, cx)),
+            )
+            .when_some(markdown, |el, markdown| {
+                el.child(copy_button(
+                    frame.id("copy", 0),
+                    Lucide::Sheet,
+                    "Copy as Markdown table",
+                    markdown,
+                    "Table copied",
+                    None,
+                    &look,
+                ))
+            })
+            .child(copy_button(
+                frame.id("json", 0),
+                Lucide::Braces,
+                "Copy data as JSON",
+                json,
+                "Visualization data copied",
+                None,
+                &look,
+            ))
             .into_any_element()
     };
     let csv = data.as_ref().map(|d| d.csv());
@@ -661,7 +889,13 @@ fn artifact(viz: &Visualization, key: usize, ident: u64, drawing: bool, window: 
     shell(SharedString::from(format!("trek-viz-{key}")), &look, cx)
         .test_support()
         .group(group.clone())
-        .child(header(kind_icon(&viz.content), title_text(viz.title.clone(), &look), actions, summary_text(viz.summary.clone(), &look), &look))
+        .child(header(
+            kind_icon(&viz.content),
+            title_text(viz.title.clone(), &look),
+            actions,
+            summary_text(viz.summary.clone(), &look),
+            &look,
+        ))
         .child(
             div()
                 // No scroll of its own: the transcript scrolls, and a box that scrolls inside
@@ -675,9 +909,15 @@ fn artifact(viz: &Visualization, key: usize, ident: u64, drawing: bool, window: 
                 .child(body)
                 .when(showing_data && !drawing, |el| {
                     el.when_some(csv, |el, csv| {
-                        el.child(
-                            h_flex().pt_2().justify_end().child(copy_button(frame.id("csv", 0), Lucide::Copy, "Copy as CSV", csv, "CSV copied", Some("CSV"), &look)),
-                        )
+                        el.child(h_flex().pt_2().justify_end().child(copy_button(
+                            frame.id("csv", 0),
+                            Lucide::Copy,
+                            "Copy as CSV",
+                            csv,
+                            "CSV copied",
+                            Some("CSV"),
+                            &look,
+                        )))
                     })
                 }),
         )
@@ -702,7 +942,13 @@ fn expected_height(kind: Option<&str>) -> f32 {
 
 /// A visualization still being written with nothing whole to draw yet: its card, with its type
 /// and title as soon as they're written, and a quiet skeleton of its marks where they will go.
-fn pending(kind: Option<&str>, title: Option<&str>, key: usize, window: &mut Window, cx: &mut App) -> AnyElement {
+fn pending(
+    kind: Option<&str>,
+    title: Option<&str>,
+    key: usize,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     let look = Look::of(cx);
     let motion = motion(cx);
     let phase = shimmer(motion, window);
@@ -714,9 +960,19 @@ fn pending(kind: Option<&str>, title: Option<&str>, key: usize, window: &mut Win
     };
     let title = match title {
         Some(t) => title_text(t.to_string(), &look),
-        None => div().h(px(17.)).flex().items_center().child(bar(0.42, 10.)).into_any_element(),
+        None => div()
+            .h(px(17.))
+            .flex()
+            .items_center()
+            .child(bar(0.42, 10.))
+            .into_any_element(),
     };
-    let summary = div().h(px(17.)).flex().items_center().child(bar(0.6, 8.)).into_any_element();
+    let summary = div()
+        .h(px(17.))
+        .flex()
+        .items_center()
+        .child(bar(0.6, 8.))
+        .into_any_element();
     let height = expected_height(kind);
     // A hint of the marks to come, in the type's own shape.
     let marks = match kind {
@@ -724,13 +980,25 @@ fn pending(kind: Option<&str>, title: Option<&str>, key: usize, window: &mut Win
             .size_full()
             .p_3()
             .gap(px(12.))
-            .children([0.82, 0.58, 0.7, 0.36, 0.5].into_iter().map(|w| h_flex().gap(px(10.)).child(div().w(px(64.)).flex_none().child(bar(1., 8.))).child(div().flex_1().child(bar(w, 12.)))))
+            .children([0.82, 0.58, 0.7, 0.36, 0.5].into_iter().map(|w| {
+                h_flex()
+                    .gap(px(10.))
+                    .child(div().w(px(64.)).flex_none().child(bar(1., 8.)))
+                    .child(div().flex_1().child(bar(w, 12.)))
+            }))
             .into_any_element(),
         Some("stats") => h_flex()
             .size_full()
             .p_3()
             .gap_3()
-            .children((0..3).map(|_| v_flex().flex_1().gap(px(10.)).child(bar(0.5, 8.)).child(bar(0.7, 16.)).child(bar(0.35, 8.))))
+            .children((0..3).map(|_| {
+                v_flex()
+                    .flex_1()
+                    .gap(px(10.))
+                    .child(bar(0.5, 8.))
+                    .child(bar(0.7, 16.))
+                    .child(bar(0.35, 8.))
+            }))
             .into_any_element(),
         _ => div().into_any_element(),
     };
@@ -751,8 +1019,24 @@ fn pending(kind: Option<&str>, title: Option<&str>, key: usize, window: &mut Win
     shell(SharedString::from(format!("viz-pending-{key}")), &look, cx)
         .aria_label(label)
         .test_support()
-        .child(header(kind_icon_named(kind.unwrap_or("")), title, drawing_label(key, phase, &look), summary, &look))
-        .child(div().w_full().px_4().pb_4().child(inset(&look).relative().overflow_hidden().w_full().h(px(height)).child(marks).when(motion, |el| el.child(sweep))))
+        .child(header(
+            kind_icon_named(kind.unwrap_or("")),
+            title,
+            drawing_label(key, phase, &look),
+            summary,
+            &look,
+        ))
+        .child(
+            div().w_full().px_4().pb_4().child(
+                inset(&look)
+                    .relative()
+                    .overflow_hidden()
+                    .w_full()
+                    .h(px(height))
+                    .child(marks)
+                    .when(motion, |el| el.child(sweep)),
+            ),
+        )
         .into_any_element()
 }
 
@@ -779,10 +1063,31 @@ fn invalid(reason: &str, source: &str, key: usize, size: Pixels, cx: &App) -> An
                 .bg(crate::palette::amber(cx).opacity(if look.dark { 0.06 } else { 0.07 }))
                 .text_size(px(12.))
                 .line_height(relative(1.45))
-                .child(div().flex_none().h(px(12. * 1.45)).flex().items_center().child(Icon::new(IconName::TriangleAlert).size(px(13.)).text_color(crate::palette::amber(cx))))
+                .child(
+                    div()
+                        .flex_none()
+                        .h(px(12. * 1.45))
+                        .flex()
+                        .items_center()
+                        .child(
+                            Icon::new(IconName::TriangleAlert)
+                                .size(px(13.))
+                                .text_color(crate::palette::amber(cx)),
+                        ),
+                )
                 .child(div().flex_1().min_w_0().text_color(look.muted).child(note)),
         )
-        .child(crate::md::keyed(SharedString::from(format!("viz-raw-{key}")), source.to_string(), None, None, size, false, false, None, cx))
+        .child(crate::md::keyed(
+            SharedString::from(format!("viz-raw-{key}")),
+            source.to_string(),
+            None,
+            None,
+            size,
+            false,
+            false,
+            None,
+            cx,
+        ))
         .into_any_element()
 }
 
@@ -803,9 +1108,20 @@ fn view_switch(frame: &Frame, showing_data: bool, cx: &App) -> AnyElement {
             .text_size(px(11.))
             .cursor_pointer()
             .when(active, |el| {
-                el.bg(raised).text_color(look.fg).font_medium().shadow(vec![BoxShadow { color: gpui_kit::black().opacity(if look.dark { 0.4 } else { 0.08 }), offset: point(px(0.), px(1.)), blur_radius: px(2.), spread_radius: px(0.), inset: false }])
+                el.bg(raised)
+                    .text_color(look.fg)
+                    .font_medium()
+                    .shadow(vec![BoxShadow {
+                        color: gpui_kit::black().opacity(if look.dark { 0.4 } else { 0.08 }),
+                        offset: point(px(0.), px(1.)),
+                        blur_radius: px(2.),
+                        spread_radius: px(0.),
+                        inset: false,
+                    }])
             })
-            .when(!active, |el| el.text_color(look.muted).hover(|s| s.text_color(look.fg)))
+            .when(!active, |el| {
+                el.text_color(look.muted).hover(|s| s.text_color(look.fg))
+            })
             .on_click(move |_, _, cx| {
                 state.update(cx, |s, cx| {
                     s.data = data;
@@ -827,7 +1143,15 @@ fn view_switch(frame: &Frame, showing_data: bool, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-fn copy_button(id: SharedString, icon: Lucide, tip: &'static str, text: String, done: &'static str, label: Option<&'static str>, look: &Look) -> AnyElement {
+fn copy_button(
+    id: SharedString,
+    icon: Lucide,
+    tip: &'static str,
+    text: String,
+    done: &'static str,
+    label: Option<&'static str>,
+    look: &Look,
+) -> AnyElement {
     let muted = look.muted;
     let hover = look.fg.opacity(0.06);
     h_flex()
@@ -842,12 +1166,16 @@ fn copy_button(id: SharedString, icon: Lucide, tip: &'static str, text: String, 
         .cursor_pointer()
         .hover(|s| s.bg(hover))
         .child(Icon::new(icon).size(px(13.)).text_color(muted))
-        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
+        })
         .on_click(move |_, window, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
             crate::toast::push(window, done, cx);
         })
-        .when_some(label, |el, label| el.child(div().text_size(px(11.)).text_color(muted).child(label)))
+        .when_some(label, |el, label| {
+            el.child(div().text_size(px(11.)).text_color(muted).child(label))
+        })
         .into_any_element()
 }
 
@@ -862,15 +1190,31 @@ pub(super) fn readout(look: &Look) -> Div {
         .border_color(look.fg.opacity(if look.dark { 0.14 } else { 0.10 }))
         .bg(look.popover)
         .shadow(vec![
-            BoxShadow { color: gpui_kit::black().opacity(if look.dark { 0.45 } else { 0.10 }), offset: point(px(0.), px(6.)), blur_radius: px(18.), spread_radius: px(-4.), inset: false },
-            BoxShadow { color: gpui_kit::black().opacity(if look.dark { 0.3 } else { 0.05 }), offset: point(px(0.), px(1.)), blur_radius: px(3.), spread_radius: px(0.), inset: false },
+            BoxShadow {
+                color: gpui_kit::black().opacity(if look.dark { 0.45 } else { 0.10 }),
+                offset: point(px(0.), px(6.)),
+                blur_radius: px(18.),
+                spread_radius: px(-4.),
+                inset: false,
+            },
+            BoxShadow {
+                color: gpui_kit::black().opacity(if look.dark { 0.3 } else { 0.05 }),
+                offset: point(px(0.), px(1.)),
+                blur_radius: px(3.),
+                spread_radius: px(0.),
+                inset: false,
+            },
         ])
         .text_size(px(11.5))
 }
 
 /// The inset surface marks sit on.
 pub(crate) fn inset(look: &Look) -> Div {
-    div().rounded(px(9.)).border_1().border_color(look.fg.opacity(if look.dark { 0.05 } else { 0.06 })).bg(look.inset)
+    div()
+        .rounded(px(9.))
+        .border_1()
+        .border_color(look.fg.opacity(if look.dark { 0.05 } else { 0.06 }))
+        .bg(look.inset)
 }
 
 // ---------- data: the table behind every chart ----------
@@ -885,7 +1229,11 @@ impl DataTable {
     fn cell_text(cell: &TableCell) -> String {
         match cell {
             TableCell::Number(n) => {
-                if n.fract() == 0. && n.abs() < 1e15 { format!("{n:.0}") } else { n.to_string() }
+                if n.fract() == 0. && n.abs() < 1e15 {
+                    format!("{n:.0}")
+                } else {
+                    n.to_string()
+                }
             }
             TableCell::Text(t) => t.clone(),
         }
@@ -893,21 +1241,65 @@ impl DataTable {
 
     pub fn markdown(&self) -> String {
         let escape = |s: String| s.replace('|', "\\|");
-        let mut out = format!("| {} |\n", self.columns.iter().cloned().map(escape).collect::<Vec<_>>().join(" | "));
-        let numeric: Vec<bool> = (0..self.columns.len()).map(|c| self.rows.iter().all(|r| matches!(r.get(c), Some(TableCell::Number(_))))).collect();
-        out.push_str(&format!("| {} |\n", numeric.iter().map(|n| if *n { "---:" } else { "---" }).collect::<Vec<_>>().join(" | ")));
+        let mut out = format!(
+            "| {} |\n",
+            self.columns
+                .iter()
+                .cloned()
+                .map(escape)
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+        let numeric: Vec<bool> = (0..self.columns.len())
+            .map(|c| {
+                self.rows
+                    .iter()
+                    .all(|r| matches!(r.get(c), Some(TableCell::Number(_))))
+            })
+            .collect();
+        out.push_str(&format!(
+            "| {} |\n",
+            numeric
+                .iter()
+                .map(|n| if *n { "---:" } else { "---" })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        ));
         for row in &self.rows {
-            out.push_str(&format!("| {} |\n", row.iter().map(|c| escape(Self::cell_text(c))).collect::<Vec<_>>().join(" | ")));
+            out.push_str(&format!(
+                "| {} |\n",
+                row.iter()
+                    .map(|c| escape(Self::cell_text(c)))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ));
         }
         out
     }
 
     pub fn csv(&self) -> String {
-        let field = |s: String| if s.contains([',', '"', '\n']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s };
-        let mut out = self.columns.iter().cloned().map(field).collect::<Vec<_>>().join(",");
+        let field = |s: String| {
+            if s.contains([',', '"', '\n']) {
+                format!("\"{}\"", s.replace('"', "\"\""))
+            } else {
+                s
+            }
+        };
+        let mut out = self
+            .columns
+            .iter()
+            .cloned()
+            .map(field)
+            .collect::<Vec<_>>()
+            .join(",");
         out.push('\n');
         for row in &self.rows {
-            out.push_str(&row.iter().map(|c| field(Self::cell_text(c))).collect::<Vec<_>>().join(","));
+            out.push_str(
+                &row.iter()
+                    .map(|c| field(Self::cell_text(c)))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
             out.push('\n');
         }
         out
@@ -929,35 +1321,100 @@ fn time_text(point: &TimePoint) -> TableCell {
 pub(super) fn data_table(viz: &Visualization) -> Option<DataTable> {
     use VisualizationContent as V;
     let (columns, rows): (Vec<String>, Vec<Vec<TableCell>>) = match &viz.content {
-        V::Bar { bars, x_label, y_label } => (
-            vec![y_label.clone().unwrap_or_else(|| "Label".into()), x_label.clone().unwrap_or_else(|| "Value".into())],
-            bars.iter().map(|b| vec![text(&b.label), TableCell::Number(b.value)]).collect(),
+        V::Bar {
+            bars,
+            x_label,
+            y_label,
+        } => (
+            vec![
+                y_label.clone().unwrap_or_else(|| "Label".into()),
+                x_label.clone().unwrap_or_else(|| "Value".into()),
+            ],
+            bars.iter()
+                .map(|b| vec![text(&b.label), TableCell::Number(b.value)])
+                .collect(),
         ),
-        V::Line { x_labels, series, .. } => (
-            std::iter::once(String::new()).chain(series.iter().map(|s| s.label.clone())).collect(),
-            x_labels.iter().enumerate().map(|(i, x)| std::iter::once(text(x)).chain(series.iter().map(|s| TableCell::Number(s.values[i]))).collect()).collect(),
+        V::Line {
+            x_labels, series, ..
+        } => (
+            std::iter::once(String::new())
+                .chain(series.iter().map(|s| s.label.clone()))
+                .collect(),
+            x_labels
+                .iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    std::iter::once(text(x))
+                        .chain(series.iter().map(|s| TableCell::Number(s.values[i])))
+                        .collect()
+                })
+                .collect(),
         ),
         V::Donut { parts, .. } => {
             let total: f64 = parts.iter().map(|p| p.value).sum();
             (
                 vec!["Part".into(), "Value".into(), "Share".into()],
-                parts.iter().map(|p| vec![text(&p.label), TableCell::Number(p.value), text(&format!("{:.1}%", p.value / total * 100.))]).collect(),
+                parts
+                    .iter()
+                    .map(|p| {
+                        vec![
+                            text(&p.label),
+                            TableCell::Number(p.value),
+                            text(&format!("{:.1}%", p.value / total * 100.)),
+                        ]
+                    })
+                    .collect(),
             )
         }
         V::Stats { tiles } => (
             vec!["Figure".into(), "Value".into(), "Change".into()],
-            tiles.iter().map(|t| vec![text(&t.label), text(&t.value), text(t.delta.as_deref().unwrap_or(""))]).collect(),
+            tiles
+                .iter()
+                .map(|t| {
+                    vec![
+                        text(&t.label),
+                        text(&t.value),
+                        text(t.delta.as_deref().unwrap_or("")),
+                    ]
+                })
+                .collect(),
         ),
-        V::Table { columns, rows } => (columns.clone(), rows.iter().map(|r| r.cells().to_vec()).collect()),
-        V::Heatmap { x_labels, y_labels, values } => (
-            std::iter::once(String::new()).chain(x_labels.iter().cloned()).collect(),
-            y_labels.iter().zip(values).map(|(y, row)| std::iter::once(text(y)).chain(row.iter().map(|v| TableCell::Number(*v))).collect()).collect(),
+        V::Table { columns, rows } => (
+            columns.clone(),
+            rows.iter().map(|r| r.cells().to_vec()).collect(),
+        ),
+        V::Heatmap {
+            x_labels,
+            y_labels,
+            values,
+        } => (
+            std::iter::once(String::new())
+                .chain(x_labels.iter().cloned())
+                .collect(),
+            y_labels
+                .iter()
+                .zip(values)
+                .map(|(y, row)| {
+                    std::iter::once(text(y))
+                        .chain(row.iter().map(|v| TableCell::Number(*v)))
+                        .collect()
+                })
+                .collect(),
         ),
         V::Treemap { items } => {
             let total: f64 = items.iter().map(|i| i.weight).sum();
             (
                 vec!["Item".into(), "Weight".into(), "Share".into()],
-                items.iter().map(|i| vec![text(&i.label), TableCell::Number(i.weight), text(&format!("{:.1}%", i.weight / total * 100.))]).collect(),
+                items
+                    .iter()
+                    .map(|i| {
+                        vec![
+                            text(&i.label),
+                            TableCell::Number(i.weight),
+                            text(&format!("{:.1}%", i.weight / total * 100.)),
+                        ]
+                    })
+                    .collect(),
             )
         }
         V::Timeline { events, .. } => {
@@ -984,7 +1441,13 @@ pub(super) fn data_table(viz: &Visualization) -> Option<DataTable> {
             )
         }
         V::Flow { nodes, edges } => {
-            let label = |id: &str| nodes.iter().find(|n| n.id == id).map(|n| n.label.clone()).unwrap_or_default();
+            let label = |id: &str| {
+                nodes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .map(|n| n.label.clone())
+                    .unwrap_or_default()
+            };
             let grouped = nodes.iter().any(|n| n.group.is_some());
             let mut columns = vec!["Step".to_string()];
             if grouped {
@@ -1018,7 +1481,16 @@ pub(super) fn data_table(viz: &Visualization) -> Option<DataTable> {
         }
         V::Layers { layers } => (
             vec!["Layer".into(), "Detail".into(), "Contains".into()],
-            layers.iter().map(|l| vec![text(&l.label), text(l.detail.as_deref().unwrap_or("")), text(&l.items.join(", "))]).collect(),
+            layers
+                .iter()
+                .map(|l| {
+                    vec![
+                        text(&l.label),
+                        text(l.detail.as_deref().unwrap_or("")),
+                        text(&l.items.join(", ")),
+                    ]
+                })
+                .collect(),
         ),
         V::Mockup { .. } => return None,
     };
@@ -1058,7 +1530,13 @@ fn accessible_description(viz: &Visualization) -> String {
             }
         }
         VisualizationContent::Flow { edges, nodes } => {
-            let label = |id: &str| nodes.iter().find(|n| n.id == id).map(|n| n.label.as_str()).unwrap_or("");
+            let label = |id: &str| {
+                nodes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .map(|n| n.label.as_str())
+                    .unwrap_or("")
+            };
             for node in nodes {
                 push(match (&node.group, &node.detail) {
                     (Some(g), Some(d)) => format!("{} ({g}): {d}", node.label),
@@ -1085,7 +1563,11 @@ fn accessible_description(viz: &Visualization) -> String {
                                 TableCell::Number(n) => format_number(*n),
                                 TableCell::Text(t) => t.clone(),
                             };
-                            if column.is_empty() { value } else { format!("{column} {value}") }
+                            if column.is_empty() {
+                                value
+                            } else {
+                                format!("{column} {value}")
+                            }
                         })
                         .collect();
                     push(cells.join(", "));
@@ -1098,7 +1580,10 @@ fn accessible_description(viz: &Visualization) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Visualization, TableCell, accessible_description, data_table, fence_closed, format_exact, format_number, format_tick, ident, with_unit};
+    use super::{
+        TableCell, Visualization, accessible_description, data_table, fence_closed, format_exact,
+        format_number, format_tick, ident, with_unit,
+    };
 
     #[test]
     fn a_block_keeps_its_identity_while_it_arrives() {
@@ -1110,10 +1595,20 @@ mod tests {
         assert!(fence_closed("```trek-viz\n{\"a\":1}\n````\n"));
         // The entrance is keyed on type and title, written before any mark: the first marks
         // drawn and the finished chart are the same visualization, so it plays once.
-        let full = trek_agents::mock::VIZ_GALLERY.iter().find(|(k, _)| *k == "bar").unwrap().1;
+        let full = trek_agents::mock::VIZ_GALLERY
+            .iter()
+            .find(|(k, _)| *k == "bar")
+            .unwrap()
+            .1;
         let json = &full[full.find('{').unwrap()..full.rfind('}').unwrap() + 1];
-        let early = trek_core::visualization::parse_partial(&json[..json.find("trek-agents").unwrap()]).drawable.expect("two bars drawn");
-        assert_eq!(ident(&early), ident(&trek_core::visualization::parse(json).unwrap()));
+        let early =
+            trek_core::visualization::parse_partial(&json[..json.find("trek-agents").unwrap()])
+                .drawable
+                .expect("two bars drawn");
+        assert_eq!(
+            ident(&early),
+            ident(&trek_core::visualization::parse(json).unwrap())
+        );
     }
 
     #[test]
@@ -1142,23 +1637,41 @@ mod tests {
 
     #[test]
     fn every_chart_has_a_table_and_a_complete_description() {
-        let line = viz(r#"{"version":1,"title":"Latency","summary":"p95 falls","type":"line","x_labels":["Mon","Tue"],"series":[{"label":"p95","values":[120,80]}],"unit":"ms"}"#);
+        let line = viz(
+            r#"{"version":1,"title":"Latency","summary":"p95 falls","type":"line","x_labels":["Mon","Tue"],"series":[{"label":"p95","values":[120,80]}],"unit":"ms"}"#,
+        );
         let data = data_table(&line).unwrap();
-        assert_eq!(data.markdown(), "|  | p95 |\n| --- | ---: |\n| Mon | 120 |\n| Tue | 80 |\n");
+        assert_eq!(
+            data.markdown(),
+            "|  | p95 |\n| --- | ---: |\n| Mon | 120 |\n| Tue | 80 |\n"
+        );
         assert_eq!(data.csv(), ",p95\nMon,120\nTue,80\n");
         assert!(accessible_description(&line).contains("Mon, p95 120; Tue, p95 80"));
 
-        let flow = viz(r#"{"version":1,"title":"Send","summary":"s","type":"flow","nodes":[{"id":"a","label":"Composer"},{"id":"b","label":"Agent","detail":"runs the turn"}],"edges":[{"from":"a","to":"b","label":"prompt"}]}"#);
+        let flow = viz(
+            r#"{"version":1,"title":"Send","summary":"s","type":"flow","nodes":[{"id":"a","label":"Composer"},{"id":"b","label":"Agent","detail":"runs the turn"}],"edges":[{"from":"a","to":"b","label":"prompt"}]}"#,
+        );
         let described = accessible_description(&flow);
-        assert!(described.contains("Agent: runs the turn") && described.contains("Composer to Agent (prompt)"), "{described}");
-        assert_eq!(data_table(&flow).unwrap().rows[0][1], TableCell::Text("Agent (prompt)".into()));
+        assert!(
+            described.contains("Agent: runs the turn")
+                && described.contains("Composer to Agent (prompt)"),
+            "{described}"
+        );
+        assert_eq!(
+            data_table(&flow).unwrap().rows[0][1],
+            TableCell::Text("Agent (prompt)".into())
+        );
 
-        let table = viz(r#"{"version":1,"title":"T","summary":"s","type":"table","columns":["a|b","n"],"rows":[["x, \"y\"",1.5]]}"#);
+        let table = viz(
+            r#"{"version":1,"title":"T","summary":"s","type":"table","columns":["a|b","n"],"rows":[["x, \"y\"",1.5]]}"#,
+        );
         let data = data_table(&table).unwrap();
         assert!(data.markdown().contains("a\\|b"));
         assert!(data.csv().contains("\"x, \"\"y\"\"\",1.5"));
 
-        let mock = viz(r#"{"version":1,"title":"M","summary":"s","type":"mockup","nodes":[{"kind":"frame","device":"phone","children":[{"kind":"button","text":"Deploy"}]}]}"#);
+        let mock = viz(
+            r#"{"version":1,"title":"M","summary":"s","type":"mockup","nodes":[{"kind":"frame","device":"phone","children":[{"kind":"button","text":"Deploy"}]}]}"#,
+        );
         assert!(data_table(&mock).is_none());
         assert!(accessible_description(&mock).contains("phone frame; Deploy"));
     }

@@ -11,7 +11,7 @@ mod restore;
 mod review;
 mod transcript;
 
-pub use input::UndoAllOrStop;
 #[cfg(test)]
 pub use input::AiInput;
+pub use input::UndoAllOrStop;
 pub use pane::AiPane;

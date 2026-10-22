@@ -8,7 +8,9 @@ use serde_json::{Value, json};
 
 use crate::desktop::{self, Button, Desktop, Input, WindowInfo};
 use crate::keys;
-use crate::rpc::{self, ToolDef, ToolResult, arg_f64, arg_point, arg_str, opt_f64, point_schema, text};
+use crate::rpc::{
+    self, ToolDef, ToolResult, arg_f64, arg_point, arg_str, opt_f64, point_schema, text,
+};
 use crate::util::{MAX_IMAGE_SIDE, fmt_num};
 
 const ACCESSIBILITY_ERROR: &str = "Accessibility permission is missing, so trek-mcp cannot control the mouse or keyboard. \
@@ -160,10 +162,24 @@ struct Target {
 impl Default for Computer {
     fn default() -> Self {
         let desktop: Box<dyn Desktop> = Box::new(desktop::Native::default());
-        let asked = std::env::var(trek_ipc::ENV_COMPUTER_MODE).is_ok_and(|m| m == trek_ipc::COMPUTER_BACKGROUND);
-        let mode = if asked && desktop.works_behind() { Mode::Background } else { Mode::Front };
-        let report = (mode == Mode::Background).then(trek_ipc::Client::from_env).flatten().map(Reporter::start);
-        Self { last: None, desktop, mode, target: None, report }
+        let asked = std::env::var(trek_ipc::ENV_COMPUTER_MODE)
+            .is_ok_and(|m| m == trek_ipc::COMPUTER_BACKGROUND);
+        let mode = if asked && desktop.works_behind() {
+            Mode::Background
+        } else {
+            Mode::Front
+        };
+        let report = (mode == Mode::Background)
+            .then(trek_ipc::Client::from_env)
+            .flatten()
+            .map(Reporter::start);
+        Self {
+            last: None,
+            desktop,
+            mode,
+            target: None,
+            report,
+        }
     }
 }
 
@@ -186,7 +202,10 @@ impl Reporter {
                 if conn.is_none() {
                     conn = client.connect().ok();
                 }
-                if conn.as_mut().is_some_and(|c| c.call(trek_ipc::COMPUTER_ACTIVITY, &activity).is_err()) {
+                if conn
+                    .as_mut()
+                    .is_some_and(|c| c.call(trek_ipc::COMPUTER_ACTIVITY, &activity).is_err())
+                {
                     conn = None;
                 }
             }
@@ -196,7 +215,13 @@ impl Reporter {
 }
 
 /// A report of one step in window `w`: `point` (and a drag's `from`) in its own coordinates.
-fn activity(action: &str, detail: String, w: &WindowInfo, point: Option<(f64, f64)>, from: Option<(f64, f64)>) -> Value {
+fn activity(
+    action: &str,
+    detail: String,
+    w: &WindowInfo,
+    point: Option<(f64, f64)>,
+    from: Option<(f64, f64)>,
+) -> Value {
     let at = |p: Option<(f64, f64)>| p.map(|(x, y)| json!({"x": x, "y": y}));
     json!({
         "action": action,
@@ -210,7 +235,10 @@ fn activity(action: &str, detail: String, w: &WindowInfo, point: Option<(f64, f6
 /// What's typed, as the picture-in-picture window says it: the start of it, on one line.
 fn typing(text: &str) -> String {
     const SHOWN: usize = 32;
-    let one_line: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let one_line: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
     let one_line = one_line.trim();
     let mut shown: String = one_line.chars().take(SHOWN).collect();
     if one_line.chars().count() > SHOWN {
@@ -259,7 +287,9 @@ fn is_trek(w: &WindowInfo) -> bool {
 
 /// The window a click at (`x`, `y`) in screen points would land in: the frontmost holding it.
 fn window_at(windows: &[WindowInfo], x: f64, y: f64) -> Option<&WindowInfo> {
-    windows.iter().find(|w| x >= w.x && x < w.x + w.w && y >= w.y && y < w.y + w.h)
+    windows
+        .iter()
+        .find(|w| x >= w.x && x < w.x + w.w && y >= w.y && y < w.y + w.h)
 }
 
 impl Computer {
@@ -268,12 +298,12 @@ impl Computer {
     /// give itself Full access in Settings. When the windows can't be listed, nothing is done:
     /// better no click than one nobody checked.
     fn keep_off_trek(&self, points: &[(f64, f64)]) -> Result<(), String> {
-        let windows = self
-            .desktop
-            .windows()
-            .map_err(|e| format!("Couldn't check which window that is ({e}), so nothing was done."))?;
+        let windows = self.desktop.windows().map_err(|e| {
+            format!("Couldn't check which window that is ({e}), so nothing was done.")
+        })?;
         let in_trek = |&(x, y): &(f64, f64)| {
-            window_at(&windows, x, y).is_some_and(is_trek) || self.desktop.owner_at(x, y).is_some_and(|o| is_trek_app(&o))
+            window_at(&windows, x, y).is_some_and(is_trek)
+                || self.desktop.owner_at(x, y).is_some_and(|o| is_trek_app(&o))
         };
         if points.iter().any(in_trek) {
             return Err(OWN_WINDOW.into());
@@ -283,10 +313,9 @@ impl Computer {
 
     /// Refuses keys while Trek's own window is the one in front (they'd be typed into Trek).
     fn keep_keys_off_trek(&self) -> Result<(), String> {
-        let front = self
-            .desktop
-            .key_window()
-            .map_err(|e| format!("Couldn't check which window is in front ({e}), so nothing was typed."))?;
+        let front = self.desktop.key_window().map_err(|e| {
+            format!("Couldn't check which window is in front ({e}), so nothing was typed.")
+        })?;
         if front.as_ref().is_some_and(is_trek) {
             return Err(OWN_KEYS.into());
         }
@@ -297,7 +326,10 @@ impl Computer {
 /// Tools that post mouse or keyboard events, and so need Accessibility. Screenshots need Screen
 /// Recording instead (checked when capturing); the rest need nothing.
 fn needs_accessibility(tool: &str) -> bool {
-    matches!(tool, "click" | "move_mouse" | "drag" | "scroll" | "type_text" | "key")
+    matches!(
+        tool,
+        "click" | "move_mouse" | "drag" | "scroll" | "type_text" | "key"
+    )
 }
 
 /// Longest side of a full-screen screenshot: the display's size in points (so one screenshot
@@ -308,9 +340,23 @@ fn full_side(logical_w: f64, logical_h: f64) -> u32 {
 }
 
 /// What the model is told with a full-screen screenshot.
-fn full_info(iw: u32, ih: u32, lw: f64, lh: f64, physical: Option<(u64, u64)>, m: Mapping, note: &str) -> String {
-    let physical = physical.map(|(pw, ph)| format!(", {pw}x{ph} physical pixels")).unwrap_or_default();
-    let units = if cfg!(windows) { "pixels" } else { "logical points" };
+fn full_info(
+    iw: u32,
+    ih: u32,
+    lw: f64,
+    lh: f64,
+    physical: Option<(u64, u64)>,
+    m: Mapping,
+    note: &str,
+) -> String {
+    let physical = physical
+        .map(|(pw, ph)| format!(", {pw}x{ph} physical pixels"))
+        .unwrap_or_default();
+    let units = if cfg!(windows) {
+        "pixels"
+    } else {
+        "logical points"
+    };
     format!(
         "Screenshot of the main display: {iw}x{ih} px. Screen: {}x{} {units}{physical}. \
 Scale: 1 screenshot px = {} {SCREEN_UNITS}. Pass screenshot pixel coordinates (origin top-left) to click, move_mouse, drag \
@@ -323,7 +369,13 @@ and scroll; trek-mcp converts them to screen {SCREEN_UNITS}.{note}",
 
 /// What the model is told with a zoom: the region `(x0, y0, rw, rh)` in screen points, rendered
 /// at `iw`×`ih`, and how to map a point in the zoom back to full-screenshot pixels.
-fn region_info(region_pts: (f64, f64, f64, f64), iw: u32, ih: u32, m: Mapping, note: &str) -> String {
+fn region_info(
+    region_pts: (f64, f64, f64, f64),
+    iw: u32,
+    ih: u32,
+    m: Mapping,
+    note: &str,
+) -> String {
     let (x0, y0, rw, rh) = region_pts;
     let (sx, sy, sw, sh) = (x0 / m.scale, y0 / m.scale, rw / m.scale, rh / m.scale);
     format!(
@@ -346,7 +398,13 @@ screenshot space. A point (u, v) in this image is at full-screenshot ({} + u*{},
 }
 
 /// A zoom's area in screen points from a region in full-screenshot pixels.
-fn region_points(m: Mapping, x: f64, y: f64, w: f64, h: f64) -> Result<(f64, f64, f64, f64), String> {
+fn region_points(
+    m: Mapping,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Result<(f64, f64, f64, f64), String> {
     if w <= 0.0 || h <= 0.0 {
         return Err("region width and height must be positive".into());
     }
@@ -369,7 +427,12 @@ impl Computer {
 
         let region = match args.get("region") {
             None | Some(Value::Null) => None,
-            Some(r) => Some((arg_f64(r, "x")?, arg_f64(r, "y")?, arg_f64(r, "width")?, arg_f64(r, "height")?)),
+            Some(r) => Some((
+                arg_f64(r, "x")?,
+                arg_f64(r, "y")?,
+                arg_f64(r, "width")?,
+                arg_f64(r, "height")?,
+            )),
         };
 
         match region {
@@ -377,7 +440,15 @@ impl Computer {
                 let shot = self.desktop.capture(None, full_side(lw, lh))?;
                 let m = Mapping::from_image(lw, lh, shot.width, shot.height);
                 self.last = Some(m);
-                let info = full_info(shot.width, shot.height, lw, lh, display.physical, m, shot.note);
+                let info = full_info(
+                    shot.width,
+                    shot.height,
+                    lw,
+                    lh,
+                    display.physical,
+                    m,
+                    shot.note,
+                );
                 Ok(vec![rpc::image_png(shot.png_base64), text(info)])
             }
             // Region → screen points, through the full-screen mapping.
@@ -400,7 +471,11 @@ impl Computer {
         let btn = match button {
             "left" => Button::Left,
             "right" => Button::Right,
-            other => return Err(format!("Unknown button {other:?}; use \"left\" or \"right\"")),
+            other => {
+                return Err(format!(
+                    "Unknown button {other:?}; use \"left\" or \"right\""
+                ));
+            }
         };
         let (px, py) = self.mapping().to_points(x, y)?;
         self.keep_off_trek(&[(px, py)])?;
@@ -423,7 +498,11 @@ impl Computer {
         let (x, y) = (arg_f64(args, "x")?, arg_f64(args, "y")?);
         let (px, py) = self.mapping().to_points(x, y)?;
         self.desktop.move_to(px, py)?;
-        Ok(vec![text(format!("Moved mouse to ({}, {}).", fmt_num(x), fmt_num(y)))])
+        Ok(vec![text(format!(
+            "Moved mouse to ({}, {}).",
+            fmt_num(x),
+            fmt_num(y)
+        ))])
     }
 
     fn drag(&mut self, args: &Value) -> ToolResult {
@@ -467,7 +546,10 @@ impl Computer {
         }
         self.keep_keys_off_trek()?;
         self.desktop.type_text(s)?;
-        Ok(vec![text(format!("Typed {} characters.", s.chars().count()))])
+        Ok(vec![text(format!(
+            "Typed {} characters.",
+            s.chars().count()
+        ))])
     }
 
     fn key(&mut self, args: &Value) -> ToolResult {
@@ -483,7 +565,9 @@ impl Computer {
         if name.is_empty() {
             return Err("name is empty".into());
         }
-        self.desktop.open_app(name).map_err(|e| format!("Could not open {name:?}: {e}"))?;
+        self.desktop
+            .open_app(name)
+            .map_err(|e| format!("Could not open {name:?}: {e}"))?;
         Ok(vec![text(format!(
             "Opened {name}. Take a screenshot to see it (it may take a moment to appear)."
         ))])
@@ -492,7 +576,11 @@ impl Computer {
     fn list_windows(&mut self) -> ToolResult {
         let windows = self.desktop.windows()?;
         let m = self.mapping();
-        let working_in = self.target.as_ref().map(|t| t.window.id).filter(|_| self.mode == Mode::Background);
+        let working_in = self
+            .target
+            .as_ref()
+            .map(|t| t.window.id)
+            .filter(|_| self.mode == Mode::Background);
         let list: Vec<Value> = windows
             .iter()
             .map(|w| {
@@ -515,8 +603,16 @@ impl Computer {
                 v
             })
             .collect();
-        let titles = if cfg!(windows) { "" } else { " Window titles are empty without Screen Recording permission." };
-        let units = if cfg!(windows) { " bounds_points is in screen pixels." } else { "" };
+        let titles = if cfg!(windows) {
+            ""
+        } else {
+            " Window titles are empty without Screen Recording permission."
+        };
+        let units = if cfg!(windows) {
+            " bounds_points is in screen pixels."
+        } else {
+            ""
+        };
         let header = match self.mode {
             Mode::Front => format!(
                 "{} on-screen windows, front to back. bounds_screenshot uses screenshot pixel coordinates (scale {}).{units}{titles}",
@@ -544,9 +640,14 @@ impl Computer {
     /// The window being worked in, as it is now. Gone (closed, minimised, on another Space):
     /// it's forgotten, and the agent is told to pick another.
     fn working_window(&mut self) -> Result<WindowInfo, String> {
-        let Some(t) = &self.target else { return Err(NO_WINDOW.into()) };
+        let Some(t) = &self.target else {
+            return Err(NO_WINDOW.into());
+        };
         if t.window.id == 0 {
-            return Err(format!("{} has no window yet, so there's nothing to point at: keys reach it (cmd+n opens a window in most apps), then list_windows and screenshot with its window_id.", t.window.owner));
+            return Err(format!(
+                "{} has no window yet, so there's nothing to point at: keys reach it (cmd+n opens a window in most apps), then list_windows and screenshot with its window_id.",
+                t.window.owner
+            ));
         }
         let (id, owner, title) = (t.window.id, t.window.owner.clone(), t.window.title.clone());
         match self.desktop.window(id)? {
@@ -559,8 +660,14 @@ impl Computer {
             }
             None => {
                 self.target = None;
-                let title = if title.is_empty() { String::new() } else { format!(" “{title}”") };
-                Err(format!("{owner}'s window{title} has closed or left the screen (minimised, or on another Space). Call list_windows and screenshot another window_id, or open_app."))
+                let title = if title.is_empty() {
+                    String::new()
+                } else {
+                    format!(" “{title}”")
+                };
+                Err(format!(
+                    "{owner}'s window{title} has closed or left the screen (minimised, or on another Space). Call list_windows and screenshot another window_id, or open_app."
+                ))
             }
         }
     }
@@ -568,7 +675,9 @@ impl Computer {
     /// The working window and the mapping of its latest screenshot, for a pointer action.
     fn pointing(&mut self) -> Result<(WindowInfo, Mapping), String> {
         let w = self.working_window()?;
-        let m = self.target.as_ref().and_then(|t| t.shot).ok_or("Take a screenshot of the window first: x/y are pixels in its latest screenshot.")?;
+        let m = self.target.as_ref().and_then(|t| t.shot).ok_or(
+            "Take a screenshot of the window first: x/y are pixels in its latest screenshot.",
+        )?;
         if (m.logical_w - w.w).abs() > 1.0 || (m.logical_h - w.h).abs() > 1.0 {
             return Err(RESIZED.into());
         }
@@ -578,7 +687,12 @@ impl Computer {
     fn bg_screenshot(&mut self, args: &Value) -> ToolResult {
         let region = match args.get("region") {
             None | Some(Value::Null) => None,
-            Some(r) => Some((arg_f64(r, "x")?, arg_f64(r, "y")?, arg_f64(r, "width")?, arg_f64(r, "height")?)),
+            Some(r) => Some((
+                arg_f64(r, "x")?,
+                arg_f64(r, "y")?,
+                arg_f64(r, "width")?,
+                arg_f64(r, "height")?,
+            )),
         };
         if let Some(id) = opt_f64(args, "window_id")? {
             let id = id as i64;
@@ -587,7 +701,10 @@ impl Computer {
                 return Err(OWN_WINDOW_BEHIND.into());
             }
             if self.target.as_ref().is_none_or(|t| t.window.id != id) {
-                self.target = Some(Target { window: w, shot: None });
+                self.target = Some(Target {
+                    window: w,
+                    shot: None,
+                });
             }
         }
         // Nothing picked yet: the whole screen, for finding the way.
@@ -600,7 +717,11 @@ impl Computer {
             return Ok(shot);
         }
         let w = self.working_window()?;
-        let title = if w.title.is_empty() { String::new() } else { format!(" “{}”", w.title) };
+        let title = if w.title.is_empty() {
+            String::new()
+        } else {
+            format!(" “{}”", w.title)
+        };
         match region {
             None => {
                 let shot = self.desktop.capture_window(&w, None, full_side(w.w, w.h))?;
@@ -627,9 +748,23 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
             Some((x, y, rw, rh)) => {
                 let (_, m) = self.pointing()?;
                 let region = region_points(m, x, y, rw, rh)?;
-                let shot = self.desktop.capture_window(&w, Some(region), MAX_IMAGE_SIDE)?;
-                self.tell(activity("screenshot", "Looking closer".into(), &w, Some((region.0 + region.2 / 2.0, region.1 + region.3 / 2.0)), None));
-                let info = region_info(region, shot.width, shot.height, m, shot.note).replace("full-screen screenshot", "window's screenshot").replace("full-screenshot", "window-screenshot").replace(&format!("(screen {SCREEN_UNITS}"), &format!("(window {SCREEN_UNITS}"));
+                let shot = self
+                    .desktop
+                    .capture_window(&w, Some(region), MAX_IMAGE_SIDE)?;
+                self.tell(activity(
+                    "screenshot",
+                    "Looking closer".into(),
+                    &w,
+                    Some((region.0 + region.2 / 2.0, region.1 + region.3 / 2.0)),
+                    None,
+                ));
+                let info = region_info(region, shot.width, shot.height, m, shot.note)
+                    .replace("full-screen screenshot", "window's screenshot")
+                    .replace("full-screenshot", "window-screenshot")
+                    .replace(
+                        &format!("(screen {SCREEN_UNITS}"),
+                        &format!("(window {SCREEN_UNITS}"),
+                    );
                 Ok(vec![rpc::image_png(shot.png_base64), text(info)])
             }
         }
@@ -645,11 +780,23 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         let btn = match button {
             "left" => Button::Left,
             "right" => Button::Right,
-            other => return Err(format!("Unknown button {other:?}; use \"left\" or \"right\"")),
+            other => {
+                return Err(format!(
+                    "Unknown button {other:?}; use \"left\" or \"right\""
+                ));
+            }
         };
         let (w, m) = self.pointing()?;
         let (px, py) = m.to_points(x, y)?;
-        self.desktop.behind(&w, &Input::Click { x: px, y: py, button: btn, count: count as u32 })?;
+        self.desktop.behind(
+            &w,
+            &Input::Click {
+                x: px,
+                y: py,
+                button: btn,
+                count: count as u32,
+            },
+        )?;
         let what = match (count, btn) {
             (_, Button::Right) => "Right-clicked",
             (2, _) => "Double-clicked",
@@ -663,7 +810,14 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
             _ => "Clicking",
         };
         self.tell(activity("click", doing.into(), &w, Some((px, py)), None));
-        Ok(vec![text(format!("{what} at ({}, {}) in {}'s window (window {SCREEN_UNITS} {}, {}), in the background.", fmt_num(x), fmt_num(y), w.owner, fmt_num(px), fmt_num(py)))])
+        Ok(vec![text(format!(
+            "{what} at ({}, {}) in {}'s window (window {SCREEN_UNITS} {}, {}), in the background.",
+            fmt_num(x),
+            fmt_num(y),
+            w.owner,
+            fmt_num(px),
+            fmt_num(py)
+        ))])
     }
 
     fn bg_move(&mut self, args: &Value) -> ToolResult {
@@ -671,8 +825,19 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         let (w, m) = self.pointing()?;
         let (px, py) = m.to_points(x, y)?;
         self.desktop.behind(&w, &Input::Move(px, py))?;
-        self.tell(activity("move", "Pointing".into(), &w, Some((px, py)), None));
-        Ok(vec![text(format!("Moved the pointer to ({}, {}) in {}'s window, in the background (the user's pointer stays put).", fmt_num(x), fmt_num(y), w.owner))])
+        self.tell(activity(
+            "move",
+            "Pointing".into(),
+            &w,
+            Some((px, py)),
+            None,
+        ));
+        Ok(vec![text(format!(
+            "Moved the pointer to ({}, {}) in {}'s window, in the background (the user's pointer stays put).",
+            fmt_num(x),
+            fmt_num(y),
+            w.owner
+        ))])
     }
 
     fn bg_drag(&mut self, args: &Value) -> ToolResult {
@@ -683,7 +848,14 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         let b = m.to_points(tx, ty)?;
         self.desktop.behind(&w, &Input::Drag { from: a, to: b })?;
         self.tell(activity("drag", "Dragging".into(), &w, Some(b), Some(a)));
-        Ok(vec![text(format!("Dragged from ({}, {}) to ({}, {}) in {}'s window, in the background.", fmt_num(fx), fmt_num(fy), fmt_num(tx), fmt_num(ty), w.owner))])
+        Ok(vec![text(format!(
+            "Dragged from ({}, {}) to ({}, {}) in {}'s window, in the background.",
+            fmt_num(fx),
+            fmt_num(fy),
+            fmt_num(tx),
+            fmt_num(ty),
+            w.owner
+        ))])
     }
 
     fn bg_scroll(&mut self, args: &Value) -> ToolResult {
@@ -695,15 +867,34 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         }
         let (w, m) = self.pointing()?;
         let (px, py) = m.to_points(x, y)?;
-        self.desktop.behind(&w, &Input::Scroll { x: px, y: py, dx, dy })?;
+        self.desktop.behind(
+            &w,
+            &Input::Scroll {
+                x: px,
+                y: py,
+                dx,
+                dy,
+            },
+        )?;
         let way = match (dy.signum(), dx.signum()) {
             (1, _) => "down",
             (-1, _) => "up",
             (_, 1) => "right",
             _ => "left",
         };
-        self.tell(activity("scroll", format!("Scrolling {way}"), &w, Some((px, py)), None));
-        Ok(vec![text(format!("Scrolled dx={dx} dy={dy} lines at ({}, {}) in {}'s window, in the background.", fmt_num(x), fmt_num(y), w.owner))])
+        self.tell(activity(
+            "scroll",
+            format!("Scrolling {way}"),
+            &w,
+            Some((px, py)),
+            None,
+        ));
+        Ok(vec![text(format!(
+            "Scrolled dx={dx} dy={dy} lines at ({}, {}) in {}'s window, in the background.",
+            fmt_num(x),
+            fmt_num(y),
+            w.owner
+        ))])
     }
 
     /// The window (or windowless app) keys go to.
@@ -723,7 +914,11 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         let w = self.keyed()?;
         self.desktop.behind(&w, &Input::Type(s.to_string()))?;
         self.tell(activity("type", typing(s), &w, None, None));
-        Ok(vec![text(format!("Typed {} characters into {}, in the background.", s.chars().count(), w.owner))])
+        Ok(vec![text(format!(
+            "Typed {} characters into {}, in the background.",
+            s.chars().count(),
+            w.owner
+        ))])
     }
 
     fn bg_key(&mut self, args: &Value) -> ToolResult {
@@ -732,7 +927,10 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         let w = self.keyed()?;
         self.desktop.behind(&w, &Input::Key(parsed))?;
         self.tell(activity("key", format!("Pressing {combo}"), &w, None, None));
-        Ok(vec![text(format!("Pressed {combo} in {}, in the background.", w.owner))])
+        Ok(vec![text(format!(
+            "Pressed {combo} in {}, in the background.",
+            w.owner
+        ))])
     }
 
     /// Open the app behind the user's windows and work in its window: a new one if one appears,
@@ -745,12 +943,26 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         if is_trek_app(name) {
             return Err(OWN_WINDOW_BEHIND.into());
         }
-        let before: Vec<i64> = self.desktop.windows().unwrap_or_default().iter().map(|w| w.id).collect();
-        self.desktop.open_app_behind(name).map_err(|e| format!("Could not open {name:?}: {e}"))?;
+        let before: Vec<i64> = self
+            .desktop
+            .windows()
+            .unwrap_or_default()
+            .iter()
+            .map(|w| w.id)
+            .collect();
+        self.desktop
+            .open_app_behind(name)
+            .map_err(|e| format!("Could not open {name:?}: {e}"))?;
         let started = std::time::Instant::now();
         let deadline = started + WINDOW_WAIT;
         let found = loop {
-            let theirs: Vec<WindowInfo> = self.desktop.windows().unwrap_or_default().into_iter().filter(|w| is_app(&w.owner, name) && !is_trek(w)).collect();
+            let theirs: Vec<WindowInfo> = self
+                .desktop
+                .windows()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|w| is_app(&w.owner, name) && !is_trek(w))
+                .collect();
             let new = theirs.iter().find(|w| !before.contains(&w.id)).cloned();
             // A window it already had will do, once a new one has had a moment to appear.
             let waited = started.elapsed() >= Duration::from_millis(1500);
@@ -762,18 +974,50 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         };
         match found {
             Some(w) => {
-                let title = if w.title.is_empty() { String::new() } else { format!(" “{}”", w.title) };
-                let reply = format!("Opened {name} behind the user's windows. Working in its window{title} (window_id {}): take a screenshot to see it.", w.id);
-                self.tell(activity("open_app", format!("Opening {}", w.owner), &w, None, None));
-                self.target = Some(Target { window: w, shot: None });
+                let title = if w.title.is_empty() {
+                    String::new()
+                } else {
+                    format!(" “{}”", w.title)
+                };
+                let reply = format!(
+                    "Opened {name} behind the user's windows. Working in its window{title} (window_id {}): take a screenshot to see it.",
+                    w.id
+                );
+                self.tell(activity(
+                    "open_app",
+                    format!("Opening {}", w.owner),
+                    &w,
+                    None,
+                    None,
+                ));
+                self.target = Some(Target {
+                    window: w,
+                    shot: None,
+                });
                 Ok(vec![text(reply)])
             }
             None => match self.desktop.app_pid(name) {
                 Some(pid) => {
-                    self.target = Some(Target { window: WindowInfo { owner: name.to_string(), title: String::new(), pid, id: 0, x: 0.0, y: 0.0, w: 0.0, h: 0.0 }, shot: None });
-                    Ok(vec![text(format!("{name} is open but shows no window. Keys go to it now (cmd+n opens a new window in most apps); then call list_windows and screenshot with the new window's window_id."))])
+                    self.target = Some(Target {
+                        window: WindowInfo {
+                            owner: name.to_string(),
+                            title: String::new(),
+                            pid,
+                            id: 0,
+                            x: 0.0,
+                            y: 0.0,
+                            w: 0.0,
+                            h: 0.0,
+                        },
+                        shot: None,
+                    });
+                    Ok(vec![text(format!(
+                        "{name} is open but shows no window. Keys go to it now (cmd+n opens a new window in most apps); then call list_windows and screenshot with the new window's window_id."
+                    ))])
                 }
-                None => Err(format!("Opened {name}, but no window of it has appeared yet. Call list_windows in a moment, then screenshot with its window_id.")),
+                None => Err(format!(
+                    "Opened {name}, but no window of it has appeared yet. Call list_windows in a moment, then screenshot with its window_id."
+                )),
             },
         }
     }
@@ -799,7 +1043,10 @@ impl rpc::ToolSet for Computer {
             })
         };
         let mut click_props = xy("Click").as_object().cloned().unwrap_or_default();
-        click_props.insert("button".into(), json!({"type": "string", "enum": ["left", "right"], "default": "left"}));
+        click_props.insert(
+            "button".into(),
+            json!({"type": "string", "enum": ["left", "right"], "default": "left"}),
+        );
         click_props.insert(
             "count".into(),
             json!({"type": "integer", "enum": [1, 2, 3], "default": 1, "description": "1 = click, 2 = double-click, 3 = triple-click"}),
@@ -828,7 +1075,8 @@ impl rpc::ToolSet for Computer {
         if behind {
             shot_props["window_id"] = json!({"type": "integer", "description": "The window to work in, from list_windows; it stays the one you work in until you pick another"});
         }
-        let pick = |front: &'static str, background: &'static str| if behind { background } else { front };
+        let pick =
+            |front: &'static str, background: &'static str| if behind { background } else { front };
         vec![
             ToolDef {
                 name: "screenshot",
@@ -982,12 +1230,21 @@ mod tests {
 
     /// A computer on `fake`, as if its last screenshot was of a 1512x982 display.
     fn on(fake: &Recording) -> Computer {
-        Computer { last: Some(Mapping::for_display(1512.0, 982.0)), desktop: Box::new(fake.clone()), mode: Mode::Front, target: None, report: None }
+        Computer {
+            last: Some(Mapping::for_display(1512.0, 982.0)),
+            desktop: Box::new(fake.clone()),
+            mode: Mode::Front,
+            target: None,
+            report: None,
+        }
     }
 
     /// A computer on `fake` working in the background, with nothing picked yet.
     fn behind(fake: &Recording) -> Computer {
-        Computer { mode: Mode::Background, ..on(fake) }
+        Computer {
+            mode: Mode::Background,
+            ..on(fake)
+        }
     }
 
     #[test]
@@ -1027,52 +1284,124 @@ mod tests {
 
     #[test]
     fn input_tools_need_accessibility_and_do_nothing_without_it() {
-        let fake = Recording { trusted: false, ..Recording::new() };
+        let fake = Recording {
+            trusted: false,
+            ..Recording::new()
+        };
         let mut c = on(&fake);
         for tool in ["click", "move_mouse", "drag", "scroll", "type_text", "key"] {
             assert!(needs_accessibility(tool));
-            assert_eq!(c.call(tool, &acting_args(tool)), Err(ACCESSIBILITY_ERROR.to_string()), "{tool}");
+            assert_eq!(
+                c.call(tool, &acting_args(tool)),
+                Err(ACCESSIBILITY_ERROR.to_string()),
+                "{tool}"
+            );
         }
         assert_eq!(fake.events(), vec![], "nothing was posted");
         // Looking, launching and waiting need no Accessibility.
         for tool in ["screenshot", "list_windows", "open_app", "wait"] {
             assert!(!needs_accessibility(tool), "{tool}");
         }
-        assert_eq!(c.call("wait", &json!({"ms": 0})), Ok(vec![text("Waited 0 ms.")]));
+        assert_eq!(
+            c.call("wait", &json!({"ms": 0})),
+            Ok(vec![text("Waited 0 ms.")])
+        );
     }
 
     /// A window as `Desktop::windows` lists one.
     fn window(owner: &str, x: f64, y: f64, w: f64, h: f64) -> WindowInfo {
-        WindowInfo { owner: owner.into(), title: String::new(), pid: 1, id: 1, x, y, w, h }
+        WindowInfo {
+            owner: owner.into(),
+            title: String::new(),
+            pid: 1,
+            id: 1,
+            x,
+            y,
+            w,
+            h,
+        }
     }
 
     #[test]
     fn the_mouse_and_keys_stay_out_of_treks_own_windows() {
         // Trek's window in front, covering the left of the screen; a browser behind it.
-        let trek_in_front = vec![window("Trek", 0.0, 0.0, 800.0, 900.0), window("Safari", 0.0, 0.0, 1512.0, 982.0)];
-        let fake = Recording { windows: Ok(trek_in_front.clone()), ..Recording::new() };
+        let trek_in_front = vec![
+            window("Trek", 0.0, 0.0, 800.0, 900.0),
+            window("Safari", 0.0, 0.0, 1512.0, 982.0),
+        ];
+        let fake = Recording {
+            windows: Ok(trek_in_front.clone()),
+            ..Recording::new()
+        };
         let mut c = on(&fake);
         // Every action that would land in it (or type into it) is refused before any event.
-        assert_eq!(c.call("click", &json!({"x": 10, "y": 10})), Err(OWN_WINDOW.to_string()));
-        assert_eq!(c.call("scroll", &json!({"x": 400, "y": 300, "dy": 3})), Err(OWN_WINDOW.to_string()));
+        assert_eq!(
+            c.call("click", &json!({"x": 10, "y": 10})),
+            Err(OWN_WINDOW.to_string())
+        );
+        assert_eq!(
+            c.call("scroll", &json!({"x": 400, "y": 300, "dy": 3})),
+            Err(OWN_WINDOW.to_string())
+        );
         // A drag that starts outside and ends inside is refused too.
-        assert_eq!(c.call("drag", &json!({"from": {"x": 1200, "y": 500}, "to": {"x": 100, "y": 100}})), Err(OWN_WINDOW.to_string()));
-        assert_eq!(c.call("type_text", &json!({"text": "y"})), Err(OWN_KEYS.to_string()));
-        assert_eq!(c.call("key", &json!({"combo": "return"})), Err(OWN_KEYS.to_string()));
+        assert_eq!(
+            c.call(
+                "drag",
+                &json!({"from": {"x": 1200, "y": 500}, "to": {"x": 100, "y": 100}})
+            ),
+            Err(OWN_WINDOW.to_string())
+        );
+        assert_eq!(
+            c.call("type_text", &json!({"text": "y"})),
+            Err(OWN_KEYS.to_string())
+        );
+        assert_eq!(
+            c.call("key", &json!({"combo": "return"})),
+            Err(OWN_KEYS.to_string())
+        );
         assert_eq!(fake.events(), vec![], "nothing reached the desktop");
         // Outside Trek's window the click goes through, to the point it was given.
         assert!(c.call("click", &json!({"x": 1200, "y": 500})).is_ok());
-        assert_eq!(fake.events(), vec![Event::Click { x: 1200.0, y: 500.0, button: Button::Left, count: 1 }]);
+        assert_eq!(
+            fake.events(),
+            vec![Event::Click {
+                x: 1200.0,
+                y: 500.0,
+                button: Button::Left,
+                count: 1
+            }]
+        );
         // The window a point is in is the frontmost one holding it; a dev build counts as Trek.
-        assert_eq!(window_at(&trek_in_front, 10.0, 10.0).map(|w| w.owner.as_str()), Some("Trek"));
-        assert_eq!(window_at(&trek_in_front, 1200.0, 500.0).map(|w| w.owner.as_str()), Some("Safari"));
-        assert_eq!(window_at(&trek_in_front, 5000.0, 5000.0).map(|w| w.owner.as_str()), None);
-        assert!(is_trek(&window("trek", 0.0, 0.0, 1.0, 1.0)) && !is_trek(&window("Trekking Maps", 0.0, 0.0, 1.0, 1.0)));
+        assert_eq!(
+            window_at(&trek_in_front, 10.0, 10.0).map(|w| w.owner.as_str()),
+            Some("Trek")
+        );
+        assert_eq!(
+            window_at(&trek_in_front, 1200.0, 500.0).map(|w| w.owner.as_str()),
+            Some("Safari")
+        );
+        assert_eq!(
+            window_at(&trek_in_front, 5000.0, 5000.0).map(|w| w.owner.as_str()),
+            None
+        );
+        assert!(
+            is_trek(&window("trek", 0.0, 0.0, 1.0, 1.0))
+                && !is_trek(&window("Trekking Maps", 0.0, 0.0, 1.0, 1.0))
+        );
         // The windows can't be listed: nothing is done unchecked.
-        let blind = Recording { windows: Err("no window list".into()), ..Recording::new() };
+        let blind = Recording {
+            windows: Err("no window list".into()),
+            ..Recording::new()
+        };
         let mut c = on(&blind);
-        assert!(c.call("click", &json!({"x": 10, "y": 10})).is_err_and(|e| e.contains("nothing was done")));
-        assert!(c.call("key", &json!({"combo": "return"})).is_err_and(|e| e.contains("nothing was typed")));
+        assert!(
+            c.call("click", &json!({"x": 10, "y": 10}))
+                .is_err_and(|e| e.contains("nothing was done"))
+        );
+        assert!(
+            c.call("key", &json!({"combo": "return"}))
+                .is_err_and(|e| e.contains("nothing was typed"))
+        );
         assert_eq!(blind.events(), vec![]);
     }
 
@@ -1082,12 +1411,18 @@ mod tests {
         // on Windows, without being marked click-through), but the system's own hit test says the
         // click would reach Trek beneath it: refused.
         let fake = Recording {
-            windows: Ok(vec![window("NVIDIA Overlay", 0.0, 0.0, 1512.0, 982.0), window("trek", 0.0, 0.0, 800.0, 900.0)]),
+            windows: Ok(vec![
+                window("NVIDIA Overlay", 0.0, 0.0, 1512.0, 982.0),
+                window("trek", 0.0, 0.0, 800.0, 900.0),
+            ]),
             owner_at: Some("trek".into()),
             ..Recording::new()
         };
         let mut c = on(&fake);
-        assert_eq!(c.call("click", &json!({"x": 10, "y": 10})), Err(OWN_WINDOW.to_string()));
+        assert_eq!(
+            c.call("click", &json!({"x": 10, "y": 10})),
+            Err(OWN_WINDOW.to_string())
+        );
         assert_eq!(fake.events(), vec![]);
         // Keys go by the window in front, whatever is under the mouse.
         assert!(c.call("key", &json!({"combo": "escape"})).is_ok());
@@ -1098,12 +1433,26 @@ mod tests {
         // On Windows an always-on-top window (the taskbar, an overlay) leads the list whichever
         // app has the focus; the desktop says who does.
         let taskbar = window("Explorer", 0.0, 940.0, 1512.0, 42.0);
-        let on_top = vec![taskbar.clone(), window("Notepad", 0.0, 0.0, 800.0, 900.0), window("trek", 0.0, 0.0, 1512.0, 982.0)];
+        let on_top = vec![
+            taskbar.clone(),
+            window("Notepad", 0.0, 0.0, 800.0, 900.0),
+            window("trek", 0.0, 0.0, 1512.0, 982.0),
+        ];
         // Trek has the focus: refused, though the list leads with the taskbar.
-        let fake = Recording { windows: Ok(on_top), key_window: Some(Ok(Some(window("trek", 0.0, 0.0, 1512.0, 982.0)))), ..Recording::new() };
+        let fake = Recording {
+            windows: Ok(on_top),
+            key_window: Some(Ok(Some(window("trek", 0.0, 0.0, 1512.0, 982.0)))),
+            ..Recording::new()
+        };
         let mut c = on(&fake);
-        assert_eq!(c.call("type_text", &json!({"text": "y"})), Err(OWN_KEYS.to_string()));
-        assert_eq!(c.call("key", &json!({"combo": "return"})), Err(OWN_KEYS.to_string()));
+        assert_eq!(
+            c.call("type_text", &json!({"text": "y"})),
+            Err(OWN_KEYS.to_string())
+        );
+        assert_eq!(
+            c.call("key", &json!({"combo": "return"})),
+            Err(OWN_KEYS.to_string())
+        );
         assert_eq!(fake.events(), vec![]);
         // Trek is high in the list but another app has the focus: the keys go to that app.
         let fake = Recording {
@@ -1113,12 +1462,24 @@ mod tests {
         };
         let mut c = on(&fake);
         assert!(c.call("key", &json!({"combo": "ctrl+s"})).is_ok());
-        assert_eq!(fake.events(), vec![Event::Key(keys::parse("ctrl+s").unwrap())]);
+        assert_eq!(
+            fake.events(),
+            vec![Event::Key(keys::parse("ctrl+s").unwrap())]
+        );
         // The focus can't be read: nothing is typed unchecked.
-        let blind = Recording { key_window: Some(Err("no foreground".into())), ..Recording::new() };
+        let blind = Recording {
+            key_window: Some(Err("no foreground".into())),
+            ..Recording::new()
+        };
         let mut c = on(&blind);
-        assert!(c.call("type_text", &json!({"text": "y"})).is_err_and(|e| e.contains("nothing was typed")));
-        assert!(c.call("key", &json!({"combo": "return"})).is_err_and(|e| e.contains("nothing was typed")));
+        assert!(
+            c.call("type_text", &json!({"text": "y"}))
+                .is_err_and(|e| e.contains("nothing was typed"))
+        );
+        assert!(
+            c.call("key", &json!({"combo": "return"}))
+                .is_err_and(|e| e.contains("nothing was typed"))
+        );
         assert_eq!(blind.events(), vec![]);
     }
 
@@ -1126,15 +1487,37 @@ mod tests {
     fn the_systems_hit_test_guards_every_pointer_action() {
         // Whatever the window list says (nothing here), the system's own answer that the point
         // is Trek's is enough to refuse a click, a scroll, or a drag starting or ending there.
-        let fake = Recording { owner_at: Some("Trek".into()), ..Recording::new() };
+        let fake = Recording {
+            owner_at: Some("Trek".into()),
+            ..Recording::new()
+        };
         let mut c = on(&fake);
-        assert_eq!(c.call("click", &json!({"x": 100, "y": 100, "button": "right"})), Err(OWN_WINDOW.to_string()));
-        assert_eq!(c.call("scroll", &json!({"x": 100, "y": 100, "dy": 3})), Err(OWN_WINDOW.to_string()));
-        assert_eq!(c.call("drag", &json!({"from": {"x": 1, "y": 1}, "to": {"x": 100, "y": 100}})), Err(OWN_WINDOW.to_string()));
+        assert_eq!(
+            c.call("click", &json!({"x": 100, "y": 100, "button": "right"})),
+            Err(OWN_WINDOW.to_string())
+        );
+        assert_eq!(
+            c.call("scroll", &json!({"x": 100, "y": 100, "dy": 3})),
+            Err(OWN_WINDOW.to_string())
+        );
+        assert_eq!(
+            c.call(
+                "drag",
+                &json!({"from": {"x": 1, "y": 1}, "to": {"x": 100, "y": 100}})
+            ),
+            Err(OWN_WINDOW.to_string())
+        );
         assert_eq!(fake.events(), vec![]);
         // Another app's answer lets them through.
-        let fake = Recording { owner_at: Some("Notepad".into()), ..Recording::new() };
-        assert!(on(&fake).call("click", &json!({"x": 100, "y": 100})).is_ok());
+        let fake = Recording {
+            owner_at: Some("Notepad".into()),
+            ..Recording::new()
+        };
+        assert!(
+            on(&fake)
+                .call("click", &json!({"x": 100, "y": 100}))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1142,14 +1525,38 @@ mod tests {
         // Trusted, but every call here fails its checks before posting anything.
         let fake = Recording::new();
         let mut c = on(&fake);
-        let refused = |c: &mut Computer, tool: &str, args: Value| c.call(tool, &args).expect_err(tool);
+        let refused =
+            |c: &mut Computer, tool: &str, args: Value| c.call(tool, &args).expect_err(tool);
         assert!(refused(&mut c, "click", json!({})).contains("`x`"));
-        assert!(refused(&mut c, "click", json!({"x": 10, "y": 10, "count": 4})).contains("count must be"));
-        assert!(refused(&mut c, "click", json!({"x": 10, "y": 10, "button": "middle"})).contains("Unknown button"));
-        assert!(refused(&mut c, "click", json!({"x": 5000, "y": 10})).contains("outside the screenshot (1512x982)"));
-        assert!(refused(&mut c, "move_mouse", json!({"x": 10, "y": -40})).contains("outside the screenshot"));
+        assert!(
+            refused(&mut c, "click", json!({"x": 10, "y": 10, "count": 4}))
+                .contains("count must be")
+        );
+        assert!(
+            refused(
+                &mut c,
+                "click",
+                json!({"x": 10, "y": 10, "button": "middle"})
+            )
+            .contains("Unknown button")
+        );
+        assert!(
+            refused(&mut c, "click", json!({"x": 5000, "y": 10}))
+                .contains("outside the screenshot (1512x982)")
+        );
+        assert!(
+            refused(&mut c, "move_mouse", json!({"x": 10, "y": -40}))
+                .contains("outside the screenshot")
+        );
         assert!(refused(&mut c, "drag", json!({"from": {"x": 10, "y": 10}})).contains("`to`"));
-        assert!(refused(&mut c, "drag", json!({"from": {"x": 10, "y": 10}, "to": {"x": 10, "y": 9000}})).contains("outside the screenshot"));
+        assert!(
+            refused(
+                &mut c,
+                "drag",
+                json!({"from": {"x": 10, "y": 10}, "to": {"x": 10, "y": 9000}})
+            )
+            .contains("outside the screenshot")
+        );
         assert!(refused(&mut c, "scroll", json!({"x": 10, "y": 10})).contains("non-zero dx or dy"));
         assert!(refused(&mut c, "type_text", json!({"text": ""})).contains("empty"));
         assert!(refused(&mut c, "key", json!({"combo": "cmd+nope"})).contains("nope"));
@@ -1161,7 +1568,10 @@ mod tests {
 
     #[test]
     fn every_tool_has_an_object_schema_and_a_handler() {
-        let fake = Recording { trusted: false, ..Recording::new() };
+        let fake = Recording {
+            trusted: false,
+            ..Recording::new()
+        };
         let mut c = on(&fake);
         let tools = c.tools();
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
@@ -1171,14 +1581,31 @@ mod tests {
         // The same tools on every platform.
         assert_eq!(
             names,
-            vec!["click", "drag", "key", "list_windows", "move_mouse", "open_app", "screenshot", "scroll", "type_text", "wait"]
+            vec![
+                "click",
+                "drag",
+                "key",
+                "list_windows",
+                "move_mouse",
+                "open_app",
+                "screenshot",
+                "scroll",
+                "type_text",
+                "wait"
+            ]
         );
         for t in &tools {
             let schema = t.to_json()["inputSchema"].clone();
             assert_eq!(schema["type"], "object", "{}", t.name);
-            let props = schema["properties"].as_object().unwrap_or_else(|| panic!("{} has properties", t.name));
+            let props = schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{} has properties", t.name));
             for req in schema["required"].as_array().into_iter().flatten() {
-                assert!(props.contains_key(req.as_str().unwrap()), "{} requires {req}, which it doesn't describe", t.name);
+                assert!(
+                    props.contains_key(req.as_str().unwrap()),
+                    "{} requires {req}, which it doesn't describe",
+                    t.name
+                );
             }
             assert!(!t.description.is_empty());
             // Every listed tool is handled (screenshots and the window list are answered below).
@@ -1191,14 +1618,29 @@ mod tests {
         for name in ["click", "move_mouse", "scroll"] {
             let t = tools.iter().find(|t| t.name == name).unwrap();
             assert_eq!(t.input_schema["required"], json!(["x", "y"]));
-            assert!(t.input_schema["properties"]["x"]["description"].as_str().unwrap().contains("screenshot pixels"));
+            assert!(
+                t.input_schema["properties"]["x"]["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("screenshot pixels")
+            );
         }
         // Each platform's text names only its own keys and apps.
         let key = tools.iter().find(|t| t.name == "key").unwrap().description;
-        let open = tools.iter().find(|t| t.name == "open_app").unwrap().description;
+        let open = tools
+            .iter()
+            .find(|t| t.name == "open_app")
+            .unwrap()
+            .description;
         if cfg!(windows) {
-            assert!(key.contains("ctrl+c") && key.contains("win") && !key.contains("fn"), "{key}");
-            assert!(!open.contains("macOS") && !INSTRUCTIONS.contains("macOS"), "{open}");
+            assert!(
+                key.contains("ctrl+c") && key.contains("win") && !key.contains("fn"),
+                "{key}"
+            );
+            assert!(
+                !open.contains("macOS") && !INSTRUCTIONS.contains("macOS"),
+                "{open}"
+            );
         } else {
             assert!(key.contains("cmd+c") && open.contains("macOS"));
         }
@@ -1215,11 +1657,24 @@ mod tests {
         // 16" at 1728x1117 points (3456x2234 pixels): capped at 1568, aspect kept by `sips`.
         assert_eq!(full_side(1728.0, 1117.0), 1568);
         let m = Mapping::from_image(1728.0, 1117.0, 1568, 1014);
-        assert_eq!((m.image_w, m.image_h), (Mapping::for_display(1728.0, 1117.0).image_w, Mapping::for_display(1728.0, 1117.0).image_h));
+        assert_eq!(
+            (m.image_w, m.image_h),
+            (
+                Mapping::for_display(1728.0, 1117.0).image_w,
+                Mapping::for_display(1728.0, 1117.0).image_h
+            )
+        );
         let (x, y) = m.to_points(784.0, 507.0).unwrap();
-        assert!((x - 864.0).abs() < 0.5 && (y - 558.5).abs() < 1.0, "the centre maps to the centre: {x}, {y}");
+        assert!(
+            (x - 864.0).abs() < 0.5 && (y - 558.5).abs() < 1.0,
+            "the centre maps to the centre: {x}, {y}"
+        );
         assert_eq!(m.to_points(0.0, 0.0), Ok((0.0, 0.0)));
-        assert_eq!(m.to_points(1568.0, 1014.0), Ok((1727.0, 1116.0)), "far corner stays on the display");
+        assert_eq!(
+            m.to_points(1568.0, 1014.0),
+            Ok((1727.0, 1116.0)),
+            "far corner stays on the display"
+        );
         // A portrait display: its height is the long side.
         assert_eq!(full_side(1080.0, 1920.0), 1568);
         let m = Mapping::for_display(1080.0, 1920.0);
@@ -1232,58 +1687,141 @@ mod tests {
     fn zooms_say_how_to_map_back_and_reject_bad_regions() {
         let m = Mapping::from_image(1728.0, 1117.0, 1568, 1014);
         let region = region_points(m, 100.0, 200.0, 300.0, 150.0).unwrap();
-        assert!((region.0 - 100.0 * m.scale).abs() < 1e-9 && (region.2 - 300.0 * m.scale).abs() < 1e-9, "{region:?}");
+        assert!(
+            (region.0 - 100.0 * m.scale).abs() < 1e-9 && (region.2 - 300.0 * m.scale).abs() < 1e-9,
+            "{region:?}"
+        );
         // Captured on a Retina display: twice the points, in pixels.
-        let (iw, ih) = ((region.2 * 2.0).round() as u32, (region.3 * 2.0).round() as u32);
+        let (iw, ih) = (
+            (region.2 * 2.0).round() as u32,
+            (region.3 * 2.0).round() as u32,
+        );
         let info = region_info(region, iw, ih, m, "");
         assert!(info.contains("x=100 y=200 width=300 height=150"), "{info}");
-        assert!(info.contains(&format!("(100 + u*{}, 200 + v*{})", fmt_num(300.0 / iw as f64), fmt_num(150.0 / ih as f64))), "{info}");
-        assert!(region_points(m, 10.0, 10.0, 0.0, 5.0).unwrap_err().contains("positive"));
-        assert!(region_points(m, 1500.0, 10.0, 400.0, 5.0).unwrap_err().contains("outside"));
+        assert!(
+            info.contains(&format!(
+                "(100 + u*{}, 200 + v*{})",
+                fmt_num(300.0 / iw as f64),
+                fmt_num(150.0 / ih as f64)
+            )),
+            "{info}"
+        );
+        assert!(
+            region_points(m, 10.0, 10.0, 0.0, 5.0)
+                .unwrap_err()
+                .contains("positive")
+        );
+        assert!(
+            region_points(m, 1500.0, 10.0, 400.0, 5.0)
+                .unwrap_err()
+                .contains("outside")
+        );
         let full = full_info(1568, 1014, 1728.0, 1117.0, Some((3456, 2234)), m, "");
-        assert!(full.contains("1568x1014 px") && full.contains("3456x2234 physical pixels"), "{full}");
-        assert!(full.contains(&format!("1 screenshot px = {} {SCREEN_UNITS}", fmt_num(m.scale))));
+        assert!(
+            full.contains("1568x1014 px") && full.contains("3456x2234 physical pixels"),
+            "{full}"
+        );
+        assert!(full.contains(&format!(
+            "1 screenshot px = {} {SCREEN_UNITS}",
+            fmt_num(m.scale)
+        )));
     }
 
     #[test]
     fn a_1080p_pc_screen_maps_screenshot_pixels_to_screen_pixels() {
         // Windows reports the primary display in physical pixels (trek-mcp is per-monitor DPI
         // aware): a 1920x1080 screen at any scaling is shot at 1568x882.
-        let fake = Recording { display: Display { width: 1920.0, height: 1080.0, physical: None }, ..Recording::new() };
-        let mut c = Computer { last: None, ..on(&fake) };
+        let fake = Recording {
+            display: Display {
+                width: 1920.0,
+                height: 1080.0,
+                physical: None,
+            },
+            ..Recording::new()
+        };
+        let mut c = Computer {
+            last: None,
+            ..on(&fake)
+        };
         let shot = c.call("screenshot", &json!({})).unwrap();
-        assert_eq!(fake.events(), vec![Event::Capture { region: None, max_side: 1568 }]);
-        assert_eq!(shot[0], json!({"type": "image", "data": "UE5H", "mimeType": "image/png"}));
+        assert_eq!(
+            fake.events(),
+            vec![Event::Capture {
+                region: None,
+                max_side: 1568
+            }]
+        );
+        assert_eq!(
+            shot[0],
+            json!({"type": "image", "data": "UE5H", "mimeType": "image/png"})
+        );
         let info = shot[1]["text"].as_str().unwrap();
-        assert!(info.starts_with("Screenshot of the main display: 1568x882 px."), "{info}");
+        assert!(
+            info.starts_with("Screenshot of the main display: 1568x882 px."),
+            "{info}"
+        );
         // The screenshot's centre is the screen's; its far corner stays on it.
         c.call("click", &json!({"x": 784, "y": 441})).unwrap();
         c.call("move_mouse", &json!({"x": 1568, "y": 882})).unwrap();
         let events = fake.events();
-        let Event::Click { x, y, .. } = events[1] else { panic!("{events:?}") };
-        assert!((x - 960.0).abs() <= 1.0 && (y - 540.0).abs() <= 1.0, "{x}, {y}");
-        let Event::Move(x, y) = events[2] else { panic!("{events:?}") };
-        assert!((x - 1919.0).abs() <= 1.0 && (y - 1079.0).abs() <= 1.0, "{x}, {y}");
+        let Event::Click { x, y, .. } = events[1] else {
+            panic!("{events:?}")
+        };
+        assert!(
+            (x - 960.0).abs() <= 1.0 && (y - 540.0).abs() <= 1.0,
+            "{x}, {y}"
+        );
+        let Event::Move(x, y) = events[2] else {
+            panic!("{events:?}")
+        };
+        assert!(
+            (x - 1919.0).abs() <= 1.0 && (y - 1079.0).abs() <= 1.0,
+            "{x}, {y}"
+        );
     }
 
     #[test]
     fn tools_answer_in_the_same_shapes_everywhere() {
         let fake = Recording {
-            windows: Ok(vec![WindowInfo { owner: "Notepad".into(), title: "notes.txt".into(), pid: 42, id: 7, x: 100.0, y: 50.0, w: 800.0, h: 600.0 }]),
+            windows: Ok(vec![WindowInfo {
+                owner: "Notepad".into(),
+                title: "notes.txt".into(),
+                pid: 42,
+                id: 7,
+                x: 100.0,
+                y: 50.0,
+                w: 800.0,
+                h: 600.0,
+            }]),
             ..Recording::new()
         };
         let mut c = on(&fake);
         let points = SCREEN_UNITS;
         assert_eq!(
-            Value::Array(c.call("click", &json!({"x": 10, "y": 20, "button": "right", "count": 2})).unwrap()),
+            Value::Array(
+                c.call(
+                    "click",
+                    &json!({"x": 10, "y": 20, "button": "right", "count": 2})
+                )
+                .unwrap()
+            ),
             json!([{"type": "text", "text": format!("Double-clicked right at (10, 20) (screen {points} 10, 20).")}])
         );
         assert_eq!(
-            Value::Array(c.call("drag", &json!({"from": {"x": 1000, "y": 10}, "to": {"x": 1100, "y": 20}})).unwrap()),
+            Value::Array(
+                c.call(
+                    "drag",
+                    &json!({"from": {"x": 1000, "y": 10}, "to": {"x": 1100, "y": 20}})
+                )
+                .unwrap()
+            ),
             json!([{"type": "text", "text": "Dragged from (1000, 10) to (1100, 20)."}])
         );
         assert_eq!(
-            Value::Array(c.call("scroll", &json!({"x": 1000, "y": 10, "dy": -3})).unwrap()),
+            Value::Array(
+                c.call("scroll", &json!({"x": 1000, "y": 10, "dy": -3}))
+                    .unwrap()
+            ),
             json!([{"type": "text", "text": "Scrolled dx=0 dy=-3 lines at (1000, 10)."}])
         );
         assert_eq!(
@@ -1301,9 +1839,22 @@ mod tests {
         assert_eq!(
             fake.events(),
             vec![
-                Event::Click { x: 10.0, y: 20.0, button: Button::Right, count: 2 },
-                Event::Drag { from: (1000.0, 10.0), to: (1100.0, 20.0) },
-                Event::Scroll { x: 1000.0, y: 10.0, dx: 0, dy: -3 },
+                Event::Click {
+                    x: 10.0,
+                    y: 20.0,
+                    button: Button::Right,
+                    count: 2
+                },
+                Event::Drag {
+                    from: (1000.0, 10.0),
+                    to: (1100.0, 20.0)
+                },
+                Event::Scroll {
+                    x: 1000.0,
+                    y: 10.0,
+                    dx: 0,
+                    dy: -3
+                },
                 Event::Type("héllo\n".into()),
                 Event::Key(keys::parse("ctrl+shift+t").unwrap()),
                 Event::OpenApp("Notepad".into()),
@@ -1313,7 +1864,12 @@ mod tests {
         let listed = c.call("list_windows", &json!({})).unwrap();
         let body = listed[0]["text"].as_str().unwrap();
         let mut lines = body.lines();
-        assert!(lines.next().unwrap().starts_with("1 on-screen windows, front to back."));
+        assert!(
+            lines
+                .next()
+                .unwrap()
+                .starts_with("1 on-screen windows, front to back.")
+        );
         let w: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
         assert_eq!(
             w,
@@ -1324,10 +1880,26 @@ mod tests {
             })
         );
         // A zoom: the region in screen units, at most 1568 on its long side.
-        let zoom = c.call("screenshot", &json!({"region": {"x": 100, "y": 200, "width": 300, "height": 150}})).unwrap();
+        let zoom = c
+            .call(
+                "screenshot",
+                &json!({"region": {"x": 100, "y": 200, "width": 300, "height": 150}}),
+            )
+            .unwrap();
         assert_eq!(zoom[0]["type"], "image");
-        assert!(zoom[1]["text"].as_str().unwrap().starts_with("Zoomed view of screenshot region x=100 y=200 width=300 height=150"));
-        assert_eq!(fake.events().last(), Some(&Event::Capture { region: Some((100.0, 200.0, 300.0, 150.0)), max_side: 1568 }));
+        assert!(
+            zoom[1]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Zoomed view of screenshot region x=100 y=200 width=300 height=150")
+        );
+        assert_eq!(
+            fake.events().last(),
+            Some(&Event::Capture {
+                region: Some((100.0, 200.0, 300.0, 150.0)),
+                max_side: 1568
+            })
+        );
     }
 
     /// Safari's window, half covered by the user's own; Trek's beside it.
@@ -1335,8 +1907,26 @@ mod tests {
         Recording {
             windows: Ok(vec![
                 window("Notes", 0.0, 0.0, 700.0, 900.0),
-                WindowInfo { owner: "Safari".into(), title: "Docs".into(), pid: 42, id: 7, x: 400.0, y: 100.0, w: 800.0, h: 600.0 },
-                WindowInfo { owner: "Trek".into(), title: "Trek".into(), pid: 9, id: 3, x: 0.0, y: 0.0, w: 1512.0, h: 982.0 },
+                WindowInfo {
+                    owner: "Safari".into(),
+                    title: "Docs".into(),
+                    pid: 42,
+                    id: 7,
+                    x: 400.0,
+                    y: 100.0,
+                    w: 800.0,
+                    h: 600.0,
+                },
+                WindowInfo {
+                    owner: "Trek".into(),
+                    title: "Trek".into(),
+                    pid: 9,
+                    id: 3,
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1512.0,
+                    h: 982.0,
+                },
             ]),
             ..Recording::new()
         }
@@ -1347,20 +1937,53 @@ mod tests {
         let fake = behind_the_users();
         let mut c = behind(&fake);
         // Nothing picked: actions are refused, a screenshot is of the whole screen and says how to pick.
-        assert_eq!(c.call("click", &json!({"x": 10, "y": 10})), Err(NO_WINDOW.to_string()));
-        assert_eq!(c.call("type_text", &json!({"text": "hi"})), Err(NO_WINDOW.to_string()));
+        assert_eq!(
+            c.call("click", &json!({"x": 10, "y": 10})),
+            Err(NO_WINDOW.to_string())
+        );
+        assert_eq!(
+            c.call("type_text", &json!({"text": "hi"})),
+            Err(NO_WINDOW.to_string())
+        );
         let whole = c.call("screenshot", &json!({})).unwrap();
-        assert!(whole.last().unwrap()["text"].as_str().unwrap().contains("window_id"));
-        assert_eq!(fake.events(), vec![Event::Capture { region: None, max_side: 1512 }]);
+        assert!(
+            whole.last().unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .contains("window_id")
+        );
+        assert_eq!(
+            fake.events(),
+            vec![Event::Capture {
+                region: None,
+                max_side: 1512
+            }]
+        );
         // Picked: the window alone, at its own size (twice that in pixels, fitted to it).
         let shot = c.call("screenshot", &json!({"window_id": 7})).unwrap();
         let info = shot[1]["text"].as_str().unwrap();
-        assert!(info.contains("Safari's window “Docs” (window_id 7)") && info.contains("800x600 px"), "{info}");
-        assert_eq!(fake.events()[1], Event::CaptureWindow { id: 7, region: None, max_side: 800 });
+        assert!(
+            info.contains("Safari's window “Docs” (window_id 7)") && info.contains("800x600 px"),
+            "{info}"
+        );
+        assert_eq!(
+            fake.events()[1],
+            Event::CaptureWindow {
+                id: 7,
+                region: None,
+                max_side: 800
+            }
+        );
         // Clicks, keys and scrolls go to it, in its own points, however it's covered.
-        c.call("click", &json!({"x": 100, "y": 50, "count": 2})).unwrap();
-        c.call("scroll", &json!({"x": 400, "y": 300, "dy": 3})).unwrap();
-        c.call("drag", &json!({"from": {"x": 10, "y": 10}, "to": {"x": 20, "y": 30}})).unwrap();
+        c.call("click", &json!({"x": 100, "y": 50, "count": 2}))
+            .unwrap();
+        c.call("scroll", &json!({"x": 400, "y": 300, "dy": 3}))
+            .unwrap();
+        c.call(
+            "drag",
+            &json!({"from": {"x": 10, "y": 10}, "to": {"x": 20, "y": 30}}),
+        )
+        .unwrap();
         c.call("move_mouse", &json!({"x": 5, "y": 6})).unwrap();
         c.call("type_text", &json!({"text": "héllo"})).unwrap();
         c.call("key", &json!({"combo": "cmd+l"})).unwrap();
@@ -1368,35 +1991,94 @@ mod tests {
         assert_eq!(
             fake.events()[2..],
             [
-                to_safari(Input::Click { x: 100.0, y: 50.0, button: Button::Left, count: 2 }),
-                to_safari(Input::Scroll { x: 400.0, y: 300.0, dx: 0, dy: 3 }),
-                to_safari(Input::Drag { from: (10.0, 10.0), to: (20.0, 30.0) }),
+                to_safari(Input::Click {
+                    x: 100.0,
+                    y: 50.0,
+                    button: Button::Left,
+                    count: 2
+                }),
+                to_safari(Input::Scroll {
+                    x: 400.0,
+                    y: 300.0,
+                    dx: 0,
+                    dy: 3
+                }),
+                to_safari(Input::Drag {
+                    from: (10.0, 10.0),
+                    to: (20.0, 30.0)
+                }),
                 to_safari(Input::Move(5.0, 6.0)),
                 to_safari(Input::Type("héllo".into())),
                 to_safari(Input::Key(keys::parse("cmd+l").unwrap())),
             ]
         );
         // Points past the window's screenshot are refused; a zoom is cut from the window.
-        assert!(c.call("click", &json!({"x": 900, "y": 10})).unwrap_err().contains("outside the screenshot (800x600)"));
-        let zoom = c.call("screenshot", &json!({"region": {"x": 0, "y": 0, "width": 200, "height": 100}})).unwrap();
-        assert!(zoom[1]["text"].as_str().unwrap().contains(&format!("window {SCREEN_UNITS}")), "{}", zoom[1]);
-        assert_eq!(fake.events().last(), Some(&Event::CaptureWindow { id: 7, region: Some((0.0, 0.0, 200.0, 100.0)), max_side: 1568 }));
+        assert!(
+            c.call("click", &json!({"x": 900, "y": 10}))
+                .unwrap_err()
+                .contains("outside the screenshot (800x600)")
+        );
+        let zoom = c
+            .call(
+                "screenshot",
+                &json!({"region": {"x": 0, "y": 0, "width": 200, "height": 100}}),
+            )
+            .unwrap();
+        assert!(
+            zoom[1]["text"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("window {SCREEN_UNITS}")),
+            "{}",
+            zoom[1]
+        );
+        assert_eq!(
+            fake.events().last(),
+            Some(&Event::CaptureWindow {
+                id: 7,
+                region: Some((0.0, 0.0, 200.0, 100.0)),
+                max_side: 1568
+            })
+        );
         // The list says which window it works in.
         let listed = c.call("list_windows", &json!({})).unwrap();
         let body = listed[0]["text"].as_str().unwrap();
-        assert!(body.lines().nth(2).unwrap().contains("\"working_in\":true") && !body.lines().nth(1).unwrap().contains("working_in"), "{body}");
+        assert!(
+            body.lines().nth(2).unwrap().contains("\"working_in\":true")
+                && !body.lines().nth(1).unwrap().contains("working_in"),
+            "{body}"
+        );
         assert_eq!(c.instructions(), BACKGROUND_INSTRUCTIONS);
-        assert!(c.tools()[0].input_schema["properties"].get("window_id").is_some());
-        assert!(on(&fake).tools()[0].input_schema["properties"].get("window_id").is_none(), "in front, there's no window to pick");
+        assert!(
+            c.tools()[0].input_schema["properties"]
+                .get("window_id")
+                .is_some()
+        );
+        assert!(
+            on(&fake).tools()[0].input_schema["properties"]
+                .get("window_id")
+                .is_none(),
+            "in front, there's no window to pick"
+        );
     }
 
     #[test]
     fn in_the_background_trek_stays_off_limits_and_a_closed_window_is_let_go() {
         let fake = behind_the_users();
         let mut c = behind(&fake);
-        assert_eq!(c.call("screenshot", &json!({"window_id": 3})), Err(OWN_WINDOW_BEHIND.to_string()));
-        assert_eq!(c.call("open_app", &json!({"name": "Trek"})), Err(OWN_WINDOW_BEHIND.to_string()));
-        assert!(c.call("screenshot", &json!({"window_id": 99})).unwrap_err().contains("No window 99"));
+        assert_eq!(
+            c.call("screenshot", &json!({"window_id": 3})),
+            Err(OWN_WINDOW_BEHIND.to_string())
+        );
+        assert_eq!(
+            c.call("open_app", &json!({"name": "Trek"})),
+            Err(OWN_WINDOW_BEHIND.to_string())
+        );
+        assert!(
+            c.call("screenshot", &json!({"window_id": 99}))
+                .unwrap_err()
+                .contains("No window 99")
+        );
         // A pick needs a screenshot before anything is pointed at.
         c.call("screenshot", &json!({"window_id": 7})).unwrap();
         let mut gone = behind_the_users();
@@ -1404,8 +2086,16 @@ mod tests {
         c.desktop = Box::new(gone.clone());
         let err = c.call("click", &json!({"x": 1, "y": 1})).unwrap_err();
         assert!(err.contains("Safari's window “Docs” has closed"), "{err}");
-        assert_eq!(c.call("key", &json!({"combo": "return"})), Err(NO_WINDOW.to_string()), "and it's forgotten");
-        assert!(gone.events().iter().all(|e| !matches!(e, Event::Behind { .. })));
+        assert_eq!(
+            c.call("key", &json!({"combo": "return"})),
+            Err(NO_WINDOW.to_string()),
+            "and it's forgotten"
+        );
+        assert!(
+            gone.events()
+                .iter()
+                .all(|e| !matches!(e, Event::Behind { .. }))
+        );
         // Resized since its screenshot: the coordinates are stale.
         let mut c = behind(&fake);
         c.call("screenshot", &json!({"window_id": 7})).unwrap();
@@ -1414,41 +2104,124 @@ mod tests {
             ws[1].w = 1000.0;
         }
         c.desktop = Box::new(bigger);
-        assert_eq!(c.call("click", &json!({"x": 1, "y": 1})), Err(RESIZED.to_string()));
+        assert_eq!(
+            c.call("click", &json!({"x": 1, "y": 1})),
+            Err(RESIZED.to_string())
+        );
     }
 
     #[test]
     fn open_app_in_the_background_works_in_the_window_that_appears() {
         let fake = behind_the_users();
-        fake.opens.borrow_mut().push(WindowInfo { owner: "TextEdit".into(), title: "Untitled".into(), pid: 50, id: 11, x: 0.0, y: 0.0, w: 600.0, h: 400.0 });
+        fake.opens.borrow_mut().push(WindowInfo {
+            owner: "TextEdit".into(),
+            title: "Untitled".into(),
+            pid: 50,
+            id: 11,
+            x: 0.0,
+            y: 0.0,
+            w: 600.0,
+            h: 400.0,
+        });
         let mut c = behind(&fake);
-        let opened = c.call("open_app", &json!({"name": "/Applications/TextEdit.app"})).unwrap();
-        assert!(opened[0]["text"].as_str().unwrap().contains("window “Untitled” (window_id 11)"), "{opened:?}");
-        assert_eq!(fake.events(), vec![Event::OpenAppBehind("/Applications/TextEdit.app".into())]);
+        let opened = c
+            .call("open_app", &json!({"name": "/Applications/TextEdit.app"}))
+            .unwrap();
+        assert!(
+            opened[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("window “Untitled” (window_id 11)"),
+            "{opened:?}"
+        );
+        assert_eq!(
+            fake.events(),
+            vec![Event::OpenAppBehind("/Applications/TextEdit.app".into())]
+        );
         c.call("type_text", &json!({"text": "x"})).unwrap();
-        assert_eq!(fake.events().last(), Some(&Event::Behind { window: 11, input: Input::Type("x".into()) }));
+        assert_eq!(
+            fake.events().last(),
+            Some(&Event::Behind {
+                window: 11,
+                input: Input::Type("x".into())
+            })
+        );
         // An app with no window: keys go to it, pointing doesn't.
-        let fake = Recording { pids: vec![("Mail".into(), 77)], ..behind_the_users() };
+        let fake = Recording {
+            pids: vec![("Mail".into(), 77)],
+            ..behind_the_users()
+        };
         let mut c = behind(&fake);
-        assert!(c.call("open_app", &json!({"name": "Mail"})).unwrap()[0]["text"].as_str().unwrap().contains("shows no window"));
+        assert!(
+            c.call("open_app", &json!({"name": "Mail"})).unwrap()[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("shows no window")
+        );
         c.call("key", &json!({"combo": "cmd+n"})).unwrap();
-        assert_eq!(fake.events().last(), Some(&Event::Behind { window: 0, input: Input::Key(keys::parse("cmd+n").unwrap()) }));
-        assert!(c.call("click", &json!({"x": 1, "y": 1})).unwrap_err().contains("no window yet"));
+        assert_eq!(
+            fake.events().last(),
+            Some(&Event::Behind {
+                window: 0,
+                input: Input::Key(keys::parse("cmd+n").unwrap())
+            })
+        );
+        assert!(
+            c.call("click", &json!({"x": 1, "y": 1}))
+                .unwrap_err()
+                .contains("no window yet")
+        );
         // Nothing to find at all.
         let mut c = behind(&behind_the_users());
-        assert!(c.call("open_app", &json!({"name": "Nope"})).unwrap_err().contains("no window of it has appeared"));
-        assert!(is_app("Google Chrome", "chrome") && is_app("Safari", "safari.app") && !is_app("Safari", "") && !is_app("Notes", "no"));
+        assert!(
+            c.call("open_app", &json!({"name": "Nope"}))
+                .unwrap_err()
+                .contains("no window of it has appeared")
+        );
+        assert!(
+            is_app("Google Chrome", "chrome")
+                && is_app("Safari", "safari.app")
+                && !is_app("Safari", "")
+                && !is_app("Notes", "no")
+        );
     }
 
     #[test]
     fn what_the_picture_in_picture_window_is_told() {
-        let w = WindowInfo { owner: "Safari".into(), title: "Docs".into(), pid: 42, id: 7, x: 400.0, y: 100.0, w: 800.0, h: 600.0 };
-        let a = activity("drag", "Dragging".into(), &w, Some((20.0, 30.0)), Some((1.0, 2.0)));
-        assert_eq!(a["window"], json!({"id": 7, "pid": 42, "app": "Safari", "title": "Docs", "x": 400.0, "y": 100.0, "width": 800.0, "height": 600.0}));
-        assert_eq!((a["point"].clone(), a["from"].clone()), (json!({"x": 20.0, "y": 30.0}), json!({"x": 1.0, "y": 2.0})));
-        assert_eq!(activity("key", "Pressing return".into(), &w, None, None)["point"], Value::Null);
+        let w = WindowInfo {
+            owner: "Safari".into(),
+            title: "Docs".into(),
+            pid: 42,
+            id: 7,
+            x: 400.0,
+            y: 100.0,
+            w: 800.0,
+            h: 600.0,
+        };
+        let a = activity(
+            "drag",
+            "Dragging".into(),
+            &w,
+            Some((20.0, 30.0)),
+            Some((1.0, 2.0)),
+        );
+        assert_eq!(
+            a["window"],
+            json!({"id": 7, "pid": 42, "app": "Safari", "title": "Docs", "x": 400.0, "y": 100.0, "width": 800.0, "height": 600.0})
+        );
+        assert_eq!(
+            (a["point"].clone(), a["from"].clone()),
+            (json!({"x": 20.0, "y": 30.0}), json!({"x": 1.0, "y": 2.0}))
+        );
+        assert_eq!(
+            activity("key", "Pressing return".into(), &w, None, None)["point"],
+            Value::Null
+        );
         assert_eq!(typing("hi\nthere"), "Typing “hi there”");
-        assert_eq!(typing(&"a".repeat(40)), format!("Typing “{}…”", "a".repeat(32)));
+        assert_eq!(
+            typing(&"a".repeat(40)),
+            format!("Typing “{}…”", "a".repeat(32))
+        );
     }
 
     #[test]
@@ -1456,10 +2229,14 @@ mod tests {
         use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
         // A listener like Trek's: the hello, then the reports, answered with `{}`.
         #[cfg(unix)]
-        let path = std::env::temp_dir().join(format!("trek-mcp-behind-{}.sock", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("trek-mcp-behind-{}.sock", std::process::id()));
         #[cfg(windows)]
         let path = trek_ipc::pipe_name(1).unwrap();
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let mut listener = {
             let _enter = rt.enter();
             trek_ipc::server::Listener::bind(&path).unwrap()
@@ -1471,7 +2248,9 @@ mod tests {
                 let mut line = String::new();
                 r.read_line(&mut line).await.unwrap();
                 assert!(line.contains("\"hello\""), "{line}");
-                w.write_all(trek_ipc::encode(&json!({"ok": true})).as_bytes()).await.unwrap();
+                w.write_all(trek_ipc::encode(&json!({"ok": true})).as_bytes())
+                    .await
+                    .unwrap();
                 let mut told = vec![];
                 while told.len() < 2 {
                     line.clear();
@@ -1480,7 +2259,11 @@ mod tests {
                     }
                     let req: Value = serde_json::from_str(&line).unwrap();
                     assert_eq!(req["method"], trek_ipc::COMPUTER_ACTIVITY);
-                    w.write_all(trek_ipc::encode(&trek_ipc::reply(&req["id"], Ok(json!({})))).as_bytes()).await.unwrap();
+                    w.write_all(
+                        trek_ipc::encode(&trek_ipc::reply(&req["id"], Ok(json!({})))).as_bytes(),
+                    )
+                    .await
+                    .unwrap();
                     told.push(req["params"].clone());
                 }
                 told
@@ -1488,14 +2271,29 @@ mod tests {
         });
         let fake = behind_the_users();
         let mut c = behind(&fake);
-        c.report = Some(Reporter::start(trek_ipc::Client { socket: path.clone(), token: "t".into(), session: "s".into() }));
+        c.report = Some(Reporter::start(trek_ipc::Client {
+            socket: path.clone(),
+            token: "t".into(),
+            session: "s".into(),
+        }));
         c.call("screenshot", &json!({"window_id": 7})).unwrap();
         // Let the first go before the next, so neither is folded into the other.
         std::thread::sleep(Duration::from_millis(300));
         c.call("click", &json!({"x": 100, "y": 50})).unwrap();
         let told = trek.join().unwrap();
         assert_eq!(told[0]["action"], "screenshot");
-        assert_eq!((told[1]["action"].clone(), told[1]["detail"].clone(), told[1]["point"].clone()), (json!("click"), json!("Clicking"), json!({"x": 100.0, "y": 50.0})));
+        assert_eq!(
+            (
+                told[1]["action"].clone(),
+                told[1]["detail"].clone(),
+                told[1]["point"].clone()
+            ),
+            (
+                json!("click"),
+                json!("Clicking"),
+                json!({"x": 100.0, "y": 50.0})
+            )
+        );
         assert_eq!(told[1]["window"]["app"], "Safari");
         #[cfg(unix)]
         let _ = std::fs::remove_file(path);

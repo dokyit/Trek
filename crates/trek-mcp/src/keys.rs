@@ -215,7 +215,14 @@ pub fn parse_chord(combo: &str) -> Result<Chord, String> {
     let mut mods = Vec::new();
     for m in mod_tokens {
         let m = modifier(m).ok_or_else(|| {
-            format!("Unknown modifier {m:?} in {combo:?} (use {})", if cfg!(windows) { "ctrl, shift, alt, win" } else { "cmd, shift, alt/option, ctrl, fn" })
+            format!(
+                "Unknown modifier {m:?} in {combo:?} (use {})",
+                if cfg!(windows) {
+                    "ctrl, shift, alt, win"
+                } else {
+                    "cmd, shift, alt/option, ctrl, fn"
+                }
+            )
         })?;
         if !mods.contains(&m) {
             mods.push(m);
@@ -231,7 +238,10 @@ pub fn parse_chord(combo: &str) -> Result<Chord, String> {
         k => match KEYS.iter().find(|row| row.0 == k) {
             Some(row) => *row,
             None if modifier(k).is_some() => {
-                return Err(format!("Key combo {combo:?} has only modifiers; add a key, e.g. \"{}\"", if cfg!(windows) { "ctrl+c" } else { "cmd+c" }));
+                return Err(format!(
+                    "Key combo {combo:?} has only modifiers; add a key, e.g. \"{}\"",
+                    if cfg!(windows) { "ctrl+c" } else { "cmd+c" }
+                ));
             }
             None => {
                 return Err(format!(
@@ -263,7 +273,10 @@ pub fn parse_combo(combo: &str) -> Result<KeyCombo, String> {
             Modifier::Fn => FLAG_SECONDARY_FN,
         })
         .fold(0, |a, b| a | b);
-    Ok(KeyCombo { keycode: chord.key.1, flags })
+    Ok(KeyCombo {
+        keycode: chord.key.1,
+        flags,
+    })
 }
 
 /// A combo as Windows sends it: the modifier keys to hold (in the order they go down) and the key.
@@ -276,13 +289,18 @@ pub struct VkCombo {
 pub fn parse_vk(combo: &str) -> Result<VkCombo, String> {
     let chord = parse_chord(combo)?;
     if chord.has(Modifier::Fn) {
-        return Err(format!("{combo:?} needs fn, which only the keyboard itself can press on Windows. Name the key fn would give instead (e.g. f5, delete, pageup)."));
+        return Err(format!(
+            "{combo:?} needs fn, which only the keyboard itself can press on Windows. Name the key fn would give instead (e.g. f5, delete, pageup)."
+        ));
     }
     // Ctrl, Alt, Shift, then Win: the order a person presses them, and Ctrl once even when
     // both cmd and ctrl are named.
     let mut held = Vec::new();
     for (wanted, vk) in [
-        (chord.has(Modifier::Ctrl) || chord.has(Modifier::Cmd), VK_CONTROL),
+        (
+            chord.has(Modifier::Ctrl) || chord.has(Modifier::Cmd),
+            VK_CONTROL,
+        ),
         (chord.has(Modifier::Alt), VK_MENU),
         (chord.has(Modifier::Shift), VK_SHIFT),
         (chord.has(Modifier::Super), VK_LWIN),
@@ -291,7 +309,10 @@ pub fn parse_vk(combo: &str) -> Result<VkCombo, String> {
             held.push(vk);
         }
     }
-    Ok(VkCombo { held, vk: chord.key.2 })
+    Ok(VkCombo {
+        held,
+        vk: chord.key.2,
+    })
 }
 
 /// The combo this platform's `Desktop` presses.
@@ -315,7 +336,13 @@ mod tests {
 
     #[test]
     fn plain_named_keys() {
-        assert_eq!(parse_combo("return").unwrap(), KeyCombo { keycode: 36, flags: 0 });
+        assert_eq!(
+            parse_combo("return").unwrap(),
+            KeyCombo {
+                keycode: 36,
+                flags: 0
+            }
+        );
         assert_eq!(parse_combo("Enter").unwrap().keycode, 36);
         assert_eq!(parse_combo("tab").unwrap().keycode, 48);
         assert_eq!(parse_combo("space").unwrap().keycode, 49);
@@ -346,8 +373,15 @@ mod tests {
         let mut seen_vk = std::collections::HashSet::new();
         for c in ('a'..='z').chain('0'..='9') {
             assert!(seen.insert(keycode(&c.to_string()).unwrap()), "dup for {c}");
-            assert!(seen_vk.insert(vk(&c.to_string()).unwrap()), "dup vk for {c}");
-            assert_eq!(vk(&c.to_string()), Some(c.to_ascii_uppercase() as u16), "{c}");
+            assert!(
+                seen_vk.insert(vk(&c.to_string()).unwrap()),
+                "dup vk for {c}"
+            );
+            assert_eq!(
+                vk(&c.to_string()),
+                Some(c.to_ascii_uppercase() as u16),
+                "{c}"
+            );
         }
     }
 
@@ -371,18 +405,45 @@ mod tests {
         assert_eq!(k.keycode, 24);
         assert_eq!(k.flags, FLAG_COMMAND | FLAG_SHIFT);
         assert_eq!(parse_combo("cmd+plus").unwrap(), k);
-        assert_eq!(parse_combo("cmd+=").unwrap(), KeyCombo { keycode: 24, flags: FLAG_COMMAND });
+        assert_eq!(
+            parse_combo("cmd+=").unwrap(),
+            KeyCombo {
+                keycode: 24,
+                flags: FLAG_COMMAND
+            }
+        );
         assert_eq!(parse_combo("cmd+-").unwrap().keycode, 27);
-        assert_eq!(parse_vk("ctrl++").unwrap(), VkCombo { held: vec![VK_CONTROL, VK_SHIFT], vk: VK_OEM_PLUS });
-        assert_eq!(parse_vk("shift++").unwrap(), VkCombo { held: vec![VK_SHIFT], vk: VK_OEM_PLUS }, "shift is held once");
+        assert_eq!(
+            parse_vk("ctrl++").unwrap(),
+            VkCombo {
+                held: vec![VK_CONTROL, VK_SHIFT],
+                vk: VK_OEM_PLUS
+            }
+        );
+        assert_eq!(
+            parse_vk("shift++").unwrap(),
+            VkCombo {
+                held: vec![VK_SHIFT],
+                vk: VK_OEM_PLUS
+            },
+            "shift is held once"
+        );
     }
 
     #[test]
     fn errors() {
         assert!(parse_combo("").is_err());
         assert!(parse_combo("cmd").unwrap_err().contains("only modifiers"));
-        assert!(parse_combo("hyper+a").unwrap_err().contains("Unknown modifier"));
-        assert!(parse_combo("cmd+banana").unwrap_err().contains("Unknown key"));
+        assert!(
+            parse_combo("hyper+a")
+                .unwrap_err()
+                .contains("Unknown modifier")
+        );
+        assert!(
+            parse_combo("cmd+banana")
+                .unwrap_err()
+                .contains("Unknown key")
+        );
         assert!(parse_combo("cmd++a").is_err());
         assert!(parse_vk("ctrl").unwrap_err().contains("only modifiers"));
         assert!(parse_vk("ctrl+banana").unwrap_err().contains("Unknown key"));
@@ -396,12 +457,26 @@ mod tests {
         for (name, _, code) in KEYS {
             assert!(names.insert(*name), "{name} is listed twice");
             assert_eq!(name.to_lowercase(), *name, "names are matched lowercased");
-            assert!((0x08..=0xFE).contains(code), "{name}: {code:#x} isn't a virtual-key code");
+            assert!(
+                (0x08..=0xFE).contains(code),
+                "{name}: {code:#x} isn't a virtual-key code"
+            );
             assert_eq!(parse_vk(name).unwrap().vk, *code, "{name}");
-            assert_eq!(parse_combo(name).unwrap().keycode, keycode(name).unwrap(), "{name}");
+            assert_eq!(
+                parse_combo(name).unwrap().keycode,
+                keycode(name).unwrap(),
+                "{name}"
+            );
         }
         // Aliases agree on both platforms: a name and its alias are one key everywhere.
-        for (a, b) in [("delete", "backspace"), ("forwarddelete", "del"), ("return", "enter"), ("=", "equals"), ("`", "backtick"), ("pgup", "pageup")] {
+        for (a, b) in [
+            ("delete", "backspace"),
+            ("forwarddelete", "del"),
+            ("return", "enter"),
+            ("=", "equals"),
+            ("`", "backtick"),
+            ("pgup", "pageup"),
+        ] {
             assert_eq!((keycode(a), vk(a)), (keycode(b), vk(b)), "{a} = {b}");
         }
         // The Mac's delete is a PC's Backspace; its forward delete is Delete.
@@ -414,15 +489,46 @@ mod tests {
     #[test]
     fn windows_modifiers_follow_the_pc() {
         // cmd means Ctrl on a PC (cmd+c copies); win/super/meta are the Windows key.
-        assert_eq!(parse_vk("cmd+c").unwrap(), VkCombo { held: vec![VK_CONTROL], vk: 0x43 });
-        assert_eq!(parse_vk("cmd+ctrl+c").unwrap().held, vec![VK_CONTROL], "Ctrl once");
-        assert_eq!(parse_vk("win+r").unwrap(), VkCombo { held: vec![VK_LWIN], vk: 0x52 });
+        assert_eq!(
+            parse_vk("cmd+c").unwrap(),
+            VkCombo {
+                held: vec![VK_CONTROL],
+                vk: 0x43
+            }
+        );
+        assert_eq!(
+            parse_vk("cmd+ctrl+c").unwrap().held,
+            vec![VK_CONTROL],
+            "Ctrl once"
+        );
+        assert_eq!(
+            parse_vk("win+r").unwrap(),
+            VkCombo {
+                held: vec![VK_LWIN],
+                vk: 0x52
+            }
+        );
         assert_eq!(parse_vk("super+e").unwrap().held, vec![VK_LWIN]);
         assert_eq!(parse_vk("meta+e").unwrap().held, vec![VK_LWIN]);
         // Held in the order a person presses them, whatever order they're written in.
-        assert_eq!(parse_vk("shift+win+alt+ctrl+t").unwrap().held, vec![VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN]);
-        assert_eq!(parse_vk("option+left").unwrap(), VkCombo { held: vec![VK_MENU], vk: 0x25 });
-        assert_eq!(parse_vk("Return").unwrap(), VkCombo { held: vec![], vk: VK_RETURN });
+        assert_eq!(
+            parse_vk("shift+win+alt+ctrl+t").unwrap().held,
+            vec![VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN]
+        );
+        assert_eq!(
+            parse_vk("option+left").unwrap(),
+            VkCombo {
+                held: vec![VK_MENU],
+                vk: 0x25
+            }
+        );
+        assert_eq!(
+            parse_vk("Return").unwrap(),
+            VkCombo {
+                held: vec![],
+                vk: VK_RETURN
+            }
+        );
         // fn never reaches Windows: it's the keyboard's own key.
         assert!(parse_vk("fn+f1").unwrap_err().contains("fn"));
     }

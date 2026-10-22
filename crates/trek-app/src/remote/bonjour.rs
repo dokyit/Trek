@@ -88,7 +88,15 @@ impl Drop for Advert {
 mod ffi {
     use std::os::raw::{c_char, c_void};
     pub type DNSServiceRef = *mut c_void;
-    type RegisterReply = extern "C" fn(DNSServiceRef, u32, i32, *const c_char, *const c_char, *const c_char, *mut c_void);
+    type RegisterReply = extern "C" fn(
+        DNSServiceRef,
+        u32,
+        i32,
+        *const c_char,
+        *const c_char,
+        *const c_char,
+        *mut c_void,
+    );
     // dns_sd.h, in libSystem.
     unsafe extern "C" {
         #[allow(clippy::too_many_arguments)]
@@ -114,7 +122,10 @@ mod ffi {
 mod tests {
     #[test]
     fn the_txt_record_carries_the_id_and_the_name_length_led() {
-        assert_eq!(super::txt_record("abc", "Studio"), b"\x06id=abc\x0bname=Studio".to_vec());
+        assert_eq!(
+            super::txt_record("abc", "Studio"),
+            b"\x06id=abc\x0bname=Studio".to_vec()
+        );
         assert_eq!(super::txt_record(&"x".repeat(300), "M").len(), 256 + 7);
         // A long name is cut whole characters at a time ("é" is two bytes: 5 + 125 * 2 = 255).
         let txt = super::txt_record("a", &"é".repeat(200));

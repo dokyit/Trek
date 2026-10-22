@@ -19,7 +19,9 @@
 //! their end (`subscribe` with a `limit`) and are paged in (`transcript_before`); items no phone
 //! has been sent aren't followed either.
 
-use crate::workspace::{ForkAt, LineageRow, LiveThread, Route, ThreadState, Workspace, WorkspaceEvent};
+use crate::workspace::{
+    ForkAt, LineageRow, LiveThread, Route, ThreadState, Workspace, WorkspaceEvent,
+};
 use gpui_kit::{AsyncApp, Context, Task, WeakEntity};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash as _, Hasher as _};
@@ -41,8 +43,8 @@ mod icons;
 pub(crate) mod link;
 mod machines;
 mod notes;
-pub(crate) mod search;
 mod queue;
+pub(crate) mod search;
 mod settings;
 mod sub_agents;
 mod thread_actions;
@@ -136,7 +138,10 @@ impl Remote {
             snapshot_key: None,
             advert,
             announce: None,
-            policy: Arc::new(std::sync::Mutex::new(link::LinkPolicy { reach: started_with.1, tailscale: None })),
+            policy: Arc::new(std::sync::Mutex::new(link::LinkPolicy {
+                reach: started_with.1,
+                tailscale: None,
+            })),
             _tasks: tasks,
         }
     }
@@ -220,7 +225,13 @@ impl Watched {
     fn restart(&mut self, len: usize) {
         self.seq += 1;
         self.base = self.seq;
-        self.items = vec![Sent { seq: self.seq, hash: None }; len];
+        self.items = vec![
+            Sent {
+                seq: self.seq,
+                hash: None
+            };
+            len
+        ];
         self.from = len;
         self.requests.clear();
         self.changes.clear();
@@ -252,14 +263,31 @@ impl Tailnet {
     pub(crate) fn parse(json: &str) -> Option<Self> {
         let v: serde_json::Value = serde_json::from_str(json).ok()?;
         let user = v.get("Self")?.get("UserID")?.as_i64()?;
-        let account = v.get("User").and_then(|u| u.get(user.to_string())).and_then(|u| u.get("LoginName")).and_then(|n| n.as_str()).map(str::to_string);
+        let account = v
+            .get("User")
+            .and_then(|u| u.get(user.to_string()))
+            .and_then(|u| u.get("LoginName"))
+            .and_then(|n| n.as_str())
+            .map(str::to_string);
         let phones: Vec<&serde_json::Value> = v
             .get("Peer")
             .and_then(|p| p.as_object())
-            .map(|peers| peers.values().filter(|p| p.get("OS").and_then(|o| o.as_str()) == Some("iOS")).collect())
+            .map(|peers| {
+                peers
+                    .values()
+                    .filter(|p| p.get("OS").and_then(|o| o.as_str()) == Some("iOS"))
+                    .collect()
+            })
             .unwrap_or_default();
-        let phones_online = phones.iter().filter(|p| p.get("Online").and_then(|o| o.as_bool()) == Some(true)).count();
-        Some(Self { account, phones: phones.len(), phones_online })
+        let phones_online = phones
+            .iter()
+            .filter(|p| p.get("Online").and_then(|o| o.as_bool()) == Some(true))
+            .count();
+        Some(Self {
+            account,
+            phones: phones.len(),
+            phones_online,
+        })
     }
 }
 
@@ -267,9 +295,15 @@ impl Addresses {
     /// This computer's addresses, from a fresh network snapshot. Off the main thread: it may ask
     /// Tailscale.
     fn find_in(input: &AddressInputs) -> Self {
-        let mut out = Self::from_interfaces_preferring(&input.interfaces, tailscale_ip(), input.default_route);
+        let mut out = Self::from_interfaces_preferring(
+            &input.interfaces,
+            tailscale_ip(),
+            input.default_route,
+        );
         if out.tailscale.is_some() {
-            out.tailnet = tailscale(&["status", "--json"]).as_deref().and_then(Tailnet::parse);
+            out.tailnet = tailscale(&["status", "--json"])
+                .as_deref()
+                .and_then(Tailnet::parse);
         }
         out
     }
@@ -278,7 +312,10 @@ impl Addresses {
     /// CLI names (`asked`), else a 100.64/10 address on a tunnel (`utun…`): that range alone is
     /// also carrier-grade NAT, which hotspots and some ISPs hand out on Wi-Fi.
     #[cfg(test)]
-    pub(crate) fn from_interfaces(interfaces: &[(String, Ipv4Addr)], asked: Option<Ipv4Addr>) -> Self {
+    pub(crate) fn from_interfaces(
+        interfaces: &[(String, Ipv4Addr)],
+        asked: Option<Ipv4Addr>,
+    ) -> Self {
         Self::from_interfaces_preferring(interfaces, asked, None)
     }
 
@@ -297,32 +334,67 @@ impl Addresses {
         };
         let tailscale = asked
             .filter(|ip| interfaces.iter().any(|(_, a)| a == ip))
-            .or_else(|| interfaces.iter().find(|(name, ip)| (is_tailscale(name) || name.starts_with("utun")) && shared(ip)).map(|(_, ip)| *ip));
-        let lan_candidate = |(name, ip): &&(String, Ipv4Addr)| !is_virtual_or_tunnel(name) && ip.is_private();
+            .or_else(|| {
+                interfaces
+                    .iter()
+                    .find(|(name, ip)| {
+                        (is_tailscale(name) || name.starts_with("utun")) && shared(ip)
+                    })
+                    .map(|(_, ip)| *ip)
+            });
+        let lan_candidate =
+            |(name, ip): &&(String, Ipv4Addr)| !is_virtual_or_tunnel(name) && ip.is_private();
         let lan = default_route
-            .and_then(|preferred| interfaces.iter().find(|entry| lan_candidate(entry) && entry.1 == preferred))
+            .and_then(|preferred| {
+                interfaces
+                    .iter()
+                    .find(|entry| lan_candidate(entry) && entry.1 == preferred)
+            })
             .or_else(|| interfaces.iter().find(lan_candidate))
             .map(|(_, ip)| *ip);
-        Self { lan, tailscale, tailnet: None }
+        Self {
+            lan,
+            tailscale,
+            tailnet: None,
+        }
     }
 }
 
 fn is_tailscale(name: &str) -> bool {
-    name.get(..9).is_some_and(|prefix| prefix.eq_ignore_ascii_case("tailscale"))
+    name.get(..9)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("tailscale"))
 }
 
 /// Interfaces whose private addresses belong to a tunnel, VM, or local virtual switch rather
 /// than the LAN a second physical computer shares. Friendly names vary by platform and client.
 fn is_virtual_or_tunnel(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    let compact: String = lower.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let compact: String = lower
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
     lower.starts_with("utun")
         || lower.starts_with("tun")
         || lower.starts_with("tap")
         || lower.starts_with("wg")
-        || ["tailscale", "openvpn", "wireguard", "wintun", "zerotier", "vpn", "virtualbox", "vmware", "vethernet", "hyperv", "docker", "wsl", "loopback", "parallels"]
-            .iter()
-            .any(|kind| compact.contains(kind))
+        || [
+            "tailscale",
+            "openvpn",
+            "wireguard",
+            "wintun",
+            "zerotier",
+            "vpn",
+            "virtualbox",
+            "vmware",
+            "vethernet",
+            "hyperv",
+            "docker",
+            "wsl",
+            "loopback",
+            "parallels",
+        ]
+        .iter()
+        .any(|kind| compact.contains(kind))
 }
 
 /// The network facts that decide the address put in pairing links. The default route belongs in
@@ -335,7 +407,10 @@ struct AddressInputs {
 
 impl AddressInputs {
     fn read() -> Self {
-        Self { interfaces: interface_addresses(), default_route: default_route_ipv4() }
+        Self {
+            interfaces: interface_addresses(),
+            default_route: default_route_ipv4(),
+        }
     }
 }
 
@@ -363,15 +438,29 @@ fn tailscale(args: &[&str]) -> Option<String> {
     use std::io::Read as _;
     use std::process::Stdio;
     #[cfg(windows)]
-    let (app, name) = (PathBuf::from(r"C:\Program Files\Tailscale\tailscale.exe"), "tailscale.exe");
+    let (app, name) = (
+        PathBuf::from(r"C:\Program Files\Tailscale\tailscale.exe"),
+        "tailscale.exe",
+    );
     #[cfg(not(windows))]
-    let (app, name) = (PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale"), "tailscale");
+    let (app, name) = (
+        PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale"),
+        "tailscale",
+    );
     // On Windows the installer's own copy first: a `tailscale` further down PATH may be another
     // tailnet's (a second install, a build) rather than the one whose adapter is up.
     let installed = app.is_file().then_some(app);
-    let cli = if cfg!(windows) { installed.or_else(|| trek_core::detect::which(name)) } else { trek_core::detect::which(name).or(installed) }?;
+    let cli = if cfg!(windows) {
+        installed.or_else(|| trek_core::detect::which(name))
+    } else {
+        trek_core::detect::which(name).or(installed)
+    }?;
     let mut command = trek_core::procs::command(cli);
-    command.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
     let mut child = command.spawn().ok()?;
     // Read as it comes: a whole tailnet's status is more than a pipe holds, and the CLI would
     // wait on us to read it while we waited on it to finish.
@@ -384,7 +473,9 @@ fn tailscale(args: &[&str]) -> Option<String> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => break,
-            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
             Ok(Some(_)) => return None,
             _ => {
                 let _ = child.kill();
@@ -404,10 +495,22 @@ pub(crate) fn first_ipv4(output: &str) -> Option<Ipv4Addr> {
 /// What the pairing code tells phones to dial first. The server listens on every interface
 /// whatever this says; the `reach` setting decides per connection which it serves
 /// (`link::LinkPolicy`).
-pub(crate) fn remote_endpoint(addresses: &Addresses, reach: trek_core::settings::Reach, port: u16) -> std::io::Result<(SocketAddr, String)> {
+pub(crate) fn remote_endpoint(
+    addresses: &Addresses,
+    reach: trek_core::settings::Reach,
+    port: u16,
+) -> std::io::Result<(SocketAddr, String)> {
     let ip = match reach {
-        trek_core::settings::Reach::Tailscale => addresses.tailscale.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "Tailscale isn't connected; choose Wi-Fi or connect Tailscale"))?,
-        trek_core::settings::Reach::Wifi => addresses.lan.or(addresses.tailscale).unwrap_or(Ipv4Addr::LOCALHOST),
+        trek_core::settings::Reach::Tailscale => addresses.tailscale.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::AddrNotAvailable,
+                "Tailscale isn't connected; choose Wi-Fi or connect Tailscale",
+            )
+        })?,
+        trek_core::settings::Reach::Wifi => addresses
+            .lan
+            .or(addresses.tailscale)
+            .unwrap_or(Ipv4Addr::LOCALHOST),
     };
     Ok((SocketAddr::from((ip, port)), format!("{ip}:{port}")))
 }
@@ -416,17 +519,30 @@ pub(crate) fn remote_endpoint(addresses: &Addresses, reach: trek_core::settings:
 /// when Tailscale is up, so a phone paired at home still finds this Mac away from it (the
 /// tailnet is the user's own network). "Tailscale" is the tailnet alone: whoever chose it may
 /// not want Trek answering on the Wi-Fi it's on (and it doesn't: `link::LinkPolicy`).
-pub(crate) fn other_endpoint(addresses: &Addresses, reach: trek_core::settings::Reach, port: u16) -> Option<SocketAddr> {
+pub(crate) fn other_endpoint(
+    addresses: &Addresses,
+    reach: trek_core::settings::Reach,
+    port: u16,
+) -> Option<SocketAddr> {
     match reach {
-        trek_core::settings::Reach::Wifi => addresses.lan.and(addresses.tailscale).map(|ip| SocketAddr::from((ip, port))),
+        trek_core::settings::Reach::Wifi => addresses
+            .lan
+            .and(addresses.tailscale)
+            .map(|ip| SocketAddr::from((ip, port))),
         trek_core::settings::Reach::Tailscale => None,
     }
 }
 
 /// Every `host:port` phones may dial, the pairing code's first.
-pub(crate) fn remote_routes(addresses: &Addresses, reach: trek_core::settings::Reach, port: u16) -> std::io::Result<Vec<String>> {
+pub(crate) fn remote_routes(
+    addresses: &Addresses,
+    reach: trek_core::settings::Reach,
+    port: u16,
+) -> std::io::Result<Vec<String>> {
     let (_, first) = remote_endpoint(addresses, reach, port)?;
-    Ok(std::iter::once(first).chain(other_endpoint(addresses, reach, port).map(|a| a.to_string())).collect())
+    Ok(std::iter::once(first)
+        .chain(other_endpoint(addresses, reach, port).map(|a| a.to_string()))
+        .collect())
 }
 
 /// The IPv4 addresses of the interfaces that are up (not loopback), with the interfaces' names.
@@ -457,10 +573,13 @@ fn interface_addresses() -> Vec<(String, Ipv4Addr)> {
         let mut cur = list;
         while !cur.is_null() {
             let ifa = &*cur;
-            let up = ifa.ifa_flags & libc::IFF_UP as u32 != 0 && ifa.ifa_flags & libc::IFF_LOOPBACK as u32 == 0;
+            let up = ifa.ifa_flags & libc::IFF_UP as u32 != 0
+                && ifa.ifa_flags & libc::IFF_LOOPBACK as u32 == 0;
             if up && !ifa.ifa_addr.is_null() && (*ifa.ifa_addr).sa_family as i32 == libc::AF_INET {
                 let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
-                let name = std::ffi::CStr::from_ptr(ifa.ifa_name).to_string_lossy().into_owned();
+                let name = std::ffi::CStr::from_ptr(ifa.ifa_name)
+                    .to_string_lossy()
+                    .into_owned();
                 out.push((name, Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr))));
             }
             cur = ifa.ifa_next;
@@ -477,13 +596,21 @@ fn mobile_dir() -> PathBuf {
 /// The Mac as phones see it: a lasting id, its name, Trek's version.
 pub(crate) fn host_info() -> tr::HostInfo {
     let id_file = mobile_dir().join("host-id");
-    let id = std::fs::read_to_string(&id_file).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| {
-        let id = uuid_like();
-        let _ = std::fs::create_dir_all(mobile_dir());
-        let _ = std::fs::write(&id_file, &id);
-        id
-    });
-    tr::HostInfo { id, name: computer_name(), version: env!("CARGO_PKG_VERSION").to_string() }
+    let id = std::fs::read_to_string(&id_file)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let id = uuid_like();
+            let _ = std::fs::create_dir_all(mobile_dir());
+            let _ = std::fs::write(&id_file, &id);
+            id
+        });
+    tr::HostInfo {
+        id,
+        name: computer_name(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    }
 }
 
 fn uuid_like() -> String {
@@ -495,13 +622,24 @@ fn uuid_like() -> String {
 /// The PC's name: its DNS host name (`COMPUTERNAME` when Windows doesn't answer).
 #[cfg(windows)]
 fn computer_name() -> String {
-    use windows_sys::Win32::System::SystemInformation::{ComputerNameDnsHostname, GetComputerNameExW};
+    use windows_sys::Win32::System::SystemInformation::{
+        ComputerNameDnsHostname, GetComputerNameExW,
+    };
     let mut buf = [0u16; 256];
     let mut len = buf.len() as u32;
     // SAFETY: `buf` is `len` wide characters long; on success `len` is how many were written.
-    let ok = unsafe { GetComputerNameExW(ComputerNameDnsHostname, buf.as_mut_ptr(), &mut len) } != 0;
-    let name = if ok { String::from_utf16_lossy(&buf[..len as usize]) } else { std::env::var("COMPUTERNAME").unwrap_or_default() };
-    if name.trim().is_empty() { "PC".to_string() } else { name }
+    let ok =
+        unsafe { GetComputerNameExW(ComputerNameDnsHostname, buf.as_mut_ptr(), &mut len) } != 0;
+    let name = if ok {
+        String::from_utf16_lossy(&buf[..len as usize])
+    } else {
+        std::env::var("COMPUTERNAME").unwrap_or_default()
+    };
+    if name.trim().is_empty() {
+        "PC".to_string()
+    } else {
+        name
+    }
 }
 
 /// "Tobias's MacBook Pro", as Sharing settings name it.
@@ -652,11 +790,25 @@ impl Workspace {
     /// what `start_remote` sets up, for tests of what goes out to phones.
     #[cfg(test)]
     pub(crate) fn start_test_remote(&mut self) {
-        let mut config = tr::ServerConfig::new(tr::HostInfo { id: "test".into(), name: "Test Mac".into(), version: "0".into() });
+        let mut config = tr::ServerConfig::new(tr::HostInfo {
+            id: "test".into(),
+            name: "Test Mac".into(),
+            version: "0".into(),
+        });
         config.bind = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
         let (host, _requests) = tr::ChannelHost::new();
-        let handle = trek_core::runtime().block_on(tr::RemoteServer::start(config, Arc::new(host))).expect("a test server");
-        let mut remote = Remote::new(handle, Addresses::default(), String::new(), vec![], (0, trek_core::settings::Reach::Wifi), None, vec![]);
+        let handle = trek_core::runtime()
+            .block_on(tr::RemoteServer::start(config, Arc::new(host)))
+            .expect("a test server");
+        let mut remote = Remote::new(
+            handle,
+            Addresses::default(),
+            String::new(),
+            vec![],
+            (0, trek_core::settings::Reach::Wifi),
+            None,
+            vec![],
+        );
         remote.connected.insert("phone".to_string());
         self.remote = Some(remote);
     }
@@ -676,12 +828,18 @@ impl Workspace {
             remote.offer = Some(offer);
             cx.notify();
             // The server stops taking the code then; Settings stops showing it.
-            let wait = std::time::Duration::from_millis((expires_at - trek_core::store::now_ms()).max(0) as u64);
+            let wait = std::time::Duration::from_millis(
+                (expires_at - trek_core::store::now_ms()).max(0) as u64,
+            );
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(wait).await;
                 let _ = this.update(cx, |ws, cx| {
                     if let Some(remote) = ws.remote.as_mut() {
-                        if remote.offer.as_ref().is_some_and(|o| o.expires_at == expires_at) {
+                        if remote
+                            .offer
+                            .as_ref()
+                            .is_some_and(|o| o.expires_at == expires_at)
+                        {
                             remote.offer = None;
                             cx.notify();
                         }
@@ -718,20 +876,40 @@ impl Workspace {
                 // The first phone's snapshot is what later ones are compared with (not every
                 // phone's: one connecting mustn't hide a change from those connected before).
                 if let Some(remote) = self.remote.as_mut().filter(|r| r.snapshot_key.is_none()) {
-                    remote.snapshot_key = Some(hash(&(&snapshot.projects, &snapshot.agents, snapshot.full_access)));
+                    remote.snapshot_key = Some(hash(&(
+                        &snapshot.projects,
+                        &snapshot.agents,
+                        snapshot.full_access,
+                    )));
                 }
                 let _ = reply.send(Ok(snapshot));
             }
-            tr::HostRequest::Transcript { thread_id, after_seq, limit, reply } => {
+            tr::HostRequest::Transcript {
+                thread_id,
+                after_seq,
+                limit,
+                reply,
+            } => {
                 let id = thread_id.clone();
-                self.when_loaded(thread_id, reply, cx, move |ws, cx| Ok(ws.remote_transcript(&id, after_seq, limit, cx)));
+                self.when_loaded(thread_id, reply, cx, move |ws, cx| {
+                    Ok(ws.remote_transcript(&id, after_seq, limit, cx))
+                });
             }
-            tr::HostRequest::TranscriptBefore { thread_id, before, limit, reply } => {
+            tr::HostRequest::TranscriptBefore {
+                thread_id,
+                before,
+                limit,
+                reply,
+            } => {
                 let id = thread_id.clone();
-                self.when_loaded(thread_id, reply, cx, move |ws, cx| ws.remote_transcript_before(&id, &before, limit, cx));
+                self.when_loaded(thread_id, reply, cx, move |ws, cx| {
+                    ws.remote_transcript_before(&id, &before, limit, cx)
+                });
             }
             tr::HostRequest::TurnAction { req, reply } => {
-                self.when_loaded(req.thread_id.clone(), reply, cx, move |ws, cx| ws.remote_turn_action(req, cx));
+                self.when_loaded(req.thread_id.clone(), reply, cx, move |ws, cx| {
+                    ws.remote_turn_action(req, cx)
+                });
             }
             tr::HostRequest::Unwatch { thread_id } => self.remote_unwatch(&thread_id),
             tr::HostRequest::Send { req, reply } => {
@@ -754,9 +932,14 @@ impl Workspace {
             tr::HostRequest::SetPrefs { req, reply } => {
                 let _ = reply.send(self.remote_set_prefs(req, cx));
             }
-            tr::HostRequest::ThreadAction { req: tr::ThreadActionRequest { thread_id, action: tr::ThreadAction::Delete { confirmed } }, reply } => {
-                self.remote_delete(thread_id, confirmed, reply, cx)
-            }
+            tr::HostRequest::ThreadAction {
+                req:
+                    tr::ThreadActionRequest {
+                        thread_id,
+                        action: tr::ThreadAction::Delete { confirmed },
+                    },
+                reply,
+            } => self.remote_delete(thread_id, confirmed, reply, cx),
             tr::HostRequest::ThreadAction { req, reply } => {
                 let _ = reply.send(self.remote_thread_action(req, cx));
             }
@@ -787,14 +970,22 @@ impl Workspace {
             tr::HostRequest::DeleteNote { note_id, reply } => {
                 let _ = reply.send(self.remote_delete_note(&note_id, cx));
             }
-            tr::HostRequest::GitStatus { target, reply } => self.remote_git_status(target, reply, cx),
+            tr::HostRequest::GitStatus { target, reply } => {
+                self.remote_git_status(target, reply, cx)
+            }
             tr::HostRequest::GitDiff { req, reply } => self.remote_git_diff(req, reply, cx),
             tr::HostRequest::GitCommit { req, reply } => self.remote_git_commit(req, reply, cx),
             tr::HostRequest::GitPush { target, reply } => self.remote_git_push(target, reply, cx),
-            tr::HostRequest::GitBranches { target, reply } => self.remote_git_branches(target, reply, cx),
+            tr::HostRequest::GitBranches { target, reply } => {
+                self.remote_git_branches(target, reply, cx)
+            }
             tr::HostRequest::GitSwitch { req, reply } => self.remote_git_switch(req, reply, cx),
-            tr::HostRequest::WorktreeMerge { thread_id, reply } => self.remote_worktree_merge(&thread_id, reply, cx),
-            tr::HostRequest::WorktreeRemove { req, reply } => self.remote_worktree_remove(req, reply, cx),
+            tr::HostRequest::WorktreeMerge { thread_id, reply } => {
+                self.remote_worktree_merge(&thread_id, reply, cx)
+            }
+            tr::HostRequest::WorktreeRemove { req, reply } => {
+                self.remote_worktree_remove(req, reply, cx)
+            }
             tr::HostRequest::Commands { thread_id, reply } => {
                 let _ = reply.send(self.remote_commands(&thread_id));
             }
@@ -805,13 +996,23 @@ impl Workspace {
                 let _ = reply.send(self.remote_set_settings(change, cx));
             }
             // Parity with the Mac (`tr::feature`).
-            tr::HostRequest::UseReset { credit_id, reply } => self.remote_use_reset(credit_id, reply, cx),
+            tr::HostRequest::UseReset { credit_id, reply } => {
+                self.remote_use_reset(credit_id, reply, cx)
+            }
             tr::HostRequest::QueueAction { req, reply } => {
                 let _ = reply.send(self.remote_queue_action(req, cx));
             }
             tr::HostRequest::Attachment { req, reply } => self.remote_attachment(req, reply, cx),
-            tr::HostRequest::BackgroundOutput { thread_id, task_id, reply } => self.remote_background_output(thread_id, task_id, reply, cx),
-            tr::HostRequest::StopBackground { thread_id, task_id, reply } => {
+            tr::HostRequest::BackgroundOutput {
+                thread_id,
+                task_id,
+                reply,
+            } => self.remote_background_output(thread_id, task_id, reply, cx),
+            tr::HostRequest::StopBackground {
+                thread_id,
+                task_id,
+                reply,
+            } => {
                 let _ = reply.send(self.remote_stop_background(&thread_id, &task_id, cx));
             }
             tr::HostRequest::Icon { req, reply } => self.remote_icon(req, reply, cx),
@@ -822,13 +1023,27 @@ impl Workspace {
             tr::HostRequest::NoteFile { req, reply } => notes::file(req, reply, cx),
             // Another Trek driving this one (`docs/MULTI-MACHINE.md`).
             tr::HostRequest::MachineInfo { reply } => machines::machine_info(reply, cx),
-            tr::HostRequest::CloneProject { req, progress, reply } => self.remote_clone_project(req, progress, reply, cx),
-            tr::HostRequest::PutFiles { project_id, files, reply } => self.remote_put_files(&project_id, files, reply, cx),
+            tr::HostRequest::CloneProject {
+                req,
+                progress,
+                reply,
+            } => self.remote_clone_project(req, progress, reply, cx),
+            tr::HostRequest::PutFiles {
+                project_id,
+                files,
+                reply,
+            } => self.remote_put_files(&project_id, files, reply, cx),
         }
     }
 
-    fn remote_send(&mut self, req: tr::SendRequest, cx: &mut Context<Self>) -> tr::HostResult<Option<tr::Open>> {
-        let Some(t) = self.thread(&req.thread_id).cloned() else { return Err(tr::HostError::not_found("No such thread")) };
+    fn remote_send(
+        &mut self,
+        req: tr::SendRequest,
+        cx: &mut Context<Self>,
+    ) -> tr::HostResult<Option<tr::Open>> {
+        let Some(t) = self.thread(&req.thread_id).cloned() else {
+            return Err(tr::HostError::not_found("No such thread"));
+        };
         // Trek's own commands: `/new` is the phone's to carry out, `/consult` and `/restate` become
         // the message the composer would send, the rest are answered as on the Mac.
         let text = match self.phone_command(&t, &req.text)? {
@@ -846,7 +1061,11 @@ impl Workspace {
     }
 
     /// A thread's agent, model, effort, access or plan mode, changed as its composer would.
-    fn remote_set_prefs(&mut self, req: tr::PrefsRequest, cx: &mut Context<Self>) -> tr::HostResult<()> {
+    fn remote_set_prefs(
+        &mut self,
+        req: tr::PrefsRequest,
+        cx: &mut Context<Self>,
+    ) -> tr::HostResult<()> {
         if self.thread(&req.thread_id).is_none() {
             return Err(tr::HostError::not_found("No such thread"));
         }
@@ -855,26 +1074,44 @@ impl Workspace {
         if let Some(key) = &req.agent {
             let agent = AgentId::from_key(key);
             if !self.ready_agents().contains(&agent) {
-                return Err(tr::HostError::not_found(format!("{} isn't set up on {}", agent.display_name(), crate::words::words().this_computer)));
+                return Err(tr::HostError::not_found(format!(
+                    "{} isn't set up on {}",
+                    agent.display_name(),
+                    crate::words::words().this_computer
+                )));
             }
             if agent != prefs.agent {
                 // Another agent starts on its default model, as its model menu shows first.
-                prefs.model = crate::composer::default_model(&self.models_for(&agent)).map(|m| m.id.clone());
+                prefs.model =
+                    crate::composer::default_model(&self.models_for(&agent)).map(|m| m.id.clone());
                 prefs.agent = agent;
             }
         }
         let models = self.models_for(&prefs.agent);
         if let Some(model) = &req.model {
             if !models.is_empty() && !models.iter().any(|m| &m.id == model) {
-                return Err(tr::HostError::not_found(format!("{model} isn't one of {}'s models", prefs.agent.display_name())));
+                return Err(tr::HostError::not_found(format!(
+                    "{model} isn't one of {}'s models",
+                    prefs.agent.display_name()
+                )));
             }
             prefs.model = Some(model.clone());
         }
         if let Some(effort) = &req.effort {
-            prefs.effort = trek_core::Effort::parse(effort).ok_or_else(|| tr::HostError::bad_request(format!("No effort called {effort}")))?;
+            prefs.effort = trek_core::Effort::parse(effort)
+                .ok_or_else(|| tr::HostError::bad_request(format!("No effort called {effort}")))?;
         }
         // An effort the model doesn't take becomes the nearest it does (Codex has no "max").
-        if let Some(m) = prefs.model.as_ref().and_then(|id| models.iter().find(|m| crate::composer::same_model(id, &m.id))).filter(|m| !m.efforts.is_empty()) {
+        if let Some(m) = prefs
+            .model
+            .as_ref()
+            .and_then(|id| {
+                models
+                    .iter()
+                    .find(|m| crate::composer::same_model(id, &m.id))
+            })
+            .filter(|m| !m.efforts.is_empty())
+        {
             prefs.effort = prefs.effort.clamp_to(&m.efforts);
         }
         if let Some(access) = req.access {
@@ -887,8 +1124,14 @@ impl Workspace {
         Ok(())
     }
 
-    fn remote_thread_action(&mut self, req: tr::ThreadActionRequest, cx: &mut Context<Self>) -> tr::HostResult<()> {
-        let Some(t) = self.thread(&req.thread_id).cloned() else { return Err(tr::HostError::not_found("No such thread")) };
+    fn remote_thread_action(
+        &mut self,
+        req: tr::ThreadActionRequest,
+        cx: &mut Context<Self>,
+    ) -> tr::HostResult<()> {
+        let Some(t) = self.thread(&req.thread_id).cloned() else {
+            return Err(tr::HostError::not_found("No such thread"));
+        };
         let id = t.id.as_str();
         match req.action {
             tr::ThreadAction::Pin if t.pinned_at.is_none() => self.toggle_pin(id, cx),
@@ -903,21 +1146,47 @@ impl Workspace {
         Ok(())
     }
 
-    fn remote_new_thread(&mut self, req: tr::NewThreadRequest, cx: &mut Context<Self>) -> tr::HostResult<String> {
+    fn remote_new_thread(
+        &mut self,
+        req: tr::NewThreadRequest,
+        cx: &mut Context<Self>,
+    ) -> tr::HostResult<String> {
         let agent = AgentId::from_key(&req.agent);
         let text = self.phone_first_message(&agent, req.model.as_deref(), &req.text)?;
         let project = match req.project_id.as_str() {
             "" => None,
-            id => Some(self.project(id).map(|p| p.path.clone()).ok_or_else(|| tr::HostError::not_found("No such project"))?),
+            id => Some(
+                self.project(id)
+                    .map(|p| p.path.clone())
+                    .ok_or_else(|| tr::HostError::not_found("No such project"))?,
+            ),
         };
         if !self.ready_agents().contains(&agent) {
-            return Err(tr::HostError::not_found(format!("{} isn't set up on {}", agent.display_name(), crate::words::words().this_computer)));
+            return Err(tr::HostError::not_found(format!(
+                "{} isn't set up on {}",
+                agent.display_name(),
+                crate::words::words().this_computer
+            )));
         }
         let images = save_uploads(&req.images)?;
-        let hand_holding = req.access.map(|a| hand_holding(a, &self.settings)).transpose()?;
-        let effort = req.effort.as_deref().map(|e| trek_core::Effort::parse(e).ok_or_else(|| tr::HostError::bad_request(format!("No effort called {e}")))).transpose()?;
+        let hand_holding = req
+            .access
+            .map(|a| hand_holding(a, &self.settings))
+            .transpose()?;
+        let effort = req
+            .effort
+            .as_deref()
+            .map(|e| {
+                trek_core::Effort::parse(e)
+                    .ok_or_else(|| tr::HostError::bad_request(format!("No effort called {e}")))
+            })
+            .transpose()?;
         // Started the way the Mac's composer starts one, without taking over the Mac's screen.
-        let (route, prefs, tabs) = (self.route.clone(), self.draft_prefs.clone(), self.tabs.clone());
+        let (route, prefs, tabs) = (
+            self.route.clone(),
+            self.draft_prefs.clone(),
+            self.tabs.clone(),
+        );
         self.route = Route::Draft { project };
         self.draft_prefs.agent = agent;
         self.draft_prefs.model = req.model.clone();
@@ -941,22 +1210,40 @@ impl Workspace {
         started.ok_or_else(|| tr::HostError::other("The thread didn't start"))
     }
 
-    fn remote_answer(&mut self, req: tr::AnswerRequest, cx: &mut Context<Self>) -> tr::HostResult<()> {
+    fn remote_answer(
+        &mut self,
+        req: tr::AnswerRequest,
+        cx: &mut Context<Self>,
+    ) -> tr::HostResult<()> {
         let id = req.thread_id.clone();
         if self.thread(&id).is_none() {
             return Err(tr::HostError::not_found("No such thread"));
         }
-        let pending = self.live.get(&id).and_then(|l| l.permissions.iter().find(|p| p.request_id == req.request_id)).map(|p| p.prompt.clone());
+        let pending = self
+            .live
+            .get(&id)
+            .and_then(|l| {
+                l.permissions
+                    .iter()
+                    .find(|p| p.request_id == req.request_id)
+            })
+            .map(|p| p.prompt.clone());
         let Some(prompt) = pending else {
             return Err(tr::HostError::conflict("Already answered"));
         };
         let phone_response = req.response.clone();
         let mut response = req.response;
-        if let (tr::AnswerResponse::Questions { answers }, Some(trek_agents::Prompt::Questions(questions))) = (&mut response, &prompt) {
+        if let (
+            tr::AnswerResponse::Questions { answers },
+            Some(trek_agents::Prompt::Questions(questions)),
+        ) = (&mut response, &prompt)
+        {
             restore_phone_answers(answers, questions);
         }
         if let Some(remote) = self.remote.as_mut() {
-            remote.answered.insert((id.clone(), req.request_id.clone()), phone_response);
+            remote
+                .answered
+                .insert((id.clone(), req.request_id.clone()), phone_response);
         }
         match (response, prompt) {
             (tr::AnswerResponse::Approval { decision }, None) => {
@@ -966,30 +1253,60 @@ impl Workspace {
                     // own check (Face ID) was: only the Mac's setting lets it through.
                     tr::Decision::AllowForSession if !self.settings.mobile.session_approvals => {
                         if let Some(remote) = self.remote.as_mut() {
-                            remote.answered.remove(&(id.clone(), req.request_id.clone()));
+                            remote
+                                .answered
+                                .remove(&(id.clone(), req.request_id.clone()));
                         }
-                        return Err(tr::HostError::bad_request(format!("Allowing for a whole session from the phone is off on {} (Settings › Phone). Allow just this once, or turn it on there.", crate::words::words().this_computer)));
+                        return Err(tr::HostError::bad_request(format!(
+                            "Allowing for a whole session from the phone is off on {} (Settings › Phone). Allow just this once, or turn it on there.",
+                            crate::words::words().this_computer
+                        )));
                     }
                     tr::Decision::AllowForSession => trek_agents::Decision::AllowForSession,
                     tr::Decision::Deny => trek_agents::Decision::Deny,
                 };
                 self.respond(&id, &req.request_id, decision, cx);
             }
-            (tr::AnswerResponse::Questions { answers }, Some(trek_agents::Prompt::Questions(_))) => {
-                self.answer(&id, &req.request_id, answers.into_iter().map(|qa| (qa.question, qa.answer)).collect(), cx);
+            (
+                tr::AnswerResponse::Questions { answers },
+                Some(trek_agents::Prompt::Questions(_)),
+            ) => {
+                self.answer(
+                    &id,
+                    &req.request_id,
+                    answers
+                        .into_iter()
+                        .map(|qa| (qa.question, qa.answer))
+                        .collect(),
+                    cx,
+                );
             }
-            (tr::AnswerResponse::Plan { approve: true, .. }, Some(trek_agents::Prompt::Plan(_))) => self.approve_plan(&id, &req.request_id, cx),
-            (tr::AnswerResponse::Plan { approve: false, feedback }, Some(trek_agents::Prompt::Plan(_))) => {
+            (
+                tr::AnswerResponse::Plan { approve: true, .. },
+                Some(trek_agents::Prompt::Plan(_)),
+            ) => self.approve_plan(&id, &req.request_id, cx),
+            (
+                tr::AnswerResponse::Plan {
+                    approve: false,
+                    feedback,
+                },
+                Some(trek_agents::Prompt::Plan(_)),
+            ) => {
                 self.respond(&id, &req.request_id, trek_agents::Decision::Deny, cx);
                 // Feedback is a message like any other (`/new` in it opens nothing: it was an answer).
                 let thread = self.thread(&id).cloned();
-                if let (Some(feedback), Some(t)) = (feedback.filter(|f| !f.trim().is_empty()), thread)
+                if let (Some(feedback), Some(t)) =
+                    (feedback.filter(|f| !f.trim().is_empty()), thread)
                     && let Ok(commands::Phone::Send(text)) = self.phone_command(&t, &feedback)
                 {
                     self.send_to(&id, text, vec![], cx);
                 }
             }
-            _ => return Err(tr::HostError::bad_request("That answer doesn't fit the request")),
+            _ => {
+                return Err(tr::HostError::bad_request(
+                    "That answer doesn't fit the request",
+                ));
+            }
         }
         Ok(())
     }
@@ -1014,13 +1331,21 @@ impl Workspace {
         self.ensure_loaded(&id, cx);
         cx.spawn(async move |this, cx| {
             for _ in 0..200 {
-                let loaded = this.read_with(cx, |ws, _| ws.live.get(&id).is_some_and(|l| l.loaded && !l.loading)).unwrap_or(true);
+                let loaded = this
+                    .read_with(cx, |ws, _| {
+                        ws.live.get(&id).is_some_and(|l| l.loaded && !l.loading)
+                    })
+                    .unwrap_or(true);
                 if loaded {
                     break;
                 }
-                cx.background_executor().timer(Duration::from_millis(25)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(25))
+                    .await;
             }
-            let answer = this.update(cx, |ws, cx| f(ws, cx)).unwrap_or_else(|_| Err(tr::HostError::other("Trek is closing")));
+            let answer = this
+                .update(cx, |ws, cx| f(ws, cx))
+                .unwrap_or_else(|_| Err(tr::HostError::other("Trek is closing")));
             let _ = reply.send(answer);
         })
         .detach();
@@ -1029,22 +1354,41 @@ impl Workspace {
     /// Undo, retry, fork or rewind, as the turn footer's and message's buttons do on the Mac
     /// (after its confirmation, files restored when asked and Trek has them), without moving
     /// the Mac's screen.
-    fn remote_turn_action(&mut self, req: tr::TurnActionRequest, cx: &mut Context<Self>) -> tr::HostResult<tr::TurnActionDone> {
+    fn remote_turn_action(
+        &mut self,
+        req: tr::TurnActionRequest,
+        cx: &mut Context<Self>,
+    ) -> tr::HostResult<tr::TurnActionDone> {
         let id = req.thread_id.as_str();
-        let Some(live) = self.live.get(id) else { return Err(tr::HostError::not_found("No such thread")) };
-        let ix = req.item_id.strip_prefix('i').and_then(|n| n.parse::<usize>().ok()).filter(|ix| *ix < live.items.len());
-        let Some(ix) = ix else { return Err(tr::HostError::not_found("No such item")) };
+        let Some(live) = self.live.get(id) else {
+            return Err(tr::HostError::not_found("No such thread"));
+        };
+        let ix = req
+            .item_id
+            .strip_prefix('i')
+            .and_then(|n| n.parse::<usize>().ok())
+            .filter(|ix| *ix < live.items.len());
+        let Some(ix) = ix else {
+            return Err(tr::HostError::not_found("No such item"));
+        };
         let item = live.items[ix].clone();
         let key = live.items.id_at(ix).unwrap_or_default().to_string();
         let message = matches!(item, Item::User { aside: false, .. });
         let ends_turn = trek_core::rewind::ends_turn(&item);
-        let refuse_busy = |what: &str| tr::HostError::bad_request(format!("Stop the running turn to {what}"));
+        let refuse_busy =
+            |what: &str| tr::HostError::bad_request(format!("Stop the running turn to {what}"));
         let busy = self.turn_running(id);
         // Restored as the confirmation does by default: when there's a checkpoint to go back to.
-        let restore = |ws: &Self, message: &str| req.restore_files && ws.restorable_checkpoint(id, message).is_some();
+        let restore = |ws: &Self, message: &str| {
+            req.restore_files && ws.restorable_checkpoint(id, message).is_some()
+        };
         match req.action {
             tr::TurnAction::Undo | tr::TurnAction::Retry => {
-                let what = if req.action == tr::TurnAction::Undo { "undo" } else { "retry" };
+                let what = if req.action == tr::TurnAction::Undo {
+                    "undo"
+                } else {
+                    "retry"
+                };
                 if !ends_turn {
                     return Err(tr::HostError::bad_request("That item doesn't end a turn"));
                 }
@@ -1052,19 +1396,33 @@ impl Workspace {
                     return Err(refuse_busy(what));
                 }
                 let Some(start) = self.turn_start_item(id, &key) else {
-                    return Err(tr::HostError::bad_request("This turn didn't start from a message of yours"));
+                    return Err(tr::HostError::bad_request(
+                        "This turn didn't start from a message of yours",
+                    ));
                 };
                 let restore = restore(self, &start);
                 if req.action == tr::TurnAction::Undo {
-                    let (text, _) = self.undo_turn(id, &key, restore, cx).ok_or_else(|| tr::HostError::other("The turn couldn't be undone"))?;
-                    return Ok(tr::TurnActionDone { thread_id: None, text: Some(text) });
+                    let (text, _) = self
+                        .undo_turn(id, &key, restore, cx)
+                        .ok_or_else(|| tr::HostError::other("The turn couldn't be undone"))?;
+                    return Ok(tr::TurnActionDone {
+                        thread_id: None,
+                        text: Some(text),
+                    });
                 }
                 if let Some(model) = &req.model
                     && let Some(agent) = self.thread(id).map(|t| t.agent.clone())
                 {
                     let models = self.models_for(&agent);
-                    if !models.is_empty() && !models.iter().any(|m| crate::composer::same_model(model, &m.id)) {
-                        return Err(tr::HostError::not_found(format!("{model} isn't one of {}'s models", agent.display_name())));
+                    if !models.is_empty()
+                        && !models
+                            .iter()
+                            .any(|m| crate::composer::same_model(model, &m.id))
+                    {
+                        return Err(tr::HostError::not_found(format!(
+                            "{model} isn't one of {}'s models",
+                            agent.display_name()
+                        )));
                     }
                 }
                 self.retry(id, &key, req.model.clone(), restore, cx);
@@ -1076,28 +1434,44 @@ impl Workspace {
                 } else if ends_turn {
                     ForkAt::After(key)
                 } else {
-                    return Err(tr::HostError::bad_request("Fork from one of your messages or the end of a turn"));
+                    return Err(tr::HostError::bad_request(
+                        "Fork from one of your messages or the end of a turn",
+                    ));
                 };
-                let (fork, message) = self.fork_quietly(id, &at, cx).ok_or_else(|| tr::HostError::other("Couldn't fork the thread"))?;
-                Ok(tr::TurnActionDone { thread_id: Some(fork), text: message.map(|(text, _)| text) })
+                let (fork, message) = self
+                    .fork_quietly(id, &at, cx)
+                    .ok_or_else(|| tr::HostError::other("Couldn't fork the thread"))?;
+                Ok(tr::TurnActionDone {
+                    thread_id: Some(fork),
+                    text: message.map(|(text, _)| text),
+                })
             }
             tr::TurnAction::Rewind => {
                 if !message {
-                    return Err(tr::HostError::bad_request("Only your own messages can be rewound to"));
+                    return Err(tr::HostError::bad_request(
+                        "Only your own messages can be rewound to",
+                    ));
                 }
                 if busy {
                     return Err(refuse_busy("rewind"));
                 }
                 let restore = restore(self, &key);
-                let (text, _) = self.rewind(id, &key, restore, cx).ok_or_else(|| tr::HostError::other("The thread couldn't be rewound"))?;
-                Ok(tr::TurnActionDone { thread_id: None, text: Some(text) })
+                let (text, _) = self
+                    .rewind(id, &key, restore, cx)
+                    .ok_or_else(|| tr::HostError::other("The thread couldn't be rewound"))?;
+                Ok(tr::TurnActionDone {
+                    thread_id: None,
+                    text: Some(text),
+                })
             }
         }
     }
 
     /// No phone has `id` open any more: it's no longer followed each tick.
     fn remote_unwatch(&mut self, id: &str) {
-        let Some(remote) = self.remote.as_mut() else { return };
+        let Some(remote) = self.remote.as_mut() else {
+            return;
+        };
         if let Some(w) = remote.watched.remove(id) {
             remote.dormant.insert(id.to_string(), w);
         }
@@ -1106,7 +1480,10 @@ impl Workspace {
     /// A turn of `id` was counted (or may have moved): phones following it hear on the next tick.
     pub(crate) fn remote_turn_changes_moved(&mut self, id: &str) {
         if let Some(remote) = self.remote.as_mut()
-            && let Some(w) = remote.watched.get_mut(id).or_else(|| remote.dormant.get_mut(id))
+            && let Some(w) = remote
+                .watched
+                .get_mut(id)
+                .or_else(|| remote.dormant.get_mut(id))
         {
             w.recount = true;
         }
@@ -1118,55 +1495,118 @@ impl Workspace {
         match t.project_id.as_deref().and_then(|p| self.project(p)) {
             Some(p) => {
                 let prefs = self.project_prefs(&p.path);
-                let (hue, icon) = (tr::project_hue(&p.name, prefs.color), icons::project_icon(prefs.icon.as_deref()));
-                tr::ProjectRef { id: p.id.clone(), name: p.name.clone(), hue, monogram: tr::monogram(&p.name), icon }
+                let (hue, icon) = (
+                    tr::project_hue(&p.name, prefs.color),
+                    icons::project_icon(prefs.icon.as_deref()),
+                );
+                tr::ProjectRef {
+                    id: p.id.clone(),
+                    name: p.name.clone(),
+                    hue,
+                    monogram: tr::monogram(&p.name),
+                    icon,
+                }
             }
-            None => tr::ProjectRef { id: String::new(), name: "No project".into(), hue: 220, monogram: "··".into(), icon: None },
+            None => tr::ProjectRef {
+                id: String::new(),
+                name: "No project".into(),
+                hue: 220,
+                monogram: "··".into(),
+                icon: None,
+            },
         }
     }
 
     /// A thread's row on the phone.
     fn remote_summary(&self, t: &Thread, now: i64) -> tr::ThreadSummary {
         let live = self.live.get(&t.id);
-        let needs = live.and_then(|l| l.permissions.first()).map(|p| match &p.prompt {
-            Some(trek_agents::Prompt::Questions(q)) => tr::Needs { kind: tr::NeedsKind::Question, text: q.first().map(|q| q.question.clone()).unwrap_or_default() },
-            Some(trek_agents::Prompt::Plan(_)) => tr::Needs { kind: tr::NeedsKind::Plan, text: "Plan ready to review".into() },
-            None => tr::Needs { kind: tr::NeedsKind::Approval, text: format!("{} {}", p.title, first_line(&p.detail)).trim().to_string() },
-        });
+        let needs = live
+            .and_then(|l| l.permissions.first())
+            .map(|p| match &p.prompt {
+                Some(trek_agents::Prompt::Questions(q)) => tr::Needs {
+                    kind: tr::NeedsKind::Question,
+                    text: q.first().map(|q| q.question.clone()).unwrap_or_default(),
+                },
+                Some(trek_agents::Prompt::Plan(_)) => tr::Needs {
+                    kind: tr::NeedsKind::Plan,
+                    text: "Plan ready to review".into(),
+                },
+                None => tr::Needs {
+                    kind: tr::NeedsKind::Approval,
+                    text: format!("{} {}", p.title, first_line(&p.detail))
+                        .trim()
+                        .to_string(),
+                },
+            });
         let needs = needs
-            .or_else(|| t.paused.as_ref().filter(|_| t.run_state == RunState::Idle).map(|p| tr::Needs { kind: tr::NeedsKind::Limit, text: if p.wrapped { "Wrapped up before its usage limit" } else { "Paused at its usage limit" }.into() }))
+            .or_else(|| {
+                t.paused
+                    .as_ref()
+                    .filter(|_| t.run_state == RunState::Idle)
+                    .map(|p| tr::Needs {
+                        kind: tr::NeedsKind::Limit,
+                        text: if p.wrapped {
+                            "Wrapped up before its usage limit"
+                        } else {
+                            "Paused at its usage limit"
+                        }
+                        .into(),
+                    })
+            })
             .or_else(|| {
                 (t.run_state == RunState::Failed).then(|| {
-                    let last_error = live.and_then(|l| l.items.iter().rev().find_map(|i| match i {
-                        Item::Error { text } => Some(first_line(text)),
-                        _ => None,
-                    }));
-                    tr::Needs { kind: tr::NeedsKind::Failed, text: last_error.unwrap_or_else(|| "The turn failed".into()) }
+                    let last_error = live.and_then(|l| {
+                        l.items.iter().rev().find_map(|i| match i {
+                            Item::Error { text } => Some(first_line(text)),
+                            _ => None,
+                        })
+                    });
+                    tr::Needs {
+                        kind: tr::NeedsKind::Failed,
+                        text: last_error.unwrap_or_else(|| "The turn failed".into()),
+                    }
                 })
             });
         // (A snoozed thread that needs you is in the inbox already: it raised its hand.)
         // A sub-agent (sent `unlisted`): where it would sit on its own.
-        let section = match t.section(now).or_else(|| t.own_section(now)).unwrap_or(Section::Settled) {
+        let section = match t
+            .section(now)
+            .or_else(|| t.own_section(now))
+            .unwrap_or(Section::Settled)
+        {
             Section::Pinned => tr::Section::Pinned,
             Section::Inbox => tr::Section::Inbox,
             Section::Working => tr::Section::Working,
             Section::Snoozed => tr::Section::Snoozed,
             Section::Settled => tr::Section::Settled,
         };
-        let activity = live.filter(|_| t.run_state == RunState::Working).and_then(|l| {
-            l.items.iter().rev().find_map(|i| match i {
-                Item::Tool { title, detail, status: ToolStatus::Running, .. } => Some(crate::activity::op(title, detail, t.cwd.as_deref())).map(|op| format!("{} {}", op.verb, op.text).trim().to_string()),
-                _ => None,
-            })
-        });
+        let activity = live
+            .filter(|_| t.run_state == RunState::Working)
+            .and_then(|l| {
+                l.items.iter().rev().find_map(|i| match i {
+                    Item::Tool {
+                        title,
+                        detail,
+                        status: ToolStatus::Running,
+                        ..
+                    } => Some(crate::activity::op(title, detail, t.cwd.as_deref()))
+                        .map(|op| format!("{} {}", op.verb, op.text).trim().to_string()),
+                    _ => None,
+                })
+            });
         let working_since = live.and_then(|l| l.turn_started).map(instant_ms);
         // The composer's context ring and cost line, once the thread has been opened (here or on
         // the phone): what its session reported.
-        let context = live.and_then(|l| l.context).filter(|(_, window)| *window > 0).map(|(used, window)| tr::ContextUse {
-            used,
-            window,
-            percent: ((used as f64 / window as f64) * 100.).round().clamp(0., 100.) as u8,
-        });
+        let context = live
+            .and_then(|l| l.context)
+            .filter(|(_, window)| *window > 0)
+            .map(|(used, window)| tr::ContextUse {
+                used,
+                window,
+                percent: ((used as f64 / window as f64) * 100.)
+                    .round()
+                    .clamp(0., 100.) as u8,
+            });
         let cost = live.and_then(|l| l.spend.as_ref()).and_then(|spend| {
             let billing = self.billing_of(t);
             let cache = crate::cost::CacheHits::of(spend);
@@ -1187,12 +1627,17 @@ impl Workspace {
             })
         });
         let (sub_agents, background) = self.remote_at_work(t);
-        let git = t.cwd.as_ref().and_then(|c| self.git_info.get(c)).filter(|g| g.is_repo).map(|g| tr::GitSummary {
-            changed: g.changed as u32,
-            ahead: g.ahead,
-            behind: g.behind,
-            default_branch: g.default_branch.clone(),
-        });
+        let git = t
+            .cwd
+            .as_ref()
+            .and_then(|c| self.git_info.get(c))
+            .filter(|g| g.is_repo)
+            .map(|g| tr::GitSummary {
+                changed: g.changed as u32,
+                ahead: g.ahead,
+                behind: g.behind,
+                default_branch: g.default_branch.clone(),
+            });
         let mut row = tr::ThreadSummary {
             id: t.id.clone(),
             title: t.title.clone(),
@@ -1211,7 +1656,12 @@ impl Workspace {
             section,
             unseen: t.is_unseen(),
             pinned: t.pinned_at.is_some(),
-            branch: t.worktree.as_ref().map(|w| w.branch.clone()).or_else(|| t.cwd.as_ref().and_then(|c| self.git_info.get(c)).and_then(|g| g.branch.clone())),
+            branch: t.worktree.as_ref().map(|w| w.branch.clone()).or_else(|| {
+                t.cwd
+                    .as_ref()
+                    .and_then(|c| self.git_info.get(c))
+                    .and_then(|g| g.branch.clone())
+            }),
             worktree: t.worktree.is_some(),
             activity,
             working_since,
@@ -1270,7 +1720,9 @@ impl Workspace {
                 thread_id: Some(c.id.clone()),
             })
             .collect();
-        let Some(l) = self.live.get(&t.id) else { return (kids, vec![]) };
+        let Some(l) = self.live.get(&t.id) else {
+            return (kids, vec![]);
+        };
         let own = |title: &str, started: std::time::Instant| tr::SubAgent {
             agent: agent_ref(&t.agent),
             model: None,
@@ -1280,9 +1732,21 @@ impl Workspace {
             thread_id: None,
         };
         let out = |id: &str| l.tasks.iter().any(|k| k.id == id && k.done.is_none());
-        kids.extend(l.tasks.iter().filter(|k| k.done.is_none()).map(|k| own(&k.description, k.started)));
-        kids.extend(l.background_agents().filter(|b| !b.task.call.as_deref().is_some_and(out)).map(|b| own(&b.task.title, b.started)));
-        (kids, l.background_work().map(|b| b.task.title.clone()).collect())
+        kids.extend(
+            l.tasks
+                .iter()
+                .filter(|k| k.done.is_none())
+                .map(|k| own(&k.description, k.started)),
+        );
+        kids.extend(
+            l.background_agents()
+                .filter(|b| !b.task.call.as_deref().is_some_and(out))
+                .map(|b| own(&b.task.title, b.started)),
+        );
+        (
+            kids,
+            l.background_work().map(|b| b.task.title.clone()).collect(),
+        )
     }
 
     /// The threads a phone lists: the sidebar's, without side chats and sub-agents, and only the
@@ -1291,7 +1755,11 @@ impl Workspace {
         let now = now_ms();
         let mut settled = 0;
         let mut out = vec![];
-        let mut threads: Vec<&Thread> = self.threads.iter().filter(|t| t.section(now).is_some() && t.import_hidden.is_none()).collect();
+        let mut threads: Vec<&Thread> = self
+            .threads
+            .iter()
+            .filter(|t| t.section(now).is_some() && t.import_hidden.is_none())
+            .collect();
         threads.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
         for t in threads {
             if t.section(now) == Some(Section::Settled) {
@@ -1307,10 +1775,20 @@ impl Workspace {
 
     fn remote_snapshot(&self) -> tr::Snapshot {
         let now = now_ms();
-        let threads: Vec<tr::ThreadSummary> = self.remote_threads().into_iter().map(|t| self.remote_summary(t, now)).collect();
+        let threads: Vec<tr::ThreadSummary> = self
+            .remote_threads()
+            .into_iter()
+            .map(|t| self.remote_summary(t, now))
+            .collect();
         let unlisted = self.remote_unlisted(&threads, now);
         let (projects, agents, full_access) = self.remote_choices();
-        tr::Snapshot { threads, projects, agents, full_access, unlisted }
+        tr::Snapshot {
+            threads,
+            projects,
+            agents,
+            full_access,
+            unlisted,
+        }
     }
 
     /// What of a snapshot isn't sent any other way: the projects, the agents a thread can start
@@ -1342,27 +1820,61 @@ impl Workspace {
                 let default_model = crate::composer::default_model(&infos).map(|m| m.id.clone());
                 let models = infos
                     .into_iter()
-                    .map(|m| tr::ModelOption { id: m.id, label: m.name, efforts: m.efforts.iter().map(|e| e.as_str().to_string()).collect() })
+                    .map(|m| tr::ModelOption {
+                        id: m.id,
+                        label: m.name,
+                        efforts: m.efforts.iter().map(|e| e.as_str().to_string()).collect(),
+                    })
                     .collect();
-                tr::AgentOption { key: agent.key(), name: agent.display_name(), logo: crate::ui::logo_key(&agent).map(str::to_string), default_model, models, icon: icons::agent_icon(&agent) }
+                tr::AgentOption {
+                    key: agent.key(),
+                    name: agent.display_name(),
+                    logo: crate::ui::logo_key(&agent).map(str::to_string),
+                    default_model,
+                    models,
+                    icon: icons::agent_icon(&agent),
+                }
             })
             .collect();
-        (projects, agents, self.settings.permissions.full_access_unlocked)
+        (
+            projects,
+            agents,
+            self.settings.permissions.full_access_unlocked,
+        )
     }
 
     /// Bring `w` up to date with `id`'s transcript, looking only at what can have changed since
     /// it last was (`Transcript::take_edited_from`, the item streaming then and now): the events
     /// phones following it need, in order. Turns' changed files are looked at again when the
     /// transcript moved or a count came in (`remote_turn_changes_moved`).
-    fn sync_watched(&mut self, id: &str, w: &mut Watched, cx: &mut Context<Self>) -> Vec<tr::HostEvent> {
+    fn sync_watched(
+        &mut self,
+        id: &str,
+        w: &mut Watched,
+        cx: &mut Context<Self>,
+    ) -> Vec<tr::HostEvent> {
         let cwd = self.thread(id).and_then(|t| t.cwd.clone());
-        let Some(live) = self.live.get_mut(id) else { return vec![] };
+        let Some(live) = self.live.get_mut(id) else {
+            return vec![];
+        };
         let edited = live.items.take_edited_from();
         let (len, revision, streaming) = (live.items.len(), live.revision, live.streaming);
         let moved = revision != w.revision;
         // Requests come and go with a revision bump, mostly: looked at whenever they differ too.
-        let asks = moved || live.permissions.len() != w.requests.len() || live.permissions.iter().zip(&w.requests).any(|(p, (r, ..))| p.request_id != *r);
-        if edited.is_none() && !asks && streaming == w.streaming && cwd == w.cwd && !w.recount && !w.held {
+        let asks = moved
+            || live.permissions.len() != w.requests.len()
+            || live
+                .permissions
+                .iter()
+                .zip(&w.requests)
+                .any(|(p, (r, ..))| p.request_id != *r);
+        if edited.is_none()
+            && !asks
+            && streaming == w.streaming
+            && cwd == w.cwd
+            && !w.recount
+            && !w.held
+        {
             return vec![];
         }
         w.held = false;
@@ -1383,7 +1895,10 @@ impl Workspace {
         if cwd != w.cwd {
             floor = 0;
         }
-        let unsent = Sent { seq: w.seq, hash: None };
+        let unsent = Sent {
+            seq: w.seq,
+            hash: None,
+        };
         w.items.resize(len, unsent);
         let live = &self.live[id];
         for ix in floor.max(w.from)..len {
@@ -1394,7 +1909,9 @@ impl Workspace {
                     Item::Assistant { text } | Item::Reasoning { text } => text.len(),
                     _ => 0,
                 };
-                if w.stream_sent.is_some_and(|at| at.elapsed() < TICK * (size / STREAM_STEP) as u32) {
+                if w.stream_sent
+                    .is_some_and(|at| at.elapsed() < TICK * (size / STREAM_STEP) as u32)
+                {
                     w.held = true;
                     continue;
                 }
@@ -1408,17 +1925,39 @@ impl Workspace {
                 w.stream_sent = Some(std::time::Instant::now());
             }
             w.seq += 1;
-            w.items[ix] = Sent { seq: w.seq, hash: Some(h) };
-            out.push(item_event(id, format!("i{ix}"), w.seq, item_time(&live.items[ix]), body));
+            w.items[ix] = Sent {
+                seq: w.seq,
+                hash: Some(h),
+            };
+            out.push(item_event(
+                id,
+                format!("i{ix}"),
+                w.seq,
+                item_time(&live.items[ix]),
+                body,
+            ));
         }
         if asks {
             // Requests: new or changed ones as they are, answered ones as resolved.
             let requests = request_cards(live);
             let open: HashSet<&str> = requests.iter().map(|(r, _)| r.as_str()).collect();
-            for (rid, last, _) in w.requests.iter().filter(|(r, ..)| !open.contains(r.as_str())) {
+            for (rid, last, _) in w
+                .requests
+                .iter()
+                .filter(|(r, ..)| !open.contains(r.as_str()))
+            {
                 w.seq += 1;
-                let answer = self.remote.as_mut().and_then(|r| r.answered.remove(&(id.to_string(), rid.clone())));
-                out.push(item_event(id, format!("r{rid}"), w.seq, None, resolved(last.clone(), answer)));
+                let answer = self
+                    .remote
+                    .as_mut()
+                    .and_then(|r| r.answered.remove(&(id.to_string(), rid.clone())));
+                out.push(item_event(
+                    id,
+                    format!("r{rid}"),
+                    w.seq,
+                    None,
+                    resolved(last.clone(), answer),
+                ));
             }
             w.requests.retain(|(r, ..)| open.contains(r.as_str()));
             for (rid, body) in requests {
@@ -1439,7 +1978,15 @@ impl Workspace {
             let first = if recount { w.from } else { floor.max(w.from) };
             let counted = self.sync_changes(id, w, first..len, cx);
             let live = &self.live[id];
-            out.extend(counted.into_iter().map(|(end, seq, body)| item_event(id, format!("c{end}"), seq, item_time(&live.items[end]), body)));
+            out.extend(counted.into_iter().map(|(end, seq, body)| {
+                item_event(
+                    id,
+                    format!("c{end}"),
+                    seq,
+                    item_time(&live.items[end]),
+                    body,
+                )
+            }));
         }
         (w.revision, w.streaming, w.cwd) = (revision, streaming, cwd);
         out
@@ -1448,10 +1995,20 @@ impl Workspace {
     /// Have the turns ending in `range` counted (off the main thread, for those counted from
     /// git), and record (and return, by turn end, with their seq) the counts that are in and
     /// changed.
-    fn sync_changes(&mut self, id: &str, w: &mut Watched, range: std::ops::Range<usize>, cx: &mut Context<Self>) -> Vec<(usize, u64, tr::ItemBody)> {
-        let Some(live) = self.live.get(id) else { return vec![] };
+    fn sync_changes(
+        &mut self,
+        id: &str,
+        w: &mut Watched,
+        range: std::ops::Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> Vec<(usize, u64, tr::ItemBody)> {
+        let Some(live) = self.live.get(id) else {
+            return vec![];
+        };
         let range = range.start..range.end.min(live.items.len());
-        let ends: Vec<usize> = range.filter(|ix| matches!(live.items[*ix], Item::TurnEnd { .. })).collect();
+        let ends: Vec<usize> = range
+            .filter(|ix| matches!(live.items[*ix], Item::TurnEnd { .. }))
+            .collect();
         for &end in &ends {
             self.load_turn_changes(id, end, cx);
         }
@@ -1460,13 +2017,21 @@ impl Workspace {
             if self.turn_changes_waiting(id, end) {
                 w.recount = true;
             }
-            let Some(body) = turn_changes(self, id, end) else { continue };
+            let Some(body) = turn_changes(self, id, end) else {
+                continue;
+            };
             let h = hash(&body);
             if w.changes.get(&end).and_then(|s| s.hash) == Some(h) {
                 continue;
             }
             w.seq += 1;
-            w.changes.insert(end, Sent { seq: w.seq, hash: Some(h) });
+            w.changes.insert(
+                end,
+                Sent {
+                    seq: w.seq,
+                    hash: Some(h),
+                },
+            );
             out.push((end, w.seq, body));
         }
         out
@@ -1474,13 +2039,21 @@ impl Workspace {
 
     /// Phones may hold `id`'s items from `start` on: they're followed from there (their turns'
     /// changed files too). What it converted on the way, to be sent now.
-    fn send_from(&mut self, id: &str, w: &mut Watched, start: usize, cx: &mut Context<Self>) -> Converted {
+    fn send_from(
+        &mut self,
+        id: &str,
+        w: &mut Watched,
+        start: usize,
+        cx: &mut Context<Self>,
+    ) -> Converted {
         let mut out = Converted::default();
         if start >= w.from {
             return out;
         }
         let cwd = self.thread(id).and_then(|t| t.cwd.clone());
-        let Some(live) = self.live.get(id) else { return out };
+        let Some(live) = self.live.get(id) else {
+            return out;
+        };
         let old = w.from.min(live.items.len()).min(w.items.len());
         for ix in start..old {
             let body = item_body(self, live, cwd.as_deref(), ix);
@@ -1489,17 +2062,32 @@ impl Workspace {
         }
         w.from = start;
         // What's counted now goes out with them; what comes in later, on a tick.
-        out.changes = self.sync_changes(id, w, start..old, cx).into_iter().map(|(end, _, body)| (end, body)).collect();
+        out.changes = self
+            .sync_changes(id, w, start..old, cx)
+            .into_iter()
+            .map(|(end, _, body)| (end, body))
+            .collect();
         out
     }
 
     /// The reply to a phone's `subscribe`: what changed since `after_seq` when that can be told,
     /// else the last `limit` items (all of them without one), with what follows them, and every
     /// open request. From then on the thread is followed every tick.
-    pub(crate) fn remote_transcript(&mut self, id: &str, after_seq: Option<u64>, limit: Option<u32>, cx: &mut Context<Self>) -> tr::Transcript {
-        let Some(remote) = self.remote.as_mut() else { return tr::Transcript::default() };
+    pub(crate) fn remote_transcript(
+        &mut self,
+        id: &str,
+        after_seq: Option<u64>,
+        limit: Option<u32>,
+        cx: &mut Context<Self>,
+    ) -> tr::Transcript {
+        let Some(remote) = self.remote.as_mut() else {
+            return tr::Transcript::default();
+        };
         // A phone opening the thread again carries on where it left off.
-        let known = remote.watched.remove(id).or_else(|| remote.dormant.remove(id));
+        let known = remote
+            .watched
+            .remove(id)
+            .or_else(|| remote.dormant.remove(id));
         let mut w = match known {
             Some(mut w) => {
                 let events = self.sync_watched(id, &mut w, cx);
@@ -1512,7 +2100,9 @@ impl Workspace {
             }
             None => {
                 let cwd = self.thread(id).and_then(|t| t.cwd.clone());
-                let Some(live) = self.live.get_mut(id) else { return tr::Transcript::default() };
+                let Some(live) = self.live.get_mut(id) else {
+                    return tr::Transcript::default();
+                };
                 let _ = live.items.take_edited_from();
                 let mut w = Watched::fresh(live.items.len());
                 (w.revision, w.streaming, w.cwd) = (live.revision, live.streaming, cwd);
@@ -1535,22 +2125,48 @@ impl Workspace {
             for ix in first..len.min(live.items.len()) {
                 let at = item_time(&live.items[ix]);
                 if newer(w.items[ix].seq) {
-                    let body = converted.items.remove(&ix).unwrap_or_else(|| item_body(self, live, cwd.as_deref(), ix));
-                    items.push(tr::Item { id: format!("i{ix}"), seq: w.items[ix].seq, at, body });
+                    let body = converted
+                        .items
+                        .remove(&ix)
+                        .unwrap_or_else(|| item_body(self, live, cwd.as_deref(), ix));
+                    items.push(tr::Item {
+                        id: format!("i{ix}"),
+                        seq: w.items[ix].seq,
+                        at,
+                        body,
+                    });
                 }
                 if let Some(c) = w.changes.get(&ix).filter(|c| newer(c.seq))
-                    && let Some(body) = converted.changes.remove(&ix).or_else(|| turn_changes(self, id, ix))
+                    && let Some(body) = converted
+                        .changes
+                        .remove(&ix)
+                        .or_else(|| turn_changes(self, id, ix))
                 {
-                    items.push(tr::Item { id: format!("c{ix}"), seq: c.seq, at, body });
+                    items.push(tr::Item {
+                        id: format!("c{ix}"),
+                        seq: c.seq,
+                        at,
+                        body,
+                    });
                 }
             }
         }
         for (rid, body, seq) in &w.requests {
             if newer(*seq) {
-                items.push(tr::Item { id: format!("r{rid}"), seq: *seq, at: None, body: body.clone() });
+                items.push(tr::Item {
+                    id: format!("r{rid}"),
+                    seq: *seq,
+                    at: None,
+                    body: body.clone(),
+                });
             }
         }
-        let out = tr::Transcript { seq: w.seq, items, base: w.base, more: delta.is_none() && start > 0 };
+        let out = tr::Transcript {
+            seq: w.seq,
+            items,
+            base: w.base,
+            more: delta.is_none() && start > 0,
+        };
         if let Some(remote) = self.remote.as_mut() {
             remote.watched.insert(id.to_string(), w);
         }
@@ -1559,7 +2175,13 @@ impl Workspace {
 
     /// The reply to `transcript_before`: up to `limit` items just before item `before` (`i…`,
     /// or a turn's `c…`, which follows its turn end), with their turns' changed files.
-    pub(crate) fn remote_transcript_before(&mut self, id: &str, before: &str, limit: u32, cx: &mut Context<Self>) -> tr::HostResult<tr::TranscriptPage> {
+    pub(crate) fn remote_transcript_before(
+        &mut self,
+        id: &str,
+        before: &str,
+        limit: u32,
+        cx: &mut Context<Self>,
+    ) -> tr::HostResult<tr::TranscriptPage> {
         let len = self.live.get(id).map_or(0, |l| l.items.len());
         let index = |n: &str| n.parse::<usize>().ok().filter(|n| *n < len);
         let end = match before.split_at_checked(1) {
@@ -1567,7 +2189,9 @@ impl Workspace {
             Some(("c", n)) => index(n).map(|n| n + 1),
             _ => None,
         };
-        let Some(end) = end else { return Err(tr::HostError::not_found("No such item")) };
+        let Some(end) = end else {
+            return Err(tr::HostError::not_found("No such item"));
+        };
         let start = end.saturating_sub(limit.min(tr::MAX_PAGE) as usize);
         let mut w = self.remote.as_mut().and_then(|r| r.watched.remove(id));
         let mut converted = Converted::default();
@@ -1584,51 +2208,113 @@ impl Workspace {
         if let Some(live) = self.live.get(id) {
             let cwd = self.thread(id).and_then(|t| t.cwd.clone());
             // A thread no phone follows (it wasn't subscribed to) pages with no seqs.
-            let seq = |ix: usize| w.as_ref().and_then(|w| w.items.get(ix)).map_or(0, |s| s.seq);
+            let seq = |ix: usize| {
+                w.as_ref()
+                    .and_then(|w| w.items.get(ix))
+                    .map_or(0, |s| s.seq)
+            };
             for ix in start..end.min(live.items.len()) {
                 let at = item_time(&live.items[ix]);
-                let body = converted.items.remove(&ix).unwrap_or_else(|| item_body(self, live, cwd.as_deref(), ix));
-                items.push(tr::Item { id: format!("i{ix}"), seq: seq(ix), at, body });
+                let body = converted
+                    .items
+                    .remove(&ix)
+                    .unwrap_or_else(|| item_body(self, live, cwd.as_deref(), ix));
+                items.push(tr::Item {
+                    id: format!("i{ix}"),
+                    seq: seq(ix),
+                    at,
+                    body,
+                });
                 // A turn's changed files follow its end (not the files asked to come before).
-                if !matches!(live.items[ix], Item::TurnEnd { .. }) || (ix + 1 == end && before.starts_with('c')) {
+                if !matches!(live.items[ix], Item::TurnEnd { .. })
+                    || (ix + 1 == end && before.starts_with('c'))
+                {
                     continue;
                 }
-                if let Some(body) = converted.changes.remove(&ix).or_else(|| turn_changes(self, id, ix)) {
-                    let seq = w.as_ref().and_then(|w| w.changes.get(&ix)).map_or(0, |c| c.seq);
-                    items.push(tr::Item { id: format!("c{ix}"), seq, at, body });
+                if let Some(body) = converted
+                    .changes
+                    .remove(&ix)
+                    .or_else(|| turn_changes(self, id, ix))
+                {
+                    let seq = w
+                        .as_ref()
+                        .and_then(|w| w.changes.get(&ix))
+                        .map_or(0, |c| c.seq);
+                    items.push(tr::Item {
+                        id: format!("c{ix}"),
+                        seq,
+                        at,
+                        body,
+                    });
                 }
             }
         }
         if let (Some(w), Some(remote)) = (w, self.remote.as_mut()) {
             remote.watched.insert(id.to_string(), w);
         }
-        Ok(tr::TranscriptPage { items, more: start > 0 })
+        Ok(tr::TranscriptPage {
+            items,
+            more: start > 0,
+        })
     }
 
     /// Send phones what changed since the last tick: thread rows, and the transcripts they
     /// follow (only what can have changed in them).
     pub(crate) fn push_remote_changes(&mut self, cx: &mut Context<Self>) {
-        let Some(remote) = self.remote.as_ref() else { return };
+        let Some(remote) = self.remote.as_ref() else {
+            return;
+        };
         if remote.connected.is_empty() {
             return;
         }
         let now = now_ms();
         // Thread rows, when something of them can have changed (or it's been a while).
-        let key = (self.threads_gen, self.live.values().fold(0u64, |sum, l| sum.wrapping_add(l.revision)), now / ROWS_AT_LEAST_MS);
-        let rows: Option<Vec<tr::ThreadSummary>> = (remote.rows_key != Some(key)).then(|| self.remote_threads().into_iter().map(|t| self.remote_summary(t, now)).collect());
-        let unlisted = rows.as_ref().map(|rows| (self.remote_unlisted(rows, now), self.threads.iter().map(|t| t.id.clone()).collect::<HashSet<_>>()));
+        let key = (
+            self.threads_gen,
+            self.live
+                .values()
+                .fold(0u64, |sum, l| sum.wrapping_add(l.revision)),
+            now / ROWS_AT_LEAST_MS,
+        );
+        let rows: Option<Vec<tr::ThreadSummary>> = (remote.rows_key != Some(key)).then(|| {
+            self.remote_threads()
+                .into_iter()
+                .map(|t| self.remote_summary(t, now))
+                .collect()
+        });
+        let unlisted = rows.as_ref().map(|rows| {
+            (
+                self.remote_unlisted(rows, now),
+                self.threads
+                    .iter()
+                    .map(|t| t.id.clone())
+                    .collect::<HashSet<_>>(),
+            )
+        });
         // Projects, agents and their models, Full access: only a snapshot carries them, so a new
         // one goes when they change (agents found or signed in after a phone connected, models
         // fetched, a project added, Full access unlocked).
         let choices = self.remote_choices();
         let choices_key = hash(&choices);
         let snapshot = (remote.snapshot_key != Some(choices_key)).then(|| {
-            let threads: Vec<tr::ThreadSummary> = self.remote_threads().into_iter().map(|t| self.remote_summary(t, now)).collect();
+            let threads: Vec<tr::ThreadSummary> = self
+                .remote_threads()
+                .into_iter()
+                .map(|t| self.remote_summary(t, now))
+                .collect();
             let unlisted = self.remote_unlisted(&threads, now);
             let (projects, agents, full_access) = choices;
-            tr::Snapshot { threads, projects, agents, full_access, unlisted }
+            tr::Snapshot {
+                threads,
+                projects,
+                agents,
+                full_access,
+                unlisted,
+            }
         });
-        let Some(remote) = self.remote.as_mut() else { return };
+        let Some(remote) = self.remote.as_mut() else {
+            return;
+        };
         if let Some(snapshot) = snapshot {
             remote.snapshot_key = Some(choices_key);
             #[cfg(test)]
@@ -1638,11 +2324,19 @@ impl Workspace {
         if let Some(rows) = rows {
             remote.rows_key = Some(key);
             let ids: HashSet<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-            let gone: Vec<String> = remote.sent.keys().filter(|id| !ids.contains(id.as_str())).cloned().collect();
+            let gone: Vec<String> = remote
+                .sent
+                .keys()
+                .filter(|id| !ids.contains(id.as_str()))
+                .cloned()
+                .collect();
             for id in gone {
                 remote.sent.remove(&id);
                 // Still open on a phone, it's followed on as an unlisted row.
-                if !unlisted.as_ref().is_some_and(|(u, _)| u.iter().any(|r| r.id == id)) {
+                if !unlisted
+                    .as_ref()
+                    .is_some_and(|(u, _)| u.iter().any(|r| r.id == id))
+                {
                     remote.watched.remove(&id);
                     remote.dormant.remove(&id);
                 }
@@ -1661,9 +2355,13 @@ impl Workspace {
         // Open transcripts.
         let watched: Vec<String> = remote.watched.keys().cloned().collect();
         for id in watched {
-            let Some(mut w) = self.remote.as_mut().and_then(|r| r.watched.remove(&id)) else { continue };
+            let Some(mut w) = self.remote.as_mut().and_then(|r| r.watched.remove(&id)) else {
+                continue;
+            };
             let events = self.sync_watched(&id, &mut w, cx);
-            let Some(remote) = self.remote.as_mut() else { return };
+            let Some(remote) = self.remote.as_mut() else {
+                return;
+            };
             for event in events {
                 remote.handle.push(event);
             }
@@ -1673,9 +2371,17 @@ impl Workspace {
 
     /// This Mac's addresses are now `addresses`: tell phones (the routes in the next `welcome`
     /// and pairing code), Bonjour and the reach policy, without stopping the server.
-    pub(crate) fn remote_addresses_changed(&mut self, addresses: Addresses, cx: &mut Context<Self>) {
-        let Some(remote) = self.remote.as_mut() else { return };
-        if (remote.addresses.lan, remote.addresses.tailscale) == (addresses.lan, addresses.tailscale) {
+    pub(crate) fn remote_addresses_changed(
+        &mut self,
+        addresses: Addresses,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(remote) = self.remote.as_mut() else {
+            return;
+        };
+        if (remote.addresses.lan, remote.addresses.tailscale)
+            == (addresses.lan, addresses.tailscale)
+        {
             // What Tailscale says of the tailnet (its phones online), for Settings alone.
             if remote.addresses != addresses {
                 remote.addresses = addresses;
@@ -1688,7 +2394,8 @@ impl Workspace {
         let port = remote.handle.local_addr().port();
         // "Tailscale" with Tailscale gone: phones keep the tailnet address they have, which
         // answers again when it's back (it rarely changes).
-        let routes = remote_routes(&addresses, reach, port).unwrap_or_else(|_| remote.routes.clone());
+        let routes =
+            remote_routes(&addresses, reach, port).unwrap_or_else(|_| remote.routes.clone());
         tracing::info!(
             "phone server: this machine's addresses are now Wi-Fi {:?}, Tailscale {:?} (were {:?}, {:?}); phones are told {routes:?} (were {:?}); still listening on {:?}",
             addresses.lan,
@@ -1698,11 +2405,17 @@ impl Workspace {
             remote.routes,
             remote.handle.listening()
         );
-        remote.policy.lock().unwrap_or_else(|e| e.into_inner()).tailscale = addresses.tailscale;
+        remote
+            .policy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .tailscale = addresses.tailscale;
         let routes_changed = routes != remote.routes;
         if routes_changed {
             remote.advertise = routes.first().cloned().unwrap_or_default();
-            remote.handle.set_routes(Some(remote.advertise.clone()), routes.clone());
+            remote
+                .handle
+                .set_routes(Some(remote.advertise.clone()), routes.clone());
             remote.routes = routes;
         }
         // Announced again under the new address (or for the first time, or no more).
@@ -1730,29 +2443,45 @@ impl Workspace {
     pub(crate) fn phone_link(&self) -> Option<link::PhoneLink> {
         let remote = self.remote.as_ref()?;
         let policy = remote.policy();
-        let last_connection = remote.handle.last_connection().map(|c| link::LastConnection {
-            device_name: remote.devices.iter().find(|d| d.device_id == c.device_id).map(|d| d.name.clone()),
-            device_id: c.device_id,
-            at: c.at,
-            route: c.local.to_string(),
-            via: link::via(c.peer.ip(), c.local.ip(), policy.tailscale),
-        });
+        let last_connection = remote
+            .handle
+            .last_connection()
+            .map(|c| link::LastConnection {
+                device_name: remote
+                    .devices
+                    .iter()
+                    .find(|d| d.device_id == c.device_id)
+                    .map(|d| d.name.clone()),
+                device_id: c.device_id,
+                at: c.at,
+                route: c.local.to_string(),
+                via: link::via(c.peer.ip(), c.local.ip(), policy.tailscale),
+            });
         Some(link::PhoneLink {
             listening: remote.handle.listening(),
             routes: remote.routes.clone(),
-            advertised_name: remote.advert.as_ref().and(remote.announce.as_ref()).map(|(name, _)| name.clone()),
+            advertised_name: remote
+                .advert
+                .as_ref()
+                .and(remote.announce.as_ref())
+                .map(|(name, _)| name.clone()),
             policy,
             last_connection,
         })
     }
 
     pub(crate) fn remote_notice(&mut self, notice: tr::ServerNotice, cx: &mut Context<Self>) {
-        let Some(remote) = self.remote.as_mut() else { return };
+        let Some(remote) = self.remote.as_mut() else {
+            return;
+        };
         remote.devices = remote.handle.devices();
         match notice {
             tr::ServerNotice::Paired { name, .. } => {
                 remote.offer = None;
-                cx.emit(WorkspaceEvent::Toast { message: format!("{name} is paired with Trek"), undo: None });
+                cx.emit(WorkspaceEvent::Toast {
+                    message: format!("{name} is paired with Trek"),
+                    undo: None,
+                });
             }
             tr::ServerNotice::Connected { device_id } => {
                 remote.connected.insert(device_id);
@@ -1820,21 +2549,51 @@ fn clip_text_to(text: &str, limit: usize) -> String {
 }
 
 /// Item `ix` of `live` as the phone shows it (`cwd`: its thread's folder).
-fn item_body(ws: &Workspace, live: &LiveThread, cwd: Option<&std::path::Path>, ix: usize) -> tr::ItemBody {
+fn item_body(
+    ws: &Workspace,
+    live: &LiveThread,
+    cwd: Option<&std::path::Path>,
+    ix: usize,
+) -> tr::ItemBody {
     match &live.items[ix] {
-        Item::User { text, images, aside, .. } => tr::ItemBody::User { text: clip_text(text), images: images.len() as u32, aside: *aside },
-        Item::Assistant { text } => tr::ItemBody::Assistant { text: clip_text(text), streaming: live.streaming == Some(ix) },
-        Item::Reasoning { text } => tr::ItemBody::Reasoning { text: clip_text(text) },
+        Item::User {
+            text,
+            images,
+            aside,
+            ..
+        } => tr::ItemBody::User {
+            text: clip_text(text),
+            images: images.len() as u32,
+            aside: *aside,
+        },
+        Item::Assistant { text } => tr::ItemBody::Assistant {
+            text: clip_text(text),
+            streaming: live.streaming == Some(ix),
+        },
+        Item::Reasoning { text } => tr::ItemBody::Reasoning {
+            text: clip_text(text),
+        },
         // A link to another thread (`trek_core::lineage`): a row that opens it, as on the Mac.
-        Item::Tool { id, detail, .. } if trek_core::lineage::of_row(id).is_some() => thread_link(ws, id, detail),
-        Item::Tool { id: call, title, detail, output, status } => {
+        Item::Tool { id, detail, .. } if trek_core::lineage::of_row(id).is_some() => {
+            thread_link(ws, id, detail)
+        }
+        Item::Tool {
+            id: call,
+            title,
+            detail,
+            output,
+            status,
+        } => {
             let op = crate::activity::op(title, detail, cwd);
             let lines = live.lines.get(call).copied();
             tr::ItemBody::Tool {
                 call_id: call.clone(),
                 tool: tr::ToolKind::from_title(title),
                 title: clip_text_to(if op.verb.is_empty() { title } else { &op.verb }, 64 << 10),
-                detail: clip_text_to(if op.text.is_empty() { detail } else { &op.text }, 256 << 10),
+                detail: clip_text_to(
+                    if op.text.is_empty() { detail } else { &op.text },
+                    256 << 10,
+                ),
                 status: match status {
                     ToolStatus::Running => tr::ToolStatus::Running,
                     ToolStatus::Done => tr::ToolStatus::Done,
@@ -1846,13 +2605,34 @@ fn item_body(ws: &Workspace, live: &LiveThread, cwd: Option<&std::path::Path>, i
                 removed: lines.map(|l| l.1),
             }
         }
-        Item::TurnEnd { took_secs, .. } => tr::ItemBody::TurnEnd { took_secs: *took_secs },
-        Item::Notice { text } => tr::ItemBody::Notice { text: clip_text(text) },
-        Item::Error { text } => tr::ItemBody::Error { text: clip_text(text) },
-        Item::Limit { text, resets_at, .. } => tr::ItemBody::Limit { text: clip_text(text), resets_at: *resets_at },
-        Item::Handoff { from, to, from_name, to_name, .. } => tr::ItemBody::Handoff {
-            from: from_name.clone().unwrap_or_else(|| AgentId::from_key(from).display_name()),
-            to: to_name.clone().unwrap_or_else(|| AgentId::from_key(to).display_name()),
+        Item::TurnEnd { took_secs, .. } => tr::ItemBody::TurnEnd {
+            took_secs: *took_secs,
+        },
+        Item::Notice { text } => tr::ItemBody::Notice {
+            text: clip_text(text),
+        },
+        Item::Error { text } => tr::ItemBody::Error {
+            text: clip_text(text),
+        },
+        Item::Limit {
+            text, resets_at, ..
+        } => tr::ItemBody::Limit {
+            text: clip_text(text),
+            resets_at: *resets_at,
+        },
+        Item::Handoff {
+            from,
+            to,
+            from_name,
+            to_name,
+            ..
+        } => tr::ItemBody::Handoff {
+            from: from_name
+                .clone()
+                .unwrap_or_else(|| AgentId::from_key(from).display_name()),
+            to: to_name
+                .clone()
+                .unwrap_or_else(|| AgentId::from_key(to).display_name()),
         },
     }
 }
@@ -1862,7 +2642,11 @@ fn item_body(ws: &Workspace, live: &LiveThread, cwd: Option<&std::path::Path>, i
 /// or handed over to it.
 fn thread_link(ws: &Workspace, row_id: &str, detail: &str) -> tr::ItemBody {
     use trek_core::lineage::Link;
-    let Some(row) = LineageRow::read(ws, row_id, detail) else { return tr::ItemBody::Notice { text: clip_text(detail) } };
+    let Some(row) = LineageRow::read(ws, row_id, detail) else {
+        return tr::ItemBody::Notice {
+            text: clip_text(detail),
+        };
+    };
     tr::ItemBody::ThreadLink {
         link: match row.link {
             Link::Started => tr::ThreadLinkKind::Started,
@@ -1902,7 +2686,11 @@ fn request_cards(live: &LiveThread) -> Vec<(String, tr::ItemBody)> {
                     state: tr::QuestionState::Pending,
                     answers: None,
                 },
-                Some(trek_agents::Prompt::Plan(markdown)) => tr::ItemBody::Plan { request_id: p.request_id.clone(), markdown: clip_text(markdown), state: tr::PlanState::Pending },
+                Some(trek_agents::Prompt::Plan(markdown)) => tr::ItemBody::Plan {
+                    request_id: p.request_id.clone(),
+                    markdown: clip_text(markdown),
+                    state: tr::PlanState::Pending,
+                },
             };
             (p.request_id.clone(), body)
         })
@@ -1910,7 +2698,11 @@ fn request_cards(live: &LiveThread) -> Vec<(String, tr::ItemBody)> {
 }
 
 fn phone_questions(questions: &[trek_agents::Question]) -> Vec<tr::Question> {
-    let fields = questions.iter().map(|q| 2 + q.options.len() * 2).sum::<usize>().max(1);
+    let fields = questions
+        .iter()
+        .map(|q| 2 + q.options.len() * 2)
+        .sum::<usize>()
+        .max(1);
     // A resolved card also carries its answers; leave half of the body's budget for them.
     let each = (MAX_PHONE_ITEM_TEXT / 2) / fields;
     questions
@@ -1918,7 +2710,14 @@ fn phone_questions(questions: &[trek_agents::Question]) -> Vec<tr::Question> {
         .map(|q| tr::Question {
             header: clip_text_to(&q.header, each),
             question: clip_text_to(&q.question, each),
-            options: q.options.iter().map(|(label, description)| tr::QuestionOption { label: clip_text_to(label, each), description: clip_text_to(description, each) }).collect(),
+            options: q
+                .options
+                .iter()
+                .map(|(label, description)| tr::QuestionOption {
+                    label: clip_text_to(label, each),
+                    description: clip_text_to(description, each),
+                })
+                .collect(),
             multi: q.multi,
             secret: q.secret,
         })
@@ -1927,7 +2726,13 @@ fn phone_questions(questions: &[trek_agents::Question]) -> Vec<tr::Question> {
 
 fn phone_answers(answers: Vec<tr::QA>) -> Vec<tr::QA> {
     let each = (MAX_PHONE_ITEM_TEXT / 2) / (answers.len() * 2).max(1);
-    answers.into_iter().map(|qa| tr::QA { question: clip_text_to(&qa.question, each), answer: clip_text_to(&qa.answer, each) }).collect()
+    answers
+        .into_iter()
+        .map(|qa| tr::QA {
+            question: clip_text_to(&qa.question, each),
+            answer: clip_text_to(&qa.answer, each),
+        })
+        .collect()
 }
 
 /// Questions and option labels are identities in the phone's answer. Put clipped ones back
@@ -1940,14 +2745,27 @@ fn restore_phone_answers(answers: &mut [tr::QA], questions: &[trek_agents::Quest
             .filter(|q| q.question == answer.question)
             .map(|_| answer_ix)
             .or_else(|| shown.iter().position(|q| q.question == answer.question));
-        let Some(question_ix) = question_ix else { continue };
+        let Some(question_ix) = question_ix else {
+            continue;
+        };
         let (shown, original) = (&shown[question_ix], &questions[question_ix]);
-        let restore = |part: &str| shown.options.iter().position(|o| o.label == part).and_then(|ix| original.options.get(ix)).map(|o| o.0.as_str());
+        let restore = |part: &str| {
+            shown
+                .options
+                .iter()
+                .position(|o| o.label == part)
+                .and_then(|ix| original.options.get(ix))
+                .map(|o| o.0.as_str())
+        };
         if let Some(label) = restore(&answer.answer) {
             answer.answer = label.to_string();
         } else {
             let parts: Vec<&str> = answer.answer.split(", ").collect();
-            if let Some(labels) = parts.iter().map(|part| restore(part)).collect::<Option<Vec<_>>>() {
+            if let Some(labels) = parts
+                .iter()
+                .map(|part| restore(part))
+                .collect::<Option<Vec<_>>>()
+            {
                 answer.answer = labels.join(", ");
             }
         }
@@ -1956,14 +2774,30 @@ fn restore_phone_answers(answers: &mut [tr::QA], questions: &[trek_agents::Quest
 }
 
 /// An item upsert for the phones following thread `id`.
-fn item_event(id: &str, item_id: String, seq: u64, at: Option<i64>, body: tr::ItemBody) -> tr::HostEvent {
-    tr::HostEvent::Item { thread_id: id.to_string(), item: tr::Item { id: item_id, seq, at, body } }
+fn item_event(
+    id: &str,
+    item_id: String,
+    seq: u64,
+    at: Option<i64>,
+    body: tr::ItemBody,
+) -> tr::HostEvent {
+    tr::HostEvent::Item {
+        thread_id: id.to_string(),
+        item: tr::Item {
+            id: item_id,
+            seq,
+            at,
+            body,
+        },
+    }
 }
 
 /// What the turn ending at `turn_end` changed, as a `changes` item, once the Mac has counted it.
 fn turn_changes(ws: &Workspace, id: &str, turn_end: usize) -> Option<tr::ItemBody> {
     #[cfg(test)]
-    if let Some(files) = tests::TURN_FILES.with(|f| f.borrow().get(&(id.to_string(), turn_end)).cloned()) {
+    if let Some(files) =
+        tests::TURN_FILES.with(|f| f.borrow().get(&(id.to_string(), turn_end)).cloned())
+    {
         return Some(changes_item(files));
     }
     let changes = ws.turn_changes(id, turn_end)?;
@@ -1976,9 +2810,18 @@ fn turn_changes(ws: &Workspace, id: &str, turn_end: usize) -> Option<tr::ItemBod
                     trek_core::changes::FileStatus::Added => (tr::FileStatus::Added, None),
                     trek_core::changes::FileStatus::Modified => (tr::FileStatus::Modified, None),
                     trek_core::changes::FileStatus::Deleted => (tr::FileStatus::Deleted, None),
-                    trek_core::changes::FileStatus::Renamed { from } => (tr::FileStatus::Renamed, Some(from)),
+                    trek_core::changes::FileStatus::Renamed { from } => {
+                        (tr::FileStatus::Renamed, Some(from))
+                    }
                 };
-                tr::ChangedFile { path: f.path, status, from, added: f.added, removed: f.removed, binary: f.binary }
+                tr::ChangedFile {
+                    path: f.path,
+                    status,
+                    from,
+                    added: f.added,
+                    removed: f.removed,
+                    binary: f.binary,
+                }
             })
             .collect(),
     ))
@@ -1986,19 +2829,31 @@ fn turn_changes(ws: &Workspace, id: &str, turn_end: usize) -> Option<tr::ItemBod
 
 /// A `changes` item for `files`, with their totals.
 fn changes_item(files: Vec<tr::ChangedFile>) -> tr::ItemBody {
-    let (added, removed) = files.iter().fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
-    tr::ItemBody::Changes { files, added, removed }
+    let (added, removed) = files
+        .iter()
+        .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
+    tr::ItemBody::Changes {
+        files,
+        added,
+        removed,
+    }
 }
 
 /// An agent as phones see it: its key, name and the logo the Mac draws for it.
 pub(crate) fn agent_ref(agent: &AgentId) -> tr::AgentRef {
-    tr::AgentRef { key: agent.key(), name: agent.display_name(), logo: crate::ui::logo_key(agent).map(str::to_string), icon: icons::agent_icon(agent) }
+    tr::AgentRef {
+        key: agent.key(),
+        name: agent.display_name(),
+        logo: crate::ui::logo_key(agent).map(str::to_string),
+        icon: icons::agent_icon(agent),
+    }
 }
 
 /// An instant as unix ms, the same each time it's asked (`now - elapsed` drifts by the time it
 /// takes to ask, which would send an unchanged row again every tick).
 fn instant_ms(at: std::time::Instant) -> i64 {
-    static ANCHOR: std::sync::LazyLock<(std::time::Instant, i64)> = std::sync::LazyLock::new(|| (std::time::Instant::now(), now_ms()));
+    static ANCHOR: std::sync::LazyLock<(std::time::Instant, i64)> =
+        std::sync::LazyLock::new(|| (std::time::Instant::now(), now_ms()));
     let (then, ms) = *ANCHOR;
     match at.checked_duration_since(then) {
         Some(after) => ms + after.as_millis() as i64,
@@ -2017,12 +2872,19 @@ fn resolved(mut body: tr::ItemBody, answer: Option<tr::AnswerResponse>) -> tr::I
                 tr::Decision::Deny => tr::ApprovalState::Denied,
             }
         }
-        (tr::ItemBody::Question { state, answers, .. }, Some(tr::AnswerResponse::Questions { answers: given })) => {
+        (
+            tr::ItemBody::Question { state, answers, .. },
+            Some(tr::AnswerResponse::Questions { answers: given }),
+        ) => {
             *state = tr::QuestionState::Answered;
             *answers = Some(phone_answers(given));
         }
         (tr::ItemBody::Plan { state, .. }, Some(tr::AnswerResponse::Plan { approve, .. })) => {
-            *state = if approve { tr::PlanState::Approved } else { tr::PlanState::Rejected }
+            *state = if approve {
+                tr::PlanState::Approved
+            } else {
+                tr::PlanState::Rejected
+            }
         }
         (tr::ItemBody::Approval { state, .. }, _) => *state = tr::ApprovalState::Resolved,
         (tr::ItemBody::Question { state, .. }, _) => *state = tr::QuestionState::Resolved,
@@ -2059,18 +2921,34 @@ fn hash(body: &impl serde::Serialize) -> u64 {
 }
 
 fn first_line(s: &str) -> String {
-    s.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().chars().take(140).collect()
+    s.lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(140)
+        .collect()
 }
 
 /// The access level a phone asked for, if this Mac allows it: Full access only once it's been
 /// unlocked in the Mac's settings.
-fn hand_holding(access: tr::Access, settings: &trek_core::settings::Settings) -> tr::HostResult<trek_core::HandHolding> {
+fn hand_holding(
+    access: tr::Access,
+    settings: &trek_core::settings::Settings,
+) -> tr::HostResult<trek_core::HandHolding> {
     Ok(match access {
         tr::Access::Supervised => trek_core::HandHolding::Supervised,
         tr::Access::AutoAcceptEdits => trek_core::HandHolding::AutoAcceptEdits,
         tr::Access::Auto => trek_core::HandHolding::Auto,
-        tr::Access::FullAccess if settings.permissions.full_access_unlocked => trek_core::HandHolding::FullAccess,
-        tr::Access::FullAccess => return Err(tr::HostError::bad_request(format!("Full access is locked on {}: unlock it in Trek's Permissions settings first.", crate::words::words().this_computer))),
+        tr::Access::FullAccess if settings.permissions.full_access_unlocked => {
+            trek_core::HandHolding::FullAccess
+        }
+        tr::Access::FullAccess => {
+            return Err(tr::HostError::bad_request(format!(
+                "Full access is locked on {}: unlock it in Trek's Permissions settings first.",
+                crate::words::words().this_computer
+            )));
+        }
     })
 }
 
@@ -2082,20 +2960,26 @@ fn save_uploads(images: &[tr::ImageUpload]) -> tr::HostResult<Vec<PathBuf>> {
         return Ok(vec![]);
     }
     let dir = trek_core::paths::data_dir().join("snapshots");
-    std::fs::create_dir_all(&dir).map_err(|e| tr::HostError::other(format!("Couldn't keep the photo: {e}")))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| tr::HostError::other(format!("Couldn't keep the photo: {e}")))?;
     let stamp = chrono::Local::now().format("%Y-%m-%d at %H.%M.%S");
     images
         .iter()
         .enumerate()
         .map(|(i, img)| {
-            let (bytes, ext) = img.decode().map_err(|e| tr::HostError::bad_request(format!("That photo couldn't be read: {e}")))?;
+            let (bytes, ext) = img.decode().map_err(|e| {
+                tr::HostError::bad_request(format!("That photo couldn't be read: {e}"))
+            })?;
             if bytes.len() > 10 << 20 {
-                return Err(tr::HostError::bad_request("That photo is too big (10 MB at most)"));
+                return Err(tr::HostError::bad_request(
+                    "That photo is too big (10 MB at most)",
+                ));
             }
             // The stamp is to the second, and two sends can land in one.
             let n = UPLOADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let path = dir.join(format!("iPhone {stamp} {}-{n}.{ext}", i + 1));
-            std::fs::write(&path, bytes).map_err(|e| tr::HostError::other(format!("Couldn't keep the photo: {e}")))?;
+            std::fs::write(&path, bytes)
+                .map_err(|e| tr::HostError::other(format!("Couldn't keep the photo: {e}")))?;
             Ok(path)
         })
         .collect()
@@ -2103,14 +2987,26 @@ fn save_uploads(images: &[tr::ImageUpload]) -> tr::HostResult<Vec<PathBuf>> {
 
 /// One of Trek's own slash commands, which only the Mac runs.
 pub fn is_trek_command(text: &str) -> bool {
-    let Some(cmd) = text.trim_start().strip_prefix('/').and_then(|c| c.split_whitespace().next()) else { return false };
+    let Some(cmd) = text
+        .trim_start()
+        .strip_prefix('/')
+        .and_then(|c| c.split_whitespace().next())
+    else {
+        return false;
+    };
     let cmd = cmd.to_lowercase();
-    crate::workspace::BUILTIN_COMMANDS.iter().any(|(name, _)| name.split_whitespace().next() == Some(cmd.as_str()))
+    crate::workspace::BUILTIN_COMMANDS
+        .iter()
+        .any(|(name, _)| name.split_whitespace().next() == Some(cmd.as_str()))
         || matches!(cmd.as_str(), "clear" | "access" | "mode" | "permissions")
 }
 
 /// Answer phones' requests on the main thread, as they come.
-fn serve_requests(ws: WeakEntity<Workspace>, requests: async_channel::Receiver<tr::HostRequest>, cx: &mut Context<Workspace>) -> Task<()> {
+fn serve_requests(
+    ws: WeakEntity<Workspace>,
+    requests: async_channel::Receiver<tr::HostRequest>,
+    cx: &mut Context<Workspace>,
+) -> Task<()> {
     cx.spawn(async move |_, cx: &mut AsyncApp| {
         while let Ok(req) = requests.recv().await {
             if ws.update(cx, |ws, cx| ws.remote_request(req, cx)).is_err() {
@@ -2128,18 +3024,31 @@ fn serve_requests(ws: WeakEntity<Workspace>, requests: async_channel::Receiver<t
 ///
 /// `seen` is the network snapshot the server's addresses were found from (not a fresh read: an
 /// address or default route that changed since is a change to act on).
-fn follow_addresses(ws: WeakEntity<Workspace>, mut seen: AddressInputs, cx: &mut Context<Workspace>) -> Task<()> {
+fn follow_addresses(
+    ws: WeakEntity<Workspace>,
+    mut seen: AddressInputs,
+    cx: &mut Context<Workspace>,
+) -> Task<()> {
     cx.spawn(async move |_, cx: &mut AsyncApp| {
         loop {
             cx.background_executor().timer(ADDRESSES_EVERY).await;
-            let now = cx.background_executor().spawn(async { AddressInputs::read() }).await;
+            let now = cx
+                .background_executor()
+                .spawn(async { AddressInputs::read() })
+                .await;
             if now == seen {
                 continue;
             }
             seen = now;
             let input = seen.clone();
-            let found = cx.background_executor().spawn(async move { Addresses::find_in(&input) }).await;
-            if ws.update(cx, |ws, cx| ws.remote_addresses_changed(found, cx)).is_err() {
+            let found = cx
+                .background_executor()
+                .spawn(async move { Addresses::find_in(&input) })
+                .await;
+            if ws
+                .update(cx, |ws, cx| ws.remote_addresses_changed(found, cx))
+                .is_err()
+            {
                 break;
             }
         }
@@ -2166,7 +3075,11 @@ fn push_changes(ws: WeakEntity<Workspace>, cx: &mut Context<Workspace>) -> Task<
 }
 
 /// Pairings and connections: a toast, and the device list in Settings › Phone.
-fn hear_notices(ws: WeakEntity<Workspace>, mut notices: tokio::sync::broadcast::Receiver<tr::ServerNotice>, cx: &mut Context<Workspace>) -> Task<()> {
+fn hear_notices(
+    ws: WeakEntity<Workspace>,
+    mut notices: tokio::sync::broadcast::Receiver<tr::ServerNotice>,
+    cx: &mut Context<Workspace>,
+) -> Task<()> {
     let (tx, rx) = async_channel::unbounded();
     trek_core::runtime().spawn(async move {
         loop {
@@ -2212,7 +3125,10 @@ pub(crate) mod tests {
         assert!(is_trek_command("/access full"));
         assert!(is_trek_command("/new"));
         assert!(is_trek_command("/consult opus: hi"));
-        assert!(!is_trek_command("/compact"), "the agent's own commands go through");
+        assert!(
+            !is_trek_command("/compact"),
+            "the agent's own commands go through"
+        );
         assert!(!is_trek_command("fix the /permissions page"));
         assert!(!is_trek_command("plain words"));
     }

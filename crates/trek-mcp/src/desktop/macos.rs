@@ -9,13 +9,14 @@ use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
-    CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField, ScrollEventUnit,
+    CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
+    ScrollEventUnit,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect};
 use core_graphics::window::{
-    copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements, kCGWindowListOptionIncludingWindow,
-    kCGWindowListOptionOnScreenOnly,
+    copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements,
+    kCGWindowListOptionIncludingWindow, kCGWindowListOptionOnScreenOnly,
 };
 
 use super::{Button, Capture, Desktop, Display, Input, Rect, WindowInfo};
@@ -65,8 +66,14 @@ impl Desktop for Mac {
     fn display(&self) -> Display {
         let display = CGDisplay::main();
         let bounds = display.bounds();
-        let physical = display.display_mode().map(|m| (m.pixel_width(), m.pixel_height()));
-        Display { width: bounds.size.width, height: bounds.size.height, physical }
+        let physical = display
+            .display_mode()
+            .map(|m| (m.pixel_width(), m.pixel_height()));
+        Display {
+            width: bounds.size.width,
+            height: bounds.size.height,
+            physical,
+        }
     }
 
     fn windows(&self) -> Result<Vec<WindowInfo>, String> {
@@ -77,18 +84,33 @@ impl Desktop for Mac {
         let tmp = TempFile::new("png");
         let mut capture_args: Vec<String> = vec!["-x".into(), "-t".into(), "png".into()];
         match region {
-            Some((x0, y0, rw, rh)) => {
-                capture_args.push(format!("-R{},{},{},{}", x0.round(), y0.round(), rw.round(), rh.round()))
-            }
+            Some((x0, y0, rw, rh)) => capture_args.push(format!(
+                "-R{},{},{},{}",
+                x0.round(),
+                y0.round(),
+                rw.round(),
+                rh.round()
+            )),
             None => capture_args.push("-m".into()), // main display only
         }
         capture_args.push(tmp.path_str().to_string());
         let arg_refs: Vec<&str> = capture_args.iter().map(String::as_str).collect();
-        let out = util::run("/usr/sbin/screencapture", &arg_refs, None, Duration::from_secs(20))?;
+        let out = util::run(
+            "/usr/sbin/screencapture",
+            &arg_refs,
+            None,
+            Duration::from_secs(20),
+        )?;
         let size = std::fs::metadata(&tmp.0).map(|m| m.len()).unwrap_or(0);
         if !out.success() || size == 0 {
-            let detail = if out.success() { "empty capture".to_string() } else { out.reason() };
-            return Err(format!("{SCREEN_RECORDING_ERROR}\n(screencapture: {detail})"));
+            let detail = if out.success() {
+                "empty capture".to_string()
+            } else {
+                out.reason()
+            };
+            return Err(format!(
+                "{SCREEN_RECORDING_ERROR}\n(screencapture: {detail})"
+            ));
         }
         let note = if unsafe { CGPreflightScreenCaptureAccess() } {
             ""
@@ -100,17 +122,35 @@ impl Desktop for Mac {
             util::sips_fit(tmp.path_str(), max_side)?;
         }
         let (png_base64, width, height) = util::load_png(&tmp.0)?;
-        Ok(Capture { png_base64, width, height, note })
+        Ok(Capture {
+            png_base64,
+            width,
+            height,
+            note,
+        })
     }
 
     fn move_to(&self, x: f64, y: f64) -> Result<(), String> {
-        post_mouse(CGEventType::MouseMoved, CGPoint::new(x, y), CGMouseButton::Left, None)
+        post_mouse(
+            CGEventType::MouseMoved,
+            CGPoint::new(x, y),
+            CGMouseButton::Left,
+            None,
+        )
     }
 
     fn click(&self, x: f64, y: f64, button: Button, count: u32) -> Result<(), String> {
         let (down, up, btn) = match button {
-            Button::Left => (CGEventType::LeftMouseDown, CGEventType::LeftMouseUp, CGMouseButton::Left),
-            Button::Right => (CGEventType::RightMouseDown, CGEventType::RightMouseUp, CGMouseButton::Right),
+            Button::Left => (
+                CGEventType::LeftMouseDown,
+                CGEventType::LeftMouseUp,
+                CGMouseButton::Left,
+            ),
+            Button::Right => (
+                CGEventType::RightMouseDown,
+                CGEventType::RightMouseUp,
+                CGMouseButton::Right,
+            ),
         };
         let pt = CGPoint::new(x, y);
         post_mouse(CGEventType::MouseMoved, pt, CGMouseButton::Left, None)?;
@@ -130,21 +170,41 @@ impl Desktop for Mac {
         let start = CGPoint::new(ax, ay);
         post_mouse(CGEventType::MouseMoved, start, CGMouseButton::Left, None)?;
         sleep_ms(30);
-        post_mouse(CGEventType::LeftMouseDown, start, CGMouseButton::Left, Some(1))?;
+        post_mouse(
+            CGEventType::LeftMouseDown,
+            start,
+            CGMouseButton::Left,
+            Some(1),
+        )?;
         sleep_ms(60);
         const STEPS: i32 = 24;
         for i in 1..=STEPS {
             let t = i as f64 / STEPS as f64;
             let p = CGPoint::new(ax + (bx - ax) * t, ay + (by - ay) * t);
-            post_mouse(CGEventType::LeftMouseDragged, p, CGMouseButton::Left, Some(1))?;
+            post_mouse(
+                CGEventType::LeftMouseDragged,
+                p,
+                CGMouseButton::Left,
+                Some(1),
+            )?;
             sleep_ms(12);
         }
         sleep_ms(40);
-        post_mouse(CGEventType::LeftMouseUp, CGPoint::new(bx, by), CGMouseButton::Left, Some(1))
+        post_mouse(
+            CGEventType::LeftMouseUp,
+            CGPoint::new(bx, by),
+            CGMouseButton::Left,
+            Some(1),
+        )
     }
 
     fn scroll(&self, x: f64, y: f64, dx: i32, dy: i32) -> Result<(), String> {
-        post_mouse(CGEventType::MouseMoved, CGPoint::new(x, y), CGMouseButton::Left, None)?;
+        post_mouse(
+            CGEventType::MouseMoved,
+            CGPoint::new(x, y),
+            CGMouseButton::Left,
+            None,
+        )?;
         sleep_ms(30);
         // CGEvent wheel deltas are positive for up/left; our API is positive for down/right.
         let ev = CGEvent::new_scroll_event(source()?, ScrollEventUnit::LINE, 2, -dy, -dx, 0)
@@ -156,7 +216,10 @@ impl Desktop for Mac {
     fn type_text(&self, s: &str) -> Result<(), String> {
         for segment in split_for_typing(s) {
             match segment {
-                TypeSegment::Key(code) => press(KeyCombo { keycode: code, flags: 0 })?,
+                TypeSegment::Key(code) => press(KeyCombo {
+                    keycode: code,
+                    flags: 0,
+                })?,
                 TypeSegment::Text(chunk) => {
                     for down in [true, false] {
                         let ev = CGEvent::new_keyboard_event(source()?, 0, down)
@@ -177,7 +240,13 @@ impl Desktop for Mac {
     }
 
     fn open_app(&self, name: &str) -> Result<(), String> {
-        util::run_ok("/usr/bin/open", &["-a", name], None, Duration::from_secs(30)).map(|_| ())
+        util::run_ok(
+            "/usr/bin/open",
+            &["-a", name],
+            None,
+            Duration::from_secs(30),
+        )
+        .map(|_| ())
     }
 
     fn works_behind(&self) -> bool {
@@ -185,18 +254,36 @@ impl Desktop for Mac {
     }
 
     fn window(&self, id: i64) -> Result<Option<WindowInfo>, String> {
-        let Ok(id) = u32::try_from(id) else { return Ok(None) };
-        let arr = copy_window_info(kCGWindowListOptionIncludingWindow, id).ok_or("CGWindowListCopyWindowInfo returned nothing")?;
-        Ok(arr.iter().find_map(|item| window_info(*item as CFDictionaryRef, true)).filter(|w| w.id == id as i64))
+        let Ok(id) = u32::try_from(id) else {
+            return Ok(None);
+        };
+        let arr = copy_window_info(kCGWindowListOptionIncludingWindow, id)
+            .ok_or("CGWindowListCopyWindowInfo returned nothing")?;
+        Ok(arr
+            .iter()
+            .find_map(|item| window_info(*item as CFDictionaryRef, true))
+            .filter(|w| w.id == id as i64))
     }
 
     /// `screencapture -l`, which draws the window from its own buffer: what covers it doesn't
     /// show. A zoom is cut from the full-resolution capture.
-    fn capture_window(&self, w: &WindowInfo, region: Option<Rect>, max_side: u32) -> Result<Capture, String> {
+    fn capture_window(
+        &self,
+        w: &WindowInfo,
+        region: Option<Rect>,
+        max_side: u32,
+    ) -> Result<Capture, String> {
         let tmp = TempFile::new("png");
         let out = util::run(
             "/usr/sbin/screencapture",
-            &["-x", "-o", "-t", "png", &format!("-l{}", w.id), tmp.path_str()],
+            &[
+                "-x",
+                "-o",
+                "-t",
+                "png",
+                &format!("-l{}", w.id),
+                tmp.path_str(),
+            ],
             None,
             Duration::from_secs(20),
         )?;
@@ -205,8 +292,15 @@ impl Desktop for Mac {
             if !unsafe { CGPreflightScreenCaptureAccess() } {
                 return Err(SCREEN_RECORDING_ERROR.into());
             }
-            let detail = if out.success() { "empty capture".to_string() } else { out.reason() };
-            return Err(format!("Couldn't capture {}'s window ({detail}). It may have closed or been minimised: list_windows shows what's open.", w.owner));
+            let detail = if out.success() {
+                "empty capture".to_string()
+            } else {
+                out.reason()
+            };
+            return Err(format!(
+                "Couldn't capture {}'s window ({detail}). It may have closed or been minimised: list_windows shows what's open.",
+                w.owner
+            ));
         }
         let (_, w0, h0) = util::load_png(&tmp.0)?;
         if let Some((x, y, rw, rh)) = region {
@@ -216,16 +310,41 @@ impl Desktop for Mac {
             let (cx, cy) = ((x * scale).round().max(1.0), (y * scale).round().max(1.0));
             let cw = (rw * scale).round().clamp(1.0, w0 as f64 - cx);
             let ch = (rh * scale).round().clamp(1.0, h0 as f64 - cy);
-            let (cw, ch, cx, cy) = (cw.to_string(), ch.to_string(), cx.to_string(), cy.to_string());
-            util::run_ok("/usr/bin/sips", &["-c", &ch, &cw, "--cropOffset", &cy, &cx, tmp.path_str(), "--out", tmp.path_str()], None, Duration::from_secs(30))
-                .map_err(|e| format!("sips failed to cut the zoom out: {e}"))?;
+            let (cw, ch, cx, cy) = (
+                cw.to_string(),
+                ch.to_string(),
+                cx.to_string(),
+                cy.to_string(),
+            );
+            util::run_ok(
+                "/usr/bin/sips",
+                &[
+                    "-c",
+                    &ch,
+                    &cw,
+                    "--cropOffset",
+                    &cy,
+                    &cx,
+                    tmp.path_str(),
+                    "--out",
+                    tmp.path_str(),
+                ],
+                None,
+                Duration::from_secs(30),
+            )
+            .map_err(|e| format!("sips failed to cut the zoom out: {e}"))?;
         }
         let (_, w1, h1) = util::load_png(&tmp.0)?;
         if w1.max(h1) > max_side {
             util::sips_fit(tmp.path_str(), max_side)?;
         }
         let (png_base64, width, height) = util::load_png(&tmp.0)?;
-        Ok(Capture { png_base64, width, height, note: "" })
+        Ok(Capture {
+            png_base64,
+            width,
+            height,
+            note: "",
+        })
     }
 
     fn behind(&self, w: &WindowInfo, input: &Input) -> Result<(), String> {
@@ -234,11 +353,23 @@ impl Desktop for Mac {
 
     /// `open -g`: launched, or opened if it's running, and left behind the user's front app.
     fn open_app_behind(&self, name: &str) -> Result<(), String> {
-        util::run_ok("/usr/bin/open", &["-g", "-a", name], None, Duration::from_secs(30)).map(|_| ())
+        util::run_ok(
+            "/usr/bin/open",
+            &["-g", "-a", name],
+            None,
+            Duration::from_secs(30),
+        )
+        .map(|_| ())
     }
 
     fn app_pid(&self, name: &str) -> Option<i64> {
-        let out = util::run_ok("/usr/bin/lsappinfo", &["info", "-only", "pid", name], None, Duration::from_secs(5)).ok()?;
+        let out = util::run_ok(
+            "/usr/bin/lsappinfo",
+            &["info", "-only", "pid", name],
+            None,
+            Duration::from_secs(5),
+        )
+        .ok()?;
         parse_lsappinfo_pid(&out)
     }
 }
@@ -250,12 +381,22 @@ fn parse_lsappinfo_pid(out: &str) -> Option<i64> {
     while let Some(i) = rest.find("pid") {
         let (before, after) = (&rest[..i], &rest[i + 3..]);
         rest = after;
-        if before.chars().next_back().is_some_and(|c| c.is_alphanumeric()) {
+        if before
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric())
+        {
             continue;
         }
         let after = after.strip_prefix('"').unwrap_or(after).trim_start();
-        let Some(value) = after.strip_prefix('=') else { continue };
-        let digits: String = value.trim_start().chars().take_while(char::is_ascii_digit).collect();
+        let Some(value) = after.strip_prefix('=') else {
+            continue;
+        };
+        let digits: String = value
+            .trim_start()
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
         if let Ok(pid) = digits.parse() {
             return Some(pid);
         }
@@ -266,11 +407,18 @@ fn parse_lsappinfo_pid(out: &str) -> Option<i64> {
 // ---- CoreGraphics helpers ----
 
 fn source() -> Result<CGEventSource, String> {
-    CGEventSource::new(CGEventSourceStateID::HIDSystemState).map_err(|_| "Failed to create CGEventSource".to_string())
+    CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| "Failed to create CGEventSource".to_string())
 }
 
-fn post_mouse(ty: CGEventType, pt: CGPoint, button: CGMouseButton, click_state: Option<i64>) -> Result<(), String> {
-    let ev = CGEvent::new_mouse_event(source()?, ty, pt, button).map_err(|_| "Failed to create mouse event".to_string())?;
+fn post_mouse(
+    ty: CGEventType,
+    pt: CGPoint,
+    button: CGMouseButton,
+    click_state: Option<i64>,
+) -> Result<(), String> {
+    let ev = CGEvent::new_mouse_event(source()?, ty, pt, button)
+        .map_err(|_| "Failed to create mouse event".to_string())?;
     // Don't inherit modifier keys the user may be holding.
     ev.set_flags(CGEventFlags::empty());
     if let Some(n) = click_state {
@@ -342,7 +490,10 @@ fn on_screen_windows() -> Result<Vec<WindowInfo>, String> {
         kCGNullWindowID,
     )
     .ok_or("CGWindowListCopyWindowInfo returned nothing")?;
-    Ok(arr.iter().filter_map(|item| window_info(*item as CFDictionaryRef, false)).collect())
+    Ok(arr
+        .iter()
+        .filter_map(|item| window_info(*item as CFDictionaryRef, false))
+        .collect())
 }
 
 /// An app's window (layer 0, at least 2x2) from its window-list entry. `on_screen`: only one
@@ -401,7 +552,10 @@ mod tests {
         assert_eq!(parse_lsappinfo_pid("\"pid\"=1234\n"), Some(1234));
         let dump = "[ NULL ]  [ NULL ]  \n    bundleID=[ NULL ] \n    bundle path=[ NULL ] \n    pid = 698 !cgsConnection !signalled type=[ NULL ]  flavor=[ NULL ]  Version=[ NULL ]  Arch=!!none \n";
         assert_eq!(parse_lsappinfo_pid(dump), Some(698));
-        assert_eq!(parse_lsappinfo_pid("    pid = 419 token=[sess=100020 pid=419 uid:0]"), Some(419));
+        assert_eq!(
+            parse_lsappinfo_pid("    pid = 419 token=[sess=100020 pid=419 uid:0]"),
+            Some(419)
+        );
         assert_eq!(parse_lsappinfo_pid(""), None);
         assert_eq!(parse_lsappinfo_pid("Arch=!!none"), None);
     }

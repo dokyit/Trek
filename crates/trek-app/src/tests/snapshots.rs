@@ -58,14 +58,22 @@ impl Source for FakeClipboard {
         pad.sequence
     }
     fn read(&mut self) -> Read {
-        self.0.lock().unwrap().image.clone().map_or(Read::NotAnImage, Read::Image)
+        self.0
+            .lock()
+            .unwrap()
+            .image
+            .clone()
+            .map_or(Read::NotAnImage, Read::Image)
     }
 }
 
 /// The overlay and clipboard Trek uses from now on.
 fn install(cx: &mut TestAppContext, timeout: Duration) -> Arc<Mutex<Pad>> {
     let pad = Arc::new(Mutex::new(Pad::default()));
-    let fake = Arc::new(Fake { pad: pad.clone(), timeout });
+    let fake = Arc::new(Fake {
+        pad: pad.clone(),
+        timeout,
+    });
     cx.update(|cx| crate::screenclip::install(fake, cx));
     pad
 }
@@ -142,25 +150,47 @@ fn a_snip_that_arrives_attaches_like_a_paste_and_goes_with_the_message() {
         trek.type_text(cx, "what is wrong here");
         start(&trek, cx);
         assert_eq!(pad.lock().unwrap().launches, 1, "the overlay opened");
-        assert!(trek.visible(cx, "snapshot-wait"), "the wait is said in the strip");
+        assert!(
+            trek.visible(cx, "snapshot-wait"),
+            "the wait is said in the strip"
+        );
         pass(cx, 5);
         assert!(attached(&trek, cx).is_empty(), "nothing was picked yet");
         assert!(trek.visible(cx, "snapshot-wait"));
 
         snip(&pad, [10, 120, 250]);
-        until(cx, "the snip to attach", |cx| !attached(&trek, cx).is_empty());
+        until(cx, "the snip to attach", |cx| {
+            !attached(&trek, cx).is_empty()
+        });
         trek.render(cx);
         assert!(!trek.visible(cx, "snapshot-wait"), "the wait is over");
         let path = attached(&trek, cx)[0].clone();
         assert_eq!(path.extension().and_then(|e| e.to_str()), Some("png"));
-        assert!(path.starts_with(trek_core::paths::data_dir().join("snapshots")), "saved with the others: {}", path.display());
+        assert!(
+            path.starts_with(trek_core::paths::data_dir().join("snapshots")),
+            "saved with the others: {}",
+            path.display()
+        );
         let picture = image::open(&path).expect("a PNG").to_rgb8();
-        assert_eq!((picture.width(), picture.height(), picture.get_pixel(0, 0).0), (1, 1, [10, 120, 250]));
+        assert_eq!(
+            (picture.width(), picture.height(), picture.get_pixel(0, 0).0),
+            (1, 1, [10, 120, 250])
+        );
 
         // It goes out with the next message, as a pasted one does.
         trek.press(cx, "enter");
         let id = trek.thread_id(cx);
-        let images = trek.items(cx, &id).into_iter().find_map(|i| if let Item::User { images, .. } = i { Some(images) } else { None }).expect("sent");
+        let images = trek
+            .items(cx, &id)
+            .into_iter()
+            .find_map(|i| {
+                if let Item::User { images, .. } = i {
+                    Some(images)
+                } else {
+                    None
+                }
+            })
+            .expect("sent");
         assert_eq!(images, [path.display().to_string()]);
         assert!(attached(&trek, cx).is_empty(), "the outbox empties on send");
         trek.wait_done(cx, &id, RunState::Idle).await;
@@ -185,7 +215,11 @@ fn asking_again_while_waiting_gives_up_quietly() {
         // A picture that lands afterwards is nobody's snapshot, and nothing was said of it.
         snip(&pad, [9, 9, 9]);
         pass(cx, 10);
-        assert_eq!(pad.lock().unwrap().looks, looks, "the clipboard isn't looked at any more");
+        assert_eq!(
+            pad.lock().unwrap().looks,
+            looks,
+            "the clipboard isn't looked at any more"
+        );
         assert!(attached(&trek, cx).is_empty());
         assert!(seen.borrow().is_empty(), "{:?}", seen.borrow());
 
@@ -209,7 +243,10 @@ fn nothing_picked_in_time_says_so() {
         until(cx, "the wait to time out", |_| !seen.borrow().is_empty());
         let said = seen.borrow().clone();
         assert_eq!(said.len(), 1, "{said:?}");
-        assert!(said[0].starts_with("Nothing was picked in a minute"), "{said:?}");
+        assert!(
+            said[0].starts_with("Nothing was picked in a minute"),
+            "{said:?}"
+        );
         assert!(attached(&trek, cx).is_empty());
         trek.render(cx);
         assert!(!trek.visible(cx, "snapshot-wait"));
@@ -227,9 +264,15 @@ fn an_overlay_that_wont_open_is_said() {
         pad.lock().unwrap().launch_error = Some("Windows answered 31".into());
         let seen = toasts(&trek, cx);
         start(&trek, cx);
-        assert_eq!(*seen.borrow(), ["Couldn't open the snipping tool: Windows answered 31."]);
+        assert_eq!(
+            *seen.borrow(),
+            ["Couldn't open the snipping tool: Windows answered 31."]
+        );
         assert!(!trek.visible(cx, "snapshot-wait"));
-        assert!(!composer(&trek, cx).read_with(cx, |c, _| c.snapshot_waiting()), "nothing is waiting");
+        assert!(
+            !composer(&trek, cx).read_with(cx, |c, _| c.snapshot_waiting()),
+            "nothing is waiting"
+        );
     });
 }
 
@@ -249,7 +292,11 @@ fn closing_the_window_ends_the_wait() {
         pass(cx, 5);
         let after = pad.lock().unwrap().looks;
         pass(cx, 20);
-        assert_eq!(pad.lock().unwrap().looks, after, "no one is looking at the clipboard once the window is gone");
+        assert_eq!(
+            pad.lock().unwrap().looks,
+            after,
+            "no one is looking at the clipboard once the window is gone"
+        );
     });
 }
 
@@ -264,6 +311,8 @@ fn the_shortcut_opens_the_overlay() {
         assert_eq!(pad.lock().unwrap().launches, 1);
         assert!(trek.visible(cx, "snapshot-wait"));
         snip(&pad, [5, 6, 7]);
-        until(cx, "the snip to attach", |cx| !attached(&trek, cx).is_empty());
+        until(cx, "the snip to attach", |cx| {
+            !attached(&trek, cx).is_empty()
+        });
     });
 }
