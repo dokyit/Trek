@@ -158,7 +158,7 @@ impl IdeWorkbench {
                     .text_size(px(12.5))
                     .text_color(theme.muted_foreground)
                     .child(crate::keys::shared(
-                        "No threads in this folder yet. Start one in the AI side bar (⌘N).",
+                        "No threads in this folder yet. Start one in the AI side bar (⌘N).", // keys::shared
                     )),
             );
         }
@@ -171,7 +171,7 @@ impl IdeWorkbench {
                         crate::ui::icon_button(
                             "ide-agents-new",
                             crate::assets::Lucide::MessageSquarePlus,
-                            "New chat (⌘N)",
+                            "New chat (⌘N)", // icon_button( localizes
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.workspace.update(cx, |ws, cx| ws.ide_new_chat(cx));
@@ -182,7 +182,7 @@ impl IdeWorkbench {
                         crate::ui::icon_button(
                             "ide-agents-harness",
                             crate::assets::Lucide::MessageSquare,
-                            "Open Agents (⌥⌘E)",
+                            "Open Agents (⌥⌘E)", // icon_button( localizes
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.workspace

@@ -359,7 +359,7 @@ impl Sidebar {
         .test_support()
         .tooltip(|window, cx| {
             gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared(
-                "Things to jot down (⌘⇧J)",
+                "Things to jot down (⌘⇧J)", // keys::shared
             ))
             .build(window, cx)
         })
@@ -389,7 +389,7 @@ impl Sidebar {
                         ui::icon_button(
                             "new-thread",
                             crate::assets::Lucide::SquarePen,
-                            "New thread (⌘N)",
+                            "New thread (⌘N)", // icon_button( localizes
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.workspace.update(cx, |ws, cx| ws.new_thread(cx))

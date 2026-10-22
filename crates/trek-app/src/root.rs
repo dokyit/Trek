@@ -728,11 +728,13 @@ fn mode_switch(mode: crate::workspace::Mode, cx: &App) -> impl IntoElement {
                     .child(icon.size(px(13.)))
                     .child(label)
                     .tooltip(move |window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(if m == Mode::Agents {
-                            "Agents (⌥⌘E)"
-                        } else {
-                            "Editor (⌥⌘E)"
-                        })
+                        gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared(
+                            if m == Mode::Agents {
+                                "Agents (⌥⌘E)" // keys::shared
+                            } else {
+                                "Editor (⌥⌘E)" // keys::shared
+                            },
+                        ))
                         .build(window, cx)
                     })
                     .on_click(move |_, _, cx| {
@@ -863,21 +865,21 @@ impl WindowTitle {
                             .child(toggle(
                                 "toggle-primary",
                                 IconName::PanelLeft,
-                                "Primary side bar (⌘B)",
+                                "Primary side bar (⌘B)", // icon_button( localizes
                                 layout.primary_open,
                                 Box::new(ToggleSidebar),
                             ))
                             .child(toggle(
                                 "toggle-panel",
                                 IconName::PanelBottom,
-                                "Panel (⌘J)",
+                                "Panel (⌘J)", // icon_button( localizes
                                 layout.panel_open,
                                 Box::new(ToggleRightPanel),
                             ))
                             .child(toggle(
                                 "toggle-ai",
                                 IconName::PanelRight,
-                                "AI side bar (⌥⌘B)",
+                                "AI side bar (⌥⌘B)", // icon_button( localizes
                                 layout.ai_open,
                                 Box::new(crate::ToggleAiBar),
                             ))
@@ -885,7 +887,7 @@ impl WindowTitle {
                                 crate::ui::icon_button(
                                     "ide-settings",
                                     IconName::Settings,
-                                    "Settings (⌘,)",
+                                    "Settings (⌘,)", // icon_button( localizes
                                 )
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(Box::new(OpenSettings), cx)
@@ -1018,7 +1020,7 @@ impl Render for WindowTitle {
                         let toggle = crate::ui::icon_button(
                             "toggle-sidebar",
                             IconName::PanelLeft,
-                            "Toggle sidebar (⌘B)",
+                            "Toggle sidebar (⌘B)", // icon_button( localizes
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
                             let (ws, panel) = (this.workspace.clone(), this.right_panel.clone());
@@ -1099,7 +1101,7 @@ impl Render for WindowTitle {
                             crate::ui::icon_button(
                                 "pop-out",
                                 crate::assets::Lucide::SquareArrowOutUpRight,
-                                "Open in new window (⌘⇧↩)",
+                                "Open in new window (⌘⇧↩)", // icon_button( localizes
                             )
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(Box::new(OpenInNewWindow), cx)
@@ -1111,7 +1113,7 @@ impl Render for WindowTitle {
                         crate::ui::icon_button(
                             "toggle-tools",
                             IconName::PanelRight,
-                            "Tools panel (⌘J)",
+                            "Tools panel (⌘J)", // icon_button( localizes
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.right_panel.update(cx, |p, cx| p.toggle(cx))
@@ -1685,9 +1687,9 @@ pub fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl IntoElemen
             ]
             .into_iter()
             .filter(|(_, app)| {
-                matches!(*app, "Finder" | "Terminal")
+                matches!(*app, "Finder" | "Terminal") // words: ok
                     || std::path::Path::new(&format!("/Applications/{app}.app")).exists()
-            }); // words: ok
+            });
             for (label, app) in apps {
                 let dir = dir.clone();
                 menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, _| {

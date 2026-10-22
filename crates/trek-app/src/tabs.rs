@@ -212,7 +212,7 @@ pub fn strip(workspace: &Entity<Workspace>, glass: bool, cx: &App) -> Option<Any
                     )
                     .tooltip(|window, cx| {
                         gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared(
-                            "Close tab (⌘W)",
+                            "Close tab (⌘W)", // keys::shared
                         ))
                         .build(window, cx)
                     })
