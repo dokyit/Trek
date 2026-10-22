@@ -88,7 +88,15 @@ if (( ! DRY )); then
   # Tags others pushed, and where the channel tags moved: the version checks below read them.
   git fetch -q --force origin 'refs/tags/*:refs/tags/*' || die "couldn't fetch tags from origin"
 fi
-[[ -z $VERSION_TAG ]] || ! git rev-parse -q --verify "refs/tags/$VERSION_TAG" >/dev/null || die "tag $VERSION_TAG already exists"
+# A tag already on HEAD is a re-run finishing a release whose tag a maintainer pushed (the
+# workflow's token can't create a tag that brings in workflow-file changes); anywhere else, it's
+# taken.
+TAG_ON_HEAD=0
+if [[ -n $VERSION_TAG ]] && git rev-parse -q --verify "refs/tags/$VERSION_TAG" >/dev/null; then
+  [[ $(git rev-parse "refs/tags/$VERSION_TAG^{commit}") == $(git rev-parse HEAD) ]] \
+    || die "tag $VERSION_TAG already exists"
+  TAG_ON_HEAD=1
+fi
 CURRENT=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
 LAST_NIGHTLY=$(git for-each-ref --format='%(contents:subject)' refs/tags/nightly | sed -n 's/^Trek //p')
 python3 - "$CHANNEL" "$VERSION" "$CURRENT" "$LAST_NIGHTLY" $(git tag --list 'v[0-9]*') <<'PY' || exit 1
@@ -204,7 +212,7 @@ if [[ $CHANNEL == stable ]]; then
     git commit -q -m "Release v$VERSION"
   fi
   COMMITTED=1
-  git tag -a "$VERSION_TAG" -m "Trek $VERSION"
+  (( TAG_ON_HEAD )) || git tag -a "$VERSION_TAG" -m "Trek $VERSION"
   git push origin HEAD
   git push origin "refs/tags/$VERSION_TAG"
   gh release create "$RELEASE_TAG" --repo "$REPO" --verify-tag --latest \
