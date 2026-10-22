@@ -150,6 +150,25 @@ fn a_narrow_window_still_draws_every_type() {
     });
 }
 
+#[test]
+fn visualization_timeline_with_string_ticks_draws_a_numeric_axis() {
+    run(async |cx| {
+        let trek = open(cx);
+        answered(
+            &trek,
+            cx,
+            r#"```trek-viz
+{"version":1,"title":"Plan","summary":"Duration","type":"timeline","events":[{"label":"Build","start":0,"end":5},{"label":"Test","start":5,"end":12}],"ticks":"minutes"}
+```
+"#,
+        );
+        let ids = on_screen(&trek, cx);
+        assert!(find(&ids, "viz-timeline-").is_some(), "{ids:?}");
+        assert!(find(&ids, "viz-event-").is_some(), "{ids:?}");
+        assert!(find(&ids, "viz-invalid-").is_none(), "{ids:?}");
+    });
+}
+
 /// The labels of elements on screen whose ids start with `prefix`.
 fn labels(trek: &Trek, cx: &mut TestAppContext, prefix: &str) -> Vec<String> {
     cx.run_until_parked();
@@ -163,7 +182,7 @@ fn labels(trek: &Trek, cx: &mut TestAppContext, prefix: &str) -> Vec<String> {
 }
 
 #[test]
-fn an_invalid_block_says_why_over_its_json() {
+fn an_invalid_block_says_why_with_its_json_folded_away() {
     run(async |cx| {
         let trek = open(cx);
         answered(
@@ -174,8 +193,16 @@ fn an_invalid_block_says_why_over_its_json() {
         let ids = on_screen(&trek, cx);
         assert!(find(&ids, "trek-viz-").is_none(), "{ids:?}");
         assert!(find(&ids, "viz-invalid-").is_some(), "{ids:?}");
-        // The JSON stays, as a code block (its copy button) under the note.
+        // No code block (or its copy button) is mounted until the disclosure opens.
+        assert!(find(&ids, "viz-raw-").is_none(), "{ids:?}");
+        assert!(!ids.iter().any(|id| id == "copy"), "{ids:?}");
+        let toggle = find(&ids, "viz-invalid-toggle-").expect("a JSON disclosure");
+        trek.click(cx, gpui_kit::SharedString::from(toggle.clone()));
+        let ids = on_screen(&trek, cx);
+        assert!(find(&ids, "viz-raw-").is_some(), "{ids:?}");
         assert!(ids.iter().any(|id| id == "copy"), "{ids:?}");
+        trek.click(cx, gpui_kit::SharedString::from(toggle));
+        assert!(find(&on_screen(&trek, cx), "viz-raw-").is_none());
         let note = labels(&trek, cx, "viz-invalid-").concat();
         assert!(
             note.starts_with("Couldn't draw this visualization: unknown field `html`"),

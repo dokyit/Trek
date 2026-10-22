@@ -3,7 +3,7 @@
 //! Agents emit a fenced `trek-viz` JSON block. The core crate owns and validates the bounded
 //! wire format; this module only turns the parsed data into theme-aware GPUI elements. A block
 //! still being written draws as far as it validates (its frame, then its marks as they arrive);
-//! one that closed invalid shows its JSON under a note saying why it couldn't be drawn.
+//! one that closed invalid shows a compact reason, with its JSON folded behind a disclosure.
 //!
 //! Every artifact is built from the same three layers: the card (a hairline edge and the faint
 //! sheen of Trek's glass panes), an inset surface the marks sit on, and floating readouts above
@@ -132,7 +132,7 @@ impl MarkdownPlugin for VisualizationPlugin {
                         reason: error.reason(),
                         source: source.to_string(),
                     },
-                    source.to_string(),
+                    invalid_note(&error.reason()),
                 ),
             }
         } else {
@@ -200,9 +200,12 @@ impl MarkdownPlugin for VisualizationPlugin {
                 source,
                 key,
                 self.size,
+                window,
                 cx,
             ),
-            Some(Block::Invalid { reason, source }) => invalid(reason, source, key, self.size, cx),
+            Some(Block::Invalid { reason, source }) => {
+                invalid(reason, source, key, self.size, window, cx)
+            }
             None => return div().into_any_element(),
         };
         div().py_2().child(shown).into_any_element()
@@ -1040,10 +1043,37 @@ fn pending(
         .into_any_element()
 }
 
-/// A block that closed but can't be drawn: a short note saying why, over the JSON as written.
-fn invalid(reason: &str, source: &str, key: usize, size: Pixels, cx: &App) -> AnyElement {
+/// Keep parser diagnostics (which can quote an entire bad value) out of the transcript.
+fn invalid_note(reason: &str) -> String {
+    let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    let short: String = reason.chars().take(160).collect();
+    format!(
+        "Couldn't draw this visualization: {short}{}",
+        if short.len() < reason.len() {
+            "…"
+        } else {
+            ""
+        }
+    )
+}
+
+/// A failed block stays one quiet line until the reader asks to inspect its source.
+fn invalid(
+    reason: &str,
+    source: &str,
+    key: usize,
+    size: Pixels,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     let look = Look::of(cx);
-    let note = format!("Couldn't draw this visualization: {reason}");
+    let state = window.use_keyed_state(
+        SharedString::from(format!("viz-invalid-open-{key}")),
+        cx,
+        |_, _| false,
+    );
+    let open = *state.read(cx);
+    let note = invalid_note(reason);
     v_flex()
         .id(SharedString::from(format!("viz-invalid-{key}")))
         .aria_label(note.clone())
@@ -1052,42 +1082,63 @@ fn invalid(reason: &str, source: &str, key: usize, size: Pixels, cx: &App) -> An
         .gap(px(6.))
         .child(
             h_flex()
+                .id(SharedString::from(format!("viz-invalid-toggle-{key}")))
+                .aria_label(if open {
+                    "Hide visualization JSON"
+                } else {
+                    "Show visualization JSON"
+                })
+                .test_support()
                 .w_full()
-                .items_start()
                 .gap(px(8.))
-                .px(px(10.))
-                .py(px(7.))
+                .px(px(8.))
+                .py(px(6.))
                 .rounded(px(8.))
-                .border_1()
-                .border_color(look.hairline)
-                .bg(crate::palette::amber(cx).opacity(if look.dark { 0.06 } else { 0.07 }))
+                .cursor_pointer()
+                .hover(|s| s.bg(cx.theme().list_hover))
                 .text_size(px(12.))
-                .line_height(relative(1.45))
+                .text_color(look.muted)
                 .child(
-                    div()
-                        .flex_none()
-                        .h(px(12. * 1.45))
-                        .flex()
-                        .items_center()
-                        .child(
-                            Icon::new(IconName::TriangleAlert)
-                                .size(px(13.))
-                                .text_color(crate::palette::amber(cx)),
-                        ),
+                    Icon::new(IconName::TriangleAlert)
+                        .size(px(13.))
+                        .text_color(crate::palette::amber(cx)),
                 )
-                .child(div().flex_1().min_w_0().text_color(look.muted).child(note)),
+                .child(div().flex_1().min_w_0().line_clamp(1).child(note))
+                .child(div().flex_none().text_size(px(11.)).child("JSON"))
+                .child(
+                    Icon::new(if open {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .size(px(12.)),
+                )
+                .on_click(move |_, _, cx| {
+                    state.update(cx, |open, cx| {
+                        *open = !*open;
+                        cx.notify();
+                    });
+                    relayout(cx);
+                }),
         )
-        .child(crate::md::keyed(
-            SharedString::from(format!("viz-raw-{key}")),
-            source.to_string(),
-            None,
-            None,
-            size,
-            false,
-            false,
-            None,
-            cx,
-        ))
+        .when(open, |el| {
+            el.child(
+                div()
+                    .id(SharedString::from(format!("viz-raw-{key}")))
+                    .test_support()
+                    .child(crate::md::keyed(
+                        SharedString::from(format!("viz-raw-code-{key}")),
+                        source.to_string(),
+                        None,
+                        None,
+                        size,
+                        false,
+                        false,
+                        None,
+                        cx,
+                    )),
+            )
+        })
         .into_any_element()
 }
 
@@ -1609,6 +1660,15 @@ mod tests {
             ident(&early),
             ident(&trek_core::visualization::parse(json).unwrap())
         );
+    }
+
+    #[test]
+    fn invalid_visualizations_have_a_compact_single_line_description() {
+        let note = super::invalid_note(&format!("invalid value\n  {}", "x".repeat(1_000)));
+        assert!(note.starts_with("Couldn't draw this visualization: invalid value "));
+        assert!(note.ends_with('…'));
+        assert!(!note.contains('\n'));
+        assert!(note.chars().count() < 200);
     }
 
     #[test]
