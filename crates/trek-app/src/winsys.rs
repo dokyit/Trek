@@ -1109,7 +1109,9 @@ mod tests {
 /// By hand (`cargo test -p trek-app overlay -- --ignored`): puts the badge on the taskbar button of
 /// a window made for the purpose, which shows for a second or two, and clears it. The tests
 /// above only draw the pixels; this is the one that asks Windows.
-#[cfg(all(windows, any(test, feature = "test-support")))]
+// Only `test`: a `test-support` build (another crate's tests) has no #[test] fns, so the helpers
+// here would be unused and fail `-D warnings`.
+#[cfg(all(windows, test))]
 mod by_hand {
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
     use windows_sys::Win32::Foundation::HWND;

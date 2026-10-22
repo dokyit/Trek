@@ -11,7 +11,6 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
 /// Images going out with a view's next message.
 #[derive(Debug, Default)]
@@ -198,8 +197,9 @@ pub fn image_bytes(image: &Image) -> Result<(&'static str, Vec<u8>)> {
     })
 }
 
-/// Copy an image file agents can't read (see `needs_conversion`) into `dir` as PNG, with macOS's
-/// own `sips` (it reads HEIC, which the `image` crate doesn't).
+/// Copy an image file agents can't read (see `needs_conversion`) into `dir` as PNG. `sips` is
+/// asked first (it reads HEIC, which the `image` crate doesn't); where there is no `sips`
+/// (Windows), or it turned the file down, the `image` crate reads TIFF and BMP.
 pub fn convert_file(path: &Path, dir: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("{} couldn't be created", dir.display()))?;
@@ -208,21 +208,42 @@ pub fn convert_file(path: &Path, dir: &Path) -> Result<PathBuf> {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "image".into());
     let out = dir.join(format!("{stem}-{}.png", timestamp()));
-    let converted = std::process::Command::new("/usr/bin/sips")
-        .args(["-s", "format", "png"])
-        .arg(path)
-        .arg("--out")
-        .arg(&out)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
+    let converted = sips_png(path, &out) || image_crate_png(path, &out);
     if !converted || !out.is_file() {
         let _ = std::fs::remove_file(&out);
         bail!("it couldn't be converted to PNG");
     }
     Ok(out)
+}
+
+/// `path` as PNG at `out`, by macOS's own `sips` (HEIC included). There is none off macOS.
+fn sips_png(path: &Path, out: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Stdio;
+        std::process::Command::new("/usr/bin/sips")
+            .args(["-s", "format", "png"])
+            .arg(path)
+            .arg("--out")
+            .arg(out)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (path, out);
+        false
+    }
+}
+
+/// `path` as PNG at `out`, by the `image` crate (TIFF, BMP and the like, not HEIC).
+fn image_crate_png(path: &Path, out: &Path) -> bool {
+    image::open(path)
+        .and_then(|decoded| decoded.save_with_format(out, image::ImageFormat::Png))
+        .is_ok()
 }
 
 /// An image to write into Trek's snapshots folder before it can be attached.
@@ -620,10 +641,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "convert_file shells out to macOS's sips; converting image files on Windows is a product gap"
-    )]
     fn converts_image_files_agents_cant_read() {
         let dir = temp_dir("convert");
         std::fs::create_dir_all(&dir).unwrap();
