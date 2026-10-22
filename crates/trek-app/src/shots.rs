@@ -1934,7 +1934,9 @@ fn usage_demo(ws: &Entity<Workspace>, cx: &mut App) {
 
 /// `pr-demo <state>`: a PR/release card with made-up contents appended to the thread on
 /// screen (`pr_card::demo`), so its states can be shot without a real `gh`. States: open,
-/// creating, checking, conflicted, resolving, ready, merged, release, run.
+/// creating, pushing, opening, fetching, checking, conflicted, resolving, resolved, ready,
+/// merging, merged, closed, failed, release, release-published, release-failed, run,
+/// run-running, run-passed, run-failed.
 fn pr_demo(ws: &Entity<Workspace>, arg: &str, cx: &mut App) {
     ws.update(cx, |ws, cx| {
         let Some(id) = ws
@@ -1969,6 +1971,8 @@ fn pr_demo(ws: &Entity<Workspace>, arg: &str, cx: &mut App) {
             id: id.to_string(),
             appended: false,
         });
+        // The composer's status chip reads the newest card: redraw it too.
+        cx.notify();
     });
 }
 
@@ -2008,6 +2012,34 @@ fn limits_demo(ws: &Entity<Workspace>, cx: &mut App) {
                 ..Default::default()
             },
         );
+        // Three servers for the MCP row's breakdown, and a context report plus a long
+        // transcript for the card to divide up: messages the bulk, as a real thread has.
+        if ws.settings.tools.mcp_servers.is_empty() {
+            for name in ["Figma", "Linear", "GitHub"] {
+                ws.settings
+                    .tools
+                    .mcp_servers
+                    .push(trek_core::settings::McpServerConfig::stdio(
+                        name,
+                        "npx",
+                        vec![format!("mcp-{name}")],
+                    ));
+            }
+        }
+        if let Some(id) = ws
+            .thread_id_in(&crate::workspace::Scope::Main)
+            .map(str::to_string)
+        {
+            let live = ws.live.entry(id).or_default();
+            live.context = Some((120_400, 200_000));
+            if live.items.is_empty() {
+                for _ in 0..30 {
+                    live.items.push(trek_core::store::Item::Assistant {
+                        text: "The agent's answer, worked through step by step. ".repeat(200),
+                    });
+                }
+            }
+        }
         cx.notify();
     });
 }
