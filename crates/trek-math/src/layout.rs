@@ -128,11 +128,11 @@ pub trait Measure {
     fn width(&self, text: &str, face: Face) -> Option<f32>;
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 /// Measures by the font tables alone.
 pub struct ByTables;
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 impl Measure for ByTables {
     fn width(&self, _: &str, _: Face) -> Option<f32> {
         None
@@ -1690,7 +1690,7 @@ impl Typesetter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::math::parse::parse;
+    use crate::parse::parse;
 
     fn set(tex: &str, display: bool) -> MBox {
         typeset(&parse(tex), display, &ByTables)

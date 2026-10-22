@@ -9168,6 +9168,7 @@ dependencies = [
  "trek-app",
  "trek-core",
  "trek-ipc",
+ "trek-math",
  "trek-remote",
  "trek-test-fixtures",
  "uuid",
@@ -9221,6 +9222,13 @@ dependencies = [
  "tokio",
  "tracing",
  "windows-sys 0.60.2",
+]
+
+[[package]]
+name = "trek-math"
+version = "0.4.11"
+dependencies = [
+ "gpui-kit",
 ]
 
 [[package]]
