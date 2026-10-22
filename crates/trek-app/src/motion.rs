@@ -207,7 +207,7 @@ impl<T> Presence<T> {
     }
 
     /// Mounted: in, or still on its way out.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn is_mounted(&self) -> bool {
         self.item.is_some()
     }
@@ -221,7 +221,7 @@ impl<T> Presence<T> {
     }
 
     /// How far in it is at `now` (0 out, 1 in), read without side effects.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn progress(&self, now: Instant) -> f32 {
         self.spring.value(now).clamp(0., 1.)
     }
@@ -347,7 +347,7 @@ impl Flip {
     }
 
     /// How far `key` is drawn from its place at `now`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn offset(&self, key: &str, now: Instant) -> Option<f32> {
         self.rows.get(key).map(|p| p.offset.value(now))
     }

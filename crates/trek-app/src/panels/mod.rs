@@ -1,15 +1,15 @@
 //! Right panel (Synara-style): tabs of tools — Terminal, Browser, Simulator, Explorer, Side chat, Git.
 
-pub(crate) mod branch_graph;
-pub(crate) mod browser;
+pub mod branch_graph;
+pub mod browser;
 pub mod explorer;
-pub(crate) mod git;
+pub mod git;
 pub mod ide_search;
 mod side_chat;
 mod simhid;
 mod simulator;
-pub(crate) mod terminal;
-pub(crate) mod terminal_links;
+pub mod terminal;
+pub mod terminal_links;
 
 use crate::ui;
 use crate::workspace::{PanelTool, Workspace};
@@ -219,7 +219,7 @@ impl RightPanel {
     }
 
     /// The Browser tool, if it's open (the shots harness's `browser` command).
-    #[cfg(any(test, feature = "shots"))]
+    #[cfg(any(test, feature = "test-support", feature = "shots"))]
     pub fn browser(&self) -> Option<Entity<browser::BrowserPanel>> {
         self.tabs.iter().find_map(|t| match &t.view {
             View::Browser(b) => Some(b.clone()),
@@ -228,7 +228,7 @@ impl RightPanel {
     }
 
     /// The Terminal tab in front, while the panel is open (the shots harness's `terminal`).
-    #[cfg(any(test, feature = "shots"))]
+    #[cfg(any(test, feature = "test-support", feature = "shots"))]
     pub fn shown_terminal(&self) -> Option<Entity<terminal::TerminalPanel>> {
         match self.active_tab().map(|t| &t.view) {
             Some(View::Terminal(t)) if self.open => Some(t.clone()),
@@ -237,8 +237,8 @@ impl RightPanel {
     }
 
     /// The tab in front, by its id.
-    #[cfg(test)]
-    pub(crate) fn active_id(&self) -> Option<u64> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn active_id(&self) -> Option<u64> {
         self.active
     }
 
@@ -248,8 +248,8 @@ impl RightPanel {
     }
 
     /// What the Git tool's commit message box holds, while it's the tab on show.
-    #[cfg(test)]
-    pub(crate) fn git_message(&self, cx: &App) -> Option<String> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn git_message(&self, cx: &App) -> Option<String> {
         match self.active_tab().map(|t| &t.view) {
             Some(View::Git(g)) => Some(g.read(cx).message_text(cx)),
             _ => None,
@@ -257,8 +257,8 @@ impl RightPanel {
     }
 
     /// The turn the Git tool shows (its files) and the file selected, while it's the tab on show.
-    #[cfg(test)]
-    pub(crate) fn git_turn(&self, cx: &App) -> Option<(Vec<String>, Option<String>)> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn git_turn(&self, cx: &App) -> Option<(Vec<String>, Option<String>)> {
         match self.active_tab().map(|t| &t.view) {
             Some(View::Git(g)) => g.read(cx).turn_shown(),
             _ => None,
@@ -266,8 +266,8 @@ impl RightPanel {
     }
 
     /// The Git tool's lines by kind of file (`LineBreakdown::describe`), while it's the tab on show.
-    #[cfg(test)]
-    pub(crate) fn git_lines(&self, cx: &App) -> Option<Vec<String>> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn git_lines(&self, cx: &App) -> Option<Vec<String>> {
         match self.active_tab().map(|t| &t.view) {
             Some(View::Git(g)) => Some(g.read(cx).line_breakdown().describe()),
             _ => None,
@@ -275,8 +275,8 @@ impl RightPanel {
     }
 
     /// The Git tool's diff scroll offset, while it's the tab on show.
-    #[cfg(test)]
-    pub(crate) fn git_diff_offset(&self, cx: &App) -> Option<Point<Pixels>> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn git_diff_offset(&self, cx: &App) -> Option<Point<Pixels>> {
         match self.active_tab().map(|t| &t.view) {
             Some(View::Git(g)) => Some(g.read(cx).diff_offset()),
             _ => None,
@@ -421,8 +421,8 @@ impl RightPanel {
 
 impl Render for RightPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        crate::tests::rendered("RightPanel");
+        #[cfg(any(test, feature = "test-support"))]
+        crate::test_support::rendered("RightPanel");
         let theme = cx.theme().clone();
         let active = self.active;
         // Labels while they fit; past that the tabs not in front show just their icon (named on

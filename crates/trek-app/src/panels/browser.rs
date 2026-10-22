@@ -132,8 +132,7 @@ const PICK_JS: &str = r#"(() => {
 const PICK_STOP_JS: &str = "window.__trekPick && window.__trekPick.stop();";
 
 /// Where to get the WebView2 runtime when a Windows system has none.
-pub(crate) const WEBVIEW2_DOWNLOAD: &str =
-    "https://developer.microsoft.com/microsoft-edge/webview2/";
+pub const WEBVIEW2_DOWNLOAD: &str = "https://developer.microsoft.com/microsoft-edge/webview2/";
 
 /// The scheme Trek's own pages are registered under, which Trek spells `trek://`. WebView2 can't
 /// load a custom scheme, so on Windows wry serves `<scheme>://newtab/…` as `http://<scheme>.newtab/…`
@@ -855,14 +854,14 @@ fn extract_title(html: &str) -> Option<String> {
 /// A web view's page as a PNG, WebView2 drawing it (the editor's previews for `shots`, and the
 /// snapshots interactive artifacts stand in with).
 #[cfg(windows)]
-pub(crate) fn capture_png(wv: &wry::WebView) -> async_channel::Receiver<Result<Vec<u8>, String>> {
+pub fn capture_png(wv: &wry::WebView) -> async_channel::Receiver<Result<Vec<u8>, String>> {
     native::capture_png(wv)
 }
 
 /// A web view's rectangle as the screen shows it, cropped out of a capture of its window: the
 /// editor's previews, for `shots` (the Browser screenshot's own crop).
 #[cfg(all(not(windows), feature = "shots"))]
-pub(crate) fn view_capture(
+pub fn view_capture(
     view: &gpui_wry::WebView,
     window: &Window,
 ) -> Option<impl FnOnce(&std::path::Path) -> Result<(), String> + Send + use<>> {
@@ -879,7 +878,7 @@ pub(crate) fn view_capture(
 /// logs, or in the data folder a test or `TREK_DATA_DIR` moved. Left to itself it would write
 /// next to `trek.exe`, a folder an update replaces and that may not be writable.
 #[cfg(windows)]
-pub(crate) fn webview_data_dir() -> PathBuf {
+pub fn webview_data_dir() -> PathBuf {
     if trek_core::paths::isolated() {
         return trek_core::paths::data_dir().join("WebView2");
     }
@@ -1004,8 +1003,8 @@ impl BrowserPanel {
     }
 
     /// No web view could be made, so the tool says so (and on Windows offers WebView2).
-    #[cfg(test)]
-    pub(crate) fn unavailable(&self) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn unavailable(&self) -> bool {
         self.unavailable && self.tabs.is_empty()
     }
 
@@ -2125,7 +2124,7 @@ fn describe_pick(msg: &serde_json::Value) -> String {
 /// The line under the toolbar while a page loads: a bar sliding along it, or, with `still` (reduced
 /// motion), the whole line, dimmer. Sliding is what says "loading"; a sliding bar held at its
 /// start would be off the line altogether.
-pub(crate) fn loading_line(still: bool, ember: Hsla) -> impl IntoElement {
+pub fn loading_line(still: bool, ember: Hsla) -> impl IntoElement {
     let bar = div()
         .id("browser-loading-bar")
         .test_support()

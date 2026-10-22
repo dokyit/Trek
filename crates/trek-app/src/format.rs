@@ -56,7 +56,7 @@ pub fn kind_of(path: &Path) -> String {
 /// The program to run for `formatter`, with its arguments: where the PATH Trek composes has it;
 /// `None` when it isn't installed.
 pub fn resolve(formatter: &Formatter) -> Option<(PathBuf, Vec<String>)> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(found) = tests::OVERRIDE.with(|o| o.borrow().clone()) {
         return found;
     }
@@ -192,18 +192,18 @@ pub fn keep_caret(old: &str, caret: usize, new: &str) -> usize {
     new.len()
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
     use super::*;
     use std::cell::RefCell;
 
     thread_local! {
         /// What `resolve` finds in a test: `Some(found)` stands in for the PATH (and a
         /// formatter that is `found`, with the arguments it's given, for the real one).
-        pub(crate) static OVERRIDE: RefCell<Option<Option<(PathBuf, Vec<String>)>>> = const { RefCell::new(None) };
+        pub static OVERRIDE: RefCell<Option<Option<(PathBuf, Vec<String>)>>> = const { RefCell::new(None) };
     }
 
-    fn of(file: &str) -> Option<(&'static str, Vec<String>)> {
+    pub fn of(file: &str) -> Option<(&'static str, Vec<String>)> {
         formatter_for(Path::new(file)).map(|f| (f.program, f.args))
     }
 
@@ -290,14 +290,14 @@ pub(crate) mod tests {
         assert_eq!(&new[..to], "é  =");
     }
 
-    fn fixture(args: &[&str]) -> (PathBuf, Vec<String>) {
+    pub fn fixture(args: &[&str]) -> (PathBuf, Vec<String>) {
         (
             trek_test_fixtures::bin("fixture"),
             args.iter().map(|a| a.to_string()).collect(),
         )
     }
 
-    fn run_it(args: &[&str], input: &str, limit: Duration) -> Result<String, String> {
+    pub fn run_it(args: &[&str], input: &str, limit: Duration) -> Result<String, String> {
         let (program, args) = fixture(args);
         trek_core::runtime().block_on(run(
             &program,

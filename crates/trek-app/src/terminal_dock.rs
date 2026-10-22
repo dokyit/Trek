@@ -220,7 +220,7 @@ impl TerminalDock {
     }
 
     /// The shells of the thread on screen (tests).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn terminals(&self, cx: &App) -> Vec<Entity<TerminalPanel>> {
         self.dock(cx)
             .map(|d| d.terminals.clone())
@@ -228,7 +228,7 @@ impl TerminalDock {
     }
 
     /// How many shells the thread on screen has (tests).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn count(&self, cx: &App) -> usize {
         self.dock(cx).map_or(0, |d| d.terminals.len())
     }
@@ -333,8 +333,8 @@ impl TerminalDock {
 
 impl Render for TerminalDock {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        crate::tests::rendered("TerminalDock");
+        #[cfg(any(test, feature = "test-support"))]
+        crate::test_support::rendered("TerminalDock");
         let theme = cx.theme().clone();
         let glass = self.workspace.read(cx).glass();
         let line = if glass.is_some() {

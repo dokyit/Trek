@@ -62,9 +62,9 @@ pub static SCRIPTED_CURSOR_AWAY: std::sync::atomic::AtomicBool =
 /// (`WindowFromPoint`) sends the window under the cursor `WM_NCHITTEST` there and then, and when
 /// that's this window GPUI answers it by updating the window, which it can't while the app is
 /// being updated (it logs "RefCell already borrowed" instead).
-#[cfg(any(windows, test))]
+#[cfg(any(windows, test, feature = "test-support"))]
 fn cursor_over(hwnd: Option<isize>) -> Option<bool> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(ask) = CURSOR_IN_TESTS.with(|c| c.borrow().clone()) {
         return ask();
     }
@@ -83,19 +83,19 @@ fn cursor_over(hwnd: Option<isize>) -> Option<bool> {
 
 /// The tests' stand-in for the system's answer (`cursor_over`), which may do what asking Windows
 /// does: have the window's own callbacks update it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub type AskCursor = std::rc::Rc<dyn Fn() -> Option<bool>>;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local!(pub static CURSOR_IN_TESTS: std::cell::RefCell<Option<AskCursor>> = const { std::cell::RefCell::new(None) });
 
 // The windows whose cursor question is out (`ask_after_draw`): one at a time each.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, test, feature = "test-support"))]
 thread_local!(static ASKING: std::cell::RefCell<std::collections::HashSet<WindowId>> = std::cell::RefCell::default());
 
 /// Ask the system where the cursor is once this draw is over, outside any update
 /// (`system::after_update`), and move GPUI's pointer off `window` if it's over another window or
 /// none (`should_let_go`, asked again then: the window may have heard from the pointer since).
-#[cfg(any(windows, test))]
+#[cfg(any(windows, test, feature = "test-support"))]
 fn ask_after_draw(window: &mut Window, cx: &mut App) {
     let id = window.window_handle().window_id();
     if !ASKING.with(|a| a.borrow_mut().insert(id)) {
@@ -121,7 +121,7 @@ fn ask_after_draw(window: &mut Window, cx: &mut App) {
 
 /// Moves GPUI's pointer off the window, as an event past its edge would: nothing is under it, so
 /// what was hovered isn't (its highlight, its tooltip, a list holding still for it).
-#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+#[cfg_attr(not(any(windows, test, feature = "test-support")), allow(dead_code))]
 pub fn pointer_off_window(window: &mut Window, cx: &mut App) {
     let modifiers = window.modifiers();
     window.dispatch_event(
@@ -144,7 +144,7 @@ pub fn pointer_off_window(window: &mut Window, cx: &mut App) {
 /// keeps the cursor with the window (it's captured), so a drag past the edge is left alone. The
 /// system is asked after the draw (`ask_after_draw`), never during it.
 pub fn let_go_of_hover(window: &mut Window, cx: &mut App) {
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, test, feature = "test-support"))]
     {
         // Only when GPUI has been told the pointer left: most frames cost a comparison.
         if legacy_pointer()
@@ -156,12 +156,12 @@ pub fn let_go_of_hover(window: &mut Window, cx: &mut App) {
         }
         ask_after_draw(window, cx);
     }
-    #[cfg(not(any(windows, test)))]
+    #[cfg(not(any(windows, test, feature = "test-support")))]
     let _ = (window, cx);
 }
 
 /// Whether GPUI has the pointer inside the window's viewport.
-#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+#[cfg_attr(not(any(windows, test, feature = "test-support")), allow(dead_code))]
 pub fn pointer_inside(window: &Window) -> bool {
     Bounds::new(point(px(0.), px(0.)), window.viewport_size()).contains(&window.mouse_position())
 }
@@ -170,7 +170,7 @@ pub fn pointer_inside(window: &Window) -> bool {
 /// (`!window_hovered`), and the system has the cursor over another window or none
 /// (`cursor_over() == Some(false)`; `Some(true)` is this window's own frame or a web view in it).
 /// Once the pointer is moved off, it isn't inside, so the move is made once.
-#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+#[cfg_attr(not(any(windows, test, feature = "test-support")), allow(dead_code))]
 pub fn should_let_go(
     inside: bool,
     window_hovered: bool,

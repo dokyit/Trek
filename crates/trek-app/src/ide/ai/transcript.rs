@@ -1573,8 +1573,8 @@ impl AiTranscript {
 
 impl Render for AiTranscript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        crate::tests::rendered("AiTranscript");
+        #[cfg(any(test, feature = "test-support"))]
+        crate::test_support::rendered("AiTranscript");
         let Some(thread) = self.current.clone() else {
             return div().into_any_element();
         };
@@ -2229,12 +2229,12 @@ impl Render for AiTranscript {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl AiTranscript {
     /// The blocks as text: "user: <text> [ask] [chips]", "thought", "explore: Read main.rs ·
     /// searched “x”", "edits: cli.rs +9 −1, main.rs +5 −2", "command: cargo test", "subagent",
     /// "assistant", "end", "notice", "error", "limit", "handoff", "wake".
-    pub(crate) fn describe(&self, cx: &App) -> Vec<String> {
+    pub fn describe(&self, cx: &App) -> Vec<String> {
         self.views(cx)
             .0
             .into_iter()

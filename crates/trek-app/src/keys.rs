@@ -19,20 +19,20 @@ use std::sync::LazyLock;
 /// Whether this build is shown the Mac way. Tests can say otherwise for one closure
 /// (`with_mac`), so both spellings are checked on whichever machine runs them.
 pub fn is_mac() -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(mac) = FORCE_MAC.with(|f| f.get()) {
         return mac;
     }
     cfg!(target_os = "macos")
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FORCE_MAC: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 /// Run `f` as if on a Mac (`true`) or on Windows (`false`): everything here that asks `is_mac`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn with_mac<T>(mac: bool, f: impl FnOnce() -> T) -> T {
     let before = FORCE_MAC.with(|c| c.replace(Some(mac)));
     let out = f();
@@ -858,7 +858,7 @@ fn row_of(id: Id) -> Option<&'static Binding> {
 }
 
 /// The keystroke that triggers `id` here, as gpui reads it: what a test presses.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn keystroke(id: Id) -> String {
     row_of(id)
         .and_then(|b| resolve(b, is_mac()))

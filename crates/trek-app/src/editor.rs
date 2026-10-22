@@ -186,16 +186,16 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 
 pub struct EditorView {
     workspace: Entity<Workspace>,
-    pub(crate) path: PathBuf,
+    pub path: PathBuf,
     state: Entity<EditorState>,
     /// Text as last loaded or saved — `value() != saved` means dirty.
     saved: String,
-    pub(crate) dirty: bool,
+    pub dirty: bool,
     /// Why the file didn't load (too big, unreadable, gone). The view is read-only then.
     problem: Option<String>,
     /// The file turned out not to be text, or unreadable, as it was first read: the workbench
     /// takes it and shows a preview in this editor's place (`ide::preview`).
-    pub(crate) not_text: Option<crate::ide::preview::NotText>,
+    pub not_text: Option<crate::ide::preview::NotText>,
     /// The language server this doc is open on, when one covers its extension.
     lsp: Option<(Arc<crate::lsp_client::Client>, String)>,
     /// Keeps the diagnostics watcher alive.
@@ -203,12 +203,12 @@ pub struct EditorView {
     /// Git-diff line fills (added/changed/deleted vs HEAD).
     diff_marks: Option<gpui_kit::base::input::RangeDecorationCollection>,
     /// The fills last painted, for tests: (first row, end row, kind).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     painted: Vec<(u32, u32, &'static str)>,
     /// Reading the diff fills in the background; a newer read replaces it.
     _diff_read: Option<Task<()>>,
     /// The language server's program, for the status bar (`None`: no server for this file).
-    pub(crate) lsp_name: Option<&'static str>,
+    pub lsp_name: Option<&'static str>,
     /// The file changed on disk under unsaved edits and the user was told: the next save
     /// overwrites it, as long as the file is still as it was then (a hash of what was on disk).
     overwrite_armed: Option<u64>,
@@ -221,7 +221,7 @@ pub struct EditorView {
     /// scroll-to-caret moves it by the time that's measured).
     reveal: Option<(u32, Pixels)>,
     /// Not a file on disk (a Review's diff): read-only, never saved or reloaded.
-    pub(crate) scratch: bool,
+    pub scratch: bool,
     /// The review the fills are against, while the AI side bar's chat has this file pending.
     review: Option<FileReview>,
     /// The file's hunks against that review's baseline, as last read.
@@ -229,7 +229,7 @@ pub struct EditorView {
     /// The hunk the bar acts on, by index.
     hunk: usize,
     /// Put the caret on the first hunk once they're read (the file bar stepped here).
-    pub(crate) jump_to_hunk: bool,
+    pub jump_to_hunk: bool,
     /// ⌘K's prompt card, while it's open.
     inline: Option<InlineCard>,
     /// A formatter is running over the text (Format Document): one at a time.
@@ -336,7 +336,7 @@ impl EditorView {
             lsp: None,
             _diag_watch: None,
             diff_marks: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             painted: vec![],
             _diff_read: None,
             lsp_name: None,
@@ -466,7 +466,7 @@ impl EditorView {
     }
 
     /// The file is still being read.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn loading(&self) -> bool {
         self.loading
     }
@@ -503,7 +503,7 @@ impl EditorView {
             lsp: None,
             _diag_watch: None,
             diff_marks: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             painted: vec![],
             _diff_read: None,
             lsp_name: None,
@@ -528,12 +528,7 @@ impl EditorView {
     }
 
     /// A scratch document's text, replaced (a Review opened again).
-    pub(crate) fn set_scratch_text(
-        &mut self,
-        text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_scratch_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.saved = text.to_string();
         self.state.update(cx, |s, cx| {
             s.set_readonly(false, cx);
@@ -546,7 +541,7 @@ impl EditorView {
 
     /// The fills drawn now: (first row, end row, kind), as `added`, `changed`, `deleted`,
     /// `removed` — for tests.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn fills(&self) -> Vec<(u32, u32, &'static str)> {
         self.painted.clone()
     }
@@ -578,7 +573,7 @@ impl EditorView {
     /// Paint changed lines — added/modified fills, a marker where lines went away — against
     /// the chat's review baseline while the file is pending there, else against HEAD. Git runs
     /// in the background; the fills land when it's done.
-    pub(crate) fn refresh_diff(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_diff(&mut self, cx: &mut Context<Self>) {
         if self.scratch {
             return;
         }
@@ -622,7 +617,7 @@ impl EditorView {
         review: bool,
         cx: &mut Context<Self>,
     ) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             self.painted = lines
                 .iter()
@@ -692,7 +687,7 @@ impl EditorView {
 
     /// Show the file as it is on disk now: another branch or commit was checked out, or a rewind
     /// put files back. Unsaved edits stay (saving them asks first, `save_now`).
-    pub(crate) fn reload_from_disk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn reload_from_disk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.scratch || self.loading {
             return;
         }
@@ -719,7 +714,7 @@ impl EditorView {
 
     /// An agent may have written the file: a clean buffer shows it as it is on disk now. Nothing
     /// happens when it's the same, or while there are unsaved edits (saving them asks first).
-    pub(crate) fn reload_if_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn reload_if_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.scratch || self.dirty || self.loading {
             return;
         }
@@ -804,7 +799,7 @@ impl EditorView {
     /// off the main thread with the text on its stdin. The buffer is replaced (as an edit, so it
     /// undoes) only if the formatter exits cleanly with output and the text is still what was
     /// sent; otherwise a toast says why, and nothing changes.
-    pub(crate) fn format(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn format(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.scratch || self.loading || self.formatting {
             return;
         }
@@ -899,7 +894,7 @@ impl EditorView {
     }
 
     /// Write the buffer back to its file. No-op when clean.
-    pub(crate) fn save_now(&mut self, cx: &mut Context<Self>) {
+    pub fn save_now(&mut self, cx: &mut Context<Self>) {
         if !self.dirty || self.scratch || self.loading {
             return;
         }
@@ -1145,7 +1140,7 @@ impl EditorView {
     }
 
     /// ▲▼: the previous or next hunk, round the ends.
-    pub(crate) fn step_hunk(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn step_hunk(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
         let n = self.pending_hunks();
         let Some(at) = self.current_hunk(cx).filter(|_| n > 0) else {
             return;
@@ -1158,7 +1153,7 @@ impl EditorView {
     }
 
     /// Keep (⌘Y) or undo (⌥⌘⌫) the hunk the bar is on.
-    pub(crate) fn act_on_hunk(&mut self, keep: bool, cx: &mut Context<Self>) {
+    pub fn act_on_hunk(&mut self, keep: bool, cx: &mut Context<Self>) {
         let (Some(review), Some(ix)) = (self.review.clone(), self.current_hunk(cx)) else {
             return;
         };
@@ -1234,7 +1229,7 @@ impl EditorView {
     }
 
     /// ⌘K: the prompt card over the picked lines (the caret's line, with none); again, it closes.
-    pub(crate) fn open_inline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_inline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.inline.take().is_some() {
             self.focus(window, cx);
             cx.notify();
@@ -1305,7 +1300,7 @@ impl EditorView {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn inline_open(&self) -> bool {
         self.inline.is_some()
     }
@@ -1695,13 +1690,13 @@ impl EditorView {
 
     /// Save now (⌘S, or Save in the close prompt); `false` when it didn't land (the on-disk
     /// guard spoke up, or the write failed).
-    pub(crate) fn save_for_close(&mut self, cx: &mut Context<Self>) -> bool {
+    pub fn save_for_close(&mut self, cx: &mut Context<Self>) -> bool {
         self.save_now(cx);
         !self.dirty
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl EditorView {
     pub fn dirty(&self) -> bool {
         self.dirty

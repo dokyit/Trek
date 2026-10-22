@@ -42,7 +42,7 @@ actions!(
     ]
 );
 
-pub(crate) const CONTEXT: &str = "NoteEditor";
+pub const CONTEXT: &str = "NoteEditor";
 
 /// The notes' shortcuts, from the table in `keys.rs`.
 pub fn key_bindings() -> Vec<KeyBinding> {
@@ -358,8 +358,8 @@ impl NotesView {
     }
 
     /// The notes as listed, newest first, and whether the one on screen is unsaved.
-    #[cfg(test)]
-    pub(crate) fn listed(&self) -> (Vec<String>, bool) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn listed(&self) -> (Vec<String>, bool) {
         (
             self.notes.iter().map(|n| n.body.clone()).collect(),
             self.dirty,
@@ -736,12 +736,7 @@ impl NotesView {
 
     /// Attach these files to the note: pictures show in it, anything else (a video, a PDF) is a
     /// link to its copy.
-    pub(crate) fn add_files(
-        &mut self,
-        paths: Vec<PathBuf>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn add_files(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         self.add_images(
             paths
                 .into_iter()
@@ -778,7 +773,7 @@ impl NotesView {
     /// A paste the text box hands over: image data, or files copied in Finder, are attached
     /// (pictures show, other files are linked). Returns whether it was taken; anything else
     /// pastes as text.
-    pub(crate) fn paste(
+    pub fn paste(
         &mut self,
         item: &ClipboardItem,
         window: &mut Window,
@@ -812,14 +807,14 @@ impl NotesView {
 
     /// Write, Split or Preview (the driver's `note mode`).
     #[cfg_attr(not(any(test, feature = "shots")), allow(dead_code))]
-    pub(crate) fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+    pub fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
         self.mode = mode;
         cx.notify();
     }
 
     /// Put `text` in the note on screen, starting one when there's none (the driver's `note text`).
     #[cfg_attr(not(any(test, feature = "shots")), allow(dead_code))]
-    pub(crate) fn set_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn set_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
         let len = text.len();
         self.apply(
             Edit {

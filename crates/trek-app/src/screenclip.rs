@@ -81,7 +81,7 @@ struct Installed(Arc<dyn Backend>);
 impl Global for Installed {}
 
 /// Use `backend` from now on (tests).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn install(backend: Arc<dyn Backend>, cx: &mut App) {
     cx.set_global(Installed(backend));
 }

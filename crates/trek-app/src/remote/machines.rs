@@ -77,7 +77,7 @@ impl Workspace {
     /// `folder` as a project named `name`, among the user's own (as opening the folder makes
     /// it, without taking this Mac's window there); its id. Phones and machines hear of it with
     /// the next snapshot.
-    pub(crate) fn register_remote_project(
+    pub fn register_remote_project(
         &mut self,
         folder: &Path,
         name: &str,
@@ -140,11 +140,7 @@ fn clone_folder(folder: &str) -> Option<PathBuf> {
 }
 
 /// `git clone --progress -- <url> <folder>`, its output (stderr) to `progress` line by line.
-pub(crate) fn clone_into(
-    url: &str,
-    folder: &Path,
-    progress: &tr::CloneProgress,
-) -> tr::HostResult<()> {
+pub fn clone_into(url: &str, folder: &Path, progress: &tr::CloneProgress) -> tr::HostResult<()> {
     match std::fs::symlink_metadata(folder) {
         Ok(meta) if meta.is_dir() => {
             let mut entries = std::fs::read_dir(folder).map_err(|e| {
@@ -289,7 +285,7 @@ impl<'a> GitOutput<'a> {
 }
 
 /// Every file checked, then every file written; the first that can't be is the error.
-pub(crate) fn write_files(root: &Path, files: &[tr::FileUpload]) -> tr::HostResult<()> {
+pub fn write_files(root: &Path, files: &[tr::FileUpload]) -> tr::HostResult<()> {
     let root = crate::system::canonical(root)
         .filter(|r| r.is_dir())
         .ok_or_else(|| tr::HostError::not_found("The project's folder is gone"))?;

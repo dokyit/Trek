@@ -48,7 +48,7 @@ fn terminal_font(window: &Window, fallback: SharedString) -> SharedString {
 /// What the shell's output asked of the terminal besides drawing it, kept until the view looks:
 /// the bell, and a window title (OSC 0 / 2, which shells and programs set to say what's running).
 #[derive(Default)]
-pub(crate) struct Events {
+pub struct Events {
     bell: bool,
     title: Option<String>,
 }
@@ -1383,27 +1383,27 @@ impl TerminalPanel {
     }
 
     /// How many lines back into the scrollback the view is (0: at the bottom).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn scrolled_back(&self) -> usize {
         self.screen().screen().scrollback()
     }
 
     /// Output as if the shell wrote it (tests start no shell).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn feed(&self, bytes: &[u8]) {
         self.screen().process(bytes);
     }
 
     /// Output as if the shell printed it, heard as the shell's is (the bell, the title, the
     /// selection kept or let go): the shots harness's `terminal feed` and tests.
-    #[cfg(any(test, feature = "shots"))]
+    #[cfg(any(test, feature = "test-support", feature = "shots"))]
     pub fn print(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
         self.screen().process(bytes);
         self.output_arrived(cx);
     }
 
     /// Every link on screen, top to bottom.
-    #[cfg(any(test, feature = "shots"))]
+    #[cfg(any(test, feature = "test-support", feature = "shots"))]
     pub fn links(&self) -> Vec<Link> {
         let parser = self.screen();
         let screen = parser.screen();
@@ -1413,7 +1413,7 @@ impl TerminalPanel {
     }
 
     /// Open the `n`th link on screen (from 1), as ⌘-clicking it does.
-    #[cfg(any(test, feature = "shots"))]
+    #[cfg(any(test, feature = "test-support", feature = "shots"))]
     pub fn open_nth_link(
         &mut self,
         n: usize,
@@ -1430,7 +1430,7 @@ impl TerminalPanel {
 
     /// What the terminal sends its shell from now on (keys, pastes, wheel reports), kept for the
     /// test to read: tests start no shell.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn capture_input(&mut self) -> Arc<Mutex<Vec<u8>>> {
         struct Sink(Arc<Mutex<Vec<u8>>>);
         impl Write for Sink {
@@ -1449,7 +1449,7 @@ impl TerminalPanel {
 
     /// Just inside the left edge of the cell at `(row, col)`, in the window, as last drawn: the
     /// boundary before it, to a press.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn cell_start(&self, row: u16, col: u16) -> Point<Pixels> {
         let grid = self.grid.get();
         point(
@@ -1459,7 +1459,7 @@ impl TerminalPanel {
     }
 
     /// The middle of the cell at `(row, col)`, in the window, as last drawn.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn cell_center(&self, row: u16, col: u16) -> Point<Pixels> {
         let grid = self.grid.get();
         point(
@@ -1470,7 +1470,7 @@ impl TerminalPanel {
 
     /// The text under the selection now, if there's one (what ⌘C copies is what it held when
     /// last looked at, which must be the same).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn selected(&self) -> Option<String> {
         let sel = self.selection.as_ref()?;
         let (start, end) = sel.ordered();
@@ -1480,18 +1480,18 @@ impl TerminalPanel {
     }
 
     /// The link drawn underlined (⌘ held over it).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn hovered_link(&self) -> Option<String> {
         self.hovered.as_ref().map(|l| l.url.clone())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn font_size(&self) -> f32 {
         self.font_size
     }
 
     /// The rows on view, scrolled back or not.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn visible_rows(&self) -> Vec<String> {
         let parser = self.screen();
         let screen = parser.screen();

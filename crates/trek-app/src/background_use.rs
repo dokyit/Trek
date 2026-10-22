@@ -36,9 +36,17 @@ const MARGIN: f32 = 18.;
 /// How often a new frame is captured while unfolded.
 const FRAME_EVERY: Duration = Duration::from_millis(250);
 /// How long the picture stays once a thread's turn is over, so its last step can be seen.
-const LINGER: Duration = Duration::from_millis(if cfg!(test) { 200 } else { 5000 });
+const LINGER: Duration = Duration::from_millis(if cfg!(any(test, feature = "test-support")) {
+    200
+} else {
+    5000
+});
 /// How often sessions are checked for turns that are over.
-const SWEEP: Duration = Duration::from_millis(if cfg!(test) { 50 } else { 1000 });
+const SWEEP: Duration = Duration::from_millis(if cfg!(any(test, feature = "test-support")) {
+    50
+} else {
+    1000
+});
 /// How long a click's ring shows.
 const RING: Duration = Duration::from_millis(900);
 

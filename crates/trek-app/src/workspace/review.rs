@@ -236,7 +236,7 @@ impl Workspace {
 
     /// `id`'s files may have moved (the agent edited, a turn ended, a checkpoint came in, files
     /// were put back): its pending files are worked out again once things settle.
-    pub(crate) fn review_moved(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn review_moved(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(review) = self.reviews.get_mut(id) else {
             return;
         };
@@ -834,7 +834,7 @@ impl Workspace {
     }
 
     /// The pending files are being worked out (or kept, or undone) now.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn review_settled(&self, id: &str) -> bool {
         self.reviews
             .get(id)
@@ -842,7 +842,7 @@ impl Workspace {
     }
 
     /// What `undo_files` looks at, for a test's failure message.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn review_state(&self, id: &str) -> String {
         match self.reviews.get(id) {
             Some(r) => {

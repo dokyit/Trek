@@ -112,7 +112,7 @@ struct Header {
 }
 
 #[derive(Clone, PartialEq)]
-pub(crate) struct Group {
+pub struct Group {
     summary: String,
     kind: ToolKind,
     phrase: String,
@@ -142,7 +142,7 @@ impl Group {
 
 /// What a sub-agent is doing, as the bar shows its own agent's live group: the calls of the
 /// sub-agent `child`'s latest turn (one Trek runs), its newest ones as rows.
-pub(crate) fn child_group(ws: &Workspace, child: &str) -> Option<Group> {
+pub fn child_group(ws: &Workspace, child: &str) -> Option<Group> {
     let live = ws.live.get(child)?;
     let start = live
         .items
@@ -156,7 +156,7 @@ pub(crate) fn child_group(ws: &Workspace, child: &str) -> Option<Group> {
 /// The same for one of the agent's own sub-agents, from the calls it reported
 /// (`SubTask::steps`, the newest last; `earlier` more before them). The last is under way while
 /// it runs.
-pub(crate) fn steps_group(
+pub fn steps_group(
     steps: &[(String, String)],
     earlier: usize,
     running: bool,
@@ -188,13 +188,13 @@ pub(crate) fn steps_group(
 
 impl Group {
     /// Rows shown (the "+N earlier" line counts as one).
-    pub(crate) fn lines(&self) -> usize {
+    pub fn lines(&self) -> usize {
         self.rows.len() + usize::from(self.earlier > 0)
     }
 
     /// The group drawn as a sub-agent's row shows it: its summary line and its rows, the call
     /// under way shimmering (`clock` in seconds; `still`, it doesn't).
-    pub(crate) fn element(&self, clock: f32, still: bool, cx: &App) -> AnyElement {
+    pub fn element(&self, clock: f32, still: bool, cx: &App) -> AnyElement {
         let live = self.rows.iter().any(|r| r.running);
         v_flex()
             .child(WorkingBar::summary_line(
@@ -220,8 +220,8 @@ impl Group {
             .into_any_element()
     }
 
-    #[cfg(test)]
-    pub(crate) fn describe(&self) -> Vec<String> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn describe(&self) -> Vec<String> {
         let mut out = vec![format!("{} · {}", self.summary, self.phrase)];
         out.extend(self.rows.iter().map(|r| {
             [r.op.verb.as_str(), r.op.text.as_str()]
@@ -649,13 +649,7 @@ fn fold_eased(until: Instant, still: bool) -> f32 {
 /// The highlight is the same text again in brighter colours, painted only inside a band that
 /// moves along the line, rather than a colour per character: GPUI shapes a line again whenever
 /// its colour runs change, which on every frame costs more than the rest of the bar together.
-pub(crate) fn shimmer(
-    text: SharedString,
-    clock: f32,
-    still: bool,
-    base: Hsla,
-    hi: Hsla,
-) -> AnyElement {
+pub fn shimmer(text: SharedString, clock: f32, still: bool, base: Hsla, hi: Hsla) -> AnyElement {
     let plain = div().text_color(base).child(text.clone());
     if still {
         return plain.into_any_element();
@@ -1048,8 +1042,8 @@ pub struct SettledRows {
 
 impl Render for SettledRows {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        crate::tests::rendered("SettledRows");
+        #[cfg(any(test, feature = "test-support"))]
+        crate::test_support::rendered("SettledRows");
         let open = self.open.as_ref();
         column(
             self.width,
@@ -1070,8 +1064,8 @@ pub struct BarTop {
 
 impl Render for BarTop {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        crate::tests::rendered("BarTop");
+        #[cfg(any(test, feature = "test-support"))]
+        crate::test_support::rendered("BarTop");
         let Some((shown, open)) = self
             .bar
             .upgrade()
@@ -1151,8 +1145,8 @@ fn column(width: Pixels, el: impl IntoElement) -> Div {
 
 impl Render for WorkingBar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        crate::tests::rendered("WorkingBar");
+        #[cfg(any(test, feature = "test-support"))]
+        crate::test_support::rendered("WorkingBar");
         let Some(shown) = self.shown.clone() else {
             return div().into_any_element();
         };
@@ -1446,11 +1440,11 @@ pub fn agents_out(n: usize) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl WorkingBar {
     /// The header as shown: "Breaking trail… 4s · 2 agents out", "Waiting on Sol · 2s", or
     /// `None` when hidden.
-    pub(crate) fn label(&self) -> Option<String> {
+    pub fn label(&self) -> Option<String> {
         let s = self.shown.as_ref()?;
         let h = s.header.as_ref()?;
         let elapsed = h.started.map(|t| t.elapsed());
@@ -1474,7 +1468,7 @@ impl WorkingBar {
 
     /// The live group as shown: its summary line, then a line per row ("Read src/main.rs",
     /// "+12 −3" after an edit's), "+N earlier" first when some scrolled away.
-    pub(crate) fn live_group(&self) -> Option<Vec<String>> {
+    pub fn live_group(&self) -> Option<Vec<String>> {
         let g = self.shown.as_ref()?.group.as_ref()?;
         let mut out = vec![format!("{} · {}", g.summary, g.phrase)];
         if g.earlier > 0 {
@@ -1499,7 +1493,7 @@ impl WorkingBar {
     }
 
     /// The summary line of the group folding away, if one is.
-    pub(crate) fn folding(&self) -> Option<String> {
+    pub fn folding(&self) -> Option<String> {
         self.shown
             .as_ref()?
             .folding
@@ -1508,12 +1502,12 @@ impl WorkingBar {
     }
 
     /// How often the bar redraws now (`None`: it doesn't).
-    pub(crate) fn frame_interval(&self) -> Option<Duration> {
+    pub fn frame_interval(&self) -> Option<Duration> {
         self.rate()
     }
 
     /// Rows sliding in now.
-    pub(crate) fn sliding(&self) -> usize {
+    pub fn sliding(&self) -> usize {
         self.arrived.len()
     }
 }

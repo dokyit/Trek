@@ -36,7 +36,7 @@ enum Rail {
 }
 
 /// A composer's menus and picker, as they stand.
-pub(crate) struct Pickers {
+pub struct Pickers {
     model_search: Entity<InputState>,
     pub model_open: bool,
     pub access_open: bool,
@@ -89,7 +89,7 @@ impl Pickers {
 }
 
 /// A composer the pickers work for.
-pub(crate) trait PickerHost: Sized + 'static {
+pub trait PickerHost: Sized + 'static {
     fn pickers(&mut self) -> &mut Pickers;
     fn pickers_ref(&self) -> &Pickers;
     fn workspace(&self) -> &Entity<Workspace>;
@@ -101,7 +101,7 @@ pub(crate) trait PickerHost: Sized + 'static {
 }
 
 /// Change the prefs of `host`'s scope (agent, model, effort, access, plan).
-pub(crate) fn update_prefs<H: PickerHost>(host: &H, cx: &mut App, f: impl FnOnce(&mut Prefs)) {
+pub fn update_prefs<H: PickerHost>(host: &H, cx: &mut App, f: impl FnOnce(&mut Prefs)) {
     let scope = host.scope().clone();
     host.workspace().update(cx, |ws, cx| {
         let mut p = ws.prefs_in(&scope);
@@ -117,7 +117,7 @@ const CONTEXT_NEAR: f32 = 0.6;
 
 /// MonoCode-style context meter: a ring that fills as the context window does. Hidden below
 /// `CONTEXT_QUIET`; the percentage beside it from `CONTEXT_NEAR`, on hover before that.
-pub(crate) fn context_ring(used: u64, window: u64, cx: &App) -> AnyElement {
+pub fn context_ring(used: u64, window: u64, cx: &App) -> AnyElement {
     let theme = cx.theme().clone();
     let frac = (used as f32 / window.max(1) as f32).clamp(0.0, 1.0);
     // Early in a thread there's nothing to watch, and a faint ring reads as a spinner.
@@ -218,7 +218,7 @@ pub(crate) fn context_ring(used: u64, window: u64, cx: &App) -> AnyElement {
 
 /// The model pill (agent glyph, model, effort) and its menu. `narrow`: little room, the effort
 /// left out and the name cut shorter; `compact`: a narrow window; `small`: a side bar's pill.
-pub(crate) fn model_pill<H: PickerHost>(
+pub fn model_pill<H: PickerHost>(
     host: &H,
     narrow: bool,
     compact: bool,
@@ -299,7 +299,7 @@ pub(crate) fn model_pill<H: PickerHost>(
 }
 
 /// Open the model menu (the usage-limit bar's "Switch agent…").
-pub(crate) fn open_model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) {
+pub fn open_model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) {
     host.pickers().model_open = true;
     host.overlay_changed(cx);
     cx.notify();
@@ -727,7 +727,7 @@ fn model_panel<H: PickerHost>(
 
 /// The access (hand-holding) pill and its menu. `compact`: the icon alone, its name a tooltip;
 /// `small`: a side bar's pill.
-pub(crate) fn access_pill<H: PickerHost>(
+pub fn access_pill<H: PickerHost>(
     host: &H,
     compact: bool,
     small: bool,
@@ -849,7 +849,7 @@ fn access_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
 
 /// Type `ch` (`/`, `@` or `$`) to open its picker: `/` replaces the text, the others go at the
 /// cursor (after a space).
-pub(crate) fn insert_trigger<H: PickerHost>(
+pub fn insert_trigger<H: PickerHost>(
     host: &mut H,
     ch: &str,
     window: &mut Window,
@@ -880,7 +880,7 @@ pub(crate) fn insert_trigger<H: PickerHost>(
 }
 
 /// The token before the cursor opens a picker, or doesn't any more.
-pub(crate) fn update_trigger<H: PickerHost>(host: &mut H, cx: &mut Context<H>) {
+pub fn update_trigger<H: PickerHost>(host: &mut H, cx: &mut Context<H>) {
     let state = host.input().read(cx);
     let next = mentions::trigger_at(&state.value(), state.cursor());
     let p = host.pickers();
@@ -897,7 +897,7 @@ pub(crate) fn update_trigger<H: PickerHost>(host: &mut H, cx: &mut Context<H>) {
 }
 
 /// Index the folder's files for `@`, once per folder (in the background).
-pub(crate) fn ensure_file_index<H: PickerHost>(host: &mut H, cx: &mut Context<H>) {
+pub fn ensure_file_index<H: PickerHost>(host: &mut H, cx: &mut Context<H>) {
     let Some(root) = host.workspace().read(cx).cwd_in(host.scope()) else {
         return;
     };
@@ -929,7 +929,7 @@ pub(crate) fn ensure_file_index<H: PickerHost>(host: &mut H, cx: &mut Context<H>
 }
 
 /// The open picker's rows.
-pub(crate) fn picker_items<H: PickerHost>(host: &H, cx: &App) -> Vec<PickItem> {
+pub fn picker_items<H: PickerHost>(host: &H, cx: &App) -> Vec<PickItem> {
     let p = host.pickers_ref();
     let Some(t) = &p.trigger else { return vec![] };
     let ws = host.workspace().read(cx);
@@ -1045,7 +1045,7 @@ pub(crate) fn picker_items<H: PickerHost>(host: &H, cx: &App) -> Vec<PickItem> {
 
 /// The first prefix match supplies display-only text, never document content. A substring
 /// match can still be picked with Enter, but cannot be appended as a ghost suffix.
-pub(crate) fn slash_ghost<H: PickerHost>(host: &H, cx: &App) -> Option<String> {
+pub fn slash_ghost<H: PickerHost>(host: &H, cx: &App) -> Option<String> {
     let t = host.pickers_ref().trigger.as_ref()?;
     let state = host.input().read(cx);
     if t.kind != PickKind::Slash
@@ -1065,7 +1065,7 @@ pub(crate) fn slash_ghost<H: PickerHost>(host: &H, cx: &App) -> Option<String> {
 
 /// Paint after the textarea, using its current caret geometry (including wrapping and scroll).
 /// The canvas owns no text, selection or hitbox, so drafts, copy and send cannot include it.
-pub(crate) fn slash_ghost_overlay<H: PickerHost>(host: &H, cx: &App) -> Option<AnyElement> {
+pub fn slash_ghost_overlay<H: PickerHost>(host: &H, cx: &App) -> Option<AnyElement> {
     let ghost = slash_ghost(host, cx)?;
     let input = host.input().clone();
     let color = cx.theme().muted_foreground;
@@ -1113,7 +1113,7 @@ pub(crate) fn slash_ghost_overlay<H: PickerHost>(host: &H, cx: &App) -> Option<A
 }
 
 /// Put row `ix` in place of the token being completed.
-pub(crate) fn accept_pick<H: PickerHost>(
+pub fn accept_pick<H: PickerHost>(
     host: &mut H,
     ix: usize,
     window: &mut Window,
@@ -1167,7 +1167,7 @@ pub(crate) fn accept_pick<H: PickerHost>(
 
 /// A key the textarea turns into an action (↑ ↓ ⎋ ⇥ ↩) while the picker is open: it moves,
 /// closes or picks, and stops there. Otherwise it goes on to the textarea.
-pub(crate) fn picker_action<H: PickerHost>(
+pub fn picker_action<H: PickerHost>(
     host: &mut H,
     key: &str,
     window: &mut Window,
@@ -1203,7 +1203,7 @@ pub(crate) fn picker_action<H: PickerHost>(
 }
 
 /// Keys that reach the composer before the textarea while the picker is open.
-pub(crate) fn picker_key<H: PickerHost>(
+pub fn picker_key<H: PickerHost>(
     host: &mut H,
     ev: &KeyDownEvent,
     window: &mut Window,
@@ -1244,7 +1244,7 @@ pub(crate) fn picker_key<H: PickerHost>(
 }
 
 /// The open picker: its rows over the composer.
-pub(crate) fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement> {
+pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement> {
     let p = host.pickers_ref();
     let t = p.trigger.as_ref()?;
     let items = picker_items(host, cx);

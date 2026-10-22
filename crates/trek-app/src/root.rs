@@ -32,27 +32,27 @@ const TITLE_NARROW: f32 = 1000.;
 
 pub struct TrekWindow {
     workspace: Entity<Workspace>,
-    pub(crate) sidebar: Entity<Sidebar>,
-    pub(crate) thread_view: Entity<ThreadView>,
-    pub(crate) composer: Entity<Composer>,
+    pub sidebar: Entity<Sidebar>,
+    pub thread_view: Entity<ThreadView>,
+    pub composer: Entity<Composer>,
     settings: Entity<SettingsView>,
     settings_nav: Entity<SettingsNav>,
-    pub(crate) basecamp: Entity<Basecamp>,
-    pub(crate) notes: Entity<crate::notes::NotesView>,
-    pub(crate) right_panel: Entity<RightPanel>,
+    pub basecamp: Entity<Basecamp>,
+    pub notes: Entity<crate::notes::NotesView>,
+    pub right_panel: Entity<RightPanel>,
     /// The terminal docked under the chat (⌃`).
-    pub(crate) terminal_dock: Entity<crate::terminal_dock::TerminalDock>,
-    pub(crate) working_bar: Entity<WorkingBar>,
+    pub terminal_dock: Entity<crate::terminal_dock::TerminalDock>,
+    pub working_bar: Entity<WorkingBar>,
     /// What the thread's agent runs in the background, above the composer.
-    pub(crate) background_strip: Entity<crate::background_strip::BackgroundStrip>,
+    pub background_strip: Entity<crate::background_strip::BackgroundStrip>,
     /// Editor mode's workbench. It keeps the open files' tabs, which a lone `Route::Editor` in
     /// the harness shows too.
-    pub(crate) ide: Entity<crate::ide::IdeWorkbench>,
+    pub ide: Entity<crate::ide::IdeWorkbench>,
     title: Entity<WindowTitle>,
     onboarding: Entity<Onboarding>,
-    pub(crate) palette: Entity<CommandPalette>,
+    pub palette: Entity<CommandPalette>,
     /// Attachments up close, over everything else in the window.
-    pub(crate) preview: Entity<crate::image_preview::ImagePreview>,
+    pub preview: Entity<crate::image_preview::ImagePreview>,
     /// Takes keyboard focus when whatever had it leaves the screen (the composer, once a settings
     /// page opens): with nothing focused, keys reach none of the window's shortcuts, ⌘K included.
     focus: FocusHandle,
@@ -62,12 +62,12 @@ pub struct TrekWindow {
     /// Right-panel resize in progress: (pointer x at grab, width at grab).
     panel_drag: Option<(Pixels, f32)>,
     /// What the window was last told about its glass (`ui::apply_glass`).
-    pub(crate) glass_applied: Option<crate::ui::GlassState>,
+    pub glass_applied: Option<crate::ui::GlassState>,
     /// How far the sidebar is out (1) or folded away (0), on a spring the title bar shares: a
     /// second ⌘B mid-way turns it round where it is.
-    pub(crate) sidebar_motion: SharedSpring,
+    pub sidebar_motion: SharedSpring,
     /// Agents (0) to the editor (1): the two cross over on a spring as the mode switches.
-    pub(crate) mode_motion: crate::motion::Spring,
+    pub mode_motion: crate::motion::Spring,
     /// The last frame was mid-way between the modes (see `mode_motion`'s use in `render`).
     mode_fading: bool,
     /// With `TREK_FORCE_ACTIVE`, frames for the window while it's hidden (see `mascot::force_active`).
@@ -75,7 +75,7 @@ pub struct TrekWindow {
     _subscriptions: Vec<Subscription>,
 }
 
-pub(crate) type SharedSpring = std::rc::Rc<std::cell::RefCell<crate::motion::Spring>>;
+pub type SharedSpring = std::rc::Rc<std::cell::RefCell<crate::motion::Spring>>;
 
 /// The sidebar's spring at `now`, headed for out or folded as `collapsed` says; `window` gets
 /// frames while it moves. The window and its title bar each ask (they agree: the same spring).
@@ -96,7 +96,7 @@ const MIN_CHAT: f32 = 440.;
 
 /// Whether the sidebar steps aside for the open tools panel: the window can't fit the sidebar,
 /// the chat at its narrowest and the panel at its narrowest.
-pub(crate) fn sidebar_yields(window_width: f32, panel_open: bool, in_settings: bool) -> bool {
+pub fn sidebar_yields(window_width: f32, panel_open: bool, in_settings: bool) -> bool {
     panel_open
         && !in_settings
         && window_width - SIDEBAR_WIDTH - 16. < MIN_CHAT + crate::panels::MIN_PANEL
@@ -104,7 +104,7 @@ pub(crate) fn sidebar_yields(window_width: f32, panel_open: bool, in_settings: b
 
 /// Whether the tools panel floats over the chat rather than beside it: when `room` (the width
 /// beside the sidebar, if any) would leave the chat too narrow to read.
-pub(crate) fn overlay_panel(room: f32) -> bool {
+pub fn overlay_panel(room: f32) -> bool {
     room < MIN_CHAT * 0.8 + crate::panels::MIN_PANEL
 }
 
@@ -898,8 +898,8 @@ impl WindowTitle {
 
 impl Render for WindowTitle {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        crate::tests::rendered("WindowTitle");
+        #[cfg(any(test, feature = "test-support"))]
+        crate::test_support::rendered("WindowTitle");
         if self.workspace.read(cx).ide() {
             return self.render_editor(cx);
         }
@@ -1386,7 +1386,7 @@ fn attention(
         crate::system::play_alert_sound();
     }
     if alert.banner {
-        #[cfg(all(windows, not(test)))]
+        #[cfg(all(windows, not(any(test, feature = "test-support"))))]
         register_toast_identity();
         // Posted by Trek rather than through a toast's system delivery, so it goes out with no
         // window open too, and its tag says which thread to open when it's clicked.
@@ -1441,7 +1441,7 @@ fn attention(
 
 /// Windows shows a toast under its AppUserModelID's name and icon, which Trek, being no installed
 /// app, registers itself: once a run, before the first toast.
-#[cfg(all(windows, not(test)))]
+#[cfg(all(windows, not(any(test, feature = "test-support"))))]
 fn register_toast_identity() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -1495,13 +1495,13 @@ fn reveal_now(workspace: &Entity<Workspace>, thread: &str, cx: &mut App) {
 
 /// Sit `window`'s toasts `bottom` above its bottom edge, clear of the composer: they rise from
 /// the bottom of the window, away from the title bar, the tabs and the start of the transcript.
-pub(crate) fn place_toasts(bottom: Pixels, window: &Window, cx: &mut App) {
+pub fn place_toasts(bottom: Pixels, window: &Window, cx: &mut App) {
     crate::toast::place(window, bottom, cx);
 }
 
 /// How long a toast stays up: long enough to read it, and at least ten seconds when it offers
 /// an undo. The pointer on it holds it (`crate::toast`).
-pub(crate) fn toast_lifetime(message: &str, undo: bool) -> std::time::Duration {
+pub fn toast_lifetime(message: &str, undo: bool) -> std::time::Duration {
     // About four words a second, after a moment to notice it.
     let words = message.split_whitespace().count() as u64;
     let read = std::time::Duration::from_millis(2_000 + words * 250).clamp(
@@ -1578,7 +1578,7 @@ fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction
 }
 
 /// What the button on a toast says.
-pub(crate) fn toast_button_label(action: &UndoAction) -> &'static str {
+pub fn toast_button_label(action: &UndoAction) -> &'static str {
     match action {
         UndoAction::CancelRestart | UndoAction::CancelMove => "Not now",
         UndoAction::MaintainVerification(_) => "Maintain",
@@ -1640,7 +1640,7 @@ fn run_button(
 /// "Open in" menu for the project folder: the file manager, the terminal, and editors that are
 /// installed. On a Mac the apps are launched through `open -a`; on Windows each is found through
 /// the registry and PATH (`trek_core::open_in`) and started with the folder as its argument.
-pub(crate) fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl IntoElement {
+pub fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl IntoElement {
     use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
     gpui_kit::component::button::Button::new("open-in")
         .outline()
@@ -1718,8 +1718,8 @@ impl TrekWindow {
 
 impl Render for TrekWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        crate::tests::rendered("TrekWindow");
+        #[cfg(any(test, feature = "test-support"))]
+        crate::test_support::rendered("TrekWindow");
         crate::perf::frame_begins();
         crate::chrome::let_go_of_hover(window, cx);
         let route = self.workspace.read(cx).route.clone();

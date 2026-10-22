@@ -7,21 +7,21 @@ mod lineage;
 mod mcp;
 mod orchestrate;
 mod tabs;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub use tabs::MAX_TABS;
 mod ide;
-pub(crate) mod relocate;
+pub mod relocate;
 mod review;
 mod turn_changes;
-pub(crate) mod usage;
+pub mod usage;
 mod verification;
 mod worktrees;
 
 pub use ide::{ChatMode, IdeChat, IdeTab, Mode};
 pub use review::{FileReview, Review, as_given};
 
-#[cfg(test)]
-pub(crate) use added_agents::Step as InstallStep;
+#[cfg(any(test, feature = "test-support"))]
+pub use added_agents::Step as InstallStep;
 pub use added_agents::{AddedAgents, Install as AgentInstall, is_added};
 pub use agent_updates::Hold;
 pub use limits::Clock;
@@ -267,7 +267,7 @@ pub struct LiveThread {
     git_guard: std::sync::Arc<GitGuard>,
     /// Messages for the agent held until the git work before them is done: a turn mustn't start
     /// before its checkpoint is taken, or before files a rewind restores are back.
-    pub(crate) held: Vec<Command>,
+    pub held: Vec<Command>,
     _git: Option<Task<()>>,
     /// A usage limit the running turn reported: the thread pauses when the turn ends.
     limit: Option<limits::Hit>,
@@ -290,7 +290,7 @@ pub struct LiveThread {
     pub notes_pending: Option<String>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl LiveThread {
     /// No git work queued or under way.
     pub fn git_jobs_idle(&self) -> bool {
@@ -708,7 +708,7 @@ impl LiveThread {
     /// Append the rows of sub-agents started since, each after the agent's own call to
     /// `delegate_task` (transcripts only grow at the end, and the call may reach Trek before the
     /// agent's report of it does). `flush`: the turn is over; whatever waits goes in now.
-    pub(crate) fn place_task_rows(&mut self, flush: bool) {
+    pub fn place_task_rows(&mut self, flush: bool) {
         while !self.pending_rows.is_empty() {
             // Calls to `start_thread` and `handoff` have rows of their own too (`lineage`).
             let calls = self.items.iter().filter(|i| matches!(i, Item::Tool { title, status, .. } if trek_core::orchestrate::is_spawn_call(title) && *status != ToolStatus::Failed)).count();
@@ -1159,7 +1159,7 @@ const WOKE_ALERT_GAP: Duration = Duration::from_secs(10 * 60);
 
 /// How long an agent has to act on a stop before Trek ends the turn itself (`force_stop`):
 /// longer than any of them takes to wind a tool down.
-pub(crate) const STOP_GRACE: Duration = Duration::from_secs(20);
+pub const STOP_GRACE: Duration = Duration::from_secs(20);
 
 /// How soon after the user stops its sub-agents an agent's turn of its own is taken to be it
 /// saying so (Claude Code takes one within seconds).
@@ -1195,7 +1195,7 @@ impl GitInfo {
     }
 }
 
-pub(crate) fn read_git_info(cwd: &std::path::Path) -> GitInfo {
+pub fn read_git_info(cwd: &std::path::Path) -> GitInfo {
     // Read-only: `git status` mustn't take index.lock and trip a switch or commit running now,
     // nor run anything the folder's config names.
     let run = |args: &[&str]| trek_core::git::read(cwd, args);
@@ -1274,7 +1274,7 @@ pub(crate) fn read_git_info(cwd: &std::path::Path) -> GitInfo {
 
 /// What git said went wrong, for a toast: its `error:`/`fatal:` line without the prefix, with the
 /// files it names (local changes a checkout would overwrite), else `fallback`.
-pub(crate) fn git_error(stderr: &str, fallback: &str) -> String {
+pub fn git_error(stderr: &str, fallback: &str) -> String {
     let lines: Vec<&str> = stderr.lines().collect();
     let Some(at) = lines
         .iter()
@@ -1338,7 +1338,7 @@ pub struct Workspace {
     /// The cloud providers the user has a key for, found once (each is a Keychain read, and
     /// `ready_agents` runs while drawing). Forgotten when a key is saved or removed and when the
     /// agents are found again.
-    pub(crate) keyed_providers: std::cell::RefCell<Option<Vec<&'static str>>>,
+    pub keyed_providers: std::cell::RefCell<Option<Vec<&'static str>>>,
     pub importing: bool,
     pub import_summary: Option<ImportSummary>,
     pub live: HashMap<String, LiveThread>,
@@ -1354,10 +1354,10 @@ pub struct Workspace {
     pub remote: Option<crate::remote::Remote>,
     /// Other machines running Trek that this one drives, and their threads (`machines`).
     pub machines: crate::machines::Machines,
-    pub(crate) remote_starting: bool,
+    pub remote_starting: bool,
     /// Why the phone server last failed to start; it's tried again shortly (`remote::RETRY`).
-    pub(crate) remote_error: Option<String>,
-    pub(crate) remote_retry: Option<Task<()>>,
+    pub remote_error: Option<String>,
+    pub remote_retry: Option<Task<()>>,
     pub settled_open: bool,
     /// The sidebar's search text. Change it with `set_search`, which also searches messages.
     pub search: String,
@@ -1387,9 +1387,9 @@ pub struct Workspace {
     /// The newest git read asked for, per folder (`refresh_git_at`).
     git_reads: HashMap<PathBuf, u64>,
     /// Git reads started and not yet landed, stale ones included (`shot` waits for it to reach 0).
-    pub(crate) git_inflight: usize,
+    pub git_inflight: usize,
     /// Checkouts with a `git switch` running (by checkout root).
-    pub(crate) switching: HashSet<PathBuf>,
+    pub switching: HashSet<PathBuf>,
     /// Bumped when files on disk changed wholesale under the app (another branch or commit
     /// checked out, a rewind): open editors reload, file lists read again.
     pub files_epoch: u64,
@@ -1420,7 +1420,7 @@ pub struct Workspace {
     pub status_fetched_at: i64,
     /// Counts the changes to `threads` (one added, gone, or changed through `mutate_thread`):
     /// what's built from all of them is built again only when this has moved.
-    pub(crate) threads_gen: u64,
+    pub threads_gen: u64,
     /// When Devin was last asked for its plan and quota (`refresh_devin_usage`).
     devin_status_at: i64,
     /// Devin's plan and quota are being read.
@@ -1439,7 +1439,7 @@ pub struct Workspace {
     /// The project open on Settings → Project (project id).
     pub settings_project: Option<String>,
     /// An agent session started while the user was still typing a new thread's first message.
-    pub(crate) warm: Option<(WarmKey, trek_agents::SessionHandle, Instant)>,
+    pub warm: Option<(WarmKey, trek_agents::SessionHandle, Instant)>,
     /// A `settle_merged` pass is running.
     checking_merges: bool,
     /// When `tidy_inbox` last ran: snoozes that ended since then bring their threads back.
@@ -1475,12 +1475,12 @@ pub struct Workspace {
     pub background_use: Entity<crate::background_use::BackgroundUse>,
     /// A message for the main window's composer while that window is being reopened: a window
     /// opened just now hears no events until later, so `TrekWindow::new` takes it from here.
-    pub(crate) pending_compose: Option<(String, String, Vec<PathBuf>)>,
+    pub pending_compose: Option<(String, String, Vec<PathBuf>)>,
     /// Offer Trek's scripted mock agent (`TREK_MOCK_AGENT=1`, and in tests).
     pub mock_agent: bool,
     /// Tests: run once as the next turn ends, before its end checkpoint: what the agent changes
     /// over a turn, without an agent that changes files.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub at_turn_end: Option<Box<dyn FnOnce()>>,
     /// Where Basecamp goes back to (Esc): the screen it was opened from.
     basecamp_back: Option<Route>,
@@ -1494,24 +1494,24 @@ pub struct Workspace {
     /// A restart the user asked for while agents worked, counting down now that they're done.
     restart_countdown: Option<Task<()>>,
     /// A move out of a folder Trek can't update itself in (Windows), under way.
-    pub(crate) moving: relocate::Moving,
+    pub moving: relocate::Moving,
     /// What a move does to the machine; tests replace it.
-    pub(crate) mover: relocate::Mover,
+    pub mover: relocate::Mover,
     /// The copy Trek left in the folder it moved out of, while the Updates page offers to remove it.
-    pub(crate) old_copy: Option<crate::updater::OldCopy>,
+    pub old_copy: Option<crate::updater::OldCopy>,
     /// What a test says keeps Trek from updating itself, instead of where the test binary is.
-    #[cfg(test)]
-    pub(crate) blocked: Option<Option<trek_core::update::Blocker>>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub blocked: Option<Option<trek_core::update::Blocker>>,
     /// Each check a test's `blocked` answered for: whether the user asked (`blocker_now`) or not.
-    #[cfg(test)]
-    pub(crate) checks_asked: Vec<bool>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub checks_asked: Vec<bool>,
     /// Why Trek's database couldn't be opened, until the main window has said so: this session
     /// runs on an in-memory copy and nothing is saved.
     pub store_error: Option<String>,
     /// Wall-clock time for usage limits (tests set their own).
     pub clock: Clock,
     /// Wakes when the next usage-limit pause ends (`schedule_limits`).
-    pub(crate) limit_timer: Option<Task<()>>,
+    pub limit_timer: Option<Task<()>>,
     /// No resume goes before this (unix ms): just after launch, Trek finds its feet first.
     resumes_from: i64,
     /// Threads whose agent is being asked whether its limit really reset.
@@ -1523,7 +1523,7 @@ pub struct Workspace {
     /// set their own). Runs on Trek's tokio runtime.
     pub reset_consumer: Option<ResetConsumer>,
     /// Trek's end of its agents' orchestration tools, when its socket could be opened.
-    pub(crate) ipc: Option<crate::ipc::IpcServer>,
+    pub ipc: Option<crate::ipc::IpcServer>,
     _ipc_calls: Option<Task<()>>,
     /// Sub-agents started this run, by thread id (`workspace::orchestrate`).
     pub delegations: HashMap<String, orchestrate::Delegation>,
@@ -1761,7 +1761,7 @@ impl Workspace {
 
     /// The model over `store` and `settings` alone: no agent detection, import, update check or
     /// housekeeping is started (`new` adds those). Tests build on this.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with(store: Store, settings: Settings, cx: &mut Context<Self>) -> Self {
         Self::build(store, settings, true, cx)
     }
@@ -1828,7 +1828,7 @@ impl Workspace {
             updater: Default::default(),
             agent_updates: Default::default(),
             sidebar_collapsed: false,
-            tabs: if cfg!(test) {
+            tabs: if cfg!(any(test, feature = "test-support")) {
                 vec![]
             } else {
                 tabs::load_tabs()
@@ -1898,7 +1898,7 @@ impl Workspace {
             },
             pending_compose: None,
             mock_agent: trek_agents::mock::enabled(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             at_turn_end: None,
             basecamp_back: None,
             editor_back: None,
@@ -1908,9 +1908,9 @@ impl Workspace {
             moving: relocate::Moving::default(),
             mover: relocate::Mover::default(),
             old_copy: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             blocked: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             checks_asked: vec![],
             store_error: None,
             clock: Clock::default(),
@@ -1931,7 +1931,7 @@ impl Workspace {
             draft_became: None,
             verify_runs: HashMap::new(),
             changes_cache: Default::default(),
-            end_children_on_quit: (!cfg!(test))
+            end_children_on_quit: (!cfg!(any(test, feature = "test-support")))
                 .then_some(trek_core::procs::end_all as fn(std::time::Duration)),
         };
         this.reload(cx);
@@ -2603,7 +2603,7 @@ impl Workspace {
 
     /// Read git again for every folder on file that's in the same checkout as `cwd`: a thread
     /// window or a subfolder's thread shows the same branch.
-    pub(crate) fn refresh_checkout(&mut self, cwd: PathBuf, cx: &mut Context<Self>) {
+    pub fn refresh_checkout(&mut self, cwd: PathBuf, cx: &mut Context<Self>) {
         let root = trek_core::worktree::checkout_root(&cwd);
         let mut dirs: Vec<PathBuf> = self
             .git_info
@@ -2931,7 +2931,7 @@ impl Workspace {
     }
 
     /// The folder tint of the project on screen: the thread's, or the draft's.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn current_project_tint(&self, cx: &App) -> Option<gpui_kit::Hsla> {
         match &self.route {
             Route::Thread(id) => self
@@ -3192,7 +3192,7 @@ impl Workspace {
     /// thread, as an imported one's is, so opening a long thread doesn't stall the click (the
     /// transcript shows it loading meanwhile). Work that needs the history at once (forking, a
     /// resume, reports) still calls `ensure_loaded`.
-    pub(crate) fn load_for_view(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn load_for_view(&mut self, id: &str, cx: &mut Context<Self>) {
         // Another machine's thread comes from that machine (a thread window opened on it).
         if crate::machines::is_remote(id) {
             return self.follow_machine_thread(id, cx);
@@ -3303,7 +3303,7 @@ impl Workspace {
         self.keep(task);
     }
 
-    pub(crate) fn ensure_loaded(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn ensure_loaded(&mut self, id: &str, cx: &mut Context<Self>) {
         if crate::machines::is_remote(id) {
             return;
         }
@@ -3697,7 +3697,9 @@ impl Workspace {
     /// system allows it: macOS isn't set to Reduce transparency; Windows has Mica, with
     /// Transparency effects on).
     pub fn glass(&self) -> Option<f32> {
-        self.glass_unless(!cfg!(test) && crate::system::reduce_transparency())
+        self.glass_unless(
+            !cfg!(any(test, feature = "test-support")) && crate::system::reduce_transparency(),
+        )
     }
 
     /// `glass`, given whether the system asks for less transparency (macOS's Reduce transparency;
@@ -3785,7 +3787,7 @@ impl Workspace {
     /// The language server for a file's grammar, spawning it on first use. Rooted at the IDE
     /// folder (or the file's git root when opened outside one).
     pub fn lsp_for(&mut self, path: &Path, lang: &str) -> Option<Arc<crate::lsp_client::Client>> {
-        if cfg!(test) {
+        if cfg!(any(test, feature = "test-support")) {
             return None;
         }
         let root = self
@@ -4033,7 +4035,7 @@ impl Workspace {
     /// `start_thread`'s work, saying what went wrong rather than showing it. `warm`: the session
     /// warmed up while the user typed may be the thread's (an agent's thread leaves it for the
     /// user's draft). `shape` adjusts the thread before it's first saved.
-    pub(crate) fn make_thread(
+    pub fn make_thread(
         &mut self,
         project: Option<PathBuf>,
         prefs: Prefs,
@@ -4635,7 +4637,7 @@ impl Workspace {
     /// native visualization capability, interactive artifacts while those are on, the project's
     /// notes, and the recap Trek asks for at the end of work while that's on and the session
     /// `recaps` (it can change things).
-    pub(crate) fn session_notes(
+    pub fn session_notes(
         &self,
         project: Option<&std::path::Path>,
         cwd: &std::path::Path,
@@ -4751,12 +4753,7 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn apply_events(
-        &mut self,
-        id: &str,
-        events: Vec<AgentEvent>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn apply_events(&mut self, id: &str, events: Vec<AgentEvent>, cx: &mut Context<Self>) {
         // A finished call may have changed files, and a finished turn ends a span of changes:
         // an open review works its pending files out again.
         let finished = events.iter().any(|e| {
@@ -5667,7 +5664,7 @@ impl Workspace {
     /// Follow-ups held for a turn that stopped or failed while `id` was off screen go back to the
     /// composer now that it's on screen. Left queued, they'd go out after some later turn, long
     /// after the turn they were written for.
-    pub(crate) fn hand_back_queued(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn hand_back_queued(&mut self, id: &str, cx: &mut Context<Self>) {
         if !self.on_screen(id) {
             return;
         }
@@ -6082,7 +6079,7 @@ impl Workspace {
     /// thread changes afterwards isn't its. Keyed by the item that ended it (its footer, error
     /// or interruption), or the turn's last item when nothing did.
     fn checkpoint_turn_end(&mut self, id: &str, cx: &mut Context<Self>) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(f) = self.at_turn_end.take() {
             f();
         }
@@ -6731,7 +6728,7 @@ impl Workspace {
 
     /// `fork_thread` of a loaded thread, without opening the fork anywhere: its id, and for a
     /// fork from before a message, that message (for a composer).
-    pub(crate) fn fork_quietly(
+    pub fn fork_quietly(
         &mut self,
         id: &str,
         at: &ForkAt,
@@ -7252,7 +7249,7 @@ impl Workspace {
         out
     }
 
-    pub(crate) fn title_inputs(&self, id: &str) -> Option<(String, String)> {
+    pub fn title_inputs(&self, id: &str) -> Option<(String, String)> {
         let items = match self.live.get(id).filter(|l| l.loaded) {
             Some(l) => l.items.to_vec(),
             None => self.store.items(id).unwrap_or_default(),
@@ -7467,7 +7464,7 @@ impl Workspace {
     /// Settle threads left alone for the configured days and ones whose branch merged. Snoozes
     /// that have ended need nothing but a redraw: `Thread::section` puts them back in the inbox
     /// as of `now`.
-    pub(crate) fn tidy_inbox(&mut self, now: i64, cx: &mut Context<Self>) {
+    pub fn tidy_inbox(&mut self, now: i64, cx: &mut Context<Self>) {
         let since = std::mem::replace(&mut self.tidied_at, now);
         if self
             .threads
@@ -7592,7 +7589,7 @@ impl Workspace {
     /// Shut down agent processes idle for 15 minutes (150–250 MB each) that nothing waits on,
     /// and the pre-warmed draft session after 10. A thread's next message starts its session
     /// again, resuming the agent's conversation. `now` is the executor's clock (a test's own).
-    pub(crate) fn reap_idle_sessions(&mut self, now: Instant) {
+    pub fn reap_idle_sessions(&mut self, now: Instant) {
         let idle_for = |at: Option<Instant>, limit: u64| {
             at.is_none_or(|t| now.saturating_duration_since(t) > Duration::from_secs(limit * 60))
         };
@@ -7805,7 +7802,7 @@ impl Workspace {
     }
 
     /// `use_reset_credit`, telling `done` how it went (a phone waits to hear).
-    pub(crate) fn use_reset_credit_then(
+    pub fn use_reset_credit_then(
         &mut self,
         credit_id: String,
         done: impl FnOnce(Result<(), String>) + 'static,
@@ -7894,11 +7891,7 @@ impl Workspace {
 
     /// Take in what Devin said of its plan and quota. It says nothing of its commands, which
     /// its ACP sessions report per folder and stay as they were.
-    pub(crate) fn apply_devin_status(
-        &mut self,
-        res: anyhow::Result<AgentStatus>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn apply_devin_status(&mut self, res: anyhow::Result<AgentStatus>, cx: &mut Context<Self>) {
         let key = devin_agent().key();
         match res {
             Ok(st) => {
@@ -8143,7 +8136,9 @@ impl Workspace {
                 "auto" => HandHolding::Auto,
                 "full" | "full-access" | "bypass" | "yolo" => HandHolding::FullAccess,
                 other => {
-                    return format!("Unknown level “{other}”. Use supervised, edits, auto or full.");
+                    return format!(
+                        "Unknown level “{other}”. Use supervised, edits, auto or full."
+                    );
                 }
             },
         };
@@ -8395,9 +8390,9 @@ impl Workspace {
     // ---------- updates ----------
 
     pub fn update_view(&self) -> UpdateView {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let blocker = self.blocked.unwrap_or_else(trek_core::update::blocker);
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let blocker = trek_core::update::blocker();
         self.moving_view(crate::updater::describe_update(
             &self.updater.status,
@@ -8430,11 +8425,11 @@ impl Workspace {
     pub fn check_for_updates(&mut self, user_initiated: bool, cx: &mut Context<Self>) {
         // A dev build (or one macOS runs from a read-only copy) can't replace itself: don't ask.
         // The user asking asks Windows again whether Trek may write where it is.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let said = self
             .blocked
             .inspect(|_| self.checks_asked.push(user_initiated));
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let said: Option<Option<trek_core::update::Blocker>> = None;
         let blocked = said.unwrap_or_else(|| {
             if user_initiated {
@@ -8970,7 +8965,7 @@ fn start_session(config: SessionConfig) -> trek_agents::SessionHandle {
 /// ends): `Ok(Some(lock))` to keep while the folder is ours, `Ok(None)` when another process
 /// holds it.
 #[cfg(windows)]
-pub(crate) fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
+pub fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
     use std::os::windows::io::AsRawHandle as _;
     use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -9005,7 +9000,7 @@ pub(crate) fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::
 }
 
 #[cfg(unix)]
-pub(crate) fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
+pub fn lock_folder(dir: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
     use std::os::fd::AsRawFd as _;
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -9424,7 +9419,7 @@ fn trek_mcp_env(family: &str, background: bool, windows: bool) -> Vec<(String, S
 /// Whether merging a thread's work settles it: only one sitting idle in the inbox. Merged while
 /// it was busy, pinned, kept or snoozed, it stays where the user put it. Shared by the merge
 /// watch (`settle_merged`) and the Git tool's "Merge into <base>".
-pub(crate) fn settles_on_merge(t: &Thread, now: i64) -> bool {
+pub fn settles_on_merge(t: &Thread, now: i64) -> bool {
     t.settled_at.is_none()
         && t.run_state == RunState::Idle
         && t.pinned_at.is_none()

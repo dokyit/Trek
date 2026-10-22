@@ -297,7 +297,7 @@ impl Workspace {
     }
 
     /// Remind the user of skills a week past their last maintenance, once a week at most.
-    pub(crate) fn remind_verification(&mut self, now: i64, cx: &mut Context<Self>) {
+    pub fn remind_verification(&mut self, now: i64, cx: &mut Context<Self>) {
         let due: Vec<(PathBuf, String, Option<i64>)> = self
             .workspace_projects()
             .into_iter()

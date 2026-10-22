@@ -526,7 +526,7 @@ impl ExplorerPanel {
 
     /// The name typed goes: the file or folder is made (a new file opens), or renamed. A name
     /// that won't do keeps the input up, saying why.
-    pub(crate) fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(edit) = &self.edit else { return };
         let name = edit.input.read(cx).value().trim().to_string();
         let (kind, dir) = (edit.kind.clone(), edit.dir.clone());

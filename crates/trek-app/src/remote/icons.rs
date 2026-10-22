@@ -144,7 +144,7 @@ fn gone() -> tr::HostError {
 }
 
 /// An SVG drawn to fit a square, as a PNG.
-pub(crate) fn svg_png(svg: &[u8]) -> tr::HostResult<Vec<u8>> {
+pub fn svg_png(svg: &[u8]) -> tr::HostResult<Vec<u8>> {
     use resvg::{tiny_skia, usvg};
     let tree = usvg::Tree::from_data(svg, &usvg::Options::default())
         .map_err(|e| tr::HostError::other(format!("The icon couldn't be read: {e}")))?;

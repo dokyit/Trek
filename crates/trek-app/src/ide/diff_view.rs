@@ -48,7 +48,7 @@ pub enum DiffSource {
 
 /// One file's diff, as read.
 #[derive(Debug, Clone)]
-pub(crate) struct DiffFile {
+pub struct DiffFile {
     pub rel: String,
     /// `A` added (or untracked), `M` changed, `D` deleted.
     pub status: char,
@@ -480,7 +480,7 @@ fn load_git(top: &Path, rel: &str, staged: bool) -> Result<Vec<DiffFile>, String
 pub struct DiffView {
     workspace: Entity<Workspace>,
     workbench: WeakEntity<IdeWorkbench>,
-    pub(crate) source: DiffSource,
+    pub source: DiffSource,
     files: Vec<DiffFile>,
     rows: std::rc::Rc<Vec<Row>>,
     /// Files folded down to their header, by path.
@@ -674,7 +674,7 @@ impl DiffView {
         }
     }
 
-    pub(crate) fn set_split(&mut self, split: bool, cx: &mut Context<Self>) {
+    pub fn set_split(&mut self, split: bool, cx: &mut Context<Self>) {
         if self.split != split {
             self.split = split;
             self.rebuild(cx);
@@ -762,13 +762,7 @@ impl DiffView {
     }
 
     /// Keep or undo hunk `hunk` of file `file` (a Review's).
-    pub(crate) fn act_on_hunk(
-        &mut self,
-        file: usize,
-        hunk: usize,
-        keep: bool,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn act_on_hunk(&mut self, file: usize, hunk: usize, keep: bool, cx: &mut Context<Self>) {
         let Some(f) = self.files.get(file) else {
             return;
         };
@@ -789,7 +783,7 @@ impl DiffView {
     }
 
     /// Keep or undo file `file` whole (a Review's).
-    pub(crate) fn act_on_file(&mut self, file: usize, keep: bool, cx: &mut Context<Self>) {
+    pub fn act_on_file(&mut self, file: usize, keep: bool, cx: &mut Context<Self>) {
         let Some(rel) = self.files.get(file).map(|f| f.rel.clone()) else {
             return;
         };
@@ -1380,11 +1374,11 @@ impl Render for DiffView {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl DiffView {
     /// The rows as text: "file M a.rs +1 −1", "hunk @@ -1,2 +1,2 @@", "+ 2 new", "- 2 old",
     /// "  3 3 same", "fold 4 at 5", "pair 2 old | 2 new", "note …", "space".
-    pub(crate) fn describe(&self) -> Vec<String> {
+    pub fn describe(&self) -> Vec<String> {
         let side = |s: &Option<Side>| {
             s.as_ref()
                 .map(|(n, _, t)| format!("{n} {t}"))
@@ -1422,15 +1416,15 @@ impl DiffView {
             .collect()
     }
 
-    pub(crate) fn loaded(&self) -> bool {
+    pub fn loaded(&self) -> bool {
         !self.loading
     }
 
-    pub(crate) fn set_split_for_test(&mut self, split: bool, cx: &mut Context<Self>) {
+    pub fn set_split_for_test(&mut self, split: bool, cx: &mut Context<Self>) {
         self.set_split(split, cx);
     }
 
-    pub(crate) fn open_fold_for_test(&mut self, at: u32, cx: &mut Context<Self>) {
+    pub fn open_fold_for_test(&mut self, at: u32, cx: &mut Context<Self>) {
         self.open_fold(0, at, cx);
     }
 }

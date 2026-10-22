@@ -71,7 +71,7 @@ impl Workspace {
 }
 
 /// The image at `path` as a JPEG that fits in `max` pixels a side and `MAX_BYTES`, with its size.
-pub(crate) fn jpeg(path: &Path, max: u32) -> tr::HostResult<(Vec<u8>, u32, u32)> {
+pub fn jpeg(path: &Path, max: u32) -> tr::HostResult<(Vec<u8>, u32, u32)> {
     let image = image::ImageReader::open(path)
         .and_then(|r| r.with_guessed_format())
         .map_err(|_| {

@@ -122,23 +122,23 @@ enum Glyph {
 }
 
 #[derive(Clone)]
-pub(crate) struct Entry {
+pub struct Entry {
     group: Group,
     glyph: Glyph,
-    pub(crate) label: SharedString,
+    pub label: SharedString,
     /// Matched words in the label (thread titles).
     label_ranges: Vec<Range<usize>>,
     /// A second line: the matching excerpt of a message.
     snippet: Option<(SharedString, Vec<Range<usize>>)>,
     /// Quiet text on the right: a shortcut, a project, a folder.
-    pub(crate) hint: Option<SharedString>,
+    pub hint: Option<SharedString>,
     checked: bool,
     /// A thread's project on the right: name, look, and the worktree branch it runs on.
     project: Option<(String, ui::ProjectLook, Option<String>)>,
     /// How long ago a thread last changed, after its title.
     age: Option<SharedString>,
     /// ⌘<n> opens it (the recent threads).
-    pub(crate) jump: Option<usize>,
+    pub jump: Option<usize>,
     action: Action,
 }
 
@@ -267,7 +267,7 @@ fn commands_named<T>(query: &str, commands: &[(T, String, String)]) -> bool {
 
 /// How long ago `ms` was, as of `now` (both unix ms), for a switcher row: "now", "3m", "2h",
 /// "Yesterday", "4d", then the date ("Sep 12"). Hours hold across midnight for a few hours.
-pub(crate) fn age(ms: i64, now: i64) -> String {
+pub fn age(ms: i64, now: i64) -> String {
     let s = ((now - ms) / 1000).max(0);
     let day = |ms: i64| {
         chrono::DateTime::from_timestamp_millis(ms)
@@ -468,7 +468,7 @@ impl CommandPalette {
     }
 
     /// The row the keyboard is on.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn selected(&self) -> usize {
         self.selected
     }
@@ -640,7 +640,7 @@ impl CommandPalette {
         cx.notify();
     }
 
-    pub(crate) fn entries(&self, cx: &App) -> Vec<Entry> {
+    pub fn entries(&self, cx: &App) -> Vec<Entry> {
         if self.files_only {
             return self.file_entries(cx);
         }
@@ -1245,7 +1245,7 @@ impl CommandPalette {
     }
 
     /// ⌘<n>: open the n-th recent thread, when they're listed. False when there's none to open.
-    pub(crate) fn jump(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub fn jump(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(ix) = self.entries(cx).iter().position(|e| e.jump == Some(n)) else {
             return false;
         };

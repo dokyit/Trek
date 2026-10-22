@@ -52,7 +52,7 @@ enum Loaded {
     Fetched(Result<Registry, String>),
 }
 
-pub(crate) enum Step {
+pub enum Step {
     Progress(Progress),
     Done(Result<AddedAgent, String>),
 }
@@ -222,7 +222,7 @@ impl Workspace {
 
     /// What registry agent `id`'s install reported. One removed while it ran (an update's) stays
     /// removed: what the install left goes too.
-    pub(crate) fn install_step(&mut self, id: &str, step: Step, cx: &mut gpui_kit::Context<Self>) {
+    pub fn install_step(&mut self, id: &str, step: Step, cx: &mut gpui_kit::Context<Self>) {
         let Some(Install::Running(progress)) = self.added_agents.installs.get_mut(id) else {
             if let Step::Done(Ok(added)) = step {
                 trek_core::runtime().spawn_blocking(move || registry::remove(&added));

@@ -68,10 +68,10 @@ pub fn word(seed: &str, secs: u64) -> &'static str {
 }
 
 /// The hiker's walk: one lap there and back in `LAP`.
-pub(crate) const LAP: Duration = Duration::from_secs(16);
+pub const LAP: Duration = Duration::from_secs(16);
 /// Waiting for others to come back, it paces the same trail on a shorter lap: restless where
 /// the working walk is steady.
-pub(crate) const PACE: Duration = Duration::from_secs(8);
+pub const PACE: Duration = Duration::from_secs(8);
 /// One sprite pixel, in points. 1.5pt is 3 device pixels on Retina, so edges stay crisp.
 const PX: f32 = 1.5;
 const SPRITE_W: usize = 14;
@@ -196,7 +196,7 @@ pub fn trail(phase: f32, gait: f32, still: bool, cx: &App) -> AnyElement {
 
 /// Where a `phase` (0 to 1) of the way through a lap there and back leaves the hiker: its place
 /// on the trail (0 to 1), its walk frame (`gait` seconds in), and which way it faces.
-pub(crate) fn hike(phase: f32, gait: f32) -> (f32, usize, bool) {
+pub fn hike(phase: f32, gait: f32) -> (f32, usize, bool) {
     let t = phase % 1.;
     // Triangle wave: walk right for half the lap, back left for the other half.
     let (raw, right) = if t < 0.5 {
@@ -216,7 +216,7 @@ pub(crate) fn hike(phase: f32, gait: f32) -> (f32, usize, bool) {
 }
 
 /// `v` points moved to the nearest whole device pixel at `scale` (device pixels per point).
-pub(crate) fn snap(v: f32, scale: f32) -> f32 {
+pub fn snap(v: f32, scale: f32) -> f32 {
     (v * scale).round() / scale
 }
 
@@ -225,7 +225,7 @@ pub(crate) fn snap(v: f32, scale: f32) -> f32 {
 /// number nearest [`PX`] (ties down), kept short enough that the sprite fits its trail's height
 /// ([`HEIGHT`], less the trail's own line). On a Retina display that's 3 device pixels, 1.5 pt, as
 /// it always was; at 125% and 150% it's 2 (1.6 and 1.33 pt).
-pub(crate) fn cell_size(scale: f32) -> f32 {
+pub fn cell_size(scale: f32) -> f32 {
     let fits = ((HEIGHT - 1.) * scale / SPRITE_H as f32).floor();
     let nearest = (PX * scale - 0.5).ceil();
     nearest.min(fits).max(1.) / scale
@@ -234,7 +234,7 @@ pub(crate) fn cell_size(scale: f32) -> f32 {
 /// Where the sprite's pixel grid sits on a trail whose ground is at `ground` and whose hiker is
 /// at `x`, in points at `scale`: its left edge, its feet, and a pixel's size — every one a whole
 /// number of device pixels, the left edge on the sprite's own grid so it steps pixel by pixel.
-pub(crate) fn grid(x: f32, ground: f32, scale: f32) -> (f32, f32, f32) {
+pub fn grid(x: f32, ground: f32, scale: f32) -> (f32, f32, f32) {
     let cell = cell_size(scale);
     let left = (x / cell).round() * cell;
     (snap(left, scale), snap(ground, scale), cell)

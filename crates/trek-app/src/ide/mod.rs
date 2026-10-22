@@ -17,14 +17,14 @@
 
 mod activity;
 mod agents_view;
-pub(crate) mod ai;
-pub(crate) mod diff_view;
+pub mod ai;
+pub mod diff_view;
 mod editor_group;
-pub(crate) mod git;
+pub mod git;
 mod layout;
 mod panel;
-pub(crate) mod preview;
-pub(crate) mod scm;
+pub mod preview;
+pub mod scm;
 mod status_bar;
 mod watch;
 
@@ -45,26 +45,26 @@ use trek_core::settings::IdeLayout;
 pub struct IdeWorkbench {
     workspace: Entity<Workspace>,
     /// The editor group's tabs, in order.
-    pub(crate) tabs: Vec<EditorTab>,
-    pub(crate) active: usize,
+    pub tabs: Vec<EditorTab>,
+    pub active: usize,
     /// Tabs by when they were last in front (most recent last): closing the front one goes back
     /// to the one before it.
     mru: Vec<EntityId>,
-    pub(crate) explorer: Entity<ExplorerPanel>,
-    pub(crate) search: Entity<IdeSearch>,
+    pub explorer: Entity<ExplorerPanel>,
+    pub search: Entity<IdeSearch>,
     /// Source Control, made the first time it's shown (it reads git as it opens).
-    pub(crate) scm: Option<Entity<scm::ScmView>>,
-    pub(crate) ai: Entity<ai::AiPane>,
+    pub scm: Option<Entity<scm::ScmView>>,
+    pub ai: Entity<ai::AiPane>,
     status: Entity<status_bar::IdeStatus>,
     /// The bottom panel's terminals; one is made the first time the Terminal tab shows.
     terminals: Vec<Entity<crate::panels::terminal::TerminalPanel>>,
     terminal: usize,
-    pub(crate) view: SideView,
-    pub(crate) panel_tab: PanelTab,
+    pub view: SideView,
+    pub panel_tab: PanelTab,
     /// The Output panel's channel, when one was picked (else the chat in front's).
-    pub(crate) output_channel: Option<OutputChannel>,
+    pub output_channel: Option<OutputChannel>,
     /// Sizes and which regions show, as in settings.
-    pub(crate) layout: IdeLayout,
+    pub layout: IdeLayout,
     /// A region's edge being dragged.
     drag: Option<layout::Drag>,
     /// `Workspace::files_epoch` the open editors last reloaded at.
@@ -189,7 +189,7 @@ impl IdeWorkbench {
     /// `from` (a file or folder) moved to `to`, or went to the Trash (`None`): clean tabs of
     /// files under it open at the new place (or close); a tab with unsaved edits keeps them, and
     /// saves to the new place.
-    pub(crate) fn file_moved(
+    pub fn file_moved(
         &mut self,
         from: &std::path::Path,
         to: Option<&std::path::Path>,
@@ -237,7 +237,7 @@ impl IdeWorkbench {
     }
 
     /// The open files' editors.
-    pub(crate) fn editors(&self) -> Vec<Entity<EditorView>> {
+    pub fn editors(&self) -> Vec<Entity<EditorView>> {
         self.tabs
             .iter()
             .filter_map(|t| t.editor().cloned())
@@ -416,7 +416,7 @@ impl IdeWorkbench {
     }
 
     /// The files' tabs (editors and previews): (file, preview).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn tab_paths(&self, cx: &App) -> Vec<(PathBuf, bool)> {
         self.tabs
             .iter()
@@ -430,7 +430,7 @@ impl IdeWorkbench {
     }
 
     /// The preview in front, if the tab in front is one.
-    #[cfg(any(test, feature = "shots"))]
+    #[cfg(any(test, feature = "test-support", feature = "shots"))]
     pub fn active_preview(&self) -> Option<Entity<preview::PreviewView>> {
         self.tabs
             .get(self.active)
@@ -440,8 +440,8 @@ impl IdeWorkbench {
 
 impl Render for IdeWorkbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        crate::tests::rendered("IdeWorkbench");
+        #[cfg(any(test, feature = "test-support"))]
+        crate::test_support::rendered("IdeWorkbench");
         let glass = self.workspace.read(cx).glass();
         let line = Self::line(glass, cx);
         let chrome = crate::ui::chrome_bg(glass, cx);

@@ -103,7 +103,7 @@ impl Workspace {
 }
 
 /// Byte ranges in `text` as character ranges (what the phone counts in).
-pub(crate) fn char_ranges(text: &str, ranges: &[std::ops::Range<usize>]) -> Vec<[u32; 2]> {
+pub fn char_ranges(text: &str, ranges: &[std::ops::Range<usize>]) -> Vec<[u32; 2]> {
     let at = |byte: usize| text.char_indices().take_while(|(i, _)| *i < byte).count() as u32;
     ranges
         .iter()

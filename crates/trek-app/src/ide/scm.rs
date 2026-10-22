@@ -28,7 +28,7 @@ const COUNT_LIMIT: u64 = 4 << 20;
 
 /// A changed file, in one of the two lists.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ScmFile {
+pub struct ScmFile {
     /// Relative to the repository's top folder.
     pub rel: String,
     /// `M`, `A`, `D`, `R`, `U` (untracked) or `!` (in conflict).
@@ -39,7 +39,7 @@ pub(crate) struct ScmFile {
 
 /// The repository's state, as read.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct ScmState {
+pub struct ScmState {
     pub repo: bool,
     /// The repository's top folder (as the IDE folder names it).
     pub top: Option<PathBuf>,
@@ -88,7 +88,7 @@ fn status_entries(out: &[u8]) -> Vec<(char, char, String)> {
 }
 
 /// Read the repository holding `root`: its branch and the two lists.
-pub(crate) fn read(root: &Path) -> ScmState {
+pub fn read(root: &Path) -> ScmState {
     let Some(top) = super::git::top(root) else {
         return ScmState::default();
     };
@@ -177,7 +177,7 @@ pub struct ScmView {
     workspace: Entity<Workspace>,
     workbench: WeakEntity<IdeWorkbench>,
     root: Option<PathBuf>,
-    pub(crate) state: ScmState,
+    pub state: ScmState,
     loading: bool,
     /// Git at work: what's running (its button spins).
     busy: Option<&'static str>,
@@ -335,7 +335,7 @@ impl ScmView {
         }
     }
 
-    pub(crate) fn stage(&mut self, rels: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn stage(&mut self, rels: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         if rels.is_empty() {
             return;
         }
@@ -351,12 +351,7 @@ impl ScmView {
         );
     }
 
-    pub(crate) fn unstage(
-        &mut self,
-        rels: Vec<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn unstage(&mut self, rels: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         if rels.is_empty() {
             return;
         }
@@ -381,12 +376,7 @@ impl ScmView {
 
     /// Discard the Changes of `files`, after asking: tracked files go back to the index's
     /// version, new ones to the Trash.
-    pub(crate) fn discard(
-        &mut self,
-        files: Vec<ScmFile>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn discard(&mut self, files: Vec<ScmFile>, window: &mut Window, cx: &mut Context<Self>) {
         if files.is_empty() {
             return;
         }
@@ -442,7 +432,7 @@ impl ScmView {
     }
 
     /// Commit what's staged, or everything when nothing is.
-    pub(crate) fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let msg = self.message.read(cx).value().trim().to_string();
         if msg.is_empty() {
             self.workspace.update(cx, |_, cx| {
@@ -498,7 +488,7 @@ impl ScmView {
     }
 
     /// Open `file`'s diff (from `list`) in an editor tab.
-    pub(crate) fn open_changes(
+    pub fn open_changes(
         &mut self,
         file: &ScmFile,
         staged: bool,
@@ -976,10 +966,10 @@ impl Render for ScmView {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl ScmView {
     /// The two lists: "S M a.rs", "C U b.rs".
-    pub(crate) fn describe(&self) -> Vec<String> {
+    pub fn describe(&self) -> Vec<String> {
         self.state
             .staged
             .iter()
@@ -993,16 +983,16 @@ impl ScmView {
             .collect()
     }
 
-    pub(crate) fn idle(&self) -> bool {
+    pub fn idle(&self) -> bool {
         !self.loading && self.busy.is_none()
     }
 
-    pub(crate) fn set_message(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn set_message(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.message
             .update(cx, |s, cx| s.set_value(text.to_string(), window, cx));
     }
 
-    pub(crate) fn file(&self, staged: bool, rel: &str) -> Option<ScmFile> {
+    pub fn file(&self, staged: bool, rel: &str) -> Option<ScmFile> {
         if staged {
             self.state.staged.iter()
         } else {

@@ -21,7 +21,7 @@ const EMERALD: (u32, u32) = (0x3FCF8E, 0x177D4E);
 const RED: (u32, u32) = (0xFF5A5F, 0xCC343A);
 const SKY: (u32, u32) = (0x5AA9FF, 0x2B6CC4);
 /// Links in agent answers: ember, a shade darker on Paper so it reads as body-size text.
-pub(crate) const LINK: (u32, u32) = (0xFF7A3D, 0xC2410C);
+pub const LINK: (u32, u32) = (0xFF7A3D, 0xC2410C);
 
 pub fn ember(cx: &App) -> Hsla {
     pick(cx, EMBER)

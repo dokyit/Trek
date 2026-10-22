@@ -30,7 +30,7 @@ use crate::assets::Lucide;
 
 const PLUGIN: &str = "trek-visualization";
 /// How long marks take to arrive the first time a visualization is drawn.
-pub(crate) const ENTER: Duration = Duration::from_millis(720);
+pub const ENTER: Duration = Duration::from_millis(720);
 /// How long a hovered mark takes to lift.
 const LIFT: Duration = Duration::from_millis(160);
 /// One sweep of the shimmer over a visualization still being written.
@@ -233,7 +233,7 @@ pub(super) struct VizState {
 pub struct Relayout(pub u64);
 impl Global for Relayout {}
 
-pub(crate) fn relayout(cx: &mut App) {
+pub fn relayout(cx: &mut App) {
     let n = cx.try_global::<Relayout>().map_or(0, |r| r.0);
     cx.set_global(Relayout(n + 1));
 }
@@ -261,7 +261,7 @@ fn entrance(hash: u64, motion: bool, window: &mut Window) -> f32 {
 }
 
 /// Motion is allowed: neither Trek's Reduce motion setting nor the system asks for less.
-pub(crate) fn motion(cx: &App) -> bool {
+pub fn motion(cx: &App) -> bool {
     match cx.try_global::<crate::workspace::GlobalWorkspace>() {
         Some(ws) => ws.0.read(cx).motion(cx),
         None => !cx.reduce_motion(),
@@ -270,7 +270,7 @@ pub(crate) fn motion(cx: &App) -> bool {
 
 /// The colours every part of an artifact draws with, from the theme.
 #[derive(Clone)]
-pub(crate) struct Look {
+pub struct Look {
     pub dark: bool,
     pub fg: Hsla,
     pub muted: Hsla,
@@ -287,7 +287,7 @@ pub(crate) struct Look {
 }
 
 impl Look {
-    pub(crate) fn of(cx: &App) -> Look {
+    pub fn of(cx: &App) -> Look {
         let theme = cx.theme();
         let dark = theme.mode.is_dark();
         Look {
@@ -415,7 +415,7 @@ impl Frame {
 
 /// Mark `ix` of `n`'s share of an entrance `enter` of the way through (0 to 1), eased: they
 /// arrive one after another, the last starting a third of the way in. Basecamp's bars too.
-pub(crate) fn arrive(enter: f32, ix: usize, n: usize) -> f32 {
+pub fn arrive(enter: f32, ix: usize, n: usize) -> f32 {
     if enter >= 1. {
         return 1.;
     }
@@ -571,7 +571,7 @@ fn kind_icon_named(kind: &str) -> Lucide {
 
 /// The card every artifact sits in: a hairline edge, raised a step off the column, and the
 /// light a glass pane catches along its top. (Callers add `test_support`, which wraps it.)
-pub(crate) fn shell(id: SharedString, look: &Look, cx: &App) -> Stateful<Div> {
+pub fn shell(id: SharedString, look: &Look, cx: &App) -> Stateful<Div> {
     let theme = cx.theme();
     let sheen_top = gpui_kit::white().opacity(if look.dark { 0.07 } else { 0.85 });
     let sheen = gpui_kit::white().opacity(if look.dark { 0.022 } else { 0.0 });
@@ -625,7 +625,7 @@ pub(crate) fn shell(id: SharedString, look: &Look, cx: &App) -> Stateful<Div> {
 
 /// The title row: what it is, its name, and what can be done with it; the summary runs the full
 /// width beneath, so a narrow column doesn't squeeze it beside the actions.
-pub(crate) fn header(
+pub fn header(
     icon: Lucide,
     title: AnyElement,
     actions: AnyElement,
@@ -662,7 +662,7 @@ pub(crate) fn header(
         .child(div().pl(px(32.)).child(summary))
 }
 
-pub(crate) fn title_text(title: impl Into<SharedString>, look: &Look) -> AnyElement {
+pub fn title_text(title: impl Into<SharedString>, look: &Look) -> AnyElement {
     div()
         .line_clamp(2)
         .text_size(px(13.5))
@@ -673,7 +673,7 @@ pub(crate) fn title_text(title: impl Into<SharedString>, look: &Look) -> AnyElem
         .into_any_element()
 }
 
-pub(crate) fn summary_text(summary: impl Into<SharedString>, look: &Look) -> AnyElement {
+pub fn summary_text(summary: impl Into<SharedString>, look: &Look) -> AnyElement {
     div()
         .text_size(px(12.))
         .line_height(relative(1.45))
@@ -684,7 +684,7 @@ pub(crate) fn summary_text(summary: impl Into<SharedString>, look: &Look) -> Any
 
 /// 0 to 1 and round again, once per `SHIMMER`, for everything still being drawn; it keeps
 /// frames coming while anything asks for it. Without motion it holds still at the middle.
-pub(crate) fn shimmer(motion: bool, window: &mut Window) -> f32 {
+pub fn shimmer(motion: bool, window: &mut Window) -> f32 {
     static START: LazyLock<Instant> = LazyLock::new(Instant::now);
     if !motion {
         return 0.5;
@@ -1209,7 +1209,7 @@ pub(super) fn readout(look: &Look) -> Div {
 }
 
 /// The inset surface marks sit on.
-pub(crate) fn inset(look: &Look) -> Div {
+pub fn inset(look: &Look) -> Div {
     div()
         .rounded(px(9.))
         .border_1()

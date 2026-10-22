@@ -23,20 +23,20 @@ use trek_core::file_kind::LineBreakdown;
 use trek_core::worktree::{self, Change, MergeBlock, Review, Worktree};
 
 #[derive(Clone, Debug)]
-pub(crate) struct FileChange {
-    pub(crate) path: String,
-    pub(crate) status: String,
-    pub(crate) additions: i64,
-    pub(crate) deletions: i64,
+pub struct FileChange {
+    pub path: String,
+    pub status: String,
+    pub additions: i64,
+    pub deletions: i64,
 }
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Snapshot {
-    pub(crate) is_repo: bool,
-    pub(crate) branch: String,
+pub struct Snapshot {
+    pub is_repo: bool,
+    pub branch: String,
     /// (behind, ahead) its upstream.
-    pub(crate) upstream: Option<(u32, u32)>,
-    pub(crate) files: Vec<FileChange>,
+    pub upstream: Option<(u32, u32)>,
+    pub files: Vec<FileChange>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -48,7 +48,7 @@ enum LineKind {
     Ctx,
 }
 
-pub(crate) fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
+pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     // No optional locks: a status refresh mustn't hold index.lock while a switch or commit runs.
     let out = trek_core::procs::command("git")
         .args(args)
@@ -66,7 +66,7 @@ pub(crate) fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
 
 /// `git` for questions that change nothing: through `trek_core::git::read_only`, so the folder's
 /// own config runs nothing (fsmonitor, hooks) and takes no lock.
-pub(crate) fn git_read(cwd: &Path, args: &[&str]) -> Result<String, String> {
+pub fn git_read(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let out = trek_core::git::read_only(cwd)
         .args(args)
         .output()
@@ -78,7 +78,7 @@ pub(crate) fn git_read(cwd: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-pub(crate) fn snapshot(cwd: &Path) -> Snapshot {
+pub fn snapshot(cwd: &Path) -> Snapshot {
     if git_read(cwd, &["rev-parse", "--is-inside-work-tree"]).is_err() {
         return Snapshot::default();
     }
@@ -460,8 +460,8 @@ impl GitPanel {
     }
 
     /// The diff pane's scroll offset, for tests.
-    #[cfg(test)]
-    pub(crate) fn diff_offset(&self) -> Point<Pixels> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn diff_offset(&self) -> Point<Pixels> {
         self.diff_scroll.offset()
     }
 
@@ -511,7 +511,7 @@ impl GitPanel {
     }
 
     /// The listed files' lines by kind of file, as the card over the counts breaks them down.
-    pub(crate) fn line_breakdown(&self) -> LineBreakdown {
+    pub fn line_breakdown(&self) -> LineBreakdown {
         line_breakdown(self.files())
     }
 
@@ -524,8 +524,8 @@ impl GitPanel {
     }
 
     /// The turn on show (its files) and the file selected, for tests.
-    #[cfg(test)]
-    pub(crate) fn turn_shown(&self) -> Option<(Vec<String>, Option<String>)> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn turn_shown(&self) -> Option<(Vec<String>, Option<String>)> {
         self.turn.as_ref().map(|t| {
             (
                 t.files.iter().map(|f| f.path.clone()).collect(),
@@ -891,8 +891,8 @@ impl GitPanel {
         );
     }
 
-    #[cfg(test)]
-    pub(crate) fn message_text(&self, cx: &App) -> String {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn message_text(&self, cx: &App) -> String {
         self.message.read(cx).value().to_string()
     }
 

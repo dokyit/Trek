@@ -17,7 +17,7 @@ const SECTION_RECENT: usize = 3;
 
 /// The run-state mark of a thread: a spinner while it works, amber when it needs the user, red
 /// when it failed, a quiet dot otherwise.
-pub(crate) fn state_mark(t: &Thread, cx: &App) -> AnyElement {
+pub fn state_mark(t: &Thread, cx: &App) -> AnyElement {
     let theme = cx.theme();
     match t.run_state {
         RunState::Working => Spinner::new()

@@ -275,9 +275,10 @@ fn prune(dir: &Path, today: chrono::NaiveDate) {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
     use super::*;
+    #[cfg(test)]
     use log::Log as _;
 
     /// What `f` logs on this thread, as the log file has it (no time, no colour).
@@ -403,7 +404,7 @@ pub(crate) mod tests {
         );
     }
 
-    fn scratch() -> PathBuf {
+    pub fn scratch() -> PathBuf {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
             "trek-logs-{}-{}",

@@ -228,7 +228,7 @@ impl Workspace {
     /// setting).
     pub fn push_alert(&mut self, message: &str, thread: &str) {
         let m = &self.settings.mobile;
-        if !m.push || m.push_topic.is_empty() || cfg!(test) {
+        if !m.push || m.push_topic.is_empty() || cfg!(any(test, feature = "test-support")) {
             return;
         }
         if !due(m.push_when, idle_seconds, screen_locked) {

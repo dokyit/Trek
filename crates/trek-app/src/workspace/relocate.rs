@@ -13,7 +13,7 @@ use trek_core::update::relocate::{self, Moved, Prepared, Relocated, Removal};
 
 /// Where a move is.
 #[derive(Default)]
-pub(crate) enum Moving {
+pub enum Moving {
     #[default]
     No,
     /// Trek's files are being copied and checked, off the main thread.
@@ -26,7 +26,7 @@ pub(crate) enum Moving {
 
 /// The steps of a move (and what follows it) that touch the machine, which tests replace.
 #[derive(Clone, Copy)]
-pub(crate) struct Mover {
+pub struct Mover {
     /// Copy Trek's files to their new folder and check them.
     pub copy: fn() -> anyhow::Result<Prepared>,
     /// Start the copy (in front or not) once this Trek has quit.
@@ -94,7 +94,7 @@ impl Workspace {
     /// At launch, from the copy of a Trek that moved: say where it runs now (a toast, with the
     /// button to remove the old copy when there is one), put the same offer on the Updates page
     /// until it's dealt with, and, if the move was just now, point the user's shortcuts here.
-    pub(crate) fn arrived(&mut self, relocated: Relocated, cx: &mut Context<Self>) {
+    pub fn arrived(&mut self, relocated: Relocated, cx: &mut Context<Self>) {
         let Relocated { moved, fresh } = relocated;
         // The page has it at once; the toast follows once the shortcuts have been looked through.
         self.old_copy = relocate::old_copy_remains(&moved.from).then(|| OldCopy {
@@ -319,7 +319,7 @@ impl Workspace {
 }
 
 /// What Trek says when the old copy was dealt with.
-pub(crate) fn removal_message(old: &Path, removal: &Removal) -> String {
+pub fn removal_message(old: &Path, removal: &Removal) -> String {
     match removal {
         Removal::Removed => format!("Removed the old copy of Trek in {}.", old.display()),
         Removal::Gone => format!("The old copy in {} is gone already.", old.display()),
@@ -334,7 +334,7 @@ pub(crate) fn removal_message(old: &Path, removal: &Removal) -> String {
 
 /// At launch, from the copy of a Trek that moved: where Trek runs now, the old copy to remove, and
 /// what became of the user's shortcuts.
-pub(crate) fn moved_note(moved: &Moved, shortcuts: &Report) -> (String, Option<UndoAction>) {
+pub fn moved_note(moved: &Moved, shortcuts: &Report) -> (String, Option<UndoAction>) {
     let runs = format!("Trek now runs from {}", moved.to.display());
     if !relocate::old_copy_remains(&moved.from) {
         return (with_shortcuts(&runs, shortcuts), None);
@@ -351,10 +351,7 @@ pub(crate) fn moved_note(moved: &Moved, shortcuts: &Report) -> (String, Option<U
 
 /// At launch, from a folder Windows's ransomware protection guards: the offer to move, every
 /// launch (it is a real problem every time).
-pub(crate) fn guarded_offer(
-    blocker: Option<Blocker>,
-    windows: bool,
-) -> Option<(String, UndoAction)> {
+pub fn guarded_offer(blocker: Option<Blocker>, windows: bool) -> Option<(String, UndoAction)> {
     let Some(Blocker::GuardedFolder(folder)) = blocker.filter(|_| windows) else {
         return None;
     };
@@ -368,6 +365,6 @@ pub(crate) fn guarded_offer(
 
 /// The toast for why the last update didn't install: when it was ransomware protection that
 /// refused, with the move on it.
-pub(crate) fn failure_offer(failure: &str, windows: bool) -> Option<UndoAction> {
+pub fn failure_offer(failure: &str, windows: bool) -> Option<UndoAction> {
     (windows && failure.contains("ransomware protection")).then_some(UndoAction::MoveTrek)
 }

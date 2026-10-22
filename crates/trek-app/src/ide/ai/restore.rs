@@ -6,11 +6,11 @@ use std::path::PathBuf;
 use trek_core::checkpoint::{Change, FileChange};
 
 /// Files a tooltip or a card lists before "and N more".
-pub(crate) const LISTED: usize = 8;
+pub const LISTED: usize = 8;
 
 /// The files restoring would change.
 #[derive(Debug, Clone)]
-pub(crate) enum Files {
+pub enum Files {
     Checking,
     Changes(Vec<FileChange>),
     Failed(String),
@@ -20,7 +20,7 @@ pub(crate) enum Files {
 
 impl Files {
     /// Nothing to put back: the files are as they were, or can't be.
-    pub(crate) fn nothing(&self) -> bool {
+    pub fn nothing(&self) -> bool {
         match self {
             Files::Unavailable(_) => true,
             Files::Changes(c) => c.iter().all(|f| !acts(f)),
@@ -30,12 +30,12 @@ impl Files {
 }
 
 /// A change restoring makes (nested repositories and newer files are left as they are).
-pub(crate) fn acts(f: &FileChange) -> bool {
+pub fn acts(f: &FileChange) -> bool {
     !matches!(f.change, Change::Nested | Change::Kept)
 }
 
 /// What restoring does to `f`: "revert", "delete", "bring back", "left as is".
-pub(crate) fn verb(f: &FileChange) -> &'static str {
+pub fn verb(f: &FileChange) -> &'static str {
     match f.change {
         Change::Modified => "revert",
         Change::Added => "delete",
@@ -45,7 +45,7 @@ pub(crate) fn verb(f: &FileChange) -> &'static str {
 }
 
 /// "Restore 3 files", and a tooltip listing them.
-pub(crate) fn summary(changes: &[FileChange]) -> (String, String) {
+pub fn summary(changes: &[FileChange]) -> (String, String) {
     let acting: Vec<&FileChange> = changes.iter().filter(|f| acts(f)).collect();
     let mut tip = String::from("Put the files back as they were when this message was first sent:");
     for f in acting.iter().take(LISTED) {
@@ -63,7 +63,7 @@ pub(crate) fn summary(changes: &[FileChange]) -> (String, String) {
 
 /// The checkpoint `item` of `thread` would restore from (its repository and commit), or why
 /// there's none.
-pub(crate) fn checkpoint(
+pub fn checkpoint(
     ws: &crate::workspace::Workspace,
     thread: &str,
     item: &str,
@@ -79,7 +79,7 @@ pub(crate) fn checkpoint(
 }
 
 /// What restoring to `sha` of `repo` changes (run off the main thread).
-pub(crate) fn read(repo: PathBuf, sha: String) -> Files {
+pub fn read(repo: PathBuf, sha: String) -> Files {
     let result = trek_core::checkpoint::Repo::find(&repo)
         .ok_or_else(|| anyhow::anyhow!("{} isn't a git repository any more", repo.display()))
         .and_then(|r| r.changes_since(&sha));

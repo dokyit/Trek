@@ -154,7 +154,7 @@ const PART_MIN: usize = 2_000;
 /// `SPLIT_FROM` aren't cut, nor are those with a link reference definition (`[1]: https://…`):
 /// a document resolves `[text][1]` only against the definitions it holds itself, and the
 /// definitions come last. One that arrives late takes the cuts made so far back.
-pub(crate) fn answer_parts(text: &str) -> Vec<usize> {
+pub fn answer_parts(text: &str) -> Vec<usize> {
     let mut cuts = vec![];
     if text.len() < SPLIT_FROM {
         return cuts;
@@ -322,7 +322,7 @@ fn split_long_answers(rows: Vec<Row>, item_row: Vec<usize>, items: &[Item]) -> R
 }
 
 /// Part `n` of `text` cut at `cuts`, or `None` past the last.
-pub(crate) fn part_of<'a>(text: &'a str, cuts: &[usize], n: usize) -> Option<&'a str> {
+pub fn part_of<'a>(text: &'a str, cuts: &[usize], n: usize) -> Option<&'a str> {
     let start = if n == 0 { 0 } else { *cuts.get(n - 1)? };
     let end = cuts.get(n).copied().unwrap_or(text.len());
     text.get(start..end)
@@ -587,7 +587,7 @@ struct Shown {
 
 /// One side of a handoff divider: the model with its agent's name ("Claude Opus 5.5", "Codex
 /// Sol"), as a model's name alone can be ambiguous; the agent's alone without one.
-pub(crate) fn handoff_name(agent: &trek_core::AgentId, model: Option<&str>) -> String {
+pub fn handoff_name(agent: &trek_core::AgentId, model: Option<&str>) -> String {
     let agent_name = match agent {
         trek_core::AgentId::ClaudeCode => "Claude".to_string(),
         other => other.display_name(),
@@ -609,7 +609,7 @@ pub(crate) fn handoff_name(agent: &trek_core::AgentId, model: Option<&str>) -> S
 }
 
 /// What a usage-limit row says after "Usage limit reached": "5-hour limit resets 3:27 PM".
-pub(crate) fn limit_when(
+pub fn limit_when(
     scope: &trek_core::limit::LimitScope,
     resets_at: Option<i64>,
     now: i64,
@@ -4019,24 +4019,24 @@ impl ThreadView {
 }
 
 /// What a sub-agent row shows.
-pub(crate) struct SubAgentRow {
+pub struct SubAgentRow {
     /// Whose logo it wears: the agent running it.
-    pub(crate) agent: Option<trek_core::AgentId>,
+    pub agent: Option<trek_core::AgentId>,
     /// "Sol: Review the cache design"
-    pub(crate) label: String,
+    pub label: String,
     /// Where it stands, and what it's doing or why it failed.
-    pub(crate) detail: String,
-    pub(crate) state: TaskState,
-    pub(crate) elapsed: Option<std::time::Duration>,
+    pub detail: String,
+    pub state: TaskState,
+    pub elapsed: Option<std::time::Duration>,
     /// The thread it runs in, for one Trek runs.
-    pub(crate) child: Option<String>,
+    pub child: Option<String>,
     /// What it's doing, while it works: its latest calls, as the working bar shows its parent's.
-    pub(crate) activity: Option<crate::working_bar::Group>,
+    pub activity: Option<crate::working_bar::Group>,
 }
 
 impl SubAgentRow {
     /// The row for transcript item `row_id` of `thread` (whose agent is `agent`).
-    pub(crate) fn read(
+    pub fn read(
         ws: &Workspace,
         thread: &str,
         agent: &trek_core::AgentId,
@@ -4212,8 +4212,8 @@ struct RowContext {
 
 impl Render for ThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        crate::tests::rendered("ThreadView");
+        #[cfg(any(test, feature = "test-support"))]
+        crate::test_support::rendered("ThreadView");
         self.draws += 1;
         let rows = self.rows(cx);
         let footer = self.live_footer(window, cx);
@@ -4333,7 +4333,7 @@ impl Render for ThreadView {
 const TAIL_ROOM: f32 = JUMP_FADE + JUMP_BAND;
 /// The band "Jump to latest" sits in while the reader is scrolled up: the text above fades into
 /// it over `JUMP_FADE`, and the button has the solid rest to itself, never lying over a line.
-pub(crate) const JUMP_FADE: f32 = 16.;
+pub const JUMP_FADE: f32 = 16.;
 const JUMP_BAND: f32 = 36.;
 const JUMP_IN: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -4404,38 +4404,38 @@ impl ThreadView {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl ThreadView {
     /// Scroll the transcript to its first row, as a reader going back up would.
-    pub(crate) fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
+    pub fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
         self.scroller
             .update(cx, |s, cx| _ = s.scroll_to_item(0, cx));
     }
 
     /// Whether the transcript redraws on a ticker, and at the working bar's rate if so.
-    pub(crate) fn ticker(&self) -> Option<bool> {
+    pub fn ticker(&self) -> Option<bool> {
         self._ticker.as_ref().map(|(fast, _)| *fast)
     }
 
     /// The question card's masked field for its `n`th secret question.
-    pub(crate) fn secret_field(&self, n: usize) -> Entity<InputState> {
+    pub fn secret_field(&self, n: usize) -> Entity<InputState> {
         self.secrets.1[n].0.clone()
     }
 
     /// Subscriptions this view holds besides its scroller's and its secret fields' own: the same
     /// however many threads it has shown.
-    pub(crate) fn subscription_count(&self) -> usize {
+    pub fn subscription_count(&self) -> usize {
         self._subscriptions.len()
     }
 
     /// The scroller on screen, to check what observes it.
-    pub(crate) fn scroller(&self) -> Entity<MessageScrollerState> {
+    pub fn scroller(&self) -> Entity<MessageScrollerState> {
         self.scroller.clone()
     }
 
     /// The open confirmation's files: "checking", "changes: <paths>", "unavailable" or
     /// "failed"; `None` when none is open.
-    pub(crate) fn confirm_files(&self) -> Option<String> {
+    pub fn confirm_files(&self) -> Option<String> {
         self.confirm.as_ref().map(|c| match &c.files {
             Files::Checking => "checking".to_string(),
             Files::Changes(v) => format!(
@@ -4451,13 +4451,13 @@ impl ThreadView {
     }
 
     /// Markdown documents built so far.
-    pub(crate) fn markdown_states(&self) -> usize {
+    pub fn markdown_states(&self) -> usize {
         self.md.len()
     }
 
     /// The markdown documents built so far, by where their item is in the transcript now (a long
     /// answer's parts in order).
-    pub(crate) fn markdown_documents(&self, cx: &App) -> Vec<(usize, Entity<TextViewState>)> {
+    pub fn markdown_documents(&self, cx: &App) -> Vec<(usize, Entity<TextViewState>)> {
         let ws = self.workspace.read(cx);
         let Some(l) = self.current.as_ref().and_then(|id| ws.live.get(id)) else {
             return vec![];
@@ -4473,7 +4473,7 @@ impl ThreadView {
 
     /// The turns' changes as their cards list them, in order: "changes (2): +3 −1", then
     /// "  NOTES.md new +3 −0" per file. Only what has been worked out (cards drawn).
-    pub(crate) fn describe_changes(&self, cx: &App) -> Vec<String> {
+    pub fn describe_changes(&self, cx: &App) -> Vec<String> {
         let ws = self.workspace.read(cx);
         let thread = self.current.clone().unwrap_or_default();
         let Some(live) = ws.live.get(&thread) else {
@@ -4507,7 +4507,7 @@ impl ThreadView {
     /// The rows as text: "user", "assistant", "group: Ran 1 command" (with "  tool: Read" lines
     /// under an open group), "subagent: Sol: Review (Running)" (with "  Read src/main.rs" lines
     /// of its activity, opened), "wake", "end", "notice", "error".
-    pub(crate) fn describe(&self, cx: &App) -> Vec<String> {
+    pub fn describe(&self, cx: &App) -> Vec<String> {
         let ws = self.workspace.read(cx);
         let thread = self.current.clone().unwrap_or_default();
         let agent = ws

@@ -16,11 +16,19 @@ use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
 /// How long a new connection has to say hello. Shorter in tests, so the one that waits it out
 /// doesn't hold them up; not shorter than a loaded runner can take to get a thread running
 /// (a client that stalls past it is dropped, and its test fails with "closed").
-const HELLO_WITHIN: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 5 });
+const HELLO_WITHIN: Duration = Duration::from_secs(if cfg!(any(test, feature = "test-support")) {
+    3
+} else {
+    5
+});
 /// How long `delegate_task` with `wait` waits unless asked otherwise, and the bounds it may ask for.
 pub const WAIT_DEFAULT: Duration = Duration::from_secs(600);
 /// Shorter in tests, so a wait that runs out doesn't hold them up.
-const WAIT_MIN: u64 = if cfg!(test) { 1 } else { 10 };
+const WAIT_MIN: u64 = if cfg!(any(test, feature = "test-support")) {
+    1
+} else {
+    10
+};
 const WAIT_MAX: u64 = 1800;
 
 /// A tool call from an agent's session, for the workspace to answer.
@@ -125,7 +133,7 @@ impl IpcServer {
         ]
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn client(&self, key: &str) -> trek_ipc::Client {
         trek_ipc::Client {
             socket: self.path.clone(),

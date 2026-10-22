@@ -30,11 +30,11 @@ use trek_core::settings::FollowUp;
 use trek_core::{AgentId, Effort, HandHolding, RunState};
 
 mod machine_chip;
-pub(crate) use machine_chip::reach_dot;
-pub(crate) mod pickers;
-pub(crate) mod voice;
+pub use machine_chip::reach_dot;
+pub mod pickers;
+pub mod voice;
 
-pub(crate) use pickers::{PickerHost, Pickers};
+pub use pickers::{PickerHost, Pickers};
 
 pub struct Composer {
     workspace: Entity<Workspace>,
@@ -136,7 +136,7 @@ pub fn same_model(id: &str, candidate: &str) -> bool {
 }
 
 /// Display name for a model id.
-pub(crate) fn model_name(models: &[ModelInfo], id: &str) -> String {
+pub fn model_name(models: &[ModelInfo], id: &str) -> String {
     models
         .iter()
         .find(|i| same_model(id, &i.id))
@@ -145,7 +145,7 @@ pub(crate) fn model_name(models: &[ModelInfo], id: &str) -> String {
 }
 
 /// The agent's default when the thread hasn't picked one: Opus 5.5 for Claude, the first live model otherwise.
-pub(crate) fn default_model(models: &[ModelInfo]) -> Option<&ModelInfo> {
+pub fn default_model(models: &[ModelInfo]) -> Option<&ModelInfo> {
     models
         .iter()
         .find(|m| m.id == "claude-opus-5-5")
@@ -154,7 +154,7 @@ pub(crate) fn default_model(models: &[ModelInfo]) -> Option<&ModelInfo> {
 
 /// `/consult`'s models and message, split at the first colon followed by a space (or ending
 /// it): model ids may have colons of their own (`qwen2.5-coder:7b`).
-pub(crate) fn consult_split(rest: &str) -> Option<(&str, &str)> {
+pub fn consult_split(rest: &str) -> Option<(&str, &str)> {
     let at = rest
         .char_indices()
         .find(|&(i, c)| c == ':' && rest[i + 1..].chars().next().is_none_or(char::is_whitespace))?
@@ -164,7 +164,7 @@ pub(crate) fn consult_split(rest: &str) -> Option<(&str, &str)> {
 
 /// `/restate` alone (`Some(None)`), or with the message to send (`Some(Some(message))`); `None`
 /// when `text` isn't the command.
-pub(crate) fn restate_command(text: &str) -> Option<Option<String>> {
+pub fn restate_command(text: &str) -> Option<Option<String>> {
     let rest = text.trim_start().strip_prefix("/restate")?;
     let rest = rest.strip_prefix(':').unwrap_or(rest);
     if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
@@ -175,7 +175,7 @@ pub(crate) fn restate_command(text: &str) -> Option<Option<String>> {
 }
 
 /// A consultant on `model` of `agent`, at `effort` (High, unless asked) within what the model takes.
-pub(crate) fn consultant(agent: AgentId, model: &ModelInfo, effort: Option<Effort>) -> Consultant {
+pub fn consultant(agent: AgentId, model: &ModelInfo, effort: Option<Effort>) -> Consultant {
     let effort = effort.unwrap_or(Effort::High);
     let effort = if model.efforts.is_empty() {
         effort
@@ -191,10 +191,7 @@ pub(crate) fn consultant(agent: AgentId, model: &ModelInfo, effort: Option<Effor
 
 /// The model `query` names among the agents the user can pick: by id or name, whole or in part
 /// ("sol", "opus 5.5", "gpt-5.6-luna"), optionally after its agent ("codex sol").
-pub(crate) fn find_model(
-    ws: &crate::workspace::Workspace,
-    query: &str,
-) -> Option<(AgentId, ModelInfo)> {
+pub fn find_model(ws: &crate::workspace::Workspace, query: &str) -> Option<(AgentId, ModelInfo)> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
         return None;
@@ -226,7 +223,7 @@ pub(crate) fn find_model(
 
 /// Every model on offer for an arena, each agent's default first, then its others, smartest
 /// first.
-pub(crate) fn arena_options(ws: &crate::workspace::Workspace) -> Vec<(AgentId, ModelInfo)> {
+pub fn arena_options(ws: &crate::workspace::Workspace) -> Vec<(AgentId, ModelInfo)> {
     let (mut defaults, mut others) = (vec![], vec![]);
     for agent in ws.ready_agents() {
         let mut models = ws.models_for(&agent);
@@ -244,7 +241,7 @@ pub(crate) fn arena_options(ws: &crate::workspace::Workspace) -> Vec<(AgentId, M
     defaults
 }
 
-pub(crate) fn hand_icon(level: HandHolding) -> Icon {
+pub fn hand_icon(level: HandHolding) -> Icon {
     match level {
         HandHolding::Supervised => Icon::new(crate::assets::Lucide::Lock),
         HandHolding::AutoAcceptEdits => Icon::new(crate::assets::Lucide::FilePen),
@@ -1115,29 +1112,29 @@ impl Composer {
         });
     }
 
-    #[cfg(test)]
-    pub(crate) fn text(&self, cx: &App) -> String {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn text(&self, cx: &App) -> String {
         self.input.read(cx).value().to_string()
     }
 
     /// The open picker's rows, by label.
-    #[cfg(test)]
-    pub(crate) fn picks(&self, cx: &App) -> Vec<String> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn picks(&self, cx: &App) -> Vec<String> {
         pickers::picker_items(self, cx)
             .into_iter()
             .map(|i| i.label)
             .collect()
     }
 
-    #[cfg(test)]
-    pub(crate) fn slash_completion(&self, cx: &App) -> (Option<String>, usize, usize) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn slash_completion(&self, cx: &App) -> (Option<String>, usize, usize) {
         let s = self.input.read(cx);
         (pickers::slash_ghost(self, cx), s.tokens().len(), s.cursor())
     }
 
     /// The consultants picked for the next message (`agent/model/effort`), and whether they stay.
-    #[cfg(test)]
-    pub(crate) fn consultants(&self) -> (Vec<String>, bool) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn consultants(&self) -> (Vec<String>, bool) {
         (
             self.consult
                 .consultants
@@ -1149,31 +1146,31 @@ impl Composer {
     }
 
     /// Whether the next message asks for a restatement first.
-    #[cfg(test)]
-    pub(crate) fn restating(&self) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn restating(&self) -> bool {
         self.restate
     }
 
     /// The judge an arena sent now would name.
-    #[cfg(test)]
-    pub(crate) fn judge(&self, cx: &App) -> Option<String> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn judge(&self, cx: &App) -> Option<String> {
         self.arena_judge(cx).map(|j| j.key())
     }
 
     /// Images attached to the next message, and how many are still being saved.
-    #[cfg(test)]
-    pub(crate) fn attached(&self) -> (Vec<PathBuf>, usize) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn attached(&self) -> (Vec<PathBuf>, usize) {
         (self.outbox.paths.clone(), self.outbox.saving)
     }
 
     /// A snapshot is waiting on Snipping Tool.
-    #[cfg(test)]
-    pub(crate) fn snapshot_waiting(&self) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn snapshot_waiting(&self) -> bool {
         self.screenclip.is_some()
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |s, cx| s.set_value(text, window, cx));
     }
 
@@ -1220,17 +1217,12 @@ impl Composer {
     }
 
     /// The mic button: open voice mode (a take), or confirm the one that's open.
-    pub(crate) fn dictate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn dictate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.voice_step(voice::Event::Mic, window, cx);
     }
 
     /// Move voice mode on (`voice::Voice::step`) and do what that calls for.
-    pub(crate) fn voice_step(
-        &mut self,
-        event: voice::Event,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn voice_step(&mut self, event: voice::Event, window: &mut Window, cx: &mut Context<Self>) {
         let effect = self.voice.step(event);
         if effect.ask {
             self.ask_to_dictate(window, cx);
@@ -1299,7 +1291,7 @@ impl Composer {
 
     /// The take is open: the waveform row replaces the toolbar, results feed the preview, and
     /// the levels tick at 20 fps.
-    pub(crate) fn begin_voice(
+    pub fn begin_voice(
         &mut self,
         live: bool,
         results: async_channel::Receiver<dictate::Heard>,
@@ -1359,12 +1351,7 @@ impl Composer {
     /// `dictate-file` verb, exercising Speech and the insert path without the mic: voice mode
     /// opens already settling (✓ spinning) and the text goes in when Speech is done.
     #[cfg(feature = "shots")]
-    pub(crate) fn dictate_file(
-        &mut self,
-        file: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn dictate_file(&mut self, file: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let (heard, results) = async_channel::unbounded();
         match dictate::transcribe_file(file, heard) {
             Ok(d) => {
@@ -1410,13 +1397,13 @@ impl Composer {
     }
 
     /// The text heard so far as the preview shows it, and where the interim part is.
-    #[cfg(test)]
-    pub(crate) fn voice_preview_text(&self) -> (String, std::ops::Range<usize>) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn voice_preview_text(&self) -> (String, std::ops::Range<usize>) {
         self.voice.preview()
     }
 
-    #[cfg(test)]
-    pub(crate) fn voice_phase(&self) -> voice::Phase {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn voice_phase(&self) -> voice::Phase {
         self.voice.phase
     }
 
@@ -1495,7 +1482,7 @@ impl Composer {
     }
 
     /// `@path` references after what's typed, the caret behind them.
-    pub(crate) fn append_file_refs(
+    pub fn append_file_refs(
         &mut self,
         files: &[PathBuf],
         window: &mut Window,
@@ -1590,7 +1577,7 @@ impl Composer {
     /// Windows: open Snipping Tool's overlay and attach what is picked in it, which it puts on the
     /// clipboard (`screenclip`). Asking again while waiting gives up on the snip, quietly: a snip
     /// that is cancelled in the overlay leaves nothing to tell it by.
-    pub(crate) fn snapshot_by_screenclip(&mut self, cx: &mut Context<Self>) {
+    pub fn snapshot_by_screenclip(&mut self, cx: &mut Context<Self>) {
         if self.snapshotting {
             if self.screenclip.take().is_some() {
                 self.snapshotting = false;
@@ -3072,8 +3059,8 @@ const NARROW: f32 = 440.;
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(test)]
-        crate::tests::rendered("Composer");
+        #[cfg(any(test, feature = "test-support"))]
+        crate::test_support::rendered("Composer");
         let ws = self.workspace.read(cx);
         let prefs = ws.prefs_in(&self.scope);
         let thread = ws.thread_in(&self.scope).cloned();
@@ -3673,7 +3660,7 @@ fn placeholder(running: Option<FollowUp>) -> std::borrow::Cow<'static, str> {
 
 /// The send button's tooltip: which keys send and add a line, and while a turn runs (`running`),
 /// which key steers it and which queues for after it.
-pub(crate) fn delivery_hint(cmd_enter: bool, follow: FollowUp, running: bool) -> String {
+pub fn delivery_hint(cmd_enter: bool, follow: FollowUp, running: bool) -> String {
     let (send, line) = if cmd_enter {
         ("⌘↩", "↩")
     } else {

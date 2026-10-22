@@ -427,7 +427,7 @@ impl Tray {
 /// reopened if it was closed. macOS activates the app, which brings its windows; Windows has no
 /// app to activate (GPUI's `activate` does nothing there), so the main window is brought forward
 /// itself.
-pub(crate) fn open_trek(ws: &Entity<Workspace>, cx: &mut App) {
+pub fn open_trek(ws: &Entity<Workspace>, cx: &mut App) {
     cx.activate(true);
     if cfg!(windows) || ws.read(cx).main_window.is_none() {
         crate::root::show_main(ws.clone(), cx);

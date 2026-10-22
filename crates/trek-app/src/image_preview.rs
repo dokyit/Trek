@@ -84,14 +84,14 @@ fn show(
 
 /// What shows a file Trek doesn't draw itself (PDFs, SVGs, HEIC photos).
 #[derive(Debug, PartialEq, Eq)]
-enum Viewer {
+pub enum Viewer {
     /// macOS's Quick Look.
     QuickLook,
     /// The app the system opens that kind of file with (Windows has no Quick Look).
     DefaultApp,
 }
 
-fn viewer(windows: bool) -> Viewer {
+pub fn viewer(windows: bool) -> Viewer {
     if windows {
         Viewer::DefaultApp
     } else {
@@ -100,11 +100,11 @@ fn viewer(windows: bool) -> Viewer {
 }
 
 /// Show `path` as `viewer` does, for files Trek doesn't draw itself.
-#[cfg_attr(test, allow(unused_variables))]
+#[cfg_attr(any(test, feature = "test-support"), allow(unused_variables))]
 fn quick_look(path: &Path, cx: &mut App) {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     QUICK_LOOKED.with(|q| q.borrow_mut().push(path.to_path_buf()));
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     match viewer(cfg!(windows)) {
         Viewer::DefaultApp => cx.open_with_system(path),
         Viewer::QuickLook => {
@@ -124,7 +124,7 @@ fn quick_look(path: &Path, cx: &mut App) {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// What went to Quick Look in this test (nothing is launched).
     pub static QUICK_LOOKED: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -295,25 +295,25 @@ impl ImagePreview {
     }
 
     /// Still drawn: open, or on its way out.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn is_mounted(&self) -> bool {
         self.showing.is_mounted()
     }
 
     /// Whether the image is drawn at actual pixels (open or going).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn is_actual(&self) -> bool {
         self.showing.item().is_some_and(|s| s.actual)
     }
 
     /// The thumbnail it grows from and shrinks back to, if there is one on screen.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn source(&self) -> Option<Bounds<Pixels>> {
         self.showing.item().and_then(|s| s.from)
     }
 
     /// The image on screen and whether it's at actual pixels.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn current(&self) -> Option<(PathBuf, bool)> {
         self.showing
             .item()
@@ -600,7 +600,7 @@ fn format_of(path: &Path) -> ImageFormat {
 }
 
 /// A file's size as Finder gives it (decimal units).
-pub(crate) fn file_size(bytes: u64) -> String {
+pub fn file_size(bytes: u64) -> String {
     match bytes {
         b if b >= 1_000_000_000 => format!("{:.1} GB", b as f64 / 1e9),
         b if b >= 1_000_000 => format!("{:.1} MB", b as f64 / 1e6),
@@ -624,7 +624,7 @@ fn meta(s: &Showing) -> String {
 }
 
 /// Keep a pan offset on the image: offsets run from 0 (top left) down to minus the overhang.
-pub(crate) fn clamp_offset(
+pub fn clamp_offset(
     offset: Point<Pixels>,
     content: Size<Pixels>,
     area: Size<Pixels>,
