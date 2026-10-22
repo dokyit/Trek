@@ -145,6 +145,7 @@ pub fn placement(item: &Item) -> Place {
         Item::Tool { id, title, .. }
             if orch::task_of_row(id).is_some()
                 || trek_core::lineage::of_row(id).is_some()
+                || crate::pr_card::of_row(id).is_some()
                 || title == "Subagent" =>
         {
             Place::Own

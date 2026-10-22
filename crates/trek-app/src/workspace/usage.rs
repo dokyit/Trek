@@ -268,6 +268,14 @@ impl Workspace {
             .collect()
     }
 
+    /// Read `agent`'s plan limits for the context card, even when the Usage card doesn't show
+    /// it: the agent's own report, which sends no prompt. Nothing when it can't be read.
+    pub fn read_usage_for(&mut self, agent: AgentId, cx: &mut Context<Self>) {
+        if self.usage_readable(&agent) {
+            self.fetch_usage(agent, false, cx);
+        }
+    }
+
     /// Whether `agent`'s usage can be read on its own (`fetch_usage`): Claude Code's and Codex's,
     /// or any agent's a test answers for. Devin's is read apart (`refresh_devin_usage`).
     fn usage_readable(&self, agent: &AgentId) -> bool {

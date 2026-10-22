@@ -2570,6 +2570,12 @@ fn item_body(
         Item::Tool { id, detail, .. } if trek_core::lineage::of_row(id).is_some() => {
             thread_link(ws, id, detail)
         }
+        // A PR/release card (`pr_card`): the phone gets its one-line form.
+        Item::Tool { id, detail, .. } if crate::pr_card::of_row(id).is_some() => {
+            tr::ItemBody::Notice {
+                text: clip_text(&crate::pr_card::summary(detail)),
+            }
+        }
         Item::Tool {
             id: call,
             title,

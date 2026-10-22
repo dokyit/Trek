@@ -300,6 +300,8 @@ enum Script {
     Verify {
         broken: bool,
     },
+    /// `/compact`: fold the conversation, and report a smaller context window.
+    Compact,
 }
 
 impl Script {
@@ -327,6 +329,10 @@ impl Script {
         }
         if text.contains(trek_core::skills::MAINTAIN_VERIFICATION) {
             return Script::MaintainVerification;
+        }
+        // The agent's own command (Trek sends it through as the user typed it).
+        if text.trim() == "/compact" {
+            return Script::Compact;
         }
         // As written (a file name keeps its case), and lowercased for the keywords.
         let raw: Vec<&str> = text
@@ -505,6 +511,7 @@ pub fn title(request: &str) -> String {
         Script::Error => "Fix the failing build",
         Script::Write(_) => "Add a note",
         Script::InlineEdit { .. } => "Edit the selection",
+        Script::Compact => "Compacted the conversation",
         Script::Recall => "What was said",
         Script::Told => "What Trek said",
         Script::Mcp => "List the MCP servers",
@@ -1107,6 +1114,7 @@ impl Session {
             Script::History(rounds) => self.history(rounds).await?,
             Script::Write(file) => self.write(file.as_deref().unwrap_or("NOTES.md")).await?,
             Script::InlineEdit { path, lines } => self.inline_edit(&path, lines).await?,
+            Script::Compact => self.compact().await?,
             Script::Recall => {
                 let mut said = remembered(&self.native_id);
                 said.pop();
@@ -2965,6 +2973,25 @@ impl Session {
 const MAX_HISTORY: u32 = 5000;
 
 impl Session {
+    /// `/compact`: what a real agent does when asked — fold the conversation so far into a
+    /// summary, which leaves the context window much emptier.
+    async fn compact(&mut self) -> Step {
+        // Summarizing takes a moment, as it does for a real agent.
+        tokio::time::sleep(paced(1_500)).await;
+        let before = self.context;
+        self.context = (before * 30 / 100).max(2_000);
+        self.emit(AgentEvent::Context {
+            used: self.context,
+            window: WINDOW,
+        })
+        .await?;
+        self.say(&format!(
+            "Compacted the conversation so far: {} tokens freed.",
+            before - self.context
+        ))
+        .await
+    }
+
     /// `rounds` rounds of work, as fast as Trek takes them: a thought, a read, a search, an edit
     /// (with its lines) and an answer using markdown, a code block and a table.
     async fn history(&mut self, rounds: u32) -> Step {
@@ -3581,6 +3608,11 @@ mod tests {
             Script::parse("turn the page", false),
             Script::Answer,
             "bare `page` is just a word"
+        );
+        assert_eq!(
+            Script::parse("/compact", false),
+            Script::Compact,
+            "the agent's own command"
         );
         assert_eq!(
             Script::parse("mock:write CHANGELOG.md", false),

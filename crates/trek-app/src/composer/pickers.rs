@@ -112,34 +112,22 @@ pub fn update_prefs<H: PickerHost>(host: &H, cx: &mut App, f: impl FnOnce(&mut P
 
 /// Below this share of the context window the ring stays out of the way.
 const CONTEXT_QUIET: f32 = 0.2;
-/// From this share the ring says how much is used.
-const CONTEXT_NEAR: f32 = 0.6;
 
 /// MonoCode-style context meter: a ring that fills as the context window does. Hidden below
-/// `CONTEXT_QUIET`; the percentage beside it from `CONTEXT_NEAR`, on hover before that.
+/// `CONTEXT_QUIET`; the percentage beside it from `context_popover::NEAR`, on hover before that.
 pub fn context_ring(used: u64, window: u64, cx: &App) -> AnyElement {
     let theme = cx.theme().clone();
-    let frac = (used as f32 / window.max(1) as f32).clamp(0.0, 1.0);
+    let frac = crate::context_popover::fraction(used, window);
     // Early in a thread there's nothing to watch, and a faint ring reads as a spinner.
     if frac < CONTEXT_QUIET {
         return div().into_any_element();
     }
-    let color = if frac >= 0.9 {
-        palette::red(cx)
-    } else if frac >= 0.75 {
-        palette::amber(cx)
-    } else {
-        theme.foreground.opacity(0.75)
-    };
-    let track = theme.foreground.opacity(0.14);
-    let percent = format!("{:.0}%", frac * 100.);
-    let tip_title = format!("{percent} of the context used");
-    let tip_detail = format!(
-        "{} / {} tokens",
+    let tip = format!(
+        "Context {:.0}% · {} of {}",
+        frac * 100.,
         crate::workspace::fmt_tokens(used),
         crate::workspace::fmt_tokens(window)
     );
-    let near = frac >= CONTEXT_NEAR;
     h_flex()
         .id("context-ring")
         .test_support()
@@ -151,66 +139,11 @@ pub fn context_ring(used: u64, window: u64, cx: &App) -> AnyElement {
         .items_center()
         .justify_center()
         .rounded(px(8.))
-        // Near the limit the share is spelled out; before that it's on hover.
-        .when(near, |el| {
-            el.child(
-                div()
-                    .text_xs()
-                    .text_color(if frac >= 0.75 {
-                        color
-                    } else {
-                        theme.muted_foreground
-                    })
-                    .child(percent),
-            )
-        })
         .hover(|s| s.bg(theme.foreground.opacity(0.065)))
         .tooltip(move |window, cx| {
-            let (t, d) = (tip_title.clone(), tip_detail.clone());
-            gpui_kit::component::tooltip::Tooltip::element(move |_, cx| {
-                v_flex()
-                    .gap(px(2.))
-                    .child(div().text_sm().font_medium().child(t.clone()))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(d.clone()),
-                    )
-            })
-            .build(window, cx)
+            gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
         })
-        .child(
-            canvas(
-                |_, _, _| {},
-                move |bounds, _, window, _| {
-                    let c = bounds.center();
-                    let r = bounds.size.width.min(bounds.size.height) / 2. - px(1.5);
-                    let ring = |from: f32, to: f32, color: Hsla, window: &mut Window| {
-                        let steps = ((to - from) * 96.).ceil().max(2.) as usize;
-                        let mut path = PathBuilder::stroke(px(2.));
-                        for i in 0..=steps {
-                            let t = from + (to - from) * i as f32 / steps as f32;
-                            let a = t * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-                            let p = point(c.x + r * a.cos(), c.y + r * a.sin());
-                            if i == 0 {
-                                path.move_to(p)
-                            } else {
-                                path.line_to(p)
-                            }
-                        }
-                        if let Ok(p) = path.build() {
-                            window.paint_path(p, color);
-                        }
-                    };
-                    ring(0.0, 1.0, track, window);
-                    if frac > 0.004 {
-                        ring(0.0, frac, color, window);
-                    }
-                },
-            )
-            .size(px(16.)),
-        )
+        .child(crate::context_popover::dial(used, window, cx))
         .into_any_element()
 }
 
