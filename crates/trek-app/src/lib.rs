@@ -34,7 +34,7 @@ pub mod logging;
 pub mod lsp_client;
 pub mod machines;
 pub mod mascot;
-pub mod math;
+pub use trek_math as math;
 pub mod md;
 pub mod mentions;
 pub mod motion;

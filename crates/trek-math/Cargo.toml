@@ -1,0 +1,9 @@
+[package]
+name = "trek-math"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TeX in answers, typeset natively: detect, parse, lay out and draw with GPUI."
+
+[dependencies]
+gpui-kit.workspace = true
