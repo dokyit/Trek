@@ -67,3 +67,9 @@ gpui-base = { path = "vendor/gpui-base" }
 # it, so capture and test runs (TREK_SHOT_DIR, TREK_BACKGROUND) never put a Trek tile in the
 # Dock. See "Trek:" in vendor/gpui-pre-macos/src/platform.rs.
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
+# And to gpui-pre: a visible tooltip checks the mouse against its element's hitbox in the frame
+# being drawn, not the bounds it had when it appeared, so one whose element moved out from under a
+# still mouse (a scroll, an answer streaming in, a row's hover-only buttons going away) goes away
+# instead of staying until the mouse moves. See "Trek:" in vendor/gpui-pre/src/{window.rs,
+# elements/div.rs}.
+gpui-pre = { path = "vendor/gpui-pre" }
