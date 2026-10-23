@@ -528,10 +528,19 @@ final class AppModel {
     }
 
     /// Keeps each opened thread's store in step with its row, and the tab bar's counts.
+    ///
+    /// Never animated, though the list's change may be (a row moving between sections): an open
+    /// thread reads its row (whether it works, its sub-agents) and would animate its whole
+    /// transcript with it, its rows sliding and fading over each other while a busy thread's
+    /// state flips.
     private func threadsChanged() {
         if !stores.isEmpty {
             let byID = Dictionary(threads.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-            for (id, s) in stores { s.setSummary(byID[id] ?? unlisted[id]) }
+            var still = Transaction()
+            still.disablesAnimations = true
+            withTransaction(still) {
+                for (id, s) in stores { s.setSummary(byID[id] ?? unlisted[id]) }
+            }
         }
         let working = threads.count { $0.runState == .working }
         let needs = threads.count { $0.waitsOnYou && $0.section != .snoozed }

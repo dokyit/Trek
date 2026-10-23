@@ -272,8 +272,13 @@ private struct TranscriptList: View, Equatable {
     /// Far enough above the latest that the jump-down button is out.
     @State private var awayFromBottom = false
 
-    /// How many of the latest rows are laid out outside the lazy stack.
+    /// How many of the latest rows are laid out outside the lazy stack, at least.
     private static let laidOut = 3
+    /// The rows outside it reach to a multiple of this from the start: a row moves into the lazy
+    /// stack once in so many new rows, not with each. (A row that moves between the two is made
+    /// anew, its open parts closed and its height measured again, which showed as the transcript
+    /// shifting under the reader while a busy thread added rows.)
+    private static let laidOutStep = 12
 
     private struct ScrollEdges: Equatable {
         /// Within a couple of screens of the top.
@@ -312,7 +317,8 @@ private struct TranscriptList: View, Equatable {
                 .equatable()
                 .id(block.id)
         }
-        let earlier = blocks.dropLast(Self.laidOut)
+        let split = max(0, blocks.count - Self.laidOut) / Self.laidOutStep * Self.laidOutStep
+        let earlier = blocks.prefix(split)
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 LineageHeader(store: store)
@@ -329,7 +335,7 @@ private struct TranscriptList: View, Equatable {
                 // The latest rows are laid out in full, not lazily: an answer still being written
                 // (a chart drawing in) grows many times a second, and a lazy stack loses its place
                 // then, showing blank space where the transcript is.
-                ForEach(blocks.suffix(Self.laidOut)) { row($0) }
+                ForEach(blocks.dropFirst(split)) { row($0) }
                 WorkingFooter(store: store)
                 Color.clear.frame(height: 4).id("end")
             }
