@@ -9,6 +9,45 @@ use trek_app::pr_card::{self, Call, Card, Kind, Phase};
 use trek_core::store::Item;
 
 #[test]
+fn only_a_command_in_command_position_makes_a_card() {
+    // Reading, grepping or syntax-checking the release script isn't a release (these made
+    // "Release v80,135p" and "Published v" cards in a real thread).
+    for d in [
+        "sed -n 80,135p script/release.sh",
+        "grep -n \"git tag\" script/release.sh | head -30",
+        "zsh -n script/release.sh && echo syntax-ok",
+        "cat script/release.sh",
+        "echo gh pr merge 128",
+        "grep -rn 'gh run watch' crates",
+        "echo git push",
+    ] {
+        assert_eq!(pr_card::call("Run command", d), None, "{d}");
+    }
+    // The real thing still is, past assignments and wrappers, or through a shell.
+    assert_eq!(
+        pr_card::call(
+            "Run command",
+            "TREK_RELEASE_BUILD=1 zsh script/release.sh v0.4.12"
+        ),
+        Some(Call::Release {
+            version: "0.4.12".into(),
+            channel: "stable".into()
+        })
+    );
+    assert_eq!(
+        pr_card::call(
+            "Run command",
+            "cd repo && env GH_PAGER= gh pr merge 128 --squash"
+        ),
+        Some(Call::PrMerge(Some("128".into())))
+    );
+    assert!(matches!(
+        pr_card::call("Run command", "git -C repo push origin main"),
+        Some(Call::Git(_))
+    ));
+}
+
+#[test]
 fn finds_the_calls_it_cards() {
     let d = "gh pr create --title \"Add the thing\" --base main --head feat/x";
     assert_eq!(
