@@ -6100,6 +6100,11 @@ impl Workspace {
     }
 
     /// The composer's mirror of `id`'s latest card, when there is one: its chip.
+    /// The newest PR/run/release card of `id` with its row id (`pr_card::latest`).
+    pub fn pr_chip_keyed(&self, id: &str) -> Option<(String, crate::pr_card::Card)> {
+        crate::pr_card::latest(self.live.get(id)?)
+    }
+
     pub fn pr_chip(&self, id: &str) -> Option<crate::pr_card::Card> {
         crate::pr_card::latest(self.live.get(id)?).map(|(_, c)| c)
     }

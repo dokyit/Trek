@@ -69,6 +69,15 @@ pub struct Composer {
     compact_gen: u64,
     /// Watches the context after Compact now, to say what it freed.
     _compact_watch: Option<Task<()>>,
+    /// Redraws when the PR/release chip's linger ends, so a settled chip goes on time.
+    _chip_expiry: Option<(i64, Task<()>)>,
+    /// The chip the user moved on from by sending a message (its card's row and phase): a
+    /// settled chip goes then; a later change to that card brings it back.
+    chip_dismissed: Option<(String, crate::pr_card::Phase)>,
+    /// When the chip took its current state, for its fade in (row, phase, then).
+    chip_since: Option<(String, crate::pr_card::Phase, std::time::Instant)>,
+    /// Create PR was clicked and the turn it started is still going.
+    creating_pr: bool,
     /// Models to consult with the next message, and how (see `trek_core::orchestrate`).
     consult: Consult,
     /// Keep the consultants after sending (else they clear).
@@ -377,6 +386,10 @@ impl Composer {
             compact: crate::context_popover::Compact::Idle,
             compact_gen: 0,
             _compact_watch: None,
+            _chip_expiry: None,
+            chip_dismissed: None,
+            chip_since: None,
+            creating_pr: false,
             consult: Consult {
                 implement: true,
                 ..Default::default()
@@ -426,7 +439,21 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.dismiss_settled_chip(cx);
         self.submit_as(state, None, window, cx);
+    }
+
+    /// Sending a message moves on from a chip whose work is done (or failed): it goes now.
+    fn dismiss_settled_chip(&mut self, cx: &mut Context<Self>) {
+        let ws = self.workspace.read(cx);
+        let settled = ws
+            .thread_id_in(&self.scope)
+            .and_then(|id| ws.pr_chip_keyed(id))
+            .filter(|(_, card)| card.phase.terminal())
+            .map(|(key, card)| (key, card.phase));
+        if settled.is_some() {
+            self.chip_dismissed = settled;
+        }
     }
 
     /// Send what's typed. `follow`: how it goes if a turn is running (`None`: as Settings ›
@@ -967,58 +994,186 @@ impl Composer {
             .into_any_element()
     }
 
-    /// The reference's "Create PR": on a branch other than the default one, with work on it
-    /// (changed files or commits not pushed), in a thread with no pull request card yet. It asks
-    /// the agent in words, so the card that follows is the one `gh pr create` brings.
-    fn create_pr_pill(&self, running: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let ws = self.workspace.read(cx);
-        let id = ws.thread_id_in(&self.scope)?.to_string();
-        let git = ws.git_in(&self.scope)?;
-        let has_work = git.changed > 0 || git.ahead > 0;
-        let has_pr = ws
-            .pr_chip(&id)
-            .is_some_and(|c| c.kind == crate::pr_card::Kind::Pr);
-        if running
-            || !git.is_repo
-            || git.branch.is_none()
-            || git.on_default()
-            || !has_work
-            || has_pr
+    /// A finished PR/release chip lingers a few seconds, then fades (`pr_card::chip_until`);
+    /// nothing else may redraw the composer then, so it asks for a redraw when the fade starts.
+    fn redraw_when_chip_goes(&mut self, cx: &mut Context<Self>) {
+        let until = {
+            let ws = self.workspace.read(cx);
+            ws.thread_id_in(&self.scope)
+                .and_then(|id| ws.pr_chip(id))
+                .and_then(|card| crate::pr_card::chip_until(&card))
+                // From the start of the fade, which then asks for its own frames.
+                .map(|until| until - crate::pr_card::Phase::CHIP_FADE_MS)
+        };
+        let now = crate::pr_card::now_ms();
+        let Some(until) = until.filter(|until| *until > now) else {
+            self._chip_expiry = None;
+            return;
+        };
+        if self
+            ._chip_expiry
+            .as_ref()
+            .is_some_and(|(at, _)| *at == until)
         {
-            return None;
+            return;
         }
-        let theme = cx.theme();
-        let (fg, bg) = (theme.background, theme.foreground);
-        let ws = self.workspace.clone();
-        Some(
-            h_flex()
-                .id("create-pr")
-                .test_support()
-                .aria_label("Create PR")
-                .flex_none()
-                .gap(px(5.))
-                .items_center()
-                .h(px(24.))
-                .px(px(10.))
-                .rounded_full()
-                .bg(bg.opacity(0.92))
-                .hover(move |s| s.bg(bg))
-                .cursor_pointer()
-                .text_size(px(12.))
-                .font_medium()
-                .text_color(fg)
-                .child(
-                    Icon::new(crate::assets::Lucide::GitPullRequest)
-                        .size(px(12.))
-                        .text_color(fg),
-                )
-                .child("Create PR")
-                .on_click(move |_, _, cx| {
+        let wait = std::time::Duration::from_millis((until - now) as u64 + 50);
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        });
+        self._chip_expiry = Some((until, task));
+    }
+
+    /// The row the reference floats over the composer's top right: the changes chip
+    /// ("4 files +128 −36 ■■■■□"), then Create PR (a dark action pill, "◌ Creating PR" once
+    /// clicked) or the status chip of the newest PR, run or release card ("● #128 3 conflicts").
+    /// A finished chip holds a few seconds and fades (`pr_card::chip_until`); a failure stays
+    /// until the next message is sent.
+    fn chip_row(
+        &mut self,
+        running: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use crate::pr_card::{self, Kind, Phase};
+        let (id, keyed, turn_end, files, can_open_pr) = {
+            let ws = self.workspace.read(cx);
+            let id = ws.thread_id_in(&self.scope)?.to_string();
+            let keyed = ws.pr_chip_keyed(&id);
+            // What the agent last changed: the newest turn that changed files (its "Edited N
+            // files" card), as the reference's "4 files +128 −36".
+            let turn = ws.live.get(&id).and_then(|live| {
+                live.items
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .filter(|(_, item)| matches!(item, trek_core::store::Item::TurnEnd { .. }))
+                    .find_map(|(ix, _)| {
+                        let changes = ws.turn_changes(&id, ix).filter(|c| !c.files.is_empty())?;
+                        Some((live.items.id_at(ix)?.to_string(), changes))
+                    })
+            });
+            let (turn_end, files): (Option<String>, Vec<(u32, u32)>) = match turn {
+                Some((end, c)) => (
+                    Some(end),
+                    c.files.iter().map(|f| (f.added, f.removed)).collect(),
+                ),
+                None => (None, vec![]),
+            };
+            let can_open_pr = ws.git_in(&self.scope).is_some_and(|g| {
+                g.is_repo && g.branch.is_some() && !g.on_default() && (g.changed > 0 || g.ahead > 0)
+            });
+            (id, keyed, turn_end, files, can_open_pr)
+        };
+        let now = pr_card::now_ms();
+        let has_pr = keyed.as_ref().is_some_and(|(_, c)| c.kind == Kind::Pr);
+        if self.creating_pr && (has_pr || !running) {
+            self.creating_pr = false;
+        }
+        // The status chip, unless it's done and gone, or moved on from.
+        let status = keyed.filter(|(key, card)| {
+            pr_card::chip_shown(card, now)
+                && self.chip_dismissed.as_ref() != Some(&(key.clone(), card.phase))
+        });
+        let creating = self.creating_pr
+            || status
+                .as_ref()
+                .is_some_and(|(_, c)| c.kind == Kind::Pr && c.number.is_none());
+
+        // Fades: in as a state arrives (180 ms), out at the end of a finished chip's linger.
+        let mut moving = false;
+        let opacity = status.as_ref().map_or(1., |(key, card)| {
+            let fresh = self
+                .chip_since
+                .as_ref()
+                .is_none_or(|(k, p, _)| k != key || *p != card.phase);
+            if fresh {
+                self.chip_since = Some((key.clone(), card.phase, std::time::Instant::now()));
+            }
+            let since = self
+                .chip_since
+                .as_ref()
+                .map_or(0., |(.., at)| at.elapsed().as_secs_f32() / 0.18);
+            let left = pr_card::chip_until(card).map_or(1., |until| {
+                ((until - now) as f32 / Phase::CHIP_FADE_MS as f32).clamp(0., 1.)
+            });
+            let o = since.min(1.).min(left);
+            moving = o < 1.;
+            o
+        });
+        if moving && !cx.reduce_motion() {
+            window.request_animation_frame();
+        }
+        let merged = status
+            .as_ref()
+            .is_some_and(|(_, c)| c.phase == Phase::Merged);
+
+        let changes = (!files.is_empty() && !merged).then(|| {
+            let (added, removed) = files
+                .iter()
+                .fold((0u32, 0u32), |(a, r), (fa, fr)| (a + fa, r + fr));
+            // Its caret opens that turn's diff, as the card's Review does.
+            let ws = self.workspace.clone();
+            let (thread, end) = (id.clone(), turn_end.clone().unwrap_or_default());
+            changes_chip(
+                files.len(),
+                added,
+                removed,
+                move |_, _, cx| {
+                    let (thread, end) = (thread.clone(), end.clone());
+                    ws.update(cx, |_, cx| {
+                        cx.emit(crate::workspace::WorkspaceEvent::ShowTurnDiff {
+                            thread,
+                            end,
+                            path: None,
+                        })
+                    });
+                },
+                cx,
+            )
+        });
+        let action: Option<AnyElement> = if creating {
+            Some(dark_chip("create-pr", true, "Creating PR", None, cx))
+        } else if let Some((_, card)) = status.as_ref() {
+            Some(pr_card::status_chip(card, opacity, cx))
+        } else if can_open_pr && !has_pr && !running {
+            let ws = self.workspace.clone();
+            let me = cx.entity().downgrade();
+            Some(dark_chip(
+                "create-pr",
+                false,
+                "Create PR",
+                Some(Box::new(move |_, _, cx| {
                     let id = id.clone();
+                    let _ = me.update(cx, |this, cx| {
+                        this.creating_pr = true;
+                        cx.notify();
+                    });
                     ws.update(cx, |ws, cx| {
                         ws.send_to(&id, "Create PR".to_string(), vec![], cx)
                     });
-                })
+                })),
+                cx,
+            ))
+        } else {
+            None
+        };
+        if changes.is_none() && action.is_none() {
+            return None;
+        }
+        Some(
+            h_flex()
+                .id("composer-chips")
+                .test_support()
+                .absolute()
+                .bottom_full()
+                .right_0()
+                .pb(px(8.))
+                .gap(px(8.))
+                .items_center()
+                .children(changes)
+                .children(action)
                 .into_any_element(),
         )
     }
@@ -3345,6 +3500,7 @@ impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-support"))]
         crate::test_support::rendered("Composer");
+        self.redraw_when_chip_goes(cx);
         let ws = self.workspace.read(cx);
         let prefs = ws.prefs_in(&self.scope);
         let thread = ws.thread_in(&self.scope).cloned();
@@ -3370,8 +3526,6 @@ impl Render for Composer {
             .and_then(|_| crate::cost::CacheHits::of(&spend));
         let billing_tip = crate::cost::billing_note(billing.as_ref());
         let queued = thread.as_ref().map_or(0, |t| ws.queued(&t.id));
-        // A PR/release the thread pushed out (`pr_card`), mirrored next to the controls.
-        let pr_chip = thread.as_ref().and_then(|t| ws.pr_chip(&t.id));
         let theme = cx.theme().clone();
         let empty = self.input.read(cx).value().trim().is_empty()
             && self.outbox.paths.is_empty()
@@ -3633,7 +3787,6 @@ impl Render for Composer {
                             )
                         })
                         .child(div().flex_1())
-                        .children(self.create_pr_pill(running, cx))
                 )
             })
             .when_some(missing, |el, (wt, id)| el.child(self.missing_worktree(&wt, id, cx)))
@@ -3711,12 +3864,14 @@ impl Render for Composer {
                 .pb(px(8.))
                 .child(self.env_chips(self.scope != Scope::Ide, cx))
         });
+        let status_chips = self.chip_row(running, window, cx);
         let picker = pickers::picker(self, cx);
         let drop_tint = palette::ember(cx);
         let card = div()
             .relative()
             .w_full()
             .child(card)
+            .when(picker.is_none(), |el| el.children(status_chips))
             .when_some(picker, |el, p| {
                 el.child(
                     div()
@@ -3773,51 +3928,6 @@ impl Render for Composer {
                     )
                 })
                 .when(queued > 0, |el| el.child(format!("{queued} queued")))
-                .when_some(pr_chip, |el, card| {
-                    // A soft, borderless pill: a live mark, the card's name, its state in colour.
-                    let tint = crate::pr_card::chip_tint(&card, cx);
-                    let (what, state) = card.chip_parts();
-                    let busy = card.resolving
-                        || matches!(
-                            card.phase,
-                            crate::pr_card::Phase::Creating
-                                | crate::pr_card::Phase::Checking
-                                | crate::pr_card::Phase::Merging
-                                | crate::pr_card::Phase::Releasing
-                        );
-                    let mark = if busy {
-                        gpui_kit::component::spinner::Spinner::new()
-                            .xsmall()
-                            .color(tint)
-                            .into_any_element()
-                    } else if card.phase == crate::pr_card::Phase::Merged {
-                        Icon::new(crate::assets::Lucide::GitMerge)
-                            .size(px(10.))
-                            .text_color(tint)
-                            .into_any_element()
-                    } else {
-                        div()
-                            .size(px(6.))
-                            .rounded_full()
-                            .bg(tint)
-                            .into_any_element()
-                    };
-                    el.child(
-                        h_flex()
-                            .id("pr-chip")
-                            .test_support()
-                            .gap(px(6.))
-                            .items_center()
-                            .flex_none()
-                            .px(px(8.))
-                            .h(px(18.))
-                            .rounded_full()
-                            .bg(tint.opacity(0.10))
-                            .child(mark)
-                            .child(div().text_color(theme.foreground.opacity(0.9)).child(what))
-                            .child(div().text_color(tint).child(state)),
-                    )
-                })
                 .when(crowded.is_some(), |el| {
                     let ws = self.workspace.clone();
                     el.child(
@@ -4207,4 +4317,122 @@ mod tests {
         assert_eq!(consult_split(" qwen2.5-coder:7b"), None);
         assert_eq!(consult_split(" sol"), None);
     }
+}
+
+/// The changes chip: "4 files +128 −36 ■■■■□ ⌃", the thread's pending edits; opens the review.
+fn changes_chip(
+    files: usize,
+    added: u32,
+    removed: u32,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let (green, red) = (palette::emerald(cx), palette::red(cx));
+    // The squares in the reference's bright green and red on a light page (the palette's are
+    // for text there, and go muddy as small blocks).
+    let (sq_green, sq_red) = if theme.background.l > 0.5 {
+        (
+            hsla(147. / 360., 0.60, 0.48, 1.),
+            hsla(355. / 360., 0.70, 0.56, 1.),
+        )
+    } else {
+        (green, red)
+    };
+    // Five squares split by what was added and removed, as the reference's.
+    let total = (added + removed).max(1) as f32;
+    let greens = if added + removed == 0 {
+        0
+    } else {
+        ((added as f32 / total) * 5.).round().clamp(0., 5.) as usize
+    };
+    let square = |c: Hsla| div().size(px(6.)).rounded(px(1.5)).bg(c);
+    h_flex()
+        .id("changes-chip")
+        .test_support()
+        .aria_label(format!("{files} files changed"))
+        .flex_none()
+        .h(px(26.))
+        .px(px(10.))
+        .gap(px(6.))
+        .items_center()
+        .rounded_full()
+        .bg(crate::pr_card::chip_fill(cx))
+        .border_1()
+        .border_color(theme.foreground.opacity(0.08))
+        .shadow(crate::pr_card::chip_shadow())
+        .cursor_pointer()
+        .text_size(px(12.5))
+        .child(
+            Icon::new(crate::assets::Lucide::FileText)
+                .size(px(12.))
+                .text_color(theme.muted_foreground),
+        )
+        .child(
+            div()
+                .text_color(theme.foreground.opacity(0.85))
+                .child(if files == 1 {
+                    "1 file".to_string()
+                } else {
+                    format!("{files} files")
+                }),
+        )
+        .child(div().text_color(green).child(format!("+{added}")))
+        .child(div().text_color(red).child(format!("−{removed}")))
+        .child(h_flex().gap(px(2.)).children((0..5).map(|i| {
+            square(if added + removed == 0 {
+                theme.foreground.opacity(0.15)
+            } else if i < greens {
+                sq_green
+            } else {
+                sq_red
+            })
+        })))
+        .child(
+            Icon::new(IconName::ChevronUp)
+                .xsmall()
+                .text_color(theme.muted_foreground),
+        )
+        .on_click(on_click)
+        .into_any_element()
+}
+
+/// A dark action pill (the reference's "Create PR"): the page's ink as its fill; with a white
+/// spinner while what it started is under way.
+fn dark_chip(
+    id: &'static str,
+    busy: bool,
+    label: &'static str,
+    on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let (fg, bg) = (theme.background, theme.foreground);
+    h_flex()
+        .id(id)
+        .test_support()
+        .aria_label(label)
+        .flex_none()
+        .h(px(26.))
+        .px(px(11.))
+        .gap(px(6.))
+        .items_center()
+        .rounded_full()
+        .bg(bg.opacity(0.92))
+        .when(!busy, |el| el.hover(move |s| s.bg(bg)).cursor_pointer())
+        .shadow(crate::pr_card::chip_shadow())
+        .text_size(px(12.5))
+        .font_medium()
+        .text_color(fg)
+        .child(if busy {
+            crate::pr_card::ring_spinner(12., fg, cx)
+        } else {
+            Icon::new(crate::assets::Lucide::GitPullRequest)
+                .size(px(12.))
+                .text_color(fg)
+                .into_any_element()
+        })
+        .child(label)
+        .when_some(on_click, |el, f| el.on_click(f))
+        .into_any_element()
 }
