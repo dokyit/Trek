@@ -263,7 +263,10 @@ pub fn chip_tint(card: &Card, cx: &App) -> Hsla {
 /// The card of `Item::Tool` `id`/`detail`, when the row is one and its JSON reads.
 pub fn read(id: &str, detail: &str) -> Option<Card> {
     of_row(id)?;
-    serde_json::from_str(detail).ok()
+    let card: Card = serde_json::from_str(detail).ok()?;
+    // Release cards an older parser made from commands that only mentioned release.sh
+    // ("Release v80,135p", "Published v") stay in old transcripts: a release has a version.
+    (card.kind != Kind::Release || is_version(&card.version)).then_some(card)
 }
 
 /// The one-line form surfaces without the card show (the phone's transcript).
@@ -363,20 +366,67 @@ pub fn call(title: &str, detail: &str) -> Option<Call> {
     git
 }
 
+/// The segment from its command on: past `VAR=value` assignments and wrappers that run the rest
+/// (`env`, `time`…). Only a command in this place is one; a word elsewhere is an argument
+/// (`sed -n 1,9p script/release.sh`, `echo gh pr merge`).
+fn command(words: &[String]) -> &[String] {
+    let assignment = |w: &str| {
+        w.split_once('=').is_some_and(|(name, _)| {
+            !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+        })
+    };
+    let start = words
+        .iter()
+        .position(|w| {
+            !assignment(w) && !matches!(w.as_str(), "env" | "time" | "command" | "exec" | "nohup")
+        })
+        .unwrap_or(words.len());
+    &words[start..]
+}
+
 fn is_gh(words: &[String], sub: &[&str]) -> bool {
-    words
-        .windows(sub.len() + 1)
-        .any(|w| w[0] == "gh" && w[1..] == *sub)
+    words.len() > sub.len()
+        && words[0] == "gh"
+        && words[1..=sub.len()].iter().zip(sub).all(|(w, s)| w == s)
 }
 
 /// The words after `gh <sub…>` (none when it isn't there).
 fn after<'a>(words: &'a [String], sub: &[&str]) -> &'a [String] {
-    let ix = words
-        .windows(sub.len() + 1)
-        .position(|w| w[0] == "gh" && w[1..] == *sub)
-        .map(|i| i + sub.len() + 1)
-        .unwrap_or(words.len());
-    &words[ix..]
+    if is_gh(words, sub) {
+        &words[sub.len() + 1..]
+    } else {
+        &[]
+    }
+}
+
+/// Whether the segment runs a release script: as the command, or handed to a shell that runs it
+/// (`zsh script/release.sh 0.4.12`), not one only checking its syntax (`zsh -n`).
+fn runs_release_script(words: &[String]) -> bool {
+    let Some(cmd) = words.first() else {
+        return false;
+    };
+    if cmd.ends_with("release.sh") {
+        return true;
+    }
+    matches!(cmd.rsplit('/').next(), Some("zsh" | "bash" | "sh"))
+        && !words[1..].iter().any(|w| w == "-n")
+        && words[1..]
+            .iter()
+            .find(|w| !w.starts_with('-'))
+            .is_some_and(|w| w.ends_with("release.sh"))
+}
+
+/// A release version as release.sh takes it: `0.4.12`, `v0.4.12`, `0.5.0-beta.2`.
+fn is_version(v: &str) -> bool {
+    let v = v.strip_prefix('v').unwrap_or(v);
+    let core = v.split_once('-').map_or(v, |(core, _)| core);
+    let parts: Vec<&str> = core.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
 }
 
 fn is_number(w: &str) -> bool {
@@ -469,13 +519,14 @@ fn positional(words: &[String]) -> Vec<String> {
 }
 
 fn call_in(words: &[String]) -> Option<Call> {
-    if words.iter().any(|w| w.ends_with("release.sh")) {
+    let words = command(words);
+    if runs_release_script(words) {
         let pos = positional(words);
         return Some(Call::Release {
             version: pos
                 .iter()
-                .find(|v| v.chars().next().is_some_and(|c| c.is_ascii_digit()))
-                .cloned()
+                .find(|v| is_version(v))
+                .map(|v| v.trim_start_matches('v').to_string())
                 .unwrap_or_default(),
             channel: flag(words, &["--channel"]).unwrap_or_else(|| "stable".into()),
         });
@@ -532,17 +583,27 @@ fn call_in(words: &[String]) -> Option<Call> {
         });
     }
     // Plain `git` work the card narrates while it's open (a `gh` call elsewhere in the line wins).
-    let verb = match words
-        .iter()
-        .position(|w| w == "git")
-        .map(|i| words.get(i + 1))
-    {
-        Some(Some(w)) if w == "commit" => Some(GitVerb::Commit),
-        Some(Some(w)) if w == "push" => Some(GitVerb::Push),
-        Some(Some(w)) if w == "fetch" => Some(GitVerb::Fetch),
-        Some(Some(w)) if w == "merge" => Some(GitVerb::Merge),
-        Some(Some(w)) if w == "pull" => Some(GitVerb::Pull),
-        Some(Some(w)) if w == "rebase" => Some(GitVerb::Rebase),
+    // `git`'s subcommand: its first word past the options (`-C dir` and `-c key=value` take one).
+    let sub = (words.first().map(String::as_str) == Some("git"))
+        .then(|| {
+            let mut rest = words[1..].iter();
+            while let Some(w) = rest.next() {
+                if matches!(w.as_str(), "-C" | "-c") {
+                    rest.next();
+                } else if !w.starts_with('-') {
+                    return Some(w);
+                }
+            }
+            None
+        })
+        .flatten();
+    let verb = match sub {
+        Some(w) if w == "commit" => Some(GitVerb::Commit),
+        Some(w) if w == "push" => Some(GitVerb::Push),
+        Some(w) if w == "fetch" => Some(GitVerb::Fetch),
+        Some(w) if w == "merge" => Some(GitVerb::Merge),
+        Some(w) if w == "pull" => Some(GitVerb::Pull),
+        Some(w) if w == "rebase" => Some(GitVerb::Rebase),
         _ => None,
     };
     verb.map(Call::Git)
@@ -1495,7 +1556,7 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
     let tint = state_tint(card, cx);
     let motion = !cx.reduce_motion();
     // How long the phase has stood: its graph draws in, its end mark pops once.
-    let age = (now_ms() - card.phase_at_ms.max(card.created_ms)) as f32 / 1000.;
+    let age = phase_age(card, motion);
     let draw = if motion {
         (age / 0.45).clamp(0., 1.)
     } else {
@@ -1534,12 +1595,12 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
             .flex_none()
             .gap(px(4.))
             .items_center()
-            .rounded_full()
-            .px(px(8.))
-            .py(px(2.5))
-            .text_xs()
+            .rounded(px(6.))
+            .px(px(7.))
+            .py(px(2.))
+            .text_size(px(11.5))
             .text_color(tint)
-            .bg(tint.opacity(0.12))
+            .bg(tint.opacity(0.10))
             .child(match (card.kind, card.phase) {
                 (Kind::Pr, Phase::Merged) => Icon::new(crate::assets::Lucide::GitMerge)
                     .size(px(10.))
@@ -1584,15 +1645,15 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
         .id(("pr-head", ix))
         .test_support()
         .gap(px(10.))
-        .px(px(14.))
-        .pt(px(11.))
-        .pb(px(9.))
+        .px(px(16.))
+        .pt(px(14.))
+        .pb(px(10.))
         .child(
             div()
-                .size(px(26.))
+                .size(px(28.))
                 .flex_none()
-                .rounded(px(7.))
-                .bg(tint.opacity(0.12))
+                .rounded(px(8.))
+                .bg(tint.opacity(0.10))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1607,17 +1668,17 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
                     h_flex()
                         .gap(px(5.))
                         .items_baseline()
-                        .text_size(px(12.5))
+                        .text_size(px(13.))
                         .child(
                             div()
                                 .min_w_0()
                                 .truncate()
-                                .font_semibold()
-                                .text_color(theme.foreground.opacity(0.92))
+                                .font_medium()
+                                .text_color(theme.foreground.opacity(0.9))
                                 .child(title),
                         )
                         .when_some(tag, |el, t| {
-                            el.child(div().flex_none().text_xs().text_color(muted).child(t))
+                            el.child(div().flex_none().text_color(muted).child(t))
                         }),
                 )
                 .children(sub_row(card, cx)),
@@ -1651,15 +1712,15 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
         .children(step)
         .child(
             v_flex()
-                .rounded(px(10.))
+                .rounded(px(12.))
                 .border_1()
-                .border_color(theme.foreground.opacity(0.08))
-                .bg(theme.secondary)
+                .border_color(theme.foreground.opacity(0.09))
+                .bg(theme.background)
                 .overflow_hidden()
                 .child(head)
                 .child(band)
                 .children(footer)
-                .child(div().h(px(if tail { 4. } else { 0. }))),
+                .child(div().h(px(if tail { 12. } else { 0. }))),
         )
         .into_any_element()
 }
@@ -2079,11 +2140,10 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
 
     Some(
         v_flex()
-            .border_t_1()
-            .border_color(theme.foreground.opacity(0.07))
-            .px(px(14.))
-            .py(px(9.))
-            .gap(px(7.))
+            .px(px(16.))
+            .pt(px(12.))
+            .pb(px(14.))
+            .gap(px(8.))
             .child(
                 h_flex()
                     .gap(px(9.))
@@ -2194,7 +2254,7 @@ fn busy_pill(id: impl Into<ElementId>, label: &'static str, cx: &App) -> AnyElem
 /// The band's height: room for two lanes and their curves (a run's single track).
 const BAND_H: f32 = 66.;
 /// A PR's band: main, the branch below it, and the branch's name under that, clear of its line.
-const PR_BAND_H: f32 = 86.;
+const PR_BAND_H: f32 = 94.;
 /// The gap between a release's lanes, so each has room for its name.
 const LANE_GAP: f32 = 20.;
 
@@ -2214,13 +2274,13 @@ fn lane_y(i: usize) -> f32 {
 
 /// The graph strip under the header, per kind.
 fn band(card: &Card, clock: f32, draw: f32, pop: f32, motion: bool, cx: &App) -> AnyElement {
-    let theme = cx.theme();
     let strip = div()
         .relative()
+        .mx(px(14.))
         .h(px(band_height(card)))
-        .w_full()
+        .rounded(px(8.))
         .overflow_hidden()
-        .bg(theme.muted);
+        .bg(band_fill(cx));
     match card.kind {
         Kind::Pr => strip
             .child(pr_graph(card, clock, draw, pop, motion, cx))
@@ -2237,15 +2297,23 @@ fn band(card: &Card, clock: f32, draw: f32, pop: f32, motion: bool, cx: &App) ->
     }
 }
 
+/// The band's colour, solid: hollow nodes are filled with it so lines don't show through.
+fn band_fill(cx: &App) -> Hsla {
+    let theme = cx.theme();
+    theme.background.blend(theme.foreground.opacity(0.025))
+}
+
 /// The small soft pill above the graph's target node.
 fn band_pill(text: String, tint: Hsla) -> AnyElement {
     div()
         .flex_none()
         .rounded_full()
-        .px(px(6.))
+        .px(px(7.))
         .py(px(1.))
-        .bg(tint.opacity(0.12))
-        .text_size(px(10.))
+        .border_1()
+        .border_color(tint.opacity(0.3))
+        .bg(tint.opacity(0.08))
+        .text_size(px(10.5))
         .text_color(tint)
         .child(text)
         .into_any_element()
@@ -2486,11 +2554,15 @@ fn tip_label(card: &Card, cx: &App) -> Option<(String, Hsla)> {
 /// `main` across the top of the band, the head branch curving off it, a merge curve home.
 fn pr_graph(card: &Card, clock: f32, draw: f32, pop: f32, motion: bool, cx: &App) -> AnyElement {
     let theme = cx.theme();
-    let band_bg = theme.muted;
+    let band_bg = band_fill(cx);
     let muted = theme.muted_foreground.opacity(0.55);
     let tip = card.phase.tint(cx);
-    let merged = card.phase == Phase::Merged;
-    let branch = if merged { tip } else { crate::palette::sky(cx) };
+    let (sky, indigo, green) = (
+        crate::palette::sky(cx),
+        crate::palette::indigo(cx),
+        crate::palette::emerald(cx),
+    );
+    let age = phase_age(card, motion);
     let card = card.clone();
     canvas(
         move |_, _, _| {},
@@ -2498,19 +2570,43 @@ fn pr_graph(card: &Card, clock: f32, draw: f32, pop: f32, motion: bool, cx: &App
             let w = b.size.width.as_f32();
             let (ox, oy) = (b.origin.x.as_f32(), b.origin.y.as_f32());
             let at = |x: f32, y: f32| point(px(ox + x), px(oy + y));
-            let (my, by) = (PR_BAND_H * 0.3, PR_BAND_H * 0.64);
+            let (my, by) = (PR_BAND_H * 0.37, PR_BAND_H * 0.67);
             let (x0, x1) = (w * 0.08, w * 0.94);
             let fork = x0 + (x1 - x0) * 0.18;
             let tip_x = x0 + (x1 - x0) * 0.58;
             let join = x0 + (x1 - x0) * 0.94;
-            let committing = card.phase == Phase::Creating && card.step.starts_with("Committing");
+            let creating = card.phase == Phase::Creating;
+            let committing = creating && card.step.starts_with("Committing");
+            let pushing = creating && card.step.starts_with("Pushing");
             let resolving = card.phase == Phase::Conflicted && card.resolving;
-            let spinning =
-                (matches!(card.phase, Phase::Checking | Phase::Merging) || resolving) && motion;
+            let merging = card.phase == Phase::Merging;
+            let merged = card.phase == Phase::Merged;
+            let spinning = matches!(card.phase, Phase::Checking | Phase::Merging) || resolving;
             let commits = card.commits.unwrap_or(3).clamp(1, 4) as usize;
 
-            // main: its line and dots; two it fetched since the branch left it.
-            seg(&[at(x0, my), at(x1, my)], px(1.5), false, muted, window);
+            // main: solid to its last commit, then faint dashes on to the target. Once the PR is
+            // open, main's newer commits grow in from where the branch left it.
+            let main_end = if creating {
+                fork
+            } else {
+                fork + (join - fork) * 1.45 / 2.4
+            };
+            let grow = if card.phase == Phase::Open { draw } else { 1. };
+            let main_to = fork + (main_end - fork) * grow;
+            seg(
+                &[at(x0, my), at(main_to, my)],
+                px(1.5),
+                false,
+                muted,
+                window,
+            );
+            seg(
+                &[at(main_to, my), at(join, my)],
+                px(1.),
+                true,
+                muted.opacity(0.5),
+                window,
+            );
             for i in 0..2 {
                 dot(
                     at(x0 + (fork - x0) * (i as f32 + 0.5) / 2., my),
@@ -2519,54 +2615,59 @@ fn pr_graph(card: &Card, clock: f32, draw: f32, pop: f32, motion: bool, cx: &App
                     window,
                 );
             }
-            if card.phase != Phase::Creating {
+            if !creating {
                 for i in 0..2 {
-                    dot(
-                        at(fork + (join - fork) * (i as f32 + 0.45) / 2.4, my),
-                        3.,
-                        muted,
-                        window,
-                    );
+                    let x = fork + (join - fork) * (i as f32 + 0.45) / 2.4;
+                    if x <= main_to + 0.5 {
+                        dot(at(x, my), 3., muted, window);
+                    }
                 }
             }
 
-            // The branch: a curve down off the fork, then flat to `tip_x`; while it commits its
-            // last stretch is still dashed and its new commit hollow.
-            let flat = fork + 18.;
-            barc(
+            // The branch: off the fork in a long S, then flat to its tip, as one path the motion
+            // runs along. While it commits, the last stretch is dashed and the new commit hollow.
+            let flat = fork + 46.;
+            let mut path = cubic_points(
                 at(fork, my),
-                at(fork, my + 18.),
-                at(flat - 12., by),
+                at(fork + 24., my),
+                at(flat - 24., by),
                 at(flat, by),
-                1.,
-                px(1.5),
-                false,
-                branch,
-                window,
+                16,
             );
             let tail = flat + (tip_x - flat) * 0.72;
-            seg(
-                &[at(flat, by), at(if committing { tail } else { tip_x }, by)],
-                px(1.5),
-                false,
-                branch,
-                window,
-            );
+            path.push(at(if committing { tail } else { tip_x }, by));
+            // Pushing: the branch waits, faint, while a bright stretch runs along it to the tip.
+            let base = if pushing { sky.opacity(0.4) } else { sky };
+            seg(&path, px(1.5), false, base, window);
             if committing {
-                seg(
-                    &[at(tail, by), at(tip_x, by)],
-                    px(1.5),
-                    true,
-                    branch,
-                    window,
-                );
+                seg(&[at(tail, by), at(tip_x, by)], px(1.5), true, sky, window);
             }
+            if pushing {
+                let head = (clock * 0.8).fract() * 1.25;
+                stroke_range(&path, head - 0.25, head, px(2.), sky, window);
+            }
+            // Merged: the purple comes back from the target through the branch to the fork.
+            let front = if merged {
+                (age / 0.9).clamp(0., 1.)
+            } else {
+                0.
+            };
+            if front > 0. {
+                stroke_range(&path, 1. - front, 1., px(1.5), indigo, window);
+            }
+            let length = path_length(&path);
             for i in 0..commits {
                 let x = flat + (tip_x - flat) * (i as f32 + 0.6) / (commits as f32 + 0.4);
-                if committing && i == commits - 1 {
-                    ring(at(x.min(tail), by), 3.4, 1.4, branch, band_bg, window);
+                let along = (path_length_to_x(&path, ox + x) / length).clamp(0., 1.);
+                let c = if front > 0. && along >= 1. - front {
+                    indigo
                 } else {
-                    dot(at(x, by), 3., branch, window);
+                    sky
+                };
+                if committing && i == commits - 1 {
+                    ring(at(x.min(tail), by), 3.4, 1.4, c, band_bg, window);
+                } else {
+                    dot(at(x, by), 3., c, window);
                 }
             }
 
@@ -2587,21 +2688,30 @@ fn pr_graph(card: &Card, clock: f32, draw: f32, pop: f32, motion: bool, cx: &App
                 ring(at(tip_x, by), 4.5, 1.6, tip, band_bg, window);
             }
 
-            // The merge curve: dashed while it's a "could", solid for the merge itself.
+            // The merge curve: dashed while it's a "could". Merging draws the merge itself over
+            // it, solid purple from the branch's end to the target; merged, it's all purple.
             if !matches!(card.phase, Phase::Creating | Phase::Closed | Phase::Failed) {
-                let dashed = !matches!(card.phase, Phase::Merging | Phase::Merged);
-                barc(
+                let mid = (join - tip_x) * 0.5;
+                let curve = cubic_points(
                     at(tip_x, by),
-                    at(tip_x, by - 26.),
-                    at(join, my + 26.),
+                    at(tip_x + mid, by),
+                    at(join - mid, my),
                     at(join, my),
-                    draw,
-                    px(1.5),
-                    dashed,
-                    tip.opacity(if dashed { 0.85 } else { 1. }),
-                    window,
+                    24,
                 );
+                if merged {
+                    seg(&curve, px(1.5), false, indigo, window);
+                } else if merging {
+                    seg(&curve, px(1.5), true, green.opacity(0.85), window);
+                    let reach = (age / 0.8).clamp(0., 1.);
+                    stroke_range(&curve, 0., reach, px(1.75), indigo, window);
+                } else {
+                    stroke_range_dashed(&curve, draw, tip.opacity(0.85), window);
+                }
                 let r = 4.5 * (1. + 0.35 * pop);
+                if matches!(card.phase, Phase::Conflicted | Phase::Ready | Phase::Merged) {
+                    dot(at(join, my), r + 5., tip.opacity(0.16), window);
+                }
                 match card.phase {
                     Phase::Open => ring(at(join, my), 3.4, 1.4, muted, band_bg, window),
                     Phase::Checking => {
@@ -2617,17 +2727,19 @@ fn pr_graph(card: &Card, clock: f32, draw: f32, pop: f32, motion: bool, cx: &App
                         tick(at(join, my), band_bg, window);
                     }
                     Phase::Merging => {
-                        ring(at(join, my), r + 1.5, 1.6, tip, band_bg, window);
-                        spin_arc(at(join, my), 8.5, clock, tip, window);
+                        dot(at(join, my), r + 1.5, green, window);
+                        tick(at(join, my), band_bg, window);
+                        spin_arc(at(join, my), 8.5, clock, indigo, window);
                     }
                     Phase::Merged => {
-                        dot(at(join, my), r, tip, window);
+                        dot(at(join, my), r, indigo, window);
                         dot(at(join, my), 1.8, band_bg, window);
                     }
                     _ => {}
                 }
             }
-            if (spinning || draw < 1.) && motion {
+            let moving = spinning || pushing || draw < 1. || (merged && front < 1.);
+            if moving && motion {
                 window.request_animation_frame();
             }
         },
@@ -2635,6 +2747,108 @@ fn pr_graph(card: &Card, clock: f32, draw: f32, pop: f32, motion: bool, cx: &App
     .w_full()
     .h(px(PR_BAND_H))
     .into_any_element()
+}
+
+/// Seconds since the card's phase began (long ago when motion is off, so it draws settled).
+fn phase_age(card: &Card, motion: bool) -> f32 {
+    if !motion {
+        return f32::MAX;
+    }
+    let age = (now_ms() - card.phase_at_ms.max(card.created_ms)) as f32 / 1000.;
+    // Design review (`shots`): `TREK_SLOW_MOTION=<k>` slows these as it does Trek's springs.
+    #[cfg(feature = "shots")]
+    let age = age
+        / std::env::var("TREK_SLOW_MOTION")
+            .ok()
+            .and_then(|k| k.parse::<f32>().ok())
+            .filter(|k| *k > 1.)
+            .unwrap_or(1.);
+    age
+}
+
+/// `n` points along a cubic, ends included.
+fn cubic_points(
+    p0: Point<Pixels>,
+    c1: Point<Pixels>,
+    c2: Point<Pixels>,
+    p1: Point<Pixels>,
+    n: usize,
+) -> Vec<Point<Pixels>> {
+    (0..=n)
+        .map(|i| bcubic(p0, c1, c2, p1, i as f32 / n as f32))
+        .collect()
+}
+
+fn dist(a: Point<Pixels>, b: Point<Pixels>) -> f32 {
+    let (dx, dy) = ((b.x - a.x).as_f32(), (b.y - a.y).as_f32());
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn path_length(points: &[Point<Pixels>]) -> f32 {
+    points
+        .windows(2)
+        .map(|w| dist(w[0], w[1]))
+        .sum::<f32>()
+        .max(1.)
+}
+
+/// How far along `points` the path first reaches `x` (window coordinates).
+fn path_length_to_x(points: &[Point<Pixels>], x: f32) -> f32 {
+    let mut run = 0.;
+    for w in points.windows(2) {
+        let (a, b) = (w[0].x.as_f32(), w[1].x.as_f32());
+        let d = dist(w[0], w[1]);
+        if (a..=b).contains(&x) && b > a {
+            return run + d * (x - a) / (b - a);
+        }
+        run += d;
+    }
+    run
+}
+
+/// The part of `points` from fraction `from` to `to` of its length (clamped to the path).
+fn sub_path(points: &[Point<Pixels>], from: f32, to: f32) -> Vec<Point<Pixels>> {
+    let total = path_length(points);
+    let (a, b) = (from.clamp(0., 1.) * total, to.clamp(0., 1.) * total);
+    if b <= a {
+        return vec![];
+    }
+    let lerp = |p: Point<Pixels>, q: Point<Pixels>, t: f32| {
+        point(p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t)
+    };
+    let mut out = vec![];
+    let mut run = 0.;
+    for w in points.windows(2) {
+        let d = dist(w[0], w[1]);
+        let (s, e) = (run, run + d);
+        if e >= a && s <= b && d > 0. {
+            let t0 = ((a - s) / d).clamp(0., 1.);
+            let t1 = ((b - s) / d).clamp(0., 1.);
+            if out.is_empty() {
+                out.push(lerp(w[0], w[1], t0));
+            }
+            out.push(lerp(w[0], w[1], t1));
+        }
+        run = e;
+    }
+    out
+}
+
+/// Stroke the part of `points` from fraction `from` to `to`: a comet's stretch, a front.
+fn stroke_range(
+    points: &[Point<Pixels>],
+    from: f32,
+    to: f32,
+    width: Pixels,
+    color: Hsla,
+    window: &mut Window,
+) {
+    seg(&sub_path(points, from, to), width, false, color, window);
+}
+
+/// A dashed line drawing itself out: the first `t` of `points`.
+fn stroke_range_dashed(points: &[Point<Pixels>], t: f32, color: Hsla, window: &mut Window) {
+    seg(&sub_path(points, 0., t), px(1.5), true, color, window);
 }
 
 /// The band's written marks: the base and head's names, the phase's pill over the target.
@@ -2647,7 +2861,10 @@ fn pr_labels(card: &Card, cx: &App) -> Vec<AnyElement> {
             div()
                 .absolute()
                 .left(relative(0.045))
-                .top(px(4.))
+                .top(px(7.))
+                .rounded(px(4.))
+                .px(px(4.))
+                .bg(theme.foreground.opacity(0.06))
                 .text_size(px(9.5))
                 .font_family(mono.clone())
                 .text_color(theme.muted_foreground)
@@ -2656,7 +2873,8 @@ fn pr_labels(card: &Card, cx: &App) -> Vec<AnyElement> {
         );
     }
     if !card.head.is_empty() {
-        let c = if card.phase == Phase::Merged {
+        let passed = card.phase == Phase::Merged && phase_age(card, true) > 0.55;
+        let c = if passed {
             crate::palette::indigo(cx)
         } else {
             crate::palette::sky(cx)
@@ -2666,6 +2884,9 @@ fn pr_labels(card: &Card, cx: &App) -> Vec<AnyElement> {
                 .absolute()
                 .left(relative(0.27))
                 .bottom(px(6.))
+                .rounded(px(4.))
+                .px(px(4.))
+                .bg(c.opacity(0.10))
                 .text_size(px(9.5))
                 .font_family(mono)
                 .text_color(c)
@@ -2697,7 +2918,7 @@ fn pipeline_graph(
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
-    let band_bg = theme.muted;
+    let band_bg = band_fill(cx);
     let muted = theme.muted_foreground.opacity(0.55);
     let tip = state_tint(card, cx);
     let m = marks(cx);
@@ -2709,7 +2930,7 @@ fn pipeline_graph(
             let w = b.size.width.as_f32();
             let (ox, oy) = (b.origin.x.as_f32(), b.origin.y.as_f32());
             let at = |x: f32, y: f32| point(px(ox + x), px(oy + y));
-            let y = BAND_H * 0.42;
+            let y = BAND_H * 0.5;
             let (x0, x1) = (w * 0.07, w * 0.78);
             let join = w * 0.90;
             let n = jobs.len();
@@ -2819,7 +3040,7 @@ fn pipeline_labels(card: &Card, cx: &App) -> Vec<AnyElement> {
 
 fn lanes_graph(card: &Card, clock: f32, draw: f32, pop: f32, motion: bool, cx: &App) -> AnyElement {
     let theme = cx.theme();
-    let band_bg = theme.muted;
+    let band_bg = band_fill(cx);
     let muted = theme.muted_foreground.opacity(0.55);
     let tip = state_tint(card, cx);
     let m = marks(cx);
@@ -2938,7 +3159,7 @@ pub fn demo(state: &str) -> Card {
         added: Some(128),
         removed: Some(36),
         created_ms: now - 300_000,
-        phase_at_ms: now - 20_000,
+        phase_at_ms: now,
         ..Default::default()
     };
     let conflicts = vec![
