@@ -1738,8 +1738,11 @@ fn a_turn_blocked_on_its_agent_s_own_sub_agent_says_it_waits_on_it() {
             trek.root.read(cx).sidebar.read(cx).at_work(&t, cx)
         });
         assert_eq!(
-            trek_app::sidebar::card_tip(&kids, &background).as_deref(),
-            Some("Sub-agents at work:\nSurvey the test suite")
+            trek_app::sidebar::card_tip(&kids, &background),
+            Some(format!(
+                "1 sub-agent at work:\n{} · Survey the test suite",
+                kids[0].0.display_name()
+            ))
         );
         trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
         trek.wait_done(cx, &id, RunState::Idle).await;
@@ -1845,8 +1848,24 @@ fn the_card_tip_names_sub_agents_and_background_work() {
             &["npm run dev".into(), "cargo watch".into()]
         )
         .as_deref(),
+        Some(format!(
+            "1 sub-agent at work:\n{} · Sol: Review the cache\n\nRunning in the background:\nnpm run dev\ncargo watch",
+            mock.display_name()
+        ))
+        .as_deref()
+    );
+    // Several, each by the provider it runs on.
+    let tip = trek_app::sidebar::card_tip(
+        &[
+            (trek_core::AgentId::Codex, "Sol: Review the cache".into()),
+            (trek_core::AgentId::ClaudeCode, "Explore the tests".into()),
+        ],
+        &[],
+    );
+    assert_eq!(
+        tip.as_deref(),
         Some(
-            "Sub-agents at work:\nSol: Review the cache\n\nRunning in the background:\nnpm run dev\ncargo watch"
+            "2 sub-agents at work:\nCodex · Sol: Review the cache\nClaude Code · Explore the tests"
         )
     );
 }

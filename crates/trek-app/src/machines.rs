@@ -613,6 +613,24 @@ impl Machines {
         })
     }
 
+    /// Where machine thread `id` is, as the sidebar names it out of its machine's group: its
+    /// project there and the machine ("trek on T-Book").
+    pub fn place(&self, id: &str) -> Option<String> {
+        let (host, _) = split_id(id)?;
+        let m = self.get(host)?;
+        let name = &m.entry.name;
+        Some(match m.row(id).map(|r| r.project.name.as_str()) {
+            Some(project) if !project.is_empty() => format!("{project} on {name}"),
+            _ => name.clone(),
+        })
+    }
+
+    /// The model machine thread `id` runs, as the machine names it ("Opus 5.5").
+    pub fn model_label(&self, id: &str) -> Option<String> {
+        let (host, _) = split_id(id)?;
+        self.get(host)?.row(id)?.model_label.clone()
+    }
+
     /// The run of the clone of `folder` to `host`, if it's still the one the sheet shows.
     fn clone_run(&mut self, host: &str, folder: &str) -> Option<&mut CloneRun> {
         self.clone
