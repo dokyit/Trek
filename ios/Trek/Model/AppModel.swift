@@ -253,13 +253,16 @@ final class AppModel {
 
     /// Pairs with a machine from its QR code or typed details; on success the token and the
     /// certificate fingerprint are kept and the connection joins the others as a link of its
-    /// own. A failed pairing touches nothing already connected.
-    func pair(address: String, alternates: [String] = [], code: String, transport: Transport) {
+    /// own. A failed pairing touches nothing already connected. With the machine's id (a pairing
+    /// link carries it), Bonjour looks for it meanwhile, on the Wi-Fi and on a cable to it: Wi-Fi
+    /// that keeps devices apart doesn't stop a phone plugged into the Mac from pairing.
+    func pair(address: String, alternates: [String] = [], code: String, transport: Transport, hostId: String? = nil) {
         pendingLink = nil
         pairing = true
         pairingError = nil
         let client = TrekClient(address: address, routes: [address] + alternates,
-                                auth: .pair(code: code, deviceId: Device.id, deviceName: Device.name), transport: transport)
+                                auth: .pair(code: code, deviceId: Device.id, deviceName: Device.name), transport: transport,
+                                hostId: hostId)
         client.onPaired = { [weak self, weak client] token, host, kept in
             guard let self, let client else { return }
             self.pairing = false

@@ -2375,3 +2375,63 @@ async fn welcome_lists_the_features_and_a_host_without_them_says_so() {
         assert!(reply["message"].as_str().unwrap().starts_with("This Mac can't"), "the server knows the type; the host doesn't do it: {reply}");
     }
 }
+
+/// A phone on a USB cable reaches the Mac at a link-local IPv6 address on the cable's interface
+/// (`fe80::…%en7`). Here, the loopback's own link-local address (`fe80::1%lo0`, on every Mac):
+/// it's admitted, asked about and described with its scope (the interface) kept, and pairs.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_link_local_peer_keeps_its_interface_and_pairs() {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let described = Arc::new(Mutex::new(Vec::new()));
+    let (handle, _) = start_with(|c| {
+        c.bind = "[::]:0".parse().unwrap();
+        let asked = asked.clone();
+        let described = described.clone();
+        c.admit = Some(
+            Admission::new(move |peer, local| {
+                asked.lock().unwrap().push((peer, local));
+                true
+            })
+            .describing(move |peer, local| {
+                described.lock().unwrap().push((peer, local));
+                "link-local on lo0".into()
+            }),
+        );
+    })
+    .await;
+    let port = handle.local_addr().port();
+    let lo0 = {
+        let name = std::ffi::CString::new("lo0").unwrap();
+        // SAFETY: a NUL-terminated name.
+        unsafe { libc_if_nametoindex(name.as_ptr()) }
+    };
+    assert_ne!(lo0, 0, "lo0 has an index");
+    let to = std::net::SocketAddrV6::new("fe80::1".parse().unwrap(), port, 0, lo0);
+    let tcp = TcpStream::connect(to).await.unwrap();
+    let (mut c, _) =
+        tokio_tungstenite::client_async("ws://trek.local/", MaybeTlsStream::Plain(tcp))
+            .await
+            .unwrap();
+    let code = handle.pairing_offer().code;
+    send(&mut c, json!({"type": "pair", "protocol": 1, "code": code, "device_id": "usb", "device_name": "x"})).await;
+    let paired = recv(&mut c).await;
+    assert_eq!(paired["type"], "paired", "{paired}");
+    let (peer, local) = asked.lock().unwrap()[0];
+    for addr in [peer, local] {
+        let std::net::SocketAddr::V6(v6) = addr else {
+            panic!("{addr} isn't IPv6");
+        };
+        assert_eq!(v6.ip().segments()[0], 0xfe80, "{addr}");
+        assert_eq!(v6.scope_id(), lo0, "{addr} keeps its interface");
+    }
+    assert_eq!(described.lock().unwrap()[0], (peer, local));
+    assert_eq!(handle.last_connection().unwrap().device_id, "usb");
+    assert_eq!(network_of(peer.ip()), "link-local");
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    #[link_name = "if_nametoindex"]
+    fn libc_if_nametoindex(name: *const std::ffi::c_char) -> u32;
+}

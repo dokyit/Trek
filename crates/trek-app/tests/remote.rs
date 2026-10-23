@@ -142,7 +142,8 @@ fn the_tailnet_says_whether_an_iphone_is_in_it() {
         Tailnet {
             account: Some("dokyit@".into()),
             phones: 0,
-            phones_online: 0
+            phones_online: 0,
+            peers: vec![],
         }
     );
     let asleep = Tailnet::parse(&status(
@@ -3966,6 +3967,65 @@ fn the_reach_setting_decides_per_connection() {
         !tailnet.admits(ip("192.168.1.30"), lan_mac)
             && !tailnet.admits(ip("fe80::1c2b"), ip("fe80::1"))
             && !tailnet.admits(ip("8.8.8.8"), lan_mac)
+    );
+}
+
+#[test]
+fn a_phone_on_the_usb_cable_is_let_in_and_said_to_come_by_link_local() {
+    use trek_app::remote::link::{LinkPolicy, Via, describe, via};
+    use trek_core::settings::Reach;
+    let ip = |s: &str| -> std::net::IpAddr { s.parse().unwrap() };
+    // The iPhone USB link on this Mac (`en7`): fe80::8bd:468e:5454:604a and 169.254.209.17.
+    let (mac6, mac4) = (ip("fe80::8bd:468e:5454:604a"), ip("169.254.209.17"));
+    let (phone6, phone4) = (ip("fe80::1c:42ff:fe8a:1234"), ip("169.254.40.9"));
+    assert_eq!(via(phone6, mac6, None), Via::Wifi);
+    assert_eq!(via(phone4, mac4, None), Via::Wifi);
+    let wifi = LinkPolicy {
+        reach: Reach::Wifi,
+        tailscale: Some("100.120.68.5".parse().unwrap()),
+    };
+    assert!(wifi.admits(phone6, mac6) && wifi.admits(phone4, mac4));
+    assert_eq!(
+        describe(phone6, mac6, None, Some("en7")),
+        "link-local (USB cable or Wi-Fi) on en7"
+    );
+    assert_eq!(
+        describe(ip("10.220.61.40"), ip("10.220.61.2"), None, Some("en0")),
+        "local network on en0"
+    );
+    assert_eq!(
+        describe(
+            ip("100.88.7.6"),
+            ip("100.120.68.5"),
+            Some("100.120.68.5".parse().unwrap()),
+            Some("utun4")
+        ),
+        "Tailscale on utun4"
+    );
+    assert_eq!(
+        describe(ip("8.8.8.8"), ip("10.220.61.2"), None, None),
+        "elsewhere"
+    );
+}
+
+#[test]
+fn the_tailnet_lists_its_other_devices() {
+    let status = r#"{"Self":{"UserID":7,"OS":"macOS"},"User":{"7":{"LoginName":"dokyit@"}},"Peer":{
+        "k1":{"HostName":"T-Book","DNSName":"t-book.tail1234.ts.net.","OS":"windows","Online":true,
+              "TailscaleIPs":["100.77.1.2","fd7a:115c:a1e0::4"]}}}"#;
+    let tailnet = trek_app::remote::Tailnet::parse(status).unwrap();
+    assert_eq!(tailnet.peers.len(), 1);
+    let peer = &tailnet.peers[0];
+    assert_eq!(
+        (peer.host_name.as_str(), peer.dns_name.as_str(), peer.online),
+        ("T-Book", "t-book.tail1234.ts.net.", true)
+    );
+    assert_eq!(
+        peer.ips,
+        vec![
+            "100.77.1.2".parse::<std::net::IpAddr>().unwrap(),
+            "fd7a:115c:a1e0::4".parse().unwrap()
+        ]
     );
 }
 

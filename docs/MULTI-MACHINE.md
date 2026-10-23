@@ -57,12 +57,29 @@ advertised on Wi-Fi with only an `id` in the TXT record.
 
 ## Rust client (`crates/trek-remote/src/client.rs`)
 
-Mirrors `TrekClient.swift`: connect to the first route that answers, pin the fingerprint, `pair` or
-`hello`, request/reply matched by `id`, an event stream for pushes, app-level `ping` every 25 s,
-reconnect with exponential backoff capped at 30 s, stop on `unauthorized`, certificate mismatch or
-protocol mismatch, and resubscribe after `welcome` (not before: the phone's bug). The protocol types
-already derive `Deserialize`, so the client reuses them. Tested against the in-process server the
-existing tests use.
+Mirrors `TrekClient.swift`: dial every route at once (the one that answered last 300 ms ahead of
+the next, and so on) and keep the first that answers, pin the fingerprint, `pair` or `hello`,
+request/reply matched by `id`, an event stream for pushes, app-level `ping` every 25 s, reconnect
+with exponential backoff capped at 30 s, stop on `unauthorized`, certificate mismatch on every route
+of its own, or protocol mismatch, and resubscribe after `welcome` (not before: the phone's bug). The
+routes `welcome` names lead, the ones it named before follow (up to 8), so a tailnet address B left
+out while its Tailscale was down still reaches it later. `network_changed()` dials at once (or pings a
+connection that's up and drops it after 5 s of silence); `also_try()` adds guesses that are kept only
+once they answer with the pinned certificate. Each route's dial result is logged at info when it
+changes. The protocol types already derive `Deserialize`, so the client reuses them. Tested against
+the in-process server the existing tests use.
+
+## Away from B's network
+
+A watches its own network every 5 s while machines are paired. A change (another Wi-Fi, Tailscale up)
+has every client dial again at once. When A is on Tailscale, it looks B up among its tailnet's peers
+by name (`tailscale status --json`, again each minute while B can't be reached) and has the client
+try that address too, so B is reached over the tailnet with no re-pairing even if A never saw B's
+tailnet address. While B can't be reached, its threads stay in the sidebar as they last were, none of
+them running (no spinner, phrase or clock), under "Offline since 3:19 PM", and the sidebar and
+Settings › Machines say why when Trek can tell: every route known for B is on a local network
+("install Tailscale on it and on this Mac, signed in to the same account"), Tailscale is off here, or B
+is offline in the tailnet.
 
 ## Rendering a remote thread
 

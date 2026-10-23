@@ -91,6 +91,33 @@ pub fn via(peer: IpAddr, local: IpAddr, tailscale: Option<Ipv4Addr>) -> Via {
     }
 }
 
+/// How the log names the way a connection from `peer` reached this Mac's `local` (on
+/// `interface`, when known): `local network on en0`, `link-local (USB cable or Wi-Fi) on en7`,
+/// `Tailscale on utun4`. A phone on a USB cable reaches the Mac at a link-local address on the
+/// cable's own interface (`fe80::…%en7`, or 169.254/16).
+pub fn describe(
+    peer: IpAddr,
+    local: IpAddr,
+    tailscale: Option<Ipv4Addr>,
+    interface: Option<&str>,
+) -> String {
+    let link_local = match peer.to_canonical() {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => v6.segments()[0] & 0xffc0 == 0xfe80,
+    };
+    let kind = match via(peer, local, tailscale) {
+        Via::ThisMac => "this machine",
+        Via::Wifi if link_local => "link-local (USB cable or Wi-Fi)",
+        Via::Wifi => "local network",
+        Via::Tailnet => "Tailscale",
+        Via::Elsewhere => "elsewhere",
+    };
+    match interface {
+        Some(name) => format!("{kind} on {name}"),
+        None => kind.to_string(),
+    }
+}
+
 /// 100.64.0.0/10: Tailscale's addresses, and carrier-grade NAT's.
 fn shared_v4(ip: Ipv4Addr) -> bool {
     let [a, b, ..] = ip.octets();

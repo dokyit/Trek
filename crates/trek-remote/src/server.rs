@@ -80,16 +80,59 @@ pub const DEFAULT_PORT: u16 = 7420;
 /// machine's it reached (`local`), both with IPv4-mapped IPv6 turned back into IPv4. Asked once per
 /// connection, as it's accepted, on the accepting task: keep it quick.
 #[derive(Clone)]
-pub struct Admission(Arc<dyn Fn(SocketAddr, SocketAddr) -> bool + Send + Sync>);
+pub struct Admission {
+    admits: Arc<dyn Fn(SocketAddr, SocketAddr) -> bool + Send + Sync>,
+    describe: Option<Arc<dyn Fn(SocketAddr, SocketAddr) -> String + Send + Sync>>,
+}
 
 impl Admission {
     pub fn new(admits: impl Fn(SocketAddr, SocketAddr) -> bool + Send + Sync + 'static) -> Self {
-        Self(Arc::new(admits))
+        Self {
+            admits: Arc::new(admits),
+            describe: None,
+        }
+    }
+
+    /// How the log names the way a connection from `peer` to `local` came (`Wi-Fi on en0`,
+    /// `Tailscale on utun4`, `link-local on en7`), in place of what the server can tell from the
+    /// addresses alone ([`network_of`]). Asked once per connection, as it's accepted: keep it
+    /// quick too.
+    pub fn describing(
+        mut self,
+        describe: impl Fn(SocketAddr, SocketAddr) -> String + Send + Sync + 'static,
+    ) -> Self {
+        self.describe = Some(Arc::new(describe));
+        self
     }
 
     /// Whether a connection from `peer` to `local` is served.
     pub fn admits(&self, peer: SocketAddr, local: SocketAddr) -> bool {
-        (self.0)(canonical(peer), canonical(local))
+        (self.admits)(canonical(peer), canonical(local))
+    }
+
+    /// How the connection came, for the log.
+    pub fn describe(&self, peer: SocketAddr, local: SocketAddr) -> Option<String> {
+        self.describe
+            .as_ref()
+            .map(|d| d(canonical(peer), canonical(local)))
+    }
+}
+
+/// Which kind of network `peer` is on, as far as its address says: the log's account of a
+/// connection when Trek gives none ([`Admission::describing`]).
+pub fn network_of(peer: std::net::IpAddr) -> &'static str {
+    use std::net::IpAddr;
+    match peer.to_canonical() {
+        ip if ip.is_loopback() => "this machine",
+        IpAddr::V4(v4) if v4.is_link_local() => "link-local",
+        IpAddr::V4(v4) if v4.is_private() => "local network",
+        IpAddr::V4(v4) if v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1]) => {
+            "tailnet or carrier-grade NAT"
+        }
+        IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80 => "link-local",
+        IpAddr::V6(v6) if v6.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0] => "tailnet",
+        IpAddr::V6(v6) if v6.segments()[0] & 0xfe00 == 0xfc00 => "local network",
+        _ => "elsewhere",
     }
 }
 
@@ -100,9 +143,16 @@ impl std::fmt::Debug for Admission {
 }
 
 /// `addr` with an IPv4-mapped IPv6 address (`[::ffff:192.168.1.2]`, what a dual-stack socket
-/// sees of IPv4) written as the IPv4 it is.
+/// sees of IPv4) written as the IPv4 it is. An IPv6 address keeps its scope (the interface of a
+/// link-local one: `fe80::1%en7`, a phone on a USB cable).
 fn canonical(addr: SocketAddr) -> SocketAddr {
-    SocketAddr::new(addr.ip().to_canonical(), addr.port())
+    match addr {
+        SocketAddr::V6(v6) => match v6.ip().to_ipv4_mapped() {
+            Some(v4) => SocketAddr::new(v4.into(), v6.port()),
+            None => addr,
+        },
+        SocketAddr::V4(_) => addr,
+    }
 }
 
 /// The last device that authenticated: who, when, from where, and on which of this machine's
@@ -626,16 +676,23 @@ async fn accept_loop<H: RemoteHost>(listener: TcpListener, inner: Arc<Inner>, ho
                 Ok((stream, peer)) => {
                     let peer = canonical(peer);
                     let local = stream.local_addr().map(canonical).unwrap_or(inner.local_addr);
+                    let via = inner
+                        .config
+                        .admit
+                        .as_ref()
+                        .and_then(|admit| admit.describe(peer, local))
+                        .unwrap_or_else(|| network_of(peer.ip()).to_string());
                     if inner.config.admit.as_ref().is_some_and(|admit| !admit.admits(peer, local)) {
-                        tracing::debug!(%peer, %local, "connection refused: not from a network this machine serves");
+                        tracing::info!(%peer, %local, via, "connection refused: not from a network this machine serves");
                         continue;
                     }
                     let _ = stream.set_nodelay(true);
                     let Some(slot) = inner.pre_auth.take(peer.ip()) else {
-                        tracing::debug!(%peer, "too many unauthenticated connections");
+                        tracing::info!(%peer, via, "connection refused: too many unauthenticated connections");
                         continue;
                     };
-                    tokio::spawn(serve(stream, peer, local, inner.clone(), host.clone(), slot));
+                    tracing::info!(%peer, %local, via, "connection");
+                    tokio::spawn(serve(stream, peer, local, via, inner.clone(), host.clone(), slot));
                 }
                 Err(err) => {
                     tracing::warn!(%err, "accept failed");
@@ -670,10 +727,12 @@ fn refuse_browsers(req: &Request, resp: Response) -> Result<Response, ErrorRespo
     Ok(resp)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve<H: RemoteHost>(
     stream: TcpStream,
     peer: SocketAddr,
     local: SocketAddr,
+    via: String,
     inner: Arc<Inner>,
     host: Arc<H>,
     unauthenticated: PreAuth,
@@ -687,11 +746,11 @@ async fn serve<H: RemoteHost>(
         Some(acceptor) => match tokio::time::timeout_at(deadline, acceptor.accept(stream)).await {
             Ok(Ok(tls)) => Box::new(tls),
             Ok(Err(err)) => {
-                tracing::debug!(%peer, %err, "TLS handshake failed");
+                tracing::info!(%peer, via, %err, "TLS handshake failed");
                 return;
             }
             Err(_) => {
-                tracing::debug!(%peer, "TLS handshake timed out");
+                tracing::info!(%peer, via, "TLS handshake timed out");
                 return;
             }
         },
@@ -707,16 +766,16 @@ async fn serve<H: RemoteHost>(
     let mut ws = match tokio::time::timeout_at(deadline, handshake).await {
         Ok(Ok(ws)) => ws,
         Ok(Err(err)) => {
-            tracing::debug!(%peer, %err, "websocket handshake refused or failed");
+            tracing::info!(%peer, via, %err, "websocket handshake refused or failed");
             return;
         }
         Err(_) => {
-            tracing::debug!(%peer, "websocket handshake timed out");
+            tracing::info!(%peer, via, "websocket handshake timed out");
             return;
         }
     };
     allowance.set(MAX_PRE_AUTH);
-    let Some(auth) = authenticate(&mut ws, peer, &inner, deadline).await else {
+    let Some(auth) = authenticate(&mut ws, peer, &via, &inner, deadline).await else {
         return;
     };
     allowance.set(usize::MAX);
@@ -729,7 +788,7 @@ async fn serve<H: RemoteHost>(
         peer,
         local,
     });
-    tracing::info!(%peer, %local, device_id, "phone connected");
+    tracing::info!(%peer, %local, via, device_id, "phone connected");
     inner.notice(ServerNotice::Connected {
         device_id: device_id.clone(),
     });
@@ -773,6 +832,7 @@ struct Authenticated {
 async fn authenticate(
     ws: &mut Ws,
     peer: SocketAddr,
+    via: &str,
     inner: &Inner,
     deadline: tokio::time::Instant,
 ) -> Option<Authenticated> {
@@ -781,7 +841,7 @@ async fn authenticate(
         let frame = tokio::select! {
             frame = ws.next() => frame,
             _ = tokio::time::sleep_until(deadline) => {
-                tracing::debug!(%peer, "no pair/hello in time");
+                tracing::info!(%peer, via, "not authenticated: no pair or hello in time");
                 close(ws, CloseCode::Policy, "Authentication timed out").await;
                 return None;
             }
@@ -791,14 +851,18 @@ async fn authenticate(
             }
         };
         let text = match frame {
-            None | Some(Ok(Message::Close(_))) => return None,
+            None | Some(Ok(Message::Close(_))) => {
+                tracing::info!(%peer, via, "not authenticated: closed before pair or hello");
+                return None;
+            }
             Some(Err(err)) => {
-                tracing::debug!(%peer, %err, "connection failed before authenticating");
+                tracing::info!(%peer, via, %err, "not authenticated: the connection failed");
                 return None;
             }
             Some(Ok(Message::Text(text))) => text,
             Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => continue,
             Some(Ok(Message::Binary(_))) => {
+                tracing::info!(%peer, via, "not authenticated: binary before pair or hello");
                 reject(ws, None, ErrorCode::Unauthorized, "Pair or say hello first").await;
                 return None;
             }
@@ -807,10 +871,13 @@ async fn authenticate(
         let msg = match parsed {
             Ok(msg) => msg,
             Err(bad) if bad.is_auth() => {
+                // What was wrong with it stays out: serde may quote the code or token it held.
+                tracing::info!(%peer, via, "not authenticated: a malformed pair or hello");
                 reject(ws, re, ErrorCode::BadRequest, &bad.message).await;
                 return None;
             }
             Err(_) => {
+                tracing::info!(%peer, via, "not authenticated: not a message it knows");
                 reject(ws, re, ErrorCode::Unauthorized, "Pair or say hello first").await;
                 return None;
             }
@@ -827,7 +894,7 @@ async fn authenticate(
                 ..
             } => (*protocol, device_id.clone()),
             _ => {
-                tracing::debug!(%peer, kind = msg.kind(), "unauthenticated request refused");
+                tracing::info!(%peer, via, kind = msg.kind(), "not authenticated: a request before pair or hello");
                 reject(ws, re, ErrorCode::Unauthorized, "Pair or say hello first").await;
                 return None;
             }
@@ -835,10 +902,12 @@ async fn authenticate(
         if protocol != PROTOCOL_VERSION {
             let message =
                 format!("This Mac speaks protocol {PROTOCOL_VERSION}, the app speaks {protocol}");
+            tracing::info!(%peer, via, protocol, "not authenticated: another protocol version");
             reject(ws, re, ErrorCode::UnsupportedProtocol, &message).await;
             return None;
         }
         if !valid_device_id(&device_id) {
+            tracing::info!(%peer, via, "not authenticated: an invalid device id");
             reject(ws, re, ErrorCode::BadRequest, "Invalid device_id").await;
             return None;
         }
@@ -875,7 +944,7 @@ async fn authenticate(
                 };
                 match outcome {
                     Ok((token, conn_id)) => {
-                        tracing::info!(%peer, device_id, name, "device paired");
+                        tracing::info!(%peer, via, device_id, name, "device paired");
                         inner.notice(ServerNotice::Paired {
                             device_id: device_id.clone(),
                             name,
@@ -895,7 +964,7 @@ async fn authenticate(
                         })
                     }
                     Err(err) => {
-                        tracing::warn!(%peer, %err, "pairing refused");
+                        tracing::warn!(%peer, via, %err, "pairing refused");
                         reject(ws, re, err.code, &err.message).await;
                         None
                     }
@@ -927,7 +996,7 @@ async fn authenticate(
                         })
                     }
                     None => {
-                        tracing::warn!(%peer, device_id, "hello with an unknown device or a wrong token");
+                        tracing::warn!(%peer, via, device_id, "not authenticated: hello with an unknown device or a wrong token");
                         reject(
                             ws,
                             re,

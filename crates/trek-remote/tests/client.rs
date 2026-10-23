@@ -751,3 +751,193 @@ async fn messages_over_the_limit_are_not_sent() {
         "the connection is still up"
     );
 }
+
+/// A route that takes the connection and then says nothing (TLS never answers): a machine's old
+/// address on a network this computer has left, as the client meets it.
+async fn silent_route() -> (tokio::net::TcpListener, String) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let route = listener.local_addr().unwrap().to_string();
+    (listener, route)
+}
+
+#[tokio::test]
+async fn a_route_that_never_answers_doesnt_hold_up_the_next() {
+    let m = machine().await;
+    let (_held, silent) = silent_route().await;
+    let options = ClientOptions {
+        connect_timeout: Duration::from_secs(8),
+        ..quick()
+    };
+    let started = std::time::Instant::now();
+    let client = Client::connect_with(
+        vec![silent.clone(), m.handle.local_addr().to_string()],
+        &m.identity.fingerprint,
+        m.pair_auth("machine-a"),
+        options,
+    )
+    .unwrap();
+    let mut events = client.events().unwrap();
+    let route = next(&mut events, |e| match e {
+        Event::Connected { route, .. } => Some(route),
+        _ => None,
+    })
+    .await;
+    assert_eq!(route, m.handle.local_addr().to_string());
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "dialled alongside the silent one, not after its timeout: {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_network_change_dials_at_once_instead_of_waiting_out_the_backoff() {
+    let m = machine().await;
+    let target = Arc::new(Mutex::new(Some(m.handle.local_addr())));
+    let route = front(target.clone()).await.to_string();
+    let slow = ClientOptions {
+        backoff_first: Duration::from_secs(60),
+        backoff_max: Duration::from_secs(60),
+        ..ClientOptions::default()
+    };
+    let client = Client::connect_with(
+        vec![route],
+        &m.identity.fingerprint,
+        m.pair_auth("machine-a"),
+        slow,
+    )
+    .unwrap();
+    let mut events = client.events().unwrap();
+    connected(&mut events).await;
+
+    // The machine goes away; the client waits a minute before dialling again.
+    *target.lock().unwrap() = None;
+    m.handle.shutdown();
+    next(&mut events, |e| {
+        matches!(e, Event::Disconnected { .. }).then_some(())
+    })
+    .await;
+    let back = serve(
+        "127.0.0.1:0".parse().unwrap(),
+        m.identity.clone(),
+        m.dir.clone(),
+    )
+    .await;
+    *target.lock().unwrap() = Some(back.handle.local_addr());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let now = client.state().borrow().clone();
+    assert_eq!(now, State::Connecting, "still waiting");
+
+    // This computer joined another network: it dials now.
+    client.network_changed();
+    let (_, newly) = connected(&mut events).await;
+    assert!(!newly);
+}
+
+#[tokio::test]
+async fn a_connection_lost_with_the_old_network_is_noticed_at_once() {
+    let m = machine().await;
+    // A route that forwards, then goes quiet without closing (Wi-Fi gone under it).
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let route = listener.local_addr().unwrap().to_string();
+    let to = m.handle.local_addr();
+    let quiet = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let q = quiet.clone();
+    tokio::spawn(async move {
+        while let Ok((inbound, _)) = listener.accept().await {
+            let q = q.clone();
+            tokio::spawn(async move {
+                let outbound = tokio::net::TcpStream::connect(to).await.unwrap();
+                let (mut ir, mut iw) = inbound.into_split();
+                let (mut or, mut ow) = outbound.into_split();
+                let q1 = q.clone();
+                let up = async move {
+                    let mut buf = [0u8; 8192];
+                    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                    while let Ok(n) = ir.read(&mut buf).await {
+                        if n == 0 {
+                            break;
+                        }
+                        if !q1.load(std::sync::atomic::Ordering::SeqCst) {
+                            let _ = ow.write_all(&buf[..n]).await;
+                        }
+                    }
+                };
+                let down = async move {
+                    let mut buf = [0u8; 8192];
+                    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                    while let Ok(n) = or.read(&mut buf).await {
+                        if n == 0 {
+                            break;
+                        }
+                        if !q.load(std::sync::atomic::Ordering::SeqCst) {
+                            let _ = iw.write_all(&buf[..n]).await;
+                        }
+                    }
+                };
+                tokio::join!(up, down);
+            });
+        }
+    });
+    let options = ClientOptions {
+        probe: Duration::from_millis(500),
+        ..quick()
+    };
+    let client = Client::connect_with(
+        vec![route],
+        &m.identity.fingerprint,
+        m.pair_auth("machine-a"),
+        options,
+    )
+    .unwrap();
+    let mut events = client.events().unwrap();
+    connected(&mut events).await;
+    quiet.store(true, std::sync::atomic::Ordering::SeqCst);
+    client.network_changed();
+    let reason = next(&mut events, |e| match e {
+        Event::Disconnected { reason } => Some(reason),
+        _ => None,
+    })
+    .await;
+    assert!(reason.contains("network changed"), "{reason}");
+}
+
+#[tokio::test]
+async fn a_suggested_route_is_dialled_and_kept_once_it_answers_as_the_machine() {
+    let m = machine().await;
+    let (_m, paired) = {
+        let (client, _events, paired) = paired_client(&m, "machine-a").await;
+        client.close();
+        (client, paired)
+    };
+    // Only an address it had on another network (nothing answers there now)...
+    let dead = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string();
+    let mut away = paired.clone();
+    away.routes = vec![dead.clone()];
+    let client =
+        Client::connect_with(away.routes.clone(), &away.fingerprint, away.auth(), quick()).unwrap();
+    let mut events = client.events().unwrap();
+
+    // ...and a guess that is another Trek: another certificate there doesn't stop it.
+    let impostor = machine().await;
+    client.also_try(vec![impostor.handle.local_addr().to_string()]);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(*client.state().borrow(), State::Connecting);
+
+    // The right guess (its tailnet address, say) answers with the pinned certificate.
+    let real = m.handle.local_addr().to_string();
+    client.also_try(vec![real.clone()]);
+    client.network_changed();
+    let (kept, newly) = connected(&mut events).await;
+    assert!(!newly);
+    assert_eq!(kept.routes.first(), Some(&real), "{:?}", kept.routes);
+    assert!(
+        kept.routes.contains(&dead),
+        "the address it had is kept too: {:?}",
+        kept.routes
+    );
+}

@@ -2644,24 +2644,27 @@ impl Render for Sidebar {
             live_groups.push((format!("live-g-{pid}").into(), group.into_any_element()));
         }
         list = list.child(crate::motion::flip_stack(&flip, live_groups, now));
-        // Threads living on other machines, under each machine's name (`machines`).
-        let machines: Vec<(String, String, bool, Vec<Thread>)> = self
-            .workspace
-            .read(cx)
-            .machines
-            .list
-            .iter()
-            .map(|m| {
-                (
-                    m.id().to_string(),
-                    m.entry.name.clone(),
-                    m.reachable(),
-                    m.listed().into_iter().cloned().collect::<Vec<_>>(),
-                )
-            })
-            .filter(|(.., threads)| !threads.is_empty())
-            .collect();
-        for (host, name, reachable, threads) in machines {
+        // Threads living on other machines, under each machine's name (`machines`). One that
+        // can't be reached says since when, and why when Trek can tell.
+        let machines: Vec<(String, String, bool, Option<String>, Vec<Thread>)> = {
+            let ws = self.workspace.read(cx);
+            let this = crate::words::words().this_computer;
+            ws.machines
+                .list
+                .iter()
+                .map(|m| {
+                    (
+                        m.id().to_string(),
+                        m.entry.name.clone(),
+                        m.reachable(),
+                        crate::machines::offline_note(m, &ws.machines.here, this),
+                        m.listed().into_iter().cloned().collect::<Vec<_>>(),
+                    )
+                })
+                .filter(|(.., threads)| !threads.is_empty())
+                .collect()
+        };
+        for (host, name, reachable, offline, threads) in machines {
             let header = h_flex()
                 .id(SharedString::from(format!("machine-head-{host}")))
                 .test_support()
@@ -2683,6 +2686,19 @@ impl Render for Sidebar {
                 )
                 .child(threads.len().to_string());
             let mut group = v_flex().w_full().child(header);
+            if let Some(note) = offline {
+                group = group.child(
+                    div()
+                        .id(SharedString::from(format!("machine-offline-{host}")))
+                        .test_support()
+                        .mx_2()
+                        .px_3()
+                        .pb_1()
+                        .text_xs()
+                        .text_color(theme.muted_foreground.opacity(0.8))
+                        .child(note),
+                );
+            }
             for t in &threads {
                 let sel = selected.as_deref() == Some(t.id.as_str());
                 let row = if attention(t) {

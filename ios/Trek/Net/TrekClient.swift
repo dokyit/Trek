@@ -188,7 +188,8 @@ final class TrekClient: Backend {
     /// Addresses the Mac answered at before (another network it was on), newest first.
     private(set) var known: [String]
     /// The paired Mac's lasting id, which its Bonjour record carries: with it the Mac is looked
-    /// for on this network. Set when pairing succeeds, for the client that paired stays the live one.
+    /// for on this network. Given when pairing from a link that carries it (so a phone on the
+    /// cable can pair), else set when pairing succeeds, for the client that paired stays the live one.
     var hostId: String? {
         didSet {
             guard hostId != oldValue else { return }
@@ -355,8 +356,10 @@ final class TrekClient: Backend {
         abandonRound()
         search = Search(started: timeline.now())
         backoff.reset()
-        guard p.up else { updateStatus(); return }
+        // No Wi-Fi or cellular, but a cable to the Mac may be there all the same: it's looked
+        // for on it, and what Bonjour finds there is dialled.
         startFinder()
+        guard p.up else { updateStatus(); return }
         dialRound()
     }
 
@@ -596,7 +599,13 @@ final class TrekClient: Backend {
     }
 
     private func startFinder() {
-        guard finder == nil, let hostId, !stopped else { return }
+        guard let hostId, !stopped else { return }
+        // A browse that failed (the mDNS responder restarted, the network went) has stopped
+        // itself: it starts again here, each round. One still up is left as it is.
+        if let finder {
+            finder.start()
+            return
+        }
         let f = makeFinder(hostId)
         f.onEvent = { [weak self] in self?.finderEvent($0) }
         finder = f
@@ -985,6 +994,8 @@ final class NetworkLink: MacLink {
     private var isOpen = false
     private var closed = false
     private nonisolated static let queue = DispatchQueue(label: "trek.link")
+    /// The name TLS asks the Mac for (SNI): any valid host name does.
+    nonisolated static let serverName = "trek.local"
 
     init(address: String, transport: Transport) {
         self.address = address
@@ -1027,6 +1038,11 @@ final class NetworkLink: MacLink {
             sec_protocol_options_set_verify_block(tls.securityProtocolOptions, { _, trust, complete in
                 complete(pinning.check(sec_trust_copy_ref(trust).takeRetainedValue()))
             }, queue)
+            // A host name for the Mac's TLS: left to itself, Network.framework names the server
+            // after the endpoint (a Bonjour service's name, "Toby's MacBook Air", or a scoped
+            // `fe80::1%en7`), which isn't one, and rustls on the Mac ends the handshake over it.
+            // The Mac has one certificate whatever is asked for, and the pin decides.
+            sec_protocol_options_set_tls_server_name(tls.securityProtocolOptions, Self.serverName)
             params = NWParameters(tls: tls)
         } else {
             params = .tcp

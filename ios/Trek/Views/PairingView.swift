@@ -250,7 +250,7 @@ struct PairingConfirmSheet: View {
             VStack(spacing: 10) {
                 if link.fingerprint != nil {
                     Button {
-                        model.pair(address: link.address, alternates: link.alternates, code: link.code, transport: link.transport)
+                        model.pair(address: link.address, alternates: link.alternates, code: link.code, transport: link.transport, hostId: link.hostId)
                     } label: {
                         Text("Pair").fontWeight(.semibold).foregroundStyle(Trek.background).frame(maxWidth: .infinity)
                     }
@@ -259,7 +259,7 @@ struct PairingConfirmSheet: View {
                     .controlSize(.extraLarge)
                 } else {
                     Button {
-                        model.pair(address: link.address, alternates: link.alternates, code: link.code, transport: .plain)
+                        model.pair(address: link.address, alternates: link.alternates, code: link.code, transport: .plain, hostId: link.hostId)
                     } label: {
                         Text("Pair without encryption").fontWeight(.medium).foregroundStyle(Trek.approval).frame(maxWidth: .infinity)
                     }

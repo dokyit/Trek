@@ -256,6 +256,20 @@ pub struct Tailnet {
     /// iPhones and iPads in it, and how many of them are online now.
     pub phones: usize,
     pub phones_online: usize,
+    /// Every other device in it: where a paired machine may be found once it's on the tailnet
+    /// too (`machines::tailnet_routes`).
+    pub peers: Vec<TailnetPeer>,
+}
+
+/// Another device in the tailnet.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TailnetPeer {
+    /// Its own name for itself (`T-Book`).
+    pub host_name: String,
+    /// Its MagicDNS name (`t-book.tail1234.ts.net.`).
+    pub dns_name: String,
+    pub ips: Vec<IpAddr>,
+    pub online: bool,
 }
 
 impl Tailnet {
@@ -283,10 +297,38 @@ impl Tailnet {
             .iter()
             .filter(|p| p.get("Online").and_then(|o| o.as_bool()) == Some(true))
             .count();
+        let text = |p: &serde_json::Value, key: &str| {
+            p.get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        let peers = v
+            .get("Peer")
+            .and_then(|p| p.as_object())
+            .map(|peers| {
+                peers
+                    .values()
+                    .map(|p| TailnetPeer {
+                        host_name: text(p, "HostName"),
+                        dns_name: text(p, "DNSName"),
+                        ips: p
+                            .get("TailscaleIPs")
+                            .and_then(|ips| ips.as_array())
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|ip| ip.as_str()?.parse().ok())
+                            .collect(),
+                        online: p.get("Online").and_then(|o| o.as_bool()) == Some(true),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Some(Self {
             account,
             phones: phones.len(),
             phones_online,
+            peers,
         })
     }
 }
@@ -294,7 +336,7 @@ impl Tailnet {
 impl Addresses {
     /// This computer's addresses, from a fresh network snapshot. Off the main thread: it may ask
     /// Tailscale.
-    fn find_in(input: &AddressInputs) -> Self {
+    pub(crate) fn find_in(input: &AddressInputs) -> Self {
         let mut out = Self::from_interfaces_preferring(
             &input.interfaces,
             tailscale_ip(),
@@ -397,13 +439,13 @@ fn is_virtual_or_tunnel(name: &str) -> bool {
 /// The network facts that decide the address put in pairing links. The default route belongs in
 /// the snapshot too: a VPN or adapter metric can change it without adding or removing an address.
 #[derive(Debug, Clone, PartialEq)]
-struct AddressInputs {
+pub(crate) struct AddressInputs {
     interfaces: Vec<(String, Ipv4Addr)>,
     default_route: Option<Ipv4Addr>,
 }
 
 impl AddressInputs {
-    fn read() -> Self {
+    pub(crate) fn read() -> Self {
         Self {
             interfaces: interface_addresses(),
             default_route: default_route_ipv4(),
@@ -540,6 +582,43 @@ pub fn remote_routes(
     Ok(std::iter::once(first)
         .chain(other_endpoint(addresses, reach, port).map(|a| a.to_string()))
         .collect())
+}
+
+/// The interface this Mac's address `local` is on (`en0`, `en7`, `utun4`), for the log: a
+/// link-local IPv6 address names it in its scope, another is looked up among the interfaces.
+fn interface_of(local: SocketAddr) -> Option<String> {
+    if let SocketAddr::V6(v6) = local
+        && v6.scope_id() != 0
+    {
+        return interface_name(v6.scope_id());
+    }
+    let IpAddr::V4(ip) = local.ip() else {
+        return None;
+    };
+    interface_addresses()
+        .into_iter()
+        .find(|(_, a)| *a == ip)
+        .map(|(name, _)| name)
+}
+
+/// The name of the interface with index `index`.
+fn interface_name(index: u32) -> Option<String> {
+    #[cfg(unix)]
+    {
+        let mut buf = [0 as libc::c_char; libc::IF_NAMESIZE];
+        // SAFETY: `buf` is IF_NAMESIZE long, as if_indextoname asks; it writes a C string there.
+        let name = unsafe { libc::if_indextoname(index, buf.as_mut_ptr()) };
+        if name.is_null() {
+            return None;
+        }
+        // SAFETY: if_indextoname succeeded, so `buf` holds a NUL-terminated name.
+        let name = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+        Some(name.to_string_lossy().into_owned())
+    }
+    #[cfg(not(unix))]
+    {
+        Some(format!("interface {index}"))
+    }
 }
 
 /// The IPv4 addresses of the interfaces that are up (not loopback), with the interfaces' names.
@@ -700,7 +779,12 @@ impl Workspace {
                     let policy = Arc::new(std::sync::Mutex::new(link::LinkPolicy { reach, tailscale: addresses.tailscale }));
                     config.admit = Some({
                         let policy = policy.clone();
+                        let named = policy.clone();
                         tr::Admission::new(move |peer, local| policy.lock().unwrap_or_else(|e| e.into_inner()).admits(peer.ip(), local.ip()))
+                            .describing(move |peer, local| {
+                                let tailscale = named.lock().unwrap_or_else(|e| e.into_inner()).tailscale;
+                                link::describe(peer.ip(), local.ip(), tailscale, interface_of(local).as_deref())
+                            })
                     });
                     config.devices_path = Some(mobile_dir().join("devices.json"));
                     config.tls = Some(identity);

@@ -88,6 +88,7 @@ pub use host::{
 pub use pairing::{DeviceInfo, DeviceRegistry, PairingError, PairingOffer};
 pub use protocol::*;
 pub use server::{
-    Admission, DEFAULT_PORT, LastConnection, RemoteHandle, RemoteServer, ServerConfig, ServerNotice,
+    Admission, DEFAULT_PORT, LastConnection, RemoteHandle, RemoteServer, ServerConfig,
+    ServerNotice, network_of,
 };
 pub use tls::TlsIdentity;
