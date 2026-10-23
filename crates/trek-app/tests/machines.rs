@@ -1490,7 +1490,8 @@ fn a_machines_thread_at_work_shows_above_the_projects_with_its_clock_and_sub_age
         let clock = trek.read(cx, |ws, _| ws.machines.working_for(&id)).unwrap();
         assert!(clock >= Duration::from_secs(75), "{clock:?}");
         assert!(
-            trek.read(cx, |ws, _| ws.any_turn_running() || ws.machines.any_at_work()),
+            trek.read(cx, |ws, _| ws.any_turn_running()
+                || ws.machines.any_at_work()),
             "the sidebar's clock ticks by the second"
         );
         // Its sub-agents: the pill on its card, and their names for its tooltip.
@@ -1505,9 +1506,15 @@ fn a_machines_thread_at_work_shows_above_the_projects_with_its_clock_and_sub_age
         assert!(trek.visible(cx, format!("card-kids-count-{id}")));
         // It's in Active, above this Mac's projects, as a thread at work here would be; its
         // machine's group holds only what's quiet there (nothing now).
-        let pid = trek.read(cx, |ws, _| ws.thread(&here).unwrap().project_id.clone().unwrap());
+        let pid = trek.read(cx, |ws, _| {
+            ws.thread(&here).unwrap().project_id.clone().unwrap()
+        });
         let card = trek.bounds(cx, format!("card-{id}")).unwrap().origin.y;
-        let project = trek.bounds(cx, format!("live-proj-head-{pid}")).unwrap().origin.y;
+        let project = trek
+            .bounds(cx, format!("live-proj-head-{pid}"))
+            .unwrap()
+            .origin
+            .y;
         assert!(card < project, "{card:?} above {project:?}");
         assert!(!trek.visible(cx, "machine-head-machine-c"));
         let place = trek.read(cx, |ws, _| ws.machines.place(&id));

@@ -2850,7 +2850,9 @@ impl Render for Sidebar {
                         .font_medium()
                         .child(name),
                 )
-                .when(!threads.is_empty(), |el| el.child(threads.len().to_string()));
+                .when(!threads.is_empty(), |el| {
+                    el.child(threads.len().to_string())
+                });
             let mut group = v_flex().w_full().child(header);
             if let Some(note) = offline {
                 group = group.child(
