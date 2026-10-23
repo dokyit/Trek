@@ -654,7 +654,20 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Every backslash command goes through here, so `\hat\hat…` (arg -> atom -> command ->
+    /// arg) counts against the same limit as nested groups.
     fn command(&mut self, name: &str) -> Vec<Node> {
+        self.depth += 1;
+        let out = if self.depth > MAX_DEPTH {
+            self.rest_as_text()
+        } else {
+            self.command_inner(name)
+        };
+        self.depth -= 1;
+        out
+    }
+
+    fn command_inner(&mut self, name: &str) -> Vec<Node> {
         let one = |n: Node| vec![n];
         match name {
             "" => one(Node::Unknown("\\".into())),
@@ -1915,6 +1928,21 @@ mod tests {
                 s.push_str(pieces[(x % pieces.len() as u64) as usize]);
             }
             let _ = parse(&s);
+        }
+    }
+
+    #[test]
+    fn argument_less_command_chains_do_not_overflow_a_small_stack() {
+        for cmd in [r"\hat", r"\frac", r"\sqrt", r"\overline", r"\boxed"] {
+            let src = format!("{}x", cmd.repeat(2000));
+            std::thread::Builder::new()
+                .stack_size(256 * 1024)
+                .spawn(move || {
+                    let _ = parse(&src);
+                })
+                .unwrap()
+                .join()
+                .unwrap();
         }
     }
 }

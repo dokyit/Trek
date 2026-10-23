@@ -1263,10 +1263,13 @@ impl Workspace {
             })
             .transpose()?;
         // Started the way the Mac's composer starts one, without taking over the Mac's screen.
-        let (route, prefs, tabs) = (
+        // `draft_became` too: the Mac's own draft didn't become this thread, and the terminal dock
+        // would give the draft's shells to it.
+        let (route, prefs, tabs, became) = (
             self.route.clone(),
             self.draft_prefs.clone(),
             self.tabs.clone(),
+            self.draft_became.clone(),
         );
         self.route = Route::Draft { project };
         self.draft_prefs.agent = agent;
@@ -1287,6 +1290,7 @@ impl Workspace {
         self.route = route;
         self.draft_prefs = prefs;
         self.tabs = tabs;
+        self.draft_became = became;
         cx.notify();
         started.ok_or_else(|| tr::HostError::other("The thread didn't start"))
     }
@@ -2932,16 +2936,14 @@ pub fn agent_ref(agent: &AgentId) -> tr::AgentRef {
     }
 }
 
-/// An instant as unix ms, the same each time it's asked (`now - elapsed` drifts by the time it
-/// takes to ask, which would send an unchanged row again every tick).
+/// An instant as unix ms, the same each time it's asked: worked out from the clock now and the
+/// time since (which, like the Mac's own timers, doesn't count the Mac's sleep: a fixed anchor
+/// would put every instant after a wake that much too early), rounded to the second so the
+/// time it takes to ask doesn't send an unchanged row again every tick.
 fn instant_ms(at: std::time::Instant) -> i64 {
-    static ANCHOR: std::sync::LazyLock<(std::time::Instant, i64)> =
-        std::sync::LazyLock::new(|| (std::time::Instant::now(), now_ms()));
-    let (then, ms) = *ANCHOR;
-    match at.checked_duration_since(then) {
-        Some(after) => ms + after.as_millis() as i64,
-        None => ms - then.duration_since(at).as_millis() as i64,
-    }
+    let ago = std::time::Instant::now().saturating_duration_since(at);
+    let ms = now_ms() - ago.as_millis() as i64;
+    (ms + 500).div_euclid(1000) * 1000
 }
 
 /// A request answered: its card as last sent, saying how a phone answered it, or just closed
@@ -3190,7 +3192,7 @@ fn hear_notices(
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests {
     #[cfg(test)]
-    use super::is_trek_command;
+    use super::{instant_ms, is_trek_command};
     use std::cell::RefCell;
     use std::collections::HashMap;
 
@@ -3215,5 +3217,20 @@ pub mod tests {
         );
         assert!(!is_trek_command("fix the /permissions page"));
         assert!(!is_trek_command("plain words"));
+    }
+
+    #[test]
+    fn an_instant_is_unix_ms_that_holds_still() {
+        // Started a whole number of seconds ago on the clock, so asking can't land on the edge
+        // between two seconds.
+        let ago = 90_000 + trek_core::store::now_ms().rem_euclid(1000) as u64;
+        let at = std::time::Instant::now() - std::time::Duration::from_millis(ago);
+        let ms = instant_ms(at);
+        let expected = trek_core::store::now_ms() - ago as i64;
+        assert!((ms - expected).abs() <= 500, "{ms} vs {expected}");
+        assert_eq!(ms % 1000, 0, "to the second");
+        // Asked again, and again later, the same: nothing changes on a phone's row.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert_eq!(instant_ms(at), ms);
     }
 }

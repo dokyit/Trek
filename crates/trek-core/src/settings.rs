@@ -1090,12 +1090,16 @@ impl Settings {
             }
         };
         let error = match toml::Value::Table(table.clone()).try_into::<Settings>() {
-            Ok(s) => return (s, None),
+            Ok(mut s) => {
+                s.keep_unknown(&table);
+                return (s, None);
+            }
             Err(e) => e.to_string(),
         };
         let mut kept = toml::Table::new();
         let mut dropped = vec![];
         salvage::<Settings>(&table, &mut vec![], &mut kept, &mut dropped);
+        let salvaged = kept.clone();
         let mut s = toml::Value::Table(kept)
             .try_into::<Settings>()
             .unwrap_or_else(|_| {
@@ -1113,6 +1117,8 @@ impl Settings {
                 ))
             })
             .collect();
+        // What was read cleanly: unknown keys are looked for there, past the unreadable values.
+        s.keep_unknown(&salvaged);
         let dropped = dropped.iter().map(|p| p.join(".")).collect();
         (
             s,
@@ -1123,6 +1129,49 @@ impl Settings {
                 error,
             }),
         )
+    }
+
+    /// Remember the keys of the file that this build has no setting for (a newer build's, or one
+    /// added by hand), so `to_toml` writes them back. A key is unknown when leaving it out of the
+    /// file changes nothing about the settings read.
+    fn keep_unknown(&mut self, table: &toml::Table) {
+        fn walk(
+            node: &toml::Table,
+            path: &mut Vec<String>,
+            all: &toml::Table,
+            base: &toml::Value,
+            kept: &mut Vec<(Vec<String>, toml::Value, Option<toml::Value>)>,
+        ) {
+            for (k, v) in node {
+                path.push(k.clone());
+                if let Some(known) = value_at(base, path) {
+                    if let (toml::Value::Table(t), true) = (v, known.is_table()) {
+                        walk(t, path, all, base, kept);
+                    }
+                } else if !kept.iter().any(|(p, ..)| path.starts_with(p)) {
+                    // The file without this key, read again.
+                    let mut without = toml::Value::Table(all.clone());
+                    if let Some(parent) = path[..path.len() - 1]
+                        .iter()
+                        .try_fold(&mut without, |v, k| v.as_table_mut()?.get_mut(k))
+                        .and_then(toml::Value::as_table_mut)
+                    {
+                        parent.remove(k);
+                    }
+                    let same = without
+                        .try_into::<Settings>()
+                        .ok()
+                        .and_then(|s| toml::Value::try_from(&s).ok());
+                    if same.as_ref() == Some(base) {
+                        kept.push((path.clone(), v.clone(), None));
+                    }
+                }
+                path.pop();
+            }
+        }
+        if let Ok(base) = toml::Value::try_from(&*self) {
+            walk(table, &mut vec![], table, &base, &mut self.guard.kept);
+        }
     }
 
     fn migrated(mut s: Settings) -> Settings {
@@ -1774,6 +1823,31 @@ mod tests {
         s.appearance.theme = ThemeChoice::Paper;
         let back: toml::Table = toml::from_str(&s.to_toml().unwrap()).unwrap();
         assert_eq!(back["appearance"]["theme"].as_str(), Some("paper"));
+    }
+
+    #[test]
+    fn keys_this_build_has_no_setting_for_survive_a_save() {
+        let text = "[general]\nsend_with_cmd_enter = true\nnewer_option = 3\n\n[mobile]\nfuture = { a = 1 }\n\n[from_nightly]\nx = \"y\"\n\n[appearance]\ntheme = \"aurora\"\n";
+        let (mut s, problem) = Settings::parse(text);
+        // The bad theme is the only problem reported; the unknown keys are not.
+        assert_eq!(problem.unwrap().dropped, ["appearance.theme"]);
+        s.general.send_with_cmd_enter = false;
+        s.appearance.ui_font_size = 15.0;
+        let back: toml::Table = toml::from_str(&s.to_toml().unwrap()).unwrap();
+        assert_eq!(back["general"]["newer_option"].as_integer(), Some(3));
+        assert_eq!(
+            back["general"]["send_with_cmd_enter"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(back["mobile"]["future"]["a"].as_integer(), Some(1));
+        assert_eq!(back["from_nightly"]["x"].as_str(), Some("y"));
+        assert_eq!(back["appearance"]["theme"].as_str(), Some("aurora"));
+        // A file with only known keys carries nothing extra, and a cleared optional value stays cleared.
+        let (mut s, problem) = Settings::parse("[appearance]\nui_font_size = 16.0\n");
+        assert!(problem.is_none() && s.guard.kept.is_empty());
+        s.appearance.ui_font_size = 15.0;
+        let back: toml::Table = toml::from_str(&s.to_toml().unwrap()).unwrap();
+        assert_eq!(back["appearance"]["ui_font_size"].as_float(), Some(15.0));
     }
 
     #[test]

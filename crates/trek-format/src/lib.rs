@@ -30,7 +30,7 @@ pub fn formatter_for(path: &Path) -> Option<Formatter> {
     let ext = path.extension()?.to_string_lossy().to_lowercase();
     let file = path.to_string_lossy();
     match ext.as_str() {
-        "rs" => fmt("rustfmt", &["--edition", "2021"]),
+        "rs" => fmt("rustfmt", &["--edition", &rust_edition(path)]),
         "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" | "json" | "jsonc" | "css"
         | "scss" | "html" | "htm" | "md" | "markdown" | "yaml" | "yml" => {
             fmt("prettier", &["--stdin-filepath", &file])
@@ -40,6 +40,79 @@ pub fn formatter_for(path: &Path) -> Option<Formatter> {
         "sh" | "bash" => fmt("shfmt", &[]),
         _ => None,
     }
+}
+
+/// The edition `rustfmt` is told for the Rust file at `path`: its crate's, from the nearest
+/// `Cargo.toml` up from the file (`edition = "2021"`, or `edition.workspace = true` and the
+/// workspace root's). `rustfmt` never reads `Cargo.toml` when it is given text on stdin, and one
+/// that isn't told parses as 2015, so a crate with no edition to be found gets the current one,
+/// which is what `cargo new` writes.
+fn rust_edition(path: &Path) -> String {
+    const CURRENT: &str = "2024";
+    let Some(dir) = path.parent() else {
+        return CURRENT.to_string();
+    };
+    for crate_dir in dir.ancestors() {
+        let Ok(manifest) = std::fs::read_to_string(crate_dir.join("Cargo.toml")) else {
+            continue;
+        };
+        // A manifest that is only a workspace has no edition of its own, and is not a crate.
+        match manifest_edition(&manifest, "package") {
+            Some(Edition::Own(edition)) => return edition,
+            Some(Edition::Workspace) => {
+                return crate_dir
+                    .ancestors()
+                    .find_map(|root| {
+                        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+                        match manifest_edition(&manifest, "workspace.package") {
+                            Some(Edition::Own(edition)) => Some(edition),
+                            _ => None,
+                        }
+                    })
+                    .unwrap_or_else(|| CURRENT.to_string());
+            }
+            None => {}
+        }
+        if manifest_edition(&manifest, "workspace.package").is_some() {
+            break;
+        }
+    }
+    CURRENT.to_string()
+}
+
+enum Edition {
+    Own(String),
+    Workspace,
+}
+
+/// The `edition` set in the `[section]` of a `Cargo.toml`'s text: its own year, or inherited from
+/// the workspace (`edition.workspace = true`, `edition = { workspace = true }`).
+fn manifest_edition(manifest: &str, section: &str) -> Option<Edition> {
+    let mut inside = false;
+    for line in manifest.lines() {
+        let line = line.split('#').next().unwrap_or_default().trim();
+        if let Some(header) = line.strip_prefix('[') {
+            inside = header.trim_end_matches(']').trim() == section;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let (key, value) = (key.trim(), value.trim());
+        if key == "edition.workspace" || (key == "edition" && value.starts_with('{')) {
+            return value.contains("true").then_some(Edition::Workspace);
+        }
+        if key == "edition" {
+            let year = value.trim_matches(['"', '\'']);
+            if ["2015", "2018", "2021", "2024"].contains(&year) {
+                return Some(Edition::Own(year.to_string()));
+            }
+        }
+    }
+    None
 }
 
 /// What a missing formatter is called to the user: the file's extension (`.cs`), or its name.
@@ -210,8 +283,8 @@ pub mod tests {
     #[test]
     fn each_language_has_the_formatter_its_community_uses() {
         assert_eq!(
-            of("main.rs"),
-            Some(("rustfmt", vec!["--edition".into(), "2021".into()]))
+            of("main.rs").map(|f| (f.0, f.1.first().cloned())),
+            Some(("rustfmt", Some("--edition".into())))
         );
         assert_eq!(of("go/main.go"), Some(("gofmt", vec![])));
         assert_eq!(of("run.sh"), Some(("shfmt", vec![])));
@@ -241,6 +314,51 @@ pub mod tests {
         let f = formatter_for(&Path::new("proj").join("a.py")).unwrap();
         assert_eq!(f.args.last().map(String::as_str), Some("-"));
         assert!(f.args.contains(&"--stdin-filename".to_string()));
+    }
+
+    #[cfg(test)]
+    fn edition_of(dir: &Path, file: &str) -> String {
+        let f = formatter_for(&dir.join(file)).unwrap();
+        assert_eq!(f.args[0], "--edition");
+        f.args[1].clone()
+    }
+
+    #[test]
+    fn rustfmt_is_told_the_edition_of_the_crate_the_file_is_in() {
+        let root = std::env::temp_dir().join(format!("trek-format-edition-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |path: &str, text: &str| {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        // A crate's own edition, from a file in a folder below its manifest.
+        write(
+            "old/Cargo.toml",
+            "[package]\nname = \"old\"\nedition = \"2018\" # not new\n\n[dependencies]\nedition = \"1\"\n",
+        );
+        assert_eq!(edition_of(&root, "old/src/deep/lib.rs"), "2018");
+        // One that takes the workspace's, in each way of saying so.
+        write(
+            "ws/Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nedition = \"2021\"\n",
+        );
+        write(
+            "ws/crates/a/Cargo.toml",
+            "[package]\nname = \"a\"\nedition.workspace = true\n",
+        );
+        write(
+            "ws/crates/b/Cargo.toml",
+            "[package]\nname = \"b\"\nedition = { workspace = true }\n",
+        );
+        assert_eq!(edition_of(&root, "ws/crates/a/src/lib.rs"), "2021");
+        assert_eq!(edition_of(&root, "ws/crates/b/src/lib.rs"), "2021");
+        // A crate that says nothing, and a file outside any crate, get the current edition, not
+        // the 2015 that rustfmt assumes from stdin (nor a 2021 that rejects let chains).
+        write("bare/Cargo.toml", "[package]\nname = \"bare\"\n");
+        assert_eq!(edition_of(&root, "bare/src/lib.rs"), "2024");
+        assert_eq!(edition_of(&root, "loose/x.rs"), "2024");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

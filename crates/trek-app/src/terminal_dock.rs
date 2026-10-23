@@ -91,13 +91,14 @@ impl TerminalDock {
         let Some(now) = owner(&ws.read(cx).route) else {
             return;
         };
+        // Only the route change that sent the draft hands its shells on: taken here so a later
+        // draft's shells never go to that thread when it's opened.
+        let became = ws.update(cx, |ws, _| ws.draft_became.take());
         if now == self.shown && !self.launch_open {
             return;
         }
         if let (Owner::Draft, Owner::Thread(id)) = (&self.shown, &now) {
-            if ws.read(cx).draft_became.as_deref() == Some(id.as_str())
-                && !self.docks.contains_key(&now)
-            {
+            if became.as_deref() == Some(id.as_str()) && !self.docks.contains_key(&now) {
                 if let Some(draft) = self.docks.remove(&Owner::Draft) {
                     self.docks.insert(now.clone(), draft);
                 }

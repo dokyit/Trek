@@ -85,7 +85,7 @@ private struct ThreadScreen: View {
                 Text("It leaves your threads on the Mac too.")
             }
             .sheet(isPresented: $showingGit) { GitSheet(threadID: threadID) }
-            .sheet(isPresented: $showingUsage) { UsageSheet() }
+            .sheet(isPresented: $showingUsage) { UsageSheet(host: model.link(for: threadID)) }
             .sheet(isPresented: $snoozePicking) { if let t = thread { SnoozePicker(thread: t) } }
             .deleteConfirmation($deleteAsk, model: model) { _ in dismiss() }
             .sheet(item: $newThread) { request in

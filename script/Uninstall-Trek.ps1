@@ -88,11 +88,17 @@ if (Test-Path $uninstallKey) {
 }
 
 # 6. Delete installation directory
-if (Test-Path $InstallDir) {
-    Get-ChildItem -Path $InstallDir -Exclude "Uninstall-Trek.ps1" -Recurse -ErrorAction SilentlyContinue |
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+# The folder may be one the user picked (Documents, C:\Tools...), so remove only the files the
+# installer put there, and the folder itself only if nothing else is left in it.
+if (Test-Path -LiteralPath $InstallDir) {
+    foreach ($f in @("trek.exe", "trek-mcp.exe", "trek-update.exe")) {
+        Remove-Item -LiteralPath (Join-Path $InstallDir $f) -Force -ErrorAction SilentlyContinue
+    }
 
-    $cmd = "timeout /t 1 /nobreak >nul & rmdir /s /q `"$InstallDir`""
+    # This script lives in the folder and is still running, so cmd removes it after we exit.
+    # rmdir without /s refuses a folder that still holds anything else.
+    $self = Join-Path $InstallDir "Uninstall-Trek.ps1"
+    $cmd = "timeout /t 1 /nobreak >nul & del /f /q `"$self`" & rmdir `"$InstallDir`""
     Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$cmd`"" -WindowStyle Hidden
 }
 

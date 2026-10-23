@@ -1127,3 +1127,297 @@ fn a_machine_that_stops_answering_holds_its_threads_still_and_says_why() {
         assert_eq!(offline, None);
     });
 }
+
+/// What `ws` says in toasts, and what it gives back to the composer, from now on; and how often
+/// it was told to send the draft.
+#[derive(Default)]
+struct Heard {
+    toasts: Vec<String>,
+    given_back: Vec<String>,
+    sent_draft: usize,
+}
+
+fn listen(trek: &Trek, cx: &mut TestAppContext) -> (Arc<Mutex<Heard>>, gpui_kit::Subscription) {
+    use trek_app::workspace::WorkspaceEvent;
+    let heard = Arc::new(Mutex::new(Heard::default()));
+    let seen = heard.clone();
+    let sub = trek.update(cx, |_, cx| {
+        cx.subscribe_self(move |_, e: &WorkspaceEvent, _| {
+            let mut heard = seen.lock().unwrap();
+            match e {
+                WorkspaceEvent::Toast { message, .. } => heard.toasts.push(message.clone()),
+                WorkspaceEvent::InsertIntoComposer(text) => heard.given_back.push(text.clone()),
+                WorkspaceEvent::SendDraft => heard.sent_draft += 1,
+                _ => {}
+            }
+        })
+    });
+    (heard, sub)
+}
+
+#[test]
+fn nothing_is_asked_of_a_machine_out_of_reach_it_is_refused_and_given_back() {
+    run(async |cx| {
+        let trek = open(cx);
+        let link = serve_as_machine_b(&trek, cx);
+        pair(&trek, cx, link).await;
+        let (id, _) = start_on_b(&trek, cx, "ask permission first").await;
+        trek.wait(cx, "the approval card here", |ws| {
+            ws.live.get(&id).is_some_and(|l| !l.permissions.is_empty())
+        })
+        .await;
+        let card = trek.request(cx, &id);
+        trek.read(cx, |ws, _| ws.remote.as_ref().unwrap().handle.shutdown());
+        trek.wait(cx, "B out of reach", |ws| {
+            ws.machines.get("machine-b").is_some_and(|m| !m.reachable())
+        })
+        .await;
+        let (heard, _sub) = listen(&trek, cx);
+        let project = trek.project.clone();
+
+        // A message: said in a toast, and back in the composer.
+        trek.update(cx, |ws, cx| {
+            ws.machine_send(&id, "are you there".into(), vec![], None, cx)
+        });
+        {
+            let heard = heard.lock().unwrap();
+            assert_eq!(heard.given_back, ["are you there"]);
+            assert!(
+                heard.toasts[0].contains("Machine B is offline"),
+                "{heard:?}",
+                heard = heard.toasts
+            );
+        }
+        // Stop.
+        trek.update(cx, |ws, cx| ws.machine_interrupt(&id, cx));
+        assert_eq!(heard.lock().unwrap().toasts.len(), 2);
+        // An answer: the card stays, for when it can be answered.
+        trek.update(cx, |ws, cx| {
+            ws.machine_answer(
+                &id,
+                &card,
+                tr::AnswerResponse::Plan {
+                    approve: true,
+                    feedback: None,
+                },
+                cx,
+            )
+        });
+        assert_eq!(heard.lock().unwrap().toasts.len(), 3);
+        assert!(trek.read(cx, |ws, _| {
+            ws.live[&id]
+                .permissions
+                .iter()
+                .any(|p| p.request_id == card)
+        }));
+        // A new thread there: its text goes back too.
+        trek.update(cx, |ws, cx| {
+            ws.machine_start_thread("machine-b", project.clone(), "start it".into(), vec![], cx)
+        });
+        {
+            let heard = heard.lock().unwrap();
+            assert_eq!(heard.given_back, ["are you there", "start it"]);
+            assert_eq!(heard.toasts.len(), 4);
+        }
+        // A clone: fails at once, not "Cloning…" for as long as it's away.
+        trek.update(cx, |ws, cx| {
+            ws.clone_to_machine(
+                "machine-b",
+                project.clone(),
+                "https://example.com/a.git".into(),
+                "/tmp/a".into(),
+                vec![],
+                cx,
+            )
+        });
+        let run = trek.read(cx, |ws, _| ws.machines.clone.clone()).unwrap();
+        assert!(
+            matches!(&run.stage, CloneStage::Failed(why) if why.contains("offline")),
+            "{run:?}"
+        );
+    });
+}
+
+#[test]
+fn a_machine_paired_again_keeps_the_threads_open_here_followed() {
+    run(async |cx| {
+        let trek = open(cx);
+        let link = serve_as_machine_b(&trek, cx);
+        pair(&trek, cx, link).await;
+        let (id, _) = start_on_b(&trek, cx, "hello from A").await;
+        trek.wait(cx, "B's answer here", |ws| {
+            ws.thread(&id)
+                .is_some_and(|t| t.run_state == RunState::Idle)
+                && ws
+                    .live
+                    .get(&id)
+                    .is_some_and(|l| l.items.iter().any(|i| matches!(i, Item::Assistant { .. })))
+        })
+        .await;
+
+        // Paired again from Settings, without forgetting it first.
+        let (code, routes, fingerprint) = trek.read(cx, |ws, _| {
+            let paired = &ws.machines.get("machine-b").unwrap().entry.paired;
+            (
+                ws.remote.as_ref().unwrap().handle.pairing_offer().code,
+                paired.routes.clone(),
+                paired.fingerprint.clone(),
+            )
+        });
+        trek.update(cx, |ws, cx| {
+            ws.machines.pairing = None;
+            ws.pair_machine(
+                PairLink {
+                    routes,
+                    code,
+                    fingerprint,
+                    name: None,
+                    host_id: None,
+                },
+                cx,
+            )
+        });
+        trek.wait_explained(
+            cx,
+            "pairing again",
+            REAL_TIME_LIMIT,
+            |ws| matches!(ws.machines.pairing, Some(Pairing::Done(_))),
+            |ws| format!("{:?}", ws.machines.pairing),
+        )
+        .await;
+        trek.wait(cx, "B reachable again", |ws| {
+            ws.machines.get("machine-b").is_some_and(|m| m.reachable())
+        })
+        .await;
+
+        // What B says in the thread still reaches the open transcript.
+        trek.update(cx, |ws, cx| {
+            ws.machine_send(&id, "after pairing again".into(), vec![], None, cx)
+        });
+        trek.wait(cx, "the message in the open thread", |ws| {
+            ws.live.get(&id).is_some_and(|l| {
+                said(
+                    &l.items.iter().cloned().collect::<Vec<_>>(),
+                    "after pairing again",
+                )
+            })
+        })
+        .await;
+    });
+}
+
+/// Machine C (scripted), paired and with its home folder known.
+async fn pair_c(trek: &Trek, cx: &mut TestAppContext) -> Arc<Mutex<Asked>> {
+    let asked = Arc::new(Mutex::new(Asked::default()));
+    let link = scripted_machine(asked.clone());
+    trek.update(cx, |ws, cx| ws.pair_machine(link, cx));
+    trek.wait(cx, "machine C's home folder", |ws| {
+        ws.machine_home("machine-c").is_some()
+    })
+    .await;
+    asked
+}
+
+#[test]
+fn a_finished_clone_sends_the_draft_only_while_that_draft_is_on_screen() {
+    run(async |cx| {
+        let project = ignoring_project();
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| {
+            ws.add_project(project.clone(), cx);
+            // Somewhere else, typing something else, as the clone runs.
+            ws.navigate(Route::Draft { project: None }, cx);
+        });
+        let _asked = pair_c(&trek, cx).await;
+        let (heard, _sub) = listen(&trek, cx);
+        let clone = |trek: &Trek, cx: &mut TestAppContext, folder: &str| {
+            let (project, folder) = (project.clone(), folder.to_string());
+            trek.update(cx, |ws, cx| {
+                ws.clone_to_machine(
+                    "machine-c",
+                    project,
+                    "https://github.com/dokyit/trek.git".into(),
+                    folder,
+                    vec![],
+                    cx,
+                )
+            });
+        };
+        let done = |ws: &trek_app::workspace::Workspace| matches!(&ws.machines.clone, Some(r) if matches!(r.stage, CloneStage::Done { .. }));
+        clone(&trek, cx, "/Users/c/first");
+        trek.wait(cx, "the first clone done", done).await;
+        assert_eq!(
+            heard.lock().unwrap().sent_draft,
+            0,
+            "the draft on screen isn't the one cloned"
+        );
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.draft_machine(&project)).as_deref(),
+            Some("machine-c"),
+            "the project's draft still starts there"
+        );
+
+        // On that draft, what's typed goes.
+        trek.update(cx, |ws, cx| {
+            ws.navigate(
+                Route::Draft {
+                    project: Some(project.clone()),
+                },
+                cx,
+            )
+        });
+        clone(&trek, cx, "/Users/c/second");
+        trek.wait(cx, "the second clone done", |ws| {
+            done(ws)
+                && ws
+                    .machines
+                    .clone
+                    .as_ref()
+                    .is_some_and(|r| r.folder == "/Users/c/second")
+        })
+        .await;
+        assert_eq!(heard.lock().unwrap().sent_draft, 1);
+    });
+}
+
+#[test]
+fn a_clone_that_finishes_leaves_the_run_of_a_clone_started_since_alone() {
+    run(async |cx| {
+        let project = ignoring_project();
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| ws.add_project(project.clone(), cx));
+        let _asked = pair_c(&trek, cx).await;
+        let other = machines::CloneRun {
+            host: "machine-d".into(),
+            folder: "/Users/d/trek".into(),
+            lines: vec![],
+            stage: CloneStage::Cloning,
+        };
+        // The clone to C starts; the sheet is then closed and one to D started (it takes the
+        // run's place: there is only the one).
+        trek.update(cx, |ws, cx| {
+            ws.clone_to_machine(
+                "machine-c",
+                project.clone(),
+                "https://github.com/dokyit/trek.git".into(),
+                "/Users/c/trek".into(),
+                vec![],
+                cx,
+            );
+            ws.machines.clone = Some(other.clone());
+        });
+        trek.wait(cx, "C's clone finished", |ws| {
+            ws.machines.get("machine-c").is_some_and(|m| {
+                m.entry
+                    .projects
+                    .contains_key(&project.display().to_string())
+            })
+        })
+        .await;
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.machines.clone.clone()),
+            Some(other),
+            "D's run isn't marked done by C's clone"
+        );
+    });
+}

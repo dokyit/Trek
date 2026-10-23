@@ -619,7 +619,12 @@ fn output_path(result: &str, windows: bool) -> Option<&str> {
         .trim_start();
     let sentence = rest.lines().next()?.split(';').next()?;
     let path = if windows && is_windows_path(sentence) {
-        sentence.split_once(". ").map_or(sentence, |(path, _)| path)
+        // A folder may be called "J. Smith": a ". " ends the path only where nothing after it
+        // reads as more of one (no separator), else it is the sentence's own full stop.
+        sentence
+            .match_indices(". ")
+            .find(|(i, _)| !sentence[i + 2..].contains(['\\', '/']))
+            .map_or(sentence, |(i, _)| &sentence[..i])
     } else {
         sentence.split_whitespace().next()?
     };
@@ -797,6 +802,21 @@ mod tests {
         assert_eq!(
             output_path("Output is being written to: c:foo bar", true),
             Some("c:foo")
+        );
+    }
+
+    #[test]
+    fn a_windows_folder_name_may_hold_a_full_stop_and_space() {
+        let said = r"Output is being written to: C:\Users\J. Smith\AppData\Local\Temp\claude\tasks\b1.output.";
+        assert_eq!(
+            output_path(said, true),
+            Some(r"C:\Users\J. Smith\AppData\Local\Temp\claude\tasks\b1.output")
+        );
+        let then_more =
+            r"Output is being written to: C:\Users\J. Smith\tasks\b1.output. It is still running.";
+        assert_eq!(
+            output_path(then_more, true),
+            Some(r"C:\Users\J. Smith\tasks\b1.output")
         );
     }
 

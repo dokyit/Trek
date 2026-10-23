@@ -193,6 +193,11 @@ pub struct Card {
     /// Run cards: when the run started and (once completed) ended, for the elapsed label.
     pub started_ms: i64,
     pub ended_ms: i64,
+    /// Release cards: the `release.yml` workflow dispatch. Its command ends once the run is
+    /// queued, so the run, not the command, says how it went (`fetch_release`).
+    pub workflow: bool,
+    /// Release cards: the workflow run this dispatch made, once it shows in `gh run list`.
+    pub run_id: Option<u64>,
 }
 
 impl Card {
@@ -348,15 +353,15 @@ pub enum GitVerb {
     Rebase,
 }
 
-/// Command lines are split per `&&`/`;`/`|` segment: a `gh` call wins over a `git` one
+/// Command lines are split per `&&`/`;`/`|`/newline segment: a `gh` call wins over a `git` one
 /// (`git commit && gh pr create` opens the card, it doesn't just re-word its step).
 pub fn call(title: &str, detail: &str) -> Option<Call> {
     if crate::activity::tool_kind(title) != crate::activity::ToolKind::Command {
         return None;
     }
     let mut git = None;
-    for segment in detail.split(['&', ';', '|']) {
-        let words = shell_words(segment);
+    for segment in segments(detail) {
+        let words = shell_words(&segment);
         match call_in(&words) {
             Some(Call::Git(_)) => git = git.or_else(|| call_in(&words)),
             Some(c) => return Some(c),
@@ -521,6 +526,14 @@ fn positional(words: &[String]) -> Vec<String> {
 fn call_in(words: &[String]) -> Option<Call> {
     let words = command(words);
     if runs_release_script(words) {
+        // A dry run builds and stops before git and GitHub, and `--help` only prints usage:
+        // nothing is published, so there's no release to follow.
+        if words
+            .iter()
+            .any(|w| matches!(w.as_str(), "--dry-run" | "--help" | "-h"))
+        {
+            return None;
+        }
         let pos = positional(words);
         return Some(Call::Release {
             version: pos
@@ -556,6 +569,7 @@ fn call_in(words: &[String]) -> Option<Call> {
         if positional(words).iter().any(|w| w.contains("release")) {
             let mut version = String::new();
             let mut channel = String::new();
+            let mut dry_run = false;
             for (i, w) in words.iter().enumerate() {
                 let field = if matches!(w.as_str(), "-f" | "--field") {
                     words.get(i + 1).cloned()
@@ -569,8 +583,13 @@ fn call_in(words: &[String]) -> Option<Call> {
                         version = v.to_string();
                     } else if let Some(v) = f.strip_prefix("channel=") {
                         channel = v.to_string();
+                    } else if let Some(v) = f.strip_prefix("dry_run=") {
+                        dry_run = v == "true";
                     }
                 }
+            }
+            if dry_run {
+                return None;
             }
             return Some(Call::ReleaseWorkflow { version, channel });
         }
@@ -607,6 +626,105 @@ fn call_in(words: &[String]) -> Option<Call> {
         _ => None,
     };
     verb.map(Call::Git)
+}
+
+/// The command line cut into its commands: at `&`, `;`, `|` and line ends, but not inside quotes
+/// (`git commit -m "fix; gh pr merge 5"` is one command). A backslash before a line end joins the
+/// lines, and the body of a heredoc (`<<EOF` … `EOF`) is text, not commands.
+fn segments(text: &str) -> Vec<String> {
+    let mut out = vec![];
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    // Heredoc terminators waiting for the end of the line that named them.
+    let mut heredocs: Vec<(String, bool)> = vec![];
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                cur.push(c);
+                if c == q {
+                    quote = None;
+                } else if c == '\\' && q == '"' {
+                    cur.extend(chars.next());
+                }
+            }
+            None => match c {
+                '"' | '\'' => {
+                    quote = Some(c);
+                    cur.push(c);
+                }
+                '\\' => match chars.next() {
+                    Some('\n') => cur.push(' '),
+                    Some(next) => {
+                        cur.push(c);
+                        cur.push(next);
+                    }
+                    None => cur.push(c),
+                },
+                '<' if chars.peek() == Some(&'<') => {
+                    chars.next();
+                    if chars.peek() == Some(&'<') {
+                        // `<<<`: a here-string, no body.
+                        chars.next();
+                        cur.push_str("<<<");
+                        continue;
+                    }
+                    let strip = chars.peek() == Some(&'-');
+                    if strip {
+                        chars.next();
+                    }
+                    while chars.peek().is_some_and(|c| *c == ' ' || *c == '\t') {
+                        chars.next();
+                    }
+                    let mut word = String::new();
+                    while let Some(&w) = chars.peek() {
+                        if w.is_whitespace() || matches!(w, ';' | '&' | '|' | '<' | '>' | ')') {
+                            break;
+                        }
+                        chars.next();
+                        if !matches!(w, '"' | '\'' | '\\') {
+                            word.push(w);
+                        }
+                    }
+                    if !word.is_empty() {
+                        heredocs.push((word, strip));
+                    }
+                    cur.push_str("<<");
+                }
+                '&' | ';' | '|' => out.push(std::mem::take(&mut cur)),
+                '\n' => {
+                    out.push(std::mem::take(&mut cur));
+                    // The bodies of the heredocs this line opened, up to their terminators.
+                    for (word, strip) in heredocs.drain(..) {
+                        let mut line = String::new();
+                        loop {
+                            line.clear();
+                            let mut ended = true;
+                            for c in chars.by_ref() {
+                                if c == '\n' {
+                                    ended = false;
+                                    break;
+                                }
+                                line.push(c);
+                            }
+                            let body = if strip {
+                                line.trim_start_matches('\t')
+                            } else {
+                                &line
+                            };
+                            if body == word || ended {
+                                break;
+                            }
+                        }
+                    }
+                }
+                _ => cur.push(c),
+            },
+        }
+    }
+    out.push(cur);
+    out.retain(|s| !s.trim().is_empty());
+    out
 }
 
 /// `words` of a shell segment: whitespace-split, single and double quotes honoured.
@@ -662,6 +780,52 @@ fn enter_phase(card: &mut Card, phase: Phase) {
     }
 }
 
+/// Whether a `gh` watcher can ever finish `card`: a PR that exists, a run it names, a release
+/// workflow. A release a local script or `gh release create` made is only ever finished by its
+/// own command, which a card read back from the store has lost.
+pub fn followable(card: &Card) -> bool {
+    match card.kind {
+        Kind::Pr => card.phase != Phase::Creating,
+        Kind::Run => card.number.is_some(),
+        Kind::Release => is_workflow(card),
+    }
+}
+
+/// A card that is working but has nothing left to finish it (its command is gone with the old
+/// session, or its watcher gave up or can't start) stops: spinners and the animation loop only
+/// belong to a card something is following. `true` when it changed.
+pub fn settle(card: &mut Card) -> bool {
+    if !matches!(
+        card.phase,
+        Phase::Creating | Phase::Checking | Phase::Merging | Phase::Releasing
+    ) {
+        return false;
+    }
+    match card.kind {
+        // The pull request is still there; Trek just isn't looking at it any more.
+        Kind::Pr if card.phase != Phase::Creating => {
+            card.merging = false;
+            enter_phase(card, Phase::Open);
+            card.step = "Not following this pull request".into();
+        }
+        kind => {
+            enter_phase(card, Phase::Failed);
+            card.step = match kind {
+                Kind::Pr => "Lost track of this pull request",
+                Kind::Run => "Lost track of this run",
+                Kind::Release => "Lost track of this release",
+            }
+            .into();
+            for s in &mut card.stages {
+                if s.state.pending() {
+                    s.state = CheckState::Skipped;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// What `tool_started`/`tool_finished` ask the workspace to do (their `live` edits are done).
 #[derive(Debug, Default)]
 pub struct Effects {
@@ -698,8 +862,8 @@ pub fn tool_started(
                 created_ms: now_ms(),
                 ..Default::default()
             };
-            push(live, &key, &card, &mut fx);
-            live.pr_calls.insert(call_id.to_string(), row_id(&key));
+            let row = push(live, &key, &card, &mut fx);
+            live.pr_calls.insert(call_id.to_string(), row);
         }
         Call::PrMerge(pr) => {
             // The card of the PR it names, else the thread's latest: it goes to Merging.
@@ -746,8 +910,8 @@ pub fn tool_started(
                     created_ms: now_ms(),
                     ..Default::default()
                 };
-                push(live, &key, &card, &mut fx);
-                fx.watch.push(row_id(&key));
+                let row = push(live, &key, &card, &mut fx);
+                fx.watch.push(row);
             }
         }
         Call::ReleaseWorkflow { version, channel } => {
@@ -759,16 +923,17 @@ pub fn tool_started(
                     &version
                 }
             );
-            let card = release_card(
+            let mut card = release_card(
                 &version,
                 &channel,
                 "release.yml",
                 "Release workflow running",
                 &dir,
             );
-            push(live, &key, &card, &mut fx);
-            live.pr_calls.insert(call_id.to_string(), row_id(&key));
-            fx.watch.push(row_id(&key));
+            card.workflow = true;
+            let row = push(live, &key, &card, &mut fx);
+            live.pr_calls.insert(call_id.to_string(), row.clone());
+            fx.watch.push(row);
         }
         Call::Release { version, channel } => {
             let key = format!(
@@ -786,8 +951,8 @@ pub fn tool_started(
                 "Building and publishing",
                 &dir,
             );
-            push(live, &key, &card, &mut fx);
-            live.pr_calls.insert(call_id.to_string(), row_id(&key));
+            let row = push(live, &key, &card, &mut fx);
+            live.pr_calls.insert(call_id.to_string(), row);
         }
         Call::ReleaseTag { tag } => {
             let key = format!("release-{}", if tag.is_empty() { call_id } else { &tag });
@@ -799,8 +964,8 @@ pub fn tool_started(
                 &dir,
             );
             card.title = format!("Release {tag}");
-            push(live, &key, &card, &mut fx);
-            live.pr_calls.insert(call_id.to_string(), row_id(&key));
+            let row = push(live, &key, &card, &mut fx);
+            live.pr_calls.insert(call_id.to_string(), row);
         }
         Call::Git(verb) => {
             // The thread's open PR card narrates the step ("Committing the last changes").
@@ -1006,6 +1171,11 @@ pub fn tool_finished(
                 enter_phase(&mut card, Phase::Open);
             }
         }
+        // `gh workflow run` ends once the run is queued: the run says how the release went.
+        Kind::Release if ok && is_workflow(&card) => {
+            fx.watch.push(row);
+            return fx;
+        }
         Kind::Release => {
             enter_phase(&mut card, if ok { Phase::Published } else { Phase::Failed });
             card.step = if ok {
@@ -1032,11 +1202,29 @@ pub fn tool_finished(
     fx
 }
 
-/// Append `card` as a `trek-pr:` row.
-fn push(live: &mut crate::workspace::LiveThread, key: &str, card: &Card, fx: &mut Effects) {
+/// Append `card` as a `trek-pr:` row, and say which id it got: the key's own, unless a row has
+/// it already (a release run again, `gh pr checks` on a PR it already carded), which would
+/// leave every later look-up by id on the old row and the new card never finished.
+fn push(
+    live: &mut crate::workspace::LiveThread,
+    key: &str,
+    card: &Card,
+    fx: &mut Effects,
+) -> String {
     live.streaming = None;
+    let taken = |row: &str| {
+        live.items
+            .iter()
+            .any(|i| matches!(i, Item::Tool { id, .. } if id == row))
+    };
+    let mut row = row_id(key);
+    let mut n = 1;
+    while taken(&row) {
+        n += 1;
+        row = row_id(&format!("{key}~{n}"));
+    }
     let ix = live.items.push(Item::Tool {
-        id: row_id(key),
+        id: row.clone(),
         title: match card.kind {
             Kind::Pr => "Pull request".into(),
             Kind::Release => "Release".into(),
@@ -1049,6 +1237,7 @@ fn push(live: &mut crate::workspace::LiveThread, key: &str, card: &Card, fx: &mu
     if let Some(item) = live.items.id_at(ix) {
         fx.changed.push(item.to_string());
     }
+    row
 }
 
 /// Write `card` back to the item at `ix` (its transcript id reported for remeasure).
@@ -1313,6 +1502,19 @@ fn fetch_pr(card: &Card, dir: &Path) -> Option<Card> {
         return None;
     }
     let view: PrView = serde_json::from_slice(&out.stdout).ok()?;
+    let mut card = pr_from_view(card, view);
+    // The conflicting files' names, once GitHub says there are some and a trial merge can tell
+    // them apart (best effort: its failure only loses the chips). While it resolves, the list is
+    // asked again each pass so the card counts down, remembering what already cleared.
+    if card.phase == Phase::Conflicted && (card.conflicts.is_empty() || card.resolving) {
+        let next = conflicting_files(&card, dir);
+        apply_conflicts(&mut card, next);
+    }
+    Some(card)
+}
+
+/// `card` as `gh pr view` reports its pull request.
+fn pr_from_view(card: &Card, view: PrView) -> Card {
     let mut card = card.clone();
     if card.number.is_none() && view.number > 0 {
         card.number = Some(view.number);
@@ -1337,6 +1539,12 @@ fn fetch_pr(card: &Card, dir: &Path) -> Option<Card> {
     card.removed = Some(view.deletions as u32);
     card.checks = view.checks.iter().filter_map(check).collect();
     let pending = card.checks.iter().filter(|c| c.state.pending()).count();
+    let failing: Vec<String> = card
+        .checks
+        .iter()
+        .filter(|c| c.state == CheckState::Fail)
+        .map(|c| c.name.clone())
+        .collect();
     let phase = match view.state.as_str() {
         "MERGED" => Phase::Merged,
         "CLOSED" => Phase::Closed,
@@ -1344,6 +1552,8 @@ fn fetch_pr(card: &Card, dir: &Path) -> Option<Card> {
         _ => match view.mergeable.as_str() {
             "CONFLICTING" => Phase::Conflicted,
             "MERGEABLE" if pending > 0 => Phase::Checking,
+            // A red PR isn't ready to merge: it stays open, its step line naming the failures.
+            "MERGEABLE" if !failing.is_empty() => Phase::Open,
             "MERGEABLE" => Phase::Ready,
             _ => Phase::Checking,
         },
@@ -1370,6 +1580,12 @@ fn fetch_pr(card: &Card, dir: &Path) -> Option<Card> {
                 card.base
             ),
         },
+        Phase::Open if !failing.is_empty() => format!(
+            "{} of {} checks failing: {}",
+            failing.len(),
+            card.checks.len(),
+            failing.join(", ")
+        ),
         Phase::Ready => "Ready to merge".into(),
         Phase::Merging => "Merging the pull request".into(),
         Phase::Merged if card.branch_deleted => {
@@ -1379,30 +1595,34 @@ fn fetch_pr(card: &Card, dir: &Path) -> Option<Card> {
         Phase::Closed => "Closed".into(),
         _ => card.step.clone(),
     };
-    // The conflicting files' names, once GitHub says there are some and a trial merge can tell
-    // them apart (best effort: its failure only loses the chips). While it resolves, the list is
-    // asked again each pass so the card counts down, remembering what already cleared.
-    if card.phase == Phase::Conflicted && (card.conflicts.is_empty() || card.resolving) {
-        let next = conflicting_files(&card, dir);
-        if card.resolving {
-            for f in card.conflicts.drain(..) {
-                if !next.contains(&f) && !card.resolved.contains(&f) && card.resolved.len() < 12 {
-                    card.resolved.push(f);
-                }
-            }
-        }
-        card.conflicts = next;
-    }
-    Some(card)
+    card
 }
 
-/// Conflicting paths between the PR's head and its base, from a `merge-tree` trial in `dir`.
-fn conflicting_files(card: &Card, dir: &Path) -> Vec<String> {
+/// The conflict list a trial merge found (`None`: it couldn't tell, so the card keeps what it
+/// had) — while it resolves, the files that dropped out of it count as resolved.
+fn apply_conflicts(card: &mut Card, next: Option<Vec<String>>) {
+    let Some(next) = next else {
+        return;
+    };
+    if card.resolving {
+        for f in card.conflicts.drain(..) {
+            if !next.contains(&f) && !card.resolved.contains(&f) && card.resolved.len() < 12 {
+                card.resolved.push(f);
+            }
+        }
+    }
+    card.conflicts = next;
+}
+
+/// Conflicting paths between the PR's head and its base, from a `merge-tree` trial in `dir`;
+/// `None` when the trial couldn't run (no `origin`, a fetch that failed, a git without
+/// `merge-tree --write-tree`), which is not the same as no conflicts.
+fn conflicting_files(card: &Card, dir: &Path) -> Option<Vec<String>> {
     let (Some(n), base, head) = (card.number, card.base.clone(), card.head.clone()) else {
-        return vec![];
+        return None;
     };
     if base.is_empty() || head.is_empty() {
-        return vec![];
+        return None;
     }
     let git = || {
         let mut c = trek_core::procs::command("git");
@@ -1410,14 +1630,15 @@ fn conflicting_files(card: &Card, dir: &Path) -> Vec<String> {
             .current_dir(dir);
         c
     };
-    // The base, and the PR's head — `pull/N/head` reaches it even from a fork.
+    // The base, and the PR's head — `pull/N/head` reaches it even from a fork. Forced (`+`): a
+    // rebased or amended head is no fast-forward of what the last look kept.
     let fetch = git()
         .args([
             "fetch",
             "-q",
             "origin",
-            &format!("{base}:refs/trek/pr-base"),
-            &format!("pull/{n}/head:refs/trek/pr-head"),
+            &format!("+{base}:refs/trek/pr-base"),
+            &format!("+pull/{n}/head:refs/trek/pr-head"),
         ])
         .output()
         .map(|o| o.status.success())
@@ -1427,14 +1648,14 @@ fn conflicting_files(card: &Card, dir: &Path) -> Vec<String> {
                 "fetch",
                 "-q",
                 "origin",
-                &format!("{base}:refs/trek/pr-base"),
-                &format!("{head}:refs/trek/pr-head"),
+                &format!("+{base}:refs/trek/pr-base"),
+                &format!("+{head}:refs/trek/pr-head"),
             ])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
     if !fetch {
-        return vec![];
+        return None;
     }
     let out = git()
         .args([
@@ -1446,72 +1667,75 @@ fn conflicting_files(card: &Card, dir: &Path) -> Vec<String> {
         ])
         .output();
     match out {
-        // Exit 1: conflicts — the tree oid is first, then one path per line.
-        Ok(o) if !o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .skip(1)
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .take(24)
-            .collect(),
-        _ => vec![],
+        // Exit 0: it merges cleanly.
+        Ok(o) if o.status.success() => Some(vec![]),
+        // Exit 1: conflicts — the tree oid is first, then one path per line, then a blank line
+        // and git's messages about them ("CONFLICT (content): …"), which are not paths.
+        Ok(o) if o.status.code() == Some(1) => Some(
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .skip(1)
+                .map(str::trim)
+                .take_while(|l| !l.is_empty())
+                .map(String::from)
+                .take(24)
+                .collect(),
+        ),
+        // Anything else (an old git's usage error) is no answer.
+        _ => None,
     }
 }
 
-fn fetch_release(card: &Card, dir: &Path) -> Option<Card> {
-    // Only workflow releases are followed past the command that started them.
-    if card.stages.first().is_none_or(|s| s.label != "release.yml") {
-        return None;
+/// Whether `card` follows a `release.yml` run (the marker; cards from before it have the stage).
+fn is_workflow(card: &Card) -> bool {
+    card.workflow
+        || (card.run_id.is_none()
+            && card
+                .stages
+                .first()
+                .is_some_and(|s| s.label == "release.yml"))
+}
+
+/// A run of `gh run list --json databaseId,status,conclusion,url,createdAt`.
+#[derive(Deserialize)]
+struct WorkflowRun {
+    #[serde(rename = "databaseId")]
+    id: u64,
+    status: String,
+    conclusion: String,
+    url: String,
+    #[serde(rename = "createdAt")]
+    created: String,
+}
+
+/// The run the dispatch behind `card` made: the one it already follows, else the first run
+/// started since the dispatch (the list is newest first; an older run is someone else's).
+fn pick_run<'a>(card: &Card, runs: &'a [WorkflowRun]) -> Option<&'a WorkflowRun> {
+    if let Some(id) = card.run_id {
+        return runs.iter().find(|r| r.id == id);
     }
-    let out = gh(dir)?
-        .args([
-            "run",
-            "list",
-            "--workflow",
-            "release.yml",
-            "--limit",
-            "1",
-            "--json",
-            "databaseId,status,conclusion,url",
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    #[derive(Deserialize)]
-    struct Run {
-        #[serde(rename = "databaseId")]
-        id: u64,
-        status: String,
-        conclusion: String,
-        url: String,
-    }
-    let run = serde_json::from_slice::<Vec<Run>>(&out.stdout)
-        .ok()?
-        .into_iter()
-        .next()?;
+    // A little slack for the clocks of this machine and GitHub's.
+    let since = card.created_ms - 2_000;
+    runs.iter().rev().find(|r| {
+        chrono::DateTime::parse_from_rfc3339(&r.created)
+            .is_ok_and(|d| d.timestamp_millis() >= since)
+    })
+}
+
+/// `card` as `run` (and its `jobs`, when known) say the release is going.
+fn release_run_card(card: &Card, run: &WorkflowRun, jobs: &[JobJson]) -> Card {
     let mut card = card.clone();
-    card.url = Some(run.url);
+    card.workflow = true;
+    card.run_id = Some(run.id);
+    card.url = Some(run.url.clone());
+    let stages = job_stages(jobs);
+    if !stages.is_empty() {
+        card.stages = stages;
+    }
     if run.status != "completed" {
-        if let Some(jobs) = gh(dir)
-            .and_then(|mut c| {
-                c.args(["run", "view", &run.id.to_string(), "--json", "jobs"])
-                    .output()
-                    .ok()
-            })
-            .and_then(|o| {
-                #[derive(Deserialize)]
-                struct Jobs {
-                    jobs: Vec<JobJson>,
-                }
-                serde_json::from_slice::<Jobs>(&o.stdout).ok()
-            })
-        {
-            card.stages = job_stages(&jobs.jobs);
-        }
+        enter_phase(&mut card, Phase::Releasing);
         card.step = "Release workflow running".into();
-        return Some(card);
+        return card;
     }
     enter_phase(
         &mut card,
@@ -1535,7 +1759,49 @@ fn fetch_release(card: &Card, dir: &Path) -> Option<Card> {
             s.state = state;
         }
     }
-    Some(card)
+    card
+}
+
+fn fetch_release(card: &Card, dir: &Path) -> Option<Card> {
+    // Only workflow releases are followed past the command that started them.
+    if !is_workflow(card) {
+        return None;
+    }
+    let out = gh(dir)?
+        .args([
+            "run",
+            "list",
+            "--workflow",
+            "release.yml",
+            "--limit",
+            "20",
+            "--json",
+            "databaseId,status,conclusion,url,createdAt",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let runs = serde_json::from_slice::<Vec<WorkflowRun>>(&out.stdout).ok()?;
+    // None yet: the dispatch is queued and the card keeps waiting.
+    let run = pick_run(card, &runs)?;
+    let jobs = gh(dir)
+        .and_then(|mut c| {
+            c.args(["run", "view", &run.id.to_string(), "--json", "jobs"])
+                .output()
+                .ok()
+        })
+        .and_then(|o| {
+            #[derive(Deserialize)]
+            struct Jobs {
+                jobs: Vec<JobJson>,
+            }
+            serde_json::from_slice::<Jobs>(&o.stdout).ok()
+        })
+        .map(|j| j.jobs)
+        .unwrap_or_default();
+    Some(release_run_card(card, run, &jobs))
 }
 
 // ---------- drawing ----------
@@ -1865,6 +2131,16 @@ fn sub_row(card: &Card, cx: &App) -> Option<AnyElement> {
 }
 
 /// "45s", "3m 12s", "1h 4m" — coarse, like the working bar's.
+/// How long a run took: to its end once it has one, else up to now.
+fn run_ms(card: &Card) -> i64 {
+    let end = if card.ended_ms > 0 {
+        card.ended_ms
+    } else {
+        now_ms()
+    };
+    end - card.started_ms
+}
+
 fn dur_label(ms: i64) -> String {
     let s = (ms / 1000).max(0);
     if s < 60 {
@@ -1962,8 +2238,13 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
                     } else {
                         format!(
                             "{} with {}",
-                            if n == 0 {
-                                format!("{} conflicts", card.resolved.len().max(1))
+                            if n == 0 && card.resolved.is_empty() {
+                                "Conflicts".to_string()
+                            } else if n == 0 {
+                                match card.resolved.len() {
+                                    1 => "1 conflict".to_string(),
+                                    r => format!("{r} conflicts"),
+                                }
                             } else if n == 1 {
                                 "1 conflict".to_string()
                             } else {
@@ -2038,11 +2319,7 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
                     .into_any_element(),
                 green,
                 "All jobs passed".to_string(),
-                format!(
-                    "{} jobs · {}",
-                    card.stages.len(),
-                    dur_label(card.ended_ms.max(now_ms()) - card.started_ms)
-                ),
+                format!("{} jobs · {}", card.stages.len(), dur_label(run_ms(card))),
             ),
             Phase::Failed => (
                 Icon::new(IconName::CircleX)
@@ -2533,8 +2810,12 @@ fn tip_label(card: &Card, cx: &App) -> Option<(String, Hsla)> {
         Phase::Checking => Some(("Checking".to_string(), muted)),
         Phase::Conflicted => {
             let n = card.conflicts.len();
-            if n == 0 {
+            // Only a card that watched its conflicts clear says so; an empty list can also mean
+            // the files couldn't be listed.
+            if n == 0 && card.resolving && !card.resolved.is_empty() {
                 Some(("Resolved".to_string(), crate::palette::amber(cx)))
+            } else if n == 0 {
+                Some(("Conflicts".to_string(), crate::palette::amber(cx)))
             } else if n == 1 {
                 Some(("1 conflict".to_string(), crate::palette::amber(cx)))
             } else {
@@ -3460,5 +3741,271 @@ pub fn demo(state: &str) -> Card {
             step: String::new(),
             ..base
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Named, not `super::*`: that would bring in gpui_kit's own `test` macro.
+    use super::{
+        Card, CheckState, JobJson, Kind, Phase, PrView, WorkflowRun, apply_conflicts,
+        conflicting_files, is_workflow, now_ms, pick_run, pr_from_view, release_card,
+        release_run_card, run_ms, segments,
+    };
+    use std::path::Path;
+
+    fn words(s: &str) -> Vec<String> {
+        segments(s).iter().map(|s| s.trim().to_string()).collect()
+    }
+
+    #[test]
+    fn lines_split_commands_but_quotes_and_heredocs_do_not() {
+        assert_eq!(
+            words("git add -A\ngit commit -m \"x\"\ngh pr create --title t"),
+            [
+                "git add -A",
+                "git commit -m \"x\"",
+                "gh pr create --title t"
+            ]
+        );
+        // A separator inside quotes is text.
+        assert_eq!(
+            words("git commit -m \"fix; gh pr merge 5\" && echo 'a | b'"),
+            ["git commit -m \"fix; gh pr merge 5\"", "echo 'a | b'"]
+        );
+        // A backslash joins the lines.
+        assert_eq!(
+            words("gh pr create \\\n  --title t"),
+            ["gh pr create    --title t"]
+        );
+        // A heredoc's body is not a command; what follows it is.
+        assert_eq!(
+            words("cat > f <<'EOF'\ngh pr merge 9\nEOF\nscript/release.sh 0.4.14"),
+            ["cat > f <<", "script/release.sh 0.4.14"]
+        );
+        assert_eq!(
+            words("cat <<-EOF\n\tgh pr merge 9\n\tEOF\ngh pr merge 1"),
+            ["cat <<", "gh pr merge 1"]
+        );
+        // A here-string and a lone `<<` in quotes open no body.
+        assert_eq!(
+            words("cat <<< hi\ngh pr merge 2"),
+            ["cat <<< hi", "gh pr merge 2"]
+        );
+        assert_eq!(
+            words("git commit -m \"a << b\"\ngh pr merge 3"),
+            ["git commit -m \"a << b\"", "gh pr merge 3"]
+        );
+    }
+
+    fn run(id: u64, status: &str, conclusion: &str, created: &str) -> WorkflowRun {
+        WorkflowRun {
+            id,
+            status: status.into(),
+            conclusion: conclusion.into(),
+            url: format!("https://github.com/o/r/actions/runs/{id}"),
+            created: created.into(),
+        }
+    }
+
+    fn dispatched() -> Card {
+        let mut card = release_card("0.4.14", "stable", "release.yml", "x", Path::new(""));
+        card.workflow = true;
+        // 2026-10-23T12:00:00Z
+        card.created_ms = 1_792_756_800_000;
+        card
+    }
+
+    #[test]
+    fn a_workflow_card_follows_the_run_its_dispatch_made() {
+        let card = dispatched();
+        // The newest completed run is the previous release's, from before the dispatch.
+        let old = run(1, "completed", "success", "2026-10-23T09:00:00Z");
+        assert!(pick_run(&card, std::slice::from_ref(&old)).is_none());
+        // Once the dispatch's run shows (newest first), that is the one, not the old one.
+        let mine = run(2, "in_progress", "", "2026-10-23T12:00:03Z");
+        let runs = [mine, old];
+        let picked = pick_run(&card, &runs).unwrap();
+        assert_eq!(picked.id, 2);
+        let jobs = [JobJson {
+            name: "build".into(),
+            status: "in_progress".into(),
+            conclusion: "".into(),
+        }];
+        let running = release_run_card(&card, picked, &jobs);
+        assert_eq!(running.phase, Phase::Releasing);
+        assert_eq!(running.run_id, Some(2));
+        assert_eq!(
+            running.stages[0].label, "build",
+            "jobs replace the dispatch stage"
+        );
+        // Job names no longer defeat the check that this is a workflow card.
+        assert!(is_workflow(&running));
+        // It sticks to that run when a newer run (someone else's) turns up.
+        let other = run(3, "queued", "", "2026-10-23T12:30:00Z");
+        let done = run(2, "completed", "success", "2026-10-23T12:00:03Z");
+        let runs = [other, done];
+        let picked = pick_run(&running, &runs).unwrap();
+        assert_eq!(picked.id, 2);
+        let published = release_run_card(&running, picked, &[]);
+        assert_eq!(published.phase, Phase::Published);
+        assert!(published.stages.iter().all(|s| s.state == CheckState::Pass));
+        // And a failed run is Failed.
+        let failed = run(2, "completed", "failure", "2026-10-23T12:00:03Z");
+        assert_eq!(
+            release_run_card(&running, &failed, &[]).phase,
+            Phase::Failed
+        );
+    }
+
+    fn view(mergeable: &str, checks: &str) -> PrView {
+        serde_json::from_str(&format!(
+            r#"{{"number": 9, "state": "OPEN", "mergeable": "{mergeable}", "headRefName": "feat",
+                "baseRefName": "main", "statusCheckRollup": {checks}}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_pull_request_with_failing_checks_is_not_ready_to_merge() {
+        let card = Card {
+            kind: Kind::Pr,
+            ..Default::default()
+        };
+        let check = |name: &str, conclusion: &str| {
+            format!(r#"{{"name": "{name}", "status": "COMPLETED", "conclusion": "{conclusion}"}}"#)
+        };
+        let red = format!(
+            "[{}, {}, {}]",
+            check("build", "SUCCESS"),
+            check("test", "FAILURE"),
+            check("lint", "SUCCESS")
+        );
+        let c = pr_from_view(&card, view("MERGEABLE", &red));
+        assert_eq!(c.phase, Phase::Open, "{c:?}");
+        assert_eq!(c.step, "1 of 3 checks failing: test");
+        // All green is ready; still running is still checking; red outranks nothing but a conflict.
+        let green = format!(
+            "[{}, {}]",
+            check("build", "SUCCESS"),
+            check("lint", "SKIPPED")
+        );
+        assert_eq!(
+            pr_from_view(&card, view("MERGEABLE", &green)).phase,
+            Phase::Ready
+        );
+        let running = r#"[{"name": "t", "status": "IN_PROGRESS", "conclusion": ""}]"#;
+        assert_eq!(
+            pr_from_view(&card, view("MERGEABLE", running)).phase,
+            Phase::Checking
+        );
+        assert_eq!(
+            pr_from_view(&card, view("CONFLICTING", &red)).phase,
+            Phase::Conflicted
+        );
+    }
+
+    #[test]
+    fn a_finished_runs_duration_stops_at_its_end() {
+        let card = Card {
+            started_ms: now_ms() - 10 * 60_000,
+            ended_ms: now_ms() - 8 * 60_000,
+            ..Default::default()
+        };
+        assert_eq!(run_ms(&card), 2 * 60_000);
+    }
+
+    #[test]
+    fn conflicts_the_trial_could_not_list_are_kept_not_resolved() {
+        let mut card = Card {
+            phase: Phase::Conflicted,
+            resolving: true,
+            conflicts: vec!["src/a.rs".into(), "src/b.rs".into()],
+            ..Default::default()
+        };
+        apply_conflicts(&mut card, None);
+        assert_eq!(card.conflicts, ["src/a.rs", "src/b.rs"]);
+        assert!(card.resolved.is_empty());
+        // A real answer moves what cleared to resolved.
+        apply_conflicts(&mut card, Some(vec!["src/b.rs".into()]));
+        assert_eq!(card.resolved, ["src/a.rs"]);
+        assert_eq!(card.conflicts, ["src/b.rs"]);
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn commit(dir: &Path, file: &str, text: &str) -> String {
+        std::fs::write(dir.join(file), text).unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", text]);
+        git(dir, &["rev-parse", "HEAD"])
+    }
+
+    /// The PR's head being rewritten (rebase, amend, force-push) must not blind the trial merge.
+    #[test]
+    fn the_conflict_list_survives_a_force_pushed_head() {
+        let root = std::env::temp_dir().join(format!("trek-pr-card-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (origin, work) = (root.join("origin"), root.join("work"));
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        git(&origin, &["init", "-q", "-b", "main"]);
+        let base = commit(&origin, "a.rs", "one\n");
+        git(&origin, &["checkout", "-q", "-b", "feat"]);
+        let first = commit(&origin, "a.rs", "feat\n");
+        git(&origin, &["checkout", "-q", "main"]);
+        commit(&origin, "a.rs", "main\n");
+        git(&origin, &["checkout", "-q", "feat"]);
+        git(&origin, &["update-ref", "refs/pull/7/head", &first]);
+        git(&work, &["clone", "-q", origin.to_str().unwrap(), "."]);
+
+        let card = Card {
+            kind: Kind::Pr,
+            number: Some(7),
+            base: "main".into(),
+            head: "feat".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            conflicting_files(&card, &work),
+            Some(vec!["a.rs".to_string()])
+        );
+
+        // The PR head is rewritten onto a different parent: no fast-forward of what was fetched.
+        git(&origin, &["checkout", "-q", "--detach", &base]);
+        let rewritten = commit(&origin, "a.rs", "feat again\n");
+        git(&origin, &["update-ref", "refs/pull/7/head", &rewritten]);
+        assert_eq!(
+            conflicting_files(&card, &work),
+            Some(vec!["a.rs".to_string()])
+        );
+
+        // No answer is not "no conflicts".
+        let lost = Card {
+            head: String::new(),
+            ..card
+        };
+        assert_eq!(conflicting_files(&lost, &work), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

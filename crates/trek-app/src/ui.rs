@@ -700,11 +700,26 @@ pub fn releases_notes(
 /// Release notes' own headings ("## Highlights") as bold lines: at markdown's heading sizes they
 /// would outweigh the version they sit under.
 fn quiet_headings(notes: &str) -> String {
+    let mut fenced = false;
     notes
         .lines()
-        .map(|l| match l.trim_start().strip_prefix('#') {
-            Some(rest) => format!("**{}**", rest.trim_start_matches('#').trim()),
-            None => l.to_string(),
+        .map(|l| {
+            let t = l.trim_start();
+            if t.starts_with("```") || t.starts_with("~~~") {
+                fenced = !fenced;
+                return l.to_string();
+            }
+            // A heading is one to six '#' and a space: "#412 fixed" is a reference, and a
+            // `# comment` inside a code block is code.
+            let hashes = t.bytes().take_while(|b| *b == b'#').count();
+            let heading = (1..=6).contains(&hashes)
+                && t[hashes..].starts_with(' ')
+                && !t[hashes..].trim().is_empty();
+            if fenced || !heading {
+                l.to_string()
+            } else {
+                format!("**{}**", t[hashes..].trim())
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -1146,7 +1161,28 @@ pub fn hero_background(spec: Option<&str>, dim: f32, cx: &App) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{PROJECT_COLORS, lead_to_match, project_hue, project_ink, reveal_alphas};
+    use super::{
+        PROJECT_COLORS, lead_to_match, project_hue, project_ink, quiet_headings, reveal_alphas,
+    };
+
+    #[test]
+    fn only_real_headings_go_quiet() {
+        assert_eq!(
+            quiet_headings("## Highlights\n- one"),
+            "**Highlights**\n- one"
+        );
+        assert_eq!(
+            quiet_headings("#412 Fix crash on resume"),
+            "#412 Fix crash on resume"
+        );
+        assert_eq!(quiet_headings("#"), "#");
+        assert_eq!(quiet_headings("####### seven"), "####### seven");
+        let fenced = "# Title\n```sh\n# install\ncargo run\n```\n## After";
+        assert_eq!(
+            quiet_headings(fenced),
+            "**Title**\n```sh\n# install\ncargo run\n```\n**After**"
+        );
+    }
 
     #[test]
     fn a_project_keeps_one_colour_and_a_chosen_one_wins() {

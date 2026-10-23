@@ -157,14 +157,52 @@ pub fn remote_video(url: &str) -> Option<String> {
     is_video_name(path).then(|| url.to_string())
 }
 
+/// A file as a message names it: `@path`, or `@"path"` when the path has whitespace (a mention
+/// ends at whitespace otherwise, and `Quarterly Report.pdf` would be cut at the space).
+pub fn mention_of(path: &str) -> String {
+    if path.contains(char::is_whitespace) && !path.contains('"') {
+        format!("@\"{path}\"")
+    } else {
+        format!("@{path}")
+    }
+}
+
+/// The `@` words of a message: what follows the `@` up to whitespace, or up to the closing
+/// quote after `@"`.
+fn mention_words(text: &str) -> Vec<&str> {
+    let mut out = vec![];
+    let mut at = 0;
+    while let Some(i) = text[at..].find('@') {
+        let start = at + i;
+        // Only at the start of a word: `me@host` isn't a mention.
+        let word_start = text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace);
+        let rest = &text[start + 1..];
+        let (word, used) = match rest.strip_prefix('"').filter(|_| word_start) {
+            Some(quoted) => match quoted.find('"') {
+                Some(end) => (&quoted[..end], end + 2),
+                None => ("", quoted.len() + 1),
+            },
+            None => {
+                let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                (&rest[..end], end)
+            }
+        };
+        if word_start && !word.is_empty() {
+            out.push(word);
+        }
+        at = start + 1 + used;
+    }
+    out
+}
+
 /// The video files a message names as `@path` (how a file attached to a message is sent), on disk:
 /// absolute, `~/`, or relative to `cwd`. In order, each once.
 pub fn mentioned_videos(text: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
-    for word in text.split_whitespace() {
-        let Some(raw) = word.strip_prefix('@') else {
-            continue;
-        };
+    for raw in mention_words(text) {
         let raw = raw.trim_end_matches([',', '.', ';', ':', ')', '!', '?']);
         if !is_video_name(raw) {
             continue;
@@ -300,6 +338,27 @@ mod tests {
             "relative needs a folder"
         );
         assert_eq!(mentioned_videos("@clip.mov", Some(&dir)), vec![clip]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn attached_videos_with_spaces_in_their_path_are_found() {
+        let dir = std::env::temp_dir().join(format!("trek-media-spaced-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("My Clip.mp4");
+        std::fs::write(&clip, b"x").unwrap();
+        let said = format!("look {} please", mention_of(&clip.display().to_string()));
+        assert!(said.contains("@\""), "{said}");
+        assert_eq!(mentioned_videos(&said, Some(&dir)), vec![clip.clone()]);
+        assert_eq!(
+            mentioned_videos("see @\"My Clip.mp4\".", Some(&dir)),
+            vec![clip]
+        );
+        assert_eq!(
+            mention_of("/a/b.mp4"),
+            "@/a/b.mp4",
+            "no quotes without a space"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

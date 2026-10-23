@@ -491,6 +491,9 @@ fn paste_bytes(text: &str, bracketed: bool, windows: bool) -> String {
         text.to_string()
     };
     if bracketed {
+        // No ESC inside: a pasted `ESC[201~` would end the paste early and the rest would reach
+        // the shell as typed keys.
+        let text = text.replace('\x1b', "");
         format!("\x1b[200~{text}\x1b[201~")
     } else {
         text
@@ -2240,6 +2243,11 @@ mod tests {
         );
         assert_eq!(paste_bytes("a\r\nb\nc", false, true), "a\rb\rc");
         assert_eq!(paste_bytes("ls", true, true), "\x1b[200~ls\x1b[201~");
+        // A pasted end marker (even one built from pieces) can't end the paste early.
+        assert_eq!(
+            paste_bytes("a\x1b[201~; rm x\n\x1b[2\x1b[201~01~", true, false),
+            "\x1b[200~a[201~; rm x\n[2[201~01~\x1b[201~"
+        );
     }
 
     #[test]

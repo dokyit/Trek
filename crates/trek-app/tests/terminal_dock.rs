@@ -212,6 +212,45 @@ fn the_drafts_shells_go_with_it_when_it_becomes_a_thread() {
 }
 
 #[test]
+fn a_later_drafts_shells_stay_with_it_when_an_older_thread_is_opened() {
+    run(async |cx| {
+        let trek = open(cx);
+        // Sent from a draft with no terminal: thread T has no dock.
+        let t = trek.send(cx, "hello");
+        trek.render(cx);
+        assert!(shells(&trek, cx).is_empty());
+        // A new draft opens a terminal of its own.
+        let project = trek.project.clone();
+        go(
+            &trek,
+            cx,
+            Route::Draft {
+                project: Some(project),
+            },
+        );
+        trek.click(cx, "open-terminal");
+        trek.render(cx);
+        let draft_shells = shells(&trek, cx);
+        assert_eq!(draft_shells.len(), 1);
+        // Opening T doesn't give it the draft's shell.
+        go(&trek, cx, Route::Thread(t));
+        assert!(
+            shells(&trek, cx).is_empty() && !trek.visible(cx, "terminal-dock"),
+            "the draft's shell isn't T's"
+        );
+        let project = trek.project.clone();
+        go(
+            &trek,
+            cx,
+            Route::Draft {
+                project: Some(project),
+            },
+        );
+        assert_eq!(shells(&trek, cx), draft_shells, "the draft kept its shell");
+    });
+}
+
+#[test]
 fn the_terminal_scrolls_back_through_its_output_and_a_key_brings_it_down() {
     run(async |cx| {
         let trek = open(cx);

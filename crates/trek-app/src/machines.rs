@@ -307,13 +307,25 @@ pub fn save(device_id: &str, machines: &[MachineEntry]) -> std::io::Result<()> {
     };
     let text = serde_json::to_string_pretty(&file).map_err(std::io::Error::other)?;
     let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, text)?;
+    write_private(&tmp, &text)?;
+    std::fs::rename(&tmp, &path)
+}
+
+/// Write `text` to a new file at `path` that only its owner can read, from the moment it exists
+/// (a file made first and restricted after can be read by others in between). One left there
+/// by an earlier run is replaced.
+fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let _ = std::fs::remove_file(path);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
     }
-    std::fs::rename(&tmp, &path)
+    let mut file = options.open(path)?;
+    file.write_all(text.as_bytes())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -481,6 +493,13 @@ impl Machines {
         self.get(host)?.threads.iter().find(|t| t.id == id)
     }
 
+    /// The run of the clone of `folder` to `host`, if it's still the one the sheet shows.
+    fn clone_run(&mut self, host: &str, folder: &str) -> Option<&mut CloneRun> {
+        self.clone
+            .as_mut()
+            .filter(|r| r.host == host && r.folder == folder)
+    }
+
     pub fn entries(&self) -> Vec<MachineEntry> {
         self.list.iter().map(|m| m.entry.clone()).collect()
     }
@@ -575,6 +594,19 @@ pub struct Mapped {
     pub rows: Vec<(String, Item)>,
     pub requests: Vec<PendingPermission>,
     pub streaming: Option<usize>,
+}
+
+/// A tool call that was running when its machine went out of reach: nothing here can say it
+/// still is, so it shows as ended (as a local call left running by a turn that ended does,
+/// `Failed`) until the machine is back and says.
+pub fn settle_running_tools(rows: &mut [(String, Item)]) {
+    for (_, item) in rows {
+        if let Item::Tool { status, .. } = item
+            && *status == ToolStatus::Running
+        {
+            *status = ToolStatus::Failed;
+        }
+    }
 }
 
 /// The machine's items as Trek's. What they can't carry is left out (a turn's changed files, the
@@ -1017,11 +1049,14 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let host = entry.id().to_string();
+        // The threads open here stay open: they're followed again on the new connection.
+        let mut reopen: Vec<String> = vec![];
         if let Some(old) = self.machines.list.iter().position(|m| m.id() == host) {
             let old = self.machines.list.remove(old);
             if let Some(c) = &old.client {
                 c.close();
             }
+            reopen = old.followed.into_keys().collect();
         }
         let connected = client.is_some();
         let made = match client {
@@ -1062,6 +1097,9 @@ impl Workspace {
             Err(e) => machine.reach = Reach::Stopped(e.to_string()),
         }
         self.machines.list.push(machine);
+        for tid in reopen {
+            self.follow_machine_thread(&local_id(&host, &tid), cx);
+        }
         self.follow_machines_network(cx);
         // What the tailnet says of it, as for the others.
         let here = self.machines.here.clone();
@@ -1261,7 +1299,10 @@ impl Workspace {
         let context = row
             .and_then(|r| r.context.as_ref())
             .map(|c| (c.used, c.window));
-        let mapped = map_items(&f.items);
+        let mut mapped = map_items(&f.items);
+        if offline {
+            settle_running_tools(&mut mapped.rows);
+        }
         let loaded = f.loaded;
         let live = self.live.entry(local.clone()).or_default();
         let reasoning = (working
@@ -1352,6 +1393,36 @@ impl Workspace {
         .detach();
     }
 
+    /// Why machine `host` can't be asked anything now (`None`: it can). A request made while it
+    /// is out of reach would be held (the client has no timeout) and go whenever it's back, long
+    /// after the person has forgotten it.
+    fn machine_unavailable_why(&self, host: &str) -> Option<String> {
+        let m = self.machines.get(host)?;
+        let name = &m.entry.name;
+        if m.client.is_none() {
+            Some(format!("{name} isn't connected."))
+        } else if !m.reachable() {
+            Some(format!("{name} is offline. Try again when it's back."))
+        } else {
+            None
+        }
+    }
+
+    /// `machine_unavailable_why`, said in a toast. True when it can't be asked (or isn't there).
+    fn machine_unavailable(&mut self, host: &str, cx: &mut Context<Self>) -> bool {
+        if self.machines.get(host).is_none() {
+            return true;
+        }
+        let Some(message) = self.machine_unavailable_why(host) else {
+            return false;
+        };
+        cx.emit(WorkspaceEvent::Toast {
+            message,
+            undo: None,
+        });
+        true
+    }
+
     /// Send `msg` (made from the thread's id on its machine) for the machine's thread `id`; a
     /// refusal is said in a toast that names `what` was tried.
     fn machine_request(
@@ -1368,11 +1439,10 @@ impl Workspace {
             return;
         };
         let name = m.entry.name.clone();
-        let Some(client) = m.client.clone() else {
-            cx.emit(WorkspaceEvent::Toast {
-                message: format!("{name} isn't connected."),
-                undo: None,
-            });
+        if self.machine_unavailable(host, cx) {
+            return;
+        }
+        let Some(client) = self.machines.get(host).and_then(|m| m.client.clone()) else {
             return;
         };
         let msg = msg(tid.to_string());
@@ -1399,6 +1469,14 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if text.trim().is_empty() && images.is_empty() {
+            return;
+        }
+        // Out of reach: the composer let go of the message as it was sent, so it goes back.
+        if split_id(id).is_some_and(|(host, _)| self.machine_unavailable(host, cx)) {
+            cx.emit(WorkspaceEvent::InsertIntoComposer(text));
+            for image in images {
+                cx.emit(WorkspaceEvent::AttachImage(image));
+            }
             return;
         }
         let mode = follow.map(|f| match f {
@@ -1438,6 +1516,10 @@ impl Workspace {
         response: tr::AnswerResponse,
         cx: &mut Context<Self>,
     ) {
+        // Out of reach, the card stays: answered now, it would be sent whenever the machine is back.
+        if split_id(id).is_some_and(|(host, _)| self.machine_unavailable(host, cx)) {
+            return;
+        }
         if let Some(live) = self.live.get_mut(id) {
             live.permissions.retain(|p| p.request_id != request_id);
             live.revision += 1;
@@ -1597,8 +1679,11 @@ impl Workspace {
             return give_back(self, "That machine isn't paired any more.".into(), text, cx);
         };
         let machine = m.entry.name.clone();
+        if let Some(why) = self.machine_unavailable_why(host) {
+            return give_back(self, why, text, cx);
+        }
         let Some(client) = m.client.clone() else {
-            return give_back(self, format!("{machine} isn't connected."), text, cx);
+            return;
         };
         let name = self
             .projects
@@ -1829,14 +1914,19 @@ impl Workspace {
         let Some(m) = self.machines.get(host) else {
             return;
         };
-        let Some(client) = m.client.clone() else {
+        // Out of reach, a clone would wait for the machine, "Cloning…" for as long as that takes,
+        // and start whenever it came back.
+        if let Some(why) = self.machine_unavailable_why(host) {
             self.machines.clone = Some(CloneRun {
                 host: host.into(),
                 folder,
                 lines: vec![],
-                stage: CloneStage::Failed(format!("{} isn't connected.", m.entry.name)),
+                stage: CloneStage::Failed(why),
             });
             cx.notify();
+            return;
+        }
+        let Some(client) = m.client.clone() else {
             return;
         };
         let name = self
@@ -1858,12 +1948,15 @@ impl Workspace {
         });
         cx.notify();
         let host = host.to_string();
+        let run_folder = folder.clone();
         cx.spawn(async move |this, cx| {
+            // Another clone may have taken the sheet's place by now: what this one does to the
+            // run (`clone_run`) is only said while it's still the one shown.
             let fail = |this: &gpui_kit::WeakEntity<Workspace>,
                         cx: &mut gpui_kit::AsyncApp,
                         why: String| {
                 let _ = this.update(cx, |ws, cx| {
-                    if let Some(run) = ws.machines.clone.as_mut() {
+                    if let Some(run) = ws.machines.clone_run(&host, &run_folder) {
                         run.stage = CloneStage::Failed(why);
                     }
                     cx.notify();
@@ -1878,7 +1971,7 @@ impl Workspace {
             };
             if !files.is_empty() {
                 let _ = this.update(cx, |ws, cx| {
-                    if let Some(run) = ws.machines.clone.as_mut() {
+                    if let Some(run) = ws.machines.clone_run(&host, &run_folder) {
                         run.stage = CloneStage::Copying { files: files.len() };
                     }
                     cx.notify();
@@ -1907,18 +2000,33 @@ impl Workspace {
                 }
             }
             let _ = this.update(cx, |ws, cx| {
-                if let Some(m) = ws.machines.get_mut(&host) {
-                    m.entry
-                        .projects
-                        .insert(project.display().to_string(), project_id.clone());
-                }
+                let Some(m) = ws.machines.get_mut(&host) else {
+                    // Forgotten while it cloned: nothing to start there.
+                    if let Some(run) = ws.machines.clone_run(&host, &run_folder) {
+                        run.stage = CloneStage::Failed(
+                            "That machine was forgotten here before the clone finished.".into(),
+                        );
+                    }
+                    cx.notify();
+                    return;
+                };
+                m.entry
+                    .projects
+                    .insert(project.display().to_string(), project_id.clone());
                 ws.machines.save();
-                if let Some(run) = ws.machines.clone.as_mut() {
+                if let Some(run) = ws.machines.clone_run(&host, &run_folder) {
                     run.stage = CloneStage::Done { project_id };
                 }
                 ws.set_draft_machine(&project, Some(host.clone()), cx);
-                // What's typed in the draft goes there now.
-                cx.emit(WorkspaceEvent::SendDraft);
+                // What's typed in the draft goes there now: only if that is still the draft on
+                // screen, not whatever else is being typed by the time a clone is done.
+                if ws.route
+                    == (Route::Draft {
+                        project: Some(project),
+                    })
+                {
+                    cx.emit(WorkspaceEvent::SendDraft);
+                }
                 cx.notify();
             });
         })
@@ -2011,6 +2119,60 @@ fn tr_kind(msg: &tr::ServerMessage) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tool_running_when_its_machine_went_away_shows_as_ended() {
+        let tool = |id: &str, status| {
+            (
+                id.to_string(),
+                Item::Tool {
+                    id: id.into(),
+                    title: "Bash".into(),
+                    detail: String::new(),
+                    output: String::new(),
+                    status,
+                },
+            )
+        };
+        let mut rows = vec![
+            tool("a", ToolStatus::Running),
+            tool("b", ToolStatus::Done),
+            (
+                "n".into(),
+                Item::Notice {
+                    text: "hello".into(),
+                },
+            ),
+        ];
+        settle_running_tools(&mut rows);
+        let statuses: Vec<_> = rows
+            .iter()
+            .filter_map(|(_, i)| match i {
+                Item::Tool { status, .. } => Some(*status),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(statuses, [ToolStatus::Failed, ToolStatus::Done]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn machines_json_is_private_from_the_moment_it_exists() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("trek-private-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("machines.json.tmp");
+        // One left by an earlier run, readable by everyone, is replaced rather than reused.
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&path, "token").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "token");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn local_ids_round_trip() {

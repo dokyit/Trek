@@ -14,7 +14,7 @@ if [ -z "$TEAM" ]; then
   echo "No team: add your Apple ID in Xcode › Settings › Accounts (or set TEAM=...)." >&2
   exit 1
 fi
-DEVICE="${DEVICE:-$(xcrun devicectl list devices 2>/dev/null | awk '/iPhone/ && !/simulated/ && (/available/ || /connected/) {for (i=1;i<=NF;i++) if ($i ~ /^[0-9A-F]{8}-[0-9A-F]{16}$/) print $i}' | head -1)}"
+DEVICE="${DEVICE:-$(xcrun devicectl list devices 2>/dev/null | awk '/iPhone/ && !/simulated/ && /(^|[^a-z])(available|connected)([^a-z]|$)/ {for (i=1;i<=NF;i++) if ($i ~ /^[0-9A-F]{8}-[0-9A-F]{16}$/) print $i}' | head -1)}"
 if [ -z "$DEVICE" ]; then
   echo "No iPhone: plug it in, unlock it and trust this Mac." >&2
   exit 1

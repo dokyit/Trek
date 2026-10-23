@@ -114,11 +114,13 @@ function Read-State {
     $s
 }
 function Get-Signature([int]$ProcId) {
+    if ($ProcId -le 0) { return '' }
     $p = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcId" -ErrorAction SilentlyContinue
-    if (-not $p) { return '' }
+    if (-not $p -or -not $p.CreationDate) { return '' }
     "$($p.CreationDate.ToString('o'))|$($p.CommandLine)"
 }
 function Test-Alive($State) {
+    if ($null -eq $State.pid) { return $false }
     $sig = Get-Signature ([int]$State.pid)
     return $sig -and $sig -eq $State.process_signature
 }

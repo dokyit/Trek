@@ -270,6 +270,29 @@ fn a_move_counting_down_can_be_called_off_and_then_forced() {
 }
 
 #[test]
+fn a_stale_not_now_or_move_now_leaves_the_move_as_it_is() {
+    run(async |cx| {
+        let _windows = trek_app::words::pretend(true);
+        let trek = open(cx);
+        guarded_here(&trek, cx, fakes(copies, starts));
+        // "Not now" clicked on a toast after its countdown ended in waiting again.
+        trek.update(cx, |ws, _| ws.moving = Moving::Waiting(prepared()));
+        trek.update(cx, |ws, cx| ws.undo(UndoAction::CancelMove, cx));
+        assert!(
+            is_moving(&trek, cx, |m| matches!(m, Moving::Waiting(_))),
+            "the copy still waits"
+        );
+        // "Move now" while the copy is still being made doesn't forget the copy is under way.
+        trek.update(cx, |ws, _| ws.moving = Moving::Copying);
+        trek.update(cx, |ws, cx| ws.run_update_action(UpdateAction::MoveNow, cx));
+        assert!(is_moving(&trek, cx, |m| matches!(m, Moving::Copying)));
+        trek.update(cx, |ws, cx| ws.undo(UndoAction::CancelMove, cx));
+        assert!(is_moving(&trek, cx, |m| matches!(m, Moving::Copying)));
+        assert!(started().is_empty());
+    });
+}
+
+#[test]
 fn moving_a_build_that_isnt_installed_is_refused_in_words_and_changes_nothing() {
     run(async |cx| {
         let _windows = trek_app::words::pretend(true);

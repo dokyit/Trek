@@ -362,6 +362,50 @@ fn explorer_clicks_preview_and_edits_keep_the_tab() {
 }
 
 #[test]
+fn closing_the_front_tab_after_a_preview_replaced_another_goes_back_to_the_last_one_kept() {
+    run(async |cx| {
+        let trek = open(cx);
+        let names = ["a.rs", "b.rs", "p.rs", "q.rs"];
+        let files: Vec<_> = names.iter().map(|n| trek.project.join(n)).collect();
+        for f in &files {
+            std::fs::write(f, "x\n").unwrap();
+        }
+        editor_on_draft(&trek, cx);
+        let ide = ide(&trek, cx);
+        let open_file = |cx: &mut TestAppContext, ix: usize, preview: bool| {
+            let path = files[ix].clone();
+            trek.window(cx, |window, cx| {
+                ide.update(cx, |i, cx| i.open(path, None, preview, window, cx))
+            });
+            trek.render(cx);
+        };
+        open_file(cx, 0, false);
+        open_file(cx, 1, false);
+        open_file(cx, 2, true);
+        // Q takes the preview tab P's place.
+        open_file(cx, 3, true);
+        assert_eq!(
+            tabs(&trek, cx),
+            vec![
+                (files[0].clone(), false),
+                (files[1].clone(), false),
+                (files[3].clone(), true)
+            ]
+        );
+        assert_eq!(active_file(&trek, cx), Some(files[3].clone()));
+        trek.window(cx, |window, cx| {
+            ide.update(cx, |i, cx| i.close_active(window, cx))
+        });
+        trek.render(cx);
+        assert_eq!(
+            active_file(&trek, cx),
+            Some(files[1].clone()),
+            "back to the tab that was in front before the preview"
+        );
+    });
+}
+
+#[test]
 fn cmd_p_lists_the_folders_files() {
     run(async |cx| {
         let trek = open(cx);
@@ -1921,6 +1965,33 @@ fn source_control_stages_unstages_discards_and_commits_with_status_caught_up_at_
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "Add new.txt");
+    });
+}
+
+#[test]
+fn unstaging_a_staged_rename_puts_the_old_path_back_in_the_index_too() {
+    run(async |cx| {
+        let trek = open(cx);
+        make_repo(&trek);
+        std::fs::write(trek.project.join("a.rs"), "one\ntwo\nthree\nfour\n").unwrap();
+        git(&trek.project, &["add", "-A"]);
+        git(&trek.project, &["commit", "-qm", "a"]);
+        git(&trek.project, &["mv", "a.rs", "b.rs"]);
+        editor_on_draft(&trek, cx);
+        let view = scm(&trek, cx);
+        // One row under the new name, with the rename's own (empty) diff, not four added lines.
+        scm_rows(cx, &view, "the rename", &["S R b.rs"]).await;
+        assert_eq!(
+            view.read_with(cx, |v, _| v
+                .file(true, "b.rs")
+                .map(|f| (f.added, f.removed))),
+            Some((0, 0))
+        );
+        trek.window(cx, |window, cx| {
+            view.update(cx, |v, cx| v.unstage(vec!["b.rs".into()], window, cx))
+        });
+        // The deletion of a.rs goes back out of the index with it.
+        scm_rows(cx, &view, "unstaged", &["C D a.rs", "C U b.rs"]).await;
     });
 }
 

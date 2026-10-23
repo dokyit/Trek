@@ -109,8 +109,13 @@ pub fn git_marks(root: &Path) -> HashMap<PathBuf, GitMark> {
         return HashMap::new();
     };
     let mut marks = HashMap::new();
-    let mut entries = out.split(|b| *b == 0).filter(|e| e.len() > 3);
+    // Not filtered by length: a rename's old path can be as short as `a.c`, and must be there to
+    // be skipped. (An entry itself is at least `XY p`.)
+    let mut entries = out.split(|b| *b == 0).filter(|e| !e.is_empty());
     while let Some(e) = entries.next() {
+        if e.len() < 4 {
+            continue;
+        }
         let (x, y) = (e[0] as char, e[1] as char);
         let rel = String::from_utf8_lossy(&e[3..]).to_string();
         // A rename's entry is followed by its old path.
@@ -918,7 +923,7 @@ impl ExplorerPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::name_problem;
+    use super::{GitMark, git_marks, name_problem};
 
     #[test]
     fn a_rename_that_only_changes_case_is_not_a_clash_with_itself() {
@@ -947,6 +952,40 @@ mod tests {
                     .any(|e| e.unwrap().file_name() == "README.md")
             );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rename_from_a_short_path_does_not_hide_the_next_changed_file() {
+        let dir =
+            std::env::temp_dir().join(format!("trek-explorer-marks-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run =
+            |args: &[&str]| assert!(crate::panels::git::git(&dir, args).is_ok(), "git {args:?}");
+        run(&["init", "-q"]);
+        std::fs::write(dir.join("a.c"), "x\n").unwrap();
+        std::fs::write(dir.join("zzzz.txt"), "y\n").unwrap();
+        run(&["add", "."]);
+        run(&[
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "first",
+        ]);
+        run(&["mv", "a.c", "b.c"]);
+        std::fs::write(dir.join("zzzz.txt"), "y\nz\n").unwrap();
+        let marks = git_marks(&dir);
+        let modified = marks
+            .iter()
+            .any(|(p, m)| p.ends_with("zzzz.txt") && *m == GitMark::Modified);
+        assert!(modified, "{marks:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

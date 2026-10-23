@@ -21,6 +21,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
+/// A thread's id and those of its side chats and sub-agents, theirs too, all the way down.
+fn family_ids(c: &Connection, id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut st = c.prepare(
+        "WITH RECURSIVE family(id) AS (SELECT ?1 UNION SELECT t.id FROM threads t JOIN family f ON t.side_of = f.id OR t.parent_id = f.id)
+         SELECT id FROM family",
+    )?;
+    st.query_map([id], |r| r.get(0))?.collect()
+}
+
 /// Lock `m` even if a panic poisoned it: a transaction a panic cut short rolls back as it's
 /// dropped, so the connection is as good as before, and one panic doesn't fail every later call.
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1341,14 +1350,7 @@ impl Store {
         let mut conn = lock(&self.conn);
         let tx = conn.transaction()?;
         // The thread, its side chats and its sub-agents, theirs too, all the way down.
-        let ids: Vec<String> = {
-            let mut st = tx.prepare(
-                "WITH RECURSIVE family(id) AS (SELECT ?1 UNION SELECT t.id FROM threads t JOIN family f ON t.side_of = f.id OR t.parent_id = f.id)
-                 SELECT id FROM family",
-            )?;
-            st.query_map([id], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?
-        };
+        let ids = family_ids(&tx, id)?;
         for gone in &ids {
             tx.execute(
                 "INSERT OR REPLACE INTO retired_sessions (native_id, thread_id)
@@ -1388,10 +1390,25 @@ impl Store {
             rows.collect()
         })?;
         let mut out = Vec::with_capacity(orphans.len());
+        let mut seen = HashSet::new();
         for t in orphans {
-            let checkpoints = self.checkpoints(&t.id)?;
-            self.delete_thread(&t.id)?;
-            out.push((t, checkpoints));
+            // The orphan's side chats and sub-agents go with it; their checkpoints are returned
+            // too, or their refs in the user's repos would outlive every row that names them.
+            let root = t.id.clone();
+            let family = self.with(|c| family_ids(c, &root))?;
+            let mut members = vec![t];
+            for id in family.into_iter().filter(|id| *id != root) {
+                members.extend(self.thread(&id)?);
+            }
+            let mut batch = Vec::with_capacity(members.len());
+            for m in members {
+                if seen.insert(m.id.clone()) {
+                    let checkpoints = self.checkpoints(&m.id)?;
+                    batch.push((m, checkpoints));
+                }
+            }
+            self.delete_thread(&root)?;
+            out.extend(batch);
         }
         Ok(out)
     }
@@ -1946,6 +1963,61 @@ mod tests {
             .map(|(t, _)| t.id)
             .collect();
         assert_eq!(dropped, [stray.id]);
+    }
+
+    #[test]
+    fn dropping_an_orphan_returns_its_descendants_checkpoints_too() {
+        let s = Store::in_memory().unwrap();
+        let mut side = s
+            .create_thread(None, AgentId::Codex, None, Effort::Low, HandHolding::Auto)
+            .unwrap();
+        side.side_of = Some("draft".into());
+        s.save_thread(&side).unwrap();
+        let mut sub = s
+            .create_thread(None, AgentId::Codex, None, Effort::Low, HandHolding::Auto)
+            .unwrap();
+        sub.parent_id = Some(side.id.clone());
+        s.save_thread(&sub).unwrap();
+        let mut subsub = s
+            .create_thread(None, AgentId::Codex, None, Effort::Low, HandHolding::Auto)
+            .unwrap();
+        subsub.parent_id = Some(sub.id.clone());
+        s.save_thread(&subsub).unwrap();
+        let other = s
+            .create_thread(None, AgentId::Codex, None, Effort::Low, HandHolding::Auto)
+            .unwrap();
+        for t in [&sub, &subsub, &other] {
+            let mut tr = Transcript::default();
+            tr.push(Item::User {
+                text: "go".into(),
+                images: vec![],
+                at: None,
+                resume: None,
+                aside: false,
+            });
+            s.save_transcript(&t.id, &mut tr).unwrap();
+            s.add_checkpoint(&t.id, &tr.ids()[0], Path::new("/tmp/repo"), "abc")
+                .unwrap();
+        }
+        let gone = s.drop_orphan_side_chats().unwrap();
+        let mut got: Vec<(String, usize)> =
+            gone.iter().map(|(t, c)| (t.id.clone(), c.len())).collect();
+        got.sort();
+        let mut want = vec![
+            (side.id.clone(), 0),
+            (sub.id.clone(), 1),
+            (subsub.id.clone(), 1),
+        ];
+        want.sort();
+        assert_eq!(
+            got, want,
+            "every thread that went comes back with its checkpoints"
+        );
+        for t in [&side, &sub, &subsub] {
+            assert!(s.thread(&t.id).unwrap().is_none());
+        }
+        assert!(s.thread(&other.id).unwrap().is_some());
+        assert_eq!(s.checkpoints(&other.id).unwrap().len(), 1);
     }
 
     #[test]

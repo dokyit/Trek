@@ -278,12 +278,16 @@ enum LivePage {
       const helper = (
       ((post, live) => {
         const MAX = 4096;
-        const bytes = (s) => { try { return new TextEncoder().encode(s).length; } catch (_) { return s.length * 3; } };
+        // The clock and the encoder are taken now, before the page's own scripts run: a page that
+        // replaces `Date.now` or `TextEncoder` later changes nothing here.
+        const now = Date.now.bind(Date);
+        const encode = (() => { try { const e = new TextEncoder(); return e.encode.bind(e); } catch (_) { return null; } })();
+        const bytes = (s) => { try { return encode(s).length; } catch (_) { return s.length * 3; } };
         const fit = (s) => typeof s === 'string' && s.trim() !== '' && bytes(s) <= MAX && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(s);
         let sent = 0;
         const act = (t) => (text) => {
           if (!fit(text) || !live()) return false;
-          if (t === 'send') { const now = Date.now(); if (now - sent < 1000) return false; sent = now; }
+          if (t === 'send') { const at = now(); if (at - sent < 1000) return false; sent = at; }
           post({ t, text });
           return true;
         };

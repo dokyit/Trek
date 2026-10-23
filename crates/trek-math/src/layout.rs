@@ -1977,4 +1977,13 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn nested_radicals_stay_small() {
+        // The parser stops nesting without braces at a fixed depth; layout is not quadratic.
+        let start = std::time::Instant::now();
+        let b = set(&format!("{}x", r"\sqrt".repeat(4000)), true);
+        assert!(start.elapsed().as_secs() < 3, "{:?}", start.elapsed());
+        assert!(b.items.len() < 20_000, "{}", b.items.len());
+    }
 }

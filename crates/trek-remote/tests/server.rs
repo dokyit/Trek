@@ -372,11 +372,17 @@ impl RemoteHost for FakeHost {
 
     async fn git_commit(&self, req: GitCommitRequest) -> HostResult<()> {
         self.record(format!("git_commit {:?} {}", req.target, req.message));
+        if req.target.thread_id.as_deref() == Some("slow") {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
         Ok(())
     }
 
     async fn git_push(&self, target: GitTarget) -> HostResult<()> {
         self.record(format!("git_push {target:?}"));
+        if target.thread_id.as_deref() == Some("slow") {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
         Ok(())
     }
 
@@ -1704,6 +1710,79 @@ async fn slow_reads_dont_hold_up_actions() {
     .await;
     assert_eq!(recv(&mut c).await["re"], "fast2");
     assert_eq!(recv(&mut c).await["re"], "page");
+}
+
+/// A push (or a commit, merge, remove, delete) can take minutes: what the phone sends meanwhile
+/// is answered at once, not after it.
+#[tokio::test]
+async fn slow_actions_dont_hold_up_what_follows() {
+    let (handle, _) = start().await;
+    let (mut c, _) = pair(&handle, "dev-1").await;
+    send(
+        &mut c,
+        json!({"type": "git_push", "id": "push", "thread_id": "slow"}),
+    )
+    .await;
+    send(
+        &mut c,
+        json!({"type": "interrupt", "id": "fast", "thread_id": "t1"}),
+    )
+    .await;
+    send(
+        &mut c,
+        json!({"type": "subscribe", "id": "sub", "thread_id": "t1"}),
+    )
+    .await;
+    let mut order = Vec::new();
+    while !order.contains(&"push".to_string()) {
+        let v = recv(&mut c).await;
+        if let Some(re) = v["re"].as_str() {
+            order.push(re.to_string());
+        }
+    }
+    assert_eq!(order.last().map(String::as_str), Some("push"));
+    assert!(order.contains(&"fast".to_string()), "{order:?}");
+    assert!(order.contains(&"sub".to_string()), "{order:?}");
+}
+
+/// Slow changes leave the connection free, but stay in the order they were sent: a push sent
+/// after a commit that's still running waits for it, rather than pushing without it.
+#[tokio::test]
+async fn a_push_sent_after_a_slow_commit_waits_for_it() {
+    let (handle, host) = start().await;
+    let (mut c, _) = pair(&handle, "dev-1").await;
+    send(
+        &mut c,
+        json!({"type": "git_commit", "id": "commit", "thread_id": "slow", "message": "m"}),
+    )
+    .await;
+    send(
+        &mut c,
+        json!({"type": "git_push", "id": "push", "thread_id": "slow2"}),
+    )
+    .await;
+    send(
+        &mut c,
+        json!({"type": "interrupt", "id": "fast", "thread_id": "t1"}),
+    )
+    .await;
+    let mut order = Vec::new();
+    while !order.contains(&"push".to_string()) {
+        let v = recv(&mut c).await;
+        if let Some(re) = v["re"].as_str() {
+            order.push(re.to_string());
+        }
+    }
+    let at = |id: &str| order.iter().position(|r| r == id);
+    assert!(at("commit") < at("push"), "{order:?}");
+    assert!(
+        at("fast") < at("commit"),
+        "the interrupt isn't held up: {order:?}"
+    );
+    let calls = host.calls();
+    let commit = calls.iter().position(|c| c.starts_with("git_commit"));
+    let push = calls.iter().position(|c| c.starts_with("git_push"));
+    assert!(commit < push, "{calls:?}");
 }
 
 #[tokio::test]

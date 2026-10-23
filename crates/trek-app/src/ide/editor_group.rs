@@ -318,13 +318,21 @@ impl IdeWorkbench {
         let replace = preview
             .then(|| self.tabs.iter().position(|t| t.preview && !t.dirty(cx)))
             .flatten();
+        let new = tab.id();
         match replace {
             Some(ix) => {
                 let old = std::mem::replace(&mut self.tabs[ix], tab);
                 self.forget_file(&old, cx);
+                // The new tab takes the old one's place in the order tabs were in front.
+                let old = old.id();
+                for m in self.mru.iter_mut().filter(|m| **m == old) {
+                    *m = new;
+                }
                 ix
             }
             None => {
+                // Never in front yet: the one closing the front tab goes back to last.
+                self.mru.insert(0, new);
                 let at = if self.tabs.is_empty() {
                     0
                 } else {
@@ -559,10 +567,12 @@ impl IdeWorkbench {
         let file = tab.file(cx);
         self.forget_file(&tab, cx);
         self.mru.retain(|m| *m != id);
+        // The tab last in front that still exists.
         let front = self
             .mru
-            .last()
-            .and_then(|m| self.tabs.iter().position(|t| t.id() == *m));
+            .iter()
+            .rev()
+            .find_map(|m| self.tabs.iter().position(|t| t.id() == *m));
         match front {
             Some(f) => self.activate(f, cx),
             None => {

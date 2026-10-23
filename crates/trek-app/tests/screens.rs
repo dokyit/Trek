@@ -313,6 +313,39 @@ fn the_palette_moves_by_keyboard_and_keeps_the_selection_in_view() {
     });
 }
 
+/// An image still being saved when the user moves to another thread belongs to the thread it
+/// was pasted into, not the one on screen when it lands.
+#[test]
+fn a_pasted_image_lands_in_the_thread_it_was_pasted_into() {
+    run(async |cx| {
+        let trek = open(cx);
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        let a = trek.quiet_thread(cx);
+        let b = trek.quiet_thread(cx);
+        let image = gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, png());
+        cx.write_to_clipboard(ClipboardItem::new_image(&image));
+        // Paste into B and move to A in the same breath, before the save can land.
+        let (ws, to) = (trek.ws.clone(), Route::Thread(a.clone()));
+        trek.window(cx, |window, cx| {
+            window.press("secondary-v", cx);
+            ws.update(cx, |ws, cx| ws.navigate(to, cx));
+        });
+        until(cx, "the image to be saved", |cx| {
+            composer.read_with(cx, |c, _| c.attached()).1 == 0
+        });
+        assert!(
+            composer.read_with(cx, |c, _| c.attached()).0.is_empty(),
+            "A doesn't get B's image"
+        );
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(b), cx));
+        assert_eq!(
+            composer.read_with(cx, |c, _| c.attached()).0.len(),
+            1,
+            "B has it"
+        );
+    });
+}
+
 #[test]
 fn a_pasted_screenshot_is_saved_attached_and_sent() {
     run(async |cx| {

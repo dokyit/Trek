@@ -2317,9 +2317,7 @@ impl SettingsView {
                     menu = menu.item(PopupMenuItem::new(label).icon(Icon::new(*icon)).on_click(
                         move |_, _, cx| {
                             let spec = format!("lucide:{key}");
-                            w.update(cx, |ws, cx| {
-                                ws.update_project_prefs(&p, |pr| pr.icon = Some(spec), cx)
-                            })
+                            w.update(cx, |ws, cx| set_project_icon(ws, &p, Some(spec), cx))
                         },
                     ));
                 }
@@ -2343,9 +2341,7 @@ impl SettingsView {
                 .ghost()
                 .label("Reset")
                 .on_click(move |_, _, cx| {
-                    w.update(cx, |ws, cx| {
-                        ws.update_project_prefs(&p2, |pr| pr.icon = None, cx)
-                    })
+                    w.update(cx, |ws, cx| set_project_icon(ws, &p2, None, cx))
                 })
         });
         // Colour: from the name, or one of a few that stay apart.
@@ -2931,7 +2927,18 @@ impl SettingsView {
         let Some((id, name, path)) = selected else {
             return;
         };
-        if self.project_name_for.as_deref() != Some(id.as_str()) {
+        let switched = self.project_name_for.as_deref() != Some(id.as_str());
+        let field = self.project_name.read(cx).value();
+        let focused = self
+            .project_name
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
+        if let Some(show) = name_to_show(&field, &name, focused, switched) {
+            self.project_name
+                .update(cx, |s, cx| s.set_value(show, window, cx));
+        }
+        if switched {
             let copy = self
                 .workspace
                 .read(cx)
@@ -2939,8 +2946,6 @@ impl SettingsView {
                 .worktree_copy
                 .join(", ");
             self.project_name_for = Some(id);
-            self.project_name
-                .update(cx, |s, cx| s.set_value(name, window, cx));
             self.worktree_copy
                 .update(cx, |s, cx| s.set_value(copy, window, cx));
         }
@@ -2960,26 +2965,102 @@ impl SettingsView {
             let Some(src) = paths.into_iter().next() else {
                 return;
             };
-            // Keep a copy in Trek's data folder so the icon survives the original moving.
-            let dir = trek_core::paths::data_dir().join("project-icons");
-            let _ = std::fs::create_dir_all(&dir);
-            let ext = src
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("png")
-                .to_string();
-            let dest = dir.join(format!("{}.{ext}", uuid_like()));
-            if std::fs::copy(&src, &dest).is_err() {
-                return;
-            }
+            // Keep a copy in Trek's data folder so the icon survives the original moving. The
+            // copy can be big, so it happens off the main thread.
+            let dir = project_icons_dir();
+            let copied = cx
+                .background_executor()
+                .spawn(async move { copy_icon_image(&src, &dir) })
+                .await;
             let _ = this.update(cx, |this, cx| {
-                let spec = format!("file:{}", dest.display());
-                this.workspace.update(cx, |ws, cx| {
-                    ws.update_project_prefs(&project, |pr| pr.icon = Some(spec), cx)
+                this.workspace.update(cx, |ws, cx| match copied {
+                    Ok(dest) => {
+                        let spec = format!("file:{}", dest.display());
+                        set_project_icon(ws, &project, Some(spec), cx);
+                    }
+                    Err(message) => cx.emit(crate::workspace::WorkspaceEvent::Toast {
+                        message,
+                        undo: None,
+                    }),
                 });
             });
         })
         .detach();
+    }
+}
+
+/// What the Name field should be set to, if anything: the project's name when another project
+/// was selected, or when the field is not being edited and has fallen out of step (a rename
+/// done elsewhere, or an empty name that was refused).
+fn name_to_show(field: &str, project: &str, focused: bool, switched: bool) -> Option<String> {
+    (switched || (!focused && field != project)).then(|| project.to_string())
+}
+
+/// Where the copies of chosen project icon images live.
+fn project_icons_dir() -> std::path::PathBuf {
+    trek_core::paths::data_dir().join("project-icons")
+}
+
+/// What a project icon image may be, by extension.
+const ICON_EXTENSIONS: [&str; 9] = [
+    "png", "jpg", "jpeg", "gif", "webp", "heic", "svg", "ico", "icns",
+];
+/// Bigger than this is not an icon.
+const ICON_MAX_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Copy `src` into `dir` as the project's icon, if it is an image of a sensible size. The error
+/// is what to tell the person.
+fn copy_icon_image(
+    src: &std::path::Path,
+    dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .filter(|e| ICON_EXTENSIONS.contains(&e.as_str()))
+        .ok_or_else(|| "That isn't an image Trek can use as an icon.".to_string())?;
+    let size = std::fs::metadata(src)
+        .map_err(|e| format!("Couldn't read that image: {e}"))?
+        .len();
+    if size > ICON_MAX_BYTES {
+        return Err("That image is too big for an icon (the limit is 20 MB).".into());
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't save the icon: {e}"))?;
+    let dest = dir.join(format!("{}.{ext}", uuid_like()));
+    std::fs::copy(src, &dest).map_err(|e| format!("Couldn't save the icon: {e}"))?;
+    Ok(dest)
+}
+
+/// Delete the copy a `file:` icon points at, but only one Trek made in `dir`.
+fn forget_icon_copy(spec: &str, dir: &std::path::Path) {
+    let Some(file) = spec.strip_prefix("file:").map(std::path::Path::new) else {
+        return;
+    };
+    let inside = file.starts_with(dir)
+        && !file
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir));
+    if inside {
+        let _ = std::fs::remove_file(file);
+    }
+}
+
+/// Set (or with `None`, reset) a project's icon, and delete the image copy it replaces.
+fn set_project_icon(
+    ws: &mut crate::workspace::Workspace,
+    project: &std::path::Path,
+    icon: Option<String>,
+    cx: &mut Context<crate::workspace::Workspace>,
+) {
+    let mut old = None;
+    ws.update_project_prefs(
+        project,
+        |pr| old = std::mem::replace(&mut pr.icon, icon),
+        cx,
+    );
+    if let Some(old) = old {
+        forget_icon_copy(&old, &project_icons_dir());
     }
 }
 
@@ -2991,4 +3072,87 @@ fn uuid_like() -> String {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: the gpui glob import brings its own `test` attribute.
+    use super::{copy_icon_image, forget_icon_copy, name_to_show};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "trek-icon-{name}-{}-{}",
+            std::process::id(),
+            super::uuid_like()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_name_field_goes_back_to_the_projects_name_when_it_is_left() {
+        // Cleared and left: the rename was refused, so the old name comes back.
+        assert_eq!(
+            name_to_show("", "Trek", false, false).as_deref(),
+            Some("Trek")
+        );
+        // Renamed elsewhere while the field sat there.
+        assert_eq!(
+            name_to_show("Old", "New", false, false).as_deref(),
+            Some("New")
+        );
+        // Another project selected.
+        assert_eq!(name_to_show("A", "B", true, true).as_deref(), Some("B"));
+        // Being typed in, or already right: left alone.
+        assert_eq!(name_to_show("", "Trek", true, false), None);
+        assert_eq!(name_to_show("Trek", "Trek", false, false), None);
+    }
+
+    #[test]
+    fn only_images_of_a_sensible_size_are_copied_as_icons() {
+        let root = scratch("copy");
+        let dir = root.join("project-icons");
+        let png = root.join("Badge.PNG");
+        std::fs::write(&png, b"not really a png").unwrap();
+        let copy = copy_icon_image(&png, &dir).expect("an image is copied");
+        assert!(copy.starts_with(&dir));
+        assert_eq!(copy.extension().and_then(|e| e.to_str()), Some("png"));
+        assert!(copy.exists());
+
+        let video = root.join("clip.mov");
+        std::fs::write(&video, b"video").unwrap();
+        assert!(copy_icon_image(&video, &dir).is_err(), "not an image");
+        let bare = root.join("noextension");
+        std::fs::write(&bare, b"x").unwrap();
+        assert!(copy_icon_image(&bare, &dir).is_err(), "no extension");
+
+        let big = root.join("big.png");
+        let file = std::fs::File::create(&big).unwrap();
+        file.set_len(super::ICON_MAX_BYTES + 1).unwrap();
+        assert!(copy_icon_image(&big, &dir).is_err(), "over 20 MB");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "only the png");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_replaced_icon_copy_is_deleted_but_only_inside_the_icons_folder() {
+        let root = scratch("forget");
+        let dir = root.join("project-icons");
+        std::fs::create_dir_all(&dir).unwrap();
+        let ours = dir.join("1.png");
+        let theirs = root.join("photo.png");
+        std::fs::write(&ours, b"x").unwrap();
+        std::fs::write(&theirs, b"x").unwrap();
+
+        forget_icon_copy(&format!("file:{}", theirs.display()), &dir);
+        assert!(theirs.exists(), "a file outside the folder stays");
+        let sneaky = dir.join("..").join("photo.png");
+        forget_icon_copy(&format!("file:{}", sneaky.display()), &dir);
+        assert!(theirs.exists(), "so does one reached through ..");
+        forget_icon_copy("lucide:folder", &dir);
+        assert!(ours.exists(), "a built-in icon names no file");
+        forget_icon_copy(&format!("file:{}", ours.display()), &dir);
+        assert!(!ours.exists(), "the copy goes");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

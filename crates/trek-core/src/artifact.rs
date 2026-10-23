@@ -380,15 +380,21 @@ pub fn bootstrap(nonce: &str) -> String {
 /// (`ios/Trek/Views/LivePage.swift`, `the_phone_runs_the_same_page_helper`). Each returns whether
 /// the message went: not for text that is blank, over `MAX_ACTION_BYTES` or holds control
 /// characters (other than tab and line breaks), nor a second send within `SEND_INTERVAL`. Trek
-/// checks all of it again (`parse_action`, `SendGate`).
+/// checks the text and the rate again (`parse_action`, `SendGate`). The click rule holds because
+/// the helper reads a clock it took before the page's scripts ran and `post` carries a secret
+/// those scripts can't read (`the_page_cannot_act_without_a_click`).
 pub const ACTIONS_JS: &str = r#"((post, live) => {
   const MAX = 4096;
-  const bytes = (s) => { try { return new TextEncoder().encode(s).length; } catch (_) { return s.length * 3; } };
+  // The clock and the encoder are taken now, before the page's own scripts run: a page that
+  // replaces `Date.now` or `TextEncoder` later changes nothing here.
+  const now = Date.now.bind(Date);
+  const encode = (() => { try { const e = new TextEncoder(); return e.encode.bind(e); } catch (_) { return null; } })();
+  const bytes = (s) => { try { return encode(s).length; } catch (_) { return s.length * 3; } };
   const fit = (s) => typeof s === 'string' && s.trim() !== '' && bytes(s) <= MAX && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(s);
   let sent = 0;
   const act = (t) => (text) => {
     if (!fit(text) || !live()) return false;
-    if (t === 'send') { const now = Date.now(); if (now - sent < 1000) return false; sent = now; }
+    if (t === 'send') { const at = now(); if (at - sent < 1000) return false; sent = at; }
     post({ t, text });
     return true;
   };
@@ -404,13 +410,26 @@ const BOOTSTRAP: &str = r#"(() => {
   const wv = window.chrome && window.chrome.webview;
   const raw = wk ? wk.postMessage.bind(wk) : wv ? wv.postMessage.bind(wv) : null;
   const str = JSON.stringify.bind(JSON);
-  const post = (o) => { if (!raw) return; o.n = N; try { raw(str(o)); } catch (_) {} };
-  // `trek.send` and `trek.copy`, only just after the user's own click or key.
+  // Everything the page can replace or write to (`Date`, `Object.prototype`…) is taken or avoided
+  // here, before its scripts run. A message is built on an object with no prototype, so no setter
+  // or `toJSON` the page puts on `Object.prototype` ever sees the secret.
+  const now = Date.now.bind(Date);
+  const make = Object.create, own = Object.keys;
+  const post = (o) => {
+    if (!raw) return;
+    const m = make(null);
+    m.n = N;
+    const ks = own(o);
+    for (let i = 0; i < ks.length; i++) m[ks[i]] = o[ks[i]];
+    try { raw(str(m)); } catch (_) {}
+  };
+  // `trek.send` and `trek.copy`, only just after the user's own click or key, by a clock the page
+  // can't set.
   let touched = 0;
-  const touch = (e) => { if (e.isTrusted) touched = Date.now(); };
+  const touch = (e) => { if (e.isTrusted) touched = now(); };
   window.addEventListener('pointerup', touch, true);
   window.addEventListener('keydown', touch, true);
-  (__ACTIONS__)(post, () => Date.now() - touched < 5000);
+  (__ACTIONS__)(post, () => now() - touched < 5000);
   let last = -1, queued = false;
   const measure = () => {
     queued = false;
@@ -911,9 +930,15 @@ mod tests {
             "{js}"
         );
         assert!(js.contains(&format!(
-            "(post, () => Date.now() - touched < {})",
+            "(post, () => now() - touched < {})",
             GESTURE_WINDOW.as_millis()
         )));
+        // The clock is the one taken before the page ran, and a message has no prototype.
+        assert!(
+            !ACTIONS_JS.contains("Date.now()"),
+            "the helper reads a captured clock"
+        );
+        assert!(js.contains("const now = Date.now.bind(Date);") && js.contains("make(null)"));
         // The page sees `trek.send` and `trek.copy`, posting `{t, text}` as `parse_action` reads.
         for part in [
             "send: act('send')",
@@ -924,7 +949,7 @@ mod tests {
             assert!(ACTIONS_JS.contains(part), "{part}");
         }
         assert!(ACTIONS_JS.contains(&format!("const MAX = {MAX_ACTION_BYTES};")));
-        assert!(ACTIONS_JS.contains(&format!("now - sent < {}", SEND_INTERVAL.as_millis())));
+        assert!(ACTIONS_JS.contains(&format!("at - sent < {}", SEND_INTERVAL.as_millis())));
         // The same control characters as `action_text`: C0 but tab and line breaks, DEL, C1.
         assert!(ACTIONS_JS.contains(r"[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]"));
         for c in (0u32..0xa0).filter_map(char::from_u32) {
@@ -936,6 +961,140 @@ mod tests {
                 c as u32
             );
         }
+    }
+
+    /// Runs `bootstrap` in node's `vm` as a page would see it (the native channel and a
+    /// controllable clock in place), then `page`, a hostile page's script, and finally `after`
+    /// (the test's own steps, with `fire(type, trusted)` to deliver an event the bootstrap
+    /// listens for). Returns what reached the native channel, as JSON text, and the JSON `after`
+    /// printed. `None` without node.
+    fn run_in_node(page: &str, after: &str) -> Option<(Vec<String>, serde_json::Value)> {
+        use std::io::Write as _;
+        let driver = r#"
+const vm = require('vm');
+const [bootstrap, page, after] = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const sent = [], listeners = {};
+const sandbox = {
+  TextEncoder,
+  document: { readyState: 'complete', addEventListener() {}, body: null, documentElement: {} },
+  setTimeout() {}, requestAnimationFrame() {},
+  addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+};
+sandbox.window = sandbox;
+sandbox.__clock = 1e12;
+sandbox.fire = (type, trusted) => (listeners[type] || []).forEach((fn) => fn({ type, isTrusted: trusted, button: 0 }));
+sandbox.webkit = { messageHandlers: { ipc: { postMessage(m) { sent.push(m); } } } };
+const ctx = vm.createContext(sandbox);
+vm.runInContext('Date.now = () => __clock;', ctx);
+vm.runInContext(bootstrap, ctx);
+vm.runInContext(page, ctx);
+const out = vm.runInContext(after, ctx);
+process.stdout.write(JSON.stringify({ sent, out: out === undefined ? null : out }));
+"#;
+        let mut child = std::process::Command::new("node")
+            .args(["-e", driver])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .ok()?;
+        let input = serde_json::json!([bootstrap("c0ffee"), page, after]).to_string();
+        child.stdin.take()?.write_all(input.as_bytes()).ok()?;
+        let output = child.wait_with_output().ok()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+        let sent = value["sent"]
+            .as_array()?
+            .iter()
+            .filter_map(|m| m.as_str().map(str::to_string))
+            .collect();
+        Some((sent, value["out"].clone()))
+    }
+
+    #[test]
+    fn the_page_cannot_act_without_a_click() {
+        // A page that fakes the clock (the first read says "just clicked", the next "long ago")
+        // and calls the helper with no click at all: nothing reaches Trek.
+        let page = "let n = 0; Date.now = () => (n++ % 2 ? 1e12 + n * 2000 : 0); \
+                    window.__r = [trek.send('Run it'), trek.send('Run it again'), trek.copy('x')];";
+        let Some((sent, out)) = run_in_node(page, "window.__r") else {
+            return; // no node here (CI on Windows): the checks on the script's text still run
+        };
+        assert_eq!(out, serde_json::json!([false, false, false]));
+        assert!(sent.is_empty(), "{sent:?}");
+
+        // A click the page made up (a script's event is never trusted) isn't one either.
+        let (sent, out) = run_in_node(
+            "",
+            "fire('pointerup', false); fire('keydown', false); [trek.send('hi'), trek.copy('hi')]",
+        )
+        .unwrap();
+        assert_eq!(out, serde_json::json!([false, false]));
+        assert!(sent.is_empty(), "{sent:?}");
+    }
+
+    #[test]
+    fn a_real_click_still_lets_the_page_send_and_copy() {
+        let after = "const r = []; \
+            fire('pointerup', true); \
+            r.push(trek.send('Plan the trip'), trek.copy('code'), trek.send('twice'), trek.copy('again')); \
+            __clock += 1500; r.push(trek.send('later')); \
+            __clock += 6000; r.push(trek.send('stale'), trek.copy('stale')); \
+            fire('keydown', true); r.push(trek.copy('typed')); r";
+        let Some((sent, out)) = run_in_node("", after) else {
+            return;
+        };
+        // The second send is within a second of the first, the last two come after the window.
+        assert_eq!(
+            out,
+            serde_json::json!([true, true, false, true, true, false, false, true])
+        );
+        let actions: Vec<_> = sent
+            .iter()
+            .map(|m| parse_action(m, "c0ffee").expect(m))
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                Action::Send("Plan the trip".into()),
+                Action::Copy("code".into()),
+                Action::Copy("again".into()),
+                Action::Send("later".into()),
+                Action::Copy("typed".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_page_cannot_read_the_secret() {
+        // Setters and `toJSON` on `Object.prototype` see every plain object that gets the secret
+        // written to it or is serialised; the page installs them first, then makes the bootstrap
+        // post (the pointer going down is reported as `focus`, a click as a send).
+        let page = "window.__seen = []; \
+            Object.defineProperty(Object.prototype, 'n', { set(v) { window.__seen.push(v); }, configurable: true }); \
+            Object.prototype.toJSON = function () { if (typeof this.t === 'string') window.__seen.push(this.n); return this; }; \
+            const real = JSON.stringify; JSON.stringify = (...a) => { window.__seen.push(a[0] && a[0].n); return real(...a); }; \
+            Object.keys = () => []; Object.create = () => ({});";
+        let Some((sent, out)) = run_in_node(
+            page,
+            "fire('pointerdown', true); fire('pointerup', true); trek.send('hi'); window.__seen",
+        ) else {
+            return;
+        };
+        let seen = out.to_string();
+        assert!(!seen.contains("c0ffee"), "{seen}");
+        assert_eq!(out, serde_json::json!([]), "{seen}");
+        // Both messages still went, with the secret.
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert_eq!(parse_message(&sent[0], "c0ffee"), Some(Message::Focus));
+        assert_eq!(
+            parse_action(&sent[1], "c0ffee"),
+            Some(Action::Send("hi".into()))
+        );
     }
 
     #[test]

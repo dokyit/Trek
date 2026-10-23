@@ -1691,7 +1691,9 @@ impl Workspace {
     }
 
     /// Put away `id`'s sub-agents with it (archiving): any still at work stop, quietly.
-    pub(super) fn archive_children(&mut self, id: &str, cx: &mut Context<Self>) {
+    /// Returns who went, for the caller to take off screen.
+    pub(super) fn archive_children(&mut self, id: &str, cx: &mut Context<Self>) -> Vec<String> {
+        let mut archived = vec![];
         for child in self
             .descendants(id)
             .into_iter()
@@ -1712,7 +1714,9 @@ impl Workspace {
                 .update_thread(&child.id, |t| t.archived_at = Some(now_ms()));
             self.threads.retain(|t| t.id != child.id);
             self.threads_gen += 1;
+            archived.push(child.id);
         }
+        archived
     }
 
     /// Bring `id`'s sub-agents back with it (undoing an archive).

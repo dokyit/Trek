@@ -6,8 +6,10 @@ import SwiftUI
 struct UsageView: View {
     @Environment(AppModel.self) private var model
 
-    /// The machine shown (the picked one, else the first connected).
-    private var link: HostLink? { model.selected }
+    /// The machine to show, when the caller has one (a thread's own); else the picked one, else
+    /// the first connected.
+    var host: HostLink? = nil
+    private var link: HostLink? { host ?? model.selected }
     private var providers: [ProviderUsage] { link?.usage?.providers ?? [] }
     private var asking: Bool { link?.usageLoading == true || link?.usage?.loading == true }
 
@@ -45,7 +47,7 @@ struct UsageView: View {
         .navigationTitle("Usage")
         .navigationSubtitle(asking && !providers.isEmpty ? "Asking your agents…" : "")
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) { MachinePicker() }
+            if host == nil { ToolbarItem(placement: .topBarTrailing) { MachinePicker() } }
             if asking {
                 ToolbarItem(placement: .topBarTrailing) { ProgressView().controlSize(.small) }
             }
@@ -65,10 +67,12 @@ struct UsageView: View {
 /// Usage on its own, over the Threads list or a thread, with Done.
 struct UsageSheet: View {
     @Environment(\.dismiss) private var dismiss
+    /// The machine whose usage this is (a thread's); nil for the picked one.
+    var host: HostLink? = nil
 
     var body: some View {
         NavigationStack {
-            UsageView()
+            UsageView(host: host)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {

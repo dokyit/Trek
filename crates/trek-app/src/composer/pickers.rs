@@ -16,6 +16,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use trek_core::catalog::ModelInfo;
@@ -45,12 +46,28 @@ pub struct Pickers {
     /// The `/`, `@` or `$` token being completed, and the highlighted row.
     pub trigger: Option<Trigger>,
     pub picked: usize,
-    /// Project files for `@`, indexed once per folder.
+    /// Project files for `@`: indexed per folder, and again once they're `INDEX_TTL` old
+    /// (the agent creates and deletes files while the app is open).
     file_index: Option<(PathBuf, Arc<Vec<String>>)>,
+    indexed_at: Option<std::time::Instant>,
     indexing: Option<Task<()>>,
     picker_scroll: ScrollHandle,
     /// Set when Enter picked a row, so the same keypress doesn't also send.
     pub swallow_enter: Option<std::time::Instant>,
+    /// Providers whose model list the open menu already asked for, so a render doesn't ask
+    /// again after a fetch that came back empty. Forgotten when the menu closes.
+    model_fetches: HashSet<String>,
+}
+
+/// Whether the model menu should start fetching `provider`'s models now: it has none, no fetch
+/// is out, and this menu hasn't asked yet. Records the ask.
+fn should_fetch_models(
+    asked: &mut HashSet<String>,
+    provider: &str,
+    empty: bool,
+    inflight: bool,
+) -> bool {
+    empty && !inflight && asked.insert(provider.to_string())
 }
 
 impl Pickers {
@@ -64,9 +81,11 @@ impl Pickers {
             trigger: None,
             picked: 0,
             file_index: None,
+            indexed_at: None,
             indexing: None,
             picker_scroll: ScrollHandle::new(),
             swallow_enter: None,
+            model_fetches: HashSet::new(),
         }
     }
 
@@ -180,6 +199,7 @@ pub fn model_pill<H: PickerHost>(
             if !*open {
                 p.sub = None;
                 p.rail = None;
+                p.model_fetches.clear();
             }
             this.overlay_changed(cx);
             cx.notify();
@@ -242,6 +262,7 @@ fn close_model_menu<H: PickerHost>(this: &mut H, cx: &mut Context<H>) {
     let p = this.pickers();
     p.model_open = false;
     p.sub = None;
+    p.model_fetches.clear();
     this.overlay_changed(cx);
     cx.notify();
 }
@@ -399,10 +420,15 @@ fn model_panel<H: PickerHost>(
         .clone()
         .unwrap_or_else(|| Rail::Agent(prefs.agent.clone()));
     if let Rail::Agent(AgentId::Direct(ref p)) = rail {
-        let should_fetch = {
+        let (empty, inflight) = {
             let ws = host.workspace().read(cx);
-            ws.models_for(&AgentId::Direct(p.clone())).is_empty() && !ws.direct_inflight.contains(p)
+            (
+                ws.models_for(&AgentId::Direct(p.clone())).is_empty(),
+                ws.direct_inflight.contains(p),
+            )
         };
+        let should_fetch =
+            should_fetch_models(&mut host.pickers().model_fetches, p, empty, inflight);
         if should_fetch {
             let pid = p.clone();
             host.workspace().update(cx, |ws, cx| {
@@ -780,8 +806,8 @@ fn access_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
 
 // ---------- `/`, `@` and `$` ----------
 
-/// Type `ch` (`/`, `@` or `$`) to open its picker: `/` replaces the text, the others go at the
-/// cursor (after a space).
+/// Type `ch` (`/`, `@` or `$`) to open its picker: `/` goes at the start of the message, the
+/// others at the cursor (after a space).
 pub fn insert_trigger<H: PickerHost>(
     host: &mut H,
     ch: &str,
@@ -793,8 +819,18 @@ pub fn insert_trigger<H: PickerHost>(
         let cursor = s.cursor();
         let needs_space = ch != "/" && cursor > 0 && !v[..cursor].ends_with(char::is_whitespace);
         if ch == "/" {
-            s.set_value("/", window, cx);
-            s.set_selected_range(1..1, cx);
+            // Commands only open at the start of a message: a draft keeps its text and gets the
+            // slash in front (one undo takes it away again).
+            if v.is_empty() || v == "/" {
+                s.set_value("/", window, cx);
+                s.set_selected_range(1..1, cx);
+            } else if v.starts_with('/') {
+                let end = v.find(char::is_whitespace).unwrap_or(v.len());
+                s.set_selected_range(end..end, cx);
+            } else {
+                s.set_selected_range(0..0, cx);
+                s.insert("/", window, cx);
+            }
         } else {
             s.insert(
                 if needs_space {
@@ -829,13 +865,19 @@ pub fn update_trigger<H: PickerHost>(host: &mut H, cx: &mut Context<H>) {
     host.overlay_changed(cx);
 }
 
-/// Index the folder's files for `@`, once per folder (in the background).
+/// How long an `@` file index is served before the next `@` looks at the folder again.
+const INDEX_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Index the folder's files for `@` in the background: once per folder, and again when the
+/// last pass is `INDEX_TTL` old. The old list is served until the new one lands.
 pub fn ensure_file_index<H: PickerHost>(host: &mut H, cx: &mut Context<H>) {
     let Some(root) = host.workspace().read(cx).cwd_in(host.scope()) else {
         return;
     };
     let p = host.pickers_ref();
-    if p.file_index.as_ref().is_some_and(|(r, _)| *r == root) || p.indexing.is_some() {
+    let fresh = p.file_index.as_ref().is_some_and(|(r, _)| *r == root)
+        && p.indexed_at.is_some_and(|at| at.elapsed() < INDEX_TTL);
+    if fresh || p.indexing.is_some() {
         return;
     }
     let r = root.clone();
@@ -847,6 +889,7 @@ pub fn ensure_file_index<H: PickerHost>(host: &mut H, cx: &mut Context<H>) {
         let _ = this.update(cx, |this: &mut H, cx| {
             let p = this.pickers();
             p.file_index = Some((root, Arc::new(files)));
+            p.indexed_at = Some(std::time::Instant::now());
             p.indexing = None;
             // The folder on screen changed meanwhile: index that one too.
             if p.trigger
@@ -959,7 +1002,12 @@ pub fn picker_items<H: PickerHost>(host: &H, cx: &App) -> Vec<PickItem> {
                                     name.to_string()
                                 },
                                 detail: parent.to_string(),
-                                insert: format!("@{f}"),
+                                insert: if dir {
+                                    // Drilling into a folder keeps typing its path.
+                                    format!("@{f}")
+                                } else {
+                                    trek_core::media::mention_of(&f)
+                                },
                                 icon: if dir {
                                     PickIcon::Folder
                                 } else {
@@ -1187,8 +1235,15 @@ pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement
         PickKind::Mention => "Files and agents",
         PickKind::Skill => "Skills",
     };
+    // A refresh of a list already on screen isn't "indexing": the rows are there.
+    let indexed_here = {
+        let ws = host.workspace().read(cx);
+        p.file_index
+            .as_ref()
+            .is_some_and(|(root, _)| ws.cwd_in(host.scope()).as_ref() == Some(root))
+    };
     let empty = match t.kind {
-        PickKind::Mention if p.indexing.is_some() => "Indexing project files…",
+        PickKind::Mention if p.indexing.is_some() && !indexed_here => "Indexing project files…",
         PickKind::Mention => "No matching files",
         PickKind::Skill => "No matching skills",
         PickKind::Slash => "No matching commands",
@@ -1259,4 +1314,26 @@ pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement
             )
             .into_any_element(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: that brings gpui's `test` attribute in over the built-in one.
+    use super::should_fetch_models;
+    use std::collections::HashSet;
+
+    #[test]
+    fn a_menu_asks_for_a_providers_models_once() {
+        let mut asked = HashSet::new();
+        assert!(should_fetch_models(&mut asked, "ollama", true, false));
+        // The ask came back empty and a render looks again: not twice.
+        assert!(!should_fetch_models(&mut asked, "ollama", true, false));
+        // Another provider is its own ask; one with models or a fetch out isn't asked at all.
+        assert!(should_fetch_models(&mut asked, "other", true, false));
+        assert!(!should_fetch_models(&mut asked, "third", false, false));
+        assert!(!should_fetch_models(&mut asked, "fourth", true, true));
+        // Closing the menu forgets what it asked.
+        asked.clear();
+        assert!(should_fetch_models(&mut asked, "ollama", true, false));
+    }
 }
