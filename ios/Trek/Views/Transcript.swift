@@ -41,11 +41,18 @@ struct UserBubble: View {
     }
 }
 
-/// A folded run of thinking and tool calls; tap to open it.
+/// A folded run of thinking and tool calls; tap to open it. Open, it shows its newest calls
+/// and how many came before, as the Mac's live group does: a turn that runs for hours makes
+/// thousands, and laying them all out at once stalls SwiftUI (and in the end exhausts it).
 struct ToolGroupView: View {
     var items: [TItem]
     var expanded: Bool
     var toggle: () -> Void
+    @State private var shown = Self.shownAtFirst
+
+    /// The calls an open group shows at first, and how many more each "Show earlier" adds.
+    static let shownAtFirst = 40
+    static let shownMore = 200
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -74,8 +81,23 @@ struct ToolGroupView: View {
             .buttonStyle(.plain)
 
             if expanded {
+                let hidden = max(0, items.count - shown)
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(items) { item in
+                    if hidden > 0 {
+                        Button {
+                            shown += Self.shownMore
+                        } label: {
+                            Text(hidden > Self.shownMore
+                                 ? "Show \(Self.shownMore) earlier · \(hidden) in all"
+                                 : "Show \(hidden) earlier")
+                                .font(.ui(.footnote).weight(.medium))
+                                .foregroundStyle(Trek.link)
+                                .padding(.leading, 19)
+                                .padding(.vertical, 5)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    ForEach(items.suffix(shown)) { item in
                         ToolRow(item: item)
                     }
                 }

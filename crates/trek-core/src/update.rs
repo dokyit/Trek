@@ -1642,16 +1642,27 @@ fn move_dir(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Exchange two directories; returns where the replaced bundle is now. One atomic
-/// `renamex_np(RENAME_SWAP)` on APFS, two renames elsewhere.
+/// Exchange two bundles; returns where the replaced one is now (in `incoming`'s place). On APFS
+/// it's one atomic `renamex_np(RENAME_SWAP)` of their `Contents`, so the installed bundle's folder
+/// stays the very one it was: the Dock's tile for it (which follows a folder that moves, as an
+/// alias does) and Finder's references stay on the install rather than going with the old version
+/// into the backup, which left a second Trek icon in the Dock after every update. Bundles without
+/// a `Contents` are exchanged whole; elsewhere it's two renames.
 fn swap(incoming: &Path, bundle: &Path) -> Result<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         use std::os::unix::ffi::OsStrExt as _;
-        let a = std::ffi::CString::new(incoming.as_os_str().as_bytes())?;
-        let b = std::ffi::CString::new(bundle.as_os_str().as_bytes())?;
-        // SAFETY: both are valid NUL-terminated paths that outlive the call.
-        if unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) } == 0 {
+        let exchange = |a: &Path, b: &Path| -> Result<bool> {
+            let a = std::ffi::CString::new(a.as_os_str().as_bytes())?;
+            let b = std::ffi::CString::new(b.as_os_str().as_bytes())?;
+            // SAFETY: both are valid NUL-terminated paths that outlive the call.
+            Ok(unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) } == 0)
+        };
+        let (from, to) = (incoming.join("Contents"), bundle.join("Contents"));
+        if from.is_dir() && to.is_dir() && exchange(&from, &to)? {
+            return Ok(incoming.to_path_buf());
+        }
+        if exchange(incoming, bundle)? {
             return Ok(incoming.to_path_buf());
         }
     }
@@ -2157,6 +2168,32 @@ mod tests {
         // Nothing to swap with: an error, and the bundle is untouched.
         assert!(swap(&dir.join("missing.app"), &old).is_err());
         assert_eq!(contents(&old), "new");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The Dock's tile follows the bundle's folder wherever it moves: the folder at the install
+    /// must stay the same one, or the tile goes with the old version into the backup and the
+    /// relaunched Trek gets a second icon.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_update_keeps_the_installed_bundles_folder_in_place() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = scratch("same-folder");
+        let (apps, updates) = (dir.join("Applications"), dir.join("updates"));
+        let bundle = apps.join("Trek.app");
+        write_app(&bundle, "dev.trek.Trek", "0.2.0");
+        let folder = std::fs::metadata(&bundle).unwrap().ino();
+        let staged = new_download_dir(&updates).unwrap().join("Trek.app");
+        write_app(&staged, "dev.trek.Trek", "0.2.1");
+        let backup = install_into(&staged, &bundle, &updates).unwrap().unwrap();
+        assert_eq!(contents(&bundle), "0.2.1");
+        assert_eq!(contents(&backup), "0.2.0");
+        assert_eq!(
+            std::fs::metadata(&bundle).unwrap().ino(),
+            folder,
+            "the install is still the same folder"
+        );
+        assert_ne!(std::fs::metadata(&backup).unwrap().ino(), folder);
         let _ = std::fs::remove_dir_all(dir);
     }
 
