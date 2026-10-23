@@ -37,6 +37,14 @@ const PAIR_WAIT: Duration = Duration::from_secs(30);
 /// How many items a thread opens with (earlier ones stay on the machine).
 const OPEN_LIMIT: u32 = 300;
 
+/// How often this computer's network is looked at while machines are paired: a new one (another
+/// Wi-Fi, Tailscale coming up) has every machine dialled again at once.
+const NETWORK_EVERY: Duration = Duration::from_secs(5);
+
+/// How often Tailscale is asked who's in the tailnet while a machine can't be reached, the
+/// network unchanged: a machine that just joined it is found without waiting for a change here.
+const TAILNET_EVERY: Duration = Duration::from_secs(60);
+
 /// The id a thread of machine `host` goes by here.
 pub fn local_id(host: &str, thread: &str) -> String {
     format!("{ID_PREFIX}{host}:{thread}")
@@ -334,6 +342,12 @@ struct Followed {
 pub struct Machine {
     pub entry: MachineEntry,
     pub reach: Reach,
+    /// When the connection that was up was lost: its threads show as they last were, none of
+    /// them running, until it's back. `None` while connected, and before it ever was.
+    pub offline_since: Option<i64>,
+    /// Where this computer's Tailscale says the machine is (`tailnet_routes`), as last given to
+    /// the client.
+    hints: Vec<String>,
     pub client: Option<Arc<Client>>,
     /// What it said it is (`machine_info`): its home folder above all.
     pub info: Option<tr::MachineInfo>,
@@ -355,6 +369,24 @@ impl Machine {
 
     pub fn reachable(&self) -> bool {
         self.reach == Reach::Connected
+    }
+
+    /// Its rows as Trek's threads. A machine that can't be reached can't say what its threads
+    /// are doing: each shows as it last was, but none as running (no spinner, no turn clock).
+    fn refresh_threads(&mut self) {
+        let host = self.id().to_string();
+        let offline = !self.reachable();
+        self.threads = self
+            .rows
+            .iter()
+            .map(|r| {
+                let mut t = thread_of(&host, r);
+                if offline && t.run_state == RunState::Working {
+                    t.run_state = RunState::Idle;
+                }
+                t
+            })
+            .collect();
     }
 
     /// The threads the sidebar lists under its name: those not settled, newest first.
@@ -426,6 +458,9 @@ pub struct Machines {
     pub device_id: String,
     pub pairing: Option<Pairing>,
     pub clone: Option<CloneRun>,
+    /// This computer's addresses and tailnet, as last found (`follow_network`).
+    pub here: crate::remote::Addresses,
+    _network: Option<Task<()>>,
 }
 
 impl Machines {
@@ -724,6 +759,194 @@ fn this_name() -> String {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Reaching a machine from another network
+// ---------------------------------------------------------------------------------------------
+
+/// The host of a `host:port` route, without brackets or port.
+fn route_host(route: &str) -> &str {
+    let route = route.trim();
+    if let Some(rest) = route.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    match route.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') && port.parse::<u16>().is_ok() => host,
+        _ => route,
+    }
+}
+
+/// Whether `route` is on a tailnet: Tailscale's 100.64/10 or fd7a:115c:a1e0::/48 address, or a
+/// MagicDNS name. Only such a route reaches a machine from another network.
+pub fn tailnet_route(route: &str) -> bool {
+    let host = route_host(route);
+    let host = host.split('%').next().unwrap_or(host);
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            let [a, b, ..] = v4.octets();
+            a == 100 && (64..128).contains(&b)
+        }
+        Ok(std::net::IpAddr::V6(v6)) => v6.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
+        Err(_) => host
+            .trim_end_matches('.')
+            .to_ascii_lowercase()
+            .ends_with(".ts.net"),
+    }
+}
+
+/// A name as Tailscale and Trek may each write it: `T-Book`, `t-book`, `T BOOK` alike.
+fn plain_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// The peer in this computer's tailnet that is machine `name`, by its host or MagicDNS name.
+pub fn tailnet_peer<'a>(
+    name: &str,
+    tailnet: &'a crate::remote::Tailnet,
+) -> Option<&'a crate::remote::TailnetPeer> {
+    let name = plain_name(name);
+    if name.is_empty() {
+        return None;
+    }
+    tailnet.peers.iter().find(|p| {
+        plain_name(&p.host_name) == name
+            || plain_name(p.dns_name.split('.').next().unwrap_or_default()) == name
+    })
+}
+
+/// Where this computer's tailnet says machine `name` is, on the port its routes use: what its
+/// client also tries (`Client::also_try`). Only a guess by name: the client takes it only when
+/// it answers with the machine's own certificate.
+pub fn tailnet_routes(
+    name: &str,
+    routes: &[String],
+    here: &crate::remote::Addresses,
+) -> Vec<String> {
+    let Some(peer) = here
+        .tailnet
+        .as_ref()
+        .filter(|_| here.tailscale.is_some())
+        .and_then(|t| tailnet_peer(name, t))
+    else {
+        return vec![];
+    };
+    let port = routes
+        .first()
+        .and_then(|r| r.rsplit_once(':'))
+        .and_then(|(_, p)| p.parse::<u16>().ok())
+        .unwrap_or(tr::DEFAULT_PORT);
+    let mut ips = peer.ips.clone();
+    ips.sort_by_key(|ip| ip.is_ipv6());
+    ips.into_iter()
+        .map(|ip| std::net::SocketAddr::new(ip, port).to_string())
+        .collect()
+}
+
+/// Why machine `name`, which isn't connected, can't be reached from here, and what to do about
+/// it, when Trek can tell: every route it knows is on a local network (none on the tailnet), or
+/// this computer's own Tailscale is off, or the machine is offline in the tailnet. `this` is what
+/// this computer is called ("this Mac").
+pub fn reach_advice(
+    name: &str,
+    routes: &[String],
+    here: &crate::remote::Addresses,
+    this: &str,
+) -> Option<String> {
+    let tailscale_here = here.tailscale.is_some();
+    let tailnet = here.tailnet.as_ref().filter(|_| tailscale_here);
+    let peer = tailnet.and_then(|t| tailnet_peer(name, t));
+    if peer.is_none() && !routes.iter().any(|r| tailnet_route(r)) {
+        let account = tailnet.and_then(|t| t.account.as_deref());
+        return Some(match (tailscale_here, account) {
+            (true, Some(account)) => format!(
+                "{name} is only reachable on its local network. Install Tailscale on it, signed in as {account} like {this}, to reach it from anywhere."
+            ),
+            (true, None) => format!(
+                "{name} is only reachable on its local network. Install Tailscale on it, signed in to the same account as {this}, to reach it from anywhere."
+            ),
+            (false, _) => format!(
+                "{name} is only reachable on its local network. Install Tailscale on it and on {this}, signed in to the same account, to reach it from anywhere."
+            ),
+        });
+    }
+    if !tailscale_here {
+        return Some(format!(
+            "{name} is on your tailnet, but Tailscale isn't on on {this}. Turn it on to reach {name} from here."
+        ));
+    }
+    match peer {
+        Some(p) if !p.online => Some(format!(
+            "{name} is offline in your tailnet: it may be asleep or off, or Tailscale isn't on on it."
+        )),
+        _ => None,
+    }
+}
+
+/// What the sidebar and Settings say of a machine that isn't connected: since when (or that it's
+/// connecting), then why and what to do when Trek can tell (`reach_advice`). `None` while it's
+/// connected.
+pub fn offline_note(m: &Machine, here: &crate::remote::Addresses, this: &str) -> Option<String> {
+    let since = match (&m.reach, m.offline_since.or(m.entry.last_seen)) {
+        (Reach::Connected, _) => return None,
+        (Reach::Stopped(why), _) => format!("Not connecting: {why}. Forget it and pair again."),
+        (Reach::Connecting, Some(at)) => format!("Offline since {}", crate::time::clock(at)),
+        (Reach::Connecting, None) => "Connecting…".to_string(),
+    };
+    let advice = match m.reach {
+        Reach::Connecting => reach_advice(&m.entry.name, &m.entry.paired.routes, here, this),
+        _ => None,
+    };
+    Some(match advice {
+        Some(advice) if since.ends_with('…') => format!("{since} {advice}"),
+        Some(advice) => format!("{since}. {advice}"),
+        None => since,
+    })
+}
+
+/// Look at this computer's network every few seconds while machines are paired: a change has
+/// each of them dialled again at once, and the tailnet is asked where they are.
+fn follow_network(cx: &mut Context<Workspace>) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        let mut seen: Option<crate::remote::AddressInputs> = None;
+        let mut asked_at: Option<Instant> = None;
+        loop {
+            let now = cx
+                .background_executor()
+                .spawn(async { crate::remote::AddressInputs::read() })
+                .await;
+            let changed = seen.as_ref() != Some(&now);
+            let Ok(waiting) = this.update(cx, |ws, _| {
+                ws.machines
+                    .list
+                    .iter()
+                    .any(|m| m.reach == Reach::Connecting)
+            }) else {
+                break;
+            };
+            let stale = asked_at.is_none_or(|at| at.elapsed() >= TAILNET_EVERY);
+            if changed || (waiting && stale) {
+                let first = seen.is_none();
+                seen = Some(now.clone());
+                asked_at = Some(Instant::now());
+                let found = cx
+                    .background_executor()
+                    .spawn(async move { crate::remote::Addresses::find_in(&now) })
+                    .await;
+                let network_changed = changed && !first;
+                if this
+                    .update(cx, |ws, cx| ws.machines_network(found, network_changed, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            cx.background_executor().timer(NETWORK_EVERY).await;
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
 // The workspace's side
 // ---------------------------------------------------------------------------------------------
 
@@ -735,6 +958,54 @@ impl Workspace {
         for entry in entries {
             self.add_machine(entry, None, cx);
         }
+    }
+
+    /// Watch this computer's network for the machines, once one is paired (not in tests: they
+    /// say what the network is with `machines_network`).
+    fn follow_machines_network(&mut self, cx: &mut Context<Self>) {
+        if self.machines._network.is_none() && !cfg!(any(test, feature = "test-support")) {
+            self.machines._network = Some(follow_network(cx));
+        }
+    }
+
+    /// This computer's network as just found (`network_changed`: another than before): each
+    /// machine's client is told where the tailnet says it is, and one that isn't connected (or
+    /// may have lost its connection with the old network) dials again now.
+    pub fn machines_network(
+        &mut self,
+        here: crate::remote::Addresses,
+        network_changed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if network_changed {
+            tracing::info!(
+                "machines: this computer's network changed (Wi-Fi {:?}, Tailscale {:?}); dialling them again",
+                here.lan,
+                here.tailscale
+            );
+        }
+        for m in &mut self.machines.list {
+            let Some(client) = m.client.clone() else {
+                continue;
+            };
+            let hints = tailnet_routes(&m.entry.name, &m.entry.paired.routes, &here);
+            let new_hints = hints != m.hints;
+            if new_hints {
+                tracing::info!(
+                    machine = m.entry.name,
+                    ?hints,
+                    "machines: its tailnet address here"
+                );
+                client.also_try(hints.clone());
+                m.hints = hints;
+            }
+            let waiting = m.reach == Reach::Connecting;
+            if network_changed || (new_hints && waiting && !m.hints.is_empty()) {
+                client.network_changed();
+            }
+        }
+        self.machines.here = here;
+        cx.notify();
     }
 
     /// Keep `entry` (in place of one with the same id) and connect to it: on `client` when
@@ -767,6 +1038,8 @@ impl Workspace {
             } else {
                 Reach::Connecting
             },
+            offline_since: None,
+            hints: vec![],
             client: None,
             info: None,
             projects: vec![],
@@ -789,6 +1062,10 @@ impl Workspace {
             Err(e) => machine.reach = Reach::Stopped(e.to_string()),
         }
         self.machines.list.push(machine);
+        self.follow_machines_network(cx);
+        // What the tailnet says of it, as for the others.
+        let here = self.machines.here.clone();
+        self.machines_network(here, false, cx);
         cx.notify();
     }
 
@@ -825,6 +1102,12 @@ impl Workspace {
                     return;
                 };
                 m.reach = Reach::Connected;
+                m.offline_since = None;
+                m.refresh_threads();
+                self.machine_threads_changed(host, cx);
+                let Some(m) = self.machines.get_mut(host) else {
+                    return;
+                };
                 m.entry.name = paired.host.name.clone();
                 m.entry.paired = paired;
                 m.entry.last_seen = Some(now_ms());
@@ -840,11 +1123,14 @@ impl Workspace {
                 };
                 if m.reach == Reach::Connected {
                     m.entry.last_seen = Some(now_ms());
+                    m.offline_since = Some(now_ms());
                     self.machines.save();
                 }
                 if let Some(m) = self.machines.get_mut(host) {
                     m.reach = Reach::Connecting;
+                    m.refresh_threads();
                 }
+                self.machine_threads_changed(host, cx);
             }
             Event::Message(msg) => self.machine_message(host, msg, cx),
         }
@@ -854,11 +1140,30 @@ impl Workspace {
     /// Machine `host`'s connection ended for good.
     fn machine_stopped(&mut self, host: &str, state: State, cx: &mut Context<Self>) {
         if let Some(m) = self.machines.get_mut(host) {
+            if m.reach == Reach::Connected {
+                m.offline_since = Some(now_ms());
+            }
             m.reach = match state {
                 State::Stopped(reason) => Reach::Stopped(reason.to_string()),
                 _ => Reach::Stopped("closed".into()),
             };
+            m.refresh_threads();
+            self.machine_threads_changed(host, cx);
             cx.notify();
+        }
+    }
+
+    /// Machine `host`'s threads were mapped again (it came or went): the sidebar lists them
+    /// anew, and the thread view's copies follow.
+    fn machine_threads_changed(&mut self, host: &str, cx: &mut Context<Self>) {
+        self.threads_gen += 1;
+        let followed: Vec<String> = self
+            .machines
+            .get(host)
+            .map(|m| m.followed.keys().cloned().collect())
+            .unwrap_or_default();
+        for tid in followed {
+            self.machine_live(host, &tid, cx);
         }
     }
 
@@ -932,7 +1237,7 @@ impl Workspace {
             }
             _ => return,
         }
-        m.threads = m.rows.iter().map(|r| thread_of(host, r)).collect();
+        m.refresh_threads();
         self.threads_gen += 1;
         for tid in touched {
             self.machine_live(host, &tid, cx);
@@ -948,7 +1253,9 @@ impl Workspace {
         };
         let Some(f) = m.followed.get(tid) else { return };
         let row = m.rows.iter().find(|r| r.id == tid);
-        let working = row.is_some_and(|r| r.run_state == tr::RunState::Working);
+        // A machine that can't be reached runs nothing that can be seen from here.
+        let offline = !m.reachable();
+        let working = !offline && row.is_some_and(|r| r.run_state == tr::RunState::Working);
         let since = row.and_then(|r| r.working_since);
         let plan = row.is_some_and(|r| r.plan);
         let context = row
@@ -962,7 +1269,7 @@ impl Workspace {
         .then(|| mapped.rows.len() - 1);
         live.items = Transcript::stored(mapped.rows);
         live.permissions = mapped.requests;
-        live.streaming = mapped.streaming;
+        live.streaming = mapped.streaming.filter(|_| !offline);
         live.reasoning = reasoning;
         live.loaded = loaded;
         live.loading = !loaded;

@@ -946,3 +946,184 @@ fn add_to_another_machine_clones_copies_the_ticked_files_and_starts_the_thread_t
         );
     });
 }
+
+#[test]
+fn a_machine_known_only_on_its_local_network_says_to_put_tailscale_on_both() {
+    use trek_app::remote::{Addresses, Tailnet, TailnetPeer};
+    let lan = vec!["192.168.1.186:7420".to_string()];
+    assert!(!machines::tailnet_route(&lan[0]));
+    assert!(
+        machines::tailnet_route("100.77.1.2:7420")
+            && machines::tailnet_route("[fd7a:115c:a1e0::4]:7420")
+            && machines::tailnet_route("t-book.tail1234.ts.net:7420")
+    );
+    assert!(
+        !machines::tailnet_route("100.20.1.2:7420"),
+        "not in 100.64/10"
+    );
+
+    // Tailscale on neither.
+    let nowhere = Addresses::default();
+    assert_eq!(
+        machines::reach_advice("T-Book", &lan, &nowhere, "this Mac").as_deref(),
+        Some(
+            "T-Book is only reachable on its local network. Install Tailscale on it and on this Mac, signed in to the same account, to reach it from anywhere."
+        )
+    );
+    assert!(machines::tailnet_routes("T-Book", &lan, &nowhere).is_empty());
+
+    // On this Mac, signed in as dokyit@; T-Book isn't in the tailnet.
+    let mut here = Addresses {
+        lan: Some("10.220.61.2".parse().unwrap()),
+        tailscale: Some("100.120.68.5".parse().unwrap()),
+        tailnet: Some(Tailnet {
+            account: Some("dokyit@".into()),
+            ..Default::default()
+        }),
+    };
+    let advice = machines::reach_advice("T-Book", &lan, &here, "this Mac").unwrap();
+    assert!(
+        advice.contains("Install Tailscale on it, signed in as dokyit@ like this Mac"),
+        "{advice}"
+    );
+
+    // T-Book joins it: its tailnet address is what the client also tries, on its port, IPv4
+    // first; while it's online there there's nothing more to say.
+    here.tailnet.as_mut().unwrap().peers = vec![TailnetPeer {
+        host_name: "T-BOOK".into(),
+        dns_name: "t-book.tail1234.ts.net.".into(),
+        ips: vec![
+            "fd7a:115c:a1e0::4".parse().unwrap(),
+            "100.77.1.2".parse().unwrap(),
+        ],
+        online: true,
+    }];
+    assert_eq!(
+        machines::tailnet_routes("T-Book", &lan, &here),
+        vec![
+            "100.77.1.2:7420".to_string(),
+            "[fd7a:115c:a1e0::4]:7420".to_string()
+        ]
+    );
+    assert_eq!(
+        machines::reach_advice("T-Book", &lan, &here, "this Mac"),
+        None
+    );
+    here.tailnet.as_mut().unwrap().peers[0].online = false;
+    assert!(
+        machines::reach_advice("T-Book", &lan, &here, "this Mac")
+            .unwrap()
+            .contains("offline in your tailnet")
+    );
+    assert!(
+        machines::tailnet_routes("Studio", &lan, &here).is_empty(),
+        "another name is another machine"
+    );
+
+    // Its tailnet address known (it said so while it was reachable), Tailscale off here.
+    let advice = machines::reach_advice(
+        "T-Book",
+        &["100.77.1.2:7420".to_string()],
+        &nowhere,
+        "this Mac",
+    )
+    .unwrap();
+    assert!(
+        advice.contains("Tailscale isn't on on this Mac"),
+        "{advice}"
+    );
+}
+
+#[test]
+fn a_machine_that_stops_answering_holds_its_threads_still_and_says_why() {
+    run(async |cx| {
+        let trek = open(cx);
+        let link = serve_as_machine_b(&trek, cx);
+        pair(&trek, cx, link).await;
+        let (id, _) = start_on_b(&trek, cx, "mock:long 600s").await;
+        trek.wait(cx, "B's long turn here, its clock running", |ws| {
+            ws.thread(&id)
+                .is_some_and(|t| t.run_state == RunState::Working)
+                && ws.live.get(&id).is_some_and(|l| l.turn_started.is_some())
+        })
+        .await;
+        trek.render(cx);
+        let working = format!("card-working-{id}");
+        assert!(trek.visible(cx, working.clone()));
+        assert!(!trek.visible(cx, "machine-offline-machine-b"));
+
+        // B goes away (it quit, or the network between went).
+        trek.read(cx, |ws, _| ws.remote.as_ref().unwrap().handle.shutdown());
+        trek.wait(cx, "B offline here", |ws| {
+            ws.machines
+                .get("machine-b")
+                .is_some_and(|m| !m.reachable() && m.offline_since.is_some())
+        })
+        .await;
+        let (state, clock) = trek.read(cx, |ws, _| {
+            (
+                ws.thread(&id).map(|t| t.run_state),
+                ws.live.get(&id).and_then(|l| l.turn_started),
+            )
+        });
+        assert_eq!(
+            state,
+            Some(RunState::Idle),
+            "not running, as far as here knows"
+        );
+        assert!(clock.is_none(), "no turn clock counting");
+        trek.render(cx);
+        assert!(
+            !trek.visible(cx, working.clone()),
+            "no spinner, no working phrase, no timer"
+        );
+        assert!(
+            trek.visible(cx, "machine-head-machine-b"),
+            "its threads are still listed, as they last were"
+        );
+        assert!(trek.visible(cx, "machine-offline-machine-b"));
+        let note = trek
+            .read(cx, |ws, _| {
+                machines::offline_note(
+                    ws.machines.get("machine-b").unwrap(),
+                    &ws.machines.here,
+                    "this Mac",
+                )
+            })
+            .unwrap();
+        assert!(note.starts_with("Offline since "), "{note}");
+        assert!(
+            note.contains("Install Tailscale on it and on this Mac"),
+            "only a loopback address is known for it: {note}"
+        );
+        machines_page(&trek, cx);
+        assert!(trek.visible(cx, "machine-row-machine-b"));
+
+        // Back: live again, as its rows say.
+        let paired = trek.read(cx, |ws, _| {
+            ws.machines.get("machine-b").unwrap().entry.paired.clone()
+        });
+        trek.update(cx, |ws, cx| {
+            ws.machine_event(
+                "machine-b",
+                tr::client::Event::Connected {
+                    route: paired.routes[0].clone(),
+                    paired,
+                    newly_paired: false,
+                },
+                cx,
+            )
+        });
+        let (state, clock, offline) = trek.read(cx, |ws, _| {
+            let m = ws.machines.get("machine-b").unwrap();
+            (
+                ws.thread(&id).map(|t| t.run_state),
+                ws.live.get(&id).and_then(|l| l.turn_started),
+                machines::offline_note(m, &ws.machines.here, "this Mac"),
+            )
+        });
+        assert_eq!(state, Some(RunState::Working));
+        assert!(clock.is_some());
+        assert_eq!(offline, None);
+    });
+}

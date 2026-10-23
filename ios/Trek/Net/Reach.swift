@@ -494,16 +494,17 @@ nonisolated enum ReachStatus {
         guard let path = f.path else {
             return Status(text: "Looking for \(mac)…", trying: true)
         }
-        if !path.up {
-            return Status(text: "No network. Trek connects to \(mac) when this iPhone is back online.", trying: false)
-        }
-        // The Mac's record is on a cable to it (USB, Ethernet): that works whatever the Wi-Fi does.
+        // The Mac's record is on a cable to it (USB, Ethernet): that works whatever the Wi-Fi
+        // does, and with no Wi-Fi at all.
         if let cable = f.cable, !f.cableFailed {
             let over = cable == .usb ? "the USB cable" : cable.name
             if path.local, f.localFailed {
                 return Status(text: "This Wi-Fi keeps devices apart, but \(over) should work. Connecting to \(mac) over \(cable.name)…", trying: true)
             }
             return Status(text: "Found \(mac) over \(cable.name), connecting…", trying: true)
+        }
+        if !path.up {
+            return Status(text: "No network. Trek connects to \(mac) when this iPhone is back online.", trying: false)
         }
         if !path.local {
             guard f.hasTailnet else {

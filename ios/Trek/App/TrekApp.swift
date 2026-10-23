@@ -20,7 +20,7 @@ struct TrekApp: App {
                     // Scripted live screenshots only (ios/scripts/live-screenshots.sh): pair
                     // without the sheet. Debug builds, launch arguments: never from a link.
                     if let s = Launch.pairNow, let link = PairingLink(s) {
-                        model.pair(address: link.address, alternates: link.alternates, code: link.code, transport: link.transport)
+                        model.pair(address: link.address, alternates: link.alternates, code: link.code, transport: link.transport, hostId: link.hostId)
                     }
                     #endif
                 }

@@ -1,13 +1,14 @@
 //! The other end of the protocol: one Trek talking to another as the iPhone app does
 //! (`ios/Trek/Net/TrekClient.swift`, `docs/MULTI-MACHINE.md`).
 //!
-//! It dials the first of the machine's routes that answers, over TLS pinned to the SHA-256 of
-//! the machine's certificate (nothing else is trusted, and nothing is sent before the pin
+//! It dials every route the machine has (and any [`Client::also_try`] suggests) at once, the
+//! earlier ones a moment ahead, and keeps the first that answers, over TLS pinned to the SHA-256
+//! of the machine's certificate (nothing else is trusted, and nothing is sent before the pin
 //! matched), then `pair`s with a one-time code the first time or says `hello` with its device
 //! token after. Requests are matched to their replies by `id`; everything else the machine sends
 //! (snapshots, rows, transcript items, request cards, clone progress) comes out of
 //! [`Client::events`]. It pings every 25 s and drops a connection silent for 62 s, reconnects with
-//! a backoff doubling up to 30 s, subscribes again to the threads that were open once `welcome`
+//! a backoff doubling up to 30 s (at once after [`Client::network_changed`]), subscribes again to the threads that were open once `welcome`
 //! is in (not before: the machine would refuse them), and stops for good when the machine
 //! refuses the token or the code, answers with another certificate on every route, or speaks
 //! another protocol version.
@@ -80,6 +81,12 @@ pub struct ClientOptions {
     /// How long a route has to answer (TCP, TLS and the WebSocket upgrade), and the machine to
     /// answer `pair` or `hello`.
     pub connect_timeout: Duration,
+    /// How far each route is dialled behind the one before it: every route is tried at once,
+    /// the one that answered last a little ahead, so a dead one costs no more than this.
+    pub stagger: Duration,
+    /// After [`Client::network_changed`], how long a connection that was up has to answer a ping
+    /// before it's taken for gone (it may have left with the old network).
+    pub probe: Duration,
     /// Sent with `pair` and `hello`.
     pub app_version: Option<String>,
 }
@@ -92,6 +99,8 @@ impl Default for ClientOptions {
             backoff_first: Duration::from_millis(500),
             backoff_max: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(10),
+            stagger: Duration::from_millis(300),
+            probe: Duration::from_secs(5),
             app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         }
     }
@@ -253,6 +262,10 @@ enum Cmd {
         msg: ClientMessage,
         reply: Responder,
     },
+    /// The network changed: dial now, or check the connection that's up.
+    NetworkChanged,
+    /// More `host:port`s that may reach the machine.
+    AlsoTry(Vec<String>),
     Close,
 }
 
@@ -315,18 +328,18 @@ impl Client {
         if clean.is_empty() {
             return Err(ClientError::Invalid("No address to dial".into()));
         }
-        let rejected = Arc::new(Mutex::new(None));
-        let tls = connector(fingerprint.clone(), rejected.clone())?;
+        // Each dial makes its own; one now says whether it can be made at all.
+        connector(fingerprint.clone(), Arc::default())?;
         let (cmds, cmds_rx) = mpsc::unbounded_channel();
         let (state, state_rx) = watch::channel(State::Connecting);
         let (events, events_rx) = mpsc::unbounded_channel();
         let driver = Driver {
             options,
             routes: clean,
+            hints: Vec::new(),
+            said: HashMap::new(),
             fingerprint,
             auth,
-            tls,
-            rejected,
             cmds: cmds_rx,
             state,
             events,
@@ -375,6 +388,22 @@ impl Client {
     /// Close the connection for good; requests waiting fail with [`StopReason::Closed`].
     pub fn close(&self) {
         let _ = self.cmds.send(Cmd::Close);
+    }
+
+    /// This computer joined another network, or Tailscale came up: a client waiting to dial again
+    /// dials now, from the start of its backoff; one dialling starts over (the routes it was
+    /// trying may have left with the old network); one connected pings, and takes the connection
+    /// for gone if nothing answers within [`ClientOptions::probe`].
+    pub fn network_changed(&self) {
+        let _ = self.cmds.send(Cmd::NetworkChanged);
+    }
+
+    /// More `host:port`s that may reach the machine (its tailnet address, as this computer's
+    /// Tailscale lists it), dialled with its routes from the next attempt on. One kept only once
+    /// it answered with the pinned certificate (it then leads the routes [`Event::Connected`]
+    /// carries); another certificate there never stops the client.
+    pub fn also_try(&self, routes: Vec<String>) {
+        let _ = self.cmds.send(Cmd::AlsoTry(routes));
     }
 
     /// What the machine is: name, platform, Trek's version, home folder.
@@ -575,12 +604,37 @@ enum Failure {
     Other(String),
 }
 
-/// TCP, TLS (pinned) and the WebSocket upgrade, to one route.
-async fn open(route: &str, tls: &TlsConnector) -> Result<Ws, String> {
-    let tcp = TcpStream::connect(route).await.map_err(|e| e.to_string())?;
+impl Failure {
+    /// As the log says it.
+    fn said(&self) -> String {
+        match self {
+            Self::Mismatch(seen) => {
+                format!("another certificate ({}…)", seen.get(..16).unwrap_or(seen))
+            }
+            Self::Other(why) => why.clone(),
+        }
+    }
+}
+
+/// TCP, TLS (pinned to `fingerprint`) and the WebSocket upgrade, to one route.
+async fn open(route: &str, fingerprint: &str) -> Result<Ws, Failure> {
+    let rejected = Arc::new(Mutex::new(None));
+    let tls = connector(fingerprint.to_string(), rejected.clone())
+        .map_err(|e| Failure::Other(e.to_string()))?;
+    let tcp = TcpStream::connect(route)
+        .await
+        .map_err(|e| Failure::Other(e.to_string()))?;
     let _ = tcp.set_nodelay(true);
-    let name = ServerName::try_from("trek.local").map_err(|e| e.to_string())?;
-    let stream = tls.connect(name, tcp).await.map_err(|e| e.to_string())?;
+    let name = ServerName::try_from("trek.local").map_err(|e| Failure::Other(e.to_string()))?;
+    let stream = match tls.connect(name, tcp).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            return Err(match lock(&rejected).take() {
+                Some(seen) => Failure::Mismatch(seen),
+                None => Failure::Other(format!("TLS: {err}")),
+            });
+        }
+    };
     let config = WebSocketConfig::default()
         .max_message_size(Some(MAX_INBOUND))
         .max_frame_size(Some(MAX_INBOUND));
@@ -590,30 +644,61 @@ async fn open(route: &str, tls: &TlsConnector) -> Result<Ws, String> {
         Some(config),
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| Failure::Other(format!("WebSocket: {e}")))?;
     Ok(ws)
 }
 
-/// Each route in turn: the first that answers (its index), or why each didn't.
+/// How one route did.
+struct Dialled {
+    ix: usize,
+    /// `None`: it answered.
+    failure: Option<Failure>,
+    took: Duration,
+}
+
+/// Every route at once, each `stagger` behind the one before (the first is the one that
+/// answered last): the first that answers (its index), and how each one dialled did. Those
+/// still dialling when one answers are dropped.
 async fn open_any(
-    routes: &[String],
-    tls: &TlsConnector,
-    rejected: &Mutex<Option<String>>,
+    routes: Vec<String>,
+    fingerprint: String,
     timeout: Duration,
-) -> Result<(usize, Ws), Vec<Failure>> {
-    let mut failures = Vec::new();
-    for (ix, route) in routes.iter().enumerate() {
-        *lock(rejected) = None;
-        match tokio::time::timeout(timeout, open(route, tls)).await {
-            Ok(Ok(ws)) => return Ok((ix, ws)),
-            Ok(Err(err)) => failures.push(match lock(rejected).take() {
-                Some(seen) => Failure::Mismatch(seen),
-                None => Failure::Other(format!("{route}: {err}")),
+    stagger: Duration,
+) -> (Option<(usize, Ws)>, Vec<Dialled>) {
+    let mut tries: futures_util::stream::FuturesUnordered<_> = routes
+        .iter()
+        .enumerate()
+        .map(|(ix, route)| {
+            let fingerprint = fingerprint.as_str();
+            async move {
+                tokio::time::sleep(stagger.saturating_mul(ix as u32)).await;
+                let started = Instant::now();
+                let opened = tokio::time::timeout(timeout, open(route, fingerprint))
+                    .await
+                    .unwrap_or_else(|_| Err(Failure::Other("no answer".into())));
+                (ix, opened, started.elapsed())
+            }
+        })
+        .collect();
+    let mut dialled = Vec::new();
+    while let Some((ix, opened, took)) = tries.next().await {
+        match opened {
+            Ok(ws) => {
+                dialled.push(Dialled {
+                    ix,
+                    failure: None,
+                    took,
+                });
+                return (Some((ix, ws)), dialled);
+            }
+            Err(failure) => dialled.push(Dialled {
+                ix,
+                failure: Some(failure),
+                took,
             }),
-            Err(_) => failures.push(Failure::Other(format!("{route}: no answer"))),
         }
     }
-    Err(failures)
+    (None, dialled)
 }
 
 async fn write(ws: &mut Ws, message: Message) -> Result<(), String> {
@@ -656,14 +741,28 @@ enum Authed {
     Retry(String),
 }
 
+/// The most routes a client keeps (the machine's own first, then those it said before).
+const MAX_ROUTES: usize = 8;
+
+/// What the connection heard from its [`Client`] while it wasn't serving one.
+enum Heard {
+    Nothing,
+    /// The network changed: dial now.
+    Now,
+    Close,
+}
+
 struct Driver {
     options: ClientOptions,
     /// The one that answered last first.
     routes: Vec<String>,
+    /// [`Client::also_try`]'s, none of them in `routes`.
+    hints: Vec<String>,
+    /// How each route did when last dialled, as logged: a route doing as before is logged at
+    /// debug only, so a machine away for a day doesn't fill the log.
+    said: HashMap<String, String>,
     fingerprint: String,
     auth: Auth,
-    tls: TlsConnector,
-    rejected: Arc<Mutex<Option<String>>>,
     cmds: mpsc::UnboundedReceiver<Cmd>,
     state: watch::Sender<State>,
     events: mpsc::UnboundedSender<Event>,
@@ -693,14 +792,49 @@ impl Driver {
         let _ = self.events.send(event);
     }
 
-    /// Hold requests for later; `true` when told to close meanwhile.
-    fn hold(&mut self, cmd: Option<Cmd>) -> bool {
+    /// A command while no connection is up: requests are held for later.
+    fn heard(&mut self, cmd: Option<Cmd>) -> Heard {
         match cmd {
             Some(Cmd::Request { msg, reply }) => {
                 self.waiting.push_back((msg, reply));
-                false
+                Heard::Nothing
             }
-            Some(Cmd::Close) | None => true,
+            Some(Cmd::AlsoTry(routes)) => {
+                self.also_try(routes);
+                Heard::Nothing
+            }
+            Some(Cmd::NetworkChanged) => Heard::Now,
+            Some(Cmd::Close) | None => Heard::Close,
+        }
+    }
+
+    /// [`Client::also_try`]: these in place of the ones suggested before.
+    fn also_try(&mut self, routes: Vec<String>) {
+        self.hints.clear();
+        for route in routes.iter().map(|r| bare_route(r)) {
+            if !route.is_empty() && !self.routes.contains(&route) && !self.hints.contains(&route) {
+                self.hints.push(route);
+            }
+        }
+        self.hints.truncate(MAX_ROUTES);
+    }
+
+    /// How each route dialled did, at info when it did otherwise than the last time.
+    fn log_dialled(&mut self, candidates: &[String], dialled: &[Dialled]) {
+        for d in dialled {
+            let route = &candidates[d.ix];
+            let result = d
+                .failure
+                .as_ref()
+                .map_or_else(|| "answered".to_string(), Failure::said);
+            let took_ms = d.took.as_millis() as u64;
+            let hint = d.ix >= self.routes.len();
+            if self.said.get(route) != Some(&result) {
+                tracing::info!(route, hint, took_ms, result, "trek-remote client: dialled");
+                self.said.insert(route.clone(), result);
+            } else {
+                tracing::debug!(route, hint, took_ms, result, "trek-remote client: dialled");
+            }
         }
     }
 
@@ -719,46 +853,66 @@ impl Driver {
                 loop {
                     tokio::select! {
                         _ = &mut sleep => break,
-                        cmd = self.cmds.recv() => if self.hold(cmd) { return StopReason::Closed },
+                        cmd = self.cmds.recv() => match self.heard(cmd) {
+                            Heard::Nothing => {}
+                            Heard::Now => {
+                                tracing::info!("trek-remote client: the network changed; dialling now");
+                                failures = 0;
+                                break;
+                            }
+                            Heard::Close => return StopReason::Closed,
+                        },
                     }
                 }
             }
             self.state.send_replace(State::Connecting);
-            let opened = {
+            let candidates: Vec<String> = self.routes.iter().chain(&self.hints).cloned().collect();
+            let (opened, dialled) = {
                 let attempt = open_any(
-                    &self.routes,
-                    &self.tls,
-                    &self.rejected,
+                    candidates.clone(),
+                    self.fingerprint.clone(),
                     self.options.connect_timeout,
+                    self.options.stagger,
                 );
                 tokio::pin!(attempt);
-                loop {
+                let done = loop {
                     tokio::select! {
-                        opened = &mut attempt => break opened,
-                        cmd = self.cmds.recv() => match cmd {
-                            Some(Cmd::Request { msg, reply }) => self.waiting.push_back((msg, reply)),
-                            Some(Cmd::Close) | None => return StopReason::Closed,
+                        done = &mut attempt => break Some(done),
+                        cmd = self.cmds.recv() => match self.heard(cmd) {
+                            Heard::Nothing => {}
+                            // What it was dialling may have gone with the old network.
+                            Heard::Now => break None,
+                            Heard::Close => return StopReason::Closed,
                         },
+                    }
+                };
+                match done {
+                    Some(done) => done,
+                    None => {
+                        tracing::info!("trek-remote client: the network changed; dialling again");
+                        failures = 0;
+                        continue;
                     }
                 }
             };
+            self.log_dialled(&candidates, &dialled);
             let (ix, mut ws) = match opened {
-                Ok(opened) => opened,
-                Err(why) => {
-                    // Another certificate on every route: the machine changed, or something poses
-                    // as it. Never trust it. (With some routes merely down, another machine may
-                    // just have that address on this network now: keep trying the others.)
-                    let seen: Vec<&String> = why
+                Some(opened) => opened,
+                None => {
+                    // Another certificate on every route of its own: the machine changed, or
+                    // something poses as it. Never trust it. (With some routes merely down,
+                    // another machine may just have that address on this network now: keep
+                    // trying the others. A suggested route is only a guess.)
+                    let own = self.routes.len();
+                    let seen: Vec<&String> = dialled
                         .iter()
-                        .filter_map(|f| {
-                            if let Failure::Mismatch(fp) = f {
-                                Some(fp)
-                            } else {
-                                None
-                            }
+                        .filter(|d| d.ix < own)
+                        .filter_map(|d| match &d.failure {
+                            Some(Failure::Mismatch(fp)) => Some(fp),
+                            _ => None,
                         })
                         .collect();
-                    if seen.len() == why.len()
+                    if seen.len() == own
                         && let Some(seen) = seen.first()
                     {
                         return StopReason::FingerprintMismatch {
@@ -766,25 +920,13 @@ impl Driver {
                             seen: (*seen).clone(),
                         };
                     }
-                    let why: Vec<&str> = why
-                        .iter()
-                        .map(|f| {
-                            if let Failure::Other(e) = f {
-                                e.as_str()
-                            } else {
-                                "another certificate"
-                            }
-                        })
-                        .collect();
-                    tracing::debug!(
-                        why = why.join("; "),
-                        "trek-remote client: no route answered"
-                    );
                     failures += 1;
                     continue;
                 }
             };
-            let route = self.routes.remove(ix);
+            let route = candidates[ix].clone();
+            self.routes.retain(|r| *r != route);
+            self.hints.retain(|r| *r != route);
             self.routes.insert(0, route.clone());
 
             let reply = match authenticate(&mut ws, &self.auth, &self.options).await {
@@ -835,15 +977,21 @@ impl Driver {
                 device_id: device_id.clone(),
                 token: token.clone(),
             };
-            if !routes.is_empty() {
-                let mut merged = vec![route.clone()];
-                for r in routes.iter().map(|r| bare_route(r)) {
-                    if !r.is_empty() && !merged.contains(&r) {
-                        merged.push(r);
-                    }
+            // The machine's routes as it says them now, then those it said before: a tailnet
+            // address it leaves out while its Tailscale is down still reaches it once it's back.
+            let mut merged = vec![route.clone()];
+            for r in routes
+                .iter()
+                .map(|r| bare_route(r))
+                .chain(self.routes.iter().cloned())
+            {
+                if !r.is_empty() && !merged.contains(&r) {
+                    merged.push(r);
                 }
-                self.routes = merged;
             }
+            merged.truncate(MAX_ROUTES);
+            self.hints.retain(|h| !merged.contains(h));
+            self.routes = merged;
             let paired = Paired {
                 device_id,
                 token,
@@ -865,6 +1013,8 @@ impl Driver {
                 Ended::Dropped(reason) => {
                     tracing::info!(reason, "trek-remote client: connection dropped");
                     self.emit(Event::Disconnected { reason });
+                    // Not connected while it waits to dial again.
+                    self.state.send_replace(State::Connecting);
                     // Straight back, after a moment: a machine that drops every connection at
                     // once isn't hammered.
                     failures = 1;
@@ -916,10 +1066,14 @@ impl Driver {
         let mut ping = tokio::time::interval_at(Instant::now() + every, every);
         ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut heard = Instant::now();
+        // Set by a network change: when the connection must have answered by.
+        let mut probe: Option<Instant> = None;
+        let never = Instant::now() + Duration::from_secs(365 * 24 * 3600);
         loop {
             tokio::select! {
                 frame = ws.next() => {
                     heard = Instant::now();
+                    probe = None;
                     match frame {
                         None => return Ended::Dropped("closed".into()),
                         Some(Err(err)) => return Ended::Dropped(err.to_string()),
@@ -943,11 +1097,26 @@ impl Driver {
                             return Ended::Dropped(err);
                         }
                     }
+                    Some(Cmd::AlsoTry(routes)) => self.also_try(routes),
+                    // The connection may have left with the old network, and a dead one is
+                    // otherwise only noticed after `silence`: it has `probe` to answer a ping.
+                    Some(Cmd::NetworkChanged) => {
+                        if probe.is_none() {
+                            probe = Some(Instant::now() + self.options.probe);
+                            let ping = serde_json::to_string(&ClientEnvelope { id: None, msg: ClientMessage::Ping }).expect("ping serializes");
+                            if let Err(err) = write(ws, Message::text(ping)).await {
+                                return Ended::Dropped(err);
+                            }
+                        }
+                    }
                     Some(Cmd::Close) | None => {
                         let _ = tokio::time::timeout(Duration::from_secs(2), ws.close(None)).await;
                         return Ended::Stop(StopReason::Closed);
                     }
                 },
+                _ = tokio::time::sleep_until(probe.unwrap_or(never)) => {
+                    return Ended::Dropped("the machine stopped answering after the network changed".into());
+                }
                 _ = ping.tick() => {
                     // Writes may still go through to a machine that no longer answers: only
                     // hearing from it says it's there.

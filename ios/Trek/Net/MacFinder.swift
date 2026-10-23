@@ -260,16 +260,26 @@ nonisolated final class ServiceResolve: @unchecked Sendable {
         self.port = port
         var ref: DNSServiceRef?
         let context = Unmanaged.passUnretained(self).toOpaque()
-        let err = DNSServiceGetAddrInfo(&ref, 0, interface, DNSServiceProtocol(kDNSServiceProtocol_IPv4 | kDNSServiceProtocol_IPv6), host, { _, flags, _, err, _, addr, _, context in
+        let err = DNSServiceGetAddrInfo(&ref, 0, interface, DNSServiceProtocol(kDNSServiceProtocol_IPv4 | kDNSServiceProtocol_IPv6), host, { _, flags, index, err, _, addr, _, context in
             guard err == kDNSServiceErr_NoError, flags & kDNSServiceFlagsAdd != 0, let addr, let context else { return }
-            Unmanaged<ServiceResolve>.fromOpaque(context).takeUnretainedValue().address(addr)
+            Unmanaged<ServiceResolve>.fromOpaque(context).takeUnretainedValue().address(addr, interface: index)
         }, context)
         if err == kDNSServiceErr_NoError, let ref { add(ref) }
     }
 
-    private func address(_ sa: UnsafePointer<sockaddr>) {
-        guard !stopped, let host = Self.numeric(sa, interface: interfaceName) else { return }
+    /// An address the host has, on the interface numbered `index` (what it answered on, when
+    /// the resolve wasn't on one: a 169.254 address carries no scope of its own).
+    private func address(_ sa: UnsafePointer<sockaddr>, interface index: UInt32) {
+        guard !stopped, let host = Self.numeric(sa, interface: interfaceName ?? Self.name(of: index)) else { return }
         found(Address.join(host, port))
+    }
+
+    /// The name of the interface numbered `index` (`en7`); nil for 0 (any).
+    static func name(of index: UInt32) -> String? {
+        guard index != 0 else { return nil }
+        var buf = [CChar](repeating: 0, count: Int(IF_NAMESIZE) + 1)
+        guard if_indextoname(index, &buf) != nil else { return nil }
+        return String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 
     /// The address as text; nil for loopback. A link-local one (`fe80::/10`, `169.254/16`) keeps

@@ -436,23 +436,23 @@ impl SettingsView {
         let this = crate::words::words().this_computer;
         let mut out = vec![Self::heading("Machines", cx)];
         let ws = self.workspace.read(cx);
-        let machines: Vec<(
-            String,
-            String,
-            crate::machines::Reach,
-            Option<i64>,
-            Vec<String>,
-        )> = ws
+        let machines: Vec<(String, String, bool, String)> = ws
             .machines
             .list
             .iter()
             .map(|m| {
+                let route = m.entry.paired.routes.first().cloned().unwrap_or_default();
+                // Where it stands: connected on which address, or since when it isn't, and
+                // why and what to do when Trek can tell.
+                let seen = match crate::machines::offline_note(m, &ws.machines.here, this) {
+                    None => format!("Connected now · {route}"),
+                    Some(note) => note,
+                };
                 (
                     m.id().to_string(),
                     m.entry.name.clone(),
-                    m.reach.clone(),
-                    m.entry.last_seen,
-                    m.entry.paired.routes.clone(),
+                    m.reachable(),
+                    seen,
                 )
             })
             .collect();
@@ -461,20 +461,7 @@ impl SettingsView {
         } else {
             let rows = machines
                 .into_iter()
-                .map(|(id, name, reach, last_seen, routes)| {
-                    use crate::machines::Reach;
-                    let reachable = reach == Reach::Connected;
-                    let route = routes.first().cloned().unwrap_or_default();
-                    let seen = match (&reach, last_seen) {
-                        (Reach::Connected, _) => format!("Connected now · {route}"),
-                        (Reach::Stopped(why), _) => {
-                            format!("Not connecting: {why}. Forget it and pair again.")
-                        }
-                        (Reach::Connecting, Some(at)) => {
-                            format!("Last seen {} · trying {route}", crate::time::relative(at))
-                        }
-                        (Reach::Connecting, None) => format!("Trying {route}"),
-                    };
+                .map(|(id, name, reachable, seen)| {
                     let ws = self.workspace.clone();
                     let host = id.clone();
                     Self::row(
