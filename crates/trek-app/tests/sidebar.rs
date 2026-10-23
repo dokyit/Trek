@@ -183,7 +183,7 @@ fn opening_a_live_group_doesnt_open_the_settled_one() {
 }
 
 #[test]
-fn folding_a_group_hides_its_rows_but_keeps_its_badges() {
+fn folding_a_group_hides_its_rows_but_not_what_waits_on_you() {
     run(async |cx| {
         let trek = open(cx);
         let ids: Vec<String> = (0..4)
@@ -201,18 +201,16 @@ fn folding_a_group_hides_its_rows_but_keeps_its_badges() {
         });
         let pid = project_of(&trek, cx, &asking);
         trek.render(cx);
-        // The card sits inside its project's group now, with the quiet lines after it.
+        // The card sits under Active, above the projects; its project keeps the quiet lines.
         assert!(trek.visible(cx, format!("card-{asking}")));
         assert!(trek.visible(cx, format!("live-proj-head-{pid}")));
         trek.click(cx, format!("live-fold-{pid}"));
         trek.render(cx);
-        // Folded: every row away, the header still there with its needs-you badge.
-        for id in ids.iter().chain([&asking]) {
-            assert!(
-                !trek.visible(cx, format!("live-line-{id}"))
-                    && !trek.visible(cx, format!("card-{id}"))
-            );
+        // Folded: the project's rows away, the header still there, and what asks still asks.
+        for id in &ids {
+            assert!(!trek.visible(cx, format!("live-line-{id}")));
         }
+        assert!(trek.visible(cx, format!("card-{asking}")));
         assert!(trek.visible(cx, format!("live-proj-head-{pid}")));
         trek.click(cx, format!("live-fold-{pid}"));
         trek.render(cx);
@@ -413,8 +411,8 @@ fn rows_hold_still_under_the_pointer_and_move_once_it_leaves() {
             "the newcomer waits for the pointer to leave"
         );
         assert!(
-            trek.visible(cx, format!("live-line-{asking}")),
-            "the answered thread draws as a quiet line, in its place"
+            trek.visible(cx, format!("card-{asking}")),
+            "the answered thread stays under Active, in its place"
         );
 
         // The pointer leaves for the transcript: the list catches up.
@@ -434,7 +432,7 @@ fn rows_hold_still_under_the_pointer_and_move_once_it_leaves() {
 }
 
 #[test]
-fn a_thread_waiting_on_you_is_a_line_high_and_says_what_it_waits_for() {
+fn a_thread_waiting_on_you_is_two_lines_high_and_says_what_it_waits_for() {
     run(async |cx| {
         let trek = open(cx);
         let plain = quiet(&trek, cx, "Plain", 60_000);
@@ -447,9 +445,9 @@ fn a_thread_waiting_on_you_is_a_line_high_and_says_what_it_waits_for() {
             trek.bounds(cx, format!("live-line-{plain}"))
                 .expect("a quiet line"),
         );
-        assert_eq!(
-            row.size.height, line.size.height,
-            "the same height as a quiet line"
+        assert!(
+            row.size.height > line.size.height && row.size.height < line.size.height * 2.,
+            "a title and what it waits for: taller than a quiet line, but not two of them"
         );
         assert!(trek.visible(cx, format!("card-needs-{id}")));
         assert_eq!(

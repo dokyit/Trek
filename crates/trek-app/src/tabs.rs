@@ -148,6 +148,8 @@ pub fn strip(workspace: &Entity<Workspace>, glass: bool, cx: &App) -> Option<Any
         let dot = match state {
             RunState::Idle if sub => Some(palette::needs_you(cx)),
             RunState::Idle if unseen && !active => Some(palette::emerald(cx)),
+            // The loader in place of the logo says it.
+            RunState::Working => None,
             state => palette::run_state(state, cx),
         };
         let (ws_open, ws_close, ws_drop) =
@@ -186,7 +188,16 @@ pub fn strip(workspace: &Entity<Workspace>, glass: bool, cx: &App) -> Option<Any
                         .text_color(theme.foreground)
                 })
             })
-            .child(crate::ui::agent_logo(&agent, px(13.), cx))
+            // A tab at work shows the loader its sidebar row does (still: a turning one would
+            // redraw the whole window every frame); otherwise its agent's logo.
+            .child(if state == RunState::Working {
+                Icon::new(crate::assets::Lucide::LoaderCircle)
+                    .size(px(13.))
+                    .text_color(palette::working(cx))
+                    .into_any_element()
+            } else {
+                crate::ui::agent_logo(&agent, px(13.), cx).into_any_element()
+            })
             .child(div().flex_1().min_w_0().truncate().child(title))
             .when_some(dot, |el, c| {
                 el.child(div().flex_none().size(px(6.)).rounded_full().bg(c))

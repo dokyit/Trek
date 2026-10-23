@@ -127,12 +127,11 @@ fn macos_keeps_its_system_menus_and_title_bar() {
 }
 
 /// The controls in the title bar's row, each in the area it keeps the window's drag from (`chrome::no_drag`).
-const AGENTS_CONTROLS: [&str; 7] = [
+const AGENTS_CONTROLS: [&str; 6] = [
     "toggle-sidebar",
     "mode-switch",
     "run-actions",
     "open-in",
-    "pop-out",
     "toggle-tools",
     "settle",
 ];

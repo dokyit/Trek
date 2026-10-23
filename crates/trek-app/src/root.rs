@@ -747,7 +747,7 @@ fn mode_switch(mode: crate::workspace::Mode, cx: &App) -> impl IntoElement {
 
 impl WindowTitle {
     /// Editor mode's title bar: the switch, a Command Center pill naming the folder (it opens
-    /// Quick Open), and the layout toggles. The harness's Run, Open, pop-out and Settle aren't
+    /// Quick Open), and the layout toggles. The harness's Run, Open and Settle aren't
     /// here: they belong to a thread on screen, and the editor's chat is in its side bar.
     fn render_editor(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let ws = self.workspace.read(cx);
@@ -1095,19 +1095,14 @@ impl Render for WindowTitle {
                             open_in_button(dir, narrow),
                         ))
                     })
-                    .when(thread.is_some(), |el| {
-                        el.child(crate::chrome::no_drag(
-                            "pop-out",
-                            crate::ui::icon_button(
-                                "pop-out",
-                                crate::assets::Lucide::SquareArrowOutUpRight,
-                                "Open in new window (⌘⇧↩)", // icon_button( localizes
-                            )
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(OpenInNewWindow), cx)
-                            }),
-                        ))
-                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(1.))
+                            .h(px(16.))
+                            .mx_1()
+                            .bg(theme.border),
+                    )
                     .child(crate::chrome::no_drag(
                         "toggle-tools",
                         crate::ui::icon_button(
@@ -1122,7 +1117,12 @@ impl Render for WindowTitle {
                     .when_some(settle_id, |el, id| {
                         el.child(crate::chrome::no_drag(
                             "settle",
-                            crate::ui::icon_button("settle", IconName::Check, "Settle (⌘E)")
+                            Button::new("settle")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Check)
+                                .label("Settle")
+                                .tooltip(crate::keys::shared("Settle (⌘E)"))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     let id = id.clone();
                                     this.workspace.update(cx, |ws, cx| ws.settle(&id, cx))
@@ -1608,6 +1608,7 @@ fn run_button(
         .ghost()
         .small()
         .icon(crate::assets::Lucide::Play)
+        .label("Run")
         .tooltip("Run a project action")
         .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
             menu = menu.min_w(px(220.));

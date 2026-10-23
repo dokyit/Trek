@@ -3283,12 +3283,6 @@ impl Composer {
                                         }),
                                 )
                                 .child(div().text_color(theme.foreground.opacity(0.9)).child(name))
-                                // Uncommitted work is normal, not a warning: quiet, like the branch's other details.
-                                .when_some(status, |el, s| {
-                                    el.child(
-                                        div().text_xs().text_color(theme.muted_foreground).child(s),
-                                    )
-                                })
                                 .child(
                                     Icon::new(IconName::ChevronDown)
                                         .xsmall()
@@ -3330,6 +3324,39 @@ impl Composer {
                         })
                         .into_any_element(),
                 )
+                .map(|branch| {
+                    // What's changed, beside the branch: it opens Source control, where they are.
+                    // Uncommitted work is normal, not a warning: quiet, like the branch's details.
+                    let Some(s) = status else { return branch };
+                    let ws = self.workspace.clone();
+                    let muted = theme.muted_foreground;
+                    h_flex()
+                        .gap(px(2.))
+                        .child(branch)
+                        .child(
+                            gpui_kit::component::button::Button::new("changes-to-git")
+                                .ghost()
+                                .small()
+                                .child(
+                                    h_flex()
+                                        .gap(px(5.))
+                                        .text_color(muted)
+                                        .child(
+                                            Icon::new(crate::assets::Lucide::GitCompare).xsmall(),
+                                        )
+                                        .child(s),
+                                )
+                                .tooltip("Source control")
+                                .on_click(move |_, _, cx| {
+                                    ws.update(cx, |_, cx| {
+                                        cx.emit(crate::workspace::WorkspaceEvent::OpenTool(
+                                            crate::workspace::PanelTool::Git,
+                                        ))
+                                    })
+                                }),
+                        )
+                        .into_any_element()
+                })
             }
             Some(_) if has_cwd => Some(
                 chip("env-nogit")
