@@ -42,8 +42,11 @@ advertised on Wi-Fi with only an `id` in the TXT record.
    opens in the normal thread view, and its composer sends to B. Its card reads its row as a card
    here reads the thread: the turn clock from `working_since`, the sub-agent pill and tooltip from
    `sub_agents` and `background`, "Sub-agent needs you" from `needs_thread`, and "Waiting" while its
-   turn is over and sub-agents are out. A machine with a thread at work (or one that needs the
-   user) sits above A's projects; a settled row with work still out stays listed. Approvals, questions, plan reviews,
+   turn is over and sub-agents are out. Like any card it shows its provider's logo, and its pill
+   the logo of each provider its sub-agents run on and how many there are (the tooltip names
+   provider, model and each sub-agent). What's live on B (at work, or waiting on the user) is in
+   A's Active section as "trek on T-Book"; B's own group holds its quiet threads. A settled row
+   with work still out stays listed. Approvals, questions, plan reviews,
    Stop, model and effort changes go through the protocol's `answer`, `interrupt` and `set_prefs`.
    A keeps nothing in its store: B owns the thread; A holds what the snapshot and subscription gave it
    and re-fetches on reconnect. The right panel's Git and Changes read B's repo through `git_*`.

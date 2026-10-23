@@ -1500,11 +1500,18 @@ fn a_machines_thread_at_work_shows_above_the_projects_with_its_clock_and_sub_age
         let (kids, _) = sidebar.read_with(cx, |s, cx| s.at_work(&thread, cx));
         let names: Vec<&str> = kids.iter().map(|(_, n)| n.as_str()).collect();
         assert_eq!(names, ["Sol: Review the diff", "Explore the tests"]);
-        // The machine sits above this Mac's projects while it's at work.
+        // Its provider, and how many sub-agents it has out.
+        assert!(trek.visible(cx, format!("card-agent-{id}")));
+        assert!(trek.visible(cx, format!("card-kids-count-{id}")));
+        // It's in Active, above this Mac's projects, as a thread at work here would be; its
+        // machine's group holds only what's quiet there (nothing now).
         let pid = trek.read(cx, |ws, _| ws.thread(&here).unwrap().project_id.clone().unwrap());
-        let machine = trek.bounds(cx, "machine-head-machine-c").unwrap().origin.y;
+        let card = trek.bounds(cx, format!("card-{id}")).unwrap().origin.y;
         let project = trek.bounds(cx, format!("live-proj-head-{pid}")).unwrap().origin.y;
-        assert!(machine < project, "{machine:?} above {project:?}");
+        assert!(card < project, "{card:?} above {project:?}");
+        assert!(!trek.visible(cx, "machine-head-machine-c"));
+        let place = trek.read(cx, |ws, _| ws.machines.place(&id));
+        assert_eq!(place.as_deref(), Some("trek on Machine C"));
 
         // Its turn over with its sub-agents still out: waiting on them, still at work.
         let mut waiting = row_at_work();

@@ -796,7 +796,25 @@ impl Sidebar {
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let (kids, background) = self.at_work(t, cx);
-        let tip = card_tip(&kids, &background).map(SharedString::from);
+        // Who runs it ("Claude Code · Opus 5.5"; a machine's thread as the machine names its
+        // model), then what it has at work.
+        let tip = {
+            let ws = self.workspace.read(cx);
+            let provider = t.agent.display_name();
+            let model = ws
+                .machines
+                .model_label(&t.id)
+                .unwrap_or_else(|| ws.model_label(t));
+            let runs = if model == provider {
+                provider
+            } else {
+                format!("{provider} · {model}")
+            };
+            Some(SharedString::from(match card_tip(&kids, &background) {
+                Some(rest) => format!("{runs}\n\n{rest}"),
+                None => runs,
+            }))
+        };
         let quiet = t.run_state == RunState::Idle
             && !t.is_unseen()
             && !selected
@@ -807,6 +825,14 @@ impl Sidebar {
         let title = h_flex()
             .h(px(20.))
             .gap_2()
+            // The provider it runs on, by its logo (the tooltip names it and the model).
+            .child(
+                div()
+                    .id(SharedString::from(format!("card-agent-{}", t.id)))
+                    .test_support()
+                    .flex_none()
+                    .child(ui::agent_logo(&t.agent, px(14.), cx)),
+            )
             .child(
                 div()
                     .flex_1()
@@ -831,9 +857,9 @@ impl Sidebar {
                     cx,
                 ))
             })
-            // Its sub-agents at work: one logo per agent with how many, in a pill of their own.
-            // (Overlapped logos of the same agent read as a smudge, and a ring the sidebar's colour
-            // shows under glass.)
+            // Its sub-agents at work, in a pill of their own: the logo of each provider they run on,
+            // then how many there are (the tooltip names each). (Overlapped logos read as a
+            // smudge, and a ring the sidebar's colour shows under glass.)
             .when(!kids.is_empty(), |el| {
                 el.child(
                     h_flex()
@@ -842,23 +868,24 @@ impl Sidebar {
                         .flex_none()
                         .h(px(18.))
                         .px(px(5.))
-                        .gap(px(5.))
+                        .gap(px(4.))
                         .rounded_full()
                         .bg(theme.foreground.opacity(0.07))
-                        .children(kid_groups(&kids).into_iter().take(3).map(|(agent, n)| {
-                            h_flex()
-                                .gap(px(2.))
-                                .child(ui::agent_logo(&agent, px(12.), cx))
-                                .when(n > 1, |el| {
-                                    el.child(
-                                        div()
-                                            .text_size(px(10.5))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(theme.muted_foreground)
-                                            .child(n.to_string()),
-                                    )
-                                })
-                        })),
+                        .children(
+                            kid_groups(&kids)
+                                .into_iter()
+                                .take(3)
+                                .map(|(agent, _)| ui::agent_logo(&agent, px(12.), cx)),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("card-kids-count-{}", t.id)))
+                                .test_support()
+                                .text_size(px(10.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.muted_foreground)
+                                .child(kids.len().to_string()),
+                        ),
                 )
             })
             // What its agent runs in the background after answering (a dev server, a watcher): a
@@ -2222,9 +2249,17 @@ fn usage_ring(fraction: f32, color: Hsla, cx: &App) -> AnyElement {
 
 /// A card's tooltip while it has work out: its sub-agents, then what runs in the background.
 pub fn card_tip(kids: &[(trek_core::AgentId, String)], background: &[String]) -> Option<String> {
-    let kids: Vec<String> = kids.iter().map(|(_, name)| name.clone()).collect();
+    let head = match kids.len() {
+        1 => "1 sub-agent at work".to_string(),
+        n => format!("{n} sub-agents at work"),
+    };
+    // Each by the provider it runs on: "Codex · Sol: Review the cache".
+    let kids: Vec<String> = kids
+        .iter()
+        .map(|(agent, name)| format!("{} · {name}", agent.display_name()))
+        .collect();
     let parts: Vec<String> = [
-        ("Sub-agents at work", &kids[..]),
+        (head.as_str(), &kids[..]),
         ("Running in the background", background),
     ]
     .into_iter()
@@ -2328,7 +2363,18 @@ impl Render for Sidebar {
             .iter()
             .map(|p| (p.id.clone(), p.path.clone()))
             .collect();
+        // A machine's thread names its project there and the machine ("trek on T-Book").
+        let places: HashMap<String, String> = ws
+            .machines
+            .list
+            .iter()
+            .flat_map(|m| m.threads.iter())
+            .filter_map(|t| Some((t.id.clone(), ws.machines.place(&t.id)?)))
+            .collect();
         let project_of = |t: &Thread| {
+            if let Some(place) = places.get(&t.id) {
+                return place.clone();
+            }
             t.project_id
                 .as_ref()
                 .and_then(|p| names.get(p).cloned())
@@ -2394,6 +2440,21 @@ impl Render for Sidebar {
                 || t.run_state == RunState::Working
                 || self.graph.needs.contains(&t.id)
                 || self.graph.waiting.contains(&t.id)
+        };
+        // What's live on other machines joins Active too (out of a search, which their groups
+        // don't take part in).
+        let machine_live: Vec<Thread> = if searching {
+            vec![]
+        } else {
+            self.workspace
+                .read(cx)
+                .machines
+                .list
+                .iter()
+                .flat_map(|m| m.listed())
+                .filter(|t| attention(t))
+                .cloned()
+                .collect()
         };
         let mut by_id: HashMap<String, Thread> = HashMap::new();
         let mut info: HashMap<String, GroupInfo> = HashMap::new();
@@ -2493,6 +2554,9 @@ impl Render for Sidebar {
                 fresh.push(LiveGroup { pid, rows, footer });
                 by_id.extend(cards.into_iter().chain(items).map(|t| (t.id.clone(), t)));
             }
+            active.extend(machine_live);
+            // Needs-you first, then at work, as `live_order` put each project's.
+            active.sort_by_key(|t| !(t.needs_you() || self.graph.needs.contains(&t.id)));
             if !active.is_empty() {
                 // Needs-you first, then at work (as `live_order` put them), newest first within.
                 info.insert(
@@ -2738,10 +2802,10 @@ impl Render for Sidebar {
             }
             live_groups.push((format!("live-g-{pid}").into(), group.into_any_element()));
         }
-        // Threads living on other machines, under each machine's name (`machines`). A machine
-        // with something to say (a thread at work, or one that needs you) sits above the
-        // projects, as a project with one sits above the quiet ones; a quiet machine goes under
-        // them. One that can't be reached says since when, and why when Trek can tell.
+        list = list.child(crate::motion::flip_stack(&flip, live_groups, now));
+        // Threads living on other machines, under each machine's name (`machines`): its quiet
+        // ones, what's live there being in Active. One that can't be reached says since when,
+        // and why when Trek can tell.
         let machines: Vec<(String, String, bool, Option<String>, Vec<Thread>)> = {
             let ws = self.workspace.read(cx);
             let this = crate::words::words().this_computer;
@@ -2760,14 +2824,13 @@ impl Render for Sidebar {
                 .filter(|(.., threads)| !threads.is_empty())
                 .collect()
         };
-        let mut busy_machines = v_flex().w_full();
-        let mut quiet_machines = v_flex().w_full();
-        let mut machine_busy = false;
         for (host, name, reachable, offline, mut threads) in machines {
-            // What has something to say first, as in a project's group.
-            threads.sort_by_key(|t| !attention(t));
-            let busy = threads.first().is_some_and(|t| attention(t));
-            machine_busy |= busy;
+            if !searching {
+                threads.retain(|t| !attention(t));
+            }
+            if threads.is_empty() && offline.is_none() {
+                continue;
+            }
             let header = h_flex()
                 .id(SharedString::from(format!("machine-head-{host}")))
                 .test_support()
@@ -2787,7 +2850,7 @@ impl Render for Sidebar {
                         .font_medium()
                         .child(name),
                 )
-                .child(threads.len().to_string());
+                .when(!threads.is_empty(), |el| el.child(threads.len().to_string()));
             let mut group = v_flex().w_full().child(header);
             if let Some(note) = offline {
                 group = group.child(
@@ -2811,18 +2874,10 @@ impl Render for Sidebar {
                 };
                 group = group.child(row);
             }
-            if busy {
-                busy_machines = busy_machines.child(group);
-            } else {
-                quiet_machines = quiet_machines.child(group);
-            }
+            list = list.child(group);
         }
-        list = list
-            .child(busy_machines)
-            .child(crate::motion::flip_stack(&flip, live_groups, now))
-            .child(quiet_machines);
         self.last_rows = last_rows;
-        if !live_shown && !machine_busy && !searching && !named_sections_busy {
+        if !live_shown && !searching && !named_sections_busy {
             list = list.child(
                 v_flex()
                     .mx_4()
