@@ -14,7 +14,13 @@ struct ThreadsView: View {
     @State private var showingAll: Set<String> = []
     @State private var settledOpen = Launch.folded.contains("-Settled")
     @State private var projectFilter: String?
-    @State private var machineFilter: String?
+    @State private var pickedMachine: String?
+    /// The picked machine, while it is still paired and the picker that clears it is on offer:
+    /// a machine unpaired meanwhile must not leave the list filtered to nothing.
+    private var machineFilter: String? {
+        guard let id = pickedMachine, model.links.count > 1, model.links.contains(where: { $0.id == id }) else { return nil }
+        return id
+    }
     @State private var deleteAsk: DeleteAsk?
     /// A thread whose swipe asked for the snooze menu, or a time of one's own.
     @State private var snoozeChoice: ThreadSummary?
@@ -120,7 +126,7 @@ struct ThreadsView: View {
                 }
                 if model.links.count > 1 {
                     Section("Machine") {
-                        Picker("Machine", selection: $machineFilter) {
+                        Picker("Machine", selection: $pickedMachine) {
                             Text("All machines").tag(String?.none)
                             ForEach(model.links) { l in
                                 Text(l.name).tag(Optional(l.id))
@@ -353,7 +359,7 @@ struct ThreadsView: View {
     private func reveal(_ id: String, proxy: ScrollViewProxy) {
         guard let t = model.thread(id) else { return }
         projectFilter = nil
-        machineFilter = nil
+        pickedMachine = nil
         withAnimation(.snappy) {
             collapsed.remove("project:\(t.project?.id ?? "")")
             for title in ["Pinned", "Needs you", "Working", "Snoozed", "Recent"] { collapsed.remove(title) }

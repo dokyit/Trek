@@ -320,3 +320,211 @@ fn a_run_watch_without_an_id_cards_the_run_gh_printed() {
         assert_eq!(found[0].1.kind, Kind::Run);
     });
 }
+
+#[test]
+fn commands_on_separate_lines_are_each_looked_at() {
+    // One tool call, several commands: the agent's usual way to commit, push and open the PR.
+    assert_eq!(
+        pr_card::call(
+            "Run command",
+            "git add -A\ngit commit -m \"x\"\ngit push -u origin feat\ngh pr create --title t --base main"
+        ),
+        Some(Call::PrCreate {
+            title: Some("t".into()),
+            base: Some("main".into()),
+            head: None,
+        })
+    );
+    assert_eq!(
+        pr_card::call("Run command", "cd repo\ngh pr merge 128"),
+        Some(Call::PrMerge(Some("128".into())))
+    );
+    assert_eq!(
+        pr_card::call("Run command", "export X=1\nscript/release.sh 0.4.14"),
+        Some(Call::Release {
+            version: "0.4.14".into(),
+            channel: "stable".into()
+        })
+    );
+    // Text inside quotes or a heredoc is not a command.
+    assert!(matches!(
+        pr_card::call("Run command", "git commit -m \"fix; gh pr merge 5\""),
+        Some(Call::Git(_))
+    ));
+    assert_eq!(
+        pr_card::call(
+            "Run command",
+            "cat > notes.md <<'EOF'\ngh pr merge 5\nscript/release.sh 0.4.14\nEOF"
+        ),
+        None
+    );
+}
+
+#[test]
+fn a_release_that_publishes_nothing_makes_no_card() {
+    for d in [
+        "script/release.sh 0.4.14 --dry-run",
+        "script/release.sh --dry-run 0.4.14 --channel beta",
+        "script/release.sh --help",
+        "gh workflow run release.yml -f version=0.4.1-beta.4 -f channel=beta -f dry_run=true",
+    ] {
+        assert_eq!(pr_card::call("Run command", d), None, "{d}");
+    }
+    // A real run, with the flag spelled false, still is one.
+    assert_eq!(
+        pr_card::call(
+            "Run command",
+            "gh workflow run release.yml -f version=0.4.14 -f dry_run=false"
+        ),
+        Some(Call::ReleaseWorkflow {
+            version: "0.4.14".into(),
+            channel: String::new()
+        })
+    );
+}
+
+fn failed(id: &str, output: &str) -> AgentEvent {
+    AgentEvent::ToolFinished {
+        id: id.into(),
+        output: output.into(),
+        ok: false,
+    }
+}
+
+/// `gh workflow run` exits once the run is queued, which is not the release being published:
+/// the card keeps Releasing for the watcher to settle from the run itself.
+#[test]
+fn a_workflow_dispatch_is_not_a_published_release() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![
+                    tool(
+                        "w1",
+                        "gh workflow run release.yml -f version=0.4.14 -f channel=stable",
+                    ),
+                    finished(
+                        "w1",
+                        "Created workflow_dispatch event for release.yml at main\n",
+                    ),
+                ],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let found = cards(&trek, cx, &id);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let card = &found[0].1;
+        assert_eq!(card.kind, Kind::Release);
+        assert_eq!(card.phase, Phase::Releasing, "{card:?}");
+        assert!(card.workflow);
+
+        // A dispatch that fails is a failed release.
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![
+                    tool("w2", "gh workflow run release.yml -f version=0.4.15"),
+                    failed("w2", "could not create workflow dispatch event\n"),
+                ],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let found = cards(&trek, cx, &id);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found[1].1.phase, Phase::Failed);
+    });
+}
+
+/// A release run again for the same version is a card of its own, and the second command's end
+/// finishes it, not the first one's.
+#[test]
+fn a_rerun_release_finishes_its_own_card() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![
+                    tool("r1", "script/release.sh 0.4.13"),
+                    failed("r1", "release: build failed\n"),
+                    tool("r2", "script/release.sh 0.4.13"),
+                ],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let found = cards(&trek, cx, &id);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_ne!(found[0].0, found[1].0, "each card has its own row id");
+        assert_eq!(found[0].1.phase, Phase::Failed);
+        assert_eq!(found[1].1.phase, Phase::Releasing);
+
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(&id, vec![finished("r2", "")], cx)
+        });
+        cx.run_until_parked();
+        let found = cards(&trek, cx, &id);
+        assert_eq!(
+            found[0].1.phase,
+            Phase::Failed,
+            "the old card stays as it was"
+        );
+        assert_eq!(found[1].1.phase, Phase::Published);
+    });
+}
+
+/// A card read back from the store with nothing to finish it stops working, so its spinner and
+/// the frame loop behind it end; a card something follows, or one that isn't working, is left.
+#[test]
+fn a_card_nothing_can_finish_settles() {
+    let release = Card {
+        kind: Kind::Release,
+        version: "0.4.13".into(),
+        phase: Phase::Releasing,
+        stages: vec![pr_card::Stage {
+            label: "release.sh".into(),
+            state: pr_card::CheckState::Running,
+        }],
+        ..Default::default()
+    };
+    assert!(
+        !pr_card::followable(&release),
+        "a local script's card has no run to look up"
+    );
+    let mut settled = release.clone();
+    assert!(pr_card::settle(&mut settled));
+    assert_eq!(settled.phase, Phase::Failed);
+    assert_eq!(settled.stages[0].state, pr_card::CheckState::Skipped);
+    assert!(!pr_card::settle(&mut settled), "once is enough");
+
+    let workflow = Card {
+        workflow: true,
+        ..release
+    };
+    assert!(pr_card::followable(&workflow));
+
+    // A pull request is still there: it goes back to Open and nothing spins.
+    let mut pr = Card {
+        kind: Kind::Pr,
+        number: Some(5),
+        phase: Phase::Checking,
+        ..Default::default()
+    };
+    assert!(pr_card::followable(&pr));
+    assert!(pr_card::settle(&mut pr));
+    assert_eq!(pr.phase, Phase::Open);
+    // A PR that was just waiting for its owner stays as it is.
+    let mut ready = Card {
+        kind: Kind::Pr,
+        phase: Phase::Ready,
+        ..Default::default()
+    };
+    assert!(!pr_card::settle(&mut ready));
+    assert_eq!(ready.phase, Phase::Ready);
+}

@@ -178,6 +178,15 @@ pub fn sort(paths: Vec<PathBuf>, real: &Path, given: &Path, ignores: &mut Ignore
     batch
 }
 
+/// Whether watching `root` already failed with the folder in the state it's in now (there or
+/// not): this runs on every workspace notification, so a folder that can't be watched is tried
+/// again only when it changes or comes back.
+fn already_failed(failed: &Option<(PathBuf, bool)>, root: &Path) -> bool {
+    failed
+        .as_ref()
+        .is_some_and(|(path, existed)| path == root && *existed == root.is_dir())
+}
+
 impl IdeWorkbench {
     /// Watch the IDE folder (again, when it moved) while the editor is on screen; none without
     /// one, or in Agents mode.
@@ -190,7 +199,14 @@ impl IdeWorkbench {
         if self.watch.as_ref().map(|w| &w.root) == root.as_ref() {
             return;
         }
+        if root
+            .as_deref()
+            .is_some_and(|r| already_failed(&self.watch_failed, r))
+        {
+            return;
+        }
         self.watch = None;
+        self.watch_failed = None;
         let Some(root) = root else { return };
         let (tx, rx) = async_channel::unbounded::<Vec<PathBuf>>();
         let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
@@ -200,9 +216,13 @@ impl IdeWorkbench {
         });
         let mut watcher = match watcher {
             Ok(w) => w,
-            Err(e) => return tracing::warn!("watch {}: {e}", root.display()),
+            Err(e) => {
+                self.watch_failed = Some((root.clone(), root.is_dir()));
+                return tracing::warn!("watch {}: {e}", root.display());
+            }
         };
         if let Err(e) = watcher.watch(&root, notify::RecursiveMode::Recursive) {
+            self.watch_failed = Some((root.clone(), root.is_dir()));
             return tracing::warn!("watch {}: {e}", root.display());
         }
         // FSEvents names files by their real path (`/private/var/…` for `/var/…`).
@@ -300,7 +320,22 @@ impl IdeWorkbench {
 
 #[cfg(test)]
 mod tests {
-    use super::{Ignores, sort};
+    use super::{Ignores, already_failed, sort};
+
+    #[test]
+    fn a_failed_watch_is_retried_only_when_the_folder_changes_or_comes_back() {
+        let dir = std::env::temp_dir().join(format!("trek-watch-failed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Failed while it wasn't there: not tried again until it is, or another folder is asked for.
+        let failed = Some((dir.clone(), false));
+        assert!(already_failed(&failed, &dir));
+        assert!(!already_failed(&failed, &dir.join("other")));
+        assert!(!already_failed(&None, &dir));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!already_failed(&failed, &dir), "it came back");
+        assert!(already_failed(&Some((dir.clone(), true)), &dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn nested_gitignores_and_git_state_sort_a_batch() {

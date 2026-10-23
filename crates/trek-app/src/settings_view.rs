@@ -574,7 +574,7 @@ impl SettingsView {
         subs.push(cx.subscribe_in(
             &project_name,
             window,
-            |this: &mut Self, input, event: &gpui_kit::component::input::InputEvent, _, cx| {
+            |this: &mut Self, input, event: &gpui_kit::component::input::InputEvent, window, cx| {
                 if matches!(
                     event,
                     gpui_kit::component::input::InputEvent::PressEnter { .. }
@@ -582,11 +582,16 @@ impl SettingsView {
                 ) {
                     let name = input.read(cx).value().to_string();
                     if let Some(id) = this.project_name_for.clone() {
-                        this.workspace.update(cx, |ws, cx| {
+                        let current = this.workspace.update(cx, |ws, cx| {
                             if ws.project(&id).is_some_and(|p| p.name != name.trim()) {
                                 ws.rename_project(&id, &name, cx);
                             }
+                            ws.project(&id).map(|p| p.name.clone())
                         });
+                        // An empty name is refused: the field shows the name the project has.
+                        if let Some(current) = current.filter(|c| *c != name) {
+                            input.update(cx, |s, cx| s.set_value(current, window, cx));
+                        }
                     }
                 }
             },

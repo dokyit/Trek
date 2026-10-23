@@ -661,43 +661,62 @@ async fn ask_permission(
         })
         .await?;
 
-    loop {
-        let cmd = match kept.pop_front() {
-            Some(cmd) => cmd,
-            None => match commands.recv().await {
-                Ok(cmd) => cmd,
-                Err(_) => {
-                    *shutdown = true;
-                    bail!("Commands channel closed");
-                }
-            },
+    // What arrives while the card is open (a steering message, a mode change) waits in `later`
+    // and goes behind what was already kept once this is answered. Commands already in `kept`
+    // can't answer this request, so only the channel is read here.
+    let mut later = Vec::new();
+    let answer = loop {
+        let cmd = match commands.recv().await {
+            Ok(cmd) => cmd,
+            Err(_) => {
+                *shutdown = true;
+                kept.extend(later);
+                bail!("Commands channel closed");
+            }
         };
         match cmd {
             Command::Respond {
                 request_id: id,
                 decision,
-            } if id == request_id => {
-                events
-                    .send(AgentEvent::PermissionResolved { request_id })
-                    .await?;
-                return Ok(decision);
-            }
-            Command::Interrupt => {
-                events
-                    .send(AgentEvent::PermissionResolved { request_id })
-                    .await?;
-                bail!("Interrupted");
-            }
+            } if id == request_id => break Ok(decision),
+            Command::Interrupt => break Err("Interrupted"),
             Command::Shutdown => {
-                events
-                    .send(AgentEvent::PermissionResolved { request_id })
-                    .await?;
                 *shutdown = true;
-                bail!("Shutdown");
+                break Err("Shutdown");
             }
-            other => kept.push_back(other),
+            other => later.push(other),
         }
+    };
+    kept.extend(later);
+    events
+        .send(AgentEvent::PermissionResolved { request_id })
+        .await?;
+    answer.map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Whether `write_file`/`edit_file` on `path_str` needs an answer first, and the key that
+/// "allow for the session" is remembered under. In the project folder only Supervised asks; a
+/// path outside it asks below Full access (a write there, like `~/.zshrc`, runs code later and
+/// would get round the prompt `bash` has), and an allowance covers that one path only.
+fn edit_permission(
+    tool: &str,
+    hand_holding: HandHolding,
+    path_str: &str,
+    cwd: &Path,
+    allowed_for_session: &HashSet<String>,
+) -> (bool, String) {
+    let path = if Path::new(path_str).is_absolute() {
+        PathBuf::from(path_str)
+    } else {
+        cwd.join(path_str)
+    };
+    if crate::acp::within(&path, cwd) {
+        let ask = hand_holding == HandHolding::Supervised && !allowed_for_session.contains(tool);
+        return (ask, tool.to_string());
     }
+    let key = format!("{tool}:outside:{}", path.display());
+    let ask = hand_holding != HandHolding::FullAccess && !allowed_for_session.contains(&key);
+    (ask, key)
 }
 
 async fn execute_tool(
@@ -796,17 +815,20 @@ async fn execute_tool(
             if path_str.is_empty() {
                 return Ok(("Error: path parameter is required".into(), false, None));
             }
-            let need_ask = match hand_holding {
-                HandHolding::Supervised => !allowed_for_session.contains("write_file"),
-                _ => false,
-            };
+            let (need_ask, session_key) = edit_permission(
+                "write_file",
+                hand_holding,
+                path_str,
+                cwd,
+                allowed_for_session,
+            );
             if need_ask {
                 match ask_permission("Write file", path_str, events, commands, kept, shutdown)
                     .await?
                 {
                     Decision::Allow => {}
                     Decision::AllowForSession => {
-                        allowed_for_session.insert("write_file".into());
+                        allowed_for_session.insert(session_key);
                     }
                     Decision::Deny => {
                         return Ok(("Permission denied by user".into(), false, None));
@@ -843,17 +865,20 @@ async fn execute_tool(
                     None,
                 ));
             }
-            let need_ask = match hand_holding {
-                HandHolding::Supervised => !allowed_for_session.contains("edit_file"),
-                _ => false,
-            };
+            let (need_ask, session_key) = edit_permission(
+                "edit_file",
+                hand_holding,
+                path_str,
+                cwd,
+                allowed_for_session,
+            );
             if need_ask {
                 match ask_permission("Edit file", path_str, events, commands, kept, shutdown)
                     .await?
                 {
                     Decision::Allow => {}
                     Decision::AllowForSession => {
-                        allowed_for_session.insert("edit_file".into());
+                        allowed_for_session.insert(session_key);
                     }
                     Decision::Deny => {
                         return Ok(("Permission denied by user".into(), false, None));
@@ -951,7 +976,11 @@ async fn run_bash_command(
     }
     const MAX_OUT: usize = 50_000;
     if out.len() > MAX_OUT {
-        out.truncate(MAX_OUT);
+        let mut cut = MAX_OUT;
+        while !out.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.truncate(cut);
         out.push_str("\n... [output truncated]");
     }
     if out.trim().is_empty() {
@@ -990,6 +1019,16 @@ async fn run_read_file(
                 "Start line {} is beyond end of file ({} lines)",
                 start + 1,
                 lines.len()
+            ),
+            false,
+        ));
+    }
+    if end <= start {
+        return Ok((
+            format!(
+                "End line {} is before start line {}",
+                end_line.unwrap_or(lines.len()),
+                start + 1
             ),
             false,
         ));
@@ -1522,6 +1561,19 @@ fn append(blocks: &mut [Value], index: usize, field: &str, s: &str) {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The error for a failed request whose body is `text`: the message the API gave, else the text.
+fn response_error(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    text: String,
+) -> anyhow::Error {
+    let msg = serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|v| v["error"]["message"].as_str().map(String::from))
+        .unwrap_or(text);
+    request_error(status, headers, format!("{status}: {msg}"))
+}
+
 async fn openai_turn(
     client: &reqwest::Client,
     agent: &AgentId,
@@ -1566,21 +1618,43 @@ async fn openai_turn(
         req = req.bearer_auth(k);
     }
     let resp = send_request(req, commands, kept, shutdown, Duration::from_secs(60)).await?;
-    let resp = if !resp.status().is_success() && resp.status() == reqwest::StatusCode::BAD_REQUEST {
-        // Fallback: retry without tools if rejected
-        body.as_object_mut().unwrap().remove("tools");
-        let mut retry_req = client
-            .post(format!("{base_url}/chat/completions"))
-            .json(&body);
-        if let Some(k) = key {
-            retry_req = retry_req.bearer_auth(k);
-        }
-        let retry_resp =
-            send_request(retry_req, commands, kept, shutdown, Duration::from_secs(60)).await?;
-        if retry_resp.status().is_success() {
-            retry_resp
+    let status = resp.status();
+    let resp = if status == reqwest::StatusCode::BAD_REQUEST
+        || status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    {
+        let headers = resp.headers().clone();
+        let text = resp.text().await.unwrap_or_default();
+        // A model that takes no reasoning effort says so by name: send the request again
+        // without it. Any other 400 may be the tools: send it again without those.
+        let object = body.as_object_mut().unwrap();
+        let sent_effort =
+            object.contains_key("reasoning_effort") || object.contains_key("reasoning");
+        let retried = if sent_effort && text.to_lowercase().contains("reasoning") {
+            object.remove("reasoning_effort");
+            object.remove("reasoning");
+            true
+        } else if status == reqwest::StatusCode::BAD_REQUEST {
+            object.remove("tools").is_some()
         } else {
-            resp
+            false
+        };
+        let mut retry_resp = None;
+        if retried {
+            let mut retry_req = client
+                .post(format!("{base_url}/chat/completions"))
+                .json(&body);
+            if let Some(k) = key {
+                retry_req = retry_req.bearer_auth(k);
+            }
+            let r =
+                send_request(retry_req, commands, kept, shutdown, Duration::from_secs(60)).await?;
+            if r.status().is_success() {
+                retry_resp = Some(r);
+            }
+        }
+        match retry_resp {
+            Some(r) => r,
+            None => return Err(response_error(status, &headers, text)),
         }
     } else {
         resp
@@ -1590,11 +1664,7 @@ async fn openai_turn(
         let status = resp.status();
         let headers = resp.headers().clone();
         let text = resp.text().await.unwrap_or_default();
-        let msg = serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|v| v["error"]["message"].as_str().map(String::from))
-            .unwrap_or(text);
-        return Err(request_error(status, &headers, format!("{status}: {msg}")));
+        return Err(response_error(status, &headers, text));
     }
     let mut stream = resp.bytes_stream();
     let mut buf = Vec::new();
@@ -1639,8 +1709,20 @@ async fn openai_turn(
                     if let Some(calls) = d.get("tool_calls").and_then(|t| t.as_array()) {
                         for (pos, call) in calls.iter().enumerate() {
                             // `index` missing: a single-call chunk is pos 0; several in one chunk
-                            // keep their order rather than all merging into slot 0.
-                            let idx = call.get("index").and_then(|i| i.as_u64()).map(|i| i as usize).unwrap_or(pos);
+                            // keep their order rather than all merging into slot 0. A call with
+                            // an id other than the one in that slot is a new call (one per chunk,
+                            // each without an index), so it opens a slot of its own.
+                            let mut idx = call.get("index").and_then(|i| i.as_u64()).map(|i| i as usize).unwrap_or(pos);
+                            if call.get("index").is_none() {
+                                let id = call.get("id").and_then(|i| i.as_str()).unwrap_or_default();
+                                if !id.is_empty()
+                                    && tool_calls
+                                        .get(idx)
+                                        .is_some_and(|t| !t.id.is_empty() && !t.id.ends_with(id))
+                                {
+                                    idx = tool_calls.len();
+                                }
+                            }
                             if tool_calls.len() <= idx {
                                 tool_calls.resize_with(idx + 1, AccumulatedToolCall::default);
                             }
@@ -2911,5 +2993,419 @@ mod tests {
         let messages = s.body(29)["messages"].as_array().unwrap().clone();
         assert_tool_calls_answered(&messages);
         s.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_permission_card_waits_through_other_commands() {
+        let (tx, commands) = async_channel::unbounded();
+        let (events, rx) = async_channel::unbounded();
+        let task = tokio::spawn(async move {
+            let mut kept = VecDeque::from([Command::Prompt {
+                text: "steer".into(),
+                images: vec![],
+            }]);
+            let mut shutdown = false;
+            let decision = ask_permission(
+                "Run command",
+                "ls",
+                &events,
+                &commands,
+                &mut kept,
+                &mut shutdown,
+            )
+            .await;
+            (decision, kept)
+        });
+        let Ok(AgentEvent::PermissionRequest { request_id, .. }) = rx.recv().await else {
+            panic!("no permission request")
+        };
+        tx.send(Command::SetHandHolding(HandHolding::Supervised))
+            .await
+            .unwrap();
+        tx.send(Command::Respond {
+            request_id,
+            decision: Decision::AllowForSession,
+        })
+        .await
+        .unwrap();
+        let (decision, mut kept) = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the permission wait never ended")
+            .unwrap();
+        assert_eq!(decision.unwrap(), Decision::AllowForSession);
+        assert!(matches!(
+            rx.recv().await,
+            Ok(AgentEvent::PermissionResolved { .. })
+        ));
+        // What was typed meanwhile is kept in order, behind what was already there.
+        assert!(matches!(kept.pop_front(), Some(Command::Prompt { .. })));
+        assert!(matches!(
+            kept.pop_front(),
+            Some(Command::SetHandHolding(HandHolding::Supervised))
+        ));
+        assert!(kept.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_file_with_the_end_before_the_start_says_so() {
+        let dir = std::env::temp_dir().join(format!("trek_read_range_{}", next_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lines: Vec<String> = (1..=100).map(|n| format!("line {n}")).collect();
+        std::fs::write(dir.join("a.txt"), lines.join("\n")).unwrap();
+        let (out, ok) = run_read_file("a.txt", Some(50), Some(10), &dir)
+            .await
+            .unwrap();
+        assert!(!ok);
+        assert!(out.contains("before start line 50"), "{out}");
+        let (_, ok) = run_read_file("a.txt", Some(5), Some(0), &dir)
+            .await
+            .unwrap();
+        assert!(!ok);
+        let (out, ok) = run_read_file("a.txt", Some(10), Some(10), &dir)
+            .await
+            .unwrap();
+        assert!(
+            ok && out.contains("line 10") && !out.contains("line 11"),
+            "{out}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn long_command_output_is_cut_at_a_character() {
+        let (_tx, commands) = async_channel::unbounded();
+        let (mut kept, mut shutdown) = (VecDeque::new(), false);
+        // One ASCII byte, then three-byte characters: byte 50000 is inside one.
+        let (out, ok) = run_bash_command(
+            "printf a; yes '✓' | head -n 20000 | tr -d '\\n'",
+            Path::new("."),
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+        assert!(ok);
+        assert!(out.ends_with("\n... [output truncated]"));
+        assert!(out.starts_with("a✓✓"));
+        assert!(out.len() < 50_100);
+    }
+
+    #[test]
+    fn edits_outside_the_project_ask_below_full_access() {
+        let cwd = std::env::temp_dir().join("trek_edit_permission");
+        let none = HashSet::new();
+        for tool in ["write_file", "edit_file"] {
+            // In the folder: only Supervised asks.
+            for (h, asks) in [
+                (HandHolding::Supervised, true),
+                (HandHolding::AutoAcceptEdits, false),
+                (HandHolding::Auto, false),
+                (HandHolding::FullAccess, false),
+            ] {
+                assert_eq!(edit_permission(tool, h, "src/a.rs", &cwd, &none).0, asks);
+            }
+            // Outside it, by absolute path or by `..`: everything but Full access asks.
+            for path in ["/etc/trek-test", "../../outside.txt"] {
+                for (h, asks) in [
+                    (HandHolding::Supervised, true),
+                    (HandHolding::AutoAcceptEdits, true),
+                    (HandHolding::Auto, true),
+                    (HandHolding::FullAccess, false),
+                ] {
+                    assert_eq!(
+                        edit_permission(tool, h, path, &cwd, &none).0,
+                        asks,
+                        "{path}"
+                    );
+                }
+            }
+        }
+        // An allowance for the session covers that path, not the others.
+        let (_, key) = edit_permission(
+            "write_file",
+            HandHolding::Auto,
+            "/etc/trek-test",
+            &cwd,
+            &none,
+        );
+        let allowed = HashSet::from([key]);
+        assert!(
+            !edit_permission(
+                "write_file",
+                HandHolding::Auto,
+                "/etc/trek-test",
+                &cwd,
+                &allowed
+            )
+            .0
+        );
+        assert!(
+            edit_permission(
+                "write_file",
+                HandHolding::Auto,
+                "/etc/other",
+                &cwd,
+                &allowed
+            )
+            .0
+        );
+        assert!(
+            !edit_permission(
+                "write_file",
+                HandHolding::Supervised,
+                "a.rs",
+                &cwd,
+                &HashSet::from(["write_file".to_string()])
+            )
+            .0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_write_outside_the_project_waits_for_an_answer() {
+        let dir = std::env::temp_dir().join(format!("trek_write_outside_{}", next_id()));
+        let project = dir.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let target = dir.join("outside.txt");
+        let (events, rx) = async_channel::unbounded();
+        let (tx, commands) = async_channel::unbounded();
+        tx.send(Command::Interrupt).await.unwrap();
+        let (mut kept, mut shutdown, mut allowed) = (VecDeque::new(), false, HashSet::new());
+        let args = json!({ "path": target.to_str().unwrap(), "content": "x" }).to_string();
+        let e = execute_tool(
+            "write_file",
+            &args,
+            &project,
+            false,
+            HandHolding::AutoAcceptEdits,
+            &mut allowed,
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.to_string().contains("Interrupted"), "{e:#}");
+        assert!(matches!(
+            rx.recv().await,
+            Ok(AgentEvent::PermissionRequest { .. })
+        ));
+        assert!(!target.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn openai_stream_splits_indexless_tool_calls_sent_one_per_chunk() {
+        let client = reqwest::Client::new();
+        let (_tx, commands) = async_channel::unbounded();
+        let (events, _rx) = async_channel::unbounded();
+        let (mut kept, mut shutdown) = (VecDeque::new(), false);
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"a\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"x\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"b\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        );
+        let url = sse_server(body).await;
+        let answer = openai_turn(
+            &client,
+            &AgentId::Direct("local".into()),
+            &url,
+            None,
+            true,
+            false,
+            "m",
+            Effort::Off,
+            "sys",
+            &[],
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer.tool_calls.len(), 2);
+        assert_eq!(answer.tool_calls[0].id, "a");
+        assert_eq!(answer.tool_calls[0].name, "read_file");
+        assert_eq!(answer.tool_calls[0].arguments, "{\"path\":\"x\"}");
+        assert_eq!(answer.tool_calls[1].id, "b");
+        assert_eq!(answer.tool_calls[1].name, "bash");
+        assert_eq!(answer.tool_calls[1].arguments, "{\"command\":\"ls\"}");
+    }
+
+    /// Answers each request with the next of `replies` (status line, body), and gives back the
+    /// request bodies it saw.
+    async fn scripted_server(
+        replies: Vec<(&'static str, &'static str)>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            for (status, body) in replies {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut data = Vec::new();
+                let mut buf = [0u8; 4096];
+                let (head_end, length) = loop {
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    data.extend_from_slice(&buf[..n]);
+                    if let Some(at) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&data[..at]).to_lowercase();
+                        let length = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        break (at + 4, length);
+                    }
+                    if n == 0 {
+                        return;
+                    }
+                };
+                while data.len() < head_end + length {
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    data.extend_from_slice(&buf[..n]);
+                }
+                log.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&data[head_end..]).into_owned());
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                let _ = socket.shutdown().await;
+            }
+        });
+        (url, seen)
+    }
+
+    #[tokio::test]
+    async fn a_model_that_rejects_reasoning_effort_is_asked_again_without_it() {
+        let client = reqwest::Client::new();
+        let (_tx, commands) = async_channel::unbounded();
+        let (events, _rx) = async_channel::unbounded();
+        let (mut kept, mut shutdown) = (VecDeque::new(), false);
+        let (url, seen) = scripted_server(vec![
+            (
+                "400 Bad Request",
+                "{\"error\":{\"message\":\"Unrecognized request argument supplied: reasoning_effort\"}}",
+            ),
+            (
+                "200 OK",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+            ),
+        ])
+        .await;
+        let answer = openai_turn(
+            &client,
+            &AgentId::Direct("openai".into()),
+            &url,
+            Some("key"),
+            false,
+            false,
+            "gpt-4.1",
+            Effort::High,
+            "sys",
+            &[],
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer.text, "ok");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        let first: Value = serde_json::from_str(&seen[0]).unwrap();
+        let second: Value = serde_json::from_str(&seen[1]).unwrap();
+        assert_eq!(first["reasoning_effort"], "high");
+        assert!(second.get("reasoning_effort").is_none());
+        // The tools stay: only the rejected field went.
+        assert!(second.get("tools").is_some());
+    }
+
+    #[tokio::test]
+    async fn a_400_about_something_else_still_retries_without_the_tools() {
+        let client = reqwest::Client::new();
+        let (_tx, commands) = async_channel::unbounded();
+        let (events, _rx) = async_channel::unbounded();
+        let (mut kept, mut shutdown) = (VecDeque::new(), false);
+        let (url, seen) = scripted_server(vec![
+            ("400 Bad Request", "{\"error\":{\"message\":\"tools are not supported\"}}"),
+            (
+                "200 OK",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+            ),
+        ])
+        .await;
+        let answer = openai_turn(
+            &client,
+            &AgentId::Direct("openai".into()),
+            &url,
+            None,
+            false,
+            false,
+            "m",
+            Effort::High,
+            "sys",
+            &[],
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer.text, "ok");
+        let seen = seen.lock().unwrap();
+        let second: Value = serde_json::from_str(&seen[1]).unwrap();
+        assert!(second.get("tools").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_failed_retry_reports_the_first_error() {
+        let client = reqwest::Client::new();
+        let (_tx, commands) = async_channel::unbounded();
+        let (events, _rx) = async_channel::unbounded();
+        let (mut kept, mut shutdown) = (VecDeque::new(), false);
+        let (url, _seen) = scripted_server(vec![
+            (
+                "400 Bad Request",
+                "{\"error\":{\"message\":\"no such model\"}}",
+            ),
+            (
+                "500 Internal Server Error",
+                "{\"error\":{\"message\":\"boom\"}}",
+            ),
+        ])
+        .await;
+        let e = openai_turn(
+            &client,
+            &AgentId::Direct("openai".into()),
+            &url,
+            None,
+            false,
+            false,
+            "m",
+            Effort::Off,
+            "sys",
+            &[],
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.to_string().contains("no such model"), "{e:#}");
     }
 }

@@ -145,7 +145,9 @@ fn scheme_of(s: &str) -> Option<&str> {
     .then_some(scheme)
 }
 
-fn parse_https(url: &str) -> Result<Source, String> {
+/// The host of an https URL, once it's known to be a public name: the policy for what `watch_video`
+/// will fetch, applied to the link it's given and to every redirect it's sent on to.
+fn public_host(url: &str) -> Result<String, String> {
     if url.chars().any(|c| c.is_whitespace() || c == '\\') {
         return Err("That URL has spaces or backslashes in it".into());
     }
@@ -166,14 +168,22 @@ fn parse_https(url: &str) -> Result<Source, String> {
     if host.is_empty() || !host.contains('.') {
         return Err(format!("{url} has no public host name"));
     }
+    // No top-level domain starts with a digit, but every spelling of an IPv4 address curl accepts
+    // does in its last part: 127.0.0.1, 127.1, 0x7f.1, 0177.0.0.1.
+    let last = host.rsplit('.').next().unwrap_or_default();
     if host == "localhost"
         || host.ends_with(".localhost")
         || host.ends_with(".local")
         || host.ends_with(".internal")
-        || host.parse::<std::net::Ipv4Addr>().is_ok()
+        || last.starts_with(|c: char| c.is_ascii_digit())
     {
         return Err("URLs on this computer or its local network aren't fetched".into());
     }
+    Ok(host)
+}
+
+fn parse_https(url: &str) -> Result<Source, String> {
+    let host = public_host(url)?;
     let bare = ["www.", "m.", "mobile.", "music."]
         .iter()
         .find_map(|p| host.strip_prefix(p))
@@ -970,6 +980,19 @@ fn speech_child(me: &Path, wav: &Path) -> Result<Vec<Segment>, String> {
 
 // ---------- fetching ----------
 
+const MAX_REDIRECTS: usize = 5;
+
+/// Whether a redirect may be followed: still https, and still not a host on this computer.
+fn check_redirect(next: &str) -> Result<(), String> {
+    if !next
+        .get(.."https://".len())
+        .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
+    {
+        return Err("It isn't an https link".into());
+    }
+    public_host(next).map(|_| ())
+}
+
 fn download(url: &str, dir: &Path) -> Result<PathBuf, String> {
     let curl = find("curl").ok_or("Fetching a URL needs curl, which isn't on this computer")?;
     let name = url
@@ -982,32 +1005,44 @@ fn download(url: &str, dir: &Path) -> Result<PathBuf, String> {
         .unwrap_or_else(|| "mp4".into());
     let out = dir.join(format!("download.{name}"));
     let max = MAX_DOWNLOAD.to_string();
-    util::run_ok(
-        path_str(&curl)?,
-        &[
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--location",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            "--max-redirs",
-            "5",
-            "--max-filesize",
-            &max,
-            "--max-time",
-            "900",
-            "--output",
-            path_str(&out)?,
-            "--",
-            url,
-        ],
-        None,
-        Duration::from_secs(960),
-    )
-    .map_err(|e| format!("Couldn't download {url}: {e}"))?;
+    // Redirects are followed here, not by curl, so that each hop faces the same refusal of local
+    // hosts as the link the agent gave.
+    let mut current = url.to_string();
+    for hop in 0..=MAX_REDIRECTS {
+        let printed = util::run_ok(
+            path_str(&curl)?,
+            &[
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--proto",
+                "=https",
+                "--max-filesize",
+                &max,
+                "--max-time",
+                "900",
+                "--write-out",
+                "%{redirect_url}",
+                "--output",
+                path_str(&out)?,
+                "--",
+                &current,
+            ],
+            None,
+            Duration::from_secs(960),
+        )
+        .map_err(|e| format!("Couldn't download {url}: {e}"))?;
+        let next = printed.trim();
+        if next.is_empty() {
+            break;
+        }
+        if hop == MAX_REDIRECTS {
+            return Err(format!("Couldn't download {url}: too many redirects"));
+        }
+        check_redirect(next)
+            .map_err(|e| format!("Couldn't download {url}: it redirects to {next}. {e}"))?;
+        current = next.to_string();
+    }
     let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
     if size > MAX_DOWNLOAD {
         let _ = std::fs::remove_file(&out);
@@ -1373,6 +1408,10 @@ mod tests {
             "https://localhost/a.mp4",
             "https://127.0.0.1/a.mp4",
             "https://10.0.0.2:8080/a.mp4",
+            "https://127.1:8443/a.mp4",
+            "https://0x7f.1/a.mp4",
+            "https://0177.0.0.1/a.mp4",
+            "https://192.168.1.1./a.mp4",
             "https://[::1]/a.mp4",
             "https://printer.local/a.mp4",
             "https://intranet/a.mp4",
@@ -1384,6 +1423,17 @@ mod tests {
                 parse_source(refused, &dir, None).is_err(),
                 "{refused:?} should be refused"
             );
+        }
+        for (next, ok) in [
+            ("https://cdn.example.com/a.mp4", true),
+            ("https://127.0.0.1:8443/a.mp4", false),
+            ("https://127.1/a.mp4", false),
+            ("https://localhost/a.mp4", false),
+            ("https://[::1]/a.mp4", false),
+            ("http://cdn.example.com/a.mp4", false),
+            ("ftp://cdn.example.com/a.mp4", false),
+        ] {
+            assert_eq!(check_redirect(next).is_ok(), ok, "{next:?}");
         }
         assert!(
             parse_source("http://example.com/a.mp4", &dir, None)

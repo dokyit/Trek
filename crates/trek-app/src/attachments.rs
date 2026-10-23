@@ -85,6 +85,12 @@ pub trait Attaching: Sized + 'static {
     fn target(&self, cx: &App) -> String;
     /// Send the message that waited for its images to be saved.
     fn send_held(&mut self, window: &mut Window, cx: &mut Context<Self>);
+    /// Images that finished saving after the view moved on from `target` (the one they were
+    /// pasted into). A view that keeps a draft per target puts them back in that draft; the
+    /// default attaches them to what it shows now.
+    fn land_elsewhere(&mut self, _target: &str, paths: Vec<PathBuf>) {
+        self.outbox().add(paths);
+    }
 }
 
 /// A paste a composer takes over from its textarea.
@@ -280,6 +286,7 @@ fn save<T: Attaching>(this: &mut T, jobs: Vec<Job>, window: &mut Window, cx: &mu
     }
     let n = jobs.len();
     this.outbox().saving += n;
+    let meant_for = this.target(cx);
     cx.spawn_in(window, async move |view, cx| {
         let dir = trek_core::paths::data_dir().join("snapshots");
         let results = cx
@@ -291,6 +298,26 @@ fn save<T: Attaching>(this: &mut T, jobs: Vec<Job>, window: &mut Window, cx: &mu
             })
             .await;
         let _ = view.update_in(cx, |this, window, cx| {
+            // The user moved to another thread while these were being saved: they belong to
+            // the one they were pasted into.
+            let mut away = vec![];
+            let results = if meant_for == this.target(cx) {
+                results
+            } else {
+                results
+                    .into_iter()
+                    .filter_map(|(label, result)| match result {
+                        Ok(path) => {
+                            away.push(path);
+                            None
+                        }
+                        Err(e) => Some((label, Err(e))),
+                    })
+                    .collect()
+            };
+            if !away.is_empty() {
+                this.land_elsewhere(&meant_for, away);
+            }
             let (failed, send) = this.outbox().landed(n, results);
             if let Some(message) = failed {
                 crate::workspace::workspace_global(cx).update(cx, |_, cx| {
@@ -347,7 +374,12 @@ pub fn paste<T: Attaching>(
             if !others.is_empty() {
                 let refs: String = others
                     .iter()
-                    .map(|p| format!("@{} ", p.display()))
+                    .map(|p| {
+                        format!(
+                            "{} ",
+                            trek_core::media::mention_of(&p.display().to_string())
+                        )
+                    })
                     .collect();
                 input.update(cx, |s, cx| {
                     let value = s.value().to_string();

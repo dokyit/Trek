@@ -437,16 +437,28 @@ struct PathRef {
 /// unwrapped, and relative links resolved against the answer's folder. Only real paths count.
 pub fn link_path(url: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     let raw = url.strip_prefix("file://").unwrap_or(url);
-    let path = if let Some(rest) = raw.strip_prefix("~/") {
-        trek_core::paths::home().join(rest)
+    let path = resolve_link(raw, cwd)?;
+    if path.exists() {
+        return Some(path);
+    }
+    // Markdown writes a space in a link as `%20`; the literal path wins when it exists.
+    if raw.contains('%') {
+        let path = resolve_link(&crate::note_images::percent_decode(raw), cwd)?;
+        return path.exists().then_some(path);
+    }
+    None
+}
+
+fn resolve_link(raw: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        Some(trek_core::paths::home().join(rest))
     } else if raw.starts_with('/') || Path::new(raw).is_absolute() {
-        PathBuf::from(raw)
+        Some(PathBuf::from(raw))
     } else if raw.contains(':') {
-        return None;
+        None
     } else {
-        cwd?.join(raw)
-    };
-    path.exists().then_some(path)
+        Some(cwd?.join(raw))
+    }
 }
 
 /// `url` has a scheme — https:, mailto:, vscode: — so the system can open it.
@@ -1040,6 +1052,18 @@ mod tests {
         assert!(link_path("https://example.com", Some(&dir)).is_none());
         assert!(link_path("mailto:a@b.co", Some(&dir)).is_none());
         assert!(link_path("nope.txt", Some(&dir)).is_none());
+        let spaced = dir.join("My Report.md");
+        std::fs::write(&spaced, b"x").unwrap();
+        assert_eq!(
+            link_path("My%20Report.md", Some(&dir)).as_deref(),
+            Some(spaced.as_path())
+        );
+        let abs_spaced = spaced.to_string_lossy().replace(' ', "%20");
+        assert_eq!(
+            link_path(&abs_spaced, None).as_deref(),
+            Some(spaced.as_path())
+        );
+        assert!(link_path("Not%20There.md", Some(&dir)).is_none());
         assert!(is_url("https://x.y") && is_url("mailto:a@b") && is_url("file:///x"));
         assert!(!is_url("/tmp/x") && !is_url("a b") && !is_url("x"));
     }

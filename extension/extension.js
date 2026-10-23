@@ -3,6 +3,13 @@
 
 const vscode = require('vscode');
 
+// The 1-based number of the last line a selection touches. One that ends at the start of a line
+// (a triple-click, shift+down) hasn't reached into it, so that line isn't part of it.
+function lastLine(sel) {
+    const reachesIn = sel.end.character > 0 || sel.end.line === sel.start.line;
+    return sel.end.line + (reachesIn ? 1 : 0);
+}
+
 function openLink(command) {
     const editor = vscode.window.activeTextEditor;
     if (!editor || editor.document.uri.scheme !== 'file') {
@@ -15,7 +22,7 @@ function openLink(command) {
     // opening the file goes to the caret.
     const params = [['path', doc.uri.fsPath], ['line', String((command === 'ask' ? sel.start : sel.active).line + 1)]];
     if (command === 'ask') {
-        params.push(['end', String(sel.end.line + 1)]);
+        params.push(['end', String(lastLine(sel))]);
         const text = doc.getText(sel);
         if (text) params.push(['selection', text]);
     }
@@ -41,4 +48,4 @@ function activate(context) {
 
 function deactivate() {}
 
-module.exports = { activate, deactivate };
+module.exports = { activate, deactivate, lastLine };

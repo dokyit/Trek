@@ -459,21 +459,34 @@ fn a_thread_started_on_the_phone_leaves_the_mac_where_it_was() {
                 .clone()
         });
         let route = trek.read(cx, |ws, _| ws.route.clone());
-        let id = ask(&trek, cx, |reply| tr::HostRequest::NewThread {
-            req: tr::NewThreadRequest {
-                project_id,
-                agent: common::mock().key(),
-                model: None,
-                text: "from the phone".into(),
-                worktree: false,
-                effort: Some("low".into()),
-                access: None,
-                plan: false,
-                images: vec![],
-            },
-            reply,
-        })
-        .unwrap();
+        let became = trek.read(cx, |ws, _| ws.draft_became.clone());
+        let (reply, mut rx) = tokio::sync::oneshot::channel();
+        // Looked at before anything else runs: the terminal dock hears the workspace change and
+        // would take `draft_became` (the Mac's draft didn't become the thread, or the dock would
+        // hand it the draft's shells).
+        let during = trek.update(cx, |ws, cx| {
+            ws.remote_request(
+                tr::HostRequest::NewThread {
+                    req: tr::NewThreadRequest {
+                        project_id,
+                        agent: common::mock().key(),
+                        model: None,
+                        text: "from the phone".into(),
+                        worktree: false,
+                        effort: Some("low".into()),
+                        access: None,
+                        plan: false,
+                        images: vec![],
+                    },
+                    reply,
+                },
+                cx,
+            );
+            ws.draft_became.clone()
+        });
+        assert_eq!(during, became, "the Mac's draft didn't become the thread");
+        cx.run_until_parked();
+        let id = rx.try_recv().expect("answered").unwrap();
         trek.wait_done(cx, &id, RunState::Idle).await;
         assert_eq!(
             trek.read(cx, |ws, _| ws.route.clone()),

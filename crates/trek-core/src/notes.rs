@@ -501,15 +501,46 @@ fn plain(line: &str) -> String {
     {
         l = rest;
     }
+    let chars: Vec<char> = l.chars().collect();
     let mut out = String::with_capacity(l.len());
     let mut in_tag = false;
-    for c in l.chars() {
+    for (i, &c) in chars.iter().enumerate() {
+        let before = i.checked_sub(1).map(|j| chars[j]);
+        let after = chars.get(i + 1).copied();
+        let word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+        // Whether `c` at `i` is half of a doubled mark with text on its outer side.
+        let pair = |i: usize, c: char| {
+            let start = if chars.get(i + 1) == Some(&c) {
+                i
+            } else if i > 0 && chars[i - 1] == c {
+                i - 1
+            } else {
+                return false;
+            };
+            let outer = |at: Option<usize>| {
+                at.and_then(|j| chars.get(j))
+                    .is_some_and(|c| !c.is_whitespace())
+            };
+            outer(start.checked_sub(1)) || outer(Some(start + 2))
+        };
+        if in_tag {
+            in_tag = c != '>';
+            continue;
+        }
         match c {
-            '<' => in_tag = true,
-            '>' if in_tag => in_tag = false,
-            '*' | '_' | '~' | '`' | '=' if !in_tag => {}
-            c if !in_tag => out.push(c),
-            _ => {}
+            // A tag opens with a letter, `/` or `!` and closes on this line: `x < 5` and `I <3`
+            // are text.
+            '<' if after.is_some_and(|a| a.is_alphabetic() || matches!(a, '/' | '!'))
+                && chars[i..].contains(&'>') =>
+            {
+                in_tag = true;
+            }
+            '*' | '`' => {}
+            // `_` inside a word (`snake_case`) is part of it; `~~strike~~` and `==mark==` are
+            // pairs, and a lone `~` or `=` is text (`a = b`, `~5 min`).
+            '_' if !(word(before) && word(after)) => {}
+            '~' | '=' if pair(i, c) => {}
+            c => out.push(c),
         }
     }
     out.trim().to_string()
@@ -643,7 +674,13 @@ fn marker_len(line: &str, block: Block) -> Option<usize> {
     let len = match block {
         Block::Bullets => ["- ", "* ", "+ "]
             .iter()
-            .find(|m| l.starts_with(**m) && !l.starts_with("- ["))
+            // A checkbox is a checklist's, but a link (`- [docs](…)`) is still a bullet.
+            .find(|m| {
+                l.starts_with(**m)
+                    && !["- [ ] ", "- [x] ", "- [X] "]
+                        .iter()
+                        .any(|check| l.starts_with(check))
+            })
             .map(|m| m.len()),
         Block::Numbers => {
             let digits = l.chars().take_while(char::is_ascii_digit).count();
@@ -856,6 +893,31 @@ mod tests {
     }
 
     #[test]
+    fn a_bullet_that_starts_with_a_link_is_still_a_bullet() {
+        let text = "- [Trek docs](https://x)\n- plain";
+        // Both read as bullets, so Bullets takes the markers off instead of doubling them.
+        let off = toggle_block(text, 0..text.len(), Block::Bullets);
+        assert_eq!(off.text, "[Trek docs](https://x)\nplain");
+        // A single linked item, from plain text and back.
+        let on = toggle_block("[Trek docs](https://x)", 0..0, Block::Bullets);
+        assert_eq!(on.text, "- [Trek docs](https://x)");
+        assert_eq!(
+            toggle_block(&on.text, 0..0, Block::Bullets).text,
+            "[Trek docs](https://x)"
+        );
+        // Return at the end of a linked item continues the list.
+        let line = "- [Trek docs](https://x)";
+        let e = newline(line, line.len()..line.len());
+        assert_eq!(e.text, format!("{line}\n- "));
+        // A checkbox is still a checklist item, not a bullet.
+        assert_eq!(marker_len("- [ ] a", Block::Bullets), None);
+        assert_eq!(marker_len("  - [X] a", Block::Bullets), None);
+        assert_eq!(marker_len("- [x] a", Block::Checklist), Some(6));
+        let e = newline("- [ ] a", 7..7);
+        assert_eq!(e.text, "- [ ] a\n- [ ] ");
+    }
+
+    #[test]
     fn lists_on_and_off() {
         let text = "milk\neggs\nbread";
         let e = toggle_block(text, 0..text.len(), Block::Bullets);
@@ -923,6 +985,35 @@ mod tests {
             Some("- [ ] a\n- [ ] b")
         );
         assert_eq!(toggle_check("plain", 0), None);
+    }
+
+    #[test]
+    fn titles_keep_the_text_that_only_looks_like_markup() {
+        let title = |body: &str| {
+            Note {
+                id: "x".into(),
+                path: PathBuf::new(),
+                body: body.into(),
+                modified: 0,
+            }
+            .title()
+        };
+        assert_eq!(title("x < 5 means small"), "x < 5 means small");
+        assert_eq!(title("I <3 this"), "I <3 this");
+        assert_eq!(title("a <b and never closes"), "a <b and never closes");
+        assert_eq!(title("snake_case_name"), "snake_case_name");
+        assert_eq!(title("a = b, about ~5 min"), "a = b, about ~5 min");
+        assert_eq!(title("a == b"), "a == b");
+        // Real markup still goes.
+        assert_eq!(
+            title("_soft_ and *loud* and `code`"),
+            "soft and loud and code"
+        );
+        assert_eq!(title("~~old~~ ==new== plan"), "old new plan");
+        assert_eq!(
+            title("## <b>Bold</b> and <mark style=\"x\">marked</mark> text"),
+            "Bold and marked text"
+        );
     }
 
     #[test]

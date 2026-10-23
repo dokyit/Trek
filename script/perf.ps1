@@ -288,7 +288,7 @@ function Invoke-Stress($Bin) {
         Say "  idle: $(& $sample)"
     } finally {
         $exit = Stop-Trek $t
-        $leaks = Select-String -Path "$($t.Data)\logs\*.log" -Pattern 'leaked|panic' -SimpleMatch -ErrorAction SilentlyContinue
+        $leaks = Select-String -Path "$($t.Data)\logs\*.log" -Pattern 'leaked', 'panic' -SimpleMatch -ErrorAction SilentlyContinue
         Say "  quit: exit $exit; $(@($leaks).Count) leak/panic lines in the log"
         # Every column, though the first sample (before any streaming) has no frame times.
         $samples | Select-Object Minute, WorkingSetMB, PrivateMB, Handles, Threads, Frames, FrameP95, FrameMax, LagP95, LagMax | Export-Csv -NoTypeInformation "$Out\stress.csv"

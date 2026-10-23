@@ -280,7 +280,10 @@ impl Composer {
                     if let InputEvent::PressEnter { shift, secondary } = event {
                         let send = if this.cmd_enter { *secondary } else { !*shift };
                         let swallowed = this.pickers.swallowed();
-                        if send && this.pickers.trigger.is_none() && !swallowed {
+                        // A picker with no rows (`echo $HOME`, `thanks @bob`) has nothing to pick: send.
+                        let picking = this.pickers.trigger.is_some()
+                            && !pickers::picker_items(this, cx).is_empty();
+                        if send && !picking && !swallowed {
                             this.submit(state.clone(), window, cx);
                         }
                     } else if matches!(event, InputEvent::Change) {
@@ -1744,7 +1747,10 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let refs: Vec<String> = files.iter().map(|p| format!("@{}", p.display())).collect();
+        let refs: Vec<String> = files
+            .iter()
+            .map(|p| trek_core::media::mention_of(&p.display().to_string()))
+            .collect();
         self.input.update(cx, |s, cx| {
             let mut v = s.value().to_string();
             if !v.is_empty() && !v.ends_with(' ') {
@@ -1909,7 +1915,15 @@ impl Composer {
         let (images, files) = attachments::split_files(paths.iter().cloned());
         attachments::attach_files(self, images, window, cx);
         if !files.is_empty() {
-            let refs: Vec<String> = files.iter().map(|p| format!("@{} ", p.display())).collect();
+            let refs: Vec<String> = files
+                .iter()
+                .map(|p| {
+                    format!(
+                        "{} ",
+                        trek_core::media::mention_of(&p.display().to_string())
+                    )
+                })
+                .collect();
             self.input
                 .update(cx, |s, cx| s.insert(refs.concat(), window, cx));
         }
@@ -3307,6 +3321,20 @@ impl Attaching for Composer {
     fn send_held(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let input = self.input.clone();
         self.submit(input, window, cx);
+    }
+
+    fn land_elsewhere(&mut self, target: &str, paths: Vec<PathBuf>) {
+        let draft = self.drafts.entry(target.to_string()).or_insert(Draft {
+            text: String::new(),
+            cursor: 0,
+            images: Vec::new(),
+            restate: false,
+        });
+        for path in paths {
+            if !draft.images.contains(&path) {
+                draft.images.push(path);
+            }
+        }
     }
 }
 

@@ -39,7 +39,7 @@ pub struct Snapshot {
     pub files: Vec<FileChange>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum LineKind {
     Add,
     Del,
@@ -78,10 +78,22 @@ pub fn git_read(cwd: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// The top of the repository holding `cwd`: `git status` and `git diff` name paths from it, and
+/// `cwd` can be a folder inside the repository. `cwd` itself when git doesn't say.
+fn repo_top(cwd: &Path) -> PathBuf {
+    git_read(cwd, &["rev-parse", "--show-toplevel"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cwd.to_path_buf())
+}
+
 pub fn snapshot(cwd: &Path) -> Snapshot {
     if git_read(cwd, &["rev-parse", "--is-inside-work-tree"]).is_err() {
         return Snapshot::default();
     }
+    let top = repo_top(cwd);
     let branch = git_read(cwd, &["branch", "--show-current"])
         .unwrap_or_default()
         .trim()
@@ -105,7 +117,7 @@ pub fn snapshot(cwd: &Path) -> Snapshot {
         let (additions, deletions) = match stats.get(&path) {
             Some(s) => *s,
             None if status == "??" => (
-                untracked_text(&cwd.join(&path))
+                untracked_text(&top.join(&path))
                     .map(|s| s.lines().count() as i64)
                     .unwrap_or(0),
                 0,
@@ -130,7 +142,9 @@ pub fn snapshot(cwd: &Path) -> Snapshot {
 /// The (status, path) of each entry of `git status --porcelain=v1 -z`; a rename or copy is at its
 /// new path.
 fn parse_status(out: &str) -> Vec<(String, String)> {
-    let mut entries = out.split('\0').filter(|e| e.len() > 3);
+    // No filtering by length: a rename's old path can be as short as `a.c`, and it must be there to
+    // be skipped.
+    let mut entries = out.split('\0').filter(|e| !e.is_empty());
     let mut files = Vec::new();
     while let Some(e) = entries.next() {
         let Some((xy, path)) = e
@@ -202,13 +216,26 @@ fn review_files(review: &Review) -> Vec<FileChange> {
 }
 
 fn diff_lines(text: &str) -> Vec<(LineKind, String)> {
+    diff_body(text, false)
+}
+
+/// `diff_lines`; `in_hunk` when `text` starts inside a hunk (no file header before it). The
+/// `---` and `+++` lines are a file's header only before its first hunk: inside one they are a
+/// removed line starting `--` or an added line starting `++`.
+fn diff_body(text: &str, mut in_hunk: bool) -> Vec<(LineKind, String)> {
     text.lines()
         .take(5000)
         .map(|l| {
-            let kind = if l.starts_with("+++")
-                || l.starts_with("---")
-                || l.starts_with("diff ")
-                || l.starts_with("index ")
+            if l.starts_with("diff ") {
+                in_hunk = false;
+            } else if l.starts_with("@@") {
+                in_hunk = true;
+            }
+            let kind = if !in_hunk
+                && (l.starts_with("+++")
+                    || l.starts_with("---")
+                    || l.starts_with("diff ")
+                    || l.starts_with("index "))
             {
                 LineKind::Meta
             } else if l.starts_with("@@") {
@@ -240,8 +267,10 @@ fn untracked_text(path: &Path) -> Option<String> {
 }
 
 fn file_diff(cwd: &Path, file: &FileChange) -> Vec<(LineKind, String)> {
+    // The paths are the repository's, whatever folder `cwd` is in.
+    let top = repo_top(cwd);
     let text = if file.status == "??" {
-        match untracked_text(&cwd.join(&file.path)) {
+        match untracked_text(&top.join(&file.path)) {
             Some(s) => s
                 .lines()
                 .map(|l| format!("+{l}"))
@@ -250,11 +279,12 @@ fn file_diff(cwd: &Path, file: &FileChange) -> Vec<(LineKind, String)> {
             None => "Binary, unreadable, or too large to show".into(),
         }
     } else {
-        git_read(cwd, &["diff", "HEAD", "--", &file.path])
-            .or_else(|_| git_read(cwd, &["diff", "--", &file.path]))
+        git_read(&top, &["diff", "HEAD", "--", &file.path])
+            .or_else(|_| git_read(&top, &["diff", "--", &file.path]))
             .unwrap_or_default()
     };
-    diff_lines(&text)
+    // An untracked file's lines are all added ones, with no header: a `++i` is `+++i`.
+    diff_body(&text, file.status == "??")
 }
 
 /// A pull request's description: the agent's last answer (it usually sums up the work), then the
@@ -1791,7 +1821,7 @@ impl Render for GitPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_numstat, parse_status, pr_body, pr_label};
+    use super::{LineKind, diff_lines, parse_numstat, parse_status, pr_body, pr_label};
 
     #[test]
     fn pull_request_links_read_as_repo_and_number() {
@@ -1899,6 +1929,80 @@ mod tests {
             "no added line in the diff of résumé.md ({} lines)",
             diff.len()
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rename_from_a_short_path_does_not_swallow_the_next_file() {
+        let files = parse_status("R  b.c\0a.c\0 M zzzz.txt\0");
+        assert_eq!(
+            files,
+            [
+                ("R".to_string(), "b.c".to_string()),
+                ("M".to_string(), "zzzz.txt".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn removed_lines_starting_dashes_and_added_ones_starting_pluses_show_in_a_diff() {
+        let patch = "diff --git a/q.sql b/q.sql\nindex 1..2 100644\n--- a/q.sql\n+++ b/q.sql\n@@ -1,2 +1,2 @@\n--- legacy\n+++counter;\n ctx\ndiff --git a/r b/r\n--- a/r\n+++ b/r\n@@ -1 +1 @@\n-x\n+y\n";
+        let kinds: Vec<(LineKind, String)> = diff_lines(patch);
+        let lines: Vec<(bool, &str)> = kinds
+            .iter()
+            .map(|(k, l)| (matches!(k, LineKind::Del | LineKind::Add), l.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (false, "@@ -1,2 +1,2 @@"),
+                (true, "--- legacy"),
+                (true, "+++counter;"),
+                (false, " ctx"),
+                (false, "@@ -1 +1 @@"),
+                (true, "-x"),
+                (true, "+y"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_folder_inside_the_repo_shows_its_diffs_and_untracked_files() {
+        let dir = std::env::temp_dir().join(format!("trek-git-panel-sub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        let run =
+            |args: &[&str]| assert!(crate::panels::git::git(&dir, args).is_ok(), "git {args:?}");
+        run(&["init", "-q"]);
+        std::fs::write(dir.join("app/a.txt"), "one\n").unwrap();
+        run(&["add", "."]);
+        run(&[
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "first",
+        ]);
+        std::fs::write(dir.join("app/a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.join("app/new.txt"), "a\n++b\nc\n").unwrap();
+        let sub = dir.join("app");
+        let snap = super::snapshot(&sub);
+        let by_path = |p: &str| {
+            snap.files
+                .iter()
+                .find(|f| f.path == p)
+                .unwrap_or_else(|| panic!("{p} missing from {:?}", snap.files))
+        };
+        assert_eq!(by_path("app/new.txt").additions, 3);
+        let diff = super::file_diff(&sub, by_path("app/a.txt"));
+        assert!(diff.iter().any(|(_, l)| l == "+two"), "{diff:?}");
+        let new = super::file_diff(&sub, by_path("app/new.txt"));
+        assert!(new.iter().any(|(_, l)| l == "+++b"), "{new:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

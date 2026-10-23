@@ -579,7 +579,14 @@ impl Render for CloneSheet {
                 .child(self.url().unwrap_or_default())
                 .into_any_element(),
         };
-        let can_clone = self.target.is_some() && self.url().is_some() && !running;
+        // Not to a machine that's out of reach: the clone would wait for it ("Cloning…" and a
+        // spinner for as long as that takes) and start whenever it came back.
+        let target_reachable = self.target.as_ref().is_some_and(|t| {
+            machines
+                .iter()
+                .any(|(id, _, reachable)| id == t && *reachable)
+        });
+        let can_clone = target_reachable && self.url().is_some() && !running;
         let progress = run.as_ref().map(|r| {
             let stage = match &r.stage {
                 CloneStage::Cloning => "Cloning…".to_string(),

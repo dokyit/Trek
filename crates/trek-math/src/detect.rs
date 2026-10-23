@@ -148,6 +148,10 @@ pub fn regions(source: &str) -> Vec<Region> {
     let mut fence = fences.iter().peekable();
     let mut out = Vec::new();
     let mut i = 0;
+    // `\[` openers before this offset can't close: an earlier one scanned to the end of its
+    // paragraph without finding a closer, and a later one's scan is a part of that. (`$$` can't
+    // repeat the failure: a second `$$` in the paragraph would have closed the first.)
+    let mut dead_bracket = 0;
     while i < b.len() {
         while fence.peek().is_some_and(|f| f.end <= i) {
             fence.next();
@@ -167,13 +171,22 @@ pub fn regions(source: &str) -> Vec<Region> {
                     _ => None,
                 };
                 match delim {
-                    Some(delim) => match closing(source, i, delim, next_fence) {
-                        Some(region) => {
-                            i = region.range.end;
-                            out.push(region);
+                    Some(Delim::Bracket) if i < dead_bracket => i += 2,
+                    Some(delim) => {
+                        let mut dead = 0;
+                        match closing(source, i, delim, next_fence, &mut dead) {
+                            Some(region) => {
+                                i = region.range.end;
+                                out.push(region);
+                            }
+                            None => {
+                                if delim == Delim::Bracket {
+                                    dead_bracket = dead_bracket.max(dead);
+                                }
+                                i += 2;
+                            }
                         }
-                        None => i += 2,
-                    },
+                    }
                     // An escape: whatever it escapes is literal.
                     None => i += 1 + b.get(i + 1).map_or(0, |_| char_len(source, i + 1)),
                 }
@@ -188,7 +201,7 @@ pub fn regions(source: &str) -> Vec<Region> {
                 } else {
                     Delim::Dollar
                 };
-                match closing(source, i, delim, next_fence) {
+                match closing(source, i, delim, next_fence, &mut 0) {
                     Some(region) => {
                         i = region.range.end;
                         out.push(region);
@@ -257,8 +270,9 @@ fn starts_block(line: &[u8]) -> bool {
 
 /// The formula `delim` opens at `i`, if it closes — or, when the text ends first (an answer
 /// still being written), the open one running to its end. `$` never stays open: it's as often
-/// money as math.
-fn closing(source: &str, i: usize, delim: Delim, limit: usize) -> Option<Region> {
+/// money as math. When it finds no closer before the end of the paragraph (or `limit`), `dead` is
+/// set to where it gave up: nothing opened before that offset can close either.
+fn closing(source: &str, i: usize, delim: Delim, limit: usize, dead: &mut usize) -> Option<Region> {
     let b = source.as_bytes();
     let open = delim.open().len();
     let start = i + open;
@@ -316,6 +330,7 @@ fn closing(source: &str, i: usize, delim: Delim, limit: usize) -> Option<Region>
             }
             b'\n' => {
                 if blank_line_after(b, j) {
+                    *dead = j;
                     // A paragraph can't hold a formula past its end; if this is the end of the
                     // text, the formula is still being written.
                     let rest_blank = b[j..].iter().all(u8::is_ascii_whitespace);
@@ -333,6 +348,7 @@ fn closing(source: &str, i: usize, delim: Delim, limit: usize) -> Option<Region>
             _ => j += char_len(source, j),
         }
     }
+    *dead = limit;
     (delim != Delim::Dollar && limit == b.len()).then(|| open_region(source, i, delim))
 }
 
@@ -634,5 +650,16 @@ mod tests {
                 assert_eq!(m.len(), s.len(), "{s:?}");
             }
         }
+    }
+
+    #[test]
+    fn unterminated_display_openers_are_not_rescanned() {
+        let text = format!("{}\n\nafter \\[ b \\] done", "\\[ ".repeat(60_000));
+        let start = std::time::Instant::now();
+        let got = found(&text);
+        assert!(start.elapsed().as_secs() < 3, "{:?}", start.elapsed());
+        assert_eq!(got, ["\\[ b \\]"]);
+        // An opener whose body is empty doesn't stop a later one in the same paragraph.
+        assert_eq!(found("\\[\\] \\[ x \\]"), ["\\[ x \\]"]);
     }
 }

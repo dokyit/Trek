@@ -361,6 +361,7 @@ impl Card {
             system: system_tokens,
             skills: skill_tokens,
             mcp: mcp_tokens,
+            instructions: instruction_tokens,
             messages: message_tokens,
         } = split(
             used,
@@ -389,12 +390,17 @@ impl Card {
             });
         }
         if mcp_tokens > 0 {
-            let mut detail = vec![(
-                mcp.join(", "),
-                Some(fmt_tokens(mcp_tokens - instructions.unwrap_or(0))),
-            )];
-            if let Some(tokens) = instructions {
-                detail.push(("Instructions".into(), Some(fmt_tokens(tokens))));
+            // The agent's count may be smaller than what is estimated here: each row shows what
+            // `split` had room for, so the two never add up to more than the segment.
+            let mut detail = vec![];
+            if !mcp.is_empty() {
+                detail.push((
+                    mcp.join(", "),
+                    Some(fmt_tokens(mcp_tokens - instruction_tokens)),
+                ));
+            }
+            if instructions.is_some() && instruction_tokens > 0 {
+                detail.push(("Instructions".into(), Some(fmt_tokens(instruction_tokens))));
             }
             parts.push(Part {
                 kind: Kind::Mcp,
@@ -1308,6 +1314,8 @@ struct Split {
     system: u64,
     skills: u64,
     mcp: u64,
+    /// The part of `mcp` that is the project's instructions, as far as the agent's count has room.
+    instructions: u64,
     messages: u64,
 }
 
@@ -1317,7 +1325,9 @@ struct Split {
 /// prompt and its tools' definitions, up to what such a prompt plausibly takes; anything past
 /// that is conversation too.
 fn split(used: u64, transcript: u64, skills: usize, mcp: usize, instructions: u64) -> Split {
-    let mcp = (mcp as u64 * MCP_SERVER_TOKENS + instructions).min(used);
+    let instructions = instructions.min(used);
+    let servers = (mcp as u64 * MCP_SERVER_TOKENS).min(used - instructions);
+    let mcp = servers + instructions;
     let skills = (skills as u64 * SKILL_TOKENS).min(used - mcp);
     let rest = used - mcp - skills;
     let messages = transcript.min(rest).max(rest.saturating_sub(SYSTEM_TOKENS));
@@ -1325,6 +1335,7 @@ fn split(used: u64, transcript: u64, skills: usize, mcp: usize, instructions: u6
         system: rest - messages,
         skills,
         mcp,
+        instructions,
         messages,
     }
 }
@@ -1398,12 +1409,39 @@ mod tests {
                 system: 11_000 - 168 - 4 * SKILL_TOKENS - 2 * MCP_SERVER_TOKENS,
                 skills: 4 * SKILL_TOKENS,
                 mcp: 2 * MCP_SERVER_TOKENS,
+                instructions: 0,
                 messages: 168,
             }
         );
         // And a window smaller than the estimates never goes negative.
         let tiny = split(500, 10, 4, 2, 0);
         assert_eq!(tiny.mcp + tiny.skills + tiny.messages + tiny.system, 500);
+    }
+
+    #[test]
+    fn instructions_larger_than_the_agents_count_never_underflow_the_servers_row() {
+        // A fresh session counts 1,200 tokens while the project's notes estimate 3,000.
+        let s = split(1_200, 100, 0, 2, 3_000);
+        assert_eq!(
+            s.mcp, 1_200,
+            "the segment is capped at what the agent counts"
+        );
+        assert_eq!(
+            s.instructions, 1_200,
+            "the instructions take what room there is"
+        );
+        assert_eq!(
+            s.mcp - s.instructions,
+            0,
+            "the servers row is what's left, not a wrap"
+        );
+        // With room for both, each keeps its own size.
+        let roomy = split(50_000, 100, 0, 2, 3_000);
+        assert_eq!(roomy.instructions, 3_000);
+        assert_eq!(roomy.mcp - roomy.instructions, 2 * MCP_SERVER_TOKENS);
+        // The servers give way first when only some of them fit.
+        let some = split(2_000, 100, 0, 2, 1_500);
+        assert_eq!((some.mcp, some.instructions), (2_000, 1_500));
     }
 
     #[test]

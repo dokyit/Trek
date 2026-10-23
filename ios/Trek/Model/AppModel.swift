@@ -269,6 +269,9 @@ final class AppModel {
             self.pairingClient = nil
             // Re-pairing a host this phone already knows swaps its record; the link is made fresh.
             if let old = self.link(id: host.id) { self.detach(old) }
+            // Pairing from the demo leaves it: its sample machine must not sit beside the real one
+            // (it would be the selected machine, and read as a real Mac once the mode is live).
+            if self.mode == .demo, let demo = self.link(id: PairedMac.demo.hostId) { self.detach(demo) }
             // Its id (Bonjour finds it by that on any network), the pinned fingerprint, where it
             // answered and every address it says it answers on (the code's, from a Mac that
             // names none): all there for the first launch after this one.
@@ -498,8 +501,9 @@ final class AppModel {
                 }
             }
             link.reply(re, message)
-        case .transcriptPage(let re, _, _, _):
-            link.reply(re, message)
+        case .transcriptPage(let re, let tid, let items, let more):
+            // Earlier pages carry thread_link rows too: qualify them like the first page's.
+            link.reply(re, .transcriptPage(re: re, threadId: tid, items: items.map { qualify($0, on: link) }, more: more))
         case .item(let tid, let item):
             guard let s = stores[link.qualified(tid)], s.subscribed else { return }
             s.enqueue(qualify(item, on: link))
@@ -618,7 +622,11 @@ final class AppModel {
 
     @discardableResult
     func request(_ message: ClientMessage, on explicit: HostLink? = nil, then: ((ServerMessage) -> Void)? = nil) -> String {
-        guard let link = explicit ?? route(message) else { return "" }
+        guard let link = explicit ?? route(message) else {
+            // No machine to ask: whoever waits for the answer hears so, rather than never.
+            then?(.error(re: nil, code: .unknown, message: Self.notConnected))
+            return ""
+        }
         return link.request(stripped(message, on: link), then: then)
     }
 

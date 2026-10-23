@@ -417,6 +417,96 @@ fn a_pick_with_the_caret_gone_from_the_token_replaces_nothing() {
     });
 }
 
+/// A picker with no rows has nothing for Enter to pick: `echo $HOME` or `thanks @bob` sends.
+#[test]
+fn enter_sends_when_the_picker_has_no_rows() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.type_text(cx, "mock:hi $nosuchskill_zz");
+        let picks = cx.read(|cx| trek.root.read(cx).composer.read(cx).picks(cx));
+        assert!(picks.is_empty(), "{picks:?}");
+        trek.press(cx, "enter");
+        assert!(
+            matches!(trek.read(cx, |ws, _| ws.route.clone()), Route::Thread(_)),
+            "the message was sent"
+        );
+    });
+}
+
+/// "Run a command /" in the + menu keeps the draft: the slash goes in front of it.
+#[test]
+fn the_command_item_keeps_the_draft() {
+    run(async |cx| {
+        let trek = open(cx);
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        let open_commands = |trek: &Trek, cx: &mut gpui_kit::TestAppContext| {
+            trek.window(cx, |window, cx| {
+                composer.update(cx, |c, cx| {
+                    trek_app::composer::pickers::insert_trigger(c, "/", window, cx)
+                })
+            })
+        };
+        trek.type_text(cx, "a long prompt");
+        open_commands(&trek, cx);
+        assert_eq!(trek.composer_text(cx), "/a long prompt");
+        trek.press(cx, "escape");
+        assert_eq!(trek.composer_text(cx), "/a long prompt");
+    });
+}
+
+/// `@` completes files the agent made after the index was first built.
+#[test]
+fn the_file_picker_sees_files_made_since_it_first_looked() {
+    run(async |cx| {
+        let trek = open(cx);
+        let picks = |trek: &Trek, cx: &gpui_kit::TestAppContext| {
+            cx.read(|cx| trek.root.read(cx).composer.read(cx).picks(cx))
+        };
+        std::fs::write(trek.project.join("first_file.rs"), "").unwrap();
+        trek.type_text(cx, "@first_f");
+        for _ in 0..2000 {
+            cx.run_until_parked();
+            if picks(&trek, cx).contains(&"first_file.rs".to_string()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(picks(&trek, cx).contains(&"first_file.rs".to_string()));
+        std::fs::write(trek.project.join("later_file.rs"), "").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+        trek.press(cx, "escape");
+        trek.type_text(cx, " @later_f");
+        for _ in 0..2000 {
+            cx.run_until_parked();
+            if picks(&trek, cx).contains(&"later_file.rs".to_string()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            picks(&trek, cx).contains(&"later_file.rs".to_string()),
+            "{:?}",
+            picks(&trek, cx)
+        );
+    });
+}
+
+/// A file with a space in its path is mentioned in quotes, so the mention isn't cut at the space.
+#[test]
+fn attached_files_with_spaces_are_quoted() {
+    run(async |cx| {
+        let trek = open(cx);
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        let file = trek.project.join("Quarterly Report.pdf");
+        trek.window(cx, |window, cx| {
+            composer.update(cx, |c, cx| {
+                c.append_file_refs(std::slice::from_ref(&file), window, cx)
+            })
+        });
+        assert_eq!(trek.composer_text(cx), format!("@\"{}\" ", file.display()));
+    });
+}
+
 /// "Add photos & files" appends `@path` references and leaves the caret after them.
 #[test]
 fn attached_files_leave_the_caret_after_their_references() {

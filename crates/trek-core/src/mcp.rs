@@ -16,8 +16,20 @@ pub fn read_servers(name: &str, text: &str) -> Result<Vec<McpServerConfig>, Stri
     if text.is_empty() {
         return Err("Type a command or a URL, or paste a server's JSON config.".into());
     }
-    let named = if text.starts_with('{') || text.starts_with('"') {
-        from_json_text(text)?
+    // JSON starts with `{`, or with `"` for a piece cut from inside `mcpServers`. A quote that
+    // opens a command line (`"/Applications/My App/server" --flag`) isn't JSON: read it as one.
+    let json = if text.starts_with('{') {
+        Some(json_text(text))
+    } else if text.starts_with('"') {
+        json_text(text)
+            .ok()
+            .filter(|v| v.is_object() || v.is_array())
+            .map(Ok)
+    } else {
+        None
+    };
+    let named = if let Some(json) = json {
+        from_json(&json?)?
     } else {
         let words = split_words(text)?;
         match words.iter().map(String::as_str).collect::<Vec<_>>()[..] {
@@ -230,15 +242,14 @@ pub fn placeholders(server: &McpServerConfig) -> Vec<String> {
 
 type Named = Vec<(Option<String>, McpServerConfig)>;
 
-fn from_json_text(text: &str) -> Result<Named, String> {
-    let value = serde_json::from_str::<Value>(text)
+fn json_text(text: &str) -> Result<Value, String> {
+    serde_json::from_str::<Value>(text)
         .or_else(|e| {
             // A piece cut from inside `mcpServers`: `"github": {…}`, maybe with its comma.
             let piece = text.trim_end().trim_end_matches(',');
             serde_json::from_str::<Value>(&format!("{{{piece}}}")).map_err(|_| e)
         })
-        .map_err(|e| format!("That JSON doesn't read: {e}."))?;
-    from_json(&value)
+        .map_err(|e| format!("That JSON doesn't read: {e}."))
 }
 
 /// The servers in a JSON config, whichever app's shape it has.
@@ -481,7 +492,7 @@ fn claude_add_json(words: &[String]) -> Result<Named, String> {
     let [name, json] = plain[..] else {
         return Err("That claude mcp add-json line needs a name and the JSON.".into());
     };
-    let mut servers = from_json_text(json)?;
+    let mut servers = from_json(&json_text(json)?)?;
     if let [(given, _)] = &mut servers[..] {
         *given = Some(name.to_string());
     }
@@ -879,5 +890,24 @@ mod tests {
             env(&one("gh", &s.command_line())),
             [("TOKEN", crate::settings::KEPT)]
         );
+    }
+
+    #[test]
+    fn a_command_line_may_start_with_a_quoted_path() {
+        let s = one("tools", r#""/Users/me/My Tools/srv" --stdio"#);
+        assert_eq!(s.command, "/Users/me/My Tools/srv");
+        assert_eq!(s.args, ["--stdio"]);
+        if cfg!(windows) {
+            let s = one(
+                "node",
+                r#""C:\Program Files\nodejs\node.exe" C:\srv\index.js"#,
+            );
+            assert_eq!(s.command, r"C:\Program Files\nodejs\node.exe");
+        }
+        // A quote that opens pasted JSON is still JSON.
+        let s = one("", r#""github": {"command": "npx", "args": ["-y", "x"]},"#);
+        assert_eq!((s.name.as_str(), s.command.as_str()), ("github", "npx"));
+        // Broken JSON that starts with a brace keeps the JSON error.
+        assert!(read_servers("x", "{ nope").unwrap_err().contains("JSON"));
     }
 }

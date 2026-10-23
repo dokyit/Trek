@@ -254,18 +254,24 @@ impl Workspace {
 
     /// "Not now" on the toast: the copy waits for a click or for agents to finish again.
     pub(super) fn cancel_move(&mut self, cx: &mut Context<Self>) {
-        if let Moving::Starting(prepared, _) = std::mem::take(&mut self.moving) {
-            self.moving = Moving::Waiting(prepared);
-            cx.notify();
+        // A click on a toast that outlived its countdown finds another state: that one stays.
+        match std::mem::take(&mut self.moving) {
+            Moving::Starting(prepared, _) => {
+                self.moving = Moving::Waiting(prepared);
+                cx.notify();
+            }
+            other => self.moving = other,
         }
     }
 
     /// "Move now" while agents work: the user's call, what's running stops.
     pub(super) fn move_now(&mut self, cx: &mut Context<Self>) {
-        if let Moving::Waiting(prepared) | Moving::Starting(prepared, _) =
-            std::mem::take(&mut self.moving)
-        {
-            self.finish_move(prepared, cx);
+        match std::mem::take(&mut self.moving) {
+            Moving::Waiting(prepared) | Moving::Starting(prepared, _) => {
+                self.finish_move(prepared, cx)
+            }
+            // Still copying (or nothing to move): the copy goes on, and nothing starts.
+            other => self.moving = other,
         }
     }
 

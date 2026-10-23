@@ -96,7 +96,10 @@ pub fn copy_out() -> Result<Prepared> {
     }
     let from = install_root().context("Trek can't tell which folder it runs from")?;
     let wanted = destination().context("Trek can't tell where your programs folder is")?;
-    let prepared = copy_out_from(&from, &wanted, &in_use_or_newer)?;
+    // Trek that already runs from the folder it would move to (and can't update there: it holds
+    // more than Trek's files, or the folder is read-only) moves to a free name beside it.
+    let beside = same_folder(&wanted, &from);
+    let prepared = copy_out_with(&from, &wanted, beside, &in_use_or_newer)?;
     tracing::info!(
         "relocation: copied Trek's files from {} to {}",
         prepared.from.display(),
@@ -107,24 +110,37 @@ pub fn copy_out() -> Result<Prepared> {
 
 /// `copy_out` from `from` to `wanted`, or the free name beside it. `keep` says an own folder of
 /// Trek's is not to be replaced.
+#[cfg(test)]
 fn copy_out_from(from: &Path, wanted: &Path, keep: &dyn Fn(&Path) -> bool) -> Result<Prepared> {
+    copy_out_with(from, wanted, false, keep)
+}
+
+/// `copy_out_from`; with `beside`, `wanted` being the folder Trek runs from is no refusal: the copy
+/// goes to the free name beside it (`wanted-2`, …) and never into `wanted` itself.
+fn copy_out_with(
+    from: &Path,
+    wanted: &Path,
+    beside: bool,
+    keep: &dyn Fn(&Path) -> bool,
+) -> Result<Prepared> {
     // `trek-update.exe` is what starts the copy once this Trek has quit.
     for needed in [TREK_EXE, HELPER_EXE] {
         if !from.join(needed).is_file() {
             bail!("{needed} isn't in {}", from.display());
         }
     }
-    if same_folder(wanted, from) {
+    let running_there = same_folder(wanted, from);
+    if running_there && !beside {
         bail!("Trek runs from {} already", from.display());
     }
-    if inside(wanted, from) || inside(from, wanted) {
+    if !running_there && (inside(wanted, from) || inside(from, wanted)) {
         bail!(
             "{} and {} are one inside the other",
             wanted.display(),
             from.display()
         );
     }
-    let to = choose_destination(wanted, keep)?;
+    let to = choose_destination(wanted, if running_there { 2 } else { 1 }, keep)?;
     let fresh = !to.exists();
     std::fs::create_dir_all(&to).with_context(|| format!("couldn't make {}", to.display()))?;
     if let Err(e) = copy_files(from, &to) {
@@ -142,13 +158,14 @@ fn copy_out_from(from: &Path, wanted: &Path, keep: &dyn Fn(&Path) -> bool) -> Re
 }
 
 /// `wanted`, or the first of `wanted-2`, `wanted-3`, … that can take the copy: not there yet, or
-/// empty, or an own folder of Trek's that `keep` lets go.
-fn choose_destination(wanted: &Path, keep: &dyn Fn(&Path) -> bool) -> Result<PathBuf> {
+/// empty, or an own folder of Trek's that `keep` lets go. `first` is the number to start at: 2
+/// leaves `wanted` out.
+fn choose_destination(wanted: &Path, first: u32, keep: &dyn Fn(&Path) -> bool) -> Result<PathBuf> {
     let name = wanted
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Trek".into());
-    for n in 1..=NAMES_TRIED {
+    for n in first..=NAMES_TRIED {
         let candidate = if n == 1 {
             wanted.to_path_buf()
         } else {
@@ -727,6 +744,37 @@ mod tests {
         assert_eq!(
             copy_out_from(&from, &file, NOT_IN_USE).unwrap().to,
             dir.join("Other-2")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn trek_that_cannot_update_in_the_destination_moves_to_a_name_beside_it() {
+        let dir = scratch("beside");
+        let from = dir.join("Programs").join("Trek");
+        trek_folder(&from, "x");
+        // The reason it can't update there: a file that isn't Trek's.
+        std::fs::write(from.join("notes.txt"), "mine").unwrap();
+
+        // Asked for the folder it runs from, with nothing said about it: refused, as before.
+        assert!(copy_out_from(&from, &from, NOT_IN_USE).is_err());
+        let moved = copy_out_with(&from, &from, true, NOT_IN_USE).unwrap();
+        assert_eq!(moved.to, dir.join("Programs").join("Trek-2"));
+        assert_eq!(
+            names(&moved.to),
+            ["trek-mcp.exe", "trek-update.exe", "trek.exe"]
+        );
+        assert_eq!(names(&from).len(), 4, "where Trek runs is only read");
+        // Again: Trek-2 is Trek's own and nothing runs from it, so it is replaced.
+        assert_eq!(
+            copy_out_with(&from, &from, true, NOT_IN_USE).unwrap().to,
+            moved.to
+        );
+        // Busy: the next free name.
+        let busy = |d: &Path| d == moved.to;
+        assert_eq!(
+            copy_out_with(&from, &from, true, &busy).unwrap().to,
+            dir.join("Programs").join("Trek-3")
         );
         let _ = std::fs::remove_dir_all(dir);
     }

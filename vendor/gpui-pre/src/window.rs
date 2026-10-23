@@ -977,6 +977,7 @@ pub(crate) struct DeferredDraw {
 
 /// Trek: an element's hover listener as painted in a frame, so one that stops painting while
 /// hovered (hidden, removed, replaced) still hears that it isn't hovered any more.
+#[derive(Clone)]
 pub(crate) struct HoverWatch {
     pub(crate) hovered: Rc<RefCell<bool>>,
     pub(crate) hitbox: HitboxId,
@@ -1025,6 +1026,8 @@ pub(crate) struct PaintIndex {
     #[cfg(any(test, feature = "test-support"))]
     debug_bounds_index: usize,
     mouse_listeners_index: usize,
+    // Trek: see `HoverWatch`.
+    hover_watches_index: usize,
     input_handlers_index: usize,
     cursor_styles_index: usize,
     accessed_element_states_index: usize,
@@ -3918,6 +3921,7 @@ impl Window {
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds_index: self.next_frame.debug_bounds_records.len(),
             mouse_listeners_index: self.next_frame.mouse_listeners.len(),
+            hover_watches_index: self.next_frame.hover_watches.len(),
             input_handlers_index: self.next_frame.input_handlers.len(),
             cursor_styles_index: self.next_frame.cursor_styles.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
@@ -3952,6 +3956,14 @@ impl Window {
                 [range.start.mouse_listeners_index..range.end.mouse_listeners_index]
                 .iter_mut()
                 .map(|listener| listener.take()),
+        );
+        // Trek: a reused view keeps its hover watches (hitbox ids never repeat across frames), or
+        // an element in it that later stops painting while hovered would never hear it.
+        self.next_frame.hover_watches.extend(
+            self.rendered_frame.hover_watches
+                [range.start.hover_watches_index..range.end.hover_watches_index]
+                .iter()
+                .cloned(),
         );
         self.next_frame.accessed_element_states.extend(
             self.rendered_frame.accessed_element_states[range.start.accessed_element_states_index

@@ -77,6 +77,19 @@ async fn ask_small_model(system: &str, prompt: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// `text` without one pair of quotes (or backticks) wrapped around all of it. A quote at an end
+/// with another inside belongs to the text, as in "`parse` returns an `Ast`".
+fn unwrap_quotes(text: &str) -> &str {
+    for q in ['"', '`'] {
+        if let Some(inner) = text.strip_prefix(q).and_then(|t| t.strip_suffix(q)) {
+            if !inner.contains(q) {
+                return inner;
+            }
+        }
+    }
+    text
+}
+
 /// The message without code fences or quotes around it; `None` if nothing is left.
 pub fn clean_commit_message(raw: &str) -> Option<String> {
     let lines: Vec<&str> = raw
@@ -85,7 +98,7 @@ pub fn clean_commit_message(raw: &str) -> Option<String> {
         .filter(|l| !l.trim_start().starts_with("```"))
         .collect();
     let text = lines.join("\n");
-    let text = text.trim().trim_matches(['"', '`']).trim();
+    let text = unwrap_quotes(text.trim()).trim();
     let mut lines = text.lines();
     let subject = lines
         .next()?
@@ -151,5 +164,21 @@ mod tests {
             Some("Tidy imports")
         );
         assert_eq!(clean_commit_message("```\n```"), None);
+    }
+
+    #[test]
+    fn keeps_inline_code_at_the_ends_of_a_commit_message() {
+        assert_eq!(
+            clean_commit_message("Fix parser\n\nUse `Ast` in `parse`").as_deref(),
+            Some("Fix parser\n\nUse `Ast` in `parse`")
+        );
+        assert_eq!(
+            clean_commit_message("`parse` returns an `Ast`").as_deref(),
+            Some("`parse` returns an `Ast`")
+        );
+        assert_eq!(
+            clean_commit_message("```\n`parse` returns an Ast\n```").as_deref(),
+            Some("`parse` returns an Ast")
+        );
     }
 }

@@ -73,6 +73,8 @@ pub struct IdeWorkbench {
     edits_seen: u64,
     /// FSEvents on the IDE folder, while the editor is on screen.
     watch: Option<watch::FolderWatch>,
+    /// The folder a watch failed on, and whether it was there: not tried again until that changes.
+    watch_failed: Option<(PathBuf, bool)>,
     /// Open files' paths with links resolved, as FSEvents names them (read once per file).
     canonical: std::collections::HashMap<PathBuf, PathBuf>,
     mode_seen: Mode,
@@ -177,6 +179,7 @@ impl IdeWorkbench {
             files_seen,
             edits_seen,
             watch: None,
+            watch_failed: None,
             canonical: Default::default(),
             mode_seen,
             menus_open: 0,

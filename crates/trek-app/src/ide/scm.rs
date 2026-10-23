@@ -51,22 +51,73 @@ pub struct ScmState {
 }
 
 fn numstat(top: &Path, cached: bool) -> HashMap<String, (i64, i64)> {
-    let mut args = vec!["diff", "--numstat", "--no-renames", "--no-ext-diff"];
+    let mut args = vec!["diff", "--numstat", "-z", "-M", "--no-ext-diff"];
     if cached {
         args.push("--cached");
     }
-    super::git::run(top, &args)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| {
-            let mut parts = l.splitn(3, '\t');
-            let (a, r, p) = (parts.next()?, parts.next()?, parts.next()?);
-            Some((
-                p.to_string(),
+    numstat_counts(&super::git::run(top, &args).unwrap_or_default())
+}
+
+/// `git diff --numstat -z` as (added, removed) by path. A rename is `a<TAB>r<TAB>` then the old
+/// and the new path as entries of their own: counted under the new one, as its row is.
+fn numstat_counts(out: &str) -> HashMap<String, (i64, i64)> {
+    let mut entries = out.split('\0').filter(|e| !e.is_empty());
+    let mut counts = HashMap::new();
+    while let Some(e) = entries.next() {
+        let mut parts = e.splitn(3, '\t');
+        let (Some(a), Some(r), Some(p)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let path = if p.is_empty() {
+            entries.next();
+            entries.next()
+        } else {
+            Some(p)
+        };
+        if let Some(path) = path {
+            counts.insert(
+                path.to_string(),
                 (a.parse().unwrap_or(0), r.parse().unwrap_or(0)),
-            ))
-        })
-        .collect()
+            );
+        }
+    }
+    counts
+}
+
+/// The old paths of the renames staged under `rels` (their new paths): unstaging a rename has
+/// to put the old path back in the index too, or its deletion stays staged.
+fn renamed_from(top: &Path, rels: &[String]) -> Vec<String> {
+    let out = super::git::run(
+        top,
+        &[
+            "diff",
+            "--cached",
+            "--name-status",
+            "-z",
+            "-M",
+            "--diff-filter=R",
+        ],
+    )
+    .unwrap_or_default();
+    renamed_from_in(&out, rels)
+}
+
+/// `renamed_from` over `git diff --name-status -z` output: `R100`, the old path, the new path.
+fn renamed_from_in(out: &str, rels: &[String]) -> Vec<String> {
+    let mut entries = out.split('\0').filter(|e| !e.is_empty());
+    let mut old = vec![];
+    while let Some(status) = entries.next() {
+        if !status.starts_with('R') {
+            entries.next();
+            continue;
+        }
+        if let (Some(from), Some(to)) = (entries.next(), entries.next()) {
+            if rels.iter().any(|r| r == to) {
+                old.push(from.to_string());
+            }
+        }
+    }
+    old
 }
 
 /// `git status --porcelain=v1 -z` as (index, worktree, path) per changed file. A rename or copy
@@ -358,7 +409,8 @@ impl ScmView {
         self.run_op(
             "Unstage",
             move |top| {
-                let paths: Vec<&str> = rels.iter().map(String::as_str).collect();
+                let moved = renamed_from(top, &rels);
+                let paths: Vec<&str> = rels.iter().chain(&moved).map(String::as_str).collect();
                 let mut args = vec!["restore", "--staged", "--"];
                 args.extend(&paths);
                 // Before the first commit there's no HEAD to restore from: take them out of the index.
@@ -1024,5 +1076,23 @@ mod status_tests {
             ["new name.rs", "x.txt", "y"]
         );
         assert!(status_entries(b"").is_empty());
+    }
+
+    #[test]
+    fn a_renames_counts_and_old_path_are_read_from_git_output() {
+        // A rename's numstat: the counts, then the old and the new path as entries of their own.
+        let counts = super::numstat_counts("1\t2\t\0old name.rs\0new name.rs\0");
+        assert_eq!(counts.get("new name.rs"), Some(&(1, 2)));
+        assert!(!counts.contains_key("old name.rs"));
+        let counts = super::numstat_counts("3\t0\tx.txt\0-\t-\timg.png\0");
+        assert_eq!(counts.get("x.txt"), Some(&(3, 0)));
+        assert_eq!(counts.get("img.png"), Some(&(0, 0)));
+        // Only the renames under the rows being unstaged give their old paths back.
+        let out = "R100\0a.rs\0b.rs\0M\0m.rs\0R090\0c.rs\0d.rs\0";
+        assert_eq!(
+            super::renamed_from_in(out, &["b.rs".to_string()]),
+            vec!["a.rs".to_string()]
+        );
+        assert!(super::renamed_from_in(out, &["m.rs".to_string()]).is_empty());
     }
 }

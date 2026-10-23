@@ -30,7 +30,7 @@ use crate::pairing::{
 };
 use crate::protocol::{
     ClientEnvelope, ClientMessage, ErrorCode, HostInfo, Item, MAX_PAGE, PROTOCOL_VERSION,
-    ServerEnvelope, ServerMessage, Snapshot, Transcript,
+    ServerEnvelope, ServerMessage, Snapshot, ThreadAction, ThreadActionRequest, Transcript,
 };
 
 /// How the server listens and behaves.
@@ -1273,6 +1273,22 @@ async fn worker<H: RemoteHost>(
     mut jobs: mpsc::UnboundedReceiver<Job>,
     done: mpsc::UnboundedSender<Done>,
 ) {
+    // Changes that may take a while (a commit, a push, a merge, a delete) run off this loop so
+    // an approval or an interrupt sent meanwhile isn't held up, but one at a time and in the
+    // order they came: a push sent after a commit must not overtake it.
+    let (in_order, mut in_order_rx) = mpsc::unbounded_channel::<(Option<String>, ClientMessage)>();
+    tokio::spawn({
+        let (host, done) = (host.clone(), done.clone());
+        async move {
+            while let Some((re, msg)) = in_order_rx.recv().await {
+                let envelope = call(&*host, re, msg, &done).await;
+                let _ = done.send(Done::Reply {
+                    envelope,
+                    query: false,
+                });
+            }
+        }
+    });
     while let Some(job) = jobs.recv().await {
         let finished = match job {
             // Reads are only worth doing for a live connection; actions the phone sent still run.
@@ -1299,8 +1315,14 @@ async fn worker<H: RemoteHost>(
             // time, git) don't hold up what the phone does next; nor does a clone, which may take
             // minutes (the machine that asked waits for its `ack` before it sends files).
             Job::Call { re, msg }
-                if msg.is_query() || matches!(msg, ClientMessage::CloneProject(_)) =>
+                if runs_long(&msg)
+                    && !msg.is_query()
+                    && !matches!(msg, ClientMessage::CloneProject(_)) =>
             {
+                let _ = in_order.send((re, msg));
+                continue;
+            }
+            Job::Call { re, msg } if msg.is_query() || runs_long(&msg) => {
                 let (host, done) = (host.clone(), done.clone());
                 tokio::spawn(async move {
                     let query = msg.is_query();
@@ -1318,6 +1340,22 @@ async fn worker<H: RemoteHost>(
         };
         let _ = done.send(finished);
     }
+}
+
+/// An action that may take minutes on the Mac (not a read, so it isn't counted as a query).
+fn runs_long(msg: &ClientMessage) -> bool {
+    matches!(
+        msg,
+        ClientMessage::CloneProject(_)
+            | ClientMessage::GitCommit(_)
+            | ClientMessage::GitPush(_)
+            | ClientMessage::WorktreeMerge { .. }
+            | ClientMessage::WorktreeRemove(_)
+            | ClientMessage::ThreadAction(ThreadActionRequest {
+                action: ThreadAction::Delete { .. },
+                ..
+            })
+    )
 }
 
 async fn call<H: RemoteHost>(

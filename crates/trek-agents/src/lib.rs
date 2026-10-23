@@ -62,7 +62,7 @@ pub struct SessionConfig {
     pub fast: Option<String>,
     /// Extra MCP servers to attach to the session, on top of the agent's own config.
     pub mcp_servers: Vec<McpServer>,
-    /// What Trek tells the agent about the project (its verification skill): Claude Code gets it
+    /// What Trek tells the agent about the project (its verification skill): Claude Code and Direct get it
     /// as part of its system prompt (`notes_in_system_prompt`), other agents with the session's
     /// first message, so Trek gives a session that resumes only notes it hasn't told the thread.
     pub instructions: Option<String>,
@@ -616,11 +616,10 @@ pub(crate) fn recap_first(
 }
 
 /// Whether `agent` takes the project notes (`SessionConfig::instructions`) in its system prompt,
-/// every session (Claude Code; the mock reads them from the config). Others get them in a
-/// message.
+/// every session (Claude Code; Direct providers and the mock put them in the system prompt from
+/// the config). Others get them in a message.
 pub fn notes_in_system_prompt(agent: &AgentId) -> bool {
-    matches!(agent, AgentId::ClaudeCode)
-        || matches!(agent, AgentId::Direct(p) if trek_core::catalog::is_mock(p))
+    matches!(agent, AgentId::ClaudeCode | AgentId::Direct(_))
 }
 
 /// A session's first message, with what Trek tells the agent about the project.
@@ -2006,6 +2005,15 @@ mod tests {
         assert_eq!(plan_row(&done).0, "All 2 steps done");
         let waiting = vec![("A".to_string(), Step::Done), ("B".into(), Step::Pending)];
         assert_eq!(plan_row(&waiting).0, "1 of 2 steps done");
+    }
+
+    #[test]
+    fn direct_sessions_take_the_project_notes_in_the_system_prompt_only() {
+        assert!(notes_in_system_prompt(&AgentId::ClaudeCode));
+        assert!(notes_in_system_prompt(&AgentId::Direct("openai".into())));
+        assert!(notes_in_system_prompt(&AgentId::Direct("local".into())));
+        assert!(!notes_in_system_prompt(&AgentId::Codex));
+        assert!(!notes_in_system_prompt(&AgentId::OpenCode));
     }
 
     #[test]

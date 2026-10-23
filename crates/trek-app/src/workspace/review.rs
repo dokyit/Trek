@@ -175,7 +175,7 @@ impl Workspace {
             r.root
                 .as_deref()
                 .and_then(|root| path.strip_prefix(root).ok())
-                .is_some_and(|rel| r.is_pending(&rel.to_string_lossy()))
+                .is_some_and(|rel| r.is_pending(&slashed(rel)))
         })
     }
 
@@ -689,7 +689,7 @@ impl Workspace {
         let id = self.ide_chat.active_thread()?;
         let r = self.reviews.get(id).filter(|r| r.git)?;
         let (top, base) = (r.root.clone()?, r.base.clone()?);
-        let rel = path.strip_prefix(&top).ok()?.to_string_lossy().to_string();
+        let rel = slashed(path.strip_prefix(&top).ok()?);
         r.is_pending(&rel).then(|| FileReview {
             thread: id.to_string(),
             top,
@@ -927,7 +927,22 @@ fn relative(path: &str, root: &Path) -> String {
     p.strip_prefix(root)
         .ok()
         .or_else(|| alt.as_deref().and_then(|a| p.strip_prefix(a).ok()))
-        .map_or_else(|| path.to_string(), |r| r.display().to_string())
+        .map_or_else(|| path.to_string(), slashed)
+}
+
+/// `rel` as git writes paths: `/` between folders, whatever the platform's separator is.
+fn slashed(rel: &Path) -> String {
+    with_slashes(&rel.to_string_lossy(), std::path::MAIN_SEPARATOR)
+}
+
+/// `path` with `sep` (the platform's separator) turned into `/`. A `\` in a Unix file name is
+/// part of the name, so only a `\` separator is replaced.
+fn with_slashes(path: &str, sep: char) -> String {
+    if sep == '/' {
+        path.to_string()
+    } else {
+        path.replace(sep, "/")
+    }
 }
 
 /// The pending files: what changed from the baseline (`base`, else the start checkpoint's
@@ -1030,7 +1045,7 @@ fn plain(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{as_given, below, plain, relative};
+    use super::{as_given, below, plain, relative, with_slashes};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -1093,6 +1108,22 @@ mod tests {
             "not below: git's name stays"
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn paths_are_compared_in_gits_form_on_every_platform() {
+        assert_eq!(with_slashes("src\\ui\\main.rs", '\\'), "src/ui/main.rs");
+        assert_eq!(with_slashes("a\\b.rs", '/'), "a\\b.rs");
+        // `relative` and the pending paths git names agree, nested or not.
+        let rel = relative(
+            &Path::new("/p")
+                .join("src")
+                .join("a.rs")
+                .display()
+                .to_string(),
+            Path::new("/p"),
+        );
+        assert_eq!(rel, "src/a.rs");
     }
 
     #[test]

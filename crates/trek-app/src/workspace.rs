@@ -3392,8 +3392,13 @@ impl Workspace {
                 ),
             };
             let _ = this.update(cx, |this, cx| {
-                // Deleted while its history was read: nothing is left to show it in.
+                // Deleted or archived while its history was read: nothing is left to show it in.
+                // An archived thread keeps its live state (Undo brings it back), so the flag is
+                // cleared and `loaded` stays false: the next view reads the history again.
                 if this.thread(&id).is_none() {
+                    if let Some(live) = this.live.get_mut(&id) {
+                        live.loading = false;
+                    }
                     return;
                 }
                 let live = this.live.entry(id.clone()).or_default();
@@ -3565,6 +3570,11 @@ impl Workspace {
                             t.run_state = RunState::Idle;
                         }
                     });
+                }
+                // Follow-ups queued behind the turn (or the background work) that just went with
+                // the old agent don't follow the next, unrelated turn: they go back to the composer.
+                if switched {
+                    self.hand_back_queued(&id, cx);
                 }
                 self.approve_covered_prompts(&id, prefs.hand_holding, cx);
                 if let Some((agent, model)) = was {
@@ -5762,18 +5772,60 @@ impl Workspace {
         let Some(live) = self.live.get(id) else {
             return;
         };
-        let rows: Vec<String> = live
+        // A card whose command is still running (it arrived while the history loaded) is its
+        // call's to finish; one nothing can follow any more stops instead of spinning for good.
+        let gh = trek_core::detect::which("gh").is_some();
+        let rows: Vec<(String, bool)> = live
             .items
             .iter()
             .filter_map(|i| match i {
                 Item::Tool { id, detail, .. } => crate::pr_card::read(id, detail)
-                    .and_then(|c| (!c.phase.terminal()).then(|| id.clone())),
+                    .filter(|c| !c.phase.terminal())
+                    .filter(|_| !live.pr_calls.values().any(|r| r == id))
+                    .map(|c| (id.clone(), gh && crate::pr_card::followable(&c))),
                 _ => None,
             })
             .collect();
-        for row in rows {
-            self.watch_pr(id, &row, cx);
+        for (row, follow) in rows {
+            if follow {
+                self.watch_pr(id, &row, cx);
+            } else {
+                self.pr_settle(id, &row, cx);
+            }
         }
+    }
+
+    /// The card row `row` of `id` stops working (`pr_card::settle`) and the change is kept.
+    fn pr_settle(&mut self, id: &str, row: &str, cx: &mut Context<Self>) {
+        let Some(live) = self.live.get_mut(id) else {
+            return;
+        };
+        let Some(ix) = live
+            .items
+            .iter()
+            .position(|i| matches!(i, Item::Tool { id, .. } if *id == row))
+        else {
+            return;
+        };
+        let mut changed = false;
+        crate::pr_card::edit(live, ix, |c| changed = crate::pr_card::settle(c));
+        if !changed {
+            return;
+        }
+        live.revision += 1;
+        let item = live.items.id_at(ix).map(str::to_string);
+        if let Some(item) = item {
+            cx.emit(WorkspaceEvent::CardChanged {
+                id: id.to_string(),
+                item,
+            });
+        }
+        cx.emit(WorkspaceEvent::Transcript {
+            id: id.to_string(),
+            appended: false,
+        });
+        cx.notify();
+        self.persist_soon(id, cx);
     }
 
     /// Follow the card row `row` (`Item::Tool` id) of `id` with `gh`: every few seconds at
@@ -5794,6 +5846,7 @@ impl Workspace {
         let row_ins = row.clone();
         let task = cx.spawn(async move |this, cx| {
             let mut polls = 0u32;
+            let mut gave_up = false;
             loop {
                 // The first look comes soon: a run watched after it ended shows how it ended.
                 let wait = if polls == 0 {
@@ -5807,6 +5860,7 @@ impl Workspace {
                 polls += 1;
                 // An hour at most; a PR open longer keeps its last state.
                 if polls > 240 {
+                    gave_up = true;
                     break;
                 }
                 let card = this
@@ -5881,9 +5935,13 @@ impl Workspace {
                     break;
                 }
             }
-            let _ = this.update(cx, |this, _| {
+            let _ = this.update(cx, |this, cx| {
                 if let Some(l) = this.live.get_mut(&tid) {
                     l.pr_watching.remove(&row_key);
+                }
+                // Nothing follows it now: a card still working stops rather than spin for good.
+                if gave_up {
+                    this.pr_settle(&tid, &row_key, cx);
                 }
             });
         });
@@ -7308,7 +7366,7 @@ impl Workspace {
         if crate::machines::is_remote(id) {
             return self.machine_thread_action(id, trek_remote::ThreadAction::Archive, cx);
         }
-        self.archive_children(id, cx);
+        let sub_agents = self.archive_children(id, cx);
         // A sub-agent still at its task: its parent hears it was stopped, rather than wait on it.
         if self.delegations.contains_key(id) {
             self.end_task_now(id, cx);
@@ -7350,11 +7408,18 @@ impl Workspace {
         if self.route == Route::Thread(id.into()) {
             self.new_thread(cx);
         }
-        // Its chat tab in the editor goes too.
+        // Its chat tab in the editor goes too, and its sub-agents' (the main window may be on one
+        // of them, opened from the transcript row: that thread is gone with its parent).
         self.ide_chat.forget(id);
+        for child in &sub_agents {
+            self.ide_chat.forget(child);
+        }
         self.chats_moved();
         self.threads.retain(|t| t.archived_at.is_none());
         self.threads_gen += 1;
+        if matches!(&self.route, Route::Thread(open) if sub_agents.contains(open)) {
+            self.new_thread(cx);
+        }
         cx.emit(WorkspaceEvent::Toast {
             message: "Archived".into(),
             undo: Some(UndoAction::Unarchive(id.into())),
@@ -7540,8 +7605,14 @@ impl Workspace {
                 undo: None,
             });
         }
-        let was_open = self.route == Route::Thread(id.into());
-        self.ide_chat.forget(id);
+        // The main window may be on the thread, a side chat or a sub-agent that went with it.
+        let was_open = matches!(
+            &self.route,
+            Route::Thread(open) if threads.iter().any(|t| t.id == *open)
+        );
+        for t in &threads {
+            self.ide_chat.forget(&t.id);
+        }
         self.chats_moved();
         self.reload(cx);
         if was_open {
@@ -8660,9 +8731,10 @@ impl Workspace {
                 if let Ok((pid, models)) = res {
                     if !models.is_empty() {
                         this.direct_models.insert(pid, models);
-                        cx.notify();
                     }
                 }
+                // Also when nothing came back: the menu's "Loading models…" is over.
+                cx.notify();
             });
         });
         self.keep(task);

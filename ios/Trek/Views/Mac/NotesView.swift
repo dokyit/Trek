@@ -232,7 +232,7 @@ struct NoteEditor: View {
             Text("Your Mac keeps it in the notes folder's Deleted.")
         }
         .sheet(item: $theirs) { note in
-            ConflictSheet(theirs: note, keepMine: keepMine, takeTheirs: { take(note) })
+            ConflictSheet(theirs: note, noteID: noteID, keepMine: keepMine, takeTheirs: { take(note) })
         }
         .task { open() }
         .onChange(of: text) { old, new in changed(old, new) }
@@ -513,6 +513,9 @@ private struct FormatBar: View {
 /// Mac's) or take the Mac's.
 private struct ConflictSheet: View {
     var theirs: Note
+    /// The note's id as the app knows it (qualified): the Mac's own `theirs.id` is bare, and
+    /// its pictures are fetched by the qualified one.
+    var noteID: String
     var keepMine: () -> Void
     var takeTheirs: () -> Void
 
@@ -526,7 +529,7 @@ private struct ConflictSheet: View {
                     .foregroundStyle(Trek.muted)
             }
             ScrollView {
-                NoteMarkdown(text: theirs.body, size: 15, noteID: theirs.id)
+                NoteMarkdown(text: theirs.body, size: 15, noteID: noteID)
                     .padding(14)
             }
             .frame(maxHeight: .infinity)

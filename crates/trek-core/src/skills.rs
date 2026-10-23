@@ -238,7 +238,12 @@ pub fn read_front_matter(skill_md: &Path) -> Option<(String, String)> {
             let mut lines = front.lines().peekable();
             while let Some(line) = lines.next() {
                 if let Some((k, v)) = line.split_once(':') {
-                    let mut v = v.trim().trim_matches('"').trim_matches('\'').to_string();
+                    let v = v.trim();
+                    let mut v = match v.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
+                        // A double-quoted scalar, as `yaml_description` writes one.
+                        Some(quoted) => unescape_yaml(quoted),
+                        None => v.trim_matches('"').trim_matches('\'').to_string(),
+                    };
                     // A folded (`>-`) or literal (`|`) block: the text is on the indented lines below.
                     let mut block = v.chars();
                     if matches!(block.next(), Some('>' | '|'))
@@ -433,7 +438,9 @@ pub fn set_enabled(skill: &Skill, on: bool) -> anyhow::Result<PathBuf> {
             n += 1;
         }
         // A symlinked skill: move the link, not what it points at.
-        move_dir(&skill.dir, &dest)?;
+        if !move_absolute_link(&skill.dir, &dest)? {
+            move_dir(&skill.dir, &dest)?;
+        }
         std::fs::write(dest.join(ORIGIN_FILE), skill.dir.display().to_string()).or_else(|e| {
             // A moved symlink to a read-only target: keep the origin beside it instead.
             let _ = move_dir(&dest, &skill.dir);
@@ -441,6 +448,24 @@ pub fn set_enabled(skill: &Skill, on: bool) -> anyhow::Result<PathBuf> {
         })?;
         Ok(dest)
     }
+}
+
+/// Move a symlink whose target is relative (`../../.agents/skills/foo`) to `to` as a link to the
+/// absolute target, so it doesn't dangle from its new folder. False when `from` isn't such a link.
+#[cfg(unix)]
+fn move_absolute_link(from: &Path, to: &Path) -> anyhow::Result<bool> {
+    let relative = std::fs::read_link(from).is_ok_and(|t| t.is_relative());
+    let Some(target) = relative.then(|| std::fs::canonicalize(from).ok()).flatten() else {
+        return Ok(false);
+    };
+    std::os::unix::fs::symlink(target, to)?;
+    std::fs::remove_file(from)?;
+    Ok(true)
+}
+
+#[cfg(not(unix))]
+fn move_absolute_link(_from: &Path, _to: &Path) -> anyhow::Result<bool> {
+    Ok(false)
 }
 
 fn move_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
@@ -549,6 +574,41 @@ pub fn slug(name: &str) -> String {
     s.trim_end_matches('-').to_string()
 }
 
+/// A description as one line of a front matter value that strict YAML readers (Codex's) accept:
+/// plain when it can be, else double-quoted with `\` and `"` escaped.
+fn yaml_description(description: &str) -> String {
+    let one_line = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    let plain = !one_line.contains(": ")
+        && !one_line.contains(" #")
+        && !one_line.contains(['"', '\\'])
+        && !one_line.ends_with(':')
+        && !one_line.starts_with(|c| "-?:,[]{}#&*!|>'%@`".contains(c));
+    if plain {
+        one_line
+    } else {
+        format!(
+            "\"{}\"",
+            one_line.replace('\\', "\\\\").replace('"', "\\\"")
+        )
+    }
+}
+
+/// The text of a double-quoted YAML scalar: `\\` and `\"` stand for themselves.
+fn unescape_yaml(quoted: &str) -> String {
+    let mut out = String::new();
+    let mut chars = quoted.chars();
+    while let Some(c) = chars.next() {
+        match (c, chars.clone().next()) {
+            ('\\', Some(n @ ('\\' | '"'))) => {
+                out.push(n);
+                chars.next();
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Create a new skill with a starter SKILL.md; returns the file to open.
 pub fn create(name: &str, description: &str, home: SkillHome) -> anyhow::Result<PathBuf> {
     let slug = slug(name);
@@ -557,9 +617,9 @@ pub fn create(name: &str, description: &str, home: SkillHome) -> anyhow::Result<
     anyhow::ensure!(!dir.exists(), "A skill named {slug} already exists");
     std::fs::create_dir_all(&dir)?;
     let description = if description.trim().is_empty() {
-        "Describe when an agent should use this skill."
+        "Describe when an agent should use this skill.".to_string()
     } else {
-        description.trim()
+        yaml_description(description)
     };
     let md = dir.join("SKILL.md");
     std::fs::write(
@@ -858,6 +918,70 @@ mod tests {
             .find(|s| s.name == "isolated-check")
             .expect("listed off");
         assert!(set_enabled(&off, true).unwrap().starts_with(&data));
+        let _ = std::fs::remove_dir_all(data);
+    }
+
+    #[test]
+    fn a_description_is_written_as_front_matter_strict_readers_accept() {
+        assert_eq!(
+            yaml_description("Use when reviewing PRs"),
+            "Use when reviewing PRs"
+        );
+        assert_eq!(
+            yaml_description("Use when: reviewing PRs"),
+            "\"Use when: reviewing PRs\""
+        );
+        assert_eq!(yaml_description("Fix it # now"), "\"Fix it # now\"");
+        assert_eq!(
+            yaml_description("Say \"hi\" \\ bye"),
+            r#""Say \"hi\" \\ bye""#
+        );
+        assert_eq!(yaml_description("[draft]\nnotes"), "\"[draft] notes\"");
+        // What `create` writes reads back as typed.
+        let data = std::env::temp_dir().join(format!("trek-skill-yaml-{}", std::process::id()));
+        crate::paths::isolate_thread(data.clone());
+        for typed in [
+            "Use when: reviewing PRs",
+            "Say \"hi\" \\ bye # ok",
+            "Plain one",
+        ] {
+            let md = create(typed, typed, SkillHome::ClaudeCode).unwrap();
+            let text = std::fs::read_to_string(&md).unwrap();
+            assert!(text.contains(&format!("description: {}\n", yaml_description(typed))));
+            assert_eq!(read_front_matter(&md).unwrap().1, typed);
+        }
+        let _ = std::fs::remove_dir_all(data);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_skill_linked_by_a_relative_path_can_be_turned_off_and_on() {
+        let data = std::env::temp_dir().join(format!("trek-relative-skill-{}", std::process::id()));
+        crate::paths::isolate_thread(data.clone());
+        let home = SkillHome::ClaudeCode.dir();
+        std::fs::create_dir_all(&home).unwrap();
+        let real = home.parent().unwrap().join("shared-skills/linked");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("SKILL.md"), "---\nname: linked\n---\n").unwrap();
+        let link = home.join("linked");
+        std::os::unix::fs::symlink("../shared-skills/linked", &link).unwrap();
+        let found = discover(None)
+            .into_iter()
+            .find(|s| s.name == "linked")
+            .expect("listed");
+        let off = set_enabled(&found, false).unwrap();
+        assert!(
+            off.join("SKILL.md").is_file(),
+            "the moved link still resolves"
+        );
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        let off = discover(None)
+            .into_iter()
+            .find(|s| s.name == "linked")
+            .expect("listed off");
+        assert_eq!(set_enabled(&off, true).unwrap(), link);
+        assert!(link.join("SKILL.md").is_file());
+        assert!(!real.join(ORIGIN_FILE).exists());
         let _ = std::fs::remove_dir_all(data);
     }
 
