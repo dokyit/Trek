@@ -119,9 +119,9 @@ struct GroupInfo {
 struct Graph {
     /// Threads with sub-agents in Trek's lists.
     parents: HashSet<String>,
-    /// `Workspace::waiting_on_sub_agents`.
+    /// `Workspace::waiting_on_sub_agents`, and `Machines::sub_agents_need_you`.
     needs: HashSet<String>,
-    /// `Workspace::waiting_threads`.
+    /// `Workspace::waiting_threads`, and `Machines::waiting`.
     waiting: HashSet<String>,
 }
 
@@ -235,7 +235,8 @@ impl Sidebar {
     }
 
     fn sync_clock(&mut self, cx: &mut Context<Self>) {
-        let running = self.workspace.read(cx).any_turn_running();
+        let ws = self.workspace.read(cx);
+        let running = ws.any_turn_running() || ws.machines.any_at_work();
         if self
             ._clock
             .as_ref()
@@ -629,7 +630,12 @@ impl Sidebar {
         }
         // Its turn is over but its sub-agents are still out: it's at work, waiting on them.
         if t.run_state == RunState::Idle && self.graph.waiting.contains(&t.id) {
-            let longest = ws.waiting_on(&t.id).iter().map(|w| w.elapsed).max();
+            let longest = ws
+                .waiting_on(&t.id)
+                .iter()
+                .map(|w| w.elapsed)
+                .max()
+                .or_else(|| ws.machines.waited_for(&t.id));
             let text = match longest {
                 Some(d) => format!("Waiting {}", time::elapsed(d)),
                 None => "Waiting".to_string(),
@@ -644,11 +650,14 @@ impl Sidebar {
         }
         match t.run_state {
             RunState::Working => {
+                // A machine's thread not open here counts from when its row says it started.
                 let (elapsed, secs) = ws
                     .live
                     .get(&t.id)
                     .and_then(|l| l.turn_started)
-                    .map(|s| (time::elapsed(s.elapsed()), s.elapsed().as_secs()))
+                    .map(|s| s.elapsed())
+                    .or_else(|| ws.machines.working_for(&t.id))
+                    .map(|d| (time::elapsed(d), d.as_secs()))
                     .unwrap_or_default();
                 let word = crate::mascot::word(&t.id, secs);
                 // The loader holds still and the clock beside it ticks: a spinning one would redraw
@@ -735,6 +744,9 @@ impl Sidebar {
         cx: &App,
     ) -> (Vec<(trek_core::AgentId, String)>, Vec<String>) {
         let ws = self.workspace.read(cx);
+        if crate::machines::is_remote(&t.id) {
+            return ws.machines.at_work(&t.id);
+        }
         let children = if self.graph.parents.contains(&t.id) {
             ws.running_children(&t.id)
         } else {
@@ -2257,8 +2269,17 @@ impl Render for Sidebar {
                 .iter()
                 .filter_map(|t| t.parent_id.clone())
                 .collect(),
-            needs: ws.waiting_on_sub_agents(),
-            waiting: ws.waiting_threads(),
+            // A machine's threads, as their rows say.
+            needs: ws
+                .waiting_on_sub_agents()
+                .into_iter()
+                .chain(ws.machines.sub_agents_need_you())
+                .collect(),
+            waiting: ws
+                .waiting_threads()
+                .into_iter()
+                .chain(ws.machines.waiting())
+                .collect(),
         };
         let ws = self.workspace.read(cx);
         // A title animating in draws a frame at a time, for the moment it takes.
@@ -2717,9 +2738,10 @@ impl Render for Sidebar {
             }
             live_groups.push((format!("live-g-{pid}").into(), group.into_any_element()));
         }
-        list = list.child(crate::motion::flip_stack(&flip, live_groups, now));
-        // Threads living on other machines, under each machine's name (`machines`). One that
-        // can't be reached says since when, and why when Trek can tell.
+        // Threads living on other machines, under each machine's name (`machines`). A machine
+        // with something to say (a thread at work, or one that needs you) sits above the
+        // projects, as a project with one sits above the quiet ones; a quiet machine goes under
+        // them. One that can't be reached says since when, and why when Trek can tell.
         let machines: Vec<(String, String, bool, Option<String>, Vec<Thread>)> = {
             let ws = self.workspace.read(cx);
             let this = crate::words::words().this_computer;
@@ -2738,7 +2760,14 @@ impl Render for Sidebar {
                 .filter(|(.., threads)| !threads.is_empty())
                 .collect()
         };
-        for (host, name, reachable, offline, threads) in machines {
+        let mut busy_machines = v_flex().w_full();
+        let mut quiet_machines = v_flex().w_full();
+        let mut machine_busy = false;
+        for (host, name, reachable, offline, mut threads) in machines {
+            // What has something to say first, as in a project's group.
+            threads.sort_by_key(|t| !attention(t));
+            let busy = threads.first().is_some_and(|t| attention(t));
+            machine_busy |= busy;
             let header = h_flex()
                 .id(SharedString::from(format!("machine-head-{host}")))
                 .test_support()
@@ -2782,10 +2811,18 @@ impl Render for Sidebar {
                 };
                 group = group.child(row);
             }
-            list = list.child(group);
+            if busy {
+                busy_machines = busy_machines.child(group);
+            } else {
+                quiet_machines = quiet_machines.child(group);
+            }
         }
+        list = list
+            .child(busy_machines)
+            .child(crate::motion::flip_stack(&flip, live_groups, now))
+            .child(quiet_machines);
         self.last_rows = last_rows;
-        if !live_shown && !searching && !named_sections_busy {
+        if !live_shown && !machine_busy && !searching && !named_sections_busy {
             list = list.child(
                 v_flex()
                     .mx_4()
