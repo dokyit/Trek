@@ -10,7 +10,6 @@
 //! `ToolStatus` stays `Done` — it stands for the pull request, not for the call that made it —
 //! and `phase` inside says where the PR itself stands.
 
-use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
 };
@@ -65,6 +64,12 @@ pub enum Phase {
 
 impl Phase {
     /// Nothing more to follow.
+    /// How long the composer's chip stays once a card has finished well (merged, published,
+    /// passed): long enough to see how it ended, then it goes. The card keeps the record.
+    pub const CHIP_LINGER_MS: i64 = 4_000;
+    /// How long a finished chip takes to fade out at the end of its linger.
+    pub const CHIP_FADE_MS: i64 = 250;
+
     pub fn terminal(self) -> bool {
         matches!(
             self,
@@ -258,11 +263,77 @@ fn run_name(card: &Card) -> &str {
 
 /// The colour a card's chip/badge wears (amber wins while it resolves conflicts).
 pub fn chip_tint(card: &Card, cx: &App) -> Hsla {
-    if card.resolving {
+    let tint = if card.resolving {
         crate::palette::amber(cx)
     } else {
         card.phase.tint(cx)
+    };
+    // On a light page the palette's amber and green go muddy at chip size; the reference's are
+    // the bright ones (#E8A33D, #2FA867). A dark page's palette is bright already.
+    if cx.theme().background.l > 0.5 {
+        if tint == crate::palette::amber(cx) {
+            return hsla(36. / 360., 0.78, 0.50, 1.);
+        }
+        if tint == crate::palette::emerald(cx) {
+            return hsla(147. / 360., 0.56, 0.42, 1.);
+        }
     }
+    tint
+}
+
+/// The reference's busy mark: a short arc running round a faint ring (not a dotted spinner).
+/// Still, as a quarter arc, when motion is reduced.
+pub fn ring_spinner(size: f32, color: Hsla, cx: &App) -> AnyElement {
+    let motion = !cx.reduce_motion();
+    canvas(
+        move |_, _, _| {},
+        move |b, _, window, _| {
+            let c = b.center();
+            let r = size / 2. - 1.;
+            let w = px(1.4);
+            // The track.
+            let mut track = PathBuilder::stroke(w);
+            let steps = 32;
+            for i in 0..=steps {
+                let a = i as f32 / steps as f32 * std::f32::consts::TAU;
+                let p = point(c.x + px(r) * a.cos(), c.y + px(r) * a.sin());
+                if i == 0 {
+                    track.move_to(p);
+                } else {
+                    track.line_to(p);
+                }
+            }
+            if let Ok(p) = track.build() {
+                window.paint_path(p, color.opacity(0.2));
+            }
+            // The arc: a third of the ring, once round every 0.8 s.
+            let turn = if motion {
+                (now_ms() % 800) as f32 / 800.
+            } else {
+                0.
+            };
+            let mut arc = PathBuilder::stroke(w);
+            let from = turn * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+            for i in 0..=12 {
+                let a = from + i as f32 / 12. * std::f32::consts::TAU / 3.;
+                let p = point(c.x + px(r) * a.cos(), c.y + px(r) * a.sin());
+                if i == 0 {
+                    arc.move_to(p);
+                } else {
+                    arc.line_to(p);
+                }
+            }
+            if let Ok(p) = arc.build() {
+                window.paint_path(p, color);
+            }
+            if motion {
+                window.request_animation_frame();
+            }
+        },
+    )
+    .size(px(size))
+    .flex_none()
+    .into_any_element()
 }
 
 /// The card of `Item::Tool` `id`/`detail`, when the row is one and its JSON reads.
@@ -306,6 +377,111 @@ fn latest_pr(live: &crate::workspace::LiveThread) -> Option<(usize, String, Card
         .into_iter()
         .filter(|(_, _, c)| c.kind == Kind::Pr)
         .next_back()
+}
+
+/// Until when the composer's chip shows `card` (unix ms): the moment it finished well plus
+/// [`Phase::CHIP_LINGER_MS`]. `None` while it's live, and for a failure, which stays until
+/// it's dealt with (the next message sent dismisses it).
+pub fn chip_until(card: &Card) -> Option<i64> {
+    matches!(card.phase, Phase::Merged | Phase::Published | Phase::Passed)
+        .then(|| card.phase_at_ms.max(card.created_ms) + Phase::CHIP_LINGER_MS)
+}
+
+/// The chip shows work under way: a spinner, and its state word in grey.
+pub fn chip_busy(card: &Card) -> bool {
+    card.resolving
+        || matches!(
+            card.phase,
+            Phase::Creating | Phase::Checking | Phase::Merging | Phase::Releasing
+        )
+        || (card.kind == Kind::Run && !card.phase.terminal())
+}
+
+/// The composer's status chip, as the reference draws it: a pill of the page's own colour with a
+/// hairline and a soft shadow; a mark (a spinner while it works, a dot while it waits, the kind's
+/// glyph once it's done), the name in ink, and the state, in its colour only when it's a verdict.
+pub fn status_chip(card: &Card, opacity: f32, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let tint = chip_tint(card, cx);
+    let busy = chip_busy(card);
+    let (what, state) = card.chip_parts();
+    let glyph = |icon: crate::assets::Lucide| {
+        Icon::new(icon)
+            .size(px(12.))
+            .text_color(tint)
+            .into_any_element()
+    };
+    let mark = if busy {
+        ring_spinner(12., theme.muted_foreground, cx)
+    } else {
+        match card.phase {
+            Phase::Merged => glyph(crate::assets::Lucide::GitMerge),
+            Phase::Published => glyph(crate::assets::Lucide::Rocket),
+            Phase::Passed => Icon::new(IconName::CircleCheck)
+                .size(px(12.))
+                .text_color(tint)
+                .into_any_element(),
+            Phase::Failed | Phase::Closed => Icon::new(IconName::CircleX)
+                .size(px(12.))
+                .text_color(tint)
+                .into_any_element(),
+            _ => div()
+                .size(px(6.))
+                .rounded_full()
+                .bg(tint)
+                .into_any_element(),
+        }
+    };
+    h_flex()
+        .id("pr-chip")
+        .test_support()
+        .aria_label(format!("{what} {state}"))
+        .flex_none()
+        .h(px(26.))
+        .px(px(11.))
+        .gap(px(6.))
+        .items_center()
+        .rounded_full()
+        .bg(chip_fill(cx))
+        .border_1()
+        .border_color(theme.foreground.opacity(0.08))
+        .shadow(chip_shadow())
+        .opacity(opacity)
+        .text_size(px(12.5))
+        .child(mark)
+        .child(div().text_color(theme.foreground.opacity(0.88)).child(what))
+        .child(
+            div()
+                .text_color(if busy { theme.muted_foreground } else { tint })
+                .child(state),
+        )
+        .into_any_element()
+}
+
+/// The chips' fill: the page's own colour, a touch lifted on a dark page so the pill reads.
+pub fn chip_fill(cx: &App) -> Hsla {
+    let theme = cx.theme();
+    if theme.background.l < 0.5 {
+        theme.background.blend(theme.foreground.opacity(0.05))
+    } else {
+        theme.background
+    }
+}
+
+/// The chips' shadow: soft and low, as the reference's.
+pub fn chip_shadow() -> Vec<BoxShadow> {
+    vec![BoxShadow {
+        color: hsla(0., 0., 0., 0.10),
+        offset: point(px(0.), px(1.)),
+        blur_radius: px(6.),
+        spread_radius: px(0.),
+        inset: false,
+    }]
+}
+
+/// Whether the composer's chip shows `card` at `now_ms`.
+pub fn chip_shown(card: &Card, now_ms: i64) -> bool {
+    chip_until(card).is_none_or(|until| now_ms < until)
 }
 
 /// The latest card of the thread, of any kind (the composer chip's).
@@ -1266,7 +1442,7 @@ pub fn edit(live: &mut crate::workspace::LiveThread, ix: usize, f: impl FnOnce(&
     true
 }
 
-fn now_ms() -> i64 {
+pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -1856,17 +2032,17 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
             card.number.map(|n| format!("#{n}")),
         ),
     };
+    let pill = card.kind == Kind::Pr;
     let badge = state_label(card).map(|label| {
         h_flex()
             .flex_none()
-            .gap(px(4.))
+            .gap(px(5.))
             .items_center()
             .rounded(px(6.))
-            .px(px(7.))
-            .py(px(2.))
-            .text_size(px(11.5))
+            .when(pill, |el| el.px(px(7.)).py(px(2.)).bg(tint.opacity(0.10)))
+            .text_size(px(if pill { 11.5 } else { 12. }))
+            .when(!pill, |el| el.font_medium())
             .text_color(tint)
-            .bg(tint.opacity(0.10))
             .child(match (card.kind, card.phase) {
                 (Kind::Pr, Phase::Merged) => Icon::new(crate::assets::Lucide::GitMerge)
                     .size(px(10.))
@@ -1890,7 +2066,7 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
                     .size(px(10.))
                     .text_color(tint)
                     .into_any_element(),
-                _ => Spinner::new().xsmall().color(tint).into_any_element(),
+                _ => ring_spinner(11., tint, cx),
             })
             .child(label)
     });
@@ -1961,12 +2137,13 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
             .text_color(muted)
             .child(Icon::new(IconName::ChevronRight).xsmall())
             .child(card.step.clone())
-            .when(busy && motion, |el| {
-                el.child(Spinner::new().xsmall().color(muted))
-            })
+            .when(busy && motion, |el| el.child(ring_spinner(11., muted, cx)))
     });
 
-    let band = band(card, clock, draw, pop, motion, cx);
+    // A run or release with no jobs known yet (or saved before they were read) has nothing to
+    // draw: no band, rather than an empty strip.
+    let band = (card.kind == Kind::Pr || !card.stages.is_empty())
+        .then(|| band(card, clock, draw, pop, motion, cx));
     let footer = footer(ix, card, &actions, cx);
     let tail = footer.is_none();
 
@@ -1984,7 +2161,7 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
                 .bg(theme.background)
                 .overflow_hidden()
                 .child(head)
-                .child(band)
+                .children(band)
                 .children(footer)
                 .child(div().h(px(if tail { 12. } else { 0. }))),
         )
@@ -2014,25 +2191,34 @@ fn state_tint(card: &Card, cx: &App) -> Hsla {
     }
 }
 
-/// The badge's words for its kind; `None` for a PR that isn't on GitHub yet.
-fn state_label(card: &Card) -> Option<&'static str> {
+/// The card's one state word, top right (the only place it's said); `None` for a PR that isn't
+/// on GitHub yet. A run or release says its result with a fact, as a finished job would:
+/// "Passed in 49m", "Published in 41m", "Running 3m 10s".
+fn state_label(card: &Card) -> Option<String> {
+    let took = |from: i64, to: i64| dur_label((to - from).max(0));
+    let began = if card.started_ms > 0 {
+        card.started_ms
+    } else {
+        card.created_ms
+    };
+    let settled = card.phase_at_ms.max(card.created_ms);
     match card.kind {
         Kind::Pr => match card.phase {
-            Phase::Merged => Some("Merged"),
-            Phase::Closed => Some("Closed"),
-            Phase::Failed => Some("Failed"),
-            _ if card.number.is_some() => Some("Open"),
+            Phase::Merged => Some("Merged".into()),
+            Phase::Closed => Some("Closed".into()),
+            Phase::Failed => Some("Failed".into()),
+            _ if card.number.is_some() => Some("Open".into()),
             _ => None,
         },
         Kind::Run => Some(match card.phase {
-            Phase::Passed => "Passed",
-            Phase::Failed | Phase::Closed => "Failed",
-            _ => "Running",
+            Phase::Passed => format!("Passed in {}", dur_label(run_ms(card))),
+            Phase::Failed | Phase::Closed => format!("Failed after {}", dur_label(run_ms(card))),
+            _ => format!("Running {}", dur_label(run_ms(card))),
         }),
         Kind::Release => Some(match card.phase {
-            Phase::Published => "Published",
-            Phase::Failed | Phase::Closed => "Failed",
-            _ => "Releasing",
+            Phase::Published => format!("Published in {}", took(began, settled)),
+            Phase::Failed | Phase::Closed => format!("Failed after {}", took(began, settled)),
+            _ => format!("Releasing {}", took(began, now_ms())),
         }),
     }
 }
@@ -2112,7 +2298,7 @@ fn sub_row(card: &Card, cx: &App) -> Option<AnyElement> {
         }
         Kind::Release => {
             if !card.channel.is_empty() {
-                row = row.child(mono(&card.channel, cx));
+                row = row.child(div().child(card.channel.clone()));
             }
             if !card.stages.is_empty() {
                 row = row.child(format!(
@@ -2233,32 +2419,18 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
                         .text_color(amber)
                         .into_any_element(),
                     amber,
+                    // The count is the graph's label; the footer says where and what to do.
                     if card.resolving {
-                        "Resolving conflicts".to_string()
+                        format!("Merging {} into the branch", card.base)
                     } else {
-                        format!(
-                            "{} with {}",
-                            if n == 0 && card.resolved.is_empty() {
-                                "Conflicts".to_string()
-                            } else if n == 0 {
-                                match card.resolved.len() {
-                                    1 => "1 conflict".to_string(),
-                                    r => format!("{r} conflicts"),
-                                }
-                            } else if n == 1 {
-                                "1 conflict".to_string()
-                            } else {
-                                format!("{n} conflicts")
-                            },
-                            card.base
-                        )
+                        "Changed on both branches".to_string()
                     },
                     if card.resolving && n == 0 {
                         "Pushing the merge".to_string()
                     } else if card.resolving {
                         format!("{n} left to clear")
                     } else {
-                        "These files changed on both branches".to_string()
+                        format!("Merge {} in and resolve them", card.base)
                     },
                 )
             }
@@ -2270,11 +2442,12 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
                         .text_color(green)
                         .into_any_element(),
                     green,
-                    "Ready to merge".to_string(),
+                    // "Ready to merge" is the graph's label: here, why.
+                    "No conflicts".to_string(),
                     if n == 0 {
-                        "No conflicts".to_string()
+                        format!("Merges cleanly into {}", card.base)
                     } else {
-                        format!("No conflicts · all {n} checks passed")
+                        format!("All {n} checks passed")
                     },
                 )
             }
@@ -2284,7 +2457,12 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
                     .text_color(indigo)
                     .into_any_element(),
                 indigo,
-                format!("Merged into {}", card.base),
+                // The header says Merged: here, what landed where.
+                match card.commits {
+                    Some(1) => format!("1 commit landed in {}", card.base),
+                    Some(n) => format!("{n} commits landed in {}", card.base),
+                    None => format!("Landed in {}", card.base),
+                },
                 if card.branch_deleted && !card.head.is_empty() {
                     format!("{} was deleted · {}", card.head, ago(when))
                 } else {
@@ -2311,24 +2489,16 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
             ),
             _ => return None,
         },
+        // A run that passed has nothing to add to its header's "Passed in 49m".
         Kind::Run => match card.phase {
-            Phase::Passed => (
-                Icon::new(IconName::CircleCheck)
-                    .size(px(12.))
-                    .text_color(green)
-                    .into_any_element(),
-                green,
-                "All jobs passed".to_string(),
-                format!("{} jobs · {}", card.stages.len(), dur_label(run_ms(card))),
-            ),
             Phase::Failed => (
                 Icon::new(IconName::CircleX)
                     .size(px(12.))
                     .text_color(red)
                     .into_any_element(),
                 red,
-                "Run failed".to_string(),
-                card.step.clone(),
+                failed_jobs(card),
+                failure_detail(card),
             ),
             _ => return None,
         },
@@ -2339,12 +2509,13 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
                     .text_color(indigo)
                     .into_any_element(),
                 indigo,
-                format!("Published v{}", card.version),
-                if card.channel.is_empty() {
-                    ago(when)
+                // The header says Published: here, where it went.
+                if card.channel.is_empty() || card.channel == "stable" {
+                    "The downloads are up".to_string()
                 } else {
-                    format!("{} channel · {}", card.channel, ago(when))
+                    format!("The downloads are up on {}", card.channel)
                 },
+                ago(when),
             ),
             Phase::Failed => (
                 Icon::new(IconName::CircleAlert)
@@ -2352,8 +2523,8 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
                     .text_color(red)
                     .into_any_element(),
                 red,
-                "Release failed".to_string(),
-                card.step.clone(),
+                failed_jobs(card),
+                failure_detail(card),
             ),
             _ => return None,
         },
@@ -2375,7 +2546,15 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
                     .map(|f| file_chip(&lang_tag(f), f, Some(("!", amber)), cx)),
             );
         }
-        Kind::Run | Kind::Release if card.phase == Phase::Failed => {
+        Kind::Run | Kind::Release
+            if card.phase == Phase::Failed
+                && card
+                    .stages
+                    .iter()
+                    .filter(|s| s.state == CheckState::Fail)
+                    .count()
+                    > 1 =>
+        {
             chips.extend(
                 card.stages
                     .iter()
@@ -2407,11 +2586,11 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
         (Kind::Run, Phase::Failed) | (Kind::Release, Phase::Failed) => actions
             .open
             .clone()
-            .map(|f| action_pill(("pr-logs", ix), None, "View logs", f, cx)),
+            .map(|f| link_pill(("pr-logs", ix), "View logs", red, f)),
         (Kind::Release, Phase::Published) => actions
             .open
             .clone()
-            .map(|f| action_pill(("pr-logs", ix), None, "View release", f, cx)),
+            .map(|f| link_pill(("pr-logs", ix), "Open release", indigo, f)),
         _ => None,
     };
 
@@ -2505,6 +2684,74 @@ fn action_pill(
         .into_any_element()
 }
 
+/// What's left to do with something finished: open it elsewhere. Its state's colour on a soft
+/// tint, with the arrow that says it leaves Trek.
+fn link_pill(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    tint: Hsla,
+    on_click: Rc<dyn Fn(&mut Window, &mut App)>,
+) -> AnyElement {
+    h_flex()
+        .id(id.into())
+        .test_support()
+        .aria_label(label)
+        .flex_none()
+        .gap(px(4.))
+        .items_center()
+        .h(px(24.))
+        .px(px(10.))
+        .rounded_full()
+        .bg(tint.opacity(0.10))
+        .hover(move |s| s.bg(tint.opacity(0.16)))
+        .cursor_pointer()
+        .text_size(px(12.))
+        .font_medium()
+        .text_color(tint)
+        .child(label)
+        .child(
+            Icon::new(crate::assets::Lucide::ArrowUpRight)
+                .size(px(12.))
+                .text_color(tint),
+        )
+        .on_click(move |_, window, cx| on_click(window, cx))
+        .into_any_element()
+}
+
+/// Under a failed run's or release's title: what the step line adds, or how the other jobs did
+/// when the step only says the same thing again ("Failed: Test (Windows)").
+fn failure_detail(card: &Card) -> String {
+    if !card.step.is_empty() && !card.step.starts_with("Failed") {
+        return card.step.clone();
+    }
+    let total = card.stages.len();
+    let passed = card
+        .stages
+        .iter()
+        .filter(|s| s.state == CheckState::Pass)
+        .count();
+    match (passed, total) {
+        (_, 0) => String::new(),
+        (p, t) if p + 1 == t => "The other jobs passed".to_string(),
+        (0, _) => "No job passed".to_string(),
+        (p, t) => format!("{p} of {t} jobs passed"),
+    }
+}
+
+/// A failed run or release's title: the job that failed, or how many did.
+fn failed_jobs(card: &Card) -> String {
+    let failed: Vec<&Stage> = card
+        .stages
+        .iter()
+        .filter(|s| s.state == CheckState::Fail)
+        .collect();
+    match failed.as_slice() {
+        [] => "Something failed".to_string(),
+        [one] => format!("{} failed", one.label),
+        many => format!("{} jobs failed", many.len()),
+    }
+}
+
 /// The same place once clicked: a quiet grey pill with a small spinner.
 fn busy_pill(id: impl Into<ElementId>, label: &'static str, cx: &App) -> AnyElement {
     let theme = cx.theme();
@@ -2521,7 +2768,7 @@ fn busy_pill(id: impl Into<ElementId>, label: &'static str, cx: &App) -> AnyElem
         .bg(theme.foreground.opacity(0.06))
         .text_size(px(12.))
         .text_color(theme.muted_foreground)
-        .child(Spinner::new().xsmall().color(theme.muted_foreground))
+        .child(ring_spinner(12., theme.muted_foreground, cx))
         .child(label)
         .into_any_element()
 }
@@ -2825,7 +3072,8 @@ fn tip_label(card: &Card, cx: &App) -> Option<(String, Hsla)> {
         Phase::Ready | Phase::Merging => {
             Some(("Ready to merge".to_string(), crate::palette::emerald(cx)))
         }
-        Phase::Merged => Some(("Merged".to_string(), crate::palette::indigo(cx))),
+        // The header says Merged, and the filled purple node shows it.
+        Phase::Merged => None,
         Phase::Closed => Some(("Closed".to_string(), crate::palette::red(cx))),
         Phase::Failed => Some(("Failed".to_string(), crate::palette::red(cx))),
         _ => None,
@@ -3294,26 +3542,19 @@ fn pipeline_labels(card: &Card, cx: &App) -> Vec<AnyElement> {
                 .into_any_element(),
         );
     }
-    let label = match card.phase {
-        Phase::Passed => "Passed".to_string(),
-        Phase::Failed => "Failed".to_string(),
-        _ => {
-            let done = card.stages.iter().filter(|s| !s.state.pending()).count();
-            if n == 0 {
-                "Running".to_string()
-            } else {
-                format!("{done} of {n} done")
-            }
-        }
-    };
-    out.push(
-        div()
-            .absolute()
-            .right(relative(0.05))
-            .top(px(4.))
-            .child(band_pill(label, tip))
-            .into_any_element(),
-    );
+    // While it runs, how far along (a fact the header doesn't give); once it's done the header's
+    // "Passed in 49m" says it all and the target's mark needs no word.
+    if !card.phase.terminal() && n > 0 {
+        let done = card.stages.iter().filter(|s| !s.state.pending()).count();
+        out.push(
+            div()
+                .absolute()
+                .right(relative(0.05))
+                .top(px(4.))
+                .child(band_pill(format!("{done} of {n} done"), tip))
+                .into_any_element(),
+        );
+    }
     out
 }
 
@@ -3406,19 +3647,17 @@ fn lane_labels(card: &Card, cx: &App) -> Vec<AnyElement> {
                 .into_any_element(),
         );
     }
-    let label = match card.phase {
-        Phase::Published => "Published",
-        Phase::Failed => "Failed",
-        _ => "Releasing",
-    };
-    out.push(
-        div()
-            .absolute()
-            .right(relative(0.05))
-            .top(px(4.))
-            .child(band_pill(label.to_string(), tip))
-            .into_any_element(),
-    );
+    // The target is the version the lanes ship (the header says how it went).
+    if !card.version.is_empty() {
+        out.push(
+            div()
+                .absolute()
+                .right(relative(0.05))
+                .top(px(4.))
+                .child(band_pill(format!("v{}", card.version), tip))
+                .into_any_element(),
+        );
+    }
     out
 }
 
@@ -3756,6 +3995,41 @@ mod tests {
 
     fn words(s: &str) -> Vec<String> {
         segments(s).iter().map(|s| s.trim().to_string()).collect()
+    }
+
+    #[test]
+    fn a_finished_chip_lingers_and_goes_a_live_or_failed_one_stays() {
+        use super::{chip_shown, chip_until};
+        let at = 1_000_000;
+        let live = Card {
+            phase: Phase::Checking,
+            phase_at_ms: at,
+            ..Default::default()
+        };
+        assert_eq!(chip_until(&live), None);
+        assert!(chip_shown(&live, at + 10 * Phase::CHIP_LINGER_MS));
+        // A failure stays (until the next message dismisses it); a good finish goes.
+        let failed = Card {
+            phase: Phase::Failed,
+            phase_at_ms: at,
+            ..Default::default()
+        };
+        assert!(chip_shown(&failed, at + 10 * Phase::CHIP_LINGER_MS));
+        for phase in [Phase::Merged, Phase::Published, Phase::Passed] {
+            let done = Card {
+                phase,
+                phase_at_ms: at,
+                ..Default::default()
+            };
+            assert!(
+                chip_shown(&done, at + 1_000),
+                "{phase:?} shows as it settles"
+            );
+            assert!(
+                !chip_shown(&done, at + Phase::CHIP_LINGER_MS),
+                "{phase:?} goes after its linger"
+            );
+        }
     }
 
     #[test]
