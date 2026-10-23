@@ -735,15 +735,19 @@ impl Element for FlipStack {
         cx: &mut App,
     ) -> StackFrame {
         let now = now(cx);
+        // Offsets on whole device pixels, as the rows are drawn: a band that's off by a fraction
+        // would let a passing row show a sliver under the group going up.
+        let scale = window.scale_factor();
         let groups: Vec<Stacked> = self
             .groups
             .iter()
             .zip(ids.iter())
             .map(|((key, _), id)| {
                 let bounds = window.layout_bounds(*id);
+                let offset = self.store.borrow_mut().place(key, bounds, now, window);
                 Stacked {
                     bounds,
-                    offset: self.store.borrow_mut().place(key, bounds, now, window),
+                    offset: (offset * scale).round() / scale,
                 }
             })
             .collect();

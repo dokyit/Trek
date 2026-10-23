@@ -4,9 +4,7 @@
 use crate::palette;
 use crate::time;
 use crate::ui;
-use crate::workspace::{
-    ItemRef, PanelTool, Route, SettingsPage, UpdateStatus, Workspace, WorkspaceEvent,
-};
+use crate::workspace::{ItemRef, Route, SettingsPage, UpdateStatus, Workspace};
 use crate::worktree_ui::Leave;
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::WindowExt as _;
@@ -93,6 +91,12 @@ struct Ghost {
 
 /// A project's group in the live list as drawn: its rows top to bottom (thread ids), and whether
 /// a "Show more" / "Show less" line closes it.
+/// How far a row's text sits in from its rounded hover box: headings and rows line up on it.
+const ROW_INSET: f32 = 10.;
+
+/// The Active section's key among the live groups (no project id looks like it).
+const ACTIVE: &str = "\u{0}active";
+
 #[derive(Clone, Debug, PartialEq)]
 struct LiveGroup {
     pid: String,
@@ -104,10 +108,6 @@ struct LiveGroup {
 #[derive(Default)]
 struct GroupInfo {
     name: String,
-    unread: usize,
-    needs: usize,
-    working: usize,
-    total: usize,
     folded: bool,
     open: bool,
     /// Quiet rows behind "Show more".
@@ -793,15 +793,8 @@ impl Sidebar {
         let id = t.id.clone();
         let hit = self.content_hit(t, cx);
         let title = h_flex()
-            .h(px(30.))
+            .h(px(20.))
             .gap_2()
-            .when(badge, |el| {
-                el.child(if t.project_id.is_none() {
-                    no_project_badge(cx)
-                } else {
-                    ui::project_badge(project, &self.workspace.read(cx).thread_project_look(t), cx)
-                })
-            })
             .child(
                 div()
                     .flex_1()
@@ -869,22 +862,41 @@ impl Sidebar {
                         .rounded_full()
                         .bg(palette::sky(cx)),
                 )
-            })
-            .child(self.status(t, cx));
+            });
+        // Under the title, what it's doing (and, out of its project's group, where).
+        let doing = h_flex()
+            .h(px(16.))
+            .gap(px(5.))
+            .min_w_0()
+            .child(self.status(t, cx))
+            .when(badge && t.project_id.is_some(), |el| {
+                el.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("· {project}")),
+                )
+            });
         let row = v_flex()
             .id(SharedString::from(format!("card-{}", t.id)))
             .test_support()
+            .relative()
             .mx_2()
-            .pl(px(if badge { 12. } else { 30. }))
+            .py(px(5.))
+            .pl(px(ROW_INSET))
             .pr_3()
             .rounded(px(8.))
             .cursor_pointer()
             .text_sm()
             .when(selected, |el| el.bg(theme.list_active))
             .when(!selected, |el| el.hover(|s| s.bg(theme.list_hover)))
+            .children(self.tab_mark(&t.id, selected, cx))
             .child(title)
+            .child(doing)
             .when_some(hit.clone(), |el, h| {
-                el.child(Self::hit_line(&h, cx).mt(px(-6.)).pb(px(6.)))
+                el.child(Self::hit_line(&h, cx).pt(px(2.)))
             })
             .when_some(tip, |el, tip| {
                 el.tooltip(move |window, cx| {
@@ -893,6 +905,28 @@ impl Sidebar {
             })
             .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), hit.clone(), cx)));
         self.with_menu(row, t, cx).into_any_element()
+    }
+
+    /// A thin bar at a row's left edge while its thread is open as a tab (solid for the one on
+    /// screen): what's open, without a second list.
+    fn tab_mark(&self, id: &str, selected: bool, cx: &App) -> Option<AnyElement> {
+        let open = self.workspace.read(cx).tabs.iter().any(|t| t == id);
+        let theme = cx.theme();
+        (open || selected).then(|| {
+            div()
+                .absolute()
+                .left(px(2.))
+                .top(px(9.))
+                .bottom(px(9.))
+                .w(px(2.))
+                .rounded(px(1.))
+                .bg(if selected {
+                    theme.foreground.opacity(0.8)
+                } else {
+                    theme.foreground.opacity(0.16)
+                })
+                .into_any_element()
+        })
     }
 
     /// Codex-style compact row for settled history. One whose sub-agents or background work are
@@ -938,19 +972,26 @@ impl Sidebar {
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground.opacity(0.8))
+                    .invisible()
+                    .group_hover(SharedString::from(format!("line-{}", t.id)), |s| {
+                        s.visible()
+                    })
                     .child(time::relative(t.updated_at)),
             );
         let row = v_flex()
             .id(SharedString::from(format!("line-{}", t.id)))
+            .group(SharedString::from(format!("line-{}", t.id)))
             .test_support()
+            .relative()
             .mx_2()
-            .pl(px(30.))
+            .pl(px(ROW_INSET))
             .pr_3()
             .rounded(px(8.))
             .cursor_pointer()
             .text_sm()
             .when(selected, |el| el.bg(theme.list_active))
             .when(!selected, |el| el.hover(|s| s.bg(theme.list_hover)))
+            .children(self.tab_mark(&t.id, selected, cx))
             .child(title)
             .when_some(hit.clone(), |el, h| {
                 el.child(Self::hit_line(&h, cx).mt(px(-6.)).pb(px(6.)))
@@ -1043,20 +1084,27 @@ impl Sidebar {
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground.opacity(0.8))
+                    .invisible()
+                    .group_hover(SharedString::from(format!("live-line-{}", t.id)), |s| {
+                        s.visible()
+                    })
                     .child(time::relative(t.updated_at))
                     .into_any_element()
             });
         let row = v_flex()
             .id(SharedString::from(format!("live-line-{}", t.id)))
+            .group(SharedString::from(format!("live-line-{}", t.id)))
             .test_support()
+            .relative()
             .mx_2()
-            .pl(px(30.))
+            .pl(px(ROW_INSET))
             .pr_3()
             .rounded(px(8.))
             .cursor_pointer()
             .text_sm()
             .when(selected, |el| el.bg(theme.list_active))
             .when(!selected, |el| el.hover(|s| s.bg(theme.list_hover)))
+            .children(self.tab_mark(&t.id, selected, cx))
             .child(title)
             .when_some(hit.clone(), |el, h| {
                 el.child(Self::hit_line(&h, cx).mt(px(-6.)).pb(px(6.)))
@@ -1080,7 +1128,6 @@ impl Sidebar {
         extra: Option<AnyElement>,
         fold: Option<bool>,
         paths: &HashMap<String, std::path::PathBuf>,
-        looks: &HashMap<String, crate::ui::ProjectLook>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
@@ -1095,13 +1142,13 @@ impl Sidebar {
             .test_support()
             .group("proj-head")
             .mx_2()
-            .pl_3()
+            .pl(px(ROW_INSET))
             .pr_1()
-            .h(px(30.))
-            .mt_1()
+            .h(px(28.))
+            .mt(px(8.))
             .gap_2()
             .rounded(px(8.))
-            .text_sm()
+            .text_xs()
             .text_color(theme.muted_foreground)
             .child(
                 h_flex()
@@ -1111,28 +1158,24 @@ impl Sidebar {
                     .min_w_0()
                     .gap_2()
                     .cursor_pointer()
-                    .map(|el| {
-                        if pid.is_empty() {
-                            el.child(no_project_badge(cx))
-                        } else {
-                            el.child(ui::project_badge(
-                                &name,
-                                &looks.get(pid).cloned().unwrap_or_default(),
-                                cx,
-                            ))
-                        }
-                    })
                     .child(div().min_w_0().truncate().child(name.clone()))
                     .when_some(extra, |el, extra| el.child(extra))
+                    // Folded, the chevron says so; open, it shows only to the pointer.
                     .when_some(fold, |el, folded| {
                         el.child(
-                            Icon::new(if folded {
-                                IconName::ChevronRight
-                            } else {
-                                IconName::ChevronDown
-                            })
-                            .xsmall()
-                            .text_color(theme.muted_foreground),
+                            div()
+                                .when(!folded, |el| {
+                                    el.invisible().group_hover("proj-head", |s| s.visible())
+                                })
+                                .child(
+                                    Icon::new(if folded {
+                                        IconName::ChevronRight
+                                    } else {
+                                        IconName::ChevronDown
+                                    })
+                                    .xsmall()
+                                    .text_color(theme.muted_foreground),
+                                ),
                         )
                     })
                     .when(fold.is_some(), |el| {
@@ -1495,9 +1538,10 @@ impl Sidebar {
 
     fn label(text: &str, cx: &App) -> impl IntoElement {
         div()
-            .px_5()
-            .pt_3()
-            .pb_1()
+            .mx_2()
+            .pl(px(ROW_INSET))
+            .pt(px(10.))
+            .pb(px(4.))
             .text_xs()
             .text_color(cx.theme().muted_foreground)
             .child(text.to_string())
@@ -1532,30 +1576,35 @@ impl Sidebar {
                 cx.notify();
             }))
             .trigger({
-                let peak = self
-                    .workspace
-                    .read(cx)
-                    .usage_rows()
+                // The plan's nearest limit, as a ring and its share; a plain icon before any is known.
+                let rows = self.workspace.read(cx).usage_rows();
+                let peak = rows
                     .iter()
                     .flat_map(|r| r.limits.iter().map(|l| l.percent))
-                    .fold(0.0f32, f32::max);
-                let tint = if peak >= 95. {
-                    Some(palette::red(cx))
-                } else if peak >= 80. {
-                    Some(palette::amber(cx))
-                } else {
-                    None
+                    .fold(None, |m: Option<f32>, p| Some(m.map_or(p, |m| m.max(p))));
+                let tint = match peak {
+                    Some(p) if p >= 95. => palette::red(cx),
+                    Some(p) if p >= 80. => palette::amber(cx),
+                    _ => theme.foreground.opacity(0.75),
                 };
-                let icon = Icon::new(crate::assets::Lucide::ChartNoAxesColumn);
-                ui::icon_button(
-                    "usage",
-                    match tint {
-                        Some(c) => icon.text_color(c),
-                        None => icon,
-                    },
-                    "Usage",
-                )
-                .selected(usage_open)
+                ui::Pill::new("usage")
+                    .ghost(true)
+                    .small(true)
+                    .selected(usage_open)
+                    .tooltip("Usage")
+                    .map(|p| match peak {
+                        Some(peak) => p.child(usage_ring(peak / 100., tint, cx)).child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(format!("{peak:.0}%")),
+                        ),
+                        None => p.child(
+                            Icon::new(crate::assets::Lucide::ChartNoAxesColumn)
+                                .small()
+                                .text_color(theme.muted_foreground),
+                        ),
+                    })
             })
             .content({
                 let this = this.clone();
@@ -1572,63 +1621,79 @@ impl Sidebar {
         // Found but not downloaded (automatic downloads off): say so, in neutral; ember is for
         // the one-click "restart into it".
         let available = matches!(update, UpdateStatus::Available { .. });
-        let label_color = if ready {
-            palette::ember(cx)
-        } else {
-            theme.foreground
-        };
         // Just updated: the pill offers what the update brought, until it's been opened.
         let whats_new =
             !ready && !available && !busy && self.workspace.read(cx).whats_new().is_some();
-        let updater = Popover::new("updater-popover")
-            .anchor(Anchor::BottomRight)
-            .appearance(false)
-            .open(updater_open)
-            .on_open_change(cx.listener(|this, open: &bool, _, cx| {
-                this.updater_open = *open;
-                // Seen once the card closes: marking it on open would empty the card being read.
-                if !*open {
-                    this.workspace.update(cx, |ws, cx| {
-                        if ws.whats_new().is_some() {
-                            ws.mark_whats_new_seen(cx);
-                        }
-                    });
-                }
-                cx.notify();
-            }))
-            .trigger(
-                ui::Pill::new("updater")
-                    .ghost(!ready && !available && !whats_new)
-                    .selected(updater_open)
-                    .child(if busy {
-                        Spinner::new()
-                            .xsmall()
-                            .color(theme.muted_foreground)
-                            .into_any_element()
-                    } else if whats_new {
-                        Icon::new(crate::assets::Lucide::Sparkles)
-                            .small()
-                            .text_color(palette::ember(cx))
-                            .into_any_element()
-                    } else {
-                        let color = if ready || available {
-                            label_color
+        // An update to install (or what the last one brought): a notice above the footer, only
+        // then; the card it opens has the rest. Checking quietly needs no mark at all.
+        let notice: Option<(String, &'static str)> = match &update {
+            UpdateStatus::Ready { version, .. } | UpdateStatus::RestartPending { version, .. } => {
+                Some((format!("Trek {version} is ready"), "Restart"))
+            }
+            UpdateStatus::Available { version } => {
+                Some((format!("Trek {version} is out"), "Get it"))
+            }
+            UpdateStatus::Downloading { version, .. } => {
+                Some((format!("Getting Trek {version}…"), ""))
+            }
+            _ if whats_new => Some((format!("What's new in Trek {}", trek_core::VERSION), "Read")),
+            _ => None,
+        };
+        let updater = notice.map(|(text, action)| {
+            let accent = if ready {
+                palette::ember(cx)
+            } else {
+                theme.foreground
+            };
+            Popover::new("updater-popover")
+                .anchor(Anchor::BottomLeft)
+                .appearance(false)
+                .open(updater_open)
+                .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+                    this.updater_open = *open;
+                    // Seen once the card closes: marking it on open would empty the card being read.
+                    if !*open {
+                        this.workspace.update(cx, |ws, cx| {
+                            if ws.whats_new().is_some() {
+                                ws.mark_whats_new_seen(cx);
+                            }
+                        });
+                    }
+                    cx.notify();
+                }))
+                .trigger(
+                    ui::Pill::new("updater")
+                        .flexible()
+                        .selected(updater_open)
+                        .child(if busy {
+                            Spinner::new()
+                                .xsmall()
+                                .color(theme.muted_foreground)
+                                .into_any_element()
+                        } else if whats_new && !ready && !available {
+                            Icon::new(crate::assets::Lucide::Sparkles)
+                                .small()
+                                .text_color(palette::ember(cx))
+                                .into_any_element()
                         } else {
-                            theme.muted_foreground
-                        };
-                        Icon::new(IconName::RefreshCw)
-                            .small()
-                            .text_color(color)
-                            .into_any_element()
-                    })
-                    .when(ready || available, |el| {
-                        el.child(div().text_xs().text_color(label_color).child("Update"))
-                    })
-                    .when(whats_new, |el| {
-                        el.child(div().text_xs().child("What's new"))
-                    }),
-            )
-            .content(move |_, _, cx| this.update(cx, |this, cx| this.updater_card(cx)));
+                            Icon::new(crate::assets::Lucide::CircleArrowUp)
+                                .small()
+                                .text_color(accent)
+                                .into_any_element()
+                        })
+                        .child(div().flex_1().min_w_0().truncate().text_xs().child(text))
+                        .when(!action.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .text_xs()
+                                    .font_medium()
+                                    .text_color(accent)
+                                    .child(action),
+                            )
+                        }),
+                )
+                .content(move |_, _, cx| this.update(cx, |this, cx| this.updater_card(cx)))
+        });
         // New agent CLI versions: a quiet pill with how many, only while there's one to install.
         // Kept while its card is open, so the last update finishing doesn't take the card away.
         let agent_updates = {
@@ -1671,38 +1736,42 @@ impl Sidebar {
                 )
                 .content(move |_, _, cx| crate::agent_updates::card(&ws, cx))
         });
-        h_flex()
+        v_flex()
             .px_3()
-            .py_2()
-            .gap_1()
+            .pb_2()
+            .gap(px(6.))
+            .children(updater.map(|u| div().pt_1().child(u)))
             .child(
-                ui::icon_button("open-settings", IconName::Settings, "Settings (⌘,)")
-                    .selected(in_settings)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.workspace.update(cx, |ws, cx| {
-                            ws.navigate(Route::Settings(SettingsPage::General), cx)
-                        })
-                    })),
-            )
-            .child(
-                ui::icon_button(
-                    "open-git",
-                    crate::assets::Lucide::GitCompare,
-                    "Source control",
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.workspace.update(cx, |_, cx| {
-                        cx.emit(WorkspaceEvent::OpenTool(PanelTool::Git))
+                h_flex()
+                    .pt(px(6.))
+                    .gap_1()
+                    .border_t_1()
+                    .border_color(theme.border.opacity(0.6))
+                    .child(
+                        ui::Pill::new("open-settings")
+                            .ghost(!in_settings)
+                            .small(true)
+                            .selected(in_settings)
+                            .tooltip(crate::keys::shared("Settings (⌘,)"))
+                            .child(
+                                Icon::new(IconName::Settings)
+                                    .small()
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .child(div().text_xs().child("Settings"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.workspace.update(cx, |ws, cx| {
+                                    ws.navigate(Route::Settings(SettingsPage::General), cx)
+                                })
+                            })),
+                    )
+                    .child(div().flex_1())
+                    .when(importing, |el| {
+                        el.child(Spinner::new().xsmall().color(theme.muted_foreground))
                     })
-                })),
+                    .children(agent_updates)
+                    .child(usage),
             )
-            .child(usage)
-            .child(div().flex_1())
-            .when(importing, |el| {
-                el.child(Spinner::new().xsmall().color(theme.muted_foreground))
-            })
-            .children(agent_updates)
-            .child(updater)
     }
 
     /// Plan usage per agent: 5-hour, weekly and per-model windows with reset times, for the
@@ -2102,26 +2171,44 @@ fn kid_groups(kids: &[(trek_core::AgentId, String)]) -> Vec<(trek_core::AgentId,
     out
 }
 
-/// A card's tooltip while it has work out: its sub-agents, then what runs in the background.
-/// Where a project's badge goes, for threads in no project: a chat bubble, not a monogram.
-fn no_project_badge(cx: &App) -> AnyElement {
-    div()
-        .flex_none()
-        .h(px(16.))
-        .w(px(20.))
-        .rounded(px(4.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(cx.theme().foreground.opacity(0.07))
-        .child(
-            Icon::new(crate::assets::Lucide::MessageSquare)
-                .size(px(11.))
-                .text_color(cx.theme().muted_foreground),
-        )
-        .into_any_element()
+/// A small ring filled to `fraction` (0–1) in `color`, on a faint track: the footer's usage.
+fn usage_ring(fraction: f32, color: Hsla, cx: &App) -> AnyElement {
+    let track = cx.theme().foreground.opacity(0.15);
+    let fraction = fraction.clamp(0., 1.);
+    canvas(
+        |_, _, _| {},
+        move |b, _, window, _| {
+            let c = b.center();
+            let r = 5.;
+            let arc = |from: f32, to: f32, color: Hsla, window: &mut Window| {
+                let mut path = PathBuilder::stroke(px(1.8));
+                let steps = 32;
+                for i in 0..=steps {
+                    let a = -std::f32::consts::FRAC_PI_2
+                        + (from + (to - from) * i as f32 / steps as f32) * std::f32::consts::TAU;
+                    let p = point(c.x + px(r) * a.cos(), c.y + px(r) * a.sin());
+                    if i == 0 {
+                        path.move_to(p);
+                    } else {
+                        path.line_to(p);
+                    }
+                }
+                if let Ok(p) = path.build() {
+                    window.paint_path(p, color);
+                }
+            };
+            arc(0., 1., track, window);
+            if fraction > 0. {
+                arc(0., fraction, color, window);
+            }
+        },
+    )
+    .size(px(14.))
+    .flex_none()
+    .into_any_element()
 }
 
+/// A card's tooltip while it has work out: its sub-agents, then what runs in the background.
 pub fn card_tip(kids: &[(trek_core::AgentId, String)], background: &[String]) -> Option<String> {
     let kids: Vec<String> = kids.iter().map(|(_, name)| name.clone()).collect();
     let parts: Vec<String> = [
@@ -2219,11 +2306,6 @@ impl Render for Sidebar {
             .projects
             .iter()
             .map(|p| (p.id.clone(), p.path.clone()))
-            .collect();
-        let looks: HashMap<String, crate::ui::ProjectLook> = ws
-            .projects
-            .iter()
-            .map(|p| (p.id.clone(), ws.project_look(&p.path)))
             .collect();
         let project_of = |t: &Thread| {
             t.project_id
@@ -2329,7 +2411,15 @@ impl Render for Sidebar {
                     .then(newest(b).cmp(&newest(a)))
                     .then_with(|| a.1.cmp(&b.1))
             });
+            // What's live (working, or waiting on the user) leaves its project for the Active
+            // section on top; each project keeps its quiet threads under a plain heading.
+            let mut active: Vec<Thread> = vec![];
             for (pid, name, cards, mut items) in groups {
+                active.extend(cards);
+                let cards: Vec<Thread> = vec![];
+                if items.is_empty() {
+                    continue;
+                }
                 items.sort_by(|a, b| {
                     b.is_unseen()
                         .cmp(&a.is_unseen())
@@ -2374,23 +2464,6 @@ impl Render for Sidebar {
                     pid.clone(),
                     GroupInfo {
                         name,
-                        unread: cards
-                            .iter()
-                            .chain(items.iter())
-                            .filter(|t| t.is_unseen())
-                            .count(),
-                        needs: cards
-                            .iter()
-                            .filter(|t| t.needs_you() || self.graph.needs.contains(&t.id))
-                            .count(),
-                        working: cards
-                            .iter()
-                            .filter(|t| {
-                                t.run_state == RunState::Working
-                                    || self.graph.waiting.contains(&t.id)
-                            })
-                            .count(),
-                        total: cards.len() + items.len(),
                         folded,
                         open,
                         more,
@@ -2398,6 +2471,25 @@ impl Render for Sidebar {
                 );
                 fresh.push(LiveGroup { pid, rows, footer });
                 by_id.extend(cards.into_iter().chain(items).map(|t| (t.id.clone(), t)));
+            }
+            if !active.is_empty() {
+                // Needs-you first, then at work (as `live_order` put them), newest first within.
+                info.insert(
+                    ACTIVE.to_string(),
+                    GroupInfo {
+                        name: "Active".into(),
+                        ..GroupInfo::default()
+                    },
+                );
+                fresh.insert(
+                    0,
+                    LiveGroup {
+                        pid: ACTIVE.to_string(),
+                        rows: active.iter().map(|t| t.id.clone()).collect(),
+                        footer: false,
+                    },
+                );
+                by_id.extend(active.into_iter().map(|t| (t.id.clone(), t)));
             }
         }
         // While the pointer is over the sidebar its rows hold their places: a thread answered,
@@ -2500,47 +2592,23 @@ impl Render for Sidebar {
                     .unwrap_or_else(|| "No project".into()),
                 ..GroupInfo::default()
             });
-            let extra = h_flex()
-                .gap_2()
-                .when(i.folded && i.needs > 0, |el| {
-                    el.child(
-                        div()
-                            .text_xs()
-                            .text_color(palette::needs_you(cx))
-                            .child(i.needs.to_string()),
-                    )
-                })
-                .when(i.folded && i.working > 0, |el| {
-                    el.child(
-                        div()
-                            .text_xs()
-                            .text_color(palette::working(cx))
-                            .child(i.working.to_string()),
-                    )
-                })
-                .when(i.unread > 0, |el| {
-                    el.child(
-                        div()
-                            .text_xs()
-                            .text_color(palette::emerald(cx))
-                            .child(format!("{} new", i.unread)),
-                    )
-                })
-                .child(div().text_xs().child(i.total.to_string()))
-                .into_any_element();
-            group = group.child(crate::motion::flip_row(
-                &flip,
-                format!("live-h-{pid}"),
+            let head = if pid == ACTIVE {
+                Self::label("Active", cx).into_any_element()
+            } else {
                 self.group_header(
                     "live",
                     &pid,
                     i.name.clone(),
-                    Some(extra),
+                    None,
                     Some(i.folded),
                     &paths,
-                    &looks,
                     cx,
-                ),
+                )
+            };
+            group = group.child(crate::motion::flip_row(
+                &flip,
+                format!("live-h-{pid}"),
+                head,
                 now,
                 window,
             ));
@@ -2563,8 +2631,8 @@ impl Render for Sidebar {
                         let sel = selected.as_deref() == Some(id.as_str());
                         let card = attention(t);
                         last_rows.insert(id.clone(), (t.clone(), pid.clone(), card));
-                        let row = if card {
-                            self.card(t, &i.name, false, sel, cx)
+                        let row = if card || pid == ACTIVE {
+                            self.card(t, &project_of(t), pid == ACTIVE, sel, cx)
                         } else {
                             self.live_line(t, sel, cx)
                         };
@@ -2579,8 +2647,14 @@ impl Render for Sidebar {
                     Err(gx) => {
                         let ghost = &self.ghosts[gx];
                         let left = ghost.left.frame(now, window).clamp(0., 1.);
-                        let row = if ghost.card {
-                            self.card(&ghost.thread, &i.name, false, false, cx)
+                        let row = if ghost.card || pid == ACTIVE {
+                            self.card(
+                                &ghost.thread,
+                                &project_of(&ghost.thread),
+                                pid == ACTIVE,
+                                false,
+                                cx,
+                            )
                         } else {
                             self.live_line(&ghost.thread, false, cx)
                         };
@@ -2622,8 +2696,8 @@ impl Render for Sidebar {
                         .id(SharedString::from(id))
                         .test_support()
                         .mx_2()
-                        .pl(px(30.))
-                        .h(px(28.))
+                        .pl(px(ROW_INSET))
+                        .h(px(26.))
                         .flex()
                         .items_center()
                         .text_xs()
@@ -2766,9 +2840,14 @@ impl Render for Sidebar {
                     .cursor_pointer()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .hover(|s| s.bg(theme.list_hover))
-                    .child(format!("Settled ({settled_count})"))
-                    .child(div().flex_1().h(px(1.)).bg(theme.border))
+                    .hover(|s| s.text_color(theme.foreground))
+                    .child(
+                        Icon::new(crate::assets::Lucide::Archive)
+                            .xsmall()
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child(format!("{settled_count} settled"))
+                    .child(div().flex_1())
                     .child(
                         Icon::new(if settled_open {
                             IconName::ChevronUp
@@ -2807,7 +2886,6 @@ impl Render for Sidebar {
                             None,
                             Some(folded),
                             &paths,
-                            &looks,
                             cx,
                         ),
                         now,
@@ -2827,8 +2905,8 @@ impl Render for Sidebar {
                             div()
                                 .id(SharedString::from(format!("more-{pid}")))
                                 .mx_2()
-                                .pl(px(30.))
-                                .h(px(28.))
+                                .pl(px(ROW_INSET))
+                                .h(px(26.))
                                 .flex()
                                 .items_center()
                                 .text_xs()
