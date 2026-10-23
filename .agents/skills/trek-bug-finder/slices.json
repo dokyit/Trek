@@ -284,6 +284,102 @@
         "crates/trek-core/examples/"
       ],
       "focus": []
+    },
+    {
+      "key": "generative-ui",
+      "what": "live cards and popovers built from agent activity: PR/CI/release cards, the context-window card, the video watcher, background computer use",
+      "paths": [
+        "crates/trek-app/src/pr_card.rs",
+        "crates/trek-app/src/context_popover.rs",
+        "crates/trek-app/src/video.rs",
+        "crates/trek-app/src/background_use.rs"
+      ],
+      "focus": [
+        "Command parsing that makes a card from a command that only mentions gh, git or release.sh (false positives), or misses a real one",
+        "Card phase transitions and polling: a card stuck in a live phase, a poll that never stops, a chip that doesn't follow the newest card",
+        "Animation loops that request frames forever, or never settle when motion is off",
+        "Token and percentage arithmetic in the context card: underflow, division by zero, wrong split when estimates exceed the agent's count",
+        "Compaction state that survives or vanishes at the wrong time"
+      ]
+    },
+    {
+      "key": "machines",
+      "what": "driving other machines: pairing, connection state, offline handling, cloning and file transfer to a remote machine",
+      "paths": [
+        "crates/trek-app/src/machines.rs",
+        "crates/trek-app/src/machines/"
+      ],
+      "focus": [
+        "Threads of an unreachable machine shown as live (spinner, counting timer)",
+        "Reconnect after a network change; routes kept, dropped or tried in the wrong order",
+        "Path traversal or overwrite in remote clone and file writes",
+        "State left inconsistent when a machine is forgotten mid-operation"
+      ]
+    },
+    {
+      "key": "gpui-patches",
+      "what": "Trek's patches to vendored GPUI (marked \"Trek:\"): tooltip visibility and hover bookkeeping, activation policy",
+      "paths": [
+        "vendor/gpui-pre/src/window.rs",
+        "vendor/gpui-pre/src/elements/div.rs",
+        "vendor/gpui-pre-macos/src/platform.rs"
+      ],
+      "focus": [
+        "Only the code under \"Trek:\" comments and what it touches",
+        "Hover watches: an element told it's unhovered while it is still hovered (cached views, reused frames), or listeners kept alive forever",
+        "Tooltip hitbox checks during prepaint vs paint, frames swapped",
+        "Activation policy on launch for bundled and bare-binary runs"
+      ]
+    },
+    {
+      "key": "leaf-ui",
+      "what": "small UI crates split out of trek-app: maths rendering, motion, palette, mascot, brand, assets, window look and placement, screen clips, shortcuts, words, languages, line breakdown, IPC UI",
+      "paths": [
+        "crates/trek-math/src/",
+        "crates/trek-motion/src/",
+        "crates/trek-palette/src/",
+        "crates/trek-mascot/src/",
+        "crates/trek-brand/src/",
+        "crates/trek-assets/src/",
+        "crates/trek-winlook/src/",
+        "crates/trek-window-place/src/",
+        "crates/trek-screenclip/src/",
+        "crates/trek-shortcuts/src/",
+        "crates/trek-words/src/",
+        "crates/trek-languages/src/",
+        "crates/trek-line-breakdown/src/",
+        "crates/trek-ipc-ui/src/"
+      ],
+      "focus": [
+        "Parsing and layout of odd or hostile input (maths)",
+        "Off-screen or zero-size window placement",
+        "Platform-specific wording or key glyphs shown on the wrong platform"
+      ]
+    },
+    {
+      "key": "leaf-system",
+      "what": "small system crates: updater, perf, logging, jobs, time, dictation, formatting, integrations, mentions, core media and file kinds, trek-app's lib root and test support",
+      "paths": [
+        "crates/trek-updater/src/",
+        "crates/trek-perf/src/",
+        "crates/trek-logging/src/",
+        "crates/trek-job/src/",
+        "crates/trek-time/src/",
+        "crates/trek-dictate/src/",
+        "crates/trek-format/src/",
+        "crates/trek-integrations/src/",
+        "crates/trek-mentions/src/",
+        "crates/trek-core/src/file_kind.rs",
+        "crates/trek-core/src/media.rs",
+        "crates/trek-app/src/lib.rs",
+        "crates/trek-app/src/test_support.rs"
+      ],
+      "focus": [
+        "Update download, verification and swap: a partial file or bad signature that still installs",
+        "Child processes and jobs left running or killed too broadly",
+        "Secrets in logs",
+        "Time zone and DST edge cases"
+      ]
     }
   ]
 }
