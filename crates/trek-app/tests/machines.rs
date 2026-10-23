@@ -1421,3 +1421,135 @@ fn a_clone_that_finishes_leaves_the_run_of_a_clone_started_since_alone() {
         );
     });
 }
+
+/// Machine C's row `t-9` as its Mac would send it: working for a minute and a quarter in its
+/// `trek` project, with one of Trek's sub-agents and one of its agent's own out.
+fn row_at_work() -> tr::ThreadSummary {
+    let agent = tr::AgentRef {
+        key: common::mock().key(),
+        name: "Mock".into(),
+        ..Default::default()
+    };
+    tr::ThreadSummary {
+        id: "t-9".into(),
+        title: "Port the sidebar".into(),
+        project: tr::ProjectRef {
+            id: "p-9".into(),
+            name: "trek".into(),
+            ..Default::default()
+        },
+        agent: agent.clone(),
+        run_state: tr::RunState::Working,
+        section: tr::Section::Working,
+        working_since: Some(trek_core::store::now_ms() - 75_000),
+        updated_at: trek_core::store::now_ms(),
+        sub_agents: vec![
+            tr::SubAgent {
+                agent: agent.clone(),
+                model: Some("Sol".into()),
+                title: "Review the diff".into(),
+                state: tr::SubAgentState::Running,
+                since: Some(trek_core::store::now_ms() - 30_000),
+                thread_id: Some("t-10".into()),
+            },
+            tr::SubAgent {
+                agent,
+                model: None,
+                title: "Explore the tests".into(),
+                state: tr::SubAgentState::Running,
+                since: Some(trek_core::store::now_ms() - 20_000),
+                thread_id: None,
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_machines_thread_at_work_shows_above_the_projects_with_its_clock_and_sub_agents() {
+    run(async |cx| {
+        let trek = open(cx);
+        // A quiet thread here, so there's a project group to sit above.
+        let here = trek.quiet_thread(cx);
+        pair_c(&trek, cx).await;
+        let send = |trek: &Trek, cx: &mut TestAppContext, row: tr::ThreadSummary| {
+            trek.update(cx, |ws, cx| {
+                ws.machine_event(
+                    "machine-c",
+                    tr::client::Event::Message(tr::ServerMessage::Thread { thread: row }),
+                    cx,
+                )
+            });
+            trek.render(cx);
+        };
+        let id = local_id("machine-c", "t-9");
+        send(&trek, cx, row_at_work());
+
+        // At work: its card says so with the clock its row started, as a thread here does.
+        assert!(trek.visible(cx, format!("card-working-{id}")));
+        let clock = trek.read(cx, |ws, _| ws.machines.working_for(&id)).unwrap();
+        assert!(clock >= Duration::from_secs(75), "{clock:?}");
+        assert!(
+            trek.read(cx, |ws, _| ws.any_turn_running() || ws.machines.any_at_work()),
+            "the sidebar's clock ticks by the second"
+        );
+        // Its sub-agents: the pill on its card, and their names for its tooltip.
+        assert!(trek.visible(cx, format!("card-kids-{id}")));
+        let sidebar = cx.read(|cx| trek.root.read(cx).sidebar.clone());
+        let thread = trek.read(cx, |ws, _| ws.thread(&id).cloned()).unwrap();
+        let (kids, _) = sidebar.read_with(cx, |s, cx| s.at_work(&thread, cx));
+        let names: Vec<&str> = kids.iter().map(|(_, n)| n.as_str()).collect();
+        assert_eq!(names, ["Sol: Review the diff", "Explore the tests"]);
+        // The machine sits above this Mac's projects while it's at work.
+        let pid = trek.read(cx, |ws, _| ws.thread(&here).unwrap().project_id.clone().unwrap());
+        let machine = trek.bounds(cx, "machine-head-machine-c").unwrap().origin.y;
+        let project = trek.bounds(cx, format!("live-proj-head-{pid}")).unwrap().origin.y;
+        assert!(machine < project, "{machine:?} above {project:?}");
+
+        // Its turn over with its sub-agents still out: waiting on them, still at work.
+        let mut waiting = row_at_work();
+        waiting.run_state = tr::RunState::Idle;
+        waiting.section = tr::Section::Inbox;
+        waiting.working_since = None;
+        send(&trek, cx, waiting.clone());
+        assert!(trek.visible(cx, format!("card-waiting-{id}")));
+        assert!(trek.visible(cx, format!("card-kids-{id}")));
+
+        // One of them waits on the user: the card says so.
+        let mut asking = waiting.clone();
+        asking.needs = Some(tr::Needs {
+            kind: tr::NeedsKind::Approval,
+            text: "Sub-agent needs you".into(),
+        });
+        asking.needs_thread = Some("t-10".into());
+        send(&trek, cx, asking);
+        assert!(trek.visible(cx, format!("card-sub-needs-{id}")));
+
+        // Settled there with its sub-agents out, it's still listed here; done, it goes.
+        let mut settled = waiting.clone();
+        settled.section = tr::Section::Settled;
+        send(&trek, cx, settled.clone());
+        assert!(trek.visible(cx, format!("card-waiting-{id}")));
+        settled.sub_agents.clear();
+        send(&trek, cx, settled);
+        assert!(!trek.visible(cx, format!("card-{id}")));
+        assert!(!trek.visible(cx, format!("live-line-{id}")));
+
+        // Out of reach, nothing it runs can be seen from here: no clock, no sub-agents.
+        send(&trek, cx, row_at_work());
+        trek.update(cx, |ws, cx| {
+            ws.machine_event(
+                "machine-c",
+                tr::client::Event::Disconnected {
+                    reason: "gone".into(),
+                },
+                cx,
+            )
+        });
+        trek.render(cx);
+        assert!(!trek.visible(cx, format!("card-working-{id}")));
+        assert!(!trek.visible(cx, format!("card-kids-{id}")));
+        assert!(trek.read(cx, |ws, _| ws.machines.working_for(&id).is_none()));
+        assert!(!trek.read(cx, |ws, _| ws.machines.any_at_work()));
+    });
+}

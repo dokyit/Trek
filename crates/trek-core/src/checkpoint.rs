@@ -346,7 +346,13 @@ impl Repo {
         }
         let started = Instant::now();
         let big = self.big_untracked(&index)?;
-        let limit = Some(self.limit.saturating_sub(started.elapsed()));
+        // Sizing the untracked files may have spent it all: say so by the whole limit, rather than
+        // start git with none of it left ("took longer than 0.0ns").
+        let left = self.limit.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            bail!("reading the files took longer than {:.1?}", self.limit);
+        }
+        let limit = Some(left);
         let out = if big.is_empty() {
             self.output(Some(&index), &["add", "-A", "--ignore-errors"], None, limit)?
         } else {

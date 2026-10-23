@@ -401,12 +401,14 @@ impl Machine {
             .collect();
     }
 
-    /// The threads the sidebar lists under its name: those not settled, newest first.
+    /// The threads the sidebar lists under its name: those not settled, and settled ones still
+    /// at work (a turn running, or sub-agents out), newest first.
     pub fn listed(&self) -> Vec<&Thread> {
         let mut out: Vec<&Thread> = self
             .threads
             .iter()
-            .filter(|t| t.settled_at.is_none() && t.archived_at.is_none() && t.parent_id.is_none())
+            .filter(|t| t.archived_at.is_none() && t.parent_id.is_none())
+            .filter(|t| t.settled_at.is_none() || self.busy(&t.id))
             .collect();
         out.sort_by(|a, b| {
             b.needs_you()
@@ -414,6 +416,23 @@ impl Machine {
                 .then(b.updated_at.cmp(&a.updated_at))
         });
         out
+    }
+
+    /// Its row for the thread of local id `id`.
+    fn row(&self, id: &str) -> Option<&tr::ThreadSummary> {
+        let (_, tid) = split_id(id)?;
+        self.rows.iter().find(|r| r.id == tid)
+    }
+
+    /// Whether its thread `id` is at work as far as here can see: its turn runs, or sub-agents or
+    /// background work it started are still out. Nothing is, while the machine can't be reached.
+    fn busy(&self, id: &str) -> bool {
+        self.reachable()
+            && self.row(id).is_some_and(|r| {
+                r.run_state == tr::RunState::Working
+                    || !r.sub_agents.is_empty()
+                    || !r.background.is_empty()
+            })
     }
 
     /// Its copy of this Mac's project at `path`: the one cloned there (its snapshot may not list
@@ -491,6 +510,107 @@ impl Machines {
         }
         let (host, _) = split_id(id)?;
         self.get(host)?.threads.iter().find(|t| t.id == id)
+    }
+
+    /// The machine of thread `id` and its row there, while the machine can be reached: a row
+    /// from before it went says nothing of what runs now.
+    fn reachable_row(&self, id: &str) -> Option<&tr::ThreadSummary> {
+        let (host, _) = split_id(id)?;
+        self.get(host).filter(|m| m.reachable())?.row(id)
+    }
+
+    /// What machine thread `id` has at work, as its row says, the way the sidebar's card shows a
+    /// thread here (`Sidebar::at_work`): its sub-agents still out, by logo and name ("Sol: Review
+    /// the diff" for one Trek runs there), and what its agent runs in the background, by title.
+    pub fn at_work(&self, id: &str) -> (Vec<(AgentId, String)>, Vec<String>) {
+        let Some(row) = self.reachable_row(id) else {
+            return (vec![], vec![]);
+        };
+        let kids = row
+            .sub_agents
+            .iter()
+            .filter(|k| {
+                matches!(
+                    k.state,
+                    tr::SubAgentState::Running | tr::SubAgentState::NeedsYou
+                )
+            })
+            .map(|k| {
+                let name = match &k.model {
+                    Some(model) => format!("{model}: {}", k.title),
+                    None => k.title.clone(),
+                };
+                (AgentId::from_key(&k.agent.key), name)
+            })
+            .collect();
+        (kids, row.background.clone())
+    }
+
+    /// How long machine thread `id`'s turn has run, while it works there.
+    pub fn working_for(&self, id: &str) -> Option<Duration> {
+        let row = self
+            .reachable_row(id)
+            .filter(|r| r.run_state == tr::RunState::Working)?;
+        Some(Duration::from_millis(
+            (now_ms() - row.working_since?).max(0) as u64,
+        ))
+    }
+
+    /// How long machine thread `id` has waited on its longest-running sub-agent, while its own
+    /// turn is over and they're still out (`waiting`).
+    pub fn waited_for(&self, id: &str) -> Option<Duration> {
+        let since = self
+            .reachable_row(id)?
+            .sub_agents
+            .iter()
+            .filter_map(|k| k.since)
+            .min()?;
+        Some(Duration::from_millis((now_ms() - since).max(0) as u64))
+    }
+
+    /// Machine threads a sub-agent under which waits on the user (the row's `needs_thread`):
+    /// their cards say so, as a thread's here do (`Workspace::waiting_on_sub_agents`).
+    pub fn sub_agents_need_you(&self) -> std::collections::HashSet<String> {
+        self.list
+            .iter()
+            .flat_map(|m| {
+                let host = m.id();
+                m.rows
+                    .iter()
+                    .filter(|r| r.needs_thread.is_some())
+                    .map(move |r| local_id(host, &r.id))
+            })
+            .collect()
+    }
+
+    /// Machine threads whose turn is over while sub-agents they started are still out: at work,
+    /// waiting on them (`Workspace::waiting_threads`).
+    pub fn waiting(&self) -> std::collections::HashSet<String> {
+        self.list
+            .iter()
+            .filter(|m| m.reachable())
+            .flat_map(|m| {
+                let host = m.id();
+                m.rows
+                    .iter()
+                    .filter(|r| {
+                        r.run_state == tr::RunState::Idle
+                            && r.needs.is_none()
+                            && !r.sub_agents.is_empty()
+                    })
+                    .map(move |r| local_id(host, &r.id))
+            })
+            .collect()
+    }
+
+    /// Whether a thread on a machine that can be reached has a turn running or sub-agents out:
+    /// the sidebar's clocks count by the second meanwhile.
+    pub fn any_at_work(&self) -> bool {
+        self.list.iter().filter(|m| m.reachable()).any(|m| {
+            m.rows
+                .iter()
+                .any(|r| r.run_state == tr::RunState::Working || !r.sub_agents.is_empty())
+        })
     }
 
     /// The run of the clone of `folder` to `host`, if it's still the one the sheet shows.
