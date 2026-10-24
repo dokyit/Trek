@@ -205,8 +205,9 @@ final class TrekClient: Backend {
 
     // What the client runs on, replaced by a script that drives it without a network.
     var makeLink: (String, Transport) -> MacLink = {
-        // A URL can't name a Bonjour service, or carry a link-local address's interface.
-        Address.needsInterface($0) ? NetworkLink(address: $0, transport: $1) : SocketLink(address: $0, transport: $1)
+        // A URL can't name a Bonjour service, or carry a link-local address's interface; and
+        // App Transport Security refuses the Mac's certificate on a tailnet IP address.
+        Address.needsNetworkLink($0) ? NetworkLink(address: $0, transport: $1) : SocketLink(address: $0, transport: $1)
     }
     var makeFinder: (String) -> MacBrowsing = { MacFinder(hostId: $0) }
     var paths: PathWatching = PathWatcher()
@@ -277,11 +278,13 @@ final class TrekClient: Backend {
     /// Something a dial can be made to: a URL, or (Network.framework) the Mac's Bonjour service
     /// or an address scoped to an interface.
     static func dialable(_ address: String, encrypted: Bool) -> Bool {
-        Address.needsInterface(address) ? NetworkLink.endpoint(for: address) != nil : url(for: address, encrypted: encrypted) != nil
+        Address.needsNetworkLink(address)
+            ? NetworkLink.endpoint(for: address, encrypted: encrypted) != nil
+            : url(for: address, encrypted: encrypted) != nil
     }
 
     /// `host:port` (any scheme the user typed is dropped) as a `wss://` or `ws://` URL.
-    static func url(for address: String, encrypted: Bool) -> URL? {
+    nonisolated static func url(for address: String, encrypted: Bool) -> URL? {
         var host = address.trimmingCharacters(in: .whitespacesAndNewlines)
         for scheme in ["wss://", "ws://", "https://", "http://"] where host.lowercased().hasPrefix(scheme) {
             host = String(host.dropFirst(scheme.count))
@@ -1006,15 +1009,21 @@ final class NetworkLink: MacLink {
 
     var fingerprint: String? { pinning.seen }
 
-    /// Where `address` leads: the service on its interface, or the scoped host and port. Nil
-    /// for anything else (a plain `host:port` is `SocketLink`'s).
-    nonisolated static func endpoint(for address: String) -> NWEndpoint? {
+    /// Where `address` leads: the service on its interface, the scoped host and port, or for a
+    /// plain IP address and port (a tailnet one, `Address.needsNetworkLink`) its `ws(s)://` URL,
+    /// which the WebSocket's upgrade request is made from (it can't make one from an IP
+    /// endpoint). Nil for anything else (a host name is `SocketLink`'s).
+    nonisolated static func endpoint(for address: String, encrypted: Bool = true) -> NWEndpoint? {
         if let s = Address.serviceParts(address) {
             return .service(name: s.name, type: s.type, domain: s.domain, interface: s.interface.flatMap(SeenInterfaces.named))
         }
         let (hostScoped, portText) = Address.split(address)
         let (host, name) = Address.unscoped(hostScoped)
-        guard let name, let portText, let n = UInt16(portText), let port = NWEndpoint.Port(rawValue: n) else { return nil }
+        guard let name else {
+            guard portText != nil, IPv6Address(host) != nil || IPv4Address(host) != nil else { return nil }
+            return TrekClient.url(for: address, encrypted: encrypted).map { .url($0) }
+        }
+        guard let portText, let n = UInt16(portText), let port = NWEndpoint.Port(rawValue: n) else { return nil }
         let interface = SeenInterfaces.named(name)
         if let v6 = IPv6Address(host) {
             // Network.framework scopes a link-local address by its `%en7` itself for the
@@ -1058,7 +1067,7 @@ final class NetworkLink: MacLink {
     }
 
     func start(timeout: TimeInterval) {
-        guard let endpoint = Self.endpoint(for: address) else {
+        guard let endpoint = Self.endpoint(for: address, encrypted: transport.isEncrypted) else {
             fail(.unreachable)
             return
         }
