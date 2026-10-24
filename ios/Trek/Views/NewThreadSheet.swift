@@ -39,7 +39,13 @@ struct NewThreadSheet: View {
         return model.projects.filter { link.owns($0.id) }
     }
     private var agents: [AgentOption] { link?.agents ?? [] }
-    private var project: ProjectSummary? { linkProjects.first { $0.id == projectID } ?? linkProjects.first }
+    /// "No project" on this machine: its prefix with nothing after it, which routes the request
+    /// to it and reaches it as `""` (a thread of no project, as the Mac's "No project" starts).
+    private var noProjectID: String? { link?.qualified("") }
+    private var isNoProject: Bool { projectID != nil && projectID == noProjectID }
+    private var project: ProjectSummary? {
+        isNoProject ? nil : linkProjects.first { $0.id == projectID } ?? linkProjects.first
+    }
     private var agent: AgentOption? { agents.first { $0.key == agentKey } ?? agents.first }
     private var modelLabel: String {
         ModelNaming.current(modelID, agent: agent)?.label ?? agent?.name ?? "Agent"
@@ -79,7 +85,8 @@ struct NewThreadSheet: View {
             }
         }
         .onAppear {
-            projectID = linkProjects.contains(where: { $0.id == projectID }) ? projectID : linkProjects.first?.id
+            projectID = linkProjects.contains(where: { $0.id == projectID }) || isNoProject
+                ? projectID : linkProjects.first?.id ?? noProjectID
             agentKey = agents.contains(where: { $0.key == agentKey }) ? agentKey : agents.first?.key
             focused = true
         }
@@ -103,7 +110,7 @@ struct NewThreadSheet: View {
                         agentChip
                         accessChip
                         planChip
-                        if project?.isRepo ?? true { worktreeChip }
+                        if !isNoProject, project?.isRepo ?? true { worktreeChip }
                     }
                 }
                 .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: 0.88),
@@ -177,16 +184,16 @@ struct NewThreadSheet: View {
         Menu {
             Picker("Machine", selection: Binding(get: { link?.id }, set: { id in
                 machine = model.links.first { $0.id == id }
-                projectID = linkProjects.first?.id
+                projectID = linkProjects.first?.id ?? noProjectID
                 agentKey = agents.first?.key
             })) {
                 ForEach(model.links) { l in
-                    Text(l.name).tag(Optional(l.id))
+                    Text(l.kind.word.map { "\(l.name) · \($0)" } ?? l.name).tag(Optional(l.id))
                 }
             }
         } label: {
             chip {
-                Image(systemName: "laptopcomputer").font(.system(size: 13, weight: .medium))
+                MachineMark(kind: link?.kind ?? .unknown, size: 13)
                 Text(link?.name ?? "Machine")
             }
         }
@@ -194,16 +201,20 @@ struct NewThreadSheet: View {
 
     private var projectChip: some View {
         Menu {
-            Picker("Project", selection: Binding(get: { project?.id }, set: { projectID = $0 })) {
+            Picker("Project", selection: Binding(get: { isNoProject ? noProjectID : project?.id }, set: { projectID = $0 })) {
                 ForEach(linkProjects) { p in
                     Text(p.name).tag(Optional(p.id))
                 }
+                Label("No project", systemImage: "tray").tag(noProjectID)
             }
         } label: {
             chip {
                 if let p = project {
                     ProjectBadge(project: p.ref, size: 18)
                     Text(p.name)
+                } else if isNoProject {
+                    Image(systemName: "tray").font(.system(size: 13, weight: .medium))
+                    Text("No project")
                 } else {
                     Text("Project")
                 }
@@ -257,10 +268,10 @@ struct NewThreadSheet: View {
     }
 
     private func start() {
-        guard let project, let agent else { return }
+        guard let pid = project?.id ?? (isNoProject ? noProjectID : nil), let agent else { return }
         sending = true
-        model.newThread(project: project.id, agent: agent.key, model: modelID ?? ModelNaming.defaultModel(agent)?.id,
-                        text: text.trimmingCharacters(in: .whitespacesAndNewlines), worktree: worktree && project.isRepo,
+        model.newThread(project: pid, agent: agent.key, model: modelID ?? ModelNaming.defaultModel(agent)?.id,
+                        text: text.trimmingCharacters(in: .whitespacesAndNewlines), worktree: worktree && (project?.isRepo ?? false),
                         effort: effort, access: access, plan: plan, images: photos.compactMap(\.upload)) { tid in
             dismiss()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { opened(tid) }

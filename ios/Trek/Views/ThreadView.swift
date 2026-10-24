@@ -271,6 +271,12 @@ private struct TranscriptList: View, Equatable {
     @State private var nearTop = false
     /// Far enough above the latest that the jump-down button is out.
     @State private var awayFromBottom = false
+    /// At the latest (within a few points of it): what changes size keeps the bottom still, so
+    /// new rows keep it at the latest.
+    @State private var atBottom = true
+    /// A page of earlier items is on its way, or just went in above: the bottom keeps still for
+    /// it too, so the rows being read don't move.
+    @State private var earlierLanding = false
 
     /// How many of the latest rows are laid out outside the lazy stack, at least.
     private static let laidOut = 3
@@ -287,6 +293,8 @@ private struct TranscriptList: View, Equatable {
         var short: Bool
         /// More than a screen above the latest.
         var awayFromBottom: Bool
+        /// At the latest.
+        var atBottom: Bool
     }
 
     nonisolated static func == (a: TranscriptList, b: TranscriptList) -> Bool {
@@ -343,9 +351,23 @@ private struct TranscriptList: View, Equatable {
             .padding(.top, 12)
             .padding(.bottom, 16)
         }
-        // Bottom-anchored: it opens at the latest, stays with it as items arrive, and keeps still
-        // when a page of earlier items lands above.
-        .defaultScrollAnchor(.bottom)
+        // It opens at the latest. While it's there, a change in size keeps the bottom still, so it
+        // stays with the latest as items arrive (and as a page of earlier items lands above);
+        // scrolled up, the top keeps still, so what's being read isn't pulled down as the answer
+        // grows below it (it was, with the bottom anchored for every change).
+        .defaultScrollAnchor(.bottom, for: .initialOffset)
+        .defaultScrollAnchor(atBottom || earlierLanding ? .bottom : .top, for: .sizeChanges)
+        .onChange(of: store.loadingEarlier) { _, loading in
+            if loading {
+                earlierLanding = true
+            } else {
+                // The page goes in with the update that ends the loading: keep still till it has.
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(400))
+                    earlierLanding = store.loadingEarlier
+                }
+            }
+        }
         .scrollDismissesKeyboard(.interactively)
         // Earlier items load as the user scrolls up towards them (or straight away, while what's
         // loaded doesn't fill the screen); not while the view settles at the bottom.
@@ -358,9 +380,12 @@ private struct TranscriptList: View, Equatable {
             ScrollEdges(nearTop: geo.contentOffset.y + geo.contentInsets.top < 1400,
                         short: geo.contentSize.height < geo.containerSize.height,
                         awayFromBottom: geo.contentSize.height + geo.contentInsets.bottom
-                            - geo.contentOffset.y - geo.containerSize.height > 520)
+                            - geo.contentOffset.y - geo.containerSize.height > 520,
+                        atBottom: geo.contentSize.height + geo.contentInsets.bottom
+                            - geo.contentOffset.y - geo.containerSize.height < 32)
         } action: { _, edge in
             nearTop = edge.nearTop
+            if edge.atBottom != atBottom { atBottom = edge.atBottom }
             if edge.awayFromBottom != awayFromBottom { awayFromBottom = edge.awayFromBottom }
             if edge.short || (edge.nearTop && scrolled) { model.loadEarlier(store.id) }
         }

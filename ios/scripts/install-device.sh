@@ -21,10 +21,15 @@ if [ -z "$DEVICE" ]; then
 fi
 BUNDLE="${BUNDLE:-dev.trek.TrekMobile}"
 DD="${DD:-/tmp/trek-ios-device-dd}"
-echo "Team $TEAM, iPhone $DEVICE, bundle $BUNDLE"
+# The app's version is Trek's (the workspace's, as the Mac's About says), and its build the number
+# of commits, so Settings › Version tells one install from the next.
+VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' ../Cargo.toml | head -1)"
+BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+echo "Team $TEAM, iPhone $DEVICE, bundle $BUNDLE, Trek ${VERSION:-?} ($BUILD)"
 xcodebuild -project Trek.xcodeproj -scheme Trek -configuration Debug \
   -destination "id=$DEVICE" -derivedDataPath "$DD" -allowProvisioningUpdates \
   DEVELOPMENT_TEAM="$TEAM" PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE" CODE_SIGN_STYLE=Automatic \
+  ${VERSION:+MARKETING_VERSION="$VERSION"} CURRENT_PROJECT_VERSION="$BUILD" \
   build -quiet
 xcrun devicectl device install app --device "$DEVICE" "$DD/Build/Products/Debug-iphoneos/Trek.app"
 xcrun devicectl device process launch --device "$DEVICE" "$BUNDLE" || \

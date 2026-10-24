@@ -620,6 +620,8 @@ nonisolated enum ServerMessage {
     /// `text`: a rewound message, for the composer.
     case ack(re: String?, threadId: String?, open: OpenScreen? = nil, text: String? = nil)
     case pong(re: String?)
+    /// What the machine is (`machine_info`): its platform marks its threads here.
+    case machineInfo(re: String?, MachineInfo)
     case error(re: String?, code: ErrorCode, message: String)
     case usage(re: String?, Usage)
     case basecamp(re: String?, Basecamp)
@@ -704,6 +706,7 @@ nonisolated enum ServerMessage {
         case "transcript_reset": return .transcriptReset(r.threadId ?? "")
         case "ack": return .ack(re: r.re, threadId: r.threadId, open: r.open, text: r.text)
         case "pong": return .pong(re: r.re)
+        case "machine_info": return .machineInfo(re: r.re, try decoder.decode(MachineInfo.self, from: data))
         case "error": return .error(re: r.re, code: r.code ?? .unknown, message: r.message ?? "")
         // Replies that are a value whole: decoded from the message itself.
         case "usage": return .usage(re: r.re, try decoder.decode(Usage.self, from: data))
@@ -807,6 +810,8 @@ nonisolated enum ClientMessage {
     case settings
     case setSettings(SettingsChange)
     case ping
+    /// What the machine is: its name and platform (a Mac that lists `machines` answers).
+    case machineInfo
     /// Threads whose title or messages match, as the Mac's own search finds them.
     case search(query: String, limit: Int?)
     // Parity with the Mac (Parity.swift); a Mac lists the ones it answers in `features`.
@@ -825,6 +830,8 @@ nonisolated enum ClientMessage {
     case noteFile(path: String, offset: Int64, length: Int)
 
     static let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
+    /// The build (the number of commits it was built from, `install-device.sh`).
+    static let appBuild = Bundle.main.infoDictionary?["CFBundleVersion"] as? String
 
     /// The JSON object for this message; `id` correlates the Mac's reply (`re`).
     func json(id: String?) -> [String: Any] {
@@ -913,6 +920,8 @@ nonisolated enum ClientMessage {
             o = change.json.merging(["type": "set_settings"]) { $1 }
         case .ping:
             o = ["type": "ping"]
+        case .machineInfo:
+            o = ["type": "machine_info"]
         case .search(let query, let limit):
             o = ["type": "search", "query": query]
             if let limit { o["limit"] = limit }
@@ -926,4 +935,11 @@ nonisolated enum ClientMessage {
     func encoded(id: String?) throws -> Data {
         try JSONSerialization.data(withJSONObject: json(id: id), options: [.sortedKeys])
     }
+}
+
+/// A machine's answer to `machine_info`.
+nonisolated struct MachineInfo: Codable, Sendable, Equatable {
+    var name: String
+    /// "macos", "windows", "linux".
+    var platform: String
 }

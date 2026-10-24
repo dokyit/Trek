@@ -33,6 +33,8 @@ nonisolated enum MacFeature: String, CaseIterable {
     case noteImages = "note_images"
     /// A note's other files (PDFs, videos, anything) as they are, a piece at a time.
     case noteFiles = "note_files"
+    /// `machine_info` (and running another Trek's threads, which the phone doesn't).
+    case machines
 }
 
 /// The Mac's snooze menu.

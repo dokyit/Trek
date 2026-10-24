@@ -194,6 +194,7 @@ final class AppModel {
         }
         if forceDemo {
             attach(HostLink(paired: .demo, backend: MockHost()))
+            if Launch.demoPC { attach(HostLink(paired: .demoPC, backend: MockHost(name: "T-Book", id: "demo-pc", platform: "windows"))) }
             mode = .demo
         } else if UserDefaults.standard.bool(forKey: "demoMode") {
             startDemo()
@@ -454,6 +455,7 @@ final class AppModel {
         case .paired(_, _, let host, let features, _), .welcome(_, let host, let features, _):
             link.host = host
             link.features = Set(features)
+            learnPlatform(of: link)
         case .snapshot(let s):
             let rows = s.threads.map { qualify($0, on: link) }
             let projs = s.projects.map { qualify($0, on: link) }
@@ -511,7 +513,7 @@ final class AppModel {
             // Rewound or rewritten on the host: the whole (last page of the) transcript again.
             let qid = link.qualified(tid)
             if let s = stores[qid], s.subscribed { request(.subscribe(threadId: qid, afterSeq: nil, limit: Self.firstPage)) }
-        case .ack(let re, _, _, _), .pong(let re):
+        case .ack(let re, _, _, _), .pong(let re), .machineInfo(let re, _):
             link.reply(re, message)
         case .usage(let re, _), .basecamp(let re, _), .notes(let re, _), .note(let re, _), .gitStatus(let re, _),
              .gitDiff(let re, _), .gitBranches(let re, _), .commands(let re, _, _), .settings(let re, _),
@@ -525,6 +527,22 @@ final class AppModel {
         case .unknown:
             break
         }
+    }
+
+    /// Ask a machine what it runs on, once it's connected and answers `machine_info`; kept with
+    /// its pairing.
+    private func learnPlatform(of link: HostLink) {
+        guard link.features.contains(MacFeature.machines.rawValue), link.id != "demo" else { return }
+        link.request(.machineInfo) { [weak link] reply in
+            guard let link, case .machineInfo(_, let info) = reply, link.paired.platform != info.platform else { return }
+            link.paired.platform = info.platform
+            PairedMac.save(link.paired)
+        }
+    }
+
+    /// What the machine of `qid` (a thread or project id) is.
+    func machineKind(of qid: String) -> MachineKind {
+        MachineKind(platform: link(for: qid)?.paired.platform)
     }
 
     /// Keeps each opened thread's store in step with its row, and the tab bar's counts.
@@ -1182,6 +1200,9 @@ struct PairedMac: Codable {
     /// Addresses it answered at before (the Wi-Fi it was paired on, another it was on since),
     /// newest first: dialled too, and they tell its Wi-Fi from another.
     var known: [String] = []
+    /// What it said it runs on (`machine_info`: "macos", "windows"), kept so its threads are
+    /// marked before it's reached.
+    var platform: String?
 
     init(address: String, token: String, hostName: String, hostId: String, transport: Transport, routes: [String] = [],
          known: [String] = []) {
@@ -1194,7 +1215,7 @@ struct PairedMac: Codable {
         self.known = known
     }
 
-    private enum CodingKeys: String, CodingKey { case address, token, hostName, hostId, transport, routes, known }
+    private enum CodingKeys: String, CodingKey { case address, token, hostName, hostId, transport, routes, known, platform }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -1207,10 +1228,21 @@ struct PairedMac: Codable {
         transport = try c.decodeIfPresent(Transport.self, forKey: .transport) ?? .plain
         routes = try c.decodeIfPresent([String].self, forKey: .routes) ?? []
         known = try c.decodeIfPresent([String].self, forKey: .known) ?? []
+        platform = try c.decodeIfPresent(String.self, forKey: .platform)
     }
 
     /// The demo's stand-in pairing (never saved): the demo host answers to "demo".
-    static var demo: PairedMac { PairedMac(address: "", token: "", hostName: "Demo", hostId: "demo", transport: .plain) }
+    static var demo: PairedMac {
+        var p = PairedMac(address: "", token: "", hostName: "Demo", hostId: "demo", transport: .plain)
+        p.platform = "macos"
+        return p
+    }
+    /// The demo's Windows machine (`-TrekDemoPC`).
+    static var demoPC: PairedMac {
+        var p = PairedMac(address: "", token: "", hostName: "T-Book", hostId: "demo-pc", transport: .plain)
+        p.platform = "windows"
+        return p
+    }
 
     /// The Keychain read once: views ask for it as they draw (the Settings tab, the connection
     /// banner), and a Keychain query on every redraw made them slow to appear.
