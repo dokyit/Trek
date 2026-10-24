@@ -4054,36 +4054,49 @@ fn tls_remote(
         tr::TlsIdentity::load_or_create(&common::new_project("link-tls"), "Test Mac").unwrap();
     let fingerprint = identity.fingerprint.clone();
     let reach = trek_core::settings::Reach::Wifi;
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let routes = trek_app::remote::remote_routes(&addresses, reach, port).unwrap();
     let policy = Arc::new(Mutex::new(trek_app::remote::link::LinkPolicy {
         reach,
         tailscale: addresses.tailscale,
     }));
-    let mut config = tr::ServerConfig::new(tr::HostInfo {
-        id: "test".into(),
-        name: "Test Mac".into(),
-        version: "0".into(),
-    });
-    config.bind = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    config.tls = Some(identity);
-    config.advertise = Some(routes[0].clone());
-    config.routes = routes.clone();
-    config.admit = Some({
-        let policy = policy.clone();
-        tr::Admission::new(move |peer, local| policy.lock().unwrap().admits(peer.ip(), local.ip()))
-    });
     let (host, requests) = tr::ChannelHost::new();
+    let host = Arc::new(host);
     rt.spawn(async move {
         while let Ok(req) = requests.recv().await {
             answer(req);
         }
     });
-    let handle = rt
-        .block_on(tr::RemoteServer::start(config, Arc::new(host)))
-        .unwrap();
+    // A free port, found by binding and letting go of it: another test may take it in between,
+    // so a server that can't bind it tries another.
+    let mut tries = 0;
+    let (handle, port, routes) = loop {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let routes = trek_app::remote::remote_routes(&addresses, reach, port).unwrap();
+        let mut config = tr::ServerConfig::new(tr::HostInfo {
+            id: "test".into(),
+            name: "Test Mac".into(),
+            version: "0".into(),
+        });
+        config.bind = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        config.tls = Some(identity.clone());
+        config.advertise = Some(routes[0].clone());
+        config.routes = routes.clone();
+        config.admit = Some({
+            let policy = policy.clone();
+            tr::Admission::new(move |peer, local| {
+                policy.lock().unwrap().admits(peer.ip(), local.ip())
+            })
+        });
+        match rt.block_on(tr::RemoteServer::start(config, host.clone())) {
+            Ok(handle) => break (handle, port, routes),
+            Err(e) if tries < 5 => {
+                tries += 1;
+                eprintln!("port {port} taken meanwhile ({e}); another");
+            }
+            Err(e) => panic!("no port to serve on: {e}"),
+        }
+    };
     let mut remote = trek_app::remote::Remote::new(
         handle,
         addresses,
