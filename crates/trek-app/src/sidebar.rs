@@ -1615,21 +1615,17 @@ impl Sidebar {
                 cx.notify();
             }))
             .trigger({
-                // The nearest limit of any plan, as a ring (how much of it is used) and what's left,
-                // as the card says it; the tooltip names whose and which. A plain icon before any
-                // is known.
-                let rows = self.workspace.read(cx).usage_rows();
-                let nearest = rows
-                    .iter()
-                    .flat_map(|r| r.limits.iter().map(move |l| (r, l)))
-                    .max_by(|a, b| a.1.percent.total_cmp(&b.1.percent));
-                let peak = nearest.map(|(_, l)| l.percent);
-                let tip = nearest.map_or_else(
+                // The provider in use (the open thread's, or what the composer starts with): its
+                // logo, its nearest limit as a ring (how much is used) and what's left, as the card
+                // says it; the tooltip names the limit. A plain icon before any is known.
+                let focus = self.workspace.read(cx).usage_focus();
+                let peak = focus.as_ref().map(|(_, l)| l.percent);
+                let tip = focus.as_ref().map_or_else(
                     || "Usage".to_string(),
-                    |(r, l)| {
+                    |(agent, l)| {
                         format!(
-                            "Usage · nearest limit: {} {}, {:.0}% left",
-                            r.agent.display_name(),
+                            "Usage · {}: {} {:.0}% left",
+                            agent.display_name(),
                             l.label.to_lowercase(),
                             (100. - l.percent).clamp(0., 100.)
                         )
@@ -1646,14 +1642,23 @@ impl Sidebar {
                     .selected(usage_open)
                     .tooltip(tip)
                     .map(|p| match peak {
-                        Some(peak) => p.child(usage_ring(peak / 100., tint, cx)).child(
-                            div()
-                                .id("usage-left")
-                                .test_support()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(format!("{:.0}% left", (100. - peak).clamp(0., 100.))),
-                        ),
+                        Some(peak) => p
+                            .children(focus.as_ref().map(|(agent, _)| {
+                                div().id("usage-agent").test_support().child(ui::agent_logo(
+                                    agent,
+                                    px(12.),
+                                    cx,
+                                ))
+                            }))
+                            .child(usage_ring(peak / 100., tint, cx))
+                            .child(
+                                div()
+                                    .id("usage-left")
+                                    .test_support()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("{:.0}% left", (100. - peak).clamp(0., 100.))),
+                            ),
                         None => p.child(
                             Icon::new(crate::assets::Lucide::ChartNoAxesColumn)
                                 .small()

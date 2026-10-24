@@ -206,6 +206,51 @@ impl Workspace {
     /// The Usage card's rows, for the providers it shows. What an agent said this run is shown
     /// as it is; what it said in an earlier run is shown with when (windows that have reset
     /// since are shown empty again) until it's read again.
+    /// The provider in use and the model it runs: the open thread's, or what the composer starts
+    /// a thread with (on a draft, in Settings or Basecamp).
+    pub fn usage_in_use(&self) -> (AgentId, Option<String>) {
+        if let Some(t) = self.current_thread() {
+            return (t.agent.clone(), t.model.clone());
+        }
+        (
+            self.draft_prefs.agent.clone(),
+            self.draft_prefs.model.clone(),
+        )
+    }
+
+    /// What the footer's usage pill shows: the nearest limit of the provider in use
+    /// (`usage_in_use`), counting a model's own limit ("Weekly · Fable") only while that model
+    /// is the one in use; the nearest of any provider shown when that one reports no limits.
+    pub fn usage_focus(&self) -> Option<(AgentId, UsageLimit)> {
+        let rows = self.usage_rows();
+        let (agent, model) = self.usage_in_use();
+        let model = model
+            .or_else(|| {
+                crate::composer::default_model(&self.models_for(&agent)).map(|m| m.id.clone())
+            })
+            .unwrap_or_default()
+            .to_lowercase();
+        let applies = |l: &UsageLimit| match l.label.split_once(" · ") {
+            Some((_, family)) => model.contains(&family.trim().to_lowercase()),
+            None => true,
+        };
+        let nearest = |row: &UsageRow, only_applying: bool| {
+            row.limits
+                .iter()
+                .filter(|l| !only_applying || applies(l))
+                .max_by(|a, b| a.percent.total_cmp(&b.percent))
+                .map(|l| (row.agent.clone(), l.clone()))
+        };
+        rows.iter()
+            .find(|r| r.agent == agent)
+            .and_then(|r| nearest(r, true))
+            .or_else(|| {
+                rows.iter()
+                    .filter_map(|r| nearest(r, false))
+                    .max_by(|a, b| a.1.percent.total_cmp(&b.1.percent))
+            })
+    }
+
     pub fn usage_rows(&self) -> Vec<UsageRow> {
         let now = self.now();
         self.usage_shown()

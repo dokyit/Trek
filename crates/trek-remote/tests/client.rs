@@ -202,7 +202,8 @@ fn quick() -> ClientOptions {
     }
 }
 
-/// The next event that `pick` takes, skipping others; panics after 5 s.
+/// The next event that `pick` takes, skipping others; panics after 15 s (a hang, not a slow
+/// machine: a full test run in parallel kept a 5 s wait from seeing a probe's 500 ms).
 async fn next<T>(
     events: &mut mpsc::UnboundedReceiver<Event>,
     mut pick: impl FnMut(Event) -> Option<T>,
@@ -215,7 +216,7 @@ async fn next<T>(
             }
         }
     };
-    tokio::time::timeout(Duration::from_secs(5), wait)
+    tokio::time::timeout(Duration::from_secs(15), wait)
         .await
         .expect("timed out waiting for an event")
 }
