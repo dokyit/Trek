@@ -160,6 +160,9 @@ final class ThreadStore {
     private(set) var more = false
     /// A page of earlier items is on its way.
     var loadingEarlier = false
+    /// Bumped when the transcript is replaced whole (the host rewrote it): the view draws it
+    /// afresh, at the latest, rather than keep places that no longer fit it.
+    private(set) var generation = 0
 
     @ObservationIgnored private(set) var items: [TItem] = []
     @ObservationIgnored private var index: [String: Int] = [:]
@@ -188,16 +191,30 @@ final class ThreadStore {
     }
 
     /// The Mac's reply to a subscribe: the whole (last part of the) transcript, or what changed.
-    func applyReply(reset: Bool, seq: Int64, items new: [TItem], more: Bool) {
+    /// `rewritten`: the host said it rewrote the transcript (a rewind): what was here goes. Else a
+    /// reset only means the host lost track of this phone (a reconnect, a restart): its last page
+    /// lines up with what's here, and the earlier items stay, with the reader's place.
+    func applyReply(reset: Bool, seq: Int64, items new: [TItem], more: Bool, rewritten: Bool = false) {
         flushQueued()
-        if reset {
+        if reset, !rewritten, loaded, let first = new.first, let at = index[first.id],
+           Self.linesUp(items[at...].map(\.id), with: new.map(\.id)) {
+            replaceAll(Array(items[..<at]) + new, more: self.more)
+        } else if reset {
             replaceAll(new, more: more)
+            if loaded, !items.isEmpty { generation += 1 }
         } else {
             upsert(new)
         }
         self.seq = max(reset ? seq : self.seq, seq)
         if !loaded { loaded = true }
         onChange?()
+    }
+
+    /// Whether a page sent whole continues what's here from the same item: the ids here, from
+    /// it on, are the page's first ones in order (the page may hold more after them).
+    nonisolated static func linesUp(_ here: [String], with page: [String]) -> Bool {
+        let n = min(here.count, page.count)
+        return n > 0 && here.prefix(n).elementsEqual(page.prefix(n))
     }
 
     /// From the cache on disk: shown at once, and the subscription asks only for what's newer.

@@ -1,4 +1,7 @@
 import SwiftUI
+import os
+
+private let scrollLog = Logger(subsystem: "dev.trek.TrekMobile", category: "scroll")
 
 /// A thread: its transcript, the requests waiting on the user, and the composer.
 ///
@@ -277,6 +280,8 @@ private struct TranscriptList: View, Equatable {
     /// A page of earlier items is on its way, or just went in above: the bottom keeps still for
     /// it too, so the rows being read don't move.
     @State private var earlierLanding = false
+    /// The user has a finger on it (dragging or flicking): a big move then is theirs.
+    @State private var touching = false
 
     /// How many of the latest rows are laid out outside the lazy stack, at least.
     private static let laidOut = 3
@@ -351,6 +356,9 @@ private struct TranscriptList: View, Equatable {
             .padding(.top, 12)
             .padding(.bottom, 16)
         }
+        // Drawn afresh when the host rewrote the transcript (a rewind): the places it kept were
+        // for rows that are gone, and a lazy stack holding them showed a blank screen.
+        .id(store.generation)
         // It opens at the latest. While it's there, a change in size keeps the bottom still, so it
         // stays with the latest as items arrive (and as a page of earlier items lands above);
         // scrolled up, the top keeps still, so what's being read isn't pulled down as the answer
@@ -372,6 +380,7 @@ private struct TranscriptList: View, Equatable {
         // Earlier items load as the user scrolls up towards them (or straight away, while what's
         // loaded doesn't fill the screen); not while the view settles at the bottom.
         .onScrollPhaseChange { _, phase in
+            touching = phase != .idle
             guard phase == .interacting, !scrolled else { return }
             scrolled = true
             if nearTop { model.loadEarlier(store.id) }
@@ -388,6 +397,14 @@ private struct TranscriptList: View, Equatable {
             if edge.atBottom != atBottom { atBottom = edge.atBottom }
             if edge.awayFromBottom != awayFromBottom { awayFromBottom = edge.awayFromBottom }
             if edge.short || (edge.nearTop && scrolled) { model.loadEarlier(store.id) }
+        }
+        // A move of more than a screen the user didn't make, or the content shrinking under it:
+        // what "it pulled me down" looks like, said in the log with its cause's neighbours.
+        .onScrollGeometryChange(for: [CGFloat].self) { [$0.contentOffset.y, $0.contentSize.height] } action: { old, new in
+            let (moved, shrank) = (new[0] - old[0], old[1] - new[1])
+            if !touching, abs(moved) > 700 || shrank > 700 {
+                scrollLog.info("transcript \(store.id, privacy: .public): jumped \(Int(moved)) pt, content \(Int(old[1]))→\(Int(new[1])), atBottom \(atBottom), \(store.items.count) items")
+            }
         }
         // Jump back to the latest when the transcript has been left behind.
         .overlay(alignment: .bottomTrailing) {

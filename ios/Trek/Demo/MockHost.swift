@@ -18,6 +18,7 @@ final class MockHost: Backend {
     /// it gets the whole transcript again.
     private var rewritten: [String: Int64] = [:]
     private var timer: Timer?
+    private var chatter: Timer?
     private var tick = 0
     private var notes = DemoMac.notes()
     private var settings = DemoMac.settings()
@@ -98,11 +99,24 @@ final class MockHost: Backend {
         timer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.advanceWorkingThread() }
         }
+        // `-TrekDemoChat <seconds>`: a message into the opened thread that often, each answered, so
+        // new answers keep arriving under the reader (the transcript's layout as a long thread grows).
+        if Launch.demoChat > 0, let tid = Launch.open {
+            var n = 0
+            chatter = Timer.scheduledTimer(withTimeInterval: Launch.demoChat, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    n += 1
+                    self?.take(.send(threadId: tid, text: "Step \(n): carry on", mode: nil, images: []), id: nil)
+                }
+            }
+        }
     }
 
     func stop() {
         timer?.invalidate()
         timer = nil
+        chatter?.invalidate()
+        chatter = nil
     }
 
     func wake() {}
