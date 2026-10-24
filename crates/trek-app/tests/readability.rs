@@ -156,6 +156,44 @@ fn a_project_has_one_colour_wherever_its_folders_show() {
 }
 
 #[test]
+fn a_side_chat_that_asks_to_run_something_shows_the_card_and_goes_on_once_allowed() {
+    run(async |cx| {
+        let trek = open(cx);
+        let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
+        trek.window(cx, |window, cx| {
+            panel.update(cx, |p, cx| p.open_tool(PanelTool::SideChat, window, cx))
+        });
+        trek.click(cx, "side-input");
+        trek.type_live(cx, "mock:permission");
+        trek.press_live(cx, "enter");
+        let side = |ws: &trek_app::workspace::Workspace| {
+            ws.threads
+                .iter()
+                .find(|t| t.side_of.is_some())
+                .map(|t| t.id.clone())
+        };
+        trek.wait(cx, "the side chat to ask", |ws| {
+            side(ws).is_some_and(|id| ws.live.get(&id).is_some_and(|l| !l.permissions.is_empty()))
+        })
+        .await;
+        let id = trek.read(cx, |ws, _| side(ws)).unwrap();
+        trek.render(cx);
+        // What it waits for, with Allow: not a working line that never ends.
+        assert!(trek.visible(cx, "side-request"));
+        assert!(trek.visible(cx, "ai-allow"));
+        assert!(!trek.visible(cx, "side-working"));
+        trek.click(cx, "ai-allow");
+        trek.wait(cx, "the side chat to carry on and finish", |ws| {
+            !ws.turn_running(&id) && ws.live.get(&id).is_some_and(|l| l.permissions.is_empty())
+        })
+        .await;
+        trek.render(cx);
+        assert!(!trek.visible(cx, "side-request"));
+        assert_ne!(trek.run_state(cx, &id), trek_core::RunState::NeedsYou);
+    });
+}
+
+#[test]
 fn a_side_chat_at_work_says_a_trail_word() {
     run(async |cx| {
         let trek = open(cx);

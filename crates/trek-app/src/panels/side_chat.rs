@@ -1,8 +1,10 @@
 //! Side chat: a quick, separate conversation next to the main thread (same project, own session).
 
 use crate::attachments::{self, Attaching, Outbox};
+use crate::ide::ai::cards;
 use crate::workspace::{Workspace, WorkspaceEvent};
-use gpui_kit::component::input::{Enter, InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{Enter, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::text::TextViewState;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -18,6 +20,10 @@ pub struct SideChatPanel {
     outbox: Outbox,
     /// `general.send_with_cmd_enter`, as last applied to the textarea.
     cmd_enter: bool,
+    /// The masked fields of the question card's secret questions, for its request.
+    secrets: (Option<String>, Vec<(Entity<InputState>, Subscription)>),
+    /// The plan card's document, for its request.
+    plan_md: Option<(String, Entity<TextViewState>, Subscription)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -71,7 +77,173 @@ impl SideChatPanel {
             scroll: ScrollHandle::new(),
             outbox: Outbox::default(),
             cmd_enter,
+            secrets: (None, vec![]),
+            plan_md: None,
             _subscriptions: subs,
+        }
+    }
+
+    /// What waits on the user in the side chat, under its last message: an approval, questions
+    /// or a plan, as the AI side bar draws them (`ide::ai::cards`). Without it, a side chat in
+    /// Supervised mode that asked to run a command sat at its working line for good.
+    fn request_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let id = self.thread_id.clone()?;
+        let (p, agent, picks, cwd) = {
+            let ws = self.workspace.read(cx);
+            let live = ws.live.get(&id)?;
+            let p = live.permissions.first()?.clone();
+            let t = ws.thread(&id)?;
+            (p, t.agent.display_name(), live.picks.clone(), t.cwd.clone())
+        };
+        let card = match &p.prompt {
+            None => cards::approval(
+                &self.workspace,
+                &id,
+                &p.request_id,
+                &agent,
+                &p.title,
+                &p.detail,
+                cx,
+            ),
+            Some(trek_agents::Prompt::Questions(questions)) => {
+                self.secret_fields(&p.request_id, questions, window, cx);
+                let complete = self.card_answers(&p.request_id, questions, cx).is_some();
+                let me = cx.entity().downgrade();
+                let submit = std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
+                    let _ = me.update(cx, |this, cx| this.submit_answers(window, cx));
+                });
+                let fields: Vec<Entity<InputState>> =
+                    self.secrets.1.iter().map(|(f, _)| f.clone()).collect();
+                cards::questions(
+                    &self.workspace,
+                    &id,
+                    &p.request_id,
+                    &agent,
+                    questions,
+                    &picks,
+                    &fields,
+                    complete,
+                    submit,
+                    cx,
+                )
+            }
+            Some(trek_agents::Prompt::Plan(plan)) => {
+                if self
+                    .plan_md
+                    .as_ref()
+                    .is_none_or(|(rid, _, _)| *rid != p.request_id)
+                {
+                    let md = cx.new(|cx| TextViewState::markdown(plan, cx));
+                    let parsed = cx.observe(&md, |_, _, cx| cx.notify());
+                    self.plan_md = Some((p.request_id.clone(), md, parsed));
+                }
+                let doc = self.plan_md.as_ref().map(|(_, m, _)| m.clone());
+                cards::plan(
+                    &self.workspace,
+                    &id,
+                    &p.request_id,
+                    &agent,
+                    doc.as_ref(),
+                    cwd,
+                    cx,
+                )
+            }
+        };
+        Some(
+            div()
+                .id("side-request")
+                .test_support()
+                .child(card)
+                .into_any_element(),
+        )
+    }
+
+    /// The question card's answers, one per question (a secret one as typed), once each has one.
+    fn card_answers(
+        &self,
+        request_id: &str,
+        questions: &[trek_agents::Question],
+        cx: &App,
+    ) -> Option<Vec<(String, String)>> {
+        let picks = &self
+            .workspace
+            .read(cx)
+            .live
+            .get(self.thread_id.as_ref()?)?
+            .picks;
+        let mut fields = self.secrets.1.iter();
+        questions
+            .iter()
+            .enumerate()
+            .map(|(i, q)| {
+                let picked = picks
+                    .get(&(request_id.to_string(), i))
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v.join(", "));
+                let typed = q
+                    .secret
+                    .then(|| fields.next())
+                    .flatten()
+                    .map(|(f, _)| f.read(cx).value().trim().to_string())
+                    .filter(|v| !v.is_empty());
+                typed.or(picked).map(|a| (q.question.clone(), a))
+            })
+            .collect()
+    }
+
+    fn submit_answers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.thread_id.clone() else {
+            return;
+        };
+        let pending = self
+            .workspace
+            .read(cx)
+            .live
+            .get(&id)
+            .and_then(|l| l.permissions.first())
+            .and_then(|p| match &p.prompt {
+                Some(trek_agents::Prompt::Questions(q)) => Some((p.request_id.clone(), q.clone())),
+                _ => None,
+            });
+        let Some((request_id, questions)) = pending else {
+            return;
+        };
+        let Some(answers) = self.card_answers(&request_id, &questions, cx) else {
+            return;
+        };
+        for (f, _) in &self.secrets.1 {
+            f.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        self.workspace
+            .update(cx, |ws, cx| ws.answer(&id, &request_id, answers, cx));
+    }
+
+    /// One masked field per secret question, empty for each new card.
+    fn secret_fields(
+        &mut self,
+        request_id: &str,
+        questions: &[trek_agents::Question],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.secrets.0.as_deref() != Some(request_id) {
+            self.secrets = (Some(request_id.to_string()), vec![]);
+        }
+        while self.secrets.1.len() < questions.iter().filter(|q| q.secret).count() {
+            let field = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .masked(true)
+                    .placeholder("Type it here")
+            });
+            let watch =
+                cx.subscribe_in(&field, window, |this, _, event: &InputEvent, window, cx| {
+                    match event {
+                        InputEvent::PressEnter { .. } => this.submit_answers(window, cx),
+                        InputEvent::Change => cx.notify(),
+                        _ => {}
+                    }
+                });
+            self.secrets.1.push((field, watch));
         }
     }
 
@@ -131,18 +303,23 @@ impl Attaching for SideChatPanel {
 
 impl Render for SideChatPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let request = self.request_card(window, cx);
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
         let live = self.thread_id.as_ref().and_then(|id| ws.live.get(id));
         let items: Vec<Item> = live.map(|l| l.items.to_vec()).unwrap_or_default();
         let streaming = live.and_then(|l| l.streaming);
-        // While it answers, a trail word ("Breaking trail…") rather than a plain "Working…".
-        let working = live.and_then(|l| l.turn_started).map(|t| {
-            crate::working_bar::trail_word(
-                self.thread_id.as_deref().unwrap_or_default(),
-                Some(t.elapsed()),
-            )
-        });
+        // While it answers, a trail word ("Breaking trail…") rather than a plain "Working…"; not
+        // while it waits on the user (the card under it says what for).
+        let working = live
+            .filter(|_| request.is_none())
+            .and_then(|l| l.turn_started)
+            .map(|t| {
+                crate::working_bar::trail_word(
+                    self.thread_id.as_deref().unwrap_or_default(),
+                    Some(t.elapsed()),
+                )
+            });
         let now = ws.now();
         let amber = crate::palette::amber(cx);
         let prefs = ws.prefs();
@@ -152,7 +329,7 @@ impl Render for SideChatPanel {
         let cwd = thread.and_then(|t| t.cwd.clone());
         let folder = thread.and_then(|t| ws.thread_project_tint(t, cx));
         let text_size = px(ws.settings.appearance.transcript_font_size()) * 0.93;
-        let answering = working.is_some();
+        let answering = live.is_some_and(|l| l.turn_started.is_some());
         let empty = self.input.read(cx).value().trim().is_empty()
             && self.outbox.paths.is_empty()
             && self.outbox.saving == 0;
@@ -279,6 +456,7 @@ impl Render for SideChatPanel {
                                 ),
                                 _ => None,
                             }))
+                            .children(request)
                             .when_some(working, |el, word| el.child(div().id("side-working").test_support().text_color(theme.muted_foreground).child(word))),
                     ),
             )
