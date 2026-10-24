@@ -692,3 +692,66 @@ fn live_usage_is_read_only_while_on_the_card() {
         }));
     });
 }
+
+fn limit(label: &str, percent: f32) -> UsageLimit {
+    UsageLimit {
+        label: label.into(),
+        percent,
+        resets_at: None,
+        window: "7d".into(),
+    }
+}
+
+#[test]
+fn the_footer_shows_the_usage_of_the_provider_in_use() {
+    run(async |cx| {
+        let trek = open(cx);
+        install(&trek, cx);
+        trek.update(cx, |ws, _| {
+            // Claude: 25% of its 5 hours used, 60% of its week, none of Fable's week.
+            ws.agent_status.insert(
+                AgentId::ClaudeCode.key(),
+                AgentStatus {
+                    plan: Some("Claude Max".into()),
+                    logged_in: true,
+                    limits: vec![
+                        limit("5-hour limit", 25.),
+                        limit("Weekly limit", 60.),
+                        limit("Weekly · Fable", 0.),
+                    ],
+                    ..Default::default()
+                },
+            );
+            // Devin: 78% of its week, the most of any.
+            ws.agent_status
+                .insert(devin().key(), plan("Devin Pro", 78., None));
+            ws.draft_prefs.agent = AgentId::ClaudeCode;
+            ws.draft_prefs.model = Some("claude-opus-5-5".into());
+        });
+        let focus = |trek: &Trek, cx: &TestAppContext| {
+            trek.read(cx, |ws, _| ws.usage_focus())
+                .map(|(a, l)| (a, l.label, l.percent))
+        };
+        // On Opus, Claude's own nearest limit: its week (Fable's doesn't apply).
+        assert_eq!(
+            focus(&trek, cx),
+            Some((AgentId::ClaudeCode, "Weekly limit".into(), 60.))
+        );
+        trek.render(cx);
+        assert!(trek.visible(cx, "usage-agent"));
+        // On Fable, Fable's week counts too; still Claude's.
+        trek.update(cx, |ws, _| {
+            ws.draft_prefs.model = Some("claude-fable-5-1".into())
+        });
+        assert_eq!(focus(&trek, cx).map(|f| f.0), Some(AgentId::ClaudeCode));
+        // Devin in use: Devin's.
+        trek.update(cx, |ws, _| ws.draft_prefs.agent = devin());
+        assert_eq!(
+            focus(&trek, cx),
+            Some((devin(), "5-hour limit".into(), 78.))
+        );
+        // A provider with no limits to show: the nearest of any, by its logo.
+        trek.update(cx, |ws, _| ws.draft_prefs.agent = AgentId::Codex);
+        assert_eq!(focus(&trek, cx).map(|f| f.0), Some(devin()));
+    });
+}
