@@ -496,7 +496,11 @@ final class AppModel {
         case .transcript(let re, let tid, let reset, let seq, let items, let more):
             let qid = link.qualified(tid)
             if let s = stores[qid] {
-                s.applyReply(reset: reset, seq: seq, items: items.map { qualify($0, on: link) }, more: more)
+                let rewritten = rewrites.remove(qid) != nil
+                if reset, s.loaded {
+                    protocolLog.info("transcript \(qid, privacy: .public): reset\(rewritten ? " (rewritten)" : "", privacy: .public), \(s.items.count) items → \(items.count) (re \(re ?? "-", privacy: .public))")
+                }
+                s.applyReply(reset: reset, seq: seq, items: items.map { qualify($0, on: link) }, more: more, rewritten: rewritten)
                 if let start = openStarts.removeValue(forKey: qid) {
                     Perf.report("open \(qid): reply after \(Perf.ms(Perf.now - start)), \(items.count) items\(reset ? "" : " since the cache")")
                     Perf.untilFrame("open \(qid): on screen", from: start)
@@ -512,6 +516,8 @@ final class AppModel {
         case .transcriptReset(let tid):
             // Rewound or rewritten on the host: the whole (last page of the) transcript again.
             let qid = link.qualified(tid)
+            protocolLog.info("transcript \(qid, privacy: .public): the host reset it")
+            rewrites.insert(qid)
             if let s = stores[qid], s.subscribed { request(.subscribe(threadId: qid, afterSeq: nil, limit: Self.firstPage)) }
         case .ack(let re, _, _, _), .pong(let re), .machineInfo(let re, _):
             link.reply(re, message)
@@ -667,6 +673,9 @@ final class AppModel {
     }
 
     @ObservationIgnored private var openStarts: [String: Double] = [:]
+    /// Threads whose host said it rewrote them (`transcript_reset`): the reply to the subscribe
+    /// that follows replaces what's here, where a plain reset keeps the earlier items.
+    @ObservationIgnored private var rewrites: Set<String> = []
 
     /// The thread's store, made on first use (`tid` qualified, as the list carries it).
     func store(_ tid: String) -> ThreadStore {
@@ -697,6 +706,7 @@ final class AppModel {
     }
 
     private func resubscribe(_ s: ThreadStore, on link: HostLink? = nil) {
+        protocolLog.info("transcript \(s.id, privacy: .public): subscribe after \(s.loaded ? String(s.seq) : "-", privacy: .public)")
         request(.subscribe(threadId: s.id, afterSeq: s.loaded ? s.seq : nil, limit: Self.firstPage), on: link)
     }
 

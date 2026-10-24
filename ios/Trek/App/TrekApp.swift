@@ -54,6 +54,8 @@ enum Launch {
     static var demo: Bool { UserDefaults.standard.bool(forKey: "TrekDemo") }
     /// A second demo machine, on Windows (`-TrekDemoPC YES`).
     static var demoPC: Bool { UserDefaults.standard.bool(forKey: "TrekDemoPC") }
+    /// Seconds between messages the demo sends into the opened thread (`-TrekDemoChat 6`).
+    static var demoChat: Double { UserDefaults.standard.double(forKey: "TrekDemoChat") }
     static var open: String? { UserDefaults.standard.string(forKey: "TrekOpen") }
     /// Seconds to wait before opening `open`, as if tapped once the app has settled (to measure).
     static var openDelay: Double { UserDefaults.standard.double(forKey: "TrekOpenDelay") }
