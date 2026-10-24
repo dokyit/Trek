@@ -4,7 +4,9 @@
 <dict>
 	<!-- The Mac serves wss:// with a self-signed certificate the app pins (TrekClient's
 	     PinningDelegate checks SHA-256 of its DER against the paired fingerprint).
-	     NSAllowsLocalNetworking: LAN and tailnet IP addresses, `.local` and bare host names.
+	     NSAllowsLocalNetworking: LAN IP addresses, `.local` and bare host names. Not tailnet IP
+	     addresses: ATS refuses the certificate there, so the app dials them with Network.framework
+	     (`Address.needsNetworkLink`), which leaves it to the pin.
 	     ts.net: Tailscale MagicDNS names. ATS refuses a self-signed certificate on a fully
 	     qualified name even after the pin accepted it; this exception lets the pin decide.
 	     Nothing else is exempt (no NSAllowsArbitraryLoads). -->

@@ -47,6 +47,19 @@ nonisolated enum Address {
         isService(address) || interface(of: address) != nil
     }
 
+    /// Dialled with `NetworkLink` rather than a URL session: a Bonjour service or an address
+    /// tied to an interface (a URL can't name them), and a tailnet IP address. App Transport
+    /// Security holds URL sessions to its certificate rules on any address it doesn't count as
+    /// local, and a tailnet one (reached through the Tailscale tunnel) isn't: it refused the
+    /// Mac's self-signed certificate there (-9802) before the pin was asked, so the phone never
+    /// reached a Mac over Tailscale. Network.framework leaves the decision to the pin.
+    static func needsNetworkLink(_ address: String) -> Bool {
+        if needsInterface(address) { return true }
+        guard isTailnet(address) else { return false }
+        let host = unscoped(split(address).host).host
+        return ipv4(host) != nil || host.contains(":")
+    }
+
     /// Worth keeping as where the Mac answered, for another day: not one tied to an interface
     /// (the USB cable's link-local address, the service seen on it), which may be named otherwise
     /// next time.
