@@ -8,8 +8,19 @@ use trek_core::changelog::{self, Release};
 use trek_core::settings::Channel;
 use trek_core::update::{AvailableUpdate, Blocker, Found};
 
-/// A day between background checks.
+/// A day between background checks on the stable channel.
 const CHECK_EVERY_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// How long until the next background check on `channel`: a day for stable releases; betas come
+/// faster, and a nightly can be out several times a day, so a day's wait left the nightly channel
+/// a release or two behind without a word.
+fn check_every(channel: Channel) -> i64 {
+    match channel {
+        Channel::Stable => CHECK_EVERY_MS,
+        Channel::Beta => 6 * 60 * 60 * 1000,
+        Channel::Nightly => 60 * 60 * 1000,
+    }
+}
 /// After a failure that may pass (offline, server trouble), try again within the hour.
 const RETRY_AFTER_MS: i64 = 60 * 60 * 1000;
 
@@ -203,7 +214,7 @@ impl Updater {
             return None;
         }
         self.status = UpdateStatus::Checking;
-        self.next_check = Some(now + CHECK_EVERY_MS);
+        self.next_check = Some(now + check_every(channel));
         self.channel = Some(channel);
         Some(Ticket(self.generation))
     }
@@ -923,6 +934,21 @@ mod tests {
                 version: "0.4.1-beta.2".into()
             }
         );
+    }
+
+    #[test]
+    fn nightlies_are_looked_for_hourly_betas_every_six_hours() {
+        for (channel, every) in [
+            (Channel::Nightly, HOUR),
+            (Channel::Beta, 6 * HOUR),
+            (Channel::Stable, 24 * HOUR),
+        ] {
+            let mut u = Updater::default();
+            let t = u.begin_check(channel, 0).unwrap();
+            assert!(!u.finish_check(t, Ok(Found::Nothing), false, true, 0));
+            assert!(!u.check_due(true, every - 1), "{channel:?}");
+            assert!(u.check_due(true, every), "{channel:?}");
+        }
     }
 
     #[test]
