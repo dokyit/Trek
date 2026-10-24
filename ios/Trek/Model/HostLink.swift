@@ -16,6 +16,8 @@ final class HostLink: Identifiable, Equatable {
     var id: String { paired.hostId }
     /// Its name as the user knows it: what it said on connect, else what pairing said.
     var name: String { host?.name ?? paired.hostName }
+    /// What it runs on, as it said.
+    var kind: MachineKind { MachineKind(platform: paired.platform) }
 
     var host: HostInfo?
     var connection: ConnectionState = .idle

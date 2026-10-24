@@ -67,7 +67,7 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    LabeledContent("Version", value: ClientMessage.appVersion)
+                    LabeledContent("Version", value: ClientMessage.appBuild.map { "\(ClientMessage.appVersion) (\($0))" } ?? ClientMessage.appVersion)
                     LabeledContent("Protocol", value: "v\(trekProtocolVersion)")
                     Link(destination: URL(string: "https://github.com/dokyit/Trek")!) {
                         Label("Trek on GitHub", systemImage: "arrow.up.right.square")
@@ -105,11 +105,9 @@ private struct MachineLabel: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            Image(systemName: "laptopcomputer")
-                .font(.system(size: 20, weight: .medium))
-                .foregroundStyle(Trek.foreground)
+            MachineMark(kind: link.kind, size: 20)
                 .frame(width: 40, height: 40)
-                .background(Trek.foreground.opacity(0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .background(link.kind.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             VStack(alignment: .leading, spacing: 3) {
                 Text(link.name).font(.ui(.headline))
                 HStack(alignment: .firstTextBaseline, spacing: 6) {

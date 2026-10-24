@@ -52,6 +52,8 @@ struct TrekApp: App {
 /// Launch arguments for demos and screenshots, e.g. `-TrekDemo YES -TrekOpen t-flaky -TrekAppearance dark`.
 enum Launch {
     static var demo: Bool { UserDefaults.standard.bool(forKey: "TrekDemo") }
+    /// A second demo machine, on Windows (`-TrekDemoPC YES`).
+    static var demoPC: Bool { UserDefaults.standard.bool(forKey: "TrekDemoPC") }
     static var open: String? { UserDefaults.standard.string(forKey: "TrekOpen") }
     /// Seconds to wait before opening `open`, as if tapped once the app has settled (to measure).
     static var openDelay: Double { UserDefaults.standard.double(forKey: "TrekOpenDelay") }

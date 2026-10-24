@@ -38,6 +38,12 @@ struct ThreadsView: View {
         NavigationStack(path: $path.onSet { if Perf.enabled { Perf.navigated = Perf.now } }) {
             ScrollViewReader { proxy in
                 List {
+                    if model.links.count > 1 {
+                        MachineFilterBar(picked: $pickedMachine)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 6, trailing: 0))
+                    }
                     if model.mode == .live {
                         // Each machine that isn't connected says so under its own name.
                         ForEach(model.links.filter { $0.connection != .connected }) { link in
@@ -304,7 +310,8 @@ struct ThreadsView: View {
     private func row(_ t: ThreadSummary, showsProject: Bool) -> some View {
         NavigationLink(value: t.id) {
             ThreadRow(thread: t, showsProject: showsProject,
-                      host: model.links.count > 1 ? model.hostName(of: t.id) : nil)
+                      host: model.links.count > 1 ? model.hostName(of: t.id) : nil,
+                      hostKind: model.machineKind(of: t.id))
         }
         .id(t.id)
         .navigationLinkIndicatorVisibility(.hidden)
@@ -489,8 +496,9 @@ struct ThreadRow: View {
     var thread: ThreadSummary
     /// Its project's badge and name: left out under the project's own header.
     var showsProject = true
-    /// Which machine it's on, when several are paired.
+    /// Which machine it's on, when several are paired, and what that machine is.
     var host: String? = nil
+    var hostKind: MachineKind = .unknown
     @Environment(\.compactRows) private var compact
 
     private var recedes: Bool { thread.runState == .idle && !thread.unseen && thread.needs == nil && thread.runningSubAgents.isEmpty }
@@ -505,7 +513,7 @@ struct ThreadRow: View {
             AgentGlyph(thread.agent, size: 18)
                 .opacity(recedes ? 0.7 : 1)
             if showsProject, let p = thread.project { ProjectBadge(project: p, size: 15) }
-            if let host { Text(host).font(.ui(.caption)).foregroundStyle(Trek.muted).lineLimit(1) }
+            if let host { MachineTag(name: host, kind: hostKind, compact: true) }
             Text(thread.title)
                 .scaledFont(16, weight: thread.unseen ? .semibold : .regular)
                 .foregroundStyle(recedes ? Trek.foreground.opacity(0.72) : Trek.foreground)
@@ -588,11 +596,7 @@ struct ThreadRow: View {
     private var secondary: some View {
         HStack(spacing: 5) {
             if let host {
-                Label(host, systemImage: "laptopcomputer")
-                    .labelStyle(BranchLabelStyle())
-                    .foregroundStyle(Trek.muted.opacity(0.9))
-                    .fixedSize()
-                Text("·").foregroundStyle(Trek.muted.opacity(0.6))
+                MachineTag(name: host, kind: hostKind, compact: true)
             }
             if !showsProject || thread.runState == .working {
                 Text(thread.modelLabel ?? thread.agent.name)
@@ -790,5 +794,47 @@ private struct FingerprintLabelStyle: LabeledContentStyle {
             configuration.content
         }
         .font(.ui(.footnote))
+    }
+}
+
+/// Which machines' threads the list shows: all, or one, each by its tag (its platform's mark
+/// and colour), so a Mac's threads and a PC's read apart.
+private struct MachineFilterBar: View {
+    @Binding var picked: String?
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                Button {
+                    withAnimation(.snappy(duration: 0.2)) { picked = nil }
+                } label: {
+                    Text("All")
+                        .font(.ui(.subheadline).weight(.medium))
+                        .foregroundStyle(picked == nil ? Trek.foreground : Trek.foreground.opacity(0.75))
+                        .padding(.horizontal, 14)
+                        .frame(height: 32)
+                        .background(Trek.foreground.opacity(picked == nil ? 0.14 : 0.06), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                ForEach(model.links) { link in
+                    Button {
+                        withAnimation(.snappy(duration: 0.2)) { picked = picked == link.id ? nil : link.id }
+                    } label: {
+                        HStack(spacing: 6) {
+                            MachineTag(name: link.name, kind: link.kind, selected: picked == link.id)
+                        }
+                        .overlay(alignment: .topTrailing) {
+                            if link.connection != .connected {
+                                Circle().fill(Trek.failed).frame(width: 7, height: 7).offset(x: 1, y: -1)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(link.name)\(link.kind.word.map { ", \($0)" } ?? "")")
+                }
+            }
+            .padding(.horizontal, 16)
+        }
     }
 }

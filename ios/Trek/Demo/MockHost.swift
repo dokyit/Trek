@@ -23,7 +23,16 @@ final class MockHost: Backend {
     private var settings = DemoMac.settings()
     /// The visualizations thread's answer still being written: its item, and the text to come.
     private var vizStream: (tid: String, id: String, text: String, rest: [String])?
-    private let host = HostInfo(id: "demo-mac", name: "Tobias’s MacBook Pro", version: "0.3.2")
+    private let host: HostInfo
+    /// What it says it runs on (`machine_info`).
+    private let platform: String
+
+    /// The demo's Mac; `-TrekDemoPC` adds a Windows machine beside it (the same threads, on a
+    /// machine of another name), for the machine tags and filter.
+    init(name: String = "Tobias’s MacBook Pro", id: String = "demo-mac", platform: String = "macos") {
+        host = HostInfo(id: id, name: name, version: "0.3.2")
+        self.platform = platform
+    }
 
     let projects: [ProjectSummary] = [
         MockHost.project("p-trek", "trek", hue: 24, branch: "main"),
@@ -143,6 +152,8 @@ final class MockHost: Backend {
             update(tid, push: false) { $0.unseen = false }
         case .ping:
             deliver(.pong(re: id))
+        case .machineInfo:
+            deliver(.machineInfo(re: id, MachineInfo(name: host.name, platform: platform)))
         case .useReset, .queueAction, .attachment, .backgroundOutput, .stopBackground, .icon, .noteAsset, .addNoteImage, .noteFile:
             takeParity(message, id: id)
         case .interrupt(let tid):
