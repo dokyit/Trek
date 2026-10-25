@@ -1159,7 +1159,7 @@ impl Composer {
                 .bottom_full()
                 .right_0()
                 .pb(px(8.))
-                .gap(px(8.))
+                .gap(px(6.))
                 .items_center()
                 .children(changes)
                 .children(action)
@@ -4375,15 +4375,12 @@ fn changes_chip(
 ) -> AnyElement {
     let theme = cx.theme();
     let (green, red) = (palette::emerald(cx), palette::red(cx));
-    // The squares in the reference's bright green and red on a light page (the palette's are
-    // for text there, and go muddy as small blocks).
-    let (sq_green, sq_red) = if theme.background.l > 0.5 {
-        (
-            hsla(147. / 360., 0.60, 0.48, 1.),
-            hsla(355. / 360., 0.70, 0.56, 1.),
-        )
-    } else {
+    // The squares in the reference's bright green and red (#38DE6F, #DB3B4F) on a light page
+    // (the palette's are for text there, and go muddy as small blocks).
+    let (sq_green, sq_red) = if theme.mode.is_dark() {
         (green, red)
+    } else {
+        (rgb(0x38DE6F).into(), rgb(0xDB3B4F).into())
     };
     // Five squares split by what was added and removed, as the reference's.
     let total = (added + removed).max(1) as f32;
@@ -4398,31 +4395,28 @@ fn changes_chip(
         .test_support()
         .aria_label(format!("{files} files changed"))
         .flex_none()
-        .h(px(26.))
-        .px(px(10.))
+        .h(px(31.))
+        .px(px(12.))
         .gap(px(6.))
         .items_center()
         .rounded_full()
         .bg(crate::pr_card::chip_fill(cx))
         .border_1()
-        .border_color(theme.foreground.opacity(0.08))
+        .border_color(crate::pr_card::chip_border(cx))
         .shadow(crate::pr_card::chip_shadow())
         .cursor_pointer()
-        .text_size(px(12.5))
+        .hover(|s| s.border_color(theme.foreground.opacity(0.16)))
+        .text_size(px(13.))
         .child(
             Icon::new(crate::assets::Lucide::FileText)
                 .size(px(12.))
                 .text_color(theme.muted_foreground),
         )
-        .child(
-            div()
-                .text_color(theme.foreground.opacity(0.85))
-                .child(if files == 1 {
-                    "1 file".to_string()
-                } else {
-                    format!("{files} files")
-                }),
-        )
+        .child(div().text_color(theme.foreground).child(if files == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{files} files")
+        }))
         .child(div().text_color(green).child(format!("+{added}")))
         .child(div().text_color(red).child(format!("−{removed}")))
         .child(h_flex().gap(px(2.)).children((0..5).map(|i| {
@@ -4436,8 +4430,8 @@ fn changes_chip(
         })))
         .child(
             Icon::new(IconName::ChevronUp)
-                .xsmall()
-                .text_color(theme.muted_foreground),
+                .size(px(11.))
+                .text_color(theme.muted_foreground.opacity(0.6)),
         )
         .on_click(on_click)
         .into_any_element()
@@ -4459,15 +4453,17 @@ fn dark_chip(
         .test_support()
         .aria_label(label)
         .flex_none()
-        .h(px(26.))
-        .px(px(11.))
+        .h(px(31.))
+        .px(px(12.))
         .gap(px(6.))
         .items_center()
         .rounded_full()
         .bg(bg.opacity(0.92))
-        .when(!busy, |el| el.hover(move |s| s.bg(bg)).cursor_pointer())
+        .when(!busy, |el| {
+            el.hover(move |s| s.bg(bg.opacity(0.8))).cursor_pointer()
+        })
         .shadow(crate::pr_card::chip_shadow())
-        .text_size(px(12.5))
+        .text_size(px(13.))
         .font_medium()
         .text_color(fg)
         .child(if busy {
