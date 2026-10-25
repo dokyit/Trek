@@ -93,18 +93,6 @@ impl Phase {
             Phase::Failed => "Failed",
         }
     }
-
-    /// The badge and merge-tip colour.
-    fn tint(self, cx: &App) -> Hsla {
-        match self {
-            Phase::Creating | Phase::Open => cx.theme().muted_foreground,
-            Phase::Checking | Phase::Merging | Phase::Releasing => crate::palette::sky(cx),
-            Phase::Conflicted => crate::palette::amber(cx),
-            Phase::Ready | Phase::Passed => crate::palette::emerald(cx),
-            Phase::Merged | Phase::Published => crate::palette::indigo(cx),
-            Phase::Closed | Phase::Failed => crate::palette::red(cx),
-        }
-    }
 }
 
 /// What the card stands for.
@@ -126,9 +114,10 @@ pub struct Check {
     pub state: CheckState,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckState {
+    #[default]
     Queued,
     Running,
     Pass,
@@ -144,10 +133,16 @@ impl CheckState {
 }
 
 /// A release stage (`gh run view --json jobs`), or the one step a local release reports.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stage {
     pub label: String,
     pub state: CheckState,
+    /// When the job started and (once it's done) finished, unix ms; 0 until GitHub says. The
+    /// card draws how long each took, and places its node by it.
+    #[serde(default)]
+    pub started_ms: i64,
+    #[serde(default)]
+    pub ended_ms: i64,
 }
 
 /// One commit in a pull request's history. GitHub gives us these alongside the aggregate count;
@@ -204,6 +199,8 @@ pub struct Card {
     pub stages: Vec<Stage>,
     /// Run cards: what the run is for (its commit's subject, `displayTitle`).
     pub subject: String,
+    /// Run cards: what started the run (`push`, `pull_request`, `workflow_dispatch`).
+    pub event: String,
     /// When it was made.
     pub created_ms: i64,
     /// When `phase` last changed: draws the phase's graph in (0 until tracked).
@@ -232,21 +229,30 @@ impl Card {
                 .number
                 .map(|n| format!("#{n}"))
                 .unwrap_or_else(|| "PR".to_string()),
-            Kind::Release => {
-                if self.version.is_empty() {
-                    "Release".to_string()
-                } else {
-                    format!("v{}", self.version)
-                }
-            }
+            // "v0.4.15" for v0.4.15-nightly.20261025: the card says the rest.
+            Kind::Release => match self.version.split(['-', '+']).next() {
+                Some(v) if !v.is_empty() => format!("v{v}"),
+                _ => "Release".to_string(),
+            },
             Kind::Run => run_name(self).to_string(),
         };
-        // As the reference words it: how many conflicts, not just that there are some.
-        let state = match (self.resolving, self.phase, self.conflicts.len()) {
-            (true, ..) => "Resolving".to_string(),
-            (false, Phase::Conflicted, 1) => "1 conflict".to_string(),
-            (false, Phase::Conflicted, n) if n > 1 => format!("{n} conflicts"),
-            (false, phase, _) => phase.label().to_string(),
+        let state = match self.kind {
+            // As the reference words it: how many conflicts, not just that there are some.
+            Kind::Pr => match (self.resolving, self.phase, self.conflicts.len()) {
+                (true, ..) => "Resolving".to_string(),
+                (false, Phase::Conflicted, 1) => "1 conflict".to_string(),
+                (false, Phase::Conflicted, n) if n > 1 => format!("{n} conflicts"),
+                (false, phase, _) => phase.label().to_string(),
+            },
+            // What failed, by name; else how far it got ("Building 2 of 3", "2 of 3 passed").
+            Kind::Release | Kind::Run => match self.phase {
+                Phase::Failed | Phase::Closed
+                    if self.stages.iter().any(|s| s.state == CheckState::Fail) =>
+                {
+                    failed_jobs(self)
+                }
+                _ => pipeline_state(self),
+            },
         };
         (what, state)
     }
@@ -274,24 +280,20 @@ fn run_name(card: &Card) -> &str {
     }
 }
 
-/// The colour a card's chip/badge wears (amber wins while it resolves conflicts).
-pub fn chip_tint(card: &Card, cx: &App) -> Hsla {
-    let tint = if card.resolving {
-        crate::palette::amber(cx)
-    } else {
-        card.phase.tint(cx)
-    };
-    // On a light page the palette's amber and green go muddy at chip size; the reference's are
-    // the bright ones (#E8A33D, #2FA867). A dark page's palette is bright already.
-    if cx.theme().background.l > 0.5 {
-        if tint == crate::palette::amber(cx) {
-            return hsla(36. / 360., 0.78, 0.50, 1.);
-        }
-        if tint == crate::palette::emerald(cx) {
-            return hsla(147. / 360., 0.56, 0.42, 1.);
-        }
+/// The colour a card's chip says its state in: a verdict's, or none (`None`: the ink's muted
+/// grey, for work under way).
+fn chip_hue(card: &Card, cx: &App) -> Option<Hue> {
+    let h = hues(cx);
+    if chip_busy(card) {
+        return None;
     }
-    tint
+    match card.phase {
+        Phase::Conflicted => Some(h.amber),
+        Phase::Ready | Phase::Passed | Phase::Published => Some(h.green),
+        Phase::Merged => Some(h.purple),
+        Phase::Failed => Some(h.red),
+        _ => None,
+    }
 }
 
 /// The reference's busy mark: a short arc running round a faint ring (not a dotted spinner).
@@ -317,18 +319,18 @@ pub fn ring_spinner(size: f32, color: Hsla, cx: &App) -> AnyElement {
                 }
             }
             if let Ok(p) = track.build() {
-                window.paint_path(p, color.opacity(0.2));
+                window.paint_path(p, color.opacity(0.15));
             }
-            // The arc: a third of the ring, once round every 0.8 s.
+            // The arc: three quarters of the ring, once round every 0.9 s.
             let turn = if motion {
-                (now_ms() % 800) as f32 / 800.
+                (now_ms() % 900) as f32 / 900.
             } else {
                 0.
             };
             let mut arc = PathBuilder::stroke(w);
             let from = turn * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-            for i in 0..=12 {
-                let a = from + i as f32 / 12. * std::f32::consts::TAU / 3.;
+            for i in 0..=24 {
+                let a = from + i as f32 / 24. * std::f32::consts::TAU * 0.75;
                 let p = point(c.x + px(r) * a.cos(), c.y + px(r) * a.sin());
                 if i == 0 {
                     arc.move_to(p);
@@ -410,65 +412,60 @@ pub fn chip_busy(card: &Card) -> bool {
         || (card.kind == Kind::Run && !card.phase.terminal())
 }
 
-/// The composer's status chip, as the reference draws it: a pill of the page's own colour with a
-/// hairline and a soft shadow; a mark (a spinner while it works, a dot while it waits, the kind's
-/// glyph once it's done), the name in ink, and the state, in its colour only when it's a verdict.
+/// The composer's status chip, as the reference draws it: a 31 px pill of the page's own colour
+/// with a hairline and a faint shadow; a mark (a spinner while it works, a dot while it waits or
+/// once it's done, the merge glyph once merged), the name in ink, and the state, in its colour
+/// only when it's a verdict.
 pub fn status_chip(card: &Card, opacity: f32, cx: &App) -> AnyElement {
     let theme = cx.theme();
-    let tint = chip_tint(card, cx);
-    let busy = chip_busy(card);
+    let hue = chip_hue(card, cx);
     let (what, state) = card.chip_parts();
-    let glyph = |icon: crate::assets::Lucide| {
-        Icon::new(icon)
-            .size(px(12.))
-            .text_color(tint)
-            .into_any_element()
-    };
-    let mark = if busy {
+    let mark = if chip_busy(card) {
         ring_spinner(12., theme.muted_foreground, cx)
+    } else if card.phase == Phase::Merged {
+        Icon::new(crate::assets::Lucide::GitMerge)
+            .size(px(12.))
+            .text_color(hue.map_or(theme.muted_foreground, |h| h.mark))
+            .into_any_element()
     } else {
-        match card.phase {
-            Phase::Merged => glyph(crate::assets::Lucide::GitMerge),
-            Phase::Published => glyph(crate::assets::Lucide::Rocket),
-            Phase::Passed => Icon::new(IconName::CircleCheck)
-                .size(px(12.))
-                .text_color(tint)
-                .into_any_element(),
-            Phase::Failed | Phase::Closed => Icon::new(IconName::CircleX)
-                .size(px(12.))
-                .text_color(tint)
-                .into_any_element(),
-            _ => div()
-                .size(px(6.))
-                .rounded_full()
-                .bg(tint)
-                .into_any_element(),
-        }
+        div()
+            .size(px(6.))
+            .rounded_full()
+            .bg(hue.map_or(theme.muted_foreground, |h| h.mark))
+            .into_any_element()
     };
     h_flex()
         .id("pr-chip")
         .test_support()
         .aria_label(format!("{what} {state}"))
         .flex_none()
-        .h(px(26.))
-        .px(px(11.))
+        .h(px(31.))
+        .px(px(12.))
         .gap(px(6.))
         .items_center()
         .rounded_full()
         .bg(chip_fill(cx))
         .border_1()
-        .border_color(theme.foreground.opacity(0.08))
+        .border_color(chip_border(cx))
         .shadow(chip_shadow())
         .opacity(opacity)
-        .text_size(px(12.5))
+        .text_size(px(13.))
         .child(mark)
-        .child(div().text_color(theme.foreground.opacity(0.88)).child(what))
+        .child(div().text_color(theme.foreground).child(what))
         .child(
             div()
-                .text_color(if busy { theme.muted_foreground } else { tint })
+                .text_color(hue.map_or(theme.muted_foreground, |h| h.text))
                 .child(state),
         )
         .into_any_element()
+}
+
+/// The chips' hairline (the reference's #EBEBEB on white).
+pub fn chip_border(cx: &App) -> Hsla {
+    let theme = cx.theme();
+    theme
+        .foreground
+        .opacity(if theme.mode.is_dark() { 0.12 } else { 0.085 })
 }
 
 /// The chips' fill: the page's own colour, a touch lifted on a dark page so the pill reads.
@@ -481,12 +478,12 @@ pub fn chip_fill(cx: &App) -> Hsla {
     }
 }
 
-/// The chips' shadow: soft and low, as the reference's.
+/// The chips' shadow: faint and low, as the reference's 0 1 2 rgba(0,0,0,.04).
 pub fn chip_shadow() -> Vec<BoxShadow> {
     vec![BoxShadow {
-        color: hsla(0., 0., 0., 0.10),
+        color: hsla(0., 0., 0., 0.05),
         offset: point(px(0.), px(1.)),
-        blur_radius: px(6.),
+        blur_radius: px(2.),
         spread_radius: px(0.),
         inset: false,
     }]
@@ -980,6 +977,55 @@ pub fn followable(card: &Card) -> bool {
     }
 }
 
+/// The workflow run a failed card can re-run: a run card's own, a release workflow's.
+pub fn rerun_id(card: &Card) -> Option<u64> {
+    if card.phase != Phase::Failed {
+        return None;
+    }
+    match card.kind {
+        Kind::Run => card.number,
+        Kind::Release if is_workflow(card) => card.run_id,
+        _ => None,
+    }
+}
+
+/// `card` re-run (`gh run rerun --failed`): its failed and skipped jobs queue again and it's
+/// under way, to be followed, until the run says otherwise.
+pub fn rerun_started(card: &mut Card) {
+    enter_phase(
+        card,
+        if card.kind == Kind::Release {
+            Phase::Releasing
+        } else {
+            Phase::Checking
+        },
+    );
+    card.step = "Re-running the failed jobs".into();
+    card.ended_ms = 0;
+    for s in &mut card.stages {
+        if matches!(s.state, CheckState::Fail | CheckState::Skipped) {
+            *s = Stage {
+                label: std::mem::take(&mut s.label),
+                ..Default::default()
+            };
+        }
+    }
+}
+
+/// A published release's page on GitHub (its notes): the tag, beside the run that made it.
+pub fn notes_url(card: &Card) -> Option<String> {
+    if card.kind != Kind::Release || card.phase != Phase::Published || card.version.is_empty() {
+        return None;
+    }
+    let url = card.url.as_deref()?;
+    if url.contains("/releases/") {
+        return Some(url.to_string());
+    }
+    let (repo, _) = url.split_once("/actions/")?;
+    repo.starts_with("https://github.com/")
+        .then(|| format!("{repo}/releases/tag/v{}", card.version))
+}
+
 /// A card that is working but has nothing left to finish it (its command is gone with the old
 /// session, or its watcher gave up or can't start) stops: spinners and the animation loop only
 /// belong to a card something is following. `true` when it changed.
@@ -1270,6 +1316,8 @@ fn release_card(version: &str, channel: &str, stage: &str, step: &str, dir: &Pat
         stages: vec![Stage {
             label: stage.into(),
             state: CheckState::Running,
+            started_ms: now_ms(),
+            ..Default::default()
         }],
         created_ms: now_ms(),
         ..Default::default()
@@ -1476,11 +1524,22 @@ pub fn fetch(card: &Card) -> Option<Card> {
 }
 
 /// A job of `gh run view --json jobs` (its states lowercase: `completed`, `success`).
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct JobJson {
     name: String,
     status: String,
     conclusion: String,
+    #[serde(default, rename = "startedAt")]
+    started: String,
+    #[serde(default, rename = "completedAt")]
+    completed: String,
+}
+
+/// An RFC 3339 time as unix ms; 0 for none (GitHub's `0001-01-01T00:00:00Z` included).
+fn unix_ms(s: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|d| d.timestamp_millis().max(0))
+        .unwrap_or(0)
 }
 
 /// Jobs as stage chips.
@@ -1496,6 +1555,12 @@ fn job_stages(jobs: &[JobJson]) -> Vec<Stage> {
             .map(|c| Stage {
                 label: c.name,
                 state: c.state,
+                started_ms: unix_ms(&j.started),
+                ended_ms: if c.state.pending() {
+                    0
+                } else {
+                    unix_ms(&j.completed)
+                },
             })
         })
         .collect()
@@ -1510,7 +1575,7 @@ fn fetch_run(card: &Card, dir: &Path) -> Option<Card> {
             "view",
             &run,
             "--json",
-            "workflowName,displayTitle,headBranch,status,conclusion,url,jobs,startedAt,updatedAt",
+            "workflowName,displayTitle,headBranch,event,status,conclusion,url,jobs,startedAt,updatedAt",
         ])
         .output()
         .ok()?;
@@ -1525,6 +1590,8 @@ fn fetch_run(card: &Card, dir: &Path) -> Option<Card> {
         subject: String,
         #[serde(rename = "headBranch")]
         branch: String,
+        #[serde(default)]
+        event: String,
         status: String,
         conclusion: String,
         url: String,
@@ -1551,6 +1618,7 @@ fn fetch_run(card: &Card, dir: &Path) -> Option<Card> {
             .unwrap_or(0)
     };
     let (started, ended) = (at(&view.started), at(&view.updated));
+    next.event = view.event;
     if started > 0 {
         next.started_ms = started;
     }
@@ -2042,128 +2110,171 @@ fn fetch_release(card: &Card, dir: &Path) -> Option<Card> {
 pub struct Actions {
     pub merge: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     pub resolve: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    /// Open it on GitHub: the badge, a failure's View log, a passed run's Open run.
     pub open: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    /// A failed run's (or release workflow's) Re-run.
+    pub rerun: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    /// A published release's notes on GitHub.
+    pub notes: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+}
+
+type Act = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// The card's width in the reference; narrower columns scale the graph's middle to fit.
+const CARD_W: f32 = 600.;
+
+/// A verdict colour: `mark` for the graph's dots, lines and nodes, `text` for words in it.
+/// Colour is only for verdicts (and the branch the card is about); the rest is the theme's ink.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Hue {
+    mark: Hsla,
+    text: Hsla,
+    /// How strongly its pills and tiles are washed with it: the reference's pale tints on a light
+    /// page (#F0FDF3 behind green), more on a dark one, where a pale wash disappears.
+    wash: f32,
+}
+
+impl Hue {
+    /// A soft pill or tile behind its text.
+    fn fill(self) -> Hsla {
+        self.mark.opacity(self.wash)
+    }
+    fn border(self) -> Hsla {
+        self.mark.opacity(self.wash * 3.4)
+    }
+    /// A lane's line: the mark, quietly.
+    fn lane(self) -> Hsla {
+        self.mark.opacity(0.36)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Hues {
+    blue: Hue,
+    amber: Hue,
+    green: Hue,
+    red: Hue,
+    purple: Hue,
+}
+
+/// The reference's verdict colours on a light page; brighter marks and lighter text on a dark
+/// one, so they read the same.
+fn hues(cx: &App) -> Hues {
+    let dark = cx.theme().mode.is_dark();
+    let hue = |mark: u32, text: u32| Hue {
+        mark: rgb(mark).into(),
+        text: rgb(text).into(),
+        wash: if dark { 0.13 } else { 0.075 },
+    };
+    if dark {
+        Hues {
+            blue: hue(0x5AA9FF, 0x8CC2FF),
+            amber: hue(0xF2A62A, 0xFFC560),
+            green: hue(0x34C77B, 0x63D9A0),
+            red: hue(0xFF5A5F, 0xFF8A8D),
+            purple: hue(0xA27BF7, 0xC4B0FF),
+        }
+    } else {
+        Hues {
+            blue: hue(0x4A8CF0, 0x3B5BAB),
+            amber: hue(0xE9A80E, 0xA5650F),
+            green: hue(0x2FC261, 0x1E8A4C),
+            red: hue(0xE5484D, 0xC6283D),
+            purple: hue(0x8B5CF6, 0x6227AD),
+        }
+    }
+}
+
+/// The card's neutrals, from the theme's ink: the reference's greys on white are the page's
+/// foreground at low strength, which keeps them right on Paper's warm page and on Night.
+#[derive(Clone, Copy, Debug)]
+struct Ink {
+    fg: Hsla,
+    muted: Hsla,
+    /// Commit dots and the origin.
+    dot: Hsla,
+    /// The base's lane and finished jobs' lines.
+    line: Hsla,
+    /// The base coming into the branch (a merge commit).
+    merge_in: Hsla,
+    /// The graph band, over the card.
+    band: Hsla,
+    /// Mono pills, the busy pill, the light button.
+    pill: Hsla,
+    /// The base's lane label.
+    lane_pill: Hsla,
+    /// The card's and chips' hairline.
+    hair: Hsla,
+    /// The card's fill (opaque).
+    card: Hsla,
+    /// The band over the card (opaque): hollow rings and labels sit on it.
+    surface: Hsla,
+    /// A state still being worked out ("Checking", "Building 2 of 3").
+    faint: Hsla,
+    /// Mono names: branches, the base's lane, jobs that are done.
+    mono: Hsla,
+}
+
+fn ink(cx: &App) -> Ink {
+    let theme = cx.theme();
+    let dark = theme.mode.is_dark();
+    let fg = theme.foreground;
+    let a = |light: f32, night: f32| fg.opacity(if dark { night } else { light });
+    let card = if dark {
+        theme.background.blend(fg.opacity(0.03))
+    } else {
+        theme.background
+    };
+    let band = a(0.034, 0.045);
+    Ink {
+        fg,
+        muted: theme.muted_foreground,
+        dot: a(0.32, 0.36),
+        line: a(0.12, 0.15),
+        merge_in: a(0.17, 0.2),
+        band,
+        pill: a(0.045, 0.075),
+        lane_pill: a(0.065, 0.09),
+        hair: a(0.105, 0.12),
+        card,
+        surface: card.blend(band),
+        faint: a(0.42, 0.45),
+        mono: a(0.52, 0.58),
+    }
 }
 
 /// The card for transcript item `ix` showing `card`; `clock` animates its in-progress marks
 /// (seconds; the working bar's pulse drives it).
 pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    let muted = theme.muted_foreground;
-    let tint = state_tint(card, cx);
+    let ink = ink(cx);
+    let hue = hues(cx);
     let motion = !cx.reduce_motion();
-    let busy = matches!(
-        card.phase,
-        Phase::Creating | Phase::Checking | Phase::Merging | Phase::Releasing
-    ) || card.resolving;
-
-    let (title, tag) = match card.kind {
-        Kind::Pr => (card.title.clone(), card.number.map(|n| format!("#{n}"))),
-        Kind::Release => (card.title.clone(), None),
-        Kind::Run => (
-            run_name(card).to_string(),
-            card.number.map(|n| format!("#{n}")),
-        ),
-    };
-    let badge = state_label(card).map(|label| {
-        h_flex()
-            .flex_none()
-            .gap(px(5.))
-            .items_center()
-            .text_size(px(11.))
-            .font_medium()
-            .text_color(tint)
-            .child(if busy {
-                ring_spinner(10., tint, cx)
-            } else {
-                div()
-                    .size(px(5.))
-                    .rounded_full()
-                    .bg(tint)
-                    .into_any_element()
-            })
-            .child(label)
-    });
-    let badge = match (badge, actions.open.clone()) {
-        (Some(b), Some(open)) => b
-            .id(("pr-open", ix))
-            .test_support()
-            .cursor_pointer()
-            .tooltip(|window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new("Open in the browser").build(window, cx)
-            })
-            .on_click(move |_, window, cx| open(window, cx))
-            .into_any_element(),
-        (Some(b), None) => b.into_any_element(),
-        (None, _) => div().into_any_element(),
-    };
-    let head = h_flex()
-        .id(("pr-head", ix))
-        .test_support()
-        .gap(px(6.))
-        .px(px(16.))
-        .pt(px(14.))
-        .pb(px(8.))
-        .child(
-            h_flex()
-                .flex_1()
-                .min_w_0()
-                .gap(px(5.))
-                .items_baseline()
-                .text_size(px(13.5))
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .font_semibold()
-                        .text_color(theme.foreground.opacity(0.92))
-                        .child(title),
-                )
-                .when_some(tag, |el, t| {
-                    el.child(div().flex_none().font_normal().text_color(muted).child(t))
-                }),
-        )
-        .child(badge);
-
-    let story = match card.kind {
-        Kind::Pr => Some(pr_history(ix, card, clock, motion, cx)),
-        Kind::Run | Kind::Release if !card.stages.is_empty() => {
-            Some(stage_history(ix, card, clock, motion, cx))
-        }
-        Kind::Run | Kind::Release => None,
-    };
-    let footer = reference_footer(ix, card, &actions, cx);
+    let head = header(ix, card, &actions, &hue, &ink, cx);
+    let graph = graph(card, clock, motion, cx);
+    let footer = footer(ix, card, &actions, &hue, &ink, cx);
     let tail = footer.is_none();
-
     let frame = v_flex()
         .id(("pr-card", ix))
         .test_support()
         .w_full()
-        .max_w(px(620.))
+        .max_w(px(CARD_W))
         .mt(px(2.))
         .mb(px(8.))
-        .child(
-            v_flex()
-                .rounded(px(10.))
-                .border_1()
-                .border_color(theme.foreground.opacity(0.085))
-                .bg(if theme.background.l < 0.5 {
-                    theme.foreground.opacity(0.018)
-                } else {
-                    theme.background
-                })
-                .overflow_hidden()
-                .child(head)
-                .children(story)
-                .children(footer)
-                .child(div().h(px(if tail { 7. } else { 0. }))),
-        );
+        .rounded(px(14.))
+        .border_1()
+        .border_color(ink.hair)
+        .bg(ink.card)
+        .overflow_hidden()
+        .child(head)
+        .child(graph)
+        .children(footer)
+        .when(tail, |el| el.child(div().h(px(7.))));
     if motion {
         frame
             .with_animation(
                 SharedString::from(format!("pr-card-enter-{ix}-{}", card.created_ms)),
                 Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
-                |el, t| el.opacity(t).mt(px(6. * (1. - t))),
+                |el, t| el.opacity(t).mt(px(2. + 8. * (1. - t))),
             )
             .into_any_element()
     } else {
@@ -2171,91 +2282,1376 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
     }
 }
 
-/// The header icon's and badge's colour: the card's state (open, merged, failed), not the
-/// moment's phase tint, which the graph's tip wears.
-fn state_tint(card: &Card, cx: &App) -> Hsla {
-    match card.kind {
-        Kind::Pr => match card.phase {
-            Phase::Merged => crate::palette::indigo(cx),
-            Phase::Closed | Phase::Failed => crate::palette::red(cx),
-            Phase::Creating => cx.theme().muted_foreground,
-            _ => crate::palette::emerald(cx),
-        },
-        Kind::Run => match card.phase {
-            Phase::Passed => crate::palette::emerald(cx),
-            Phase::Failed | Phase::Closed => crate::palette::red(cx),
-            _ => crate::palette::sky(cx),
-        },
-        Kind::Release => match card.phase {
-            Phase::Published => crate::palette::indigo(cx),
-            Phase::Failed | Phase::Closed => crate::palette::red(cx),
-            _ => crate::palette::sky(cx),
-        },
+/// A 22 px round tile with a 12 px glyph: the header's and the footer's lead.
+fn tile(icon: Icon, fill: Hsla, color: Hsla) -> AnyElement {
+    div()
+        .size(px(22.))
+        .flex_none()
+        .rounded_full()
+        .bg(fill)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon.size(px(12.)).text_color(color))
+        .into_any_element()
+}
+
+/// A branch, commit or base: mono on the soft square pill the reference's meta row uses.
+fn mono_pill(text: &str, ink: &Ink, cx: &App) -> AnyElement {
+    div()
+        .flex_none()
+        .max_w(px(200.))
+        .truncate()
+        .h(px(15.))
+        .px(px(5.))
+        .rounded(px(4.))
+        .bg(ink.pill)
+        .flex()
+        .items_center()
+        .text_size(px(12.))
+        .line_height(px(15.))
+        .font_family(cx.theme().mono_font_family.clone())
+        .text_color(ink.mono)
+        .child(text.to_string())
+        .into_any_element()
+}
+
+/// "Push", "Pull request": what started a run, as its badge says it.
+fn event_label(event: &str) -> String {
+    match event {
+        "" => String::new(),
+        "push" => "Push".into(),
+        "pull_request" | "pull_request_target" => "Pull request".into(),
+        "workflow_dispatch" => "Manual".into(),
+        "schedule" => "Scheduled".into(),
+        "release" => "Release".into(),
+        other => {
+            let mut words = other.replace('_', " ");
+            if let Some(first) = words.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            words
+        }
     }
 }
 
-/// The card's one state word, top right (the only place it's said); `None` for a PR that isn't
-/// on GitHub yet. A run or release says its result with a fact, as a finished job would:
-/// "Passed in 49m", "Published in 41m", "Running 3m 10s".
-fn state_label(card: &Card) -> Option<String> {
-    let took = |from: i64, to: i64| dur_label((to - from).max(0));
+/// "Nightly", "Beta": a release's channel, as its badge says it.
+fn channel_label(channel: &str) -> String {
+    let mut c = channel.to_string();
+    if let Some(first) = c.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    c
+}
+
+/// "Mac + Windows" from a release's jobs; "3 jobs" when the names don't say.
+fn platforms(card: &Card) -> String {
+    let has = |w: &str| {
+        card.stages
+            .iter()
+            .any(|s| s.label.to_lowercase().contains(w))
+    };
+    let mut names = vec![];
+    if has("mac") {
+        names.push("Mac");
+    }
+    if has("windows") {
+        names.push("Windows");
+    }
+    if has("linux") {
+        names.push("Linux");
+    }
+    if names.is_empty() {
+        jobs_count(card.stages.len())
+    } else {
+        names.join(" + ")
+    }
+}
+
+fn jobs_count(n: usize) -> String {
+    match n {
+        0 => String::new(),
+        1 => "1 job".into(),
+        n => format!("{n} jobs"),
+    }
+}
+
+/// How long a release has taken: to the moment it settled once it has, else up to now.
+fn release_ms(card: &Card) -> i64 {
     let began = if card.started_ms > 0 {
         card.started_ms
     } else {
         card.created_ms
     };
-    let settled = card.phase_at_ms.max(card.created_ms);
-    match card.kind {
-        Kind::Pr => match card.phase {
-            Phase::Merged => Some("Merged".into()),
-            Phase::Closed => Some("Closed".into()),
-            Phase::Failed => Some("Failed".into()),
-            _ if card.number.is_some() => Some("Open".into()),
-            _ => None,
-        },
-        Kind::Run => Some(match card.phase {
-            Phase::Passed => format!("Passed in {}", dur_label(run_ms(card))),
-            Phase::Failed | Phase::Closed => format!("Failed after {}", dur_label(run_ms(card))),
-            _ => format!("Running {}", dur_label(run_ms(card))),
-        }),
-        Kind::Release => Some(match card.phase {
-            Phase::Published => format!("Published in {}", took(began, settled)),
-            Phase::Failed | Phase::Closed => format!("Failed after {}", took(began, settled)),
-            _ => format!("Releasing {}", took(began, now_ms())),
-        }),
-    }
+    let end = if card.phase.terminal() {
+        card.phase_at_ms.max(card.created_ms)
+    } else {
+        now_ms()
+    };
+    (end - began).max(0)
 }
 
-/// A branch name (or channel): mono, on the soft square the names in the graph wear.
-#[allow(dead_code)]
-fn mono(text: &str, cx: &App) -> AnyElement {
+/// Title, meta row and the state badge, top right.
+fn header(
+    ix: usize,
+    card: &Card,
+    actions: &Actions,
+    hue: &Hues,
+    ink: &Ink,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
-    div()
-        .flex_none()
-        .rounded(px(4.))
-        .px(px(4.))
-        .py(px(1.))
-        .bg(theme.foreground.opacity(0.06))
-        .text_size(px(10.))
-        .font_family(theme.mono_font_family.clone())
-        .text_color(theme.foreground.opacity(0.7))
-        .child(text.to_string())
+    let lead = |icon: Icon, h: Hue| tile(icon, h.fill(), h.text);
+    let neutral = |icon: Icon| tile(icon, ink.pill, ink.muted);
+    let tile = match (card.kind, card.phase) {
+        (Kind::Pr, Phase::Merged) => lead(Icon::new(crate::assets::Lucide::GitMerge), hue.purple),
+        (Kind::Pr, Phase::Creating | Phase::Closed) => {
+            neutral(Icon::new(crate::assets::Lucide::GitPullRequest))
+        }
+        (Kind::Pr, Phase::Failed) => {
+            lead(Icon::new(crate::assets::Lucide::GitPullRequest), hue.red)
+        }
+        (Kind::Pr, _) => lead(Icon::new(crate::assets::Lucide::GitPullRequest), hue.green),
+        (Kind::Release, Phase::Published) => {
+            lead(Icon::new(crate::assets::Lucide::Rocket), hue.green)
+        }
+        (Kind::Release, Phase::Failed | Phase::Closed) => {
+            lead(Icon::new(crate::assets::Lucide::Rocket), hue.red)
+        }
+        (Kind::Release, _) => lead(Icon::new(crate::assets::Lucide::Rocket), hue.blue),
+        (Kind::Run, Phase::Passed) => lead(Icon::new(IconName::Check), hue.green),
+        (Kind::Run, Phase::Failed | Phase::Closed) => {
+            lead(Icon::new(crate::assets::Lucide::X), hue.red)
+        }
+        (Kind::Run, _) => lead(Icon::new(crate::assets::Lucide::Workflow), hue.blue),
+    };
+
+    // The title's two halves: the strong name, then what it's about.
+    let (name, rest): (String, Option<String>) = match card.kind {
+        Kind::Pr => (card.title.clone(), card.number.map(|n| format!("#{n}"))),
+        Kind::Release => match card.title.split_once(' ') {
+            Some((what, version)) => (what.to_string(), Some(version.to_string())),
+            None => (card.title.clone(), None),
+        },
+        Kind::Run => (
+            run_name(card).to_string(),
+            (!card.subject.is_empty()).then(|| card.subject.clone()),
+        ),
+    };
+    let rest_muted = card.kind == Kind::Pr;
+    let title = h_flex()
+        .h(px(20.))
+        .min_w_0()
+        .gap(px(5.))
+        .items_baseline()
+        .text_size(px(15.))
+        .line_height(px(20.))
+        .overflow_hidden()
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .font_medium()
+                .text_color(ink.fg)
+                .child(name),
+        )
+        .when_some(rest, |el, rest| {
+            el.child(
+                div()
+                    .min_w(px(40.))
+                    .truncate()
+                    .text_color(if rest_muted {
+                        ink.muted
+                    } else {
+                        ink.fg.opacity(0.82)
+                    })
+                    .child(rest),
+            )
+        });
+
+    let mut meta = h_flex()
+        .h(px(16.))
+        .mt(px(2.))
+        .min_w_0()
+        .items_center()
+        .text_size(px(13.))
+        .text_color(ink.muted)
+        .overflow_hidden();
+    let count = |n: u32| format!("{n} {}", if n == 1 { "commit" } else { "commits" });
+    match card.kind {
+        Kind::Pr => {
+            if !card.head.is_empty() {
+                meta = meta.child(mono_pill(&card.head, ink, cx)).child(
+                    div()
+                        .px(px(6.))
+                        .text_size(px(11.))
+                        .text_color(ink.muted.opacity(0.85))
+                        .child("→"),
+                );
+            }
+            if !card.base.is_empty() {
+                meta = meta.child(mono_pill(&card.base, ink, cx));
+            }
+            if let Some(n) = card.commits.filter(|n| *n > 0) {
+                meta = meta.child(div().ml(px(11.)).flex_none().child(count(n)));
+            }
+            let (a, r) = (card.added.unwrap_or(0), card.removed.unwrap_or(0));
+            if a > 0 || r > 0 {
+                meta = meta.child(
+                    h_flex()
+                        .ml(px(10.))
+                        .gap(px(5.))
+                        .flex_none()
+                        .child(div().text_color(hue.green.text).child(format!("+{a}")))
+                        .child(div().text_color(hue.red.text).child(format!("−{r}"))),
+                );
+            }
+        }
+        Kind::Release | Kind::Run => {
+            if !card.head.is_empty() {
+                meta = meta.child(div().mr(px(8.)).child(mono_pill(&card.head, ink, cx)));
+            }
+            let what = if card.kind == Kind::Release {
+                platforms(card)
+            } else {
+                jobs_count(card.stages.len())
+            };
+            if !what.is_empty() {
+                meta = meta.child(div().mr(px(8.)).flex_none().child(what));
+            }
+            let took = if card.kind == Kind::Release {
+                release_ms(card)
+            } else {
+                (card.started_ms > 0).then(|| run_ms(card)).unwrap_or(0)
+            };
+            if took > 0 {
+                meta = meta.child(div().flex_none().child(dur_label(took)));
+            }
+        }
+    }
+
+    // The badge: a PR's state; a release's channel and a run's trigger, which aren't verdicts.
+    let badge: Option<(Option<AnyElement>, String, Hsla, Hsla)> = match card.kind {
+        Kind::Pr => match card.phase {
+            Phase::Merged => Some((
+                Some(
+                    Icon::new(crate::assets::Lucide::GitMerge)
+                        .size(px(12.))
+                        .text_color(hue.purple.text)
+                        .into_any_element(),
+                ),
+                "Merged".into(),
+                hue.purple.text,
+                hue.purple.fill(),
+            )),
+            Phase::Closed => Some((None, "Closed".into(), ink.muted, ink.pill)),
+            Phase::Creating | Phase::Failed => None,
+            _ if card.number.is_some() => Some((
+                Some(
+                    Icon::new(crate::assets::Lucide::GitPullRequest)
+                        .size(px(12.))
+                        .text_color(hue.green.text)
+                        .into_any_element(),
+                ),
+                "Open".into(),
+                hue.green.text,
+                hue.green.fill(),
+            )),
+            _ => None,
+        },
+        Kind::Release => (!card.channel.is_empty())
+            .then(|| (None, channel_label(&card.channel), ink.muted, ink.pill)),
+        Kind::Run => {
+            let e = event_label(&card.event);
+            (!e.is_empty()).then(|| (None, e, ink.muted, ink.pill))
+        }
+    };
+    let badge = badge.map(|(icon, label, color, fill)| {
+        let b = h_flex()
+            .id(("pr-open", ix))
+            .test_support()
+            .flex_none()
+            .h(px(20.))
+            .px(px(8.))
+            .gap(px(4.))
+            .items_center()
+            .rounded_full()
+            .bg(fill)
+            .text_size(px(13.))
+            .text_color(color)
+            .children(icon)
+            .child(label);
+        match actions.open.clone() {
+            Some(open) => b
+                .cursor_pointer()
+                .tooltip(|window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new("Open on GitHub").build(window, cx)
+                })
+                .on_click(move |_, window, cx| open(window, cx))
+                .into_any_element(),
+            None => b.into_any_element(),
+        }
+    });
+
+    h_flex()
+        .id(("pr-head", ix))
+        .test_support()
+        .w_full()
+        .items_start()
+        .pl(px(15.))
+        .pr(px(16.))
+        .pt(px(18.))
+        .pb(px(4.))
+        .gap(px(13.))
+        .child(div().mt(px(2.)).child(tile))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(title)
+                .child(meta)
+                .text_color(theme.foreground),
+        )
+        .children(badge.map(|b| div().mt(px(2.)).flex_none().child(b)))
         .into_any_element()
 }
 
-fn branch_badge(text: &str, tint: Hsla, cx: &App) -> AnyElement {
+// ---------- the graph: a scene of marks in card coordinates ----------
+
+/// How a line is drawn: done (solid), on its way (dashed), still to come (dotted).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Stroke {
+    Solid,
+    Dashed,
+    Dotted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Glyph {
+    Check,
+    Bang,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Align {
+    Left,
+    Center,
+    Right,
+}
+
+/// A lane label (mono on the band), a branch label (mono on its tint) or a status pill.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LabelKind {
+    Lane,
+    Branch,
+    Status,
+}
+
+/// One mark of a card's graph. `x` runs from the card's left edge, `y` from the graph's top
+/// (57 px below the card's), as the reference measures them.
+#[derive(Clone, Debug, PartialEq)]
+enum Prim {
+    /// A straight run from `a` to `b`, drawn from `a` as far as `t`.
+    Line {
+        a: (f32, f32),
+        b: (f32, f32),
+        stroke: Stroke,
+        color: Hsla,
+        width: f32,
+        t: f32,
+    },
+    /// A lane change: a cubic with horizontal tangents at both ends.
+    Curve {
+        a: (f32, f32),
+        b: (f32, f32),
+        stroke: Stroke,
+        color: Hsla,
+        width: f32,
+        t: f32,
+    },
+    Dot {
+        at: (f32, f32),
+        r: f32,
+        color: Hsla,
+    },
+    /// A hollow node: a commit being made, a merge commit, a step still to come (`dashed`).
+    Ring {
+        at: (f32, f32),
+        r: f32,
+        color: Hsla,
+        dashed: bool,
+    },
+    /// A verdict node: filled, with a white glyph.
+    Node {
+        at: (f32, f32),
+        r: f32,
+        color: Hsla,
+        glyph: Option<Glyph>,
+    },
+    /// A soft disc behind a node that wants attention.
+    Halo {
+        at: (f32, f32),
+        r: f32,
+        color: Hsla,
+    },
+    /// A ring turning: work under way at this node.
+    Spinner {
+        at: (f32, f32),
+        r: f32,
+        color: Hsla,
+    },
+    /// A ring spreading out from a node being made.
+    Pulse {
+        at: (f32, f32),
+        color: Hsla,
+    },
+    Label {
+        text: String,
+        x: f32,
+        y: f32,
+        align: Align,
+        kind: LabelKind,
+        color: Hsla,
+        fill: Hsla,
+        border: Option<Hsla>,
+        strike: bool,
+    },
+}
+
+/// A graph: its marks, and whether something in it keeps moving.
+#[derive(Debug, Default)]
+struct Scene {
+    prims: Vec<Prim>,
+    live: bool,
+}
+
+/// x as the reference places it on a 600 px card; a narrower card squeezes the middle so the
+/// end node keeps its place 42 px from the right edge.
+fn scale_x(w: f32) -> impl Fn(f32) -> f32 {
+    move |x: f32| {
+        if w >= CARD_W {
+            x
+        } else {
+            34. + (x - 34.) * ((w - 42. - 34.) / (CARD_W - 42. - 34.)).max(0.3)
+        }
+    }
+}
+
+fn label(text: impl Into<String>, x: f32, y: f32, align: Align, kind: LabelKind) -> Prim {
+    Prim::Label {
+        text: text.into(),
+        x,
+        y,
+        align,
+        kind,
+        color: hsla(0., 0., 0., 0.),
+        fill: hsla(0., 0., 0., 0.),
+        border: None,
+        strike: false,
+    }
+}
+
+/// `label` with its colours.
+fn styled(mut p: Prim, text_color: Hsla, fill_color: Hsla, border_color: Option<Hsla>) -> Prim {
+    if let Prim::Label {
+        color,
+        fill,
+        border,
+        ..
+    } = &mut p
+    {
+        *color = text_color;
+        *fill = fill_color;
+        *border = border_color;
+    }
+    p
+}
+
+/// "3 conflicts", "1 conflict".
+fn conflicts_label(n: usize) -> String {
+    match n {
+        0 => "Conflicts".into(),
+        1 => "1 conflict".into(),
+        n => format!("{n} conflicts"),
+    }
+}
+
+/// The pull request's graph, as the reference draws it: the base's lane on top, the branch
+/// below, and a connector to the end node at the right, which carries the verdict.
+fn pr_scene(card: &Card, w: f32, draw: f32, hue: &Hues, ink: &Ink) -> Scene {
+    let mut p: Vec<Prim> = vec![];
+    let sx = scale_x(w);
+    let (main_y, feat_y) = (42., 79.);
+    let end = (w - 42., main_y);
+    let phase = card.phase;
+    let merged = phase == Phase::Merged;
+    let branch = if merged { hue.purple } else { hue.blue };
+    let creating = phase == Phase::Creating;
+    let committing = creating && card.step.starts_with("Committing");
+    let opening = creating && card.step.starts_with("Opening");
+    let opened = !matches!(phase, Phase::Creating | Phase::Failed);
+    // The base moved on while we worked (the reference's "Fetching main" brings its commits).
+    let moved = matches!(
+        phase,
+        Phase::Checking | Phase::Conflicted | Phase::Ready | Phase::Merging | Phase::Merged
+    ) || (phase == Phase::Open && card.step.starts_with("Fetching"));
+    let merge_commit = opened && moved && (card.resolving || !card.resolved.is_empty());
+    let resolved_all = card.resolving && card.conflicts.is_empty() && !card.resolved.is_empty();
+    let commits = card
+        .commits
+        .map(|n| n as usize)
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| card.history.len().max(1))
+        .clamp(1, 3);
+    let mut live = draw < 1.;
+
+    // The base's lane.
+    let base = if card.base.is_empty() {
+        "main"
+    } else {
+        &card.base
+    };
+    let main_dots: Vec<f32> = if moved {
+        vec![34., 109., 289., 379.]
+    } else {
+        vec![34., 109.]
+    }
+    .into_iter()
+    .map(&sx)
+    .collect();
+    let last_main = *main_dots.last().unwrap_or(&34.);
+    p.push(Prim::Line {
+        a: (main_dots[0], main_y),
+        b: (last_main, main_y),
+        stroke: Stroke::Solid,
+        color: ink.line,
+        width: 1.5,
+        t: 1.,
+    });
+    if opened || opening {
+        p.push(Prim::Line {
+            a: (last_main, main_y),
+            b: (end.0, main_y),
+            stroke: if merged {
+                Stroke::Solid
+            } else {
+                Stroke::Dotted
+            },
+            color: ink.line,
+            width: 1.5,
+            t: 1.,
+        });
+    }
+
+    // The branch: off the base's second commit, its commits 75 apart.
+    let xs: Vec<f32> = (0..commits).map(|i| sx(184. + 75. * i as f32)).collect();
+    let last_feat = *xs.last().unwrap_or(&sx(184.));
+    let lane = branch.lane();
+    p.push(Prim::Curve {
+        a: (sx(109.), main_y),
+        b: (sx(184.) - 5., feat_y),
+        stroke: Stroke::Solid,
+        color: lane,
+        width: 1.5,
+        t: 1.,
+    });
+    if commits > 1 {
+        let before_last = xs[xs.len() - 2];
+        p.push(Prim::Line {
+            a: (xs[0], feat_y),
+            b: (before_last, feat_y),
+            stroke: Stroke::Solid,
+            color: lane,
+            width: 1.5,
+            t: 1.,
+        });
+        p.push(Prim::Line {
+            a: (before_last, feat_y),
+            b: (last_feat, feat_y),
+            stroke: if committing {
+                Stroke::Dotted
+            } else {
+                Stroke::Solid
+            },
+            color: lane,
+            width: 1.5,
+            t: 1.,
+        });
+    }
+    let merge_x = sx(453.);
+    let tip = if merge_commit {
+        (merge_x, feat_y)
+    } else {
+        (last_feat, feat_y)
+    };
+    if merge_commit {
+        p.push(Prim::Line {
+            a: (last_feat, feat_y),
+            b: (merge_x, feat_y),
+            stroke: Stroke::Solid,
+            color: lane,
+            width: 1.5,
+            t: 1.,
+        });
+        p.push(Prim::Curve {
+            a: (sx(379.), main_y),
+            b: (merge_x - 4., feat_y),
+            stroke: Stroke::Solid,
+            color: ink.merge_in,
+            width: 1.5,
+            t: 1.,
+        });
+    }
+
+    // The connector to the end node, in the verdict's colour.
+    let curve = |from: (f32, f32), stroke: Stroke, color: Hsla, width: f32, t: f32| Prim::Curve {
+        a: from,
+        b: end,
+        stroke,
+        color,
+        width,
+        t,
+    };
+    let blue = hue.blue.mark.opacity(0.75);
+    match phase {
+        Phase::Creating if opening => p.push(curve(tip, Stroke::Dashed, blue, 1.5, draw)),
+        Phase::Open | Phase::Checking => p.push(curve(tip, Stroke::Dashed, blue, 1.5, 1.)),
+        Phase::Conflicted if card.resolving => {
+            p.push(curve(
+                (last_feat, feat_y),
+                Stroke::Dashed,
+                hue.amber.mark.opacity(0.3),
+                1.5,
+                1.,
+            ));
+            if resolved_all {
+                p.push(curve(tip, Stroke::Dashed, blue, 1.5, draw));
+            }
+        }
+        Phase::Conflicted => p.push(curve(tip, Stroke::Dashed, hue.amber.mark, 1.5, draw)),
+        Phase::Ready => p.push(curve(tip, Stroke::Dashed, hue.green.mark, 1.5, draw)),
+        Phase::Merging => {
+            p.push(curve(tip, Stroke::Dashed, hue.green.mark, 1.5, 1.));
+            p.push(curve(tip, Stroke::Solid, hue.purple.mark, 1.75, draw));
+        }
+        Phase::Merged => p.push(curve(tip, Stroke::Solid, hue.purple.mark, 1.75, 1.)),
+        Phase::Closed => p.push(curve(tip, Stroke::Dashed, ink.dot, 1.5, 1.)),
+        _ => {}
+    }
+
+    // Dots over the lines.
+    for x in &main_dots {
+        p.push(Prim::Dot {
+            at: (*x, main_y),
+            r: 3.5,
+            color: ink.dot,
+        });
+    }
+    for (i, x) in xs.iter().enumerate() {
+        if committing && i + 1 == xs.len() {
+            p.push(Prim::Ring {
+                at: (*x, feat_y),
+                r: 4.,
+                color: branch.mark.opacity(0.5),
+                dashed: false,
+            });
+        } else {
+            p.push(Prim::Dot {
+                at: (*x, feat_y),
+                r: 3.5,
+                color: branch.mark,
+            });
+        }
+    }
+    if merge_commit {
+        if card.resolving && !resolved_all {
+            p.push(Prim::Pulse {
+                at: tip,
+                color: branch.mark,
+            });
+            live = true;
+        }
+        p.push(Prim::Ring {
+            at: tip,
+            r: 4.,
+            color: branch.mark,
+            dashed: false,
+        });
+    }
+
+    // The end node and its pill.
+    let white_pill = |text: &str| {
+        styled(
+            label(
+                text,
+                end.0 + 7.,
+                end.1 - 25.,
+                Align::Right,
+                LabelKind::Status,
+            ),
+            ink.faint,
+            ink.card,
+            Some(ink.hair),
+        )
+    };
+    let verdict_pill = |text: &str, h: Hue| {
+        styled(
+            label(
+                text,
+                end.0 + 7.,
+                end.1 - 25.,
+                Align::Right,
+                LabelKind::Status,
+            ),
+            h.text,
+            h.fill(),
+            Some(h.border()),
+        )
+    };
+    let pending = Prim::Ring {
+        at: end,
+        r: 4.,
+        color: ink.dot,
+        dashed: true,
+    };
+    match phase {
+        Phase::Open => p.push(pending),
+        Phase::Checking => {
+            p.push(Prim::Spinner {
+                at: end,
+                r: 8.5,
+                color: ink.dot,
+            });
+            p.push(white_pill("Checking"));
+            live = true;
+        }
+        Phase::Conflicted => {
+            p.push(Prim::Halo {
+                at: end,
+                r: 11.,
+                color: hue.amber.mark.opacity(0.25),
+            });
+            p.push(Prim::Node {
+                at: end,
+                r: 7.,
+                color: hue.amber.mark,
+                glyph: Some(Glyph::Bang),
+            });
+            p.push(if resolved_all {
+                white_pill("Resolved")
+            } else {
+                verdict_pill(&conflicts_label(card.conflicts.len()), hue.amber)
+            });
+        }
+        Phase::Ready | Phase::Merging => {
+            p.push(Prim::Node {
+                at: end,
+                r: 7.,
+                color: hue.green.mark,
+                glyph: Some(Glyph::Check),
+            });
+            p.push(verdict_pill("Ready to merge", hue.green));
+        }
+        Phase::Merged => {
+            p.push(Prim::Dot {
+                at: end,
+                r: 5.5,
+                color: hue.purple.mark,
+            });
+            p.push(verdict_pill("Merged", hue.purple));
+        }
+        Phase::Closed => {
+            p.push(pending);
+            p.push(styled(
+                label(
+                    "Closed",
+                    end.0 + 7.,
+                    end.1 - 25.,
+                    Align::Right,
+                    LabelKind::Status,
+                ),
+                ink.muted,
+                ink.pill,
+                None,
+            ));
+        }
+        _ => {}
+    }
+
+    // Labels last, over everything.
+    p.push(styled(
+        label(base, sx(25.), 16., Align::Left, LabelKind::Lane),
+        ink.mono,
+        ink.lane_pill,
+        None,
+    ));
+    if !card.head.is_empty() {
+        let mid = if xs.len() > 1 {
+            (xs[0] + xs[1]) / 2.
+        } else {
+            xs[0]
+        };
+        let mut l = styled(
+            label(&card.head, mid, 86., Align::Center, LabelKind::Branch),
+            branch.text,
+            branch.fill(),
+            None,
+        );
+        if let Prim::Label { strike, .. } = &mut l {
+            *strike = merged && card.branch_deleted;
+        }
+        p.push(l);
+    }
+    Scene { prims: p, live }
+}
+
+/// The publish step of a release: it waits on the builds, so it sits after them on the base's
+/// lane rather than beside them.
+fn is_publish(stage: &Stage) -> bool {
+    let l = stage.label.to_lowercase();
+    l.contains("publish") || l.contains("upload") || l.contains("deploy")
+}
+
+/// How long a job took (or has taken so far); 0 before it starts.
+fn stage_ms(stage: &Stage) -> i64 {
+    if stage.started_ms <= 0 {
+        return 0;
+    }
+    let end = if stage.ended_ms > 0 {
+        stage.ended_ms
+    } else if stage.state.pending() {
+        now_ms()
+    } else {
+        return 0;
+    };
+    (end - stage.started_ms).max(0)
+}
+
+/// A job's label on its lane: "macOS app · 9m 12s", "Windows build · 6m", "Build · failed".
+fn stage_label(stage: &Stage) -> String {
+    let ms = stage_ms(stage);
+    let name = if stage.label.chars().count() > 28 {
+        format!("{}…", stage.label.chars().take(27).collect::<String>())
+    } else {
+        stage.label.clone()
+    };
+    match stage.state {
+        CheckState::Fail => format!("{name} · failed"),
+        CheckState::Skipped => format!("{name} · skipped"),
+        CheckState::Running if ms >= 60_000 => format!("{name} · {}m", ms / 60_000),
+        CheckState::Running if ms > 0 => format!("{name} · {}s", ms / 1000),
+        CheckState::Pass if ms > 0 => format!("{name} · {}", dur_label(ms)),
+        _ => name,
+    }
+}
+
+/// A release's or run's state in a few words, said on the end node's pill and in the chip:
+/// "Building 2 of 3", "2 of 3 passed", "Published", "1 failed".
+fn pipeline_state(card: &Card) -> String {
+    let total = card.stages.len();
+    let passed = card
+        .stages
+        .iter()
+        .filter(|s| s.state == CheckState::Pass)
+        .count();
+    let failed = card
+        .stages
+        .iter()
+        .filter(|s| s.state == CheckState::Fail)
+        .count();
+    match (card.kind, card.phase) {
+        (_, Phase::Published) => "Published".into(),
+        (_, Phase::Passed) => "Passed".into(),
+        (_, Phase::Failed | Phase::Closed) if card.step == "Cancelled" => "Cancelled".into(),
+        (Kind::Release, Phase::Failed | Phase::Closed) => "Failed".into(),
+        (_, Phase::Failed | Phase::Closed) if failed > 0 => format!("{failed} failed"),
+        (_, Phase::Failed | Phase::Closed) => "Failed".into(),
+        (Kind::Release, _)
+            if card
+                .stages
+                .iter()
+                .any(|s| is_publish(s) && s.state == CheckState::Running) =>
+        {
+            "Publishing".into()
+        }
+        (Kind::Release, _) if total > 1 => {
+            format!("Building {} of {total}", (passed + 1).min(total))
+        }
+        (Kind::Release, _) => "Releasing".into(),
+        (_, _) if total > 0 => format!("{passed} of {total} passed"),
+        _ => "Starting".into(),
+    }
+}
+
+/// A release's or run's graph: its jobs as lanes from one origin, each node placed by how long
+/// the job took, joined at the publish step (a release's) and at the end node, which carries the
+/// verdict. `measure` gives a lane label's width.
+fn pipeline_scene(
+    card: &Card,
+    w: f32,
+    draw: f32,
+    hue: &Hues,
+    ink: &Ink,
+    measure: &dyn Fn(&str) -> f32,
+) -> Scene {
+    let mut lines: Vec<Prim> = vec![];
+    let mut marks: Vec<Prim> = vec![];
+    let mut labels: Vec<Prim> = vec![];
+    let release = card.kind == Kind::Release;
+    let done = card.phase.terminal();
+    let good = matches!(card.phase, Phase::Published | Phase::Passed);
+    let end_x = w - 42.;
+
+    let (group, tail): (Vec<&Stage>, Vec<&Stage>) = if release
+        && card.stages.iter().any(is_publish)
+        && card.stages.iter().any(|s| !is_publish(s))
+    {
+        card.stages.iter().partition(|s| !is_publish(s))
+    } else {
+        (card.stages.iter().collect(), vec![])
+    };
+    let k = group.len();
+    let lanes: Vec<f32> = match k {
+        0 | 1 => vec![42.],
+        2 => vec![42., 79.],
+        3 => vec![23., 51., 79.],
+        k => (0..k).map(|i| 18. + i as f32 * 20.).collect(),
+    };
+    let oy = if k <= 2 {
+        42.
+    } else {
+        (lanes[0] + lanes[k - 1]) / 2.
+    };
+    let origin = (34., oy);
+    let tail_x = (end_x - 149.).max(origin.0 + 160.);
+    let join_x = if tail.is_empty() { end_x } else { tail_x };
+    let hi = if tail.is_empty() {
+        end_x - 154.
+    } else {
+        tail_x - 150.
+    };
+    let lo = origin.0 + 110.;
+    let max_ms = group.iter().map(|s| stage_ms(s)).max().unwrap_or(0).max(1);
+
+    let state_hue = |s: CheckState| match s {
+        CheckState::Running => Some(hue.blue),
+        CheckState::Fail => Some(hue.red),
+        _ => None,
+    };
+    let lane_color = |s: CheckState| state_hue(s).map_or(ink.line, |h| h.lane());
+    let node = |at: (f32, f32), s: CheckState, marks: &mut Vec<Prim>, live: &mut bool| match s {
+        CheckState::Pass => marks.push(Prim::Node {
+            at,
+            r: 5.5,
+            color: hue.green.mark,
+            glyph: Some(Glyph::Check),
+        }),
+        CheckState::Fail => {
+            marks.push(Prim::Halo {
+                at,
+                r: 11.,
+                color: hue.red.mark.opacity(0.2),
+            });
+            marks.push(Prim::Node {
+                at,
+                r: 7.,
+                color: hue.red.mark,
+                glyph: Some(Glyph::Bang),
+            });
+        }
+        CheckState::Running => {
+            marks.push(Prim::Spinner {
+                at,
+                r: 7.5,
+                color: hue.blue.mark,
+            });
+            marks.push(Prim::Dot {
+                at,
+                r: 3.5,
+                color: hue.blue.mark,
+            });
+            *live = true;
+        }
+        CheckState::Queued => marks.push(Prim::Ring {
+            at,
+            r: 4.,
+            color: ink.dot,
+            dashed: true,
+        }),
+        CheckState::Skipped => marks.push(Prim::Ring {
+            at,
+            r: 3.5,
+            color: ink.dot,
+            dashed: false,
+        }),
+    };
+    let label_colors = |s: CheckState| match state_hue(s) {
+        Some(h) => (h.text, h.fill()),
+        None => (ink.mono, ink.surface),
+    };
+    let mut live = draw < 1.;
+
+    for (i, stage) in group.iter().enumerate() {
+        let y = lanes[i];
+        let text = stage_label(stage);
+        let text_w = measure(&text) + 10.;
+        let inline = k >= 3;
+        let min_x = if inline {
+            origin.0 + 40. + text_w + 12.
+        } else {
+            origin.0 + text_w / 2. + 8.
+        };
+        let frac = stage_ms(stage) as f32 / max_ms as f32;
+        let x = (lo + (hi - lo) * frac).max(min_x).min(join_x - 40.);
+        let before = if stage.state == CheckState::Queued || stage.state == CheckState::Skipped {
+            Stroke::Dotted
+        } else {
+            Stroke::Solid
+        };
+        let color = lane_color(stage.state);
+        // From the origin to the node.
+        if (y - oy).abs() < 0.5 {
+            lines.push(Prim::Line {
+                a: origin,
+                b: (x, y),
+                stroke: before,
+                color,
+                width: 1.5,
+                t: 1.,
+            });
+        } else {
+            let span = (x - origin.0 - 8.).min(if inline { 110. } else { 200. });
+            lines.push(Prim::Curve {
+                a: origin,
+                b: (origin.0 + span, y),
+                stroke: before,
+                color,
+                width: 1.5,
+                t: 1.,
+            });
+            lines.push(Prim::Line {
+                a: (origin.0 + span, y),
+                b: (x, y),
+                stroke: before,
+                color,
+                width: 1.5,
+                t: 1.,
+            });
+        }
+        // From the node on to where the lanes join.
+        let after = match stage.state {
+            CheckState::Pass => Stroke::Solid,
+            CheckState::Running | CheckState::Fail => Stroke::Dashed,
+            _ => Stroke::Dotted,
+        };
+        let after_color = match stage.state {
+            CheckState::Running | CheckState::Fail => color.opacity(0.7),
+            _ => ink.line,
+        };
+        if (y - oy).abs() < 0.5 {
+            lines.push(Prim::Line {
+                a: (x, y),
+                b: (join_x, oy),
+                stroke: after,
+                color: after_color,
+                width: 1.5,
+                t: 1.,
+            });
+        } else {
+            let span = (join_x - x - 10.).min(if inline { 140. } else { 220. });
+            lines.push(Prim::Line {
+                a: (x, y),
+                b: (join_x - span, y),
+                stroke: after,
+                color: after_color,
+                width: 1.5,
+                t: 1.,
+            });
+            lines.push(Prim::Curve {
+                a: (join_x - span, y),
+                b: (join_x, oy),
+                stroke: after,
+                color: after_color,
+                width: 1.5,
+                t: 1.,
+            });
+        }
+        node((x, y), stage.state, &mut marks, &mut live);
+        let (tc, fc) = label_colors(stage.state);
+        let l = if inline {
+            label(text, x - 12., y - 7.5, Align::Right, LabelKind::Lane)
+        } else if i == 0 {
+            label(text, x, y - 26., Align::Center, LabelKind::Lane)
+        } else {
+            label(text, x, y + 11., Align::Center, LabelKind::Lane)
+        };
+        labels.push(styled(l, tc, fc, None));
+    }
+    if k == 0 {
+        lines.push(Prim::Line {
+            a: origin,
+            b: (join_x, oy),
+            stroke: if done { Stroke::Solid } else { Stroke::Dotted },
+            color: ink.line,
+            width: 1.5,
+            t: 1.,
+        });
+    }
+
+    // The publish step(s), one after another on the base's lane.
+    let m = tail.len();
+    for (j, stage) in tail.iter().enumerate() {
+        let x = tail_x - 70. * (m - 1 - j) as f32;
+        if j > 0 {
+            lines.push(Prim::Line {
+                a: (x - 70., oy),
+                b: (x, oy),
+                stroke: Stroke::Dotted,
+                color: ink.line,
+                width: 1.5,
+                t: 1.,
+            });
+        }
+        node((x, oy), stage.state, &mut marks, &mut live);
+        let (tc, fc) = label_colors(stage.state);
+        let name = Stage {
+            label: if stage.label.to_lowercase().contains("publish") {
+                "Publish".into()
+            } else {
+                stage.label.clone()
+            },
+            state: if stage.state == CheckState::Skipped {
+                CheckState::Queued
+            } else {
+                stage.state
+            },
+            ..(*stage).clone()
+        };
+        labels.push(styled(
+            label(
+                stage_label(&name),
+                x,
+                oy - 26.,
+                Align::Center,
+                LabelKind::Lane,
+            ),
+            tc,
+            fc,
+            None,
+        ));
+    }
+    if m > 0 {
+        let published = tail.iter().all(|s| s.state == CheckState::Pass);
+        lines.push(Prim::Line {
+            a: (tail_x, oy),
+            b: (end_x, oy),
+            stroke: if published {
+                Stroke::Solid
+            } else {
+                Stroke::Dotted
+            },
+            color: if published && good {
+                hue.green.mark
+            } else {
+                ink.line
+            },
+            width: 1.5,
+            t: if published { draw } else { 1. },
+        });
+    }
+
+    // The origin, the base's label and the end node with its pill.
+    marks.insert(
+        0,
+        Prim::Dot {
+            at: origin,
+            r: 3.5,
+            color: ink.dot,
+        },
+    );
+    if k <= 2 && !card.head.is_empty() {
+        labels.push(styled(
+            label(&card.head, 25., oy - 26., Align::Left, LabelKind::Lane),
+            ink.mono,
+            ink.lane_pill,
+            None,
+        ));
+    }
+    let end = (end_x, oy);
+    let pill_y = if k <= 2 { oy - 25. } else { oy - 32. };
+    let state = pipeline_state(card);
+    let pill = |text: &str, color: Hsla, fill: Hsla, border: Option<Hsla>| {
+        styled(
+            label(text, end_x + 7., pill_y, Align::Right, LabelKind::Status),
+            color,
+            fill,
+            border,
+        )
+    };
+    if good {
+        marks.push(Prim::Node {
+            at: end,
+            r: 7.,
+            color: hue.green.mark,
+            glyph: Some(Glyph::Check),
+        });
+        labels.push(pill(
+            &state,
+            hue.green.text,
+            hue.green.fill(),
+            Some(hue.green.border()),
+        ));
+    } else if done && state == "Cancelled" {
+        marks.push(Prim::Ring {
+            at: end,
+            r: 4.,
+            color: ink.dot,
+            dashed: true,
+        });
+        labels.push(pill(&state, ink.muted, ink.pill, None));
+    } else if done {
+        if release {
+            // Nothing was published: the end stays a step not taken; the failed job says why.
+            marks.push(Prim::Ring {
+                at: end,
+                r: 4.,
+                color: ink.dot,
+                dashed: true,
+            });
+        } else {
+            marks.push(Prim::Halo {
+                at: end,
+                r: 11.,
+                color: hue.red.mark.opacity(0.2),
+            });
+            marks.push(Prim::Node {
+                at: end,
+                r: 7.,
+                color: hue.red.mark,
+                glyph: Some(Glyph::Bang),
+            });
+        }
+        labels.push(pill(
+            &state,
+            hue.red.text,
+            hue.red.fill(),
+            Some(hue.red.border()),
+        ));
+    } else {
+        marks.push(Prim::Ring {
+            at: end,
+            r: 4.,
+            color: ink.dot,
+            dashed: true,
+        });
+        labels.push(pill(&state, ink.faint, ink.card, Some(ink.hair)));
+    }
+    lines.extend(marks);
+    lines.extend(labels);
+    Scene { prims: lines, live }
+}
+
+/// How tall a card's graph is, before it's laid out (a run with many jobs grows its band).
+fn graph_height(card: &Card) -> f32 {
+    match card.kind {
+        Kind::Pr => 104.,
+        _ => {
+            let publish = card.kind == Kind::Release
+                && card.stages.iter().any(is_publish)
+                && card.stages.iter().any(|s| !is_publish(s));
+            let k = card
+                .stages
+                .iter()
+                .filter(|s| !publish || !is_publish(s))
+                .count();
+            if k >= 4 {
+                (18. + (k - 1) as f32 * 20. + 25.).max(104.)
+            } else {
+                104.
+            }
+        }
+    }
+}
+
+/// The graph band: feathered, with the scene painted over it.
+fn graph(card: &Card, clock: f32, motion: bool, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let ink = ink(cx);
+    let hue = hues(cx);
+    let height = graph_height(card);
+    let draw = phase_progress(card, motion, 420.);
+    let mono = theme.mono_font_family.clone();
+    let sans = theme.font_family.clone();
+    let painted = card.clone();
+    let scene = canvas(
+        move |_, _, _| {},
+        move |bounds, _, window, cx| {
+            let w = bounds.size.width.as_f32();
+            let scene = match painted.kind {
+                Kind::Pr => pr_scene(&painted, w, draw, &hue, &ink),
+                Kind::Release | Kind::Run => {
+                    let measure = |s: &str| {
+                        window
+                            .text_system()
+                            .shape_line(
+                                SharedString::from(s.to_string()),
+                                px(12.),
+                                &[TextRun {
+                                    len: s.len(),
+                                    font: font(mono.clone()),
+                                    color: ink.muted,
+                                    background_color: None,
+                                    underline: None,
+                                    strikethrough: None,
+                                }],
+                                None,
+                            )
+                            .width
+                            .as_f32()
+                    };
+                    pipeline_scene(&painted, w, draw, &hue, &ink, &measure)
+                }
+            };
+            paint_scene(
+                &scene.prims,
+                bounds.origin,
+                if motion { clock } else { 0.2 },
+                motion,
+                &ink,
+                &mono,
+                &sans,
+                window,
+                cx,
+            );
+            if motion && scene.live {
+                window.request_animation_frame();
+            }
+        },
+    )
+    .absolute()
+    .inset_0();
+    // The band: no hard rectangle, a soft fill fading out over ~10 px at every edge.
+    // A shadow alone (no fill) is a rectangle blurred at every edge.
+    let band = div()
+        .absolute()
+        .left(px(25.))
+        .right(px(25.))
+        .top(px(11.))
+        .bottom(px(12.))
+        .rounded(px(6.))
+        .shadow(vec![BoxShadow {
+            color: ink.band,
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(8.),
+            spread_radius: px(0.),
+            inset: false,
+        }]);
     div()
-        .flex_none()
-        .max_w(px(180.))
-        .truncate()
-        .rounded(px(4.))
-        .px(px(4.))
-        .py(px(1.))
-        .bg(tint.opacity(0.07))
-        .text_size(px(9.5))
-        .font_family(cx.theme().mono_font_family.clone())
-        .text_color(tint.opacity(0.88))
-        .child(text.to_string())
+        .relative()
+        .w_full()
+        .h(px(height))
+        .child(band)
+        .child(scene)
         .into_any_element()
 }
 
@@ -2276,628 +3672,699 @@ fn phase_progress(card: &Card, motion: bool, duration_ms: f32) -> f32 {
     1. - (1. - t).powi(5)
 }
 
-/// Stagger a list without changing its settled geometry: every item is exactly `1` once the
-/// shared animation is done, however long the workflow or history is.
-fn staggered_progress(draw: f32, index: usize, count: usize) -> f32 {
-    if count <= 1 {
-        return clamp01(draw);
-    }
-    let delay = index as f32 / (count - 1) as f32 * 0.28;
-    clamp01((draw - delay) / (1. - delay))
-}
-
-/// The commit column in the reference is deliberately terse: `now`, `25m`, `2h`, not prose.
-fn commit_age(ms: i64) -> String {
-    let seconds = ((now_ms() - ms) / 1000).max(0);
-    if seconds < 60 {
-        "now".into()
-    } else if seconds < 3_600 {
-        format!("{}m", seconds / 60)
-    } else if seconds < 86_400 {
-        format!("{}h", seconds / 3_600)
-    } else {
-        format!("{}d", seconds / 86_400)
-    }
-}
-
-/// The detail line under the title: branches and counts for a PR, the run's or release's facts.
-#[allow(dead_code)]
-fn sub_row(card: &Card, cx: &App) -> Option<AnyElement> {
-    let theme = cx.theme();
-    let muted = theme.muted_foreground;
-    let mut row = h_flex()
-        .gap(px(6.))
-        .items_center()
-        .min_w_0()
-        .text_xs()
-        .text_color(muted);
-    match card.kind {
-        Kind::Pr => {
-            let mut any = false;
-            if !card.head.is_empty() {
-                row = row.child(mono(&card.head, cx)).child("→");
-                any = true;
+#[allow(clippy::too_many_arguments)]
+fn paint_scene(
+    prims: &[Prim],
+    origin: Point<Pixels>,
+    clock: f32,
+    motion: bool,
+    ink: &Ink,
+    mono: &SharedString,
+    sans: &SharedString,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let at = |(x, y): (f32, f32)| point(origin.x + px(x), origin.y + px(y));
+    let white = hsla(0., 0., 1., 1.);
+    for prim in prims {
+        match prim {
+            Prim::Line {
+                a,
+                b,
+                stroke,
+                color,
+                width,
+                t,
+            } => {
+                let t = clamp01(*t);
+                if t <= 0. {
+                    continue;
+                }
+                let b = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+                seg(&[at(*a), at(b)], px(*width), *stroke, *color, window);
             }
-            if !card.base.is_empty() {
-                row = row.child(mono(&card.base, cx));
-                any = true;
+            Prim::Curve {
+                a,
+                b,
+                stroke,
+                color,
+                width,
+                t,
+            } => {
+                let dx = (b.0 - a.0) / 2.;
+                barc(
+                    at(*a),
+                    at((a.0 + dx, a.1)),
+                    at((b.0 - dx, b.1)),
+                    at(*b),
+                    *t,
+                    px(*width),
+                    *stroke,
+                    *color,
+                    window,
+                );
             }
-            if let Some(n) = card.commits {
-                row = row.child(format!("{n} {}", if n == 1 { "commit" } else { "commits" }));
-                any = true;
-            }
-            let (a, r) = (card.added.unwrap_or(0), card.removed.unwrap_or(0));
-            if a > 0 || r > 0 {
-                row = row
-                    .child(
-                        div()
-                            .text_color(crate::palette::emerald(cx))
-                            .child(format!("+{a}")),
-                    )
-                    .child(
-                        div()
-                            .text_color(crate::palette::red(cx))
-                            .child(format!("−{r}")),
-                    );
-                any = true;
-            }
-            any.then(|| row.into_any_element())
-        }
-        Kind::Run => {
-            if !card.head.is_empty() {
-                row = row.child(mono(&card.head, cx));
-            }
-            row = row.child(div().min_w_0().truncate().child(run_name(card).to_string()));
-            if card.started_ms > 0 {
-                let end = if card.ended_ms > 0 {
-                    card.ended_ms
+            Prim::Dot { at: c, r, color } => dot(at(*c), *r, *color, window),
+            Prim::Ring {
+                at: c,
+                r,
+                color,
+                dashed,
+            } => {
+                if *dashed {
+                    dot(at(*c), *r, ink.surface, window);
+                    circle(at(*c), *r, 1., true, *color, window);
                 } else {
-                    now_ms()
-                };
-                row = row.child(dur_label(end - card.started_ms));
+                    ring(at(*c), *r, 1.5, *color, ink.surface, window);
+                }
             }
-            Some(row.into_any_element())
-        }
-        Kind::Release => {
-            if !card.channel.is_empty() {
-                row = row.child(div().child(card.channel.clone()));
+            Prim::Node {
+                at: c,
+                r,
+                color,
+                glyph,
+            } => {
+                dot(at(*c), *r, *color, window);
+                match glyph {
+                    Some(Glyph::Check) => tick(at(*c), *r, white, window),
+                    Some(Glyph::Bang) => bang(at(*c), *r, white, window),
+                    None => {}
+                }
             }
-            if !card.stages.is_empty() {
-                row = row.child(format!(
-                    "{} {}",
-                    card.stages.len(),
-                    if card.stages.len() == 1 {
-                        "job"
-                    } else {
-                        "jobs"
+            Prim::Halo { at: c, r, color } => dot(at(*c), *r, *color, window),
+            Prim::Spinner { at: c, r, color } => {
+                circle(at(*c), *r, 1.5, false, color.opacity(0.25), window);
+                spin_arc(at(*c), *r, clock, *color, window);
+            }
+            Prim::Pulse { at: c, color } => {
+                if motion {
+                    let phase = (clock / 1.2).fract();
+                    circle(
+                        at(*c),
+                        4. + 5. * phase,
+                        1.5,
+                        false,
+                        color.opacity(0.5 * (1. - phase)),
+                        window,
+                    );
+                }
+            }
+            Prim::Label {
+                text,
+                x,
+                y,
+                align,
+                kind,
+                color,
+                fill: fill_color,
+                border,
+                strike,
+            } => {
+                let (family, weight, pad, h, radius) = match kind {
+                    LabelKind::Lane | LabelKind::Branch => {
+                        (mono.clone(), FontWeight::NORMAL, 5., 15., 4.)
                     }
-                ));
+                    LabelKind::Status => (sans.clone(), FontWeight::MEDIUM, 9., 18., 9.),
+                };
+                let run = TextRun {
+                    len: text.len(),
+                    font: Font {
+                        weight,
+                        ..font(family)
+                    },
+                    color: *color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: strike.then_some(StrikethroughStyle {
+                        thickness: px(1.),
+                        color: Some(*color),
+                    }),
+                };
+                let line = window.text_system().shape_line(
+                    SharedString::from(text.clone()),
+                    px(12.),
+                    &[run],
+                    None,
+                );
+                let w = line.width.as_f32() + 2. * pad;
+                let left = match align {
+                    Align::Left => *x,
+                    Align::Center => x - w / 2.,
+                    Align::Right => x - w,
+                };
+                let bounds = Bounds::new(at((left, *y)), size(px(w), px(h)));
+                window.paint_quad(fill(bounds, ink.surface).corner_radii(px(radius)));
+                let mut quad = fill(bounds, *fill_color).corner_radii(px(radius));
+                if let Some(b) = border {
+                    quad = quad.border_widths(px(1.)).border_color(*b);
+                }
+                window.paint_quad(quad);
+                let _ = line.paint(
+                    at((left + pad, *y)),
+                    px(h),
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
             }
-            Some(row.into_any_element())
         }
     }
 }
 
-/// The pull request's actual history, arranged like the reference: commit subjects are the
-/// content and the graph is a narrow guide at their left. The previous horizontal diagram made
-/// anonymous dots the largest thing in the card and became especially empty on wide windows.
-fn pr_history(ix: usize, card: &Card, clock: f32, motion: bool, cx: &App) -> AnyElement {
+// ---------- footer ----------
+
+/// The footer under the graph when there's something to say or do; `None` while the card is
+/// just working (the band says that).
+fn footer(
+    ix: usize,
+    card: &Card,
+    actions: &Actions,
+    hue: &Hues,
+    ink: &Ink,
+    cx: &App,
+) -> Option<AnyElement> {
     let theme = cx.theme();
-    let muted = theme.muted_foreground;
-    let amber = crate::palette::amber(cx);
-    let green = crate::palette::emerald(cx);
-    let branch = if card.phase == Phase::Merged {
-        crate::palette::indigo(cx)
-    } else {
-        crate::palette::sky(cx)
-    };
-    let target = card.phase.tint(cx);
     let base = if card.base.is_empty() {
-        "base"
+        "main"
     } else {
         &card.base
     };
-    let head = if card.head.is_empty() {
-        "the branch"
-    } else {
-        &card.head
+    let when = card.phase_at_ms.max(card.created_ms);
+    let lead = |icon: Icon, h: Hue| tile(icon, h.fill(), h.text);
+    let warn = || Icon::new(IconName::TriangleAlert);
+    let sub_text = |s: String| -> Option<AnyElement> {
+        (!s.is_empty()).then(|| div().min_w_0().truncate().child(s).into_any_element())
     };
+    let mut chips: Vec<AnyElement> = vec![];
+    let mut buttons: Vec<AnyElement> = vec![];
 
-    // (title, right-hand fact, tint, lane: 0 main / 1 branch, mark, branch label)
-    // Marks: 0 ordinary, 1 unresolved conflict, 2 resolved conflict, 3 target, 4 base.
-    let mut rows: Vec<(String, String, Hsla, u8, u8, Option<String>)> = vec![(
-        format!("Merge into {base}"),
-        match card.phase {
-            Phase::Conflicted if card.conflicts.len() == 1 => "1 conflict".into(),
-            Phase::Conflicted if !card.conflicts.is_empty() => {
-                format!("{} conflicts", card.conflicts.len())
-            }
-            Phase::Ready => "ready".into(),
-            Phase::Merging => "merging".into(),
-            Phase::Merged => "merged".into(),
-            Phase::Checking => "checking".into(),
-            Phase::Closed => "closed".into(),
-            Phase::Failed => "failed".into(),
-            _ => String::new(),
-        },
-        target,
-        0,
-        3,
-        None,
-    )];
-    rows.extend(
-        card.resolved
-            .iter()
-            .take(4)
-            .map(|path| (path.clone(), "resolved".into(), green, 0, 2, None)),
-    );
-    rows.extend(card.conflicts.iter().take(4).map(|path| {
-        (
-            path.clone(),
-            "changed on both branches".into(),
-            amber,
-            0,
-            1,
-            None,
-        )
-    }));
-    let first_commit = rows.len();
-    rows.extend(
-        card.history
-            .iter()
-            .take(7)
-            .enumerate()
-            .map(|(row_ix, commit)| {
-                let mut facts = vec![];
-                if !commit.oid.is_empty() {
-                    facts.push(commit.oid.clone());
+    let (tile, title, sub): (AnyElement, String, Option<AnyElement>) = match card.kind {
+        Kind::Pr => match card.phase {
+            Phase::Conflicted => {
+                let left = card.conflicts.len();
+                let title = if card.resolving && left == 0 && !card.resolved.is_empty() {
+                    "Conflicts resolved".to_string()
+                } else {
+                    format!("{} with {base}", conflicts_label(left))
+                };
+                for path in card.resolved.iter().take(4) {
+                    chips.push(file_chip(path, Some(true), hue, ink, cx));
                 }
-                if !commit.author.is_empty() {
-                    facts.push(commit.author.clone());
+                for path in card.conflicts.iter().take(4) {
+                    chips.push(file_chip(path, None, hue, ink, cx));
                 }
-                if commit.committed_ms > 0 {
-                    facts.push(commit_age(commit.committed_ms));
+                let more = (card.resolved.len() + card.conflicts.len()).saturating_sub(8);
+                if more > 0 {
+                    chips.push(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(ink.muted)
+                            .child(format!("+{more} more"))
+                            .into_any_element(),
+                    );
+                }
+                if card.resolving {
+                    buttons.push(busy_pill(("pr-resolve", ix), "Resolving", ink, cx));
+                } else if let Some(f) = actions.resolve.clone() {
+                    buttons.push(dark_button(
+                        ("pr-resolve", ix),
+                        None,
+                        "Resolve conflicts",
+                        f,
+                        ink,
+                        cx,
+                    ));
                 }
                 (
-                    if commit.title.is_empty() {
-                        "Untitled commit".into()
-                    } else {
-                        commit.title.clone()
-                    },
-                    facts.join(" · "),
-                    branch,
-                    1,
-                    0,
-                    (row_ix == 0 && !card.head.is_empty()).then(|| card.head.clone()),
+                    lead(warn(), hue.amber),
+                    title,
+                    sub_text(format!("The same lines changed on {base}")),
                 )
-            }),
-    );
-    if card.history.is_empty() {
-        let title = match card.commits {
-            Some(1) => format!("1 commit on {head}"),
-            Some(n) if n > 1 => format!("{n} commits on {head}"),
-            _ => format!("Work on {head}"),
-        };
-        rows.push((
-            title,
-            String::new(),
-            branch,
-            1,
-            0,
-            (!card.head.is_empty()).then(|| card.head.clone()),
-        ));
-    }
-    let last_commit = rows.len().saturating_sub(1);
-    rows.push((
-        format!("Branched from {base}"),
-        String::new(),
-        muted,
-        0,
-        4,
-        Some(base.to_string()),
-    ));
-
-    let row_h = 26.;
-    let graph_h = row_h * rows.len() as f32;
-    let nodes: Vec<(Hsla, u8, u8)> = rows
-        .iter()
-        .map(|(_, _, tint, lane, mark, _)| (*tint, *lane, *mark))
-        .collect();
-    let node_count = nodes.len();
-    let row_count = rows.len();
-    let bg = theme.background;
-    let painted = card.clone();
-    let draw = phase_progress(card, motion, 420.);
-    let graph = canvas(
-        move |_, _, _| {},
-        move |bounds, _, window, _| {
-            let ox = bounds.origin.x.as_f32();
-            let oy = bounds.origin.y.as_f32();
-            let at = |x: f32, row: usize| point(px(ox + x), px(oy + row_h * (row as f32 + 0.5)));
-            let trunk_x = 17.;
-            let branch_x = 31.;
-            let last = row_count.saturating_sub(1);
-            if last > 0 {
-                seg(
-                    &[at(trunk_x, 0), at(trunk_x, last)],
-                    px(1.),
-                    false,
-                    muted.opacity(0.24),
-                    window,
-                );
             }
-            if last > 1 && first_commit <= last_commit {
-                let top_t = clamp01(draw * 3.);
-                let stem_t = clamp01(draw * 3. - 1.);
-                let bottom_t = clamp01(draw * 3. - 2.);
-                barc(
-                    at(trunk_x, 0),
-                    at(trunk_x, first_commit),
-                    at(branch_x, first_commit),
-                    at(branch_x, first_commit),
-                    top_t,
-                    px(1.4),
-                    false,
-                    branch.opacity(0.72),
-                    window,
-                );
-                if last_commit > first_commit && stem_t > 0. {
-                    let from = at(branch_x, first_commit);
-                    let to = at(branch_x, last_commit);
-                    let partial = point(
-                        from.x,
-                        px(from.y.as_f32() + (to.y.as_f32() - from.y.as_f32()) * stem_t),
-                    );
-                    seg(
-                        &[from, partial],
-                        px(1.4),
-                        false,
-                        branch.opacity(0.72),
-                        window,
-                    );
+            Phase::Ready | Phase::Merging => {
+                if card.phase == Phase::Merging {
+                    buttons.push(busy_pill(("pr-merge", ix), "Merging", ink, cx));
+                } else if let Some(f) = actions.merge.clone() {
+                    buttons.push(dark_button(
+                        ("pr-merge", ix),
+                        Some(crate::assets::Lucide::GitMerge),
+                        "Merge",
+                        f,
+                        ink,
+                        cx,
+                    ));
                 }
-                barc(
-                    at(branch_x, last_commit),
-                    at(branch_x, last),
-                    at(trunk_x, last),
-                    at(trunk_x, last),
-                    bottom_t,
-                    px(1.4),
-                    false,
-                    branch.opacity(0.72),
-                    window,
-                );
+                (
+                    lead(Icon::new(IconName::Check), hue.green),
+                    "Ready to merge".into(),
+                    sub_text(ready_detail(card)),
+                )
             }
-            for (node_ix, (color, lane, mark)) in nodes.iter().enumerate() {
-                let x = if *lane == 0 { trunk_x } else { branch_x };
-                let pop = staggered_progress(draw, node_ix, node_count);
-                if pop <= 0. {
-                    continue;
-                }
-                let at = at(x, node_ix);
-                if *mark == 3
-                    && matches!(
-                        painted.phase,
-                        Phase::Creating | Phase::Checking | Phase::Merging
-                    )
-                {
-                    ring(at, 4. * pop, 1.3, *color, bg, window);
-                    spin_arc(at, 6.3 * pop, clock, *color, window);
-                } else if *mark == 3 && matches!(painted.phase, Phase::Ready | Phase::Merged) {
-                    dot(at, 4.5 * pop, *color, window);
-                    tick(at, bg, window);
-                } else if *mark == 3 && painted.phase == Phase::Conflicted {
-                    dot(at, 4.5 * pop, *color, window);
-                    bang(at, bg, window);
-                } else if *mark == 2 {
-                    dot(at, 3.8 * pop, *color, window);
-                    tick(at, bg, window);
-                } else if *mark == 1 {
-                    dot(at, 3.5 * pop, *color, window);
-                } else {
-                    dot(
-                        at,
-                        if node_ix == last { 3. } else { 3.25 } * pop,
-                        *color,
-                        window,
-                    );
-                }
-            }
-            if motion
-                && (draw < 1.
-                    || matches!(
-                        painted.phase,
-                        Phase::Creating | Phase::Checking | Phase::Merging
-                    ))
-            {
-                window.request_animation_frame();
-            }
-        },
-    )
-    .absolute()
-    .inset_0();
-
-    let row_elements =
-        rows.into_iter()
-            .enumerate()
-            .map(|(row_ix, (title, fact, tint, _, mark, branch_label))| {
-                let key = SharedString::from(format!("pr-story-{ix}-{row_ix}-{mark}-{title}"));
-                let row = h_flex()
-                    .h(px(row_h))
-                    .pl(px(47.))
-                    .pr(px(4.))
-                    .gap(px(10.))
-                    .items_center()
-                    .rounded(px(4.))
-                    .when(mark == 1, |el| el.bg(amber.opacity(0.055)))
-                    .when(mark == 2, |el| el.bg(green.opacity(0.035)))
-                    .child(
-                        h_flex()
-                            .min_w_0()
-                            .flex_1()
-                            .gap(px(7.))
-                            .items_center()
-                            .text_size(px(11.5))
-                            .text_color(if mark == 1 {
-                                amber
-                            } else if mark == 2 || mark == 4 {
-                                muted
-                            } else {
-                                theme.foreground.opacity(0.86)
-                            })
-                            .child(div().min_w_0().truncate().child(title))
-                            .when_some(branch_label, |el, label| {
-                                el.child(branch_badge(&label, tint, cx))
-                            }),
-                    )
-                    .when(!fact.is_empty(), |el| {
-                        el.child(
+            Phase::Merged => {
+                let sub = if card.branch_deleted && !card.head.is_empty() {
+                    h_flex()
+                        .min_w_0()
+                        .gap(px(4.))
+                        .items_center()
+                        .child(mono_pill(&card.head, ink, cx))
+                        .child(
                             div()
-                                .flex_none()
-                                .max_w(relative(0.42))
+                                .min_w_0()
                                 .truncate()
-                                .text_size(px(10.))
-                                .font_family(theme.mono_font_family.clone())
-                                .text_color(tint.opacity(0.78))
-                                .child(fact),
+                                .child(format!("was deleted · {}", ago(when))),
                         )
-                    });
-                if motion {
-                    let delay = (row_ix as f32 * 0.045).min(0.3);
-                    row.with_animation(
-                        key,
-                        Animation::new(Duration::from_millis(260)).with_easing(ease_out_quint()),
-                        move |el, t| {
-                            let t = clamp01((t - delay) / (1. - delay));
-                            el.opacity(t).ml(px(4. * (1. - t)))
+                        .into_any_element()
+                } else {
+                    let n = card.commits.unwrap_or(0);
+                    div()
+                        .child(if n > 0 {
+                            format!(
+                                "{n} {} landed · {}",
+                                if n == 1 { "commit" } else { "commits" },
+                                ago(when)
+                            )
+                        } else {
+                            ago(when)
+                        })
+                        .into_any_element()
+                };
+                (
+                    lead(Icon::new(crate::assets::Lucide::GitMerge), hue.purple),
+                    format!("Merged into {base}"),
+                    Some(sub),
+                )
+            }
+            Phase::Closed => (
+                tile_neutral(Icon::new(IconName::CircleX), ink),
+                "Closed unmerged".into(),
+                sub_text(ago(when)),
+            ),
+            Phase::Failed => (
+                lead(warn(), hue.red),
+                "Couldn't open the pull request".into(),
+                sub_text(card.step.clone()),
+            ),
+            // A merge that failed, or checks that are red: what went wrong, and where to look.
+            Phase::Open
+                if card.step.starts_with("Merge failed") || card.step.contains("failing") =>
+            {
+                let (head, rest) = card
+                    .step
+                    .split_once(": ")
+                    .map(|(a, b)| (a.to_string(), b.to_string()))
+                    .unwrap_or((card.step.clone(), String::new()));
+                if let Some(f) = actions.open.clone() {
+                    buttons.push(light_button(("pr-view", ix), "View on GitHub", f, ink));
+                }
+                (lead(warn(), hue.red), head, sub_text(rest))
+            }
+            _ => return None,
+        },
+        Kind::Run | Kind::Release => match card.phase {
+            Phase::Passed | Phase::Published => {
+                let (title, sub) = if card.kind == Kind::Run {
+                    let names: Vec<&str> = card.stages.iter().map(|s| s.label.as_str()).collect();
+                    let took = dur_label(run_ms(card));
+                    (
+                        if names.is_empty() {
+                            "Passed".to_string()
+                        } else {
+                            "All checks passed".to_string()
+                        },
+                        if names.is_empty() {
+                            took
+                        } else {
+                            format!("{} · {took}", and_list(&names))
                         },
                     )
-                    .into_any_element()
                 } else {
-                    row.into_any_element()
+                    let channel = card.channel.as_str();
+                    (
+                        if channel.is_empty() || channel == "stable" {
+                            "Published".to_string()
+                        } else {
+                            format!("Published to {channel}")
+                        },
+                        format!(
+                            "{} downloads are up · {}",
+                            platforms_for_sub(card),
+                            ago(when)
+                        ),
+                    )
+                };
+                let link = if card.kind == Kind::Release {
+                    actions
+                        .notes
+                        .clone()
+                        .map(|f| ("Release notes", f))
+                        .or_else(|| actions.open.clone().map(|f| ("Open run", f)))
+                } else {
+                    actions.open.clone().map(|f| ("Open run", f))
+                };
+                if let Some((text, f)) = link {
+                    buttons.push(link_pill(("pr-link", ix), text, hue.green, f));
                 }
-            });
+                (
+                    lead(Icon::new(IconName::Check), hue.green),
+                    title,
+                    sub_text(sub),
+                )
+            }
+            Phase::Failed | Phase::Closed => {
+                let skipped_or_failed: Vec<&Stage> = card
+                    .stages
+                    .iter()
+                    .filter(|s| matches!(s.state, CheckState::Fail | CheckState::Skipped))
+                    .collect();
+                if skipped_or_failed.len() > 1 {
+                    for s in skipped_or_failed.iter().take(5) {
+                        chips.push(step_chip(s, hue, ink));
+                    }
+                }
+                if let Some(f) = actions.rerun.clone() {
+                    buttons.push(light_button(("pr-rerun", ix), "Re-run", f, ink));
+                }
+                if let Some(f) = actions.open.clone() {
+                    buttons.push(dark_button(("pr-logs", ix), None, "View log", f, ink, cx));
+                }
+                (
+                    lead(warn(), hue.red),
+                    failure_title(card),
+                    sub_text(failure_detail(card)),
+                )
+            }
+            _ => return None,
+        },
+    };
 
-    v_flex()
-        .mx(px(14.))
-        .pb(px(6.))
-        .child(
-            v_flex()
-                .relative()
-                .h(px(graph_h))
-                .child(graph)
-                .children(row_elements),
-        )
-        .when(
-            !card.checks.is_empty()
-                && matches!(card.phase, Phase::Ready | Phase::Merging | Phase::Merged),
-            |el| el.child(pr_checks(ix, card, motion, cx)),
-        )
+    Some(
+        v_flex()
+            .id(("pr-state-row", ix))
+            .test_support()
+            .pl(px(15.))
+            .pr(px(16.))
+            .pt(px(23.))
+            .pb(px(if chips.is_empty() { 11. } else { 15. }))
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap(px(12.))
+                    .items_center()
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(13.))
+                            .items_start()
+                            .child(div().mt(px(2.)).child(tile))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(14.))
+                                            .line_height(px(18.))
+                                            .font_medium()
+                                            .text_color(theme.foreground)
+                                            .child(title),
+                                    )
+                                    .when_some(sub, |el, sub| {
+                                        el.child(
+                                            h_flex()
+                                                .min_w_0()
+                                                .h(px(17.))
+                                                .items_center()
+                                                .text_size(px(13.))
+                                                .line_height(px(17.))
+                                                .text_color(ink.muted)
+                                                .child(sub),
+                                        )
+                                    }),
+                            ),
+                    )
+                    .when(!buttons.is_empty(), |el| {
+                        el.child(
+                            h_flex()
+                                .flex_none()
+                                .gap(px(6.))
+                                .items_center()
+                                .children(buttons),
+                        )
+                    }),
+            )
+            .when(!chips.is_empty(), |el| {
+                el.child(
+                    h_flex()
+                        .pl(px(35.))
+                        .mt(px(6.))
+                        .gap(px(4.))
+                        .flex_wrap()
+                        .items_center()
+                        .children(chips),
+                )
+            })
+            .into_any_element(),
+    )
+}
+
+fn tile_neutral(icon: Icon, ink: &Ink) -> AnyElement {
+    tile(icon, ink.pill, ink.muted)
+}
+
+/// "Clippy, Test (macOS) and Test (Windows)".
+fn and_list(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// "Mac and Windows" for a published release's line; "The" when its jobs don't say.
+fn platforms_for_sub(card: &Card) -> String {
+    let p = platforms(card);
+    if p.contains('+') {
+        p.replace(" + ", " and ")
+    } else if p.ends_with("job") || p.ends_with("jobs") || p.is_empty() {
+        "The".into()
+    } else {
+        p
+    }
+}
+
+/// Under Ready to merge: no conflicts, and which checks passed.
+fn ready_detail(card: &Card) -> String {
+    let names: Vec<&str> = card
+        .checks
+        .iter()
+        .filter(|c| c.state == CheckState::Pass)
+        .map(|c| c.name.as_str())
+        .collect();
+    match names.len() {
+        0 => "No conflicts".into(),
+        1..=3 => format!("No conflicts · {} passed", and_list(&names)),
+        n => format!("No conflicts · all {n} checks passed"),
+    }
+}
+
+/// A conflicting file: its language's monogram and name; a green ✓ once resolved.
+fn file_chip(path: &str, resolved: Option<bool>, hue: &Hues, ink: &Ink, cx: &App) -> AnyElement {
+    let name = path.rsplit('/').next().unwrap_or(path).to_string();
+    let tag = lang_tag(path);
+    let full = path.to_string();
+    h_flex()
+        .id(SharedString::from(format!("pr-file-{path}")))
+        .flex_none()
+        .h(px(21.))
+        .px(px(9.))
+        .gap(px(6.))
+        .items_center()
+        .rounded_full()
+        .border_1()
+        .border_color(ink.hair.opacity(0.8))
+        .bg(ink.card)
+        .text_size(px(13.))
+        .when(!tag.is_empty(), |el| {
+            el.child(
+                div()
+                    .text_size(px(10.))
+                    .font_bold()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_color(hue.blue.text.opacity(0.8))
+                    .child(tag),
+            )
+        })
+        .child(div().text_color(ink.fg.opacity(0.72)).child(name))
+        .when(resolved == Some(true), |el| {
+            el.child(
+                Icon::new(IconName::Check)
+                    .size(px(11.))
+                    .text_color(hue.green.text),
+            )
+        })
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(window, cx)
+        })
         .into_any_element()
 }
 
-/// Passed and pending checks as a quiet result row, matching the reference's Tests / Lint /
-/// Preview strip instead of turning checks into another oversized graph.
-fn pr_checks(ix: usize, card: &Card, motion: bool, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    let marks = marks(cx);
-    let strip = h_flex()
-        .min_h(px(30.))
-        .pt(px(6.))
-        .pb(px(1.))
-        .gap(px(12.))
-        .flex_wrap()
-        .border_t_1()
-        .border_color(theme.foreground.opacity(0.07))
-        .children(
-            card.checks
-                .iter()
-                .take(5)
-                .enumerate()
-                .map(|(check_ix, check)| {
-                    let state = check.state;
-                    let (glyph, tint) = match state {
-                        CheckState::Pass => ("✓", marks.green),
-                        CheckState::Fail => ("×", marks.red),
-                        CheckState::Skipped => ("–", marks.muted),
-                        CheckState::Queued | CheckState::Running => ("○", crate::palette::sky(cx)),
-                    };
-                    let name = check.name.clone();
-                    h_flex()
-                        .id(SharedString::from(format!("pr-check-{ix}-{check_ix}")))
-                        .gap(px(5.))
-                        .items_center()
-                        .text_size(px(10.5))
-                        .text_color(theme.muted_foreground)
-                        .child(div().text_color(tint).child(glyph))
-                        .child(name.clone())
-                        .tooltip(move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(match state {
-                                CheckState::Pass => format!("{name} · passed"),
-                                CheckState::Fail => format!("{name} · failed"),
-                                CheckState::Skipped => format!("{name} · skipped"),
-                                CheckState::Queued => format!("{name} · queued"),
-                                CheckState::Running => format!("{name} · running"),
-                            })
-                            .build(window, cx)
-                        })
-                }),
-        );
-    if motion {
-        strip
-            .with_animation(
-                SharedString::from(format!("pr-checks-{ix}-{}", card.phase.label())),
-                Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()),
-                |el, t| el.opacity(t).mt(px(4. * (1. - t))),
-            )
-            .into_any_element()
-    } else {
-        strip.into_any_element()
-    }
-}
-
-/// Jobs and release stages use the same compact reading direction as the pull request history.
-fn stage_history(ix: usize, card: &Card, clock: f32, motion: bool, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    let marks = marks(cx);
-    let stages = card.stages.iter().collect::<Vec<_>>();
-    let row_h = 27.;
-    let graph_h = row_h * stages.len() as f32;
-    let states = stages.iter().map(|stage| stage.state).collect::<Vec<_>>();
-    let stage_count = states.len();
-    let bg = theme.background;
-    let muted = theme.muted_foreground;
-    let sky = crate::palette::sky(cx);
-    let draw = phase_progress(card, motion, 360.);
-    let graph = canvas(
-        move |_, _, _| {},
-        move |bounds, _, window, _| {
-            let ox = bounds.origin.x.as_f32();
-            let oy = bounds.origin.y.as_f32();
-            let at = |row: usize| point(px(ox + 17.), px(oy + row_h * (row as f32 + 0.5)));
-            if states.len() > 1 {
-                let from = at(0);
-                let to = at(states.len() - 1);
-                let partial = point(
-                    from.x,
-                    px(from.y.as_f32() + (to.y.as_f32() - from.y.as_f32()) * draw),
-                );
-                seg(&[from, partial], px(1.), false, muted.opacity(0.25), window);
-            }
-            for (stage_ix, state) in states.iter().enumerate() {
-                let pop = staggered_progress(draw, stage_ix, stage_count);
-                if pop <= 0. {
-                    continue;
-                }
-                let at = at(stage_ix);
-                match state {
-                    CheckState::Pass => {
-                        dot(at, 4. * pop, marks.green, window);
-                        tick(at, bg, window);
-                    }
-                    CheckState::Fail => {
-                        dot(at, 4. * pop, marks.red, window);
-                        bang(at, bg, window);
-                    }
-                    CheckState::Running => {
-                        ring(at, 3.8 * pop, 1.3, sky, bg, window);
-                        spin_arc(at, 6. * pop, clock, sky, window);
-                    }
-                    CheckState::Queued | CheckState::Skipped => {
-                        dot(at, 3. * pop, marks.muted, window);
-                    }
-                }
-            }
-            if motion && (draw < 1. || states.iter().any(|state| *state == CheckState::Running)) {
-                window.request_animation_frame();
-            }
-        },
-    )
-    .absolute()
-    .inset_0();
-    let rows = stages.iter().enumerate().map(|(stage_ix, stage)| {
-        let (tint, state) = match stage.state {
-            CheckState::Pass => (marks.green, "passed"),
-            CheckState::Fail => (marks.red, "failed"),
-            CheckState::Skipped => (marks.muted, "skipped"),
-            CheckState::Queued => (marks.muted, "queued"),
-            CheckState::Running => (sky, "running"),
-        };
-        let row = h_flex()
-            .h(px(row_h))
-            .pl(px(47.))
-            .pr(px(4.))
-            .gap(px(10.))
-            .items_center()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(11.5))
-                    .text_color(theme.foreground.opacity(0.86))
-                    .child(stage.label.clone()),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(px(10.5))
-                    .text_color(tint)
-                    .child(state),
-            );
-        if motion {
-            let delay = (stage_ix as f32 * 0.06).min(0.3);
-            row.with_animation(
-                SharedString::from(format!(
-                    "stage-story-{ix}-{stage_ix}-{}-{state}",
-                    stage.label
-                )),
-                Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()),
-                move |el, t| {
-                    let t = clamp01((t - delay) / (1. - delay));
-                    el.opacity(t).ml(px(4. * (1. - t)))
+/// A job that failed (✕ and how long it ran) or was skipped (–).
+fn step_chip(stage: &Stage, hue: &Hues, ink: &Ink) -> AnyElement {
+    let (mark, color, what) = match stage.state {
+        CheckState::Fail => {
+            let ms = stage_ms(stage);
+            (
+                "✕",
+                hue.red.text,
+                if ms > 0 {
+                    format!("{} · {}", stage.label, dur_label(ms))
+                } else {
+                    stage.label.clone()
                 },
             )
-            .into_any_element()
-        } else {
-            row.into_any_element()
         }
-    });
-    let context = (card.kind == Kind::Run && (!card.subject.is_empty() || !card.head.is_empty()))
-        .then(|| {
-            h_flex()
-                .min_h(px(23.))
-                .pl(px(47.))
-                .pr(px(4.))
-                .pb(px(3.))
-                .gap(px(7.))
-                .items_center()
-                .when(!card.subject.is_empty(), |el| {
-                    el.child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .truncate()
-                            .text_size(px(10.5))
-                            .text_color(theme.muted_foreground)
-                            .child(card.subject.clone()),
-                    )
-                })
-                .when(!card.head.is_empty(), |el| {
-                    el.child(branch_badge(&card.head, sky, cx))
-                })
-        });
-    v_flex()
-        .mx(px(16.))
-        .pb(px(5.))
-        .children(context)
+        _ => ("–", ink.muted, format!("{} · skipped", stage.label)),
+    };
+    h_flex()
+        .flex_none()
+        .h(px(21.))
+        .px(px(9.))
+        .gap(px(6.))
+        .items_center()
+        .rounded_full()
+        .border_1()
+        .border_color(ink.hair.opacity(0.8))
+        .bg(ink.card)
+        .text_size(px(13.))
+        .child(div().text_size(px(11.)).text_color(color).child(mark))
+        .child(div().text_color(ink.fg.opacity(0.72)).child(what))
+        .into_any_element()
+}
+
+/// The short language tag a file chip leads with ("TS", "RS"), from the path's extension.
+fn lang_tag(path: &str) -> String {
+    path.rsplit('/')
+        .next()
+        .and_then(|f| f.rsplit_once('.'))
+        .map(|(_, e)| e.to_uppercase())
+        .filter(|e| e.len() <= 4)
+        .unwrap_or_default()
+}
+
+/// The footer's one action while it asks for a click: the page's ink as its fill.
+fn dark_button(
+    id: impl Into<ElementId>,
+    icon: Option<crate::assets::Lucide>,
+    label: &'static str,
+    on_click: Act,
+    ink: &Ink,
+    cx: &App,
+) -> AnyElement {
+    let (bg, fg) = (ink.fg, cx.theme().background);
+    h_flex()
+        .id(id.into())
+        .test_support()
+        .aria_label(label)
+        .flex_none()
+        .h(px(if icon.is_some() { 26. } else { 28. }))
+        .px(px(14.))
+        .gap(px(6.))
+        .items_center()
+        .rounded_full()
+        .bg(bg.opacity(0.92))
+        .hover(move |s| s.bg(bg.opacity(0.8)))
+        .active(move |s| s.bg(bg))
+        .cursor_pointer()
+        .text_size(px(13.))
+        .font_medium()
+        .text_color(fg)
+        .when_some(icon, |el, icon| {
+            el.child(Icon::new(icon).size(px(12.)).text_color(fg))
+        })
+        .child(label)
+        .on_click(move |_, window, cx| on_click(window, cx))
+        .into_any_element()
+}
+
+/// A second, quieter action beside the dark one (Re-run).
+fn light_button(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    on_click: Act,
+    ink: &Ink,
+) -> AnyElement {
+    let (bg, fg) = (ink.pill, ink.fg);
+    h_flex()
+        .id(id.into())
+        .test_support()
+        .aria_label(label)
+        .flex_none()
+        .h(px(28.))
+        .px(px(12.))
+        .items_center()
+        .rounded_full()
+        .bg(bg)
+        .hover(move |s| s.bg(fg.opacity(0.08)))
+        .active(move |s| s.bg(fg.opacity(0.11)))
+        .cursor_pointer()
+        .text_size(px(13.))
+        .text_color(fg.opacity(0.85))
+        .child(label)
+        .on_click(move |_, window, cx| on_click(window, cx))
+        .into_any_element()
+}
+
+/// What's left to do with something that finished well: open it on GitHub. A quiet link on its
+/// verdict's tint, with the arrow that says it leaves Trek.
+fn link_pill(id: impl Into<ElementId>, label: &'static str, hue: Hue, on_click: Act) -> AnyElement {
+    let tint = hue.mark;
+    h_flex()
+        .id(id.into())
+        .test_support()
+        .aria_label(label)
+        .flex_none()
+        .h(px(26.))
+        .px(px(10.))
+        .gap(px(3.))
+        .items_center()
+        .rounded_full()
+        .bg(tint.opacity(0.09))
+        .hover(move |s| s.bg(tint.opacity(0.15)))
+        .cursor_pointer()
+        .text_size(px(13.))
+        .font_medium()
+        .text_color(hue.text)
+        .child(label)
         .child(
-            v_flex()
-                .relative()
-                .h(px(graph_h))
-                .child(graph)
-                .children(rows),
+            Icon::new(crate::assets::Lucide::ArrowUpRight)
+                .size(px(11.))
+                .text_color(hue.text),
         )
+        .on_click(move |_, window, cx| on_click(window, cx))
+        .into_any_element()
+}
+
+/// The same place once clicked: a quiet grey pill with a small spinner.
+fn busy_pill(id: impl Into<ElementId>, label: &'static str, ink: &Ink, cx: &App) -> AnyElement {
+    h_flex()
+        .id(id.into())
+        .test_support()
+        .aria_label(label)
+        .flex_none()
+        .gap(px(6.))
+        .items_center()
+        .h(px(28.))
+        .px(px(12.))
+        .rounded_full()
+        .bg(ink.pill)
+        .text_size(px(13.))
+        .text_color(ink.muted)
+        .child(ring_spinner(12., ink.muted, cx))
+        .child(label)
         .into_any_element()
 }
 
@@ -2924,7 +4391,6 @@ fn dur_label(ms: i64) -> String {
 }
 
 /// "just now", "2m ago" — how long ago `ms` was.
-#[allow(dead_code)]
 fn ago(ms: i64) -> String {
     let s = ((now_ms() - ms) / 1000).max(0);
     if s < 60 {
@@ -2938,630 +4404,20 @@ fn ago(ms: i64) -> String {
     }
 }
 
-/// A file (or failed job) in the footer: hairline chip, tag, name, a trailing mark.
-#[allow(dead_code)]
-fn file_chip(tag: &str, name: &str, mark: Option<(&'static str, Hsla)>, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    let mono = theme.mono_font_family.clone();
-    h_flex()
-        .flex_none()
-        .gap(px(5.))
-        .items_center()
-        .rounded(px(5.))
-        .border_1()
-        .border_color(theme.foreground.opacity(0.10))
-        .px(px(6.))
-        .py(px(2.))
-        .text_size(px(10.))
-        .when(!tag.is_empty(), |el| {
-            el.child(
-                div()
-                    .font_family(mono.clone())
-                    .text_color(theme.muted_foreground)
-                    .child(tag.to_string()),
-            )
-        })
-        .child(
-            div()
-                .font_family(mono)
-                .text_color(theme.foreground.opacity(0.8))
-                .child(name.to_string()),
-        )
-        .when_some(mark, |el, (m, c)| {
-            el.child(div().text_color(c).child(m.to_string()))
-        })
-        .into_any_element()
+/// A watcher's step that only restates the failure ("Failed: Test (Windows)").
+fn generic_failure(step: &str) -> bool {
+    let step = step.trim();
+    step.is_empty()
+        || step.starts_with("Failed: ")
+        || step == "Run failed"
+        || step == "Release workflow failed"
 }
 
-/// The short language tag a file chip leads with ("TS", "RS"), from the path's extension.
-#[allow(dead_code)]
-fn lang_tag(path: &str) -> String {
-    path.rsplit('/')
-        .next()
-        .and_then(|f| f.rsplit_once('.'))
-        .map(|(_, e)| e.to_uppercase())
-        .filter(|e| e.len() <= 4)
-        .unwrap_or_default()
-}
-
-/// The reference keeps the current operation inside the component as one anchored row. That
-/// makes state changes legible without adding a second, detached status line above the card.
-fn reference_footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElement> {
-    let theme = cx.theme();
-    let muted = theme.muted_foreground;
-    let green = crate::palette::emerald(cx);
-    let red = crate::palette::red(cx);
-    let amber = crate::palette::amber(cx);
-    let indigo = crate::palette::indigo(cx);
-    let sky = crate::palette::sky(cx);
-    let conflict_count = card.conflicts.len();
-    let base = if card.base.is_empty() {
-        "main"
-    } else {
-        &card.base
-    };
-
-    let (mark, title, tint): (AnyElement, String, Hsla) = match card.kind {
-        Kind::Pr => match card.phase {
-            Phase::Creating => (
-                ring_spinner(11., muted, cx),
-                if card.step.is_empty() {
-                    "Creating the pull request".into()
-                } else {
-                    card.step.clone()
-                },
-                muted,
-            ),
-            Phase::Open | Phase::Checking => (
-                if card.phase == Phase::Checking {
-                    ring_spinner(11., sky, cx)
-                } else {
-                    div()
-                        .size(px(6.))
-                        .rounded_full()
-                        .bg(muted)
-                        .into_any_element()
-                },
-                if card.step.is_empty() {
-                    "Checking it merges cleanly".into()
-                } else {
-                    card.step.clone()
-                },
-                if card.phase == Phase::Checking {
-                    sky
-                } else {
-                    muted
-                },
-            ),
-            Phase::Conflicted if card.resolving => (
-                ring_spinner(11., amber, cx),
-                if card.step.is_empty() {
-                    "Merging main into the branch".into()
-                } else {
-                    card.step.clone()
-                },
-                amber,
-            ),
-            Phase::Conflicted => (
-                Icon::new(IconName::TriangleAlert)
-                    .size(px(12.))
-                    .text_color(amber)
-                    .into_any_element(),
-                match conflict_count {
-                    0 => format!("Conflicts with {base}"),
-                    1 => format!("1 conflict with {base}"),
-                    n => format!("{n} conflicts with {base}"),
-                },
-                amber,
-            ),
-            Phase::Ready => (
-                Icon::new(IconName::Check)
-                    .size(px(12.))
-                    .text_color(green)
-                    .into_any_element(),
-                "Ready to merge".into(),
-                green,
-            ),
-            Phase::Merging => (
-                ring_spinner(11., indigo, cx),
-                format!("Merging into {base}"),
-                indigo,
-            ),
-            Phase::Merged => (
-                Icon::new(crate::assets::Lucide::GitMerge)
-                    .size(px(12.))
-                    .text_color(indigo)
-                    .into_any_element(),
-                format!("Merged into {base}"),
-                indigo,
-            ),
-            Phase::Closed => (
-                Icon::new(IconName::CircleX)
-                    .size(px(12.))
-                    .text_color(muted)
-                    .into_any_element(),
-                "Closed unmerged".into(),
-                muted,
-            ),
-            Phase::Failed => (
-                Icon::new(IconName::CircleAlert)
-                    .size(px(12.))
-                    .text_color(red)
-                    .into_any_element(),
-                if card.step.is_empty() {
-                    "Couldn't open the pull request".into()
-                } else {
-                    card.step.clone()
-                },
-                red,
-            ),
-            Phase::Releasing | Phase::Published | Phase::Passed => return None,
-        },
-        Kind::Run => match card.phase {
-            Phase::Passed => (
-                Icon::new(IconName::Check)
-                    .size(px(12.))
-                    .text_color(green)
-                    .into_any_element(),
-                format!("Passed in {}", dur_label(run_ms(card))),
-                green,
-            ),
-            Phase::Failed | Phase::Closed => (
-                Icon::new(IconName::CircleX)
-                    .size(px(12.))
-                    .text_color(red)
-                    .into_any_element(),
-                failure_title(card),
-                red,
-            ),
-            _ => (
-                ring_spinner(11., sky, cx),
-                if card.step.is_empty() {
-                    "Watching the run".into()
-                } else {
-                    card.step.clone()
-                },
-                sky,
-            ),
-        },
-        Kind::Release => match card.phase {
-            Phase::Published => (
-                Icon::new(crate::assets::Lucide::Rocket)
-                    .size(px(12.))
-                    .text_color(indigo)
-                    .into_any_element(),
-                if card.channel.is_empty() || card.channel == "stable" {
-                    "The downloads are up".into()
-                } else {
-                    format!("The downloads are up on {}", card.channel)
-                },
-                indigo,
-            ),
-            Phase::Failed | Phase::Closed => (
-                Icon::new(IconName::CircleAlert)
-                    .size(px(12.))
-                    .text_color(red)
-                    .into_any_element(),
-                failure_title(card),
-                red,
-            ),
-            _ => (
-                ring_spinner(11., sky, cx),
-                if card.step.is_empty() {
-                    "Release workflow running".into()
-                } else {
-                    card.step.clone()
-                },
-                sky,
-            ),
-        },
-    };
-
-    let action = match (card.kind, card.phase) {
-        (Kind::Pr, Phase::Conflicted) if !card.resolving => actions
-            .resolve
-            .clone()
-            .map(|f| action_pill(("pr-resolve", ix), None, "Resolve conflicts", f, cx)),
-        (Kind::Pr, Phase::Conflicted) => Some(busy_pill(("pr-resolve", ix), "Resolving", cx)),
-        (Kind::Pr, Phase::Ready) => actions.merge.clone().map(|f| {
-            action_pill(
-                ("pr-merge", ix),
-                Some(crate::assets::Lucide::GitMerge),
-                "Merge",
-                f,
-                cx,
-            )
-        }),
-        (Kind::Pr, Phase::Merging) => Some(busy_pill(("pr-merge", ix), "Merging", cx)),
-        (Kind::Run, Phase::Failed) | (Kind::Release, Phase::Failed) => actions
-            .open
-            .clone()
-            .map(|f| link_pill(("pr-logs", ix), "View logs", red, f)),
-        (Kind::Release, Phase::Published) => actions
-            .open
-            .clone()
-            .map(|f| link_pill(("pr-release", ix), "Open release", indigo, f)),
-        (Kind::Pr, Phase::Merged) => actions
-            .open
-            .clone()
-            .map(|f| link_pill(("pr-github", ix), "GitHub", indigo, f)),
-        _ => None,
-    };
-
-    let title_row = h_flex()
-        .min_w_0()
-        .flex_1()
-        .gap(px(7.))
-        .items_center()
-        .child(
-            div()
-                .size(px(13.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(mark),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .text_size(px(11.5))
-                .font_medium()
-                .text_color(if card.phase == Phase::Conflicted && !card.resolving {
-                    amber
-                } else {
-                    theme.foreground.opacity(0.86)
-                })
-                .child(title.clone()),
-        );
-    let title_row = if card.phase == Phase::Conflicted && !card.conflicts.is_empty() {
-        let paths = card.conflicts.join("\n");
-        title_row
-            .id(("pr-conflicts", ix))
-            .tooltip(move |window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(paths.clone()).build(window, cx)
-            })
-            .into_any_element()
-    } else {
-        title_row.into_any_element()
-    };
-
-    Some(
-        h_flex()
-            .id(("pr-state-row", ix))
-            .test_support()
-            .min_h(px(39.))
-            .px(px(16.))
-            .gap(px(10.))
-            .items_center()
-            .border_t_1()
-            .border_color(theme.foreground.opacity(0.07))
-            .child(title_row)
-            .children(action)
-            .text_color(tint)
-            .into_any_element(),
-    )
-}
-
-/// The footer under the graph when there's something to say or do: conflicts, ready, merged,
-/// failed; a run's or release's result. `None` while the card is still just working.
-#[allow(dead_code)]
-fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElement> {
-    let theme = cx.theme();
-    let muted = theme.muted_foreground;
-    let (green, red, amber, indigo) = (
-        crate::palette::emerald(cx),
-        crate::palette::red(cx),
-        crate::palette::amber(cx),
-        crate::palette::indigo(cx),
-    );
-    let when = card.phase_at_ms.max(card.created_ms);
-    // (icon, tint, title, subtitle)
-    let (icon, _tint, title, sub): (AnyElement, Hsla, String, String) = match card.kind {
-        Kind::Pr => match card.phase {
-            Phase::Conflicted => {
-                let n = card.conflicts.len();
-                (
-                    Icon::new(IconName::TriangleAlert)
-                        .size(px(12.))
-                        .text_color(amber)
-                        .into_any_element(),
-                    amber,
-                    if card.resolving {
-                        format!("Merging {} into the branch", card.base)
-                    } else if n == 0 {
-                        format!("Conflicts with {}", card.base)
-                    } else if n == 1 {
-                        format!("1 conflict with {}", card.base)
-                    } else {
-                        format!("{n} conflicts with {}", card.base)
-                    },
-                    if card.resolving && n == 0 {
-                        "Pushing the merge".to_string()
-                    } else if card.resolving {
-                        format!("{n} left to clear")
-                    } else {
-                        format!("Merge {} in and resolve them", card.base)
-                    },
-                )
-            }
-            Phase::Ready | Phase::Merging => {
-                let n = card.checks.len();
-                (
-                    Icon::new(IconName::CircleCheck)
-                        .size(px(12.))
-                        .text_color(green)
-                        .into_any_element(),
-                    green,
-                    "Ready to merge".to_string(),
-                    if n == 0 {
-                        "No conflicts".to_string()
-                    } else {
-                        format!("No conflicts · all {n} checks passed")
-                    },
-                )
-            }
-            Phase::Merged => (
-                Icon::new(crate::assets::Lucide::GitMerge)
-                    .size(px(12.))
-                    .text_color(indigo)
-                    .into_any_element(),
-                indigo,
-                format!("Merged into {}", card.base),
-                if card.branch_deleted && !card.head.is_empty() {
-                    format!("{} was deleted · {}", card.head, ago(when))
-                } else if let Some(n) = card.commits {
-                    format!(
-                        "{n} {} landed · {}",
-                        if n == 1 { "commit" } else { "commits" },
-                        ago(when)
-                    )
-                } else {
-                    ago(when)
-                },
-            ),
-            Phase::Closed => (
-                Icon::new(IconName::CircleX)
-                    .size(px(12.))
-                    .text_color(muted)
-                    .into_any_element(),
-                muted,
-                "Closed unmerged".to_string(),
-                ago(when),
-            ),
-            Phase::Failed => (
-                Icon::new(IconName::CircleAlert)
-                    .size(px(12.))
-                    .text_color(red)
-                    .into_any_element(),
-                red,
-                "Couldn't open the pull request".to_string(),
-                card.step.clone(),
-            ),
-            _ => return None,
-        },
-        // A run that passed has nothing to add to its header's "Passed in 49m".
-        Kind::Run => match card.phase {
-            Phase::Failed => (
-                Icon::new(IconName::CircleX)
-                    .size(px(12.))
-                    .text_color(red)
-                    .into_any_element(),
-                red,
-                failed_jobs(card),
-                failure_detail(card),
-            ),
-            _ => return None,
-        },
-        Kind::Release => match card.phase {
-            Phase::Published => (
-                Icon::new(crate::assets::Lucide::Rocket)
-                    .size(px(12.))
-                    .text_color(indigo)
-                    .into_any_element(),
-                indigo,
-                // The header says Published: here, where it went.
-                if card.channel.is_empty() || card.channel == "stable" {
-                    "The downloads are up".to_string()
-                } else {
-                    format!("The downloads are up on {}", card.channel)
-                },
-                ago(when),
-            ),
-            Phase::Failed => (
-                Icon::new(IconName::CircleAlert)
-                    .size(px(12.))
-                    .text_color(red)
-                    .into_any_element(),
-                red,
-                failed_jobs(card),
-                failure_detail(card),
-            ),
-            _ => return None,
-        },
-    };
-
-    let mut chips = vec![];
-    match card.kind {
-        // PR paths already appear in the history above, where their relationship to the branch
-        // is visible. Repeating them as chips made the footer louder than the action.
-        Kind::Pr => {}
-        Kind::Run | Kind::Release
-            if card.phase == Phase::Failed
-                && card
-                    .stages
-                    .iter()
-                    .filter(|s| s.state == CheckState::Fail)
-                    .count()
-                    > 1 =>
-        {
-            chips.extend(
-                card.stages
-                    .iter()
-                    .filter(|s| s.state == CheckState::Fail)
-                    .take(6)
-                    .map(|s| file_chip("", &s.label, Some(("✕", red)), cx)),
-            );
-        }
-        _ => {}
-    }
-
-    // The right-hand action: a dark filled pill while it asks for a click, a quiet busy one after.
-    let action = match (card.kind, card.phase) {
-        (Kind::Pr, Phase::Conflicted) if !card.resolving => actions
-            .resolve
-            .clone()
-            .map(|f| action_pill(("pr-resolve", ix), None, "Resolve conflicts", f, cx)),
-        (Kind::Pr, Phase::Conflicted) => Some(busy_pill(("pr-resolve", ix), "Resolving", cx)),
-        (Kind::Pr, Phase::Ready) => actions.merge.clone().map(|f| {
-            action_pill(
-                ("pr-merge", ix),
-                Some(crate::assets::Lucide::GitMerge),
-                "Merge",
-                f,
-                cx,
-            )
-        }),
-        (Kind::Pr, Phase::Merging) => Some(busy_pill(("pr-merge", ix), "Merging", cx)),
-        (Kind::Run, Phase::Failed) | (Kind::Release, Phase::Failed) => actions
-            .open
-            .clone()
-            .map(|f| link_pill(("pr-logs", ix), "View logs", red, f)),
-        (Kind::Release, Phase::Published) => actions
-            .open
-            .clone()
-            .map(|f| link_pill(("pr-logs", ix), "Open release", indigo, f)),
-        _ => None,
-    };
-
-    Some(
-        v_flex()
-            .px(px(16.))
-            .pt(px(9.))
-            .pb(px(12.))
-            .gap(px(7.))
-            .child(
-                h_flex()
-                    .gap(px(8.))
-                    .items_center()
-                    .child(
-                        div()
-                            .size(px(15.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(px(11.5))
-                                    .font_medium()
-                                    .text_color(theme.foreground.opacity(0.9))
-                                    .child(title),
-                            )
-                            .when(!sub.is_empty(), |el| {
-                                el.child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(muted)
-                                        .child(sub),
-                                )
-                            }),
-                    )
-                    .children(action),
-            )
-            .when(!chips.is_empty(), |el| {
-                el.child(h_flex().pl(px(23.)).gap(px(5.)).flex_wrap().children(chips))
-            })
-            .into_any_element(),
-    )
-}
-
-/// The reference's action is a small blue-tinted control anchored to the state row.
-fn action_pill(
-    id: impl Into<ElementId>,
-    icon: Option<crate::assets::Lucide>,
-    label: &'static str,
-    on_click: Rc<dyn Fn(&mut Window, &mut App)>,
-    cx: &App,
-) -> AnyElement {
-    let tint = crate::palette::sky(cx);
-    h_flex()
-        .id(id.into())
-        .test_support()
-        .aria_label(label)
-        .flex_none()
-        .gap(px(5.))
-        .items_center()
-        .h(px(25.))
-        .px(px(10.))
-        .rounded(px(7.))
-        .bg(tint.opacity(0.09))
-        .hover(move |s| s.bg(tint.opacity(0.15)))
-        .active(move |s| s.bg(tint.opacity(0.2)))
-        .cursor_pointer()
-        .text_size(px(11.5))
-        .font_medium()
-        .text_color(tint)
-        .when_some(icon, |el, icon| {
-            el.child(Icon::new(icon).size(px(12.)).text_color(tint))
-        })
-        .child(label)
-        .on_click(move |_, window, cx| on_click(window, cx))
-        .into_any_element()
-}
-
-/// What's left to do with something finished: open it elsewhere. Its state's colour on a soft
-/// tint, with the arrow that says it leaves Trek.
-fn link_pill(
-    id: impl Into<ElementId>,
-    label: &'static str,
-    tint: Hsla,
-    on_click: Rc<dyn Fn(&mut Window, &mut App)>,
-) -> AnyElement {
-    h_flex()
-        .id(id.into())
-        .test_support()
-        .aria_label(label)
-        .flex_none()
-        .gap(px(4.))
-        .items_center()
-        .h(px(24.))
-        .px(px(10.))
-        .rounded(px(7.))
-        .bg(tint.opacity(0.10))
-        .hover(move |s| s.bg(tint.opacity(0.16)))
-        .cursor_pointer()
-        .text_size(px(12.))
-        .font_medium()
-        .text_color(tint)
-        .child(label)
-        .child(
-            Icon::new(crate::assets::Lucide::ArrowUpRight)
-                .size(px(12.))
-                .text_color(tint),
-        )
-        .on_click(move |_, window, cx| on_click(window, cx))
-        .into_any_element()
-}
-
-/// Under a failed run's or release's title: what the step line adds, or how the other jobs did
-/// when the step only says the same thing again ("Failed: Test (Windows)").
-#[allow(dead_code)]
+/// Under a failed run's or release's title: what the step line adds (the error), or how the
+/// other jobs did when it adds nothing.
 fn failure_detail(card: &Card) -> String {
-    if !card.step.is_empty() && !card.step.starts_with("Failed") {
-        return card.step.clone();
+    if !generic_failure(&card.step) && card.step.trim() != failure_title(card) {
+        return card.step.trim().to_string();
     }
     let total = card.stages.len();
     let passed = card
@@ -3591,38 +4447,18 @@ fn failed_jobs(card: &Card) -> String {
     }
 }
 
-/// Prefer the watcher/command's actual explanation ("Cancelled", a release script error) over
-/// an inferred job count; the latter is only a fallback for old cards without a stored step.
+/// A failed run or release's title: the job that failed when one did ("Windows build failed",
+/// the error going under it); else the watcher's or command's own explanation ("Cancelled", a
+/// release script's error).
 fn failure_title(card: &Card) -> String {
-    if card.step.trim().is_empty() {
+    if card.stages.iter().any(|s| s.state == CheckState::Fail) || generic_failure(&card.step) {
         failed_jobs(card)
     } else {
-        card.step.clone()
+        card.step.trim().to_string()
     }
 }
 
-/// The same place once clicked: a quiet grey pill with a small spinner.
-fn busy_pill(id: impl Into<ElementId>, label: &'static str, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    h_flex()
-        .id(id.into())
-        .test_support()
-        .aria_label(label)
-        .flex_none()
-        .gap(px(6.))
-        .items_center()
-        .h(px(24.))
-        .px(px(11.))
-        .rounded(px(7.))
-        .bg(theme.foreground.opacity(0.06))
-        .text_size(px(12.))
-        .text_color(theme.muted_foreground)
-        .child(ring_spinner(12., theme.muted_foreground, cx))
-        .child(label)
-        .into_any_element()
-}
-
-// ---------- painted history helpers ----------
+// ---------- painted graph helpers ----------
 
 fn clamp01(v: f32) -> f32 {
     v.clamp(0., 1.)
@@ -3646,13 +4482,16 @@ fn bcubic(
     )
 }
 
-fn seg(points: &[Point<Pixels>], width: Pixels, dash: bool, color: Hsla, window: &mut Window) {
+/// A polyline: dashed 4 / 2.5 as the reference's connectors, dotted 1.5 / 5 for what's to come.
+fn seg(points: &[Point<Pixels>], width: Pixels, stroke: Stroke, color: Hsla, window: &mut Window) {
     if points.len() < 2 {
         return;
     }
     let mut builder = PathBuilder::stroke(width);
-    if dash {
-        builder = builder.dash_array(&[px(3.5), px(3.)]);
+    match stroke {
+        Stroke::Solid => {}
+        Stroke::Dashed => builder = builder.dash_array(&[px(4.), px(2.5)]),
+        Stroke::Dotted => builder = builder.dash_array(&[px(1.5), px(4.5)]),
     }
     builder.move_to(points[0]);
     for point in &points[1..] {
@@ -3671,7 +4510,7 @@ fn barc(
     p1: Point<Pixels>,
     t: f32,
     width: Pixels,
-    dash: bool,
+    stroke: Stroke,
     color: Hsla,
     window: &mut Window,
 ) {
@@ -3679,10 +4518,10 @@ fn barc(
     if t <= 0. {
         return;
     }
-    let points: Vec<Point<Pixels>> = (0..=20)
-        .map(|i| bcubic(p0, c1, c2, p1, t * i as f32 / 20.))
+    let points: Vec<Point<Pixels>> = (0..=32)
+        .map(|i| bcubic(p0, c1, c2, p1, t * i as f32 / 32.))
         .collect();
-    seg(&points, width, dash, color, window);
+    seg(&points, width, stroke, color, window);
 }
 
 fn dot(at: Point<Pixels>, radius: f32, color: Hsla, window: &mut Window) {
@@ -3720,35 +4559,68 @@ fn ring(
     );
 }
 
-fn tick(at: Point<Pixels>, color: Hsla, window: &mut Window) {
+/// A circle's outline as a path (dashed for a node still to come).
+fn circle(
+    at: Point<Pixels>,
+    radius: f32,
+    width: f32,
+    dashed: bool,
+    color: Hsla,
+    window: &mut Window,
+) {
+    let steps = 40;
+    let points: Vec<Point<Pixels>> = (0..=steps)
+        .map(|i| {
+            let a = i as f32 / steps as f32 * std::f32::consts::TAU;
+            point(at.x + px(radius * a.cos()), at.y + px(radius * a.sin()))
+        })
+        .collect();
+    let mut builder = PathBuilder::stroke(px(width));
+    if dashed {
+        builder = builder.dash_array(&[px(2.), px(1.6)]);
+    }
+    builder.move_to(points[0]);
+    for p in &points[1..] {
+        builder.line_to(*p);
+    }
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
+}
+
+/// A ✓ sized to a node of radius `r`.
+fn tick(at: Point<Pixels>, r: f32, color: Hsla, window: &mut Window) {
     let (x, y) = (at.x.as_f32(), at.y.as_f32());
+    let s = r / 7.;
     seg(
         &[
-            point(px(x - 2.2), px(y + 0.1)),
-            point(px(x - 0.6), px(y + 1.7)),
-            point(px(x + 2.4), px(y - 1.6)),
+            point(px(x - 3.2 * s), px(y + 0.2 * s)),
+            point(px(x - 1. * s), px(y + 2.4 * s)),
+            point(px(x + 3.3 * s), px(y - 2.3 * s)),
         ],
-        px(1.4),
-        false,
+        px(1.6 * s.max(0.85)),
+        Stroke::Solid,
         color,
         window,
     );
 }
 
-fn bang(at: Point<Pixels>, color: Hsla, window: &mut Window) {
+/// A ! sized to a node of radius `r`.
+fn bang(at: Point<Pixels>, r: f32, color: Hsla, window: &mut Window) {
     let (x, y) = (at.x.as_f32(), at.y.as_f32());
+    let s = r / 7.;
     seg(
-        &[point(px(x), px(y - 2.1)), point(px(x), px(y + 0.3))],
-        px(1.4),
-        false,
+        &[point(px(x), px(y - 3.6 * s)), point(px(x), px(y + 0.8 * s))],
+        px(2. * s),
+        Stroke::Solid,
         color,
         window,
     );
-    dot(at + point(px(0.), px(2.2)), 0.9, color, window);
+    dot(at + point(px(0.), px(3.2 * s)), 1.1 * s, color, window);
 }
 
 fn spin_arc(at: Point<Pixels>, radius: f32, clock: f32, color: Hsla, window: &mut Window) {
-    let mut builder = PathBuilder::stroke(px(1.4));
+    let mut builder = PathBuilder::stroke(px(1.5));
     let steps = 24;
     let start = clock * std::f32::consts::TAU;
     for i in 0..=steps * 3 / 4 {
@@ -3765,21 +4637,6 @@ fn spin_arc(at: Point<Pixels>, radius: f32, clock: f32, color: Hsla, window: &mu
     }
     if let Ok(path) = builder.build() {
         window.paint_path(path, color);
-    }
-}
-
-#[derive(Clone, Copy)]
-struct Marks {
-    green: Hsla,
-    red: Hsla,
-    muted: Hsla,
-}
-
-fn marks(cx: &App) -> Marks {
-    Marks {
-        green: crate::palette::emerald(cx),
-        red: crate::palette::red(cx),
-        muted: cx.theme().muted_foreground.opacity(0.6),
     }
 }
 
@@ -3824,11 +4681,7 @@ pub fn demo(state: &str) -> Card {
         phase_at_ms: now,
         ..Default::default()
     };
-    let conflicts = vec![
-        "src/middleware.ts".into(),
-        "src/auth.ts".into(),
-        "src/session.rs".into(),
-    ];
+    let conflicts = vec!["src/middleware.ts".into(), "src/auth.ts".into()];
     let checks = vec![
         Check {
             name: "build (macos)".into(),
@@ -3878,16 +4731,16 @@ pub fn demo(state: &str) -> Card {
         },
         "conflicted" => Card {
             phase: Phase::Conflicted,
-            step: "3 conflicts with main".into(),
+            step: "2 conflicts with main".into(),
             conflicts,
             ..base
         },
         "resolving" => Card {
             phase: Phase::Conflicted,
             resolving: true,
-            step: "Resolving conflict 2 of 3".into(),
+            step: "Resolving conflict 2 of 2".into(),
             resolved: vec!["src/middleware.ts".into()],
-            conflicts: vec!["src/auth.ts".into(), "src/session.rs".into()],
+            conflicts: vec!["src/auth.ts".into()],
             commits: Some(4),
             ..base
         },
@@ -3903,6 +4756,7 @@ pub fn demo(state: &str) -> Card {
         "ready" => Card {
             phase: Phase::Ready,
             step: "Ready to merge".into(),
+            resolved: conflicts.clone(),
             checks: vec![
                 Check {
                     name: "build (macos)".into(),
@@ -3922,6 +4776,7 @@ pub fn demo(state: &str) -> Card {
         },
         "merging" => Card {
             phase: Phase::Merging,
+            resolved: conflicts.clone(),
             merging: true,
             step: "Merging the pull request".into(),
             checks: vec![],
@@ -3931,6 +4786,7 @@ pub fn demo(state: &str) -> Card {
         "merged" => Card {
             phase: Phase::Merged,
             branch_deleted: true,
+            resolved: conflicts.clone(),
             step: String::new(),
             commits: Some(4),
             ..base
@@ -3946,176 +4802,138 @@ pub fn demo(state: &str) -> Card {
             number: None,
             ..base
         },
-        "release" => Card {
-            kind: Kind::Release,
-            title: "Release v0.4.12".into(),
-            version: "0.4.12".into(),
-            channel: "beta".into(),
-            number: None,
-            url: None,
-            head: String::new(),
-            phase: Phase::Releasing,
-            step: "Release workflow running".into(),
-            stages: vec![
-                Stage {
-                    label: "macOS".into(),
-                    state: CheckState::Pass,
+        "release" | "release-published" | "release-failed" => {
+            let job = |label: &str, state: CheckState, from_s: i64, took_s: i64| Stage {
+                label: label.into(),
+                state,
+                started_ms: if from_s > 0 { now - from_s * 1000 } else { 0 },
+                ended_ms: if state.pending() || from_s == 0 {
+                    0
+                } else {
+                    now - (from_s - took_s) * 1000
                 },
-                Stage {
-                    label: "Windows".into(),
-                    state: CheckState::Running,
+            };
+            let (phase, step, stages, took) = match state {
+                "release-published" => (
+                    Phase::Published,
+                    "Published",
+                    vec![
+                        job("macOS app", CheckState::Pass, 791, 552),
+                        job("Windows build", CheckState::Pass, 791, 700),
+                        job("Windows publish", CheckState::Pass, 91, 91),
+                    ],
+                    791,
+                ),
+                "release-failed" => (
+                    Phase::Failed,
+                    "error[E0433]: failed to resolve: use of undeclared crate `windows`",
+                    vec![
+                        job("macOS app", CheckState::Pass, 422, 300),
+                        job("Windows build", CheckState::Fail, 422, 362),
+                        job("Windows publish", CheckState::Skipped, 0, 0),
+                    ],
+                    422,
+                ),
+                _ => (
+                    Phase::Releasing,
+                    "Release workflow running",
+                    vec![
+                        job("macOS app", CheckState::Pass, 580, 552),
+                        job("Windows build", CheckState::Running, 380, 0),
+                        job("Windows publish", CheckState::Queued, 0, 0),
+                    ],
+                    580,
+                ),
+            };
+            Card {
+                kind: Kind::Release,
+                title: "Release v0.4.15-nightly.20261025".into(),
+                version: "0.4.15-nightly.20261025".into(),
+                channel: "nightly".into(),
+                number: None,
+                url: Some("https://github.com/dokyit/Trek/actions/runs/1".into()),
+                head: "main".into(),
+                commits: None,
+                added: None,
+                removed: None,
+                phase,
+                step: step.into(),
+                stages,
+                workflow: true,
+                run_id: Some(1),
+                started_ms: now - took * 1000,
+                created_ms: now - took * 1000,
+                phase_at_ms: now,
+                ..base
+            }
+        }
+        "run" | "run-running" | "run-passed" | "run-failed" => {
+            let job = |label: &str, state: CheckState, took_s: i64| Stage {
+                label: label.into(),
+                state,
+                started_ms: now - 1_713_000,
+                ended_ms: if state.pending() {
+                    0
+                } else {
+                    now - 1_713_000 + took_s * 1000
                 },
-                Stage {
-                    label: "publish".into(),
-                    state: CheckState::Queued,
+            };
+            let (phase, step, stages, took) = match state {
+                "run-passed" => (
+                    Phase::Passed,
+                    "Passed",
+                    vec![
+                        job("Clippy", CheckState::Pass, 250),
+                        job("Test (macOS)", CheckState::Pass, 1102),
+                        job("Test (Windows)", CheckState::Pass, 1681),
+                    ],
+                    1713,
+                ),
+                "run-failed" => (
+                    Phase::Failed,
+                    "Failed: Test (Windows)",
+                    vec![
+                        job("Clippy", CheckState::Pass, 250),
+                        job("Test (macOS)", CheckState::Pass, 1102),
+                        job("Test (Windows)", CheckState::Fail, 1450),
+                    ],
+                    1450,
+                ),
+                _ => (
+                    Phase::Checking,
+                    "Watching 1 job",
+                    vec![
+                        job("Clippy", CheckState::Pass, 250),
+                        job("Test (macOS)", CheckState::Pass, 1102),
+                        job("Test (Windows)", CheckState::Running, 0),
+                    ],
+                    1265,
+                ),
+            };
+            Card {
+                kind: Kind::Run,
+                title: "CI".into(),
+                number: Some(39779843418),
+                url: Some("https://github.com/dokyit/Trek/actions/runs/39779843418".into()),
+                head: "main".into(),
+                base: String::new(),
+                subject: "Side chat and AI side bar: one VS Code-style chat panel".into(),
+                event: "push".into(),
+                commits: None,
+                added: None,
+                removed: None,
+                phase,
+                step: step.into(),
+                started_ms: now - 1_713_000,
+                ended_ms: if phase.terminal() {
+                    now - 1_713_000 + took * 1000
+                } else {
+                    0
                 },
-            ],
-            ..base
-        },
-        "release-published" => Card {
-            kind: Kind::Release,
-            title: "Release v0.4.12".into(),
-            version: "0.4.12".into(),
-            channel: "stable".into(),
-            number: None,
-            url: Some("https://github.com/dokyit/Trek/releases/tag/v0.4.12".into()),
-            head: String::new(),
-            phase: Phase::Published,
-            step: "Published".into(),
-            stages: vec![
-                Stage {
-                    label: "macOS".into(),
-                    state: CheckState::Pass,
-                },
-                Stage {
-                    label: "Windows".into(),
-                    state: CheckState::Pass,
-                },
-                Stage {
-                    label: "publish".into(),
-                    state: CheckState::Pass,
-                },
-            ],
-            ..base
-        },
-        "release-failed" => Card {
-            kind: Kind::Release,
-            title: "Release v0.4.12".into(),
-            version: "0.4.12".into(),
-            channel: "beta".into(),
-            number: None,
-            url: Some("https://github.com/dokyit/Trek/actions/runs/1".into()),
-            head: String::new(),
-            phase: Phase::Failed,
-            step: "Release workflow failed".into(),
-            stages: vec![
-                Stage {
-                    label: "macOS".into(),
-                    state: CheckState::Pass,
-                },
-                Stage {
-                    label: "Windows".into(),
-                    state: CheckState::Fail,
-                },
-                Stage {
-                    label: "publish".into(),
-                    state: CheckState::Skipped,
-                },
-            ],
-            ..base
-        },
-        "run" | "run-running" => Card {
-            kind: Kind::Run,
-            title: "CI".into(),
-            number: Some(39779843418),
-            url: Some("https://github.com/dokyit/Trek/actions/runs/39779843418".into()),
-            head: "main".into(),
-            base: String::new(),
-            subject: "Give the PR status chip a pill treatment".into(),
-            commits: None,
-            added: None,
-            removed: None,
-            phase: Phase::Checking,
-            step: "Watching 2 jobs".into(),
-            started_ms: now - 150_000,
-            stages: vec![
-                Stage {
-                    label: "Clippy".into(),
-                    state: CheckState::Pass,
-                },
-                Stage {
-                    label: "Test (macOS)".into(),
-                    state: CheckState::Running,
-                },
-                Stage {
-                    label: "Test (Windows)".into(),
-                    state: CheckState::Queued,
-                },
-            ],
-            ..base
-        },
-        "run-passed" => Card {
-            kind: Kind::Run,
-            title: "CI".into(),
-            number: Some(39779843418),
-            url: Some("https://github.com/dokyit/Trek/actions/runs/39779843418".into()),
-            head: "main".into(),
-            base: String::new(),
-            subject: "Give the PR status chip a pill treatment".into(),
-            commits: None,
-            added: None,
-            removed: None,
-            phase: Phase::Passed,
-            step: "Passed".into(),
-            started_ms: now - 160_000,
-            ended_ms: now - 20_000,
-            stages: vec![
-                Stage {
-                    label: "Clippy".into(),
-                    state: CheckState::Pass,
-                },
-                Stage {
-                    label: "Test (macOS)".into(),
-                    state: CheckState::Pass,
-                },
-                Stage {
-                    label: "Test (Windows)".into(),
-                    state: CheckState::Pass,
-                },
-            ],
-            ..base
-        },
-        "run-failed" => Card {
-            kind: Kind::Run,
-            title: "CI".into(),
-            number: Some(39779843418),
-            url: Some("https://github.com/dokyit/Trek/actions/runs/39779843418".into()),
-            head: "main".into(),
-            base: String::new(),
-            subject: "Give the PR status chip a pill treatment".into(),
-            commits: None,
-            added: None,
-            removed: None,
-            phase: Phase::Failed,
-            step: "Failed: Test (Windows)".into(),
-            started_ms: now - 160_000,
-            ended_ms: now - 20_000,
-            stages: vec![
-                Stage {
-                    label: "Clippy".into(),
-                    state: CheckState::Pass,
-                },
-                Stage {
-                    label: "Test (macOS)".into(),
-                    state: CheckState::Pass,
-                },
-                Stage {
-                    label: "Test (Windows)".into(),
-                    state: CheckState::Fail,
-                },
-            ],
-            ..base
-        },
+                stages,
+                ..base
+            }
+        }
         // "open"
         _ => Card {
             phase: Phase::Open,
@@ -4129,9 +4947,11 @@ pub fn demo(state: &str) -> Card {
 mod tests {
     // Named, not `super::*`: that would bring in gpui_kit's own `test` macro.
     use super::{
-        Card, CheckState, JobJson, Kind, Phase, PrView, WorkflowRun, apply_conflicts,
-        conflicting_files, failure_title, is_workflow, now_ms, pick_run, pr_from_view,
-        release_card, release_run_card, run_ms, segments, staggered_progress,
+        Align, Card, CheckState, Glyph, Hue, Hues, Ink, JobJson, Kind, LabelKind, Phase, PrView,
+        Prim, Scene, Stage, Stroke, WorkflowRun, apply_conflicts, conflicting_files,
+        failure_detail, failure_title, graph_height, is_workflow, job_stages, notes_url, now_ms,
+        pick_run, pipeline_scene, pr_from_view, pr_scene, release_card, release_run_card, rerun_id,
+        rerun_started, run_ms, segments, stage_label,
     };
     use std::path::Path;
 
@@ -4139,12 +4959,497 @@ mod tests {
         segments(s).iter().map(|s| s.trim().to_string()).collect()
     }
 
-    #[test]
-    fn every_staggered_marker_reaches_its_full_size() {
-        for index in 0..64 {
-            assert_eq!(staggered_progress(1., index, 64), 1., "marker {index}");
+    fn hues() -> Hues {
+        let hue = |m: u32, t: u32| Hue {
+            mark: gpui_kit::rgb(m).into(),
+            text: gpui_kit::rgb(t).into(),
+            wash: 0.075,
+        };
+        Hues {
+            blue: hue(0x4A8CF0, 0x3B5BAB),
+            amber: hue(0xE9A80E, 0xA5650F),
+            green: hue(0x2FC261, 0x1E8A4C),
+            red: hue(0xE5484D, 0xC6283D),
+            purple: hue(0x8B5CF6, 0x6227AD),
         }
-        assert_eq!(staggered_progress(1., 0, 1), 1.);
+    }
+
+    fn ink() -> Ink {
+        let g = |l: f32| gpui_kit::hsla(0., 0., l, 1.);
+        Ink {
+            fg: g(0.1),
+            muted: g(0.45),
+            dot: g(0.69),
+            line: g(0.89),
+            merge_in: g(0.84),
+            band: g(0.98),
+            pill: g(0.96),
+            lane_pill: g(0.94),
+            hair: g(0.89),
+            card: g(1.),
+            surface: g(0.98),
+            faint: g(0.65),
+            mono: g(0.55),
+        }
+    }
+
+    fn texts(scene: &Scene) -> Vec<(String, f32, f32, Align, LabelKind)> {
+        scene
+            .prims
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Label {
+                    text,
+                    x,
+                    y,
+                    align,
+                    kind,
+                    ..
+                } => Some((text.clone(), *x, *y, *align, *kind)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn status(scene: &Scene) -> Option<(String, f32, f32)> {
+        texts(scene)
+            .into_iter()
+            .find(|t| t.4 == LabelKind::Status)
+            .map(|t| (t.0, t.1, t.2))
+    }
+
+    fn end_node(scene: &Scene, at: (f32, f32)) -> Option<Prim> {
+        scene
+            .prims
+            .iter()
+            .rev()
+            .find(|p| match p {
+                Prim::Node { at: a, .. }
+                | Prim::Dot { at: a, .. }
+                | Prim::Ring { at: a, .. }
+                | Prim::Spinner { at: a, .. } => *a == at,
+                _ => false,
+            })
+            .cloned()
+    }
+
+    fn pr(phase: Phase) -> Card {
+        Card {
+            kind: Kind::Pr,
+            title: "Refresh sessions in the auth middleware".into(),
+            number: Some(128),
+            head: "feat/session-refresh".into(),
+            base: "main".into(),
+            commits: Some(3),
+            phase,
+            ..Default::default()
+        }
+    }
+
+    /// The x of everything a scene draws, labels at their anchor.
+    fn xs(scene: &Scene) -> Vec<f32> {
+        scene
+            .prims
+            .iter()
+            .flat_map(|p| match p {
+                Prim::Line { a, b, .. } | Prim::Curve { a, b, .. } => vec![a.0, b.0],
+                Prim::Dot { at, .. }
+                | Prim::Ring { at, .. }
+                | Prim::Node { at, .. }
+                | Prim::Halo { at, .. }
+                | Prim::Spinner { at, .. }
+                | Prim::Pulse { at, .. } => vec![at.0],
+                Prim::Label { x, .. } => vec![*x],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_conflicted_pull_request_is_drawn_where_the_reference_draws_it() {
+        let card = Card {
+            conflicts: vec!["src/middleware.ts".into(), "src/auth.ts".into()],
+            ..pr(Phase::Conflicted)
+        };
+        let scene = pr_scene(&card, 600., 1., &hues(), &ink());
+        // The verdict on the end node, 42 px in from the right, on the base's lane (card y 99).
+        assert!(matches!(
+            end_node(&scene, (558., 42.)),
+            Some(Prim::Node {
+                glyph: Some(Glyph::Bang),
+                r: 7.,
+                ..
+            })
+        ));
+        // Its pill ends 7 px past the node, 18 px tall, 6 px above it.
+        assert_eq!(status(&scene), Some(("2 conflicts".into(), 565., 17.)));
+        let labels = texts(&scene);
+        assert!(labels.contains(&("main".into(), 25., 16., Align::Left, LabelKind::Lane)));
+        // The branch's name under its first two commits (x 184 and 259).
+        assert!(labels.contains(&(
+            "feat/session-refresh".into(),
+            221.5,
+            86.,
+            Align::Center,
+            LabelKind::Branch
+        )));
+        assert!(scene.prims.iter().any(|p| matches!(
+            p,
+            Prim::Dot { at: (x, y), .. } if *x == 334. && *y == 79.
+        )));
+        // Nothing moves once it's drawn in: the conflict waits on the user, still.
+        assert!(!scene.live);
+    }
+
+    #[test]
+    fn resolving_draws_the_merge_commit_and_counts_down() {
+        let card = Card {
+            resolving: true,
+            conflicts: vec!["src/auth.ts".into()],
+            resolved: vec!["src/middleware.ts".into()],
+            commits: Some(4),
+            ..pr(Phase::Conflicted)
+        };
+        let scene = pr_scene(&card, 600., 1., &hues(), &ink());
+        assert!(scene.prims.iter().any(|p| matches!(
+            p,
+            Prim::Ring { at, dashed: false, .. } if *at == (453., 79.)
+        )));
+        assert!(scene.prims.iter().any(|p| matches!(p, Prim::Pulse { .. })));
+        assert!(scene.live, "the merge commit is being made");
+        assert_eq!(status(&scene).unwrap().0, "1 conflict");
+
+        let done = Card {
+            conflicts: vec![],
+            resolved: vec!["src/middleware.ts".into(), "src/auth.ts".into()],
+            ..card
+        };
+        let scene = pr_scene(&done, 600., 1., &hues(), &ink());
+        assert_eq!(status(&scene).unwrap().0, "Resolved");
+        assert!(!scene.prims.iter().any(|p| matches!(p, Prim::Pulse { .. })));
+    }
+
+    #[test]
+    fn a_merged_pull_request_ends_on_a_purple_node_and_strikes_its_deleted_branch() {
+        let card = Card {
+            branch_deleted: true,
+            ..pr(Phase::Merged)
+        };
+        let h = hues();
+        let scene = pr_scene(&card, 600., 1., &h, &ink());
+        assert!(matches!(
+            end_node(&scene, (558., 42.)),
+            Some(Prim::Dot { r: 5.5, color, .. }) if color == h.purple.mark
+        ));
+        assert_eq!(status(&scene).unwrap().0, "Merged");
+        assert!(scene.prims.iter().any(|p| matches!(
+            p,
+            Prim::Label {
+                kind: LabelKind::Branch,
+                strike: true,
+                ..
+            }
+        )));
+        assert!(scene.prims.iter().any(|p| matches!(
+            p,
+            Prim::Curve { stroke: Stroke::Solid, color, b, .. }
+                if *color == h.purple.mark && *b == (558., 42.)
+        )));
+    }
+
+    #[test]
+    fn a_narrow_card_keeps_its_graph_inside_it() {
+        for phase in [
+            Phase::Checking,
+            Phase::Conflicted,
+            Phase::Ready,
+            Phase::Merged,
+        ] {
+            let card = Card {
+                resolved: vec!["a.ts".into()],
+                ..pr(phase)
+            };
+            let scene = pr_scene(&card, 420., 1., &hues(), &ink());
+            assert!(
+                xs(&scene).iter().all(|x| *x >= 0. && *x <= 420. - 35.),
+                "{phase:?}: {:?}",
+                xs(&scene)
+            );
+            assert!(end_node(&scene, (378., 42.)).is_some(), "{phase:?}");
+        }
+    }
+
+    fn stage(label: &str, state: CheckState, took_s: i64) -> Stage {
+        let now = now_ms();
+        Stage {
+            label: label.into(),
+            state,
+            started_ms: if took_s > 0 { now - took_s * 1000 } else { 0 },
+            ended_ms: if took_s > 0 && !state.pending() {
+                now
+            } else {
+                0
+            },
+        }
+    }
+
+    fn measure(s: &str) -> f32 {
+        s.chars().count() as f32 * 7.2
+    }
+
+    #[test]
+    fn a_release_builds_side_by_side_and_publishes_after() {
+        let card = Card {
+            kind: Kind::Release,
+            title: "Release v0.4.15-nightly.20261025".into(),
+            version: "0.4.15-nightly.20261025".into(),
+            channel: "nightly".into(),
+            head: "main".into(),
+            phase: Phase::Releasing,
+            stages: vec![
+                stage("macOS app", CheckState::Pass, 552),
+                stage("Windows build", CheckState::Running, 380),
+                stage("Windows publish", CheckState::Queued, 0),
+            ],
+            ..Default::default()
+        };
+        let scene = pipeline_scene(&card, 600., 1., &hues(), &ink(), &measure);
+        let labels = texts(&scene);
+        // The builds: the first on the base's lane (label above), the second a lane below.
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.0 == "macOS app · 9m 12s" && l.2 == 16.)
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.0 == "Windows build · 6m" && l.2 == 90.)
+        );
+        // Publish after both, 149 px before the end node, said plainly.
+        assert!(labels.contains(&("Publish".into(), 409., 16., Align::Center, LabelKind::Lane)));
+        assert_eq!(status(&scene), Some(("Building 2 of 3".into(), 565., 17.)));
+        assert!(scene.live, "a job is running");
+        assert_eq!(graph_height(&card), 104.);
+        // Every job's node sits before the publish step.
+        assert!(scene.prims.iter().all(|p| match p {
+            Prim::Spinner { at, .. } => at.0 < 409. - 39.,
+            _ => true,
+        }));
+    }
+
+    #[test]
+    fn a_run_fans_its_jobs_out_and_ends_on_its_verdict() {
+        let mut card = Card {
+            kind: Kind::Run,
+            title: "CI".into(),
+            phase: Phase::Checking,
+            stages: vec![
+                stage("Clippy", CheckState::Pass, 250),
+                stage("Test (macOS)", CheckState::Pass, 1102),
+                stage("Test (Windows)", CheckState::Running, 1265),
+            ],
+            ..Default::default()
+        };
+        let scene = pipeline_scene(&card, 600., 1., &hues(), &ink(), &measure);
+        assert_eq!(status(&scene), Some(("2 of 3 passed".into(), 565., 19.)));
+        assert!(scene.prims.iter().any(|p| matches!(
+            p,
+            Prim::Dot { at, .. } if *at == (34., 51.)
+        )));
+        // A longer job ends further along its lane.
+        let node_x = |y: f32| {
+            scene
+                .prims
+                .iter()
+                .find_map(|p| match p {
+                    Prim::Node { at, .. } | Prim::Spinner { at, .. } if at.1 == y => Some(at.0),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert!(node_x(23.) < node_x(51.));
+        assert!(node_x(51.) < node_x(79.));
+        // Labels end 12 px before their node, inline on the lane.
+        assert!(
+            texts(&scene).iter().any(|l| l.0 == "Clippy · 4m 10s"
+                && l.1 == node_x(23.) - 12.
+                && l.3 == Align::Right)
+        );
+
+        card.phase = Phase::Failed;
+        card.step = "Failed: Test (Windows)".into();
+        card.stages[2] = stage("Test (Windows)", CheckState::Fail, 1450);
+        let h = hues();
+        let scene = pipeline_scene(&card, 600., 1., &h, &ink(), &measure);
+        assert_eq!(status(&scene).unwrap().0, "1 failed");
+        assert!(matches!(
+            end_node(&scene, (558., 51.)),
+            Some(Prim::Node { glyph: Some(Glyph::Bang), color, .. }) if color == h.red.mark
+        ));
+        assert!(!scene.live, "nothing moves once it's final");
+        assert_eq!(failure_title(&card), "Test (Windows) failed");
+        assert_eq!(failure_detail(&card), "The other jobs passed");
+    }
+
+    #[test]
+    fn many_jobs_grow_the_band_instead_of_overlapping() {
+        let card = Card {
+            kind: Kind::Run,
+            phase: Phase::Passed,
+            stages: (0..6)
+                .map(|i| stage(&format!("job {i}"), CheckState::Pass, 60 + i * 30))
+                .collect(),
+            ..Default::default()
+        };
+        assert!(graph_height(&card) > 104.);
+        let scene = pipeline_scene(&card, 600., 1., &hues(), &ink(), &measure);
+        let mut ys: Vec<f32> = scene
+            .prims
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Node { at, .. } => Some(at.1),
+                _ => None,
+            })
+            .collect();
+        ys.sort_by(f32::total_cmp);
+        ys.dedup();
+        // Six lanes, at least 20 px apart, plus the end node's.
+        assert!(ys.len() >= 6, "{ys:?}");
+        assert!(ys.windows(2).all(|w| w[1] - w[0] >= 9.9), "{ys:?}");
+        assert!(ys.iter().all(|y| *y + 25. <= graph_height(&card)), "{ys:?}");
+    }
+
+    #[test]
+    fn a_failed_release_leads_with_the_job_and_keeps_the_error_under_it() {
+        let card = Card {
+            kind: Kind::Release,
+            phase: Phase::Failed,
+            step: "error[E0433]: failed to resolve: use of undeclared crate `windows`".into(),
+            stages: vec![
+                stage("macOS app", CheckState::Pass, 300),
+                stage("Windows build", CheckState::Fail, 362),
+                stage("Windows publish", CheckState::Skipped, 0),
+            ],
+            version: "0.4.15-nightly.20261025".into(),
+            ..Default::default()
+        };
+        assert_eq!(failure_title(&card), "Windows build failed");
+        assert!(failure_detail(&card).starts_with("error[E0433]"));
+        assert_eq!(
+            card.chip_parts(),
+            ("v0.4.15".to_string(), "Windows build failed".to_string())
+        );
+        let scene = pipeline_scene(&card, 600., 1., &hues(), &ink(), &measure);
+        assert_eq!(status(&scene).unwrap().0, "Failed");
+        // Nothing was published: the end stays a step not taken.
+        assert!(matches!(
+            end_node(&scene, (558., 42.)),
+            Some(Prim::Ring { dashed: true, .. })
+        ));
+    }
+
+    #[test]
+    fn chips_say_how_far_a_release_or_run_got() {
+        let mut release = Card {
+            kind: Kind::Release,
+            version: "0.4.15-nightly.20261025".into(),
+            phase: Phase::Releasing,
+            stages: vec![
+                stage("macOS app", CheckState::Pass, 552),
+                stage("Windows build", CheckState::Running, 300),
+                stage("Windows publish", CheckState::Queued, 0),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(release.chip(), "v0.4.15 Building 2 of 3");
+        release.stages[1].state = CheckState::Pass;
+        release.stages[2].state = CheckState::Running;
+        assert_eq!(release.chip(), "v0.4.15 Publishing");
+        release.phase = Phase::Published;
+        assert_eq!(release.chip(), "v0.4.15 Published");
+        let mut run = Card {
+            kind: Kind::Run,
+            title: "CI".into(),
+            phase: Phase::Checking,
+            stages: vec![
+                stage("Clippy", CheckState::Pass, 250),
+                stage("Test (macOS)", CheckState::Pass, 1102),
+                stage("Test (Windows)", CheckState::Running, 1265),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(run.chip(), "CI 2 of 3 passed");
+        run.phase = Phase::Passed;
+        assert_eq!(run.chip(), "CI Passed");
+    }
+
+    #[test]
+    fn jobs_keep_how_long_they_took() {
+        let jobs = [
+            JobJson {
+                name: "Clippy".into(),
+                status: "completed".into(),
+                conclusion: "success".into(),
+                started: "2026-10-25T06:00:00Z".into(),
+                completed: "2026-10-25T06:04:10Z".into(),
+            },
+            JobJson {
+                name: "Test (Windows)".into(),
+                status: "in_progress".into(),
+                conclusion: "".into(),
+                started: "2026-10-25T06:00:00Z".into(),
+                completed: "0001-01-01T00:00:00Z".into(),
+            },
+        ];
+        let stages = job_stages(&jobs);
+        assert_eq!(stages[0].ended_ms - stages[0].started_ms, 250_000);
+        assert_eq!(stage_label(&stages[0]), "Clippy · 4m 10s");
+        assert!(stages[1].started_ms > 0);
+        assert_eq!(stages[1].ended_ms, 0, "still running");
+    }
+
+    #[test]
+    fn a_published_release_links_its_notes_and_a_failed_run_can_rerun() {
+        let release = Card {
+            kind: Kind::Release,
+            version: "0.4.15".into(),
+            phase: Phase::Published,
+            url: Some("https://github.com/dokyit/Trek/actions/runs/42".into()),
+            workflow: true,
+            run_id: Some(42),
+            ..Default::default()
+        };
+        assert_eq!(
+            notes_url(&release).as_deref(),
+            Some("https://github.com/dokyit/Trek/releases/tag/v0.4.15")
+        );
+        assert_eq!(rerun_id(&release), None, "it didn't fail");
+        let mut failed = Card {
+            phase: Phase::Failed,
+            stages: vec![
+                stage("macOS app", CheckState::Pass, 552),
+                stage("Windows build", CheckState::Fail, 300),
+                stage("Windows publish", CheckState::Skipped, 0),
+            ],
+            ..release
+        };
+        assert_eq!(rerun_id(&failed), Some(42));
+        rerun_started(&mut failed);
+        assert_eq!(failed.phase, Phase::Releasing);
+        assert_eq!(
+            failed.stages.iter().map(|s| s.state).collect::<Vec<_>>(),
+            [CheckState::Pass, CheckState::Queued, CheckState::Queued]
+        );
+        let local = Card {
+            kind: Kind::Release,
+            phase: Phase::Failed,
+            ..Default::default()
+        };
+        assert_eq!(
+            rerun_id(&local),
+            None,
+            "a local script has no run to re-run"
+        );
     }
 
     #[test]
@@ -4273,6 +5578,7 @@ mod tests {
             name: "build".into(),
             status: "in_progress".into(),
             conclusion: "".into(),
+            ..Default::default()
         }];
         let running = release_run_card(&card, picked, &jobs);
         assert_eq!(running.phase, Phase::Releasing);

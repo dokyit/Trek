@@ -6094,6 +6094,84 @@ impl Workspace {
         self.persist_soon(id, cx);
     }
 
+    /// A failed run's (or release workflow's) Re-run: `gh run rerun <id> --failed` off the main
+    /// thread. Once GitHub has taken it, the card's failed jobs queue again and it's followed
+    /// until the run ends; if it refuses, the card stays failed and says why.
+    pub fn pr_rerun(&mut self, id: &str, row: &str, cx: &mut Context<Self>) {
+        let Some(card) = self.live.get(id).and_then(|live| {
+            live.items.iter().find_map(|i| match i {
+                Item::Tool { id, detail, .. } if *id == row => crate::pr_card::read(id, detail),
+                _ => None,
+            })
+        }) else {
+            return;
+        };
+        let Some(run) = crate::pr_card::rerun_id(&card) else {
+            return;
+        };
+        let dir = PathBuf::from(&card.repo_dir);
+        let tid = id.to_string();
+        let row = row.to_string();
+        let task = cx.spawn(async move |this, cx| {
+            let out = cx
+                .background_executor()
+                .spawn(async move {
+                    let gh = trek_core::detect::which("gh")?;
+                    trek_core::procs::command(gh)
+                        .env("PATH", trek_core::detect::login_path())
+                        .current_dir(dir)
+                        .args(["run", "rerun", &run.to_string(), "--failed"])
+                        .output()
+                        .ok()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let ok = out.as_ref().is_some_and(|o| o.status.success());
+                let Some(live) = this.live.get_mut(&tid) else {
+                    return;
+                };
+                let Some(ix) = live
+                    .items
+                    .iter()
+                    .position(|i| matches!(i, Item::Tool { id, .. } if *id == row))
+                else {
+                    return;
+                };
+                crate::pr_card::edit(live, ix, |c| {
+                    if ok {
+                        crate::pr_card::rerun_started(c);
+                    } else {
+                        let why = out
+                            .and_then(|o| {
+                                let e = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                                (!e.is_empty()).then_some(e)
+                            })
+                            .unwrap_or_else(|| "gh isn't available".into());
+                        c.step = format!("Couldn't re-run: {why}");
+                    }
+                });
+                if let Some(item) = live.items.id_at(ix) {
+                    let item = item.to_string();
+                    cx.emit(WorkspaceEvent::CardChanged {
+                        id: tid.clone(),
+                        item,
+                    });
+                }
+                live.revision += 1;
+                cx.emit(WorkspaceEvent::Transcript {
+                    id: tid.clone(),
+                    appended: false,
+                });
+                if ok {
+                    this.watch_pr(&tid, &row, cx);
+                }
+                this.persist_soon(&tid, cx);
+                cx.notify();
+            });
+        });
+        self.keep(task);
+    }
+
     /// The card's Resolve conflicts: the thread's agent is asked to merge the base into the
     /// head and push; the card counts down as the files clear.
     pub fn pr_resolve(&mut self, id: &str, row: &str, cx: &mut Context<Self>) {

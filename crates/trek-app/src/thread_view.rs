@@ -3233,10 +3233,23 @@ impl ThreadView {
                         cx.open_url(&url);
                     }) as std::rc::Rc<dyn Fn(&mut Window, &mut App)>
                 });
+                let rerun = crate::pr_card::rerun_id(&card).map(|_| {
+                    let (ws, thread, row) = (ws.clone(), thread.clone(), row.clone());
+                    std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
+                        ws.update(cx, |ws, cx| ws.pr_rerun(&thread, &row, cx));
+                    }) as std::rc::Rc<dyn Fn(&mut Window, &mut App)>
+                });
+                let notes = crate::pr_card::notes_url(&card).map(|url| {
+                    std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
+                        cx.open_url(&url);
+                    }) as std::rc::Rc<dyn Fn(&mut Window, &mut App)>
+                });
                 let actions = crate::pr_card::Actions {
                     merge,
                     resolve: Some(resolve),
                     open,
+                    rerun,
+                    notes,
                 };
                 column(
                     div()

@@ -490,6 +490,7 @@ fn a_card_nothing_can_finish_settles() {
         stages: vec![pr_card::Stage {
             label: "release.sh".into(),
             state: pr_card::CheckState::Running,
+            ..Default::default()
         }],
         ..Default::default()
     };
