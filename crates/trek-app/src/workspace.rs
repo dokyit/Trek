@@ -3744,7 +3744,7 @@ impl Workspace {
     }
 
     /// Liquid glass's tint, when it's on and no window-wide image covers the desktop (and the
-    /// system allows it: macOS isn't set to Reduce transparency; Windows has Mica, with
+    /// system allows it: macOS isn't set to Reduce transparency; Windows has the system backdrop, with
     /// Transparency effects on).
     pub fn glass(&self) -> Option<f32> {
         self.glass_unless(

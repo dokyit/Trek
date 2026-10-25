@@ -177,7 +177,7 @@ fn a_thread_window_told_of_a_new_scale_cuts_its_icons_again_too() {
     });
 }
 
-/// Windows tells a window its dark title and Mica tone from the system's colours when they change,
+/// Windows tells a window its dark title and glass tone from the system's colours when they change,
 /// which Trek's own theme (Paper chosen on a dark system) may not be: the window is told again.
 #[test]
 fn a_change_of_the_system_s_colours_tells_the_window_its_glass_again() {
@@ -249,7 +249,7 @@ fn without_glass_to_show_the_window_stays_opaque() {
             s.appearance.glass = true;
             s.appearance.glass_tint = 0.6;
         });
-        // Windows 11 with Transparency effects on: Mica, at the tint.
+        // Windows 11 with Transparency effects on: Acrylic, at the tint.
         assert_eq!(trek.read(cx, |ws, _| ws.glass_unless(false)), Some(0.6));
         // Windows 10, or 11 with the switch off (`winlook::glass_available` says no): opaque.
         assert!(

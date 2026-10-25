@@ -14,7 +14,7 @@
 pub const MICA_BUILD: u32 = 22621;
 
 /// Whether a Windows at `build`, with the Transparency effects switch at `transparency`, can show
-/// glass: a window's Mica. Off either way, Trek's window stays opaque.
+/// glass: a window's system backdrop (Acrylic). Off either way, Trek's window stays opaque.
 pub fn glass_available(build: u32, transparency: bool) -> bool {
     build >= MICA_BUILD && transparency
 }
@@ -25,7 +25,7 @@ pub fn reduces_motion(client_area_animation: bool) -> bool {
     !client_area_animation
 }
 
-/// Whether this Windows can show glass now: Mica, and the Transparency effects switch on.
+/// Whether this Windows can show glass now: the system backdrop, and the Transparency effects switch on.
 /// Asked at most once a second, as it's read on every frame; a window's appearance-change
 /// callback (Windows announces a switch in Settings that way) calls `forget` so the next frame
 /// asks again.
@@ -146,11 +146,13 @@ pub fn reduce_motion() -> bool {
     read != 0 && reduces_motion(on != 0)
 }
 
-/// Tell DWM how the window's backdrop material should look. `dark` picks its dark or light tone,
-/// so Mica follows Trek's theme (Night, Paper) rather than the system's: Paper over a dark Mica
-/// would be muddy, and Night over a light one glaring (GPUI sets this from the system's
-/// appearance only). Without `glass` the material is taken off the window (GPUI's opaque
-/// background leaves a Mica it set before in place), so none shows at the frame's edge.
+/// Tell DWM how the window's backdrop material should look: Acrylic, which frosts what's behind
+/// the window (the desktop, other windows) as Liquid Glass does on the Mac. `dark` picks its dark
+/// or light tone, so it follows Trek's theme (Night, Paper) rather than the system's: Paper over a
+/// dark Acrylic would be muddy, and Night over a light one glaring (GPUI sets this from the
+/// system's appearance only). Without `glass` the material is taken off the window (GPUI's opaque
+/// background leaves one it set before in place), so none shows at the frame's edge. Call it after
+/// GPUI's `set_background_appearance`, which names a material of its own.
 #[cfg(windows)]
 pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -168,7 +170,8 @@ pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
     /// `DWMWA_SYSTEMBACKDROP_TYPE`, and its `DWMSBT_NONE`.
     const SYSTEMBACKDROP_TYPE: u32 = 38;
     const BACKDROP_NONE: i32 = 1;
-    const BACKDROP_MICA_ALT: i32 = 4;
+    /// `DWMSBT_TRANSIENTWINDOW`: Acrylic, what's behind the window frosted.
+    const BACKDROP_ACRYLIC: i32 = 3;
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return;
     };
@@ -191,7 +194,7 @@ pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
     };
     set(USE_IMMERSIVE_DARK_MODE, dark as i32);
     if glass {
-        set(SYSTEMBACKDROP_TYPE, BACKDROP_MICA_ALT);
+        set(SYSTEMBACKDROP_TYPE, BACKDROP_ACRYLIC);
     } else {
         set(SYSTEMBACKDROP_TYPE, BACKDROP_NONE);
     }

@@ -159,7 +159,7 @@ const WINDOWS: Words = Words {
     app_icon_note: "Shown on the taskbar and in Alt+Tab while Trek runs. Trek's file and its shortcuts keep Ember.",
     tray_label: "System tray icon",
 
-    glass_note: "Your wallpaper's tint shows through the window (Mica), under translucent panels. Needs Windows 11 22H2 or later, and is off while Transparency effects are off in Windows.",
+    glass_note: "Your desktop and the windows behind show through, frosted (Acrylic), under translucent panels. Needs Windows 11 22H2 or later, and is off while Transparency effects are off in Windows.",
 
     your_credential_store: "Windows Credential Manager",
     api_keys_blurb: "Pay-as-you-go models outside your subscriptions. Keys live in Windows Credential Manager; keys exported in your shell are used automatically.",
