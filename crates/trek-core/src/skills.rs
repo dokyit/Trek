@@ -802,7 +802,7 @@ mod tests {
                     [
                         "unpkg.com",
                         "tile.openstreetmap.org",
-                        "basemaps.cartocdn.com",
+                        "tiles.openfreemap.org",
                         "github.com"
                     ]
                     .iter()
@@ -841,6 +841,7 @@ mod tests {
             card(MAP_CARD).contains(&format!("send: \"{}\"", artifact::OPEN_ON_PHONE))
                 && card(MAP_CARD).contains("leaflet@1.9.4")
                 && card(MAP_CARD).contains("tile.openstreetmap.org")
+                && card(MAP_CARD).contains("tiles.openfreemap.org")
         );
         assert!(
             card(PULL_REQUEST_CARD)
