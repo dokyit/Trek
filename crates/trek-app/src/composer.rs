@@ -897,17 +897,11 @@ impl Composer {
     /// The context ring, and the card it opens: what fills the window, the plan's limits, and
     /// Compact now.
     fn context_card(&mut self, used: u64, window: u64, cx: &mut Context<Self>) -> AnyElement {
-        let tip = format!(
-            "Context {:.0}% · {} of {}",
-            crate::context_popover::fraction(used, window) * 100.,
-            crate::context_popover::fmt_tokens(used),
-            crate::context_popover::fmt_tokens(window)
-        );
         let me = cx.entity().downgrade();
         Popover::new("context-card")
             // Above the ring, right-aligned with it.
             .anchor(Anchor::BottomRight)
-            .offset(px(6.))
+            .offset(px(8.))
             .appearance(false)
             .on_open_change(cx.listener(|this, open: &bool, _, cx| {
                 // Closed after a compaction finished: its result has been seen, and the ring
@@ -952,19 +946,13 @@ impl Composer {
                 cx.notify();
             }))
             .trigger(crate::context_popover::RingTrigger::new(
-                tip,
+                used,
+                window,
                 // A turn of `/compact` shows on the ring as a folding arrow.
-                if matches!(
+                matches!(
                     self.compact,
                     crate::context_popover::Compact::Running { .. }
-                ) {
-                    Icon::new(crate::assets::Lucide::RefreshCw)
-                        .small()
-                        .text_color(cx.theme().foreground.opacity(0.75))
-                        .into_any_element()
-                } else {
-                    crate::context_popover::dial(used, window, cx).into_any_element()
-                },
+                ),
             ))
             // Gathered only while the card is open: the transcript is walked to estimate its
             // share, which is no work to do on every keystroke behind a closed card.
