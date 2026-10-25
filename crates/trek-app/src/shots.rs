@@ -1232,9 +1232,10 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         cx.refresh_windows();
         return Ok(());
     }
-    if verb == "dictate" || verb == "dictate-file" {
+    if verb == "dictate" || verb == "dictate-file" || verb == "dictate-demo" {
         // Voice input without a pointer: `dictate` runs the mic button's real path (permission
-        // prompts included); `dictate-file <path>` skips the mic and transcribes the file.
+        // prompts included); `dictate-file <path>` skips the mic and transcribes the file;
+        // `dictate-demo [text]` opens voice mode with neither (`text` as heard so far).
         let main = ws
             .read(cx)
             .main_window
@@ -1250,6 +1251,8 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
             let composer = trek.read(cx).composer.clone();
             if verb == "dictate" {
                 composer.update(cx, |c, cx| c.dictate(window, cx));
+            } else if verb == "dictate-demo" {
+                composer.update(cx, |c, cx| c.dictate_demo(arg, window, cx));
             } else {
                 composer.update(cx, |c, cx| c.dictate_file(PathBuf::from(arg), window, cx));
             }

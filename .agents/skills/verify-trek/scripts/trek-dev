@@ -50,7 +50,7 @@ port = 7431
 
 TOOLS = {"git", "explorer", "terminal", "browser", "sidechat", "simulator"}
 BASIC_ROUTES = {"draft", "no-project", "basecamp", "notes", "appearance", "first"}
-CONTROL_VERBS = {"range", "settled", "glass", "tint", "theme", "pace", "wait", "new", "diff", "tools", "editor", "ide", "artifacts", "scroll", "click", "rclick", "hover", "elements", "key", "note", "background-use", "terminal", "type", "pair", "limits-demo", "pr-demo"}
+CONTROL_VERBS = {"range", "settled", "glass", "tint", "theme", "pace", "wait", "new", "diff", "tools", "editor", "ide", "artifacts", "scroll", "click", "rclick", "hover", "elements", "key", "note", "background-use", "terminal", "type", "pair", "limits-demo", "pr-demo", "dictate-demo"}
 
 
 class CliError(RuntimeError):

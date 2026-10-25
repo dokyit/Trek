@@ -18,7 +18,7 @@ Voice mode (Mac): the mic button shows only in a bundle whose Info.plist has the
 ./.agents/skills/verify-trek/scripts/trek-dev screenshot thread
 ```
 
-Voice mode needs a bundled build and real permissions; the shots verbs are `dictate` (the mic button's path: the first call opens the take, the second is ✓) and `dictate-file <path>` (no mic: the file is transcribed and goes in as a take that's already settling).
+Voice mode needs a bundled build and real permissions; the shots verbs are `dictate` (the mic button's path: the first call opens the take, the second is ✓) and `dictate-file <path>` (no mic: the file is transcribed and goes in as a take that's already settling). `control dictate-demo [text]` works in the isolated profile with neither: it opens voice mode, with `text` as heard so far.
 
 Prompts containing `tools`, `permission`, `question`, `plan`, `error`, `mock:long 5s`, `mock:stream 5s`, or `mock:visualization` exercise those mock-agent paths. The isolated profile cannot invoke a real vendor CLI.
 
