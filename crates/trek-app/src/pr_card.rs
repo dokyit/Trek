@@ -10,15 +10,14 @@
 //! `ToolStatus` stays `Done` — it stands for the pull request, not for the call that made it —
 //! and `phase` inside says where the PR itself stands.
 
-use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Duration;
 use trek_core::store::{Item, ToolStatus};
 
 /// `Item::Tool` ids of this form are PR/release cards; the key after it is unique in the thread.
@@ -151,6 +150,18 @@ pub struct Stage {
     pub state: CheckState,
 }
 
+/// One commit in a pull request's history. GitHub gives us these alongside the aggregate count;
+/// keeping the small human description is what lets the card explain the branch instead of
+/// reducing it to anonymous dots.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Commit {
+    pub title: String,
+    pub oid: String,
+    pub author: String,
+    pub committed_ms: i64,
+}
+
 /// The card as kept in `Item::Tool.detail` (JSON). All fields default so a card an older or
 /// newer Trek wrote still reads.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -169,6 +180,8 @@ pub struct Card {
     /// `owner/repo`, once the PR's url says it.
     pub repo: Option<String>,
     pub commits: Option<u32>,
+    /// Newest commits shown in the card (GitHub returns the complete PR history).
+    pub history: Vec<Commit>,
     pub added: Option<u32>,
     pub removed: Option<u32>,
     pub phase: Phase,
@@ -1621,9 +1634,27 @@ struct PrView {
     base: String,
     additions: u64,
     deletions: u64,
-    commits: Vec<serde_json::Value>,
+    commits: Vec<PrCommitJson>,
     #[serde(rename = "statusCheckRollup")]
     checks: Vec<CheckJson>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct PrCommitJson {
+    #[serde(rename = "messageHeadline")]
+    title: String,
+    oid: String,
+    authors: Vec<PrAuthorJson>,
+    #[serde(rename = "committedDate")]
+    committed: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct PrAuthorJson {
+    login: String,
+    name: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -1711,6 +1742,30 @@ fn pr_from_view(card: &Card, view: PrView) -> Card {
     card.head = view.head;
     card.base = view.base;
     card.commits = Some(view.commits.len() as u32);
+    card.history = view
+        .commits
+        .iter()
+        .rev()
+        .take(6)
+        .map(|commit| Commit {
+            title: commit.title.clone(),
+            oid: commit.oid.chars().take(7).collect(),
+            author: commit
+                .authors
+                .first()
+                .map(|author| {
+                    if author.login.is_empty() {
+                        author.name.clone()
+                    } else {
+                        author.login.clone()
+                    }
+                })
+                .unwrap_or_default(),
+            committed_ms: chrono::DateTime::parse_from_rfc3339(&commit.committed)
+                .map(|date| date.timestamp_millis())
+                .unwrap_or(0),
+        })
+        .collect();
     card.added = Some(view.additions as u32);
     card.removed = Some(view.deletions as u32);
     card.checks = view.checks.iter().filter_map(check).collect();
@@ -1997,76 +2052,35 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
     let muted = theme.muted_foreground;
     let tint = state_tint(card, cx);
     let motion = !cx.reduce_motion();
-    // How long the phase has stood: its graph draws in, its end mark pops once.
-    let age = phase_age(card, motion);
-    let draw = if motion {
-        (age / 0.45).clamp(0., 1.)
-    } else {
-        1.
-    };
-    let pop = if motion && age < 0.4 {
-        (age / 0.4 * std::f32::consts::PI).sin()
-    } else {
-        0.
-    };
     let busy = matches!(
         card.phase,
         Phase::Creating | Phase::Checking | Phase::Merging | Phase::Releasing
     ) || card.resolving;
 
-    // --- header: tinted icon square, the title and its quiet number, a soft badge on the right.
-    let icon = match card.kind {
-        Kind::Pr => crate::assets::Lucide::GitPullRequest,
-        Kind::Release => crate::assets::Lucide::Rocket,
-        Kind::Run => crate::assets::Lucide::Workflow,
-    };
     let (title, tag) = match card.kind {
         Kind::Pr => (card.title.clone(), card.number.map(|n| format!("#{n}"))),
         Kind::Release => (card.title.clone(), None),
         Kind::Run => (
-            if card.subject.is_empty() {
-                format!("{} run", run_name(card))
-            } else {
-                card.subject.clone()
-            },
+            run_name(card).to_string(),
             card.number.map(|n| format!("#{n}")),
         ),
     };
-    let pill = card.kind == Kind::Pr;
     let badge = state_label(card).map(|label| {
         h_flex()
             .flex_none()
             .gap(px(5.))
             .items_center()
-            .rounded(px(6.))
-            .when(pill, |el| el.px(px(7.)).py(px(2.)).bg(tint.opacity(0.10)))
-            .text_size(px(if pill { 11.5 } else { 12. }))
-            .when(!pill, |el| el.font_medium())
+            .text_size(px(11.))
+            .font_medium()
             .text_color(tint)
-            .child(match (card.kind, card.phase) {
-                (Kind::Pr, Phase::Merged) => Icon::new(crate::assets::Lucide::GitMerge)
-                    .size(px(10.))
-                    .text_color(tint)
-                    .into_any_element(),
-                (Kind::Pr, Phase::Closed | Phase::Failed)
-                | (_, Phase::Failed)
-                | (Kind::Run, Phase::Closed) => Icon::new(IconName::CircleX)
-                    .size(px(10.))
-                    .text_color(tint)
-                    .into_any_element(),
-                (_, Phase::Passed) => Icon::new(IconName::CircleCheck)
-                    .size(px(10.))
-                    .text_color(tint)
-                    .into_any_element(),
-                (Kind::Pr, _) => Icon::new(crate::assets::Lucide::GitPullRequest)
-                    .size(px(10.))
-                    .text_color(tint)
-                    .into_any_element(),
-                (Kind::Release, Phase::Published) => Icon::new(crate::assets::Lucide::Rocket)
-                    .size(px(10.))
-                    .text_color(tint)
-                    .into_any_element(),
-                _ => ring_spinner(11., tint, cx),
+            .child(if busy {
+                ring_spinner(10., tint, cx)
+            } else {
+                div()
+                    .size(px(5.))
+                    .rounded_full()
+                    .bg(tint)
+                    .into_any_element()
             })
             .child(label)
     });
@@ -2086,86 +2100,75 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
     let head = h_flex()
         .id(("pr-head", ix))
         .test_support()
-        .gap(px(10.))
+        .gap(px(6.))
         .px(px(16.))
         .pt(px(14.))
-        .pb(px(10.))
+        .pb(px(8.))
         .child(
-            div()
-                .size(px(28.))
-                .flex_none()
-                .rounded(px(8.))
-                .bg(tint.opacity(0.10))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(Icon::new(icon).size(px(14.)).text_color(tint)),
-        )
-        .child(
-            v_flex()
+            h_flex()
                 .flex_1()
                 .min_w_0()
-                .gap(px(4.))
+                .gap(px(5.))
+                .items_baseline()
+                .text_size(px(13.5))
                 .child(
-                    h_flex()
-                        .gap(px(5.))
-                        .items_baseline()
-                        .text_size(px(13.))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .font_medium()
-                                .text_color(theme.foreground.opacity(0.9))
-                                .child(title),
-                        )
-                        .when_some(tag, |el, t| {
-                            el.child(div().flex_none().text_color(muted).child(t))
-                        }),
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .font_semibold()
+                        .text_color(theme.foreground.opacity(0.92))
+                        .child(title),
                 )
-                .children(sub_row(card, cx)),
+                .when_some(tag, |el, t| {
+                    el.child(div().flex_none().font_normal().text_color(muted).child(t))
+                }),
         )
         .child(badge);
 
-    let step = (!card.step.is_empty() && !card.phase.terminal()).then(|| {
-        h_flex()
-            .pl(px(2.))
-            .pb(px(4.))
-            .gap(px(5.))
-            .items_center()
-            .text_xs()
-            .text_color(muted)
-            .child(Icon::new(IconName::ChevronRight).xsmall())
-            .child(card.step.clone())
-            .when(busy && motion, |el| el.child(ring_spinner(11., muted, cx)))
-    });
-
-    // A run or release with no jobs known yet (or saved before they were read) has nothing to
-    // draw: no band, rather than an empty strip.
-    let band = (card.kind == Kind::Pr || !card.stages.is_empty())
-        .then(|| band(card, clock, draw, pop, motion, cx));
-    let footer = footer(ix, card, &actions, cx);
+    let story = match card.kind {
+        Kind::Pr => Some(pr_history(ix, card, clock, motion, cx)),
+        Kind::Run | Kind::Release if !card.stages.is_empty() => {
+            Some(stage_history(ix, card, clock, motion, cx))
+        }
+        Kind::Run | Kind::Release => None,
+    };
+    let footer = reference_footer(ix, card, &actions, cx);
     let tail = footer.is_none();
 
-    v_flex()
+    let frame = v_flex()
         .id(("pr-card", ix))
         .test_support()
-        .mt(px(4.))
+        .w_full()
+        .max_w(px(620.))
+        .mt(px(2.))
         .mb(px(8.))
-        .children(step)
         .child(
             v_flex()
-                .rounded(px(12.))
+                .rounded(px(10.))
                 .border_1()
-                .border_color(theme.foreground.opacity(0.09))
-                .bg(theme.background)
+                .border_color(theme.foreground.opacity(0.085))
+                .bg(if theme.background.l < 0.5 {
+                    theme.foreground.opacity(0.018)
+                } else {
+                    theme.background
+                })
                 .overflow_hidden()
                 .child(head)
-                .children(band)
+                .children(story)
                 .children(footer)
-                .child(div().h(px(if tail { 12. } else { 0. }))),
-        )
-        .into_any_element()
+                .child(div().h(px(if tail { 7. } else { 0. }))),
+        );
+    if motion {
+        frame
+            .with_animation(
+                SharedString::from(format!("pr-card-enter-{ix}-{}", card.created_ms)),
+                Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
+                |el, t| el.opacity(t).mt(px(6. * (1. - t))),
+            )
+            .into_any_element()
+    } else {
+        frame.into_any_element()
+    }
 }
 
 /// The header icon's and badge's colour: the card's state (open, merged, failed), not the
@@ -2224,6 +2227,7 @@ fn state_label(card: &Card) -> Option<String> {
 }
 
 /// A branch name (or channel): mono, on the soft square the names in the graph wear.
+#[allow(dead_code)]
 fn mono(text: &str, cx: &App) -> AnyElement {
     let theme = cx.theme();
     div()
@@ -2239,7 +2243,65 @@ fn mono(text: &str, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
+fn branch_badge(text: &str, tint: Hsla, cx: &App) -> AnyElement {
+    div()
+        .flex_none()
+        .max_w(px(180.))
+        .truncate()
+        .rounded(px(4.))
+        .px(px(4.))
+        .py(px(1.))
+        .bg(tint.opacity(0.07))
+        .text_size(px(9.5))
+        .font_family(cx.theme().mono_font_family.clone())
+        .text_color(tint.opacity(0.88))
+        .child(text.to_string())
+        .into_any_element()
+}
+
+/// A crisp phase entrance: fast at the start, settled within the reference's short state morph.
+fn phase_progress(card: &Card, motion: bool, duration_ms: f32) -> f32 {
+    if !motion {
+        return 1.;
+    }
+    let began = if card.phase_at_ms > 0 {
+        card.phase_at_ms
+    } else {
+        card.created_ms
+    };
+    if began <= 0 {
+        return 1.;
+    }
+    let t = clamp01((now_ms() - began).max(0) as f32 / duration_ms);
+    1. - (1. - t).powi(5)
+}
+
+/// Stagger a list without changing its settled geometry: every item is exactly `1` once the
+/// shared animation is done, however long the workflow or history is.
+fn staggered_progress(draw: f32, index: usize, count: usize) -> f32 {
+    if count <= 1 {
+        return clamp01(draw);
+    }
+    let delay = index as f32 / (count - 1) as f32 * 0.28;
+    clamp01((draw - delay) / (1. - delay))
+}
+
+/// The commit column in the reference is deliberately terse: `now`, `25m`, `2h`, not prose.
+fn commit_age(ms: i64) -> String {
+    let seconds = ((now_ms() - ms) / 1000).max(0);
+    if seconds < 60 {
+        "now".into()
+    } else if seconds < 3_600 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h", seconds / 3_600)
+    } else {
+        format!("{}d", seconds / 86_400)
+    }
+}
+
 /// The detail line under the title: branches and counts for a PR, the run's or release's facts.
+#[allow(dead_code)]
 fn sub_row(card: &Card, cx: &App) -> Option<AnyElement> {
     let theme = cx.theme();
     let muted = theme.muted_foreground;
@@ -2316,6 +2378,529 @@ fn sub_row(card: &Card, cx: &App) -> Option<AnyElement> {
     }
 }
 
+/// The pull request's actual history, arranged like the reference: commit subjects are the
+/// content and the graph is a narrow guide at their left. The previous horizontal diagram made
+/// anonymous dots the largest thing in the card and became especially empty on wide windows.
+fn pr_history(ix: usize, card: &Card, clock: f32, motion: bool, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let muted = theme.muted_foreground;
+    let amber = crate::palette::amber(cx);
+    let green = crate::palette::emerald(cx);
+    let branch = if card.phase == Phase::Merged {
+        crate::palette::indigo(cx)
+    } else {
+        crate::palette::sky(cx)
+    };
+    let target = card.phase.tint(cx);
+    let base = if card.base.is_empty() {
+        "base"
+    } else {
+        &card.base
+    };
+    let head = if card.head.is_empty() {
+        "the branch"
+    } else {
+        &card.head
+    };
+
+    // (title, right-hand fact, tint, lane: 0 main / 1 branch, mark, branch label)
+    // Marks: 0 ordinary, 1 unresolved conflict, 2 resolved conflict, 3 target, 4 base.
+    let mut rows: Vec<(String, String, Hsla, u8, u8, Option<String>)> = vec![(
+        format!("Merge into {base}"),
+        match card.phase {
+            Phase::Conflicted if card.conflicts.len() == 1 => "1 conflict".into(),
+            Phase::Conflicted if !card.conflicts.is_empty() => {
+                format!("{} conflicts", card.conflicts.len())
+            }
+            Phase::Ready => "ready".into(),
+            Phase::Merging => "merging".into(),
+            Phase::Merged => "merged".into(),
+            Phase::Checking => "checking".into(),
+            Phase::Closed => "closed".into(),
+            Phase::Failed => "failed".into(),
+            _ => String::new(),
+        },
+        target,
+        0,
+        3,
+        None,
+    )];
+    rows.extend(
+        card.resolved
+            .iter()
+            .take(4)
+            .map(|path| (path.clone(), "resolved".into(), green, 0, 2, None)),
+    );
+    rows.extend(card.conflicts.iter().take(4).map(|path| {
+        (
+            path.clone(),
+            "changed on both branches".into(),
+            amber,
+            0,
+            1,
+            None,
+        )
+    }));
+    let first_commit = rows.len();
+    rows.extend(
+        card.history
+            .iter()
+            .take(7)
+            .enumerate()
+            .map(|(row_ix, commit)| {
+                let mut facts = vec![];
+                if !commit.oid.is_empty() {
+                    facts.push(commit.oid.clone());
+                }
+                if !commit.author.is_empty() {
+                    facts.push(commit.author.clone());
+                }
+                if commit.committed_ms > 0 {
+                    facts.push(commit_age(commit.committed_ms));
+                }
+                (
+                    if commit.title.is_empty() {
+                        "Untitled commit".into()
+                    } else {
+                        commit.title.clone()
+                    },
+                    facts.join(" · "),
+                    branch,
+                    1,
+                    0,
+                    (row_ix == 0 && !card.head.is_empty()).then(|| card.head.clone()),
+                )
+            }),
+    );
+    if card.history.is_empty() {
+        let title = match card.commits {
+            Some(1) => format!("1 commit on {head}"),
+            Some(n) if n > 1 => format!("{n} commits on {head}"),
+            _ => format!("Work on {head}"),
+        };
+        rows.push((
+            title,
+            String::new(),
+            branch,
+            1,
+            0,
+            (!card.head.is_empty()).then(|| card.head.clone()),
+        ));
+    }
+    let last_commit = rows.len().saturating_sub(1);
+    rows.push((
+        format!("Branched from {base}"),
+        String::new(),
+        muted,
+        0,
+        4,
+        Some(base.to_string()),
+    ));
+
+    let row_h = 26.;
+    let graph_h = row_h * rows.len() as f32;
+    let nodes: Vec<(Hsla, u8, u8)> = rows
+        .iter()
+        .map(|(_, _, tint, lane, mark, _)| (*tint, *lane, *mark))
+        .collect();
+    let node_count = nodes.len();
+    let row_count = rows.len();
+    let bg = theme.background;
+    let painted = card.clone();
+    let draw = phase_progress(card, motion, 420.);
+    let graph = canvas(
+        move |_, _, _| {},
+        move |bounds, _, window, _| {
+            let ox = bounds.origin.x.as_f32();
+            let oy = bounds.origin.y.as_f32();
+            let at = |x: f32, row: usize| point(px(ox + x), px(oy + row_h * (row as f32 + 0.5)));
+            let trunk_x = 17.;
+            let branch_x = 31.;
+            let last = row_count.saturating_sub(1);
+            if last > 0 {
+                seg(
+                    &[at(trunk_x, 0), at(trunk_x, last)],
+                    px(1.),
+                    false,
+                    muted.opacity(0.24),
+                    window,
+                );
+            }
+            if last > 1 && first_commit <= last_commit {
+                let top_t = clamp01(draw * 3.);
+                let stem_t = clamp01(draw * 3. - 1.);
+                let bottom_t = clamp01(draw * 3. - 2.);
+                barc(
+                    at(trunk_x, 0),
+                    at(trunk_x, first_commit),
+                    at(branch_x, first_commit),
+                    at(branch_x, first_commit),
+                    top_t,
+                    px(1.4),
+                    false,
+                    branch.opacity(0.72),
+                    window,
+                );
+                if last_commit > first_commit && stem_t > 0. {
+                    let from = at(branch_x, first_commit);
+                    let to = at(branch_x, last_commit);
+                    let partial = point(
+                        from.x,
+                        px(from.y.as_f32() + (to.y.as_f32() - from.y.as_f32()) * stem_t),
+                    );
+                    seg(
+                        &[from, partial],
+                        px(1.4),
+                        false,
+                        branch.opacity(0.72),
+                        window,
+                    );
+                }
+                barc(
+                    at(branch_x, last_commit),
+                    at(branch_x, last),
+                    at(trunk_x, last),
+                    at(trunk_x, last),
+                    bottom_t,
+                    px(1.4),
+                    false,
+                    branch.opacity(0.72),
+                    window,
+                );
+            }
+            for (node_ix, (color, lane, mark)) in nodes.iter().enumerate() {
+                let x = if *lane == 0 { trunk_x } else { branch_x };
+                let pop = staggered_progress(draw, node_ix, node_count);
+                if pop <= 0. {
+                    continue;
+                }
+                let at = at(x, node_ix);
+                if *mark == 3
+                    && matches!(
+                        painted.phase,
+                        Phase::Creating | Phase::Checking | Phase::Merging
+                    )
+                {
+                    ring(at, 4. * pop, 1.3, *color, bg, window);
+                    spin_arc(at, 6.3 * pop, clock, *color, window);
+                } else if *mark == 3 && matches!(painted.phase, Phase::Ready | Phase::Merged) {
+                    dot(at, 4.5 * pop, *color, window);
+                    tick(at, bg, window);
+                } else if *mark == 3 && painted.phase == Phase::Conflicted {
+                    dot(at, 4.5 * pop, *color, window);
+                    bang(at, bg, window);
+                } else if *mark == 2 {
+                    dot(at, 3.8 * pop, *color, window);
+                    tick(at, bg, window);
+                } else if *mark == 1 {
+                    dot(at, 3.5 * pop, *color, window);
+                } else {
+                    dot(
+                        at,
+                        if node_ix == last { 3. } else { 3.25 } * pop,
+                        *color,
+                        window,
+                    );
+                }
+            }
+            if motion
+                && (draw < 1.
+                    || matches!(
+                        painted.phase,
+                        Phase::Creating | Phase::Checking | Phase::Merging
+                    ))
+            {
+                window.request_animation_frame();
+            }
+        },
+    )
+    .absolute()
+    .inset_0();
+
+    let row_elements =
+        rows.into_iter()
+            .enumerate()
+            .map(|(row_ix, (title, fact, tint, _, mark, branch_label))| {
+                let key = SharedString::from(format!("pr-story-{ix}-{row_ix}-{mark}-{title}"));
+                let row = h_flex()
+                    .h(px(row_h))
+                    .pl(px(47.))
+                    .pr(px(4.))
+                    .gap(px(10.))
+                    .items_center()
+                    .rounded(px(4.))
+                    .when(mark == 1, |el| el.bg(amber.opacity(0.055)))
+                    .when(mark == 2, |el| el.bg(green.opacity(0.035)))
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .flex_1()
+                            .gap(px(7.))
+                            .items_center()
+                            .text_size(px(11.5))
+                            .text_color(if mark == 1 {
+                                amber
+                            } else if mark == 2 || mark == 4 {
+                                muted
+                            } else {
+                                theme.foreground.opacity(0.86)
+                            })
+                            .child(div().min_w_0().truncate().child(title))
+                            .when_some(branch_label, |el, label| {
+                                el.child(branch_badge(&label, tint, cx))
+                            }),
+                    )
+                    .when(!fact.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .max_w(relative(0.42))
+                                .truncate()
+                                .text_size(px(10.))
+                                .font_family(theme.mono_font_family.clone())
+                                .text_color(tint.opacity(0.78))
+                                .child(fact),
+                        )
+                    });
+                if motion {
+                    let delay = (row_ix as f32 * 0.045).min(0.3);
+                    row.with_animation(
+                        key,
+                        Animation::new(Duration::from_millis(260)).with_easing(ease_out_quint()),
+                        move |el, t| {
+                            let t = clamp01((t - delay) / (1. - delay));
+                            el.opacity(t).ml(px(4. * (1. - t)))
+                        },
+                    )
+                    .into_any_element()
+                } else {
+                    row.into_any_element()
+                }
+            });
+
+    v_flex()
+        .mx(px(14.))
+        .pb(px(6.))
+        .child(
+            v_flex()
+                .relative()
+                .h(px(graph_h))
+                .child(graph)
+                .children(row_elements),
+        )
+        .when(
+            !card.checks.is_empty()
+                && matches!(card.phase, Phase::Ready | Phase::Merging | Phase::Merged),
+            |el| el.child(pr_checks(ix, card, motion, cx)),
+        )
+        .into_any_element()
+}
+
+/// Passed and pending checks as a quiet result row, matching the reference's Tests / Lint /
+/// Preview strip instead of turning checks into another oversized graph.
+fn pr_checks(ix: usize, card: &Card, motion: bool, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let marks = marks(cx);
+    let strip = h_flex()
+        .min_h(px(30.))
+        .pt(px(6.))
+        .pb(px(1.))
+        .gap(px(12.))
+        .flex_wrap()
+        .border_t_1()
+        .border_color(theme.foreground.opacity(0.07))
+        .children(
+            card.checks
+                .iter()
+                .take(5)
+                .enumerate()
+                .map(|(check_ix, check)| {
+                    let state = check.state;
+                    let (glyph, tint) = match state {
+                        CheckState::Pass => ("✓", marks.green),
+                        CheckState::Fail => ("×", marks.red),
+                        CheckState::Skipped => ("–", marks.muted),
+                        CheckState::Queued | CheckState::Running => ("○", crate::palette::sky(cx)),
+                    };
+                    let name = check.name.clone();
+                    h_flex()
+                        .id(SharedString::from(format!("pr-check-{ix}-{check_ix}")))
+                        .gap(px(5.))
+                        .items_center()
+                        .text_size(px(10.5))
+                        .text_color(theme.muted_foreground)
+                        .child(div().text_color(tint).child(glyph))
+                        .child(name.clone())
+                        .tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(match state {
+                                CheckState::Pass => format!("{name} · passed"),
+                                CheckState::Fail => format!("{name} · failed"),
+                                CheckState::Skipped => format!("{name} · skipped"),
+                                CheckState::Queued => format!("{name} · queued"),
+                                CheckState::Running => format!("{name} · running"),
+                            })
+                            .build(window, cx)
+                        })
+                }),
+        );
+    if motion {
+        strip
+            .with_animation(
+                SharedString::from(format!("pr-checks-{ix}-{}", card.phase.label())),
+                Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()),
+                |el, t| el.opacity(t).mt(px(4. * (1. - t))),
+            )
+            .into_any_element()
+    } else {
+        strip.into_any_element()
+    }
+}
+
+/// Jobs and release stages use the same compact reading direction as the pull request history.
+fn stage_history(ix: usize, card: &Card, clock: f32, motion: bool, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let marks = marks(cx);
+    let stages = card.stages.iter().collect::<Vec<_>>();
+    let row_h = 27.;
+    let graph_h = row_h * stages.len() as f32;
+    let states = stages.iter().map(|stage| stage.state).collect::<Vec<_>>();
+    let stage_count = states.len();
+    let bg = theme.background;
+    let muted = theme.muted_foreground;
+    let sky = crate::palette::sky(cx);
+    let draw = phase_progress(card, motion, 360.);
+    let graph = canvas(
+        move |_, _, _| {},
+        move |bounds, _, window, _| {
+            let ox = bounds.origin.x.as_f32();
+            let oy = bounds.origin.y.as_f32();
+            let at = |row: usize| point(px(ox + 17.), px(oy + row_h * (row as f32 + 0.5)));
+            if states.len() > 1 {
+                let from = at(0);
+                let to = at(states.len() - 1);
+                let partial = point(
+                    from.x,
+                    px(from.y.as_f32() + (to.y.as_f32() - from.y.as_f32()) * draw),
+                );
+                seg(&[from, partial], px(1.), false, muted.opacity(0.25), window);
+            }
+            for (stage_ix, state) in states.iter().enumerate() {
+                let pop = staggered_progress(draw, stage_ix, stage_count);
+                if pop <= 0. {
+                    continue;
+                }
+                let at = at(stage_ix);
+                match state {
+                    CheckState::Pass => {
+                        dot(at, 4. * pop, marks.green, window);
+                        tick(at, bg, window);
+                    }
+                    CheckState::Fail => {
+                        dot(at, 4. * pop, marks.red, window);
+                        bang(at, bg, window);
+                    }
+                    CheckState::Running => {
+                        ring(at, 3.8 * pop, 1.3, sky, bg, window);
+                        spin_arc(at, 6. * pop, clock, sky, window);
+                    }
+                    CheckState::Queued | CheckState::Skipped => {
+                        dot(at, 3. * pop, marks.muted, window);
+                    }
+                }
+            }
+            if motion && (draw < 1. || states.iter().any(|state| *state == CheckState::Running)) {
+                window.request_animation_frame();
+            }
+        },
+    )
+    .absolute()
+    .inset_0();
+    let rows = stages.iter().enumerate().map(|(stage_ix, stage)| {
+        let (tint, state) = match stage.state {
+            CheckState::Pass => (marks.green, "passed"),
+            CheckState::Fail => (marks.red, "failed"),
+            CheckState::Skipped => (marks.muted, "skipped"),
+            CheckState::Queued => (marks.muted, "queued"),
+            CheckState::Running => (sky, "running"),
+        };
+        let row = h_flex()
+            .h(px(row_h))
+            .pl(px(47.))
+            .pr(px(4.))
+            .gap(px(10.))
+            .items_center()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(11.5))
+                    .text_color(theme.foreground.opacity(0.86))
+                    .child(stage.label.clone()),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(10.5))
+                    .text_color(tint)
+                    .child(state),
+            );
+        if motion {
+            let delay = (stage_ix as f32 * 0.06).min(0.3);
+            row.with_animation(
+                SharedString::from(format!(
+                    "stage-story-{ix}-{stage_ix}-{}-{state}",
+                    stage.label
+                )),
+                Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()),
+                move |el, t| {
+                    let t = clamp01((t - delay) / (1. - delay));
+                    el.opacity(t).ml(px(4. * (1. - t)))
+                },
+            )
+            .into_any_element()
+        } else {
+            row.into_any_element()
+        }
+    });
+    let context = (card.kind == Kind::Run && (!card.subject.is_empty() || !card.head.is_empty()))
+        .then(|| {
+            h_flex()
+                .min_h(px(23.))
+                .pl(px(47.))
+                .pr(px(4.))
+                .pb(px(3.))
+                .gap(px(7.))
+                .items_center()
+                .when(!card.subject.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(10.5))
+                            .text_color(theme.muted_foreground)
+                            .child(card.subject.clone()),
+                    )
+                })
+                .when(!card.head.is_empty(), |el| {
+                    el.child(branch_badge(&card.head, sky, cx))
+                })
+        });
+    v_flex()
+        .mx(px(16.))
+        .pb(px(5.))
+        .children(context)
+        .child(
+            v_flex()
+                .relative()
+                .h(px(graph_h))
+                .child(graph)
+                .children(rows),
+        )
+        .into_any_element()
+}
+
 /// "45s", "3m 12s", "1h 4m" — coarse, like the working bar's.
 /// How long a run took: to its end once it has one, else up to now.
 fn run_ms(card: &Card) -> i64 {
@@ -2339,6 +2924,7 @@ fn dur_label(ms: i64) -> String {
 }
 
 /// "just now", "2m ago" — how long ago `ms` was.
+#[allow(dead_code)]
 fn ago(ms: i64) -> String {
     let s = ((now_ms() - ms) / 1000).max(0);
     if s < 60 {
@@ -2353,6 +2939,7 @@ fn ago(ms: i64) -> String {
 }
 
 /// A file (or failed job) in the footer: hairline chip, tag, name, a trailing mark.
+#[allow(dead_code)]
 fn file_chip(tag: &str, name: &str, mark: Option<(&'static str, Hsla)>, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let mono = theme.mono_font_family.clone();
@@ -2387,6 +2974,7 @@ fn file_chip(tag: &str, name: &str, mark: Option<(&'static str, Hsla)>, cx: &App
 }
 
 /// The short language tag a file chip leads with ("TS", "RS"), from the path's extension.
+#[allow(dead_code)]
 fn lang_tag(path: &str) -> String {
     path.rsplit('/')
         .next()
@@ -2396,8 +2984,269 @@ fn lang_tag(path: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The reference keeps the current operation inside the component as one anchored row. That
+/// makes state changes legible without adding a second, detached status line above the card.
+fn reference_footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElement> {
+    let theme = cx.theme();
+    let muted = theme.muted_foreground;
+    let green = crate::palette::emerald(cx);
+    let red = crate::palette::red(cx);
+    let amber = crate::palette::amber(cx);
+    let indigo = crate::palette::indigo(cx);
+    let sky = crate::palette::sky(cx);
+    let conflict_count = card.conflicts.len();
+    let base = if card.base.is_empty() {
+        "main"
+    } else {
+        &card.base
+    };
+
+    let (mark, title, tint): (AnyElement, String, Hsla) = match card.kind {
+        Kind::Pr => match card.phase {
+            Phase::Creating => (
+                ring_spinner(11., muted, cx),
+                if card.step.is_empty() {
+                    "Creating the pull request".into()
+                } else {
+                    card.step.clone()
+                },
+                muted,
+            ),
+            Phase::Open | Phase::Checking => (
+                if card.phase == Phase::Checking {
+                    ring_spinner(11., sky, cx)
+                } else {
+                    div()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(muted)
+                        .into_any_element()
+                },
+                if card.step.is_empty() {
+                    "Checking it merges cleanly".into()
+                } else {
+                    card.step.clone()
+                },
+                if card.phase == Phase::Checking {
+                    sky
+                } else {
+                    muted
+                },
+            ),
+            Phase::Conflicted if card.resolving => (
+                ring_spinner(11., amber, cx),
+                if card.step.is_empty() {
+                    "Merging main into the branch".into()
+                } else {
+                    card.step.clone()
+                },
+                amber,
+            ),
+            Phase::Conflicted => (
+                Icon::new(IconName::TriangleAlert)
+                    .size(px(12.))
+                    .text_color(amber)
+                    .into_any_element(),
+                match conflict_count {
+                    0 => format!("Conflicts with {base}"),
+                    1 => format!("1 conflict with {base}"),
+                    n => format!("{n} conflicts with {base}"),
+                },
+                amber,
+            ),
+            Phase::Ready => (
+                Icon::new(IconName::Check)
+                    .size(px(12.))
+                    .text_color(green)
+                    .into_any_element(),
+                "Ready to merge".into(),
+                green,
+            ),
+            Phase::Merging => (
+                ring_spinner(11., indigo, cx),
+                format!("Merging into {base}"),
+                indigo,
+            ),
+            Phase::Merged => (
+                Icon::new(crate::assets::Lucide::GitMerge)
+                    .size(px(12.))
+                    .text_color(indigo)
+                    .into_any_element(),
+                format!("Merged into {base}"),
+                indigo,
+            ),
+            Phase::Closed => (
+                Icon::new(IconName::CircleX)
+                    .size(px(12.))
+                    .text_color(muted)
+                    .into_any_element(),
+                "Closed unmerged".into(),
+                muted,
+            ),
+            Phase::Failed => (
+                Icon::new(IconName::CircleAlert)
+                    .size(px(12.))
+                    .text_color(red)
+                    .into_any_element(),
+                if card.step.is_empty() {
+                    "Couldn't open the pull request".into()
+                } else {
+                    card.step.clone()
+                },
+                red,
+            ),
+            Phase::Releasing | Phase::Published | Phase::Passed => return None,
+        },
+        Kind::Run => match card.phase {
+            Phase::Passed => (
+                Icon::new(IconName::Check)
+                    .size(px(12.))
+                    .text_color(green)
+                    .into_any_element(),
+                format!("Passed in {}", dur_label(run_ms(card))),
+                green,
+            ),
+            Phase::Failed | Phase::Closed => (
+                Icon::new(IconName::CircleX)
+                    .size(px(12.))
+                    .text_color(red)
+                    .into_any_element(),
+                failure_title(card),
+                red,
+            ),
+            _ => (
+                ring_spinner(11., sky, cx),
+                if card.step.is_empty() {
+                    "Watching the run".into()
+                } else {
+                    card.step.clone()
+                },
+                sky,
+            ),
+        },
+        Kind::Release => match card.phase {
+            Phase::Published => (
+                Icon::new(crate::assets::Lucide::Rocket)
+                    .size(px(12.))
+                    .text_color(indigo)
+                    .into_any_element(),
+                if card.channel.is_empty() || card.channel == "stable" {
+                    "The downloads are up".into()
+                } else {
+                    format!("The downloads are up on {}", card.channel)
+                },
+                indigo,
+            ),
+            Phase::Failed | Phase::Closed => (
+                Icon::new(IconName::CircleAlert)
+                    .size(px(12.))
+                    .text_color(red)
+                    .into_any_element(),
+                failure_title(card),
+                red,
+            ),
+            _ => (
+                ring_spinner(11., sky, cx),
+                if card.step.is_empty() {
+                    "Release workflow running".into()
+                } else {
+                    card.step.clone()
+                },
+                sky,
+            ),
+        },
+    };
+
+    let action = match (card.kind, card.phase) {
+        (Kind::Pr, Phase::Conflicted) if !card.resolving => actions
+            .resolve
+            .clone()
+            .map(|f| action_pill(("pr-resolve", ix), None, "Resolve conflicts", f, cx)),
+        (Kind::Pr, Phase::Conflicted) => Some(busy_pill(("pr-resolve", ix), "Resolving", cx)),
+        (Kind::Pr, Phase::Ready) => actions.merge.clone().map(|f| {
+            action_pill(
+                ("pr-merge", ix),
+                Some(crate::assets::Lucide::GitMerge),
+                "Merge",
+                f,
+                cx,
+            )
+        }),
+        (Kind::Pr, Phase::Merging) => Some(busy_pill(("pr-merge", ix), "Merging", cx)),
+        (Kind::Run, Phase::Failed) | (Kind::Release, Phase::Failed) => actions
+            .open
+            .clone()
+            .map(|f| link_pill(("pr-logs", ix), "View logs", red, f)),
+        (Kind::Release, Phase::Published) => actions
+            .open
+            .clone()
+            .map(|f| link_pill(("pr-release", ix), "Open release", indigo, f)),
+        (Kind::Pr, Phase::Merged) => actions
+            .open
+            .clone()
+            .map(|f| link_pill(("pr-github", ix), "GitHub", indigo, f)),
+        _ => None,
+    };
+
+    let title_row = h_flex()
+        .min_w_0()
+        .flex_1()
+        .gap(px(7.))
+        .items_center()
+        .child(
+            div()
+                .size(px(13.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(mark),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(11.5))
+                .font_medium()
+                .text_color(if card.phase == Phase::Conflicted && !card.resolving {
+                    amber
+                } else {
+                    theme.foreground.opacity(0.86)
+                })
+                .child(title.clone()),
+        );
+    let title_row = if card.phase == Phase::Conflicted && !card.conflicts.is_empty() {
+        let paths = card.conflicts.join("\n");
+        title_row
+            .id(("pr-conflicts", ix))
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(paths.clone()).build(window, cx)
+            })
+            .into_any_element()
+    } else {
+        title_row.into_any_element()
+    };
+
+    Some(
+        h_flex()
+            .id(("pr-state-row", ix))
+            .test_support()
+            .min_h(px(39.))
+            .px(px(16.))
+            .gap(px(10.))
+            .items_center()
+            .border_t_1()
+            .border_color(theme.foreground.opacity(0.07))
+            .child(title_row)
+            .children(action)
+            .text_color(tint)
+            .into_any_element(),
+    )
+}
+
 /// The footer under the graph when there's something to say or do: conflicts, ready, merged,
 /// failed; a run's or release's result. `None` while the card is still just working.
+#[allow(dead_code)]
 fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElement> {
     let theme = cx.theme();
     let muted = theme.muted_foreground;
@@ -2409,7 +3258,7 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
     );
     let when = card.phase_at_ms.max(card.created_ms);
     // (icon, tint, title, subtitle)
-    let (icon, tint, title, sub): (AnyElement, Hsla, String, String) = match card.kind {
+    let (icon, _tint, title, sub): (AnyElement, Hsla, String, String) = match card.kind {
         Kind::Pr => match card.phase {
             Phase::Conflicted => {
                 let n = card.conflicts.len();
@@ -2419,11 +3268,14 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
                         .text_color(amber)
                         .into_any_element(),
                     amber,
-                    // The count is the graph's label; the footer says where and what to do.
                     if card.resolving {
                         format!("Merging {} into the branch", card.base)
+                    } else if n == 0 {
+                        format!("Conflicts with {}", card.base)
+                    } else if n == 1 {
+                        format!("1 conflict with {}", card.base)
                     } else {
-                        "Changed on both branches".to_string()
+                        format!("{n} conflicts with {}", card.base)
                     },
                     if card.resolving && n == 0 {
                         "Pushing the merge".to_string()
@@ -2442,12 +3294,11 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
                         .text_color(green)
                         .into_any_element(),
                     green,
-                    // "Ready to merge" is the graph's label: here, why.
-                    "No conflicts".to_string(),
+                    "Ready to merge".to_string(),
                     if n == 0 {
-                        format!("Merges cleanly into {}", card.base)
+                        "No conflicts".to_string()
                     } else {
-                        format!("All {n} checks passed")
+                        format!("No conflicts · all {n} checks passed")
                     },
                 )
             }
@@ -2457,14 +3308,15 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
                     .text_color(indigo)
                     .into_any_element(),
                 indigo,
-                // The header says Merged: here, what landed where.
-                match card.commits {
-                    Some(1) => format!("1 commit landed in {}", card.base),
-                    Some(n) => format!("{n} commits landed in {}", card.base),
-                    None => format!("Landed in {}", card.base),
-                },
+                format!("Merged into {}", card.base),
                 if card.branch_deleted && !card.head.is_empty() {
                     format!("{} was deleted · {}", card.head, ago(when))
+                } else if let Some(n) = card.commits {
+                    format!(
+                        "{n} {} landed · {}",
+                        if n == 1 { "commit" } else { "commits" },
+                        ago(when)
+                    )
                 } else {
                     ago(when)
                 },
@@ -2532,20 +3384,9 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
 
     let mut chips = vec![];
     match card.kind {
-        Kind::Pr => {
-            chips.extend(
-                card.resolved
-                    .iter()
-                    .take(6)
-                    .map(|f| file_chip(&lang_tag(f), f, Some(("✓", green)), cx)),
-            );
-            chips.extend(
-                card.conflicts
-                    .iter()
-                    .take(6)
-                    .map(|f| file_chip(&lang_tag(f), f, Some(("!", amber)), cx)),
-            );
-        }
+        // PR paths already appear in the history above, where their relationship to the branch
+        // is visible. Repeating them as chips made the footer louder than the action.
+        Kind::Pr => {}
         Kind::Run | Kind::Release
             if card.phase == Phase::Failed
                 && card
@@ -2597,19 +3438,17 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
     Some(
         v_flex()
             .px(px(16.))
-            .pt(px(12.))
-            .pb(px(14.))
-            .gap(px(8.))
+            .pt(px(9.))
+            .pb(px(12.))
+            .gap(px(7.))
             .child(
                 h_flex()
-                    .gap(px(9.))
+                    .gap(px(8.))
                     .items_center()
                     .child(
                         div()
-                            .size(px(22.))
+                            .size(px(15.))
                             .flex_none()
-                            .rounded(px(6.))
-                            .bg(tint.opacity(0.12))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -2624,7 +3463,7 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
                                 div()
                                     .min_w_0()
                                     .truncate()
-                                    .text_size(px(12.))
+                                    .text_size(px(11.5))
                                     .font_medium()
                                     .text_color(theme.foreground.opacity(0.9))
                                     .child(title),
@@ -2643,14 +3482,13 @@ fn footer(ix: usize, card: &Card, actions: &Actions, cx: &App) -> Option<AnyElem
                     .children(action),
             )
             .when(!chips.is_empty(), |el| {
-                el.child(h_flex().pl(px(31.)).gap(px(5.)).flex_wrap().children(chips))
+                el.child(h_flex().pl(px(23.)).gap(px(5.)).flex_wrap().children(chips))
             })
             .into_any_element(),
     )
 }
 
-/// The footer's call to act: a filled pill in the text colour (dark on Paper, light on Night),
-/// as the reference draws "Resolve conflicts" and "Merge".
+/// The reference's action is a small blue-tinted control anchored to the state row.
 fn action_pill(
     id: impl Into<ElementId>,
     icon: Option<crate::assets::Lucide>,
@@ -2658,8 +3496,7 @@ fn action_pill(
     on_click: Rc<dyn Fn(&mut Window, &mut App)>,
     cx: &App,
 ) -> AnyElement {
-    let theme = cx.theme();
-    let (fg, bg) = (theme.background, theme.foreground);
+    let tint = crate::palette::sky(cx);
     h_flex()
         .id(id.into())
         .test_support()
@@ -2667,17 +3504,18 @@ fn action_pill(
         .flex_none()
         .gap(px(5.))
         .items_center()
-        .h(px(24.))
-        .px(px(11.))
-        .rounded_full()
-        .bg(bg.opacity(0.92))
-        .hover(move |s| s.bg(bg))
+        .h(px(25.))
+        .px(px(10.))
+        .rounded(px(7.))
+        .bg(tint.opacity(0.09))
+        .hover(move |s| s.bg(tint.opacity(0.15)))
+        .active(move |s| s.bg(tint.opacity(0.2)))
         .cursor_pointer()
-        .text_size(px(12.))
+        .text_size(px(11.5))
         .font_medium()
-        .text_color(fg)
+        .text_color(tint)
         .when_some(icon, |el, icon| {
-            el.child(Icon::new(icon).size(px(12.)).text_color(fg))
+            el.child(Icon::new(icon).size(px(12.)).text_color(tint))
         })
         .child(label)
         .on_click(move |_, window, cx| on_click(window, cx))
@@ -2701,7 +3539,7 @@ fn link_pill(
         .items_center()
         .h(px(24.))
         .px(px(10.))
-        .rounded_full()
+        .rounded(px(7.))
         .bg(tint.opacity(0.10))
         .hover(move |s| s.bg(tint.opacity(0.16)))
         .cursor_pointer()
@@ -2720,6 +3558,7 @@ fn link_pill(
 
 /// Under a failed run's or release's title: what the step line adds, or how the other jobs did
 /// when the step only says the same thing again ("Failed: Test (Windows)").
+#[allow(dead_code)]
 fn failure_detail(card: &Card) -> String {
     if !card.step.is_empty() && !card.step.starts_with("Failed") {
         return card.step.clone();
@@ -2752,6 +3591,16 @@ fn failed_jobs(card: &Card) -> String {
     }
 }
 
+/// Prefer the watcher/command's actual explanation ("Cancelled", a release script error) over
+/// an inferred job count; the latter is only a fallback for old cards without a stored step.
+fn failure_title(card: &Card) -> String {
+    if card.step.trim().is_empty() {
+        failed_jobs(card)
+    } else {
+        card.step.clone()
+    }
+}
+
 /// The same place once clicked: a quiet grey pill with a small spinner.
 fn busy_pill(id: impl Into<ElementId>, label: &'static str, cx: &App) -> AnyElement {
     let theme = cx.theme();
@@ -2764,7 +3613,7 @@ fn busy_pill(id: impl Into<ElementId>, label: &'static str, cx: &App) -> AnyElem
         .items_center()
         .h(px(24.))
         .px(px(11.))
-        .rounded_full()
+        .rounded(px(7.))
         .bg(theme.foreground.opacity(0.06))
         .text_size(px(12.))
         .text_color(theme.muted_foreground)
@@ -2773,83 +3622,12 @@ fn busy_pill(id: impl Into<ElementId>, label: &'static str, cx: &App) -> AnyElem
         .into_any_element()
 }
 
-// ---------- the graph band ----------
-
-/// The band's height: room for two lanes and their curves (a run's single track).
-const BAND_H: f32 = 66.;
-/// A PR's band: main, the branch below it, and the branch's name under that, clear of its line.
-const PR_BAND_H: f32 = 94.;
-/// The gap between a release's lanes, so each has room for its name.
-const LANE_GAP: f32 = 20.;
-
-/// How tall `card`'s band is.
-fn band_height(card: &Card) -> f32 {
-    match card.kind {
-        Kind::Pr => PR_BAND_H,
-        Kind::Run => BAND_H,
-        Kind::Release => 24. + LANE_GAP * card.stages.len().clamp(1, 4) as f32,
-    }
-}
-
-/// Where a release's lane `i` runs.
-fn lane_y(i: usize) -> f32 {
-    22. + LANE_GAP * i as f32
-}
-
-/// The graph strip under the header, per kind.
-fn band(card: &Card, clock: f32, draw: f32, pop: f32, motion: bool, cx: &App) -> AnyElement {
-    let strip = div()
-        .relative()
-        .mx(px(14.))
-        .h(px(band_height(card)))
-        .rounded(px(8.))
-        .overflow_hidden()
-        .bg(band_fill(cx));
-    match card.kind {
-        Kind::Pr => strip
-            .child(pr_graph(card, clock, draw, pop, motion, cx))
-            .children(pr_labels(card, cx))
-            .into_any_element(),
-        Kind::Run => strip
-            .child(pipeline_graph(card, clock, draw, pop, motion, cx))
-            .children(pipeline_labels(card, cx))
-            .into_any_element(),
-        Kind::Release => strip
-            .child(lanes_graph(card, clock, draw, pop, motion, cx))
-            .children(lane_labels(card, cx))
-            .into_any_element(),
-    }
-}
-
-/// The band's colour, solid: hollow nodes are filled with it so lines don't show through.
-fn band_fill(cx: &App) -> Hsla {
-    let theme = cx.theme();
-    theme.background.blend(theme.foreground.opacity(0.025))
-}
-
-/// The small soft pill above the graph's target node.
-fn band_pill(text: String, tint: Hsla) -> AnyElement {
-    div()
-        .flex_none()
-        .rounded_full()
-        .px(px(7.))
-        .py(px(1.))
-        .border_1()
-        .border_color(tint.opacity(0.3))
-        .bg(tint.opacity(0.08))
-        .text_size(px(10.5))
-        .text_color(tint)
-        .child(text)
-        .into_any_element()
-}
-
-// ---- painted helpers (as `panels::branch_graph` draws them) ----
+// ---------- painted history helpers ----------
 
 fn clamp01(v: f32) -> f32 {
     v.clamp(0., 1.)
 }
 
-/// `t` of the way from `p0` to `p1` on a cubic Bézier.
 fn bcubic(
     p0: Point<Pixels>,
     c1: Point<Pixels>,
@@ -2868,25 +3646,24 @@ fn bcubic(
     )
 }
 
-/// Stroke `points` as a polyline.
 fn seg(points: &[Point<Pixels>], width: Pixels, dash: bool, color: Hsla, window: &mut Window) {
     if points.len() < 2 {
         return;
     }
-    let mut b = PathBuilder::stroke(width);
+    let mut builder = PathBuilder::stroke(width);
     if dash {
-        b = b.dash_array(&[px(3.5), px(3.)]);
+        builder = builder.dash_array(&[px(3.5), px(3.)]);
     }
-    b.move_to(points[0]);
-    for p in &points[1..] {
-        b.line_to(*p);
+    builder.move_to(points[0]);
+    for point in &points[1..] {
+        builder.line_to(*point);
     }
-    if let Ok(p) = b.build() {
-        window.paint_path(p, color);
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
     }
 }
 
-/// A stroked cubic, drawn `t` of the way.
+#[allow(clippy::too_many_arguments)]
 fn barc(
     p0: Point<Pixels>,
     c1: Point<Pixels>,
@@ -2902,44 +3679,47 @@ fn barc(
     if t <= 0. {
         return;
     }
-    let n = 20;
-    let points: Vec<Point<Pixels>> = (0..=n)
-        .map(|i| bcubic(p0, c1, c2, p1, t * i as f32 / n as f32))
+    let points: Vec<Point<Pixels>> = (0..=20)
+        .map(|i| bcubic(p0, c1, c2, p1, t * i as f32 / 20.))
         .collect();
     seg(&points, width, dash, color, window);
 }
 
-/// A filled circle.
-fn dot(at: Point<Pixels>, r: f32, color: Hsla, window: &mut Window) {
+fn dot(at: Point<Pixels>, radius: f32, color: Hsla, window: &mut Window) {
     window.paint_quad(
         fill(
             Bounds::new(
-                point(px(at.x.as_f32() - r), px(at.y.as_f32() - r)),
-                size(px(2. * r), px(2. * r)),
+                point(px(at.x.as_f32() - radius), px(at.y.as_f32() - radius)),
+                size(px(2. * radius), px(2. * radius)),
             ),
             color,
         )
-        .corner_radii(px(r)),
+        .corner_radii(px(radius)),
     );
 }
 
-/// A hollow circle, filled so what's under it doesn't show through.
-fn ring(at: Point<Pixels>, r: f32, w: f32, color: Hsla, fill_c: Hsla, window: &mut Window) {
+fn ring(
+    at: Point<Pixels>,
+    radius: f32,
+    width: f32,
+    color: Hsla,
+    fill_color: Hsla,
+    window: &mut Window,
+) {
     window.paint_quad(
         fill(
             Bounds::new(
-                point(px(at.x.as_f32() - r), px(at.y.as_f32() - r)),
-                size(px(2. * r), px(2. * r)),
+                point(px(at.x.as_f32() - radius), px(at.y.as_f32() - radius)),
+                size(px(2. * radius), px(2. * radius)),
             ),
-            fill_c,
+            fill_color,
         )
-        .corner_radii(px(r))
-        .border_widths(px(w))
+        .corner_radii(px(radius))
+        .border_widths(px(width))
         .border_color(color),
     );
 }
 
-/// A ✓ inside a node's dot.
 fn tick(at: Point<Pixels>, color: Hsla, window: &mut Window) {
     let (x, y) = (at.x.as_f32(), at.y.as_f32());
     seg(
@@ -2955,21 +3735,6 @@ fn tick(at: Point<Pixels>, color: Hsla, window: &mut Window) {
     );
 }
 
-/// A ✕ inside a node's dot.
-fn ex(at: Point<Pixels>, color: Hsla, window: &mut Window) {
-    let (x, y) = (at.x.as_f32(), at.y.as_f32());
-    for (a, b, c, d) in [(-1.6, -1.6, 1.6, 1.6), (-1.6, 1.6, 1.6, -1.6)] {
-        seg(
-            &[point(px(x + a), px(y + b)), point(px(x + c), px(y + d))],
-            px(1.4),
-            false,
-            color,
-            window,
-        );
-    }
-}
-
-/// A ! inside a node's dot.
 fn bang(at: Point<Pixels>, color: Hsla, window: &mut Window) {
     let (x, y) = (at.x.as_f32(), at.y.as_f32());
     seg(
@@ -2982,30 +3747,29 @@ fn bang(at: Point<Pixels>, color: Hsla, window: &mut Window) {
     dot(at + point(px(0.), px(2.2)), 0.9, color, window);
 }
 
-/// A three-quarter arc turning at `at` — the spinner ring live phases wear.
-fn spin_arc(at: Point<Pixels>, r: f32, clock: f32, color: Hsla, window: &mut Window) {
-    let mut b = PathBuilder::stroke(px(1.4));
+fn spin_arc(at: Point<Pixels>, radius: f32, clock: f32, color: Hsla, window: &mut Window) {
+    let mut builder = PathBuilder::stroke(px(1.4));
     let steps = 24;
     let start = clock * std::f32::consts::TAU;
     for i in 0..=steps * 3 / 4 {
-        let a = start + (i as f32 / steps as f32) * std::f32::consts::TAU;
-        let p = point(at.x + px(r) * a.cos(), at.y + px(r) * a.sin());
+        let angle = start + (i as f32 / steps as f32) * std::f32::consts::TAU;
+        let point = point(
+            at.x + px(radius) * angle.cos(),
+            at.y + px(radius) * angle.sin(),
+        );
         if i == 0 {
-            b.move_to(p);
+            builder.move_to(point);
         } else {
-            b.line_to(p);
+            builder.line_to(point);
         }
     }
-    if let Ok(p) = b.build() {
-        window.paint_path(p, color);
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
     }
 }
 
-/// The state colours a graph's marks wear (resolved before the paint closure: `cx` can't
-/// be captured by the canvas).
 #[derive(Clone, Copy)]
 struct Marks {
-    sky: Hsla,
     green: Hsla,
     red: Hsla,
     muted: Hsla,
@@ -3013,652 +3777,10 @@ struct Marks {
 
 fn marks(cx: &App) -> Marks {
     Marks {
-        sky: crate::palette::sky(cx),
         green: crate::palette::emerald(cx),
         red: crate::palette::red(cx),
         muted: cx.theme().muted_foreground.opacity(0.6),
     }
-}
-
-/// A job or stage's node: its state as a mark.
-fn job_mark(
-    at: Point<Pixels>,
-    state: CheckState,
-    clock: f32,
-    band_bg: Hsla,
-    m: Marks,
-    window: &mut Window,
-) {
-    let (sky, green, red, muted) = (m.sky, m.green, m.red, m.muted);
-    match state {
-        CheckState::Pass => {
-            dot(at, 4.5, green, window);
-            tick(at, band_bg, window);
-        }
-        CheckState::Fail => {
-            dot(at, 4.5, red, window);
-            ex(at, band_bg, window);
-        }
-        CheckState::Skipped => dot(at, 3.5, muted, window),
-        CheckState::Queued => ring(at, 3.5, 1.4, muted, band_bg, window),
-        CheckState::Running => {
-            ring(at, 4., 1.4, sky, band_bg, window);
-            spin_arc(at, 6.5, clock, sky, window);
-        }
-    }
-}
-
-// ---- PR: the branch graph ----
-
-/// The pill over the merge target, per phase.
-fn tip_label(card: &Card, cx: &App) -> Option<(String, Hsla)> {
-    let muted = cx.theme().muted_foreground;
-    match card.phase {
-        Phase::Checking => Some(("Checking".to_string(), muted)),
-        Phase::Conflicted => {
-            let n = card.conflicts.len();
-            // Only a card that watched its conflicts clear says so; an empty list can also mean
-            // the files couldn't be listed.
-            if n == 0 && card.resolving && !card.resolved.is_empty() {
-                Some(("Resolved".to_string(), crate::palette::amber(cx)))
-            } else if n == 0 {
-                Some(("Conflicts".to_string(), crate::palette::amber(cx)))
-            } else if n == 1 {
-                Some(("1 conflict".to_string(), crate::palette::amber(cx)))
-            } else {
-                Some((format!("{n} conflicts"), crate::palette::amber(cx)))
-            }
-        }
-        Phase::Ready | Phase::Merging => {
-            Some(("Ready to merge".to_string(), crate::palette::emerald(cx)))
-        }
-        // The header says Merged, and the filled purple node shows it.
-        Phase::Merged => None,
-        Phase::Closed => Some(("Closed".to_string(), crate::palette::red(cx))),
-        Phase::Failed => Some(("Failed".to_string(), crate::palette::red(cx))),
-        _ => None,
-    }
-}
-
-/// `main` across the top of the band, the head branch curving off it, a merge curve home.
-fn pr_graph(card: &Card, clock: f32, draw: f32, pop: f32, motion: bool, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    let band_bg = band_fill(cx);
-    let muted = theme.muted_foreground.opacity(0.55);
-    let tip = card.phase.tint(cx);
-    let (sky, indigo, green) = (
-        crate::palette::sky(cx),
-        crate::palette::indigo(cx),
-        crate::palette::emerald(cx),
-    );
-    let age = phase_age(card, motion);
-    let card = card.clone();
-    canvas(
-        move |_, _, _| {},
-        move |b, _, window, _| {
-            let w = b.size.width.as_f32();
-            let (ox, oy) = (b.origin.x.as_f32(), b.origin.y.as_f32());
-            let at = |x: f32, y: f32| point(px(ox + x), px(oy + y));
-            let (my, by) = (PR_BAND_H * 0.37, PR_BAND_H * 0.67);
-            let (x0, x1) = (w * 0.08, w * 0.94);
-            let fork = x0 + (x1 - x0) * 0.18;
-            let tip_x = x0 + (x1 - x0) * 0.58;
-            let join = x0 + (x1 - x0) * 0.94;
-            let creating = card.phase == Phase::Creating;
-            let committing = creating && card.step.starts_with("Committing");
-            let pushing = creating && card.step.starts_with("Pushing");
-            let resolving = card.phase == Phase::Conflicted && card.resolving;
-            let merging = card.phase == Phase::Merging;
-            let merged = card.phase == Phase::Merged;
-            let spinning = matches!(card.phase, Phase::Checking | Phase::Merging) || resolving;
-            let commits = card.commits.unwrap_or(3).clamp(1, 4) as usize;
-
-            // main: solid to its last commit, then faint dashes on to the target. Once the PR is
-            // open, main's newer commits grow in from where the branch left it.
-            let main_end = if creating {
-                fork
-            } else {
-                fork + (join - fork) * 1.45 / 2.4
-            };
-            let grow = if card.phase == Phase::Open { draw } else { 1. };
-            let main_to = fork + (main_end - fork) * grow;
-            seg(
-                &[at(x0, my), at(main_to, my)],
-                px(1.5),
-                false,
-                muted,
-                window,
-            );
-            seg(
-                &[at(main_to, my), at(join, my)],
-                px(1.),
-                true,
-                muted.opacity(0.5),
-                window,
-            );
-            for i in 0..2 {
-                dot(
-                    at(x0 + (fork - x0) * (i as f32 + 0.5) / 2., my),
-                    3.,
-                    muted,
-                    window,
-                );
-            }
-            if !creating {
-                for i in 0..2 {
-                    let x = fork + (join - fork) * (i as f32 + 0.45) / 2.4;
-                    if x <= main_to + 0.5 {
-                        dot(at(x, my), 3., muted, window);
-                    }
-                }
-            }
-
-            // The branch: off the fork in a long S, then flat to its tip, as one path the motion
-            // runs along. While it commits, the last stretch is dashed and the new commit hollow.
-            let flat = fork + 46.;
-            let mut path = cubic_points(
-                at(fork, my),
-                at(fork + 24., my),
-                at(flat - 24., by),
-                at(flat, by),
-                16,
-            );
-            let tail = flat + (tip_x - flat) * 0.72;
-            path.push(at(if committing { tail } else { tip_x }, by));
-            // Pushing: the branch waits, faint, while a bright stretch runs along it to the tip.
-            let base = if pushing { sky.opacity(0.4) } else { sky };
-            seg(&path, px(1.5), false, base, window);
-            if committing {
-                seg(&[at(tail, by), at(tip_x, by)], px(1.5), true, sky, window);
-            }
-            if pushing {
-                let head = (clock * 0.8).fract() * 1.25;
-                stroke_range(&path, head - 0.25, head, px(2.), sky, window);
-            }
-            // Merged: the purple comes back from the target through the branch to the fork.
-            let front = if merged {
-                (age / 0.9).clamp(0., 1.)
-            } else {
-                0.
-            };
-            if front > 0. {
-                stroke_range(&path, 1. - front, 1., px(1.5), indigo, window);
-            }
-            let length = path_length(&path);
-            for i in 0..commits {
-                let x = flat + (tip_x - flat) * (i as f32 + 0.6) / (commits as f32 + 0.4);
-                let along = (path_length_to_x(&path, ox + x) / length).clamp(0., 1.);
-                let c = if front > 0. && along >= 1. - front {
-                    indigo
-                } else {
-                    sky
-                };
-                if committing && i == commits - 1 {
-                    ring(at(x.min(tail), by), 3.4, 1.4, c, band_bg, window);
-                } else {
-                    dot(at(x, by), 3., c, window);
-                }
-            }
-
-            // Resolving pours main into the branch's end, whose ring then waits.
-            if resolving {
-                let mx = fork + (join - fork) * 0.62;
-                barc(
-                    at(mx, my),
-                    at(mx, my + 22.),
-                    at(tip_x + 26., by - 20.),
-                    at(tip_x + 6., by),
-                    draw,
-                    px(1.5),
-                    false,
-                    tip,
-                    window,
-                );
-                ring(at(tip_x, by), 4.5, 1.6, tip, band_bg, window);
-            }
-
-            // The merge curve: dashed while it's a "could". Merging draws the merge itself over
-            // it, solid purple from the branch's end to the target; merged, it's all purple.
-            if !matches!(card.phase, Phase::Creating | Phase::Closed | Phase::Failed) {
-                let mid = (join - tip_x) * 0.5;
-                let curve = cubic_points(
-                    at(tip_x, by),
-                    at(tip_x + mid, by),
-                    at(join - mid, my),
-                    at(join, my),
-                    24,
-                );
-                if merged {
-                    seg(&curve, px(1.5), false, indigo, window);
-                } else if merging {
-                    seg(&curve, px(1.5), true, green.opacity(0.85), window);
-                    let reach = (age / 0.8).clamp(0., 1.);
-                    stroke_range(&curve, 0., reach, px(1.75), indigo, window);
-                } else {
-                    stroke_range_dashed(&curve, draw, tip.opacity(0.85), window);
-                }
-                let r = 4.5 * (1. + 0.35 * pop);
-                if matches!(card.phase, Phase::Conflicted | Phase::Ready | Phase::Merged) {
-                    dot(at(join, my), r + 5., tip.opacity(0.16), window);
-                }
-                match card.phase {
-                    Phase::Open => ring(at(join, my), 3.4, 1.4, muted, band_bg, window),
-                    Phase::Checking => {
-                        dot(at(join, my), 3.4, tip.opacity(0.4), window);
-                        spin_arc(at(join, my), 6., clock, tip, window);
-                    }
-                    Phase::Conflicted => {
-                        dot(at(join, my), r, tip, window);
-                        bang(at(join, my), band_bg, window);
-                    }
-                    Phase::Ready => {
-                        dot(at(join, my), r + 1.5, tip, window);
-                        tick(at(join, my), band_bg, window);
-                    }
-                    Phase::Merging => {
-                        dot(at(join, my), r + 1.5, green, window);
-                        tick(at(join, my), band_bg, window);
-                        spin_arc(at(join, my), 8.5, clock, indigo, window);
-                    }
-                    Phase::Merged => {
-                        dot(at(join, my), r, indigo, window);
-                        dot(at(join, my), 1.8, band_bg, window);
-                    }
-                    _ => {}
-                }
-            }
-            let moving = spinning || pushing || draw < 1. || (merged && front < 1.);
-            if moving && motion {
-                window.request_animation_frame();
-            }
-        },
-    )
-    .w_full()
-    .h(px(PR_BAND_H))
-    .into_any_element()
-}
-
-/// Seconds since the card's phase began (long ago when motion is off, so it draws settled).
-fn phase_age(card: &Card, motion: bool) -> f32 {
-    if !motion {
-        return f32::MAX;
-    }
-    let age = (now_ms() - card.phase_at_ms.max(card.created_ms)) as f32 / 1000.;
-    // Design review (`shots`): `TREK_SLOW_MOTION=<k>` slows these as it does Trek's springs.
-    #[cfg(feature = "shots")]
-    let age = age
-        / std::env::var("TREK_SLOW_MOTION")
-            .ok()
-            .and_then(|k| k.parse::<f32>().ok())
-            .filter(|k| *k > 1.)
-            .unwrap_or(1.);
-    age
-}
-
-/// `n` points along a cubic, ends included.
-fn cubic_points(
-    p0: Point<Pixels>,
-    c1: Point<Pixels>,
-    c2: Point<Pixels>,
-    p1: Point<Pixels>,
-    n: usize,
-) -> Vec<Point<Pixels>> {
-    (0..=n)
-        .map(|i| bcubic(p0, c1, c2, p1, i as f32 / n as f32))
-        .collect()
-}
-
-fn dist(a: Point<Pixels>, b: Point<Pixels>) -> f32 {
-    let (dx, dy) = ((b.x - a.x).as_f32(), (b.y - a.y).as_f32());
-    (dx * dx + dy * dy).sqrt()
-}
-
-fn path_length(points: &[Point<Pixels>]) -> f32 {
-    points
-        .windows(2)
-        .map(|w| dist(w[0], w[1]))
-        .sum::<f32>()
-        .max(1.)
-}
-
-/// How far along `points` the path first reaches `x` (window coordinates).
-fn path_length_to_x(points: &[Point<Pixels>], x: f32) -> f32 {
-    let mut run = 0.;
-    for w in points.windows(2) {
-        let (a, b) = (w[0].x.as_f32(), w[1].x.as_f32());
-        let d = dist(w[0], w[1]);
-        if (a..=b).contains(&x) && b > a {
-            return run + d * (x - a) / (b - a);
-        }
-        run += d;
-    }
-    run
-}
-
-/// The part of `points` from fraction `from` to `to` of its length (clamped to the path).
-fn sub_path(points: &[Point<Pixels>], from: f32, to: f32) -> Vec<Point<Pixels>> {
-    let total = path_length(points);
-    let (a, b) = (from.clamp(0., 1.) * total, to.clamp(0., 1.) * total);
-    if b <= a {
-        return vec![];
-    }
-    let lerp = |p: Point<Pixels>, q: Point<Pixels>, t: f32| {
-        point(p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t)
-    };
-    let mut out = vec![];
-    let mut run = 0.;
-    for w in points.windows(2) {
-        let d = dist(w[0], w[1]);
-        let (s, e) = (run, run + d);
-        if e >= a && s <= b && d > 0. {
-            let t0 = ((a - s) / d).clamp(0., 1.);
-            let t1 = ((b - s) / d).clamp(0., 1.);
-            if out.is_empty() {
-                out.push(lerp(w[0], w[1], t0));
-            }
-            out.push(lerp(w[0], w[1], t1));
-        }
-        run = e;
-    }
-    out
-}
-
-/// Stroke the part of `points` from fraction `from` to `to`: a comet's stretch, a front.
-fn stroke_range(
-    points: &[Point<Pixels>],
-    from: f32,
-    to: f32,
-    width: Pixels,
-    color: Hsla,
-    window: &mut Window,
-) {
-    seg(&sub_path(points, from, to), width, false, color, window);
-}
-
-/// A dashed line drawing itself out: the first `t` of `points`.
-fn stroke_range_dashed(points: &[Point<Pixels>], t: f32, color: Hsla, window: &mut Window) {
-    seg(&sub_path(points, 0., t), px(1.5), true, color, window);
-}
-
-/// The band's written marks: the base and head's names, the phase's pill over the target.
-fn pr_labels(card: &Card, cx: &App) -> Vec<AnyElement> {
-    let theme = cx.theme();
-    let mono = theme.mono_font_family.clone();
-    let mut out = vec![];
-    if !card.base.is_empty() {
-        out.push(
-            div()
-                .absolute()
-                .left(relative(0.045))
-                .top(px(7.))
-                .rounded(px(4.))
-                .px(px(4.))
-                .bg(theme.foreground.opacity(0.06))
-                .text_size(px(9.5))
-                .font_family(mono.clone())
-                .text_color(theme.muted_foreground)
-                .child(card.base.clone())
-                .into_any_element(),
-        );
-    }
-    if !card.head.is_empty() {
-        let passed = card.phase == Phase::Merged && phase_age(card, true) > 0.55;
-        let c = if passed {
-            crate::palette::indigo(cx)
-        } else {
-            crate::palette::sky(cx)
-        };
-        out.push(
-            div()
-                .absolute()
-                .left(relative(0.27))
-                .bottom(px(6.))
-                .rounded(px(4.))
-                .px(px(4.))
-                .bg(c.opacity(0.10))
-                .text_size(px(9.5))
-                .font_family(mono)
-                .text_color(c)
-                .child(card.head.clone())
-                .into_any_element(),
-        );
-    }
-    if let Some((text, tint)) = tip_label(card, cx) {
-        out.push(
-            div()
-                .absolute()
-                .right(relative(0.04))
-                .top(px(4.))
-                .child(band_pill(text, tint))
-                .into_any_element(),
-        );
-    }
-    out
-}
-
-// ---- Run: the pipeline ----
-
-fn pipeline_graph(
-    card: &Card,
-    clock: f32,
-    draw: f32,
-    pop: f32,
-    motion: bool,
-    cx: &App,
-) -> AnyElement {
-    let theme = cx.theme();
-    let band_bg = band_fill(cx);
-    let muted = theme.muted_foreground.opacity(0.55);
-    let tip = state_tint(card, cx);
-    let m = marks(cx);
-    let jobs = card.stages.clone();
-    let card = card.clone();
-    canvas(
-        move |_, _, _| {},
-        move |b, _, window, _| {
-            let w = b.size.width.as_f32();
-            let (ox, oy) = (b.origin.x.as_f32(), b.origin.y.as_f32());
-            let at = |x: f32, y: f32| point(px(ox + x), px(oy + y));
-            let y = BAND_H * 0.5;
-            let (x0, x1) = (w * 0.07, w * 0.78);
-            let join = w * 0.90;
-            let n = jobs.len();
-            let node_x = |i: usize| x0 + (x1 - x0) * (i as f32 + 0.5) / n.max(1) as f32;
-
-            // The track, filled in job colour where the work already passed through it.
-            seg(&[at(x0, y), at(join, y)], px(1.5), false, muted, window);
-            for (i, s) in jobs.iter().enumerate() {
-                if s.state.pending() {
-                    break;
-                }
-                let c = if s.state == CheckState::Fail {
-                    m.red
-                } else {
-                    m.sky
-                };
-                seg(
-                    &[
-                        at(node_x(i), y),
-                        at(if i + 1 < n { node_x(i + 1) } else { join }, y),
-                    ],
-                    px(1.5),
-                    false,
-                    c,
-                    window,
-                );
-            }
-            for (i, s) in jobs.iter().enumerate() {
-                job_mark(at(node_x(i), y), s.state, clock, band_bg, m, window);
-            }
-            // The run's verdict node at the end.
-            let r = 5. * (1. + 0.35 * pop);
-            match card.phase {
-                Phase::Passed => {
-                    dot(at(join, y), r, tip, window);
-                    tick(at(join, y), band_bg, window);
-                }
-                Phase::Failed => {
-                    dot(at(join, y), r, tip, window);
-                    ex(at(join, y), band_bg, window);
-                }
-                _ => {
-                    ring(at(join, y), 4.5, 1.4, tip, band_bg, window);
-                    spin_arc(at(join, y), 7., clock, tip, window);
-                }
-            }
-            if motion && (matches!(card.phase, Phase::Checking) || draw < 1.) {
-                window.request_animation_frame();
-            }
-        },
-    )
-    .w_full()
-    .h(px(BAND_H))
-    .into_any_element()
-}
-
-/// The run's job names under their nodes, its verdict over the target.
-fn pipeline_labels(card: &Card, cx: &App) -> Vec<AnyElement> {
-    let theme = cx.theme();
-    let tip = state_tint(card, cx);
-    let mut out = vec![];
-    let n = card.stages.len();
-    if n > 0 {
-        out.push(
-            div()
-                .absolute()
-                .left(relative(0.07))
-                .right(relative(0.22))
-                .bottom(px(6.))
-                .child(h_flex().children(card.stages.iter().map(|s| {
-                    h_flex().flex_1().min_w_0().justify_center().child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(9.5))
-                            .text_color(theme.muted_foreground)
-                            .child(s.label.clone()),
-                    )
-                })))
-                .into_any_element(),
-        );
-    }
-    // While it runs, how far along (a fact the header doesn't give); once it's done the header's
-    // "Passed in 49m" says it all and the target's mark needs no word.
-    if !card.phase.terminal() && n > 0 {
-        let done = card.stages.iter().filter(|s| !s.state.pending()).count();
-        out.push(
-            div()
-                .absolute()
-                .right(relative(0.05))
-                .top(px(4.))
-                .child(band_pill(format!("{done} of {n} done"), tip))
-                .into_any_element(),
-        );
-    }
-    out
-}
-
-// ---- Release: lanes converging on the publish ----
-
-fn lanes_graph(card: &Card, clock: f32, draw: f32, pop: f32, motion: bool, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    let band_bg = band_fill(cx);
-    let muted = theme.muted_foreground.opacity(0.55);
-    let tip = state_tint(card, cx);
-    let m = marks(cx);
-    let stages = card.stages.clone();
-    let height = band_height(card);
-    let card = card.clone();
-    canvas(
-        move |_, _, _| {},
-        move |b, _, window, _| {
-            let w = b.size.width.as_f32();
-            let (ox, oy) = (b.origin.x.as_f32(), b.origin.y.as_f32());
-            let at = |x: f32, y: f32| point(px(ox + x), px(oy + y));
-            let n = stages.len().clamp(1, 4);
-            let mid = lane_y(0) + LANE_GAP * (n as f32 - 1.) / 2.;
-            let (xl, xr) = (w * 0.13, w * 0.62);
-            let join = w * 0.88;
-            for (i, s) in stages.iter().take(4).enumerate() {
-                let y = lane_y(i);
-                let c = match s.state {
-                    CheckState::Pass => m.green,
-                    CheckState::Fail => m.red,
-                    CheckState::Running => m.sky,
-                    _ => muted,
-                };
-                // The lane, then the curve into the publish.
-                seg(&[at(xl, y), at(xr, y)], px(1.5), false, c, window);
-                job_mark(at(xr, y), s.state, clock, band_bg, m, window);
-                barc(
-                    at(xr, y),
-                    at(xr + 30., y),
-                    at(join - 40., mid),
-                    at(join, mid),
-                    if s.state.pending() { draw * 0.7 } else { 1. },
-                    px(1.5),
-                    s.state.pending(),
-                    c.opacity(0.85),
-                    window,
-                );
-            }
-            let r = 5. * (1. + 0.35 * pop);
-            match card.phase {
-                Phase::Published => {
-                    dot(at(join, mid), r, tip, window);
-                    tick(at(join, mid), band_bg, window);
-                }
-                Phase::Failed => {
-                    dot(at(join, mid), r, tip, window);
-                    ex(at(join, mid), band_bg, window);
-                }
-                _ => {
-                    ring(at(join, mid), 4.5, 1.4, tip, band_bg, window);
-                    spin_arc(at(join, mid), 7., clock, tip, window);
-                }
-            }
-            if motion && (matches!(card.phase, Phase::Releasing) || draw < 1.) {
-                window.request_animation_frame();
-            }
-        },
-    )
-    .w_full()
-    .h(px(height))
-    .into_any_element()
-}
-
-/// The release's lane names at the left edge, its verdict over the target.
-fn lane_labels(card: &Card, cx: &App) -> Vec<AnyElement> {
-    let theme = cx.theme();
-    let tip = state_tint(card, cx);
-    let mut out = vec![];
-    for (i, s) in card.stages.iter().take(4).enumerate() {
-        let y = lane_y(i);
-        out.push(
-            div()
-                .absolute()
-                .left(px(12.))
-                .top(px(y - 7.))
-                .text_size(px(9.5))
-                .text_color(theme.muted_foreground)
-                .max_w(relative(0.18))
-                .truncate()
-                .child(s.label.clone())
-                .into_any_element(),
-        );
-    }
-    // The target is the version the lanes ship (the header says how it went).
-    if !card.version.is_empty() {
-        out.push(
-            div()
-                .absolute()
-                .right(relative(0.05))
-                .top(px(4.))
-                .child(band_pill(format!("v{}", card.version), tip))
-                .into_any_element(),
-        );
-    }
-    out
 }
 
 /// A card in `state` with made-up contents, for design review (`shots`' `pr-demo`).
@@ -3676,6 +3798,26 @@ pub fn demo(state: &str) -> Card {
         repo_dir: ".".into(),
         repo: Some("dokyit/Trek".into()),
         commits: Some(3),
+        history: vec![
+            Commit {
+                title: "Add session refresh tests".into(),
+                oid: "d29f50".into(),
+                author: "You".into(),
+                committed_ms: now - 20_000,
+            },
+            Commit {
+                title: "Refresh sessions near expiry".into(),
+                oid: "c70a92".into(),
+                author: "You".into(),
+                committed_ms: now - 25 * 60_000,
+            },
+            Commit {
+                title: "Read session expiry from the token".into(),
+                oid: "1f8e3b".into(),
+                author: "You".into(),
+                committed_ms: now - 40 * 60_000,
+            },
+        ],
         added: Some(128),
         removed: Some(36),
         created_ms: now - 300_000,
@@ -3988,13 +4130,39 @@ mod tests {
     // Named, not `super::*`: that would bring in gpui_kit's own `test` macro.
     use super::{
         Card, CheckState, JobJson, Kind, Phase, PrView, WorkflowRun, apply_conflicts,
-        conflicting_files, is_workflow, now_ms, pick_run, pr_from_view, release_card,
-        release_run_card, run_ms, segments,
+        conflicting_files, failure_title, is_workflow, now_ms, pick_run, pr_from_view,
+        release_card, release_run_card, run_ms, segments, staggered_progress,
     };
     use std::path::Path;
 
     fn words(s: &str) -> Vec<String> {
         segments(s).iter().map(|s| s.trim().to_string()).collect()
+    }
+
+    #[test]
+    fn every_staggered_marker_reaches_its_full_size() {
+        for index in 0..64 {
+            assert_eq!(staggered_progress(1., index, 64), 1., "marker {index}");
+        }
+        assert_eq!(staggered_progress(1., 0, 1), 1.);
+    }
+
+    #[test]
+    fn a_failed_card_keeps_the_explanation_the_watcher_recorded() {
+        let cancelled = Card {
+            kind: Kind::Run,
+            phase: Phase::Failed,
+            step: "Cancelled".into(),
+            ..Default::default()
+        };
+        assert_eq!(failure_title(&cancelled), "Cancelled");
+        let release = Card {
+            kind: Kind::Release,
+            phase: Phase::Failed,
+            step: "codesign rejected the archive".into(),
+            ..Default::default()
+        };
+        assert_eq!(failure_title(&release), "codesign rejected the archive");
     }
 
     #[test]
@@ -4177,6 +4345,38 @@ mod tests {
             pr_from_view(&card, view("CONFLICTING", &red)).phase,
             Phase::Conflicted
         );
+    }
+
+    #[test]
+    fn a_pull_request_keeps_the_human_parts_of_its_commit_history() {
+        let card = Card {
+            kind: Kind::Pr,
+            ..Default::default()
+        };
+        let view: PrView = serde_json::from_str(
+            r#"{
+                "number": 9,
+                "state": "OPEN",
+                "mergeable": "MERGEABLE",
+                "headRefName": "feat/session-refresh",
+                "baseRefName": "main",
+                "commits": [{
+                    "messageHeadline": "Refresh sessions near expiry",
+                    "oid": "c70a928812345678",
+                    "committedDate": "2026-10-24T12:00:00Z",
+                    "authors": [{"login": "tobias", "name": "Tobias"}]
+                }],
+                "statusCheckRollup": []
+            }"#,
+        )
+        .unwrap();
+        let rendered = pr_from_view(&card, view);
+        assert_eq!(rendered.commits, Some(1));
+        assert_eq!(rendered.history.len(), 1);
+        assert_eq!(rendered.history[0].title, "Refresh sessions near expiry");
+        assert_eq!(rendered.history[0].oid, "c70a928");
+        assert_eq!(rendered.history[0].author, "tobias");
+        assert!(rendered.history[0].committed_ms > 0);
     }
 
     #[test]
