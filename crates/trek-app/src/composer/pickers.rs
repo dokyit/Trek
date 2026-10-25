@@ -3,7 +3,7 @@
 //! its menu, the context ring, and the `/`, `@` and `$` picker over the text. Each composer keeps
 //! a `Pickers` and implements `PickerHost`; the functions here draw and drive them for it.
 
-use super::{default_model, hand_icon, model_name, same_model};
+use super::{default_model, hand_icon, look, model_name, same_model};
 use crate::mentions::{self, PickIcon, PickItem, PickKind, Trigger};
 use crate::palette;
 use crate::ui::{self, Pill};
@@ -12,7 +12,8 @@ use gpui_kit::component::input::{InlineToken, Input, InputState, TextareaState};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, h_flex,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -205,9 +206,13 @@ pub fn model_pill<H: PickerHost>(
             cx.notify();
         }))
         .trigger(
+            // The agent's glyph and the model, then the effort as a five-bar signal and its
+            // name (blue at Max), as the design's effort chip draws it.
             Pill::new("model-pill")
+                .chip()
                 .flexible()
                 .small(small)
+                .selected(open)
                 .child(ui::agent_glyph(&prefs.agent, cx))
                 .child(
                     div()
@@ -220,32 +225,33 @@ pub fn model_pill<H: PickerHost>(
                             240.
                         }))
                         .truncate()
+                        .text_color(theme.foreground.opacity(0.82))
                         .child(model_label),
                 )
                 .when(!narrow, |el| {
+                    let max = prefs.effort == Effort::Max;
                     el.child(
-                        div()
+                        h_flex()
                             .flex_none()
-                            .text_color(theme.muted_foreground)
-                            .child(prefs.effort.label()),
+                            .gap(px(5.))
+                            .pl(px(1.))
+                            .child(look::effort_bars(prefs.effort, cx))
+                            .child(
+                                div()
+                                    .when(max, |el| {
+                                        el.text_color(palette::send(cx)).font_medium()
+                                    })
+                                    .child(prefs.effort.label()),
+                            ),
                     )
                 })
                 .when(prefs.fast, |el| {
                     el.child(
                         Icon::new(crate::assets::Lucide::Zap)
-                            .xsmall()
+                            .size(px(12.))
                             .text_color(palette::amber(cx)),
                     )
-                })
-                .child(
-                    Icon::new(if open {
-                        IconName::ChevronUp
-                    } else {
-                        IconName::ChevronDown
-                    })
-                    .xsmall()
-                    .text_color(theme.muted_foreground),
-                ),
+                }),
         )
         .content(move |_, _, cx| me.update(cx, |h, cx| model_menu(h, cx)))
         .into_any_element()
@@ -284,11 +290,11 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
     let muted = theme.muted_foreground;
     let sub = host.pickers_ref().sub;
 
-    let main = ui::menu_surface(cx)
+    let main = look::surface(cx)
         .w(px(260.))
         .when(fast_ok, |el| {
             el.child(
-                ui::menu_row("mm-fast", false, cx)
+                look::row("mm-fast", false, cx)
                     .child(
                         Icon::new(crate::assets::Lucide::Zap)
                             .small()
@@ -307,12 +313,14 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
             )
         })
         .child(
-            ui::menu_row("mm-effort", sub == Some(Sub::Effort), cx)
+            look::row("mm-effort", sub == Some(Sub::Effort), cx)
                 .test_support()
                 .child(
-                    Icon::new(crate::assets::Lucide::Sparkle)
-                        .small()
-                        .text_color(muted),
+                    div()
+                        .w(px(16.))
+                        .flex()
+                        .justify_center()
+                        .child(look::effort_bars(prefs.effort, cx)),
                 )
                 .child(div().flex_1().child("Effort"))
                 .child(div().text_color(muted).child(prefs.effort.label()))
@@ -329,7 +337,7 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
                 })),
         )
         .child(
-            ui::menu_row("mm-model", sub == Some(Sub::Model), cx)
+            look::row("mm-model", sub == Some(Sub::Model), cx)
                 .test_support()
                 .child(ui::agent_glyph(&prefs.agent, cx))
                 .child(div().flex_1().child("Model"))
@@ -387,18 +395,24 @@ fn effort_panel<H: PickerHost>(
             ]
         });
     let current = prefs.effort;
-    ui::menu_surface(cx)
+    look::surface(cx)
         .w(px(200.))
         .children(efforts.into_iter().map(|e| {
-            ui::menu_row(
+            look::row(
                 SharedString::from(format!("eff-{}", e.as_str())),
                 e == current,
                 cx,
             )
             .test_support()
-            .child(div().flex_1().child(e.label()))
+            .child(look::effort_bars(e, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .when(e == Effort::Max, |el| el.text_color(palette::send(cx)))
+                    .child(e.label()),
+            )
             .when(e == current, |el| {
-                el.child(Icon::new(IconName::Check).small())
+                el.child(Icon::new(IconName::Check).size(px(13.)))
             })
             .on_click(cx.listener(move |this: &mut H, _, _, cx| {
                 update_prefs(this, cx, |p| p.effort = e);
@@ -497,7 +511,7 @@ fn model_panel<H: PickerHost>(
     let custom_row = custom_target.map(|(agent, custom_id)| {
         let agent2 = agent.clone();
         let id2 = custom_id.clone();
-        ui::menu_row(
+        look::row(
             SharedString::from(format!("m-custom-{}", custom_id)),
             false,
             cx,
@@ -540,14 +554,14 @@ fn model_panel<H: PickerHost>(
                        cx: &mut Context<H>| {
         div()
             .id(id)
-            .size(px(32.))
+            .size(px(30.))
             .flex()
             .items_center()
             .justify_center()
             .rounded(px(8.))
             .cursor_pointer()
-            .when(active, |el| el.bg(theme.list_active))
-            .hover(|s| s.bg(theme.list_active))
+            .when(active, |el| el.bg(look::pressed(cx)))
+            .hover(|s| s.bg(look::chip_fill(cx)))
             .tooltip(move |window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
             })
@@ -558,10 +572,10 @@ fn model_panel<H: PickerHost>(
             }))
     };
     let mut rail_col = v_flex()
-        .gap_1()
-        .p(px(5.))
+        .gap(px(2.))
+        .p(px(4.))
         .border_r_1()
-        .border_color(theme.border)
+        .border_color(look::hairline(cx))
         .child(rail_button(
             "rail-fav".into(),
             rail == Rail::Favorites,
@@ -590,7 +604,7 @@ fn model_panel<H: PickerHost>(
         let is_fav = favorites.contains(&fav_key);
         let id = m.id.clone();
         let agent2 = agent.clone();
-        ui::menu_row(
+        look::row(
             SharedString::from(format!("m-{}-{}", agent.key(), m.id)),
             selected,
             cx,
@@ -626,7 +640,7 @@ fn model_panel<H: PickerHost>(
                     });
                 })),
         )
-        .when(selected, |el| el.child(Icon::new(IconName::Check).small()))
+        .when(selected, |el| el.child(Icon::new(IconName::Check).size(px(13.))))
         .on_click(cx.listener(move |this: &mut H, _, _, cx| {
             let (agent, id) = (agent2.clone(), id.clone());
             update_prefs(this, cx, |p| {
@@ -638,7 +652,7 @@ fn model_panel<H: PickerHost>(
     });
 
     let search = host.pickers_ref().model_search.clone();
-    ui::menu_surface(cx)
+    look::surface(cx)
         .p_0()
         .w(px(360.))
         .child(
@@ -651,17 +665,19 @@ fn model_panel<H: PickerHost>(
                         .min_w_0()
                         .child(
                             v_flex()
-                                .p(px(6.))
+                                .px(px(9.))
+                                .pt(px(8.))
+                                .pb(px(4.))
                                 .gap(px(4.))
                                 .border_b_1()
-                                .border_color(theme.border)
-                                .child(div().id("model-source").test_support().text_xs().text_color(theme.muted_foreground).child(source))
+                                .border_color(look::hairline(cx))
+                                .child(div().id("model-source").test_support().text_size(px(12.)).text_color(theme.muted_foreground).child(source))
                                 .child(Input::new(&search).small().appearance(false).prefix(Icon::new(IconName::Search).small().text_color(theme.muted_foreground))),
                         )
                         .child(
                             v_flex()
                                 .id("model-list")
-                                .p(px(5.))
+                                .p(px(4.))
                                 .max_h(px(360.))
                                 .overflow_y_scroll()
                                 .children(rows)
@@ -716,19 +732,12 @@ pub fn access_pill<H: PickerHost>(
         }))
         .trigger(
             Pill::new("access-pill")
+                .chip()
                 .small(small)
+                .selected(open)
                 .when(compact, |p| p.tooltip(hh.label()))
-                .child(hand_icon(hh).small().text_color(tint))
-                .when(!compact, |p| p.child(hh.label()))
-                .child(
-                    Icon::new(if open {
-                        IconName::ChevronUp
-                    } else {
-                        IconName::ChevronDown
-                    })
-                    .xsmall()
-                    .text_color(theme.muted_foreground),
-                ),
+                .child(hand_icon(hh).size(px(look::ICON)).text_color(tint))
+                .when(!compact, |p| p.child(hh.label())),
         )
         .content(move |_, _, cx| me.update(cx, |h, cx| access_menu(h, cx)))
         .into_any_element()
@@ -739,7 +748,7 @@ fn access_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
     let current = ws.prefs_in(host.scope()).hand_holding;
     let unlocked = ws.settings.permissions.full_access_unlocked;
     let theme = cx.theme().clone();
-    ui::menu_surface(cx)
+    look::surface(cx)
         .w(px(340.))
         .children(HandHolding::ALL.into_iter().map(|level| {
             let locked = level == HandHolding::FullAccess && !unlocked;
@@ -748,17 +757,18 @@ fn access_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
             } else {
                 theme.muted_foreground
             };
-            ui::menu_row(
+            look::row(
                 SharedString::from(format!("hh-{level:?}")),
                 level == current,
                 cx,
             )
             .items_start()
-            .py(px(9.))
+            .py(px(8.))
+            .rounded(px(9.))
             .child(
                 div()
                     .pt(px(2.))
-                    .child(hand_icon(level).small().text_color(tint)),
+                    .child(hand_icon(level).size(px(look::ICON)).text_color(tint)),
             )
             .child(
                 v_flex()
@@ -768,7 +778,7 @@ fn access_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
                     .child(div().font_medium().child(level.label()))
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(11.5))
                             .whitespace_normal()
                             .line_height(relative(1.4))
                             .text_color(theme.muted_foreground)
@@ -1049,7 +1059,8 @@ pub fn slash_ghost<H: PickerHost>(host: &H, cx: &App) -> Option<String> {
 pub fn slash_ghost_overlay<H: PickerHost>(host: &H, cx: &App) -> Option<AnyElement> {
     let ghost = slash_ghost(host, cx)?;
     let input = host.input().clone();
-    let color = cx.theme().muted_foreground;
+    // The accepted token's blue, faded: what Tab or ↩ would put in.
+    let color = palette::token(cx).opacity(0.5);
     let family = cx.theme().font_family.clone();
     Some(
         canvas(
@@ -1075,10 +1086,10 @@ pub fn slash_ghost_overlay<H: PickerHost>(host: &H, cx: &App) -> Option<AnyEleme
                     underline: None,
                     strikethrough: None,
                 };
-                // Textarea's default (Medium) uses text_sm, i.e. 0.875 rem.
+                // The composer's textarea is set to `look::TEXT` rems.
                 let line = window.text_system().shape_line(
                     ghost.clone().into(),
-                    window.rem_size() * 0.875,
+                    window.rem_size() * look::TEXT,
                     &[run],
                     None,
                 );
@@ -1230,11 +1241,6 @@ pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement
     let t = p.trigger.as_ref()?;
     let items = picker_items(host, cx);
     let theme = cx.theme().clone();
-    let title = match t.kind {
-        PickKind::Slash => "Commands",
-        PickKind::Mention => "Files and agents",
-        PickKind::Skill => "Skills",
-    };
     // A refresh of a list already on screen isn't "indexing": the rows are there.
     let indexed_here = {
         let ws = host.workspace().read(cx);
@@ -1249,25 +1255,24 @@ pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement
         PickKind::Slash => "No matching commands",
     };
     let picked = p.picked.min(items.len().saturating_sub(1));
+    // Commands and skills are two-line rows (name over description) with no icon, as the
+    // design's skill popover; files and agents keep the icon that tells them apart.
+    let files = t.kind == PickKind::Mention;
+    // `#F7F7F7` on Paper: lighter than a chip, it only says which row ↩ picks.
+    let lit = theme
+        .foreground
+        .opacity(if theme.mode.is_dark() { 0.06 } else { 0.035 });
     Some(
-        ui::menu_surface(cx)
-            .w_full()
-            .child(
-                h_flex()
-                    .px(px(10.))
-                    .pt(px(4.))
-                    .pb(px(6.))
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(div().flex_1().child(title))
-                    .child(crate::keys::shared("↑↓ to move · ↩ to pick · esc")),
-            )
+        look::surface(cx)
+            .w(px(if files { 420. } else { 326. }))
+            .max_w_full()
+            .rounded(px(16.))
             .when(items.is_empty(), |el| {
                 el.child(
                     div()
-                        .px(px(10.))
-                        .py(px(8.))
-                        .text_sm()
+                        .px(px(11.))
+                        .py(px(10.))
+                        .text_size(px(12.5))
                         .text_color(theme.muted_foreground)
                         .child(empty),
                 )
@@ -1276,7 +1281,8 @@ pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement
                 v_flex()
                     .id("picker-list")
                     .test_support()
-                    .max_h(px(280.))
+                    .gap(px(if files { 2. } else { 10. }))
+                    .max_h(px(if files { 300. } else { 290. }))
                     .overflow_y_scroll()
                     .track_scroll(&p.picker_scroll)
                     .children(items.into_iter().enumerate().map(|(i, item)| {
@@ -1287,25 +1293,44 @@ pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement
                             PickIcon::File => Icon::new(IconName::File),
                             PickIcon::Folder => Icon::new(IconName::Folder),
                         };
-                        ui::menu_row(("pick", i), false, cx)
-                            .min_h(px(30.))
-                            .when(i == picked, |el| el.bg(theme.foreground.opacity(0.09)))
-                            .child(icon.small().text_color(theme.muted_foreground))
+                        let detail = item.detail.clone();
+                        h_flex()
+                            .id(("pick", i))
+                            .px(px(11.))
+                            .py(px(6.))
+                            .min_h(px(if files { 30. } else { 47. }))
+                            .gap(px(9.))
+                            .rounded(px(12.))
+                            .cursor_pointer()
+                            .when(i == picked, |el| el.bg(lit))
+                            .hover(move |s| s.bg(lit))
+                            .when(files, |el| {
+                                el.rounded(px(8.)).child(
+                                    icon.size(px(look::ICON))
+                                        .text_color(theme.muted_foreground),
+                                )
+                            })
                             .child(
-                                div()
-                                    .flex_none()
-                                    .max_w(px(260.))
-                                    .truncate()
-                                    .child(item.label),
-                            )
-                            .child(
-                                div()
+                                v_flex()
                                     .flex_1()
                                     .min_w_0()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(item.detail),
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(12.5))
+                                            .text_color(theme.foreground)
+                                            .child(item.label),
+                                    )
+                                    .when(!detail.is_empty(), |el| {
+                                        el.child(
+                                            div()
+                                                .truncate()
+                                                .text_size(px(11.5))
+                                                .text_color(theme.muted_foreground)
+                                                .child(detail),
+                                        )
+                                    }),
                             )
                             .on_click(cx.listener(move |this: &mut H, _, window, cx| {
                                 accept_pick(this, i, window, cx)

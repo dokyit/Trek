@@ -29,6 +29,7 @@ use trek_core::orchestrate::{Consult, Consultant, Style};
 use trek_core::settings::FollowUp;
 use trek_core::{AgentId, Effort, HandHolding, RunState};
 
+pub(crate) mod look;
 mod machine_chip;
 pub use machine_chip::reach_dot;
 pub mod pickers;
@@ -1765,6 +1766,26 @@ impl Composer {
         }
     }
 
+    /// Voice mode with no mic and no Speech, for captures (the shots harness's `dictate-demo
+    /// [text]`): a live take opens, and `text`, if any, shows as heard so far with a burst of
+    /// speech at the waveform's right end. ✓ and ✕ then work as in a real take.
+    #[cfg(feature = "shots")]
+    pub fn dictate_demo(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (heard, results) = async_channel::unbounded();
+        if !text.trim().is_empty() {
+            let _ = heard.try_send(dictate::Heard::Partial(text.trim().to_string()));
+        }
+        drop(heard);
+        self.begin_voice(true, results, window, cx);
+        if !text.trim().is_empty() {
+            for i in 0..36 {
+                let level = ((i as f32) * 0.9).sin().abs() * 0.85 * ((i % 7) as f32 / 7. + 0.3);
+                self.voice.levels.push(level);
+            }
+        }
+        cx.notify();
+    }
+
     /// The text area while the waveform is up: what's typed, with what's heard so far at the
     /// caret in italic and muted (it's still being revised).
     fn voice_preview(&self, window: &Window, cx: &App) -> AnyElement {
@@ -2143,10 +2164,15 @@ impl Composer {
         let restate = self.restate;
         gpui_kit::component::button::Button::new("attach")
             .ghost()
-            .with_size(px(30.))
-            .rounded(px(8.))
-            .bg(theme.foreground.opacity(0.065))
-            .icon(Icon::new(IconName::Plus).text_color(theme.muted_foreground))
+            // A 30 px circle on the chips' fill.
+            .with_size(px(look::CONTROL))
+            .rounded(px(look::CONTROL / 2.))
+            .bg(look::chip_fill(cx))
+            .icon(
+                Icon::new(IconName::Plus)
+                    .size(px(12.))
+                    .text_color(theme.muted_foreground),
+            )
             .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
                 let (a, b, c, d, e, f, g, h) = (
                     me.clone(),
@@ -2410,7 +2436,7 @@ impl Composer {
         let main_agent = prefs.agent.display_name();
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
-        let hairline = theme.foreground.opacity(0.07);
+        let hairline = look::hairline(cx);
         let me = cx.entity();
         let empty = self.consult.consultants.is_empty();
 
@@ -2422,7 +2448,7 @@ impl Composer {
             .child(
                 div()
                     .flex_1()
-                    .text_size(px(13.5))
+                    .text_size(px(13.))
                     .font_medium()
                     .child("Consult other models"),
             )
@@ -2508,7 +2534,7 @@ impl Composer {
                     .map(|m| model_name(m, &c.model))
                     .unwrap_or_else(|| c.model.clone());
                 let choosing = self.consult_effort == Some(i);
-                ui::menu_row(("consultant", i), choosing, cx)
+                look::row(("consultant", i), choosing, cx)
                     .test_support()
                     .min_h(px(32.))
                     .child(ui::agent_glyph(&c.agent, cx))
@@ -2571,7 +2597,7 @@ impl Composer {
                 })
                 .unwrap_or_else(|| "No other model on offer".into());
             v_flex().px(px(5.)).pt(px(2.)).child(
-                ui::menu_row("consult-judge", self.consult_judge, cx)
+                look::row("consult-judge", self.consult_judge, cx)
                     .test_support()
                     .min_h(px(32.))
                     .child(
@@ -2608,8 +2634,8 @@ impl Composer {
                     .justify_center()
                     .rounded(px(7.))
                     .cursor_pointer()
-                    .when(active, |el| el.bg(theme.list_active))
-                    .hover(|s| s.bg(theme.list_active))
+                    .when(active, |el| el.bg(look::pressed(cx)))
+                    .hover(|s| s.bg(look::chip_fill(cx)))
                     .tooltip(move |window, cx| {
                         gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
                     })
@@ -2634,7 +2660,7 @@ impl Composer {
                         .iter()
                         .any(|c| c.agent == *agent && same_model(&c.model, &m.id));
                     let (agent, model) = (agent.clone(), m.clone());
-                    ui::menu_row(
+                    look::row(
                         SharedString::from(format!("consult-add-{}-{}", agent.key(), m.id)),
                         false,
                         cx,
@@ -2668,7 +2694,7 @@ impl Composer {
                 })
             }));
         let (m1, m2) = (me.clone(), me.clone());
-        let main = ui::menu_surface(cx)
+        let main = look::surface(cx)
             .id("consult-menu-body")
             .test_support()
             .w(px(330.))
@@ -2703,7 +2729,7 @@ impl Composer {
                     .pt(px(10.))
                     .border_t_1()
                     .border_color(hairline)
-                    .child(ui::segmented(
+                    .child(look::segmented(
                         "consult-style",
                         vec![
                             (Style::Advise, "Advise"),
@@ -2731,7 +2757,7 @@ impl Composer {
                         },
                         cx,
                     ))
-                    .child(ui::segmented(
+                    .child(look::segmented(
                         "consult-then",
                         vec![(true, "Then implement"), (false, "Just report")],
                         self.consult.implement,
@@ -2748,7 +2774,7 @@ impl Composer {
             let (agent, model) = self.main_model(cx);
             let current = self.arena_judge(cx);
             let options = trek_core::orchestrate::judges((&agent, &model), &self.arena_options(cx));
-            ui::menu_surface(cx)
+            look::surface(cx)
                 .id("consult-judges")
                 .test_support()
                 .w(px(230.))
@@ -2767,7 +2793,7 @@ impl Composer {
                     let on = current
                         .as_ref()
                         .is_some_and(|j| j.agent == agent && same_model(&j.model, &m.id));
-                    ui::menu_row(
+                    look::row(
                         SharedString::from(format!("consult-judge-{}-{}", agent.key(), m.id)),
                         on,
                         cx,
@@ -2802,10 +2828,10 @@ impl Composer {
             });
             let current = c.effort;
             Some(
-                ui::menu_surface(cx)
+                look::surface(cx)
                     .w(px(170.))
                     .children(efforts.into_iter().map(|e| {
-                        ui::menu_row(
+                        look::row(
                             SharedString::from(format!("consult-eff-{}", e.as_str())),
                             e == current,
                             cx,
@@ -2867,7 +2893,7 @@ impl Composer {
                     .when(i > 0, |el| el.ml(px(-5.)))
                     .p(px(1.))
                     .rounded(px(5.))
-                    .bg(theme.secondary)
+                    .bg(look::card_fill(cx))
                     .child(ui::agent_logo(&c.agent, px(14.), cx))
             },
         ));
@@ -2876,11 +2902,12 @@ impl Composer {
         let agent = self.workspace.read(cx).prefs_in(&self.scope).agent;
         if let (Some(why), true) = (self.workspace.read(cx).consult_unavailable(&agent), empty) {
             return Pill::new("consult-pill")
+                .chip()
                 .ghost(true)
                 .tooltip(format!("Can't consult: {why}"))
                 .child(
                     Icon::new(crate::assets::Lucide::MessagesSquare)
-                        .small()
+                        .size(px(look::ICON))
                         .text_color(muted.opacity(0.5)),
                 )
                 .when(!compact, |p| {
@@ -2903,13 +2930,17 @@ impl Composer {
                 cx.notify();
             }))
             .trigger(
+                // Quiet until models are picked (no fill at rest, as the design's effort chip),
+                // then a chip like the others.
                 Pill::new("consult-pill")
+                    .chip()
                     .ghost(empty)
+                    .selected(open)
                     .tooltip(tip)
                     .when(empty, |p| {
                         p.child(
                             Icon::new(crate::assets::Lucide::MessagesSquare)
-                                .small()
+                                .size(px(look::ICON))
                                 .text_color(muted),
                         )
                         .when(!compact, |p| {
@@ -2959,26 +2990,17 @@ impl Composer {
             .collect();
         let ws_entity = self.workspace.clone();
         let composer = cx.entity();
-        let theme = cx.theme().clone();
-        gpui_kit::component::button::Button::new("project-picker")
-            .ghost()
-            .small()
-            .child(
-                h_flex()
-                    .gap(px(6.))
-                    .text_color(theme.foreground.opacity(0.9))
-                    .child(
-                        Icon::new(IconName::Folder)
-                            .small()
-                            .when_some(tint, |i, c| i.text_color(c)),
-                    )
-                    .child(label)
-                    .child(
-                        Icon::new(IconName::ChevronDown)
-                            .xsmall()
-                            .text_color(theme.muted_foreground),
-                    ),
-            )
+        look::chip_button(
+            gpui_kit::component::button::Button::new("project-picker"),
+            vec![
+                Icon::new(IconName::FolderOpen)
+                    .size(px(look::ICON))
+                    .when_some(tint, |i, c| i.text_color(c))
+                    .into_any_element(),
+                div().child(label).into_any_element(),
+            ],
+            cx,
+        )
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
                 let ws = ws_entity.clone();
                 // A thread of its own, in no project: a folder of its own to work in.
@@ -3049,29 +3071,21 @@ impl Composer {
         } else {
             (crate::assets::Lucide::Laptop, "Local")
         };
-        gpui_kit::component::button::Button::new("env-place")
-            .ghost()
-            .small()
-            .child(
-                h_flex()
-                    .gap(px(6.))
-                    .text_color(theme.foreground.opacity(0.82))
-                    .child(
-                        Icon::new(icon)
-                            .small()
-                            .text_color(if worktree && blocked.is_some() {
-                                palette::amber(cx)
-                            } else {
-                                theme.muted_foreground
-                            }),
-                    )
-                    .child(label)
-                    .child(
-                        Icon::new(IconName::ChevronDown)
-                            .xsmall()
-                            .text_color(theme.muted_foreground),
-                    ),
-            )
+        look::chip_button(
+            gpui_kit::component::button::Button::new("env-place"),
+            vec![
+                Icon::new(icon)
+                    .size(px(look::ICON))
+                    .text_color(if worktree && blocked.is_some() {
+                        palette::amber(cx)
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .into_any_element(),
+                div().child(label).into_any_element(),
+            ],
+            cx,
+        )
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
                 let pick = |label: &'static str, on: bool| {
                     let (ws, scope) = (ws.clone(), scope.clone());
@@ -3126,15 +3140,16 @@ impl Composer {
             .as_ref()
             .is_some_and(|p| ws.draft_machine(p).is_some());
         let theme = cx.theme().clone();
+        // A chip that only says something (no menu): the chips' size and type, no fill.
         let chip = |id: &'static str| {
             h_flex()
                 .id(id)
-                .h(px(26.))
-                .px(px(8.))
+                .h(px(look::CONTROL))
+                .px(px(9.))
                 .gap(px(6.))
-                .rounded(px(7.))
-                .text_sm()
-                .text_color(theme.foreground.opacity(0.82))
+                .rounded_full()
+                .text_size(px(look::LABEL))
+                .text_color(theme.muted_foreground)
         };
         // A worktree needs a branch to start from (and a commit on it). The menu shows for any git
         // project, and whenever the draft is set to a worktree (its git state may not be in yet):
@@ -3255,28 +3270,21 @@ impl Composer {
                     (c, a) => Some(format!("{c} changed · ↑{a}")),
                 };
                 Some(
-                    gpui_kit::component::button::Button::new("branch-chip")
-                        .ghost()
-                        .small()
-                        .child(
-                            h_flex()
-                                .gap(px(6.))
-                                .child(
-                                    Icon::new(crate::assets::Lucide::GitBranch)
-                                        .small()
-                                        .text_color(if on_default {
-                                            theme.muted_foreground
-                                        } else {
-                                            palette::indigo(cx)
-                                        }),
-                                )
-                                .child(div().text_color(theme.foreground.opacity(0.9)).child(name))
-                                .child(
-                                    Icon::new(IconName::ChevronDown)
-                                        .xsmall()
-                                        .text_color(theme.muted_foreground),
-                                ),
-                        )
+                    look::chip_button(
+                        gpui_kit::component::button::Button::new("branch-chip"),
+                        vec![
+                            Icon::new(crate::assets::Lucide::GitBranch)
+                                .size(px(look::ICON))
+                                .text_color(if on_default {
+                                    theme.muted_foreground
+                                } else {
+                                    palette::indigo(cx)
+                                })
+                                .into_any_element(),
+                            div().child(name).into_any_element(),
+                        ],
+                        cx,
+                    )
                         .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, cx| {
                             // Read as the menu opens: an agent may have started since the chip drew.
                             let blocked = cwd
@@ -3325,9 +3333,12 @@ impl Composer {
                             gpui_kit::component::button::Button::new("changes-to-git")
                                 .ghost()
                                 .small()
+                                .h(px(look::CONTROL))
+                                .rounded(px(look::CONTROL / 2.))
                                 .child(
                                     h_flex()
                                         .gap(px(5.))
+                                        .text_size(px(look::LABEL))
                                         .text_color(muted)
                                         .child(
                                             Icon::new(crate::assets::Lucide::GitCompare).xsmall(),
@@ -3358,7 +3369,7 @@ impl Composer {
         let machine = draft_project.map(|p| self.machine_chip(p, cx));
         let on_machine = self.on_machine_chip(cx);
         h_flex()
-            .gap_1()
+            .gap(px(look::GAP))
             .when(with_project, |el| el.child(self.project_chip(cx)))
             .children(machine)
             .children(on_machine)
@@ -3589,16 +3600,10 @@ impl Render for Composer {
         let access_pill = pickers::access_pill(self, compact, false, cx);
         let hh = prefs.hand_holding;
 
-        let square = |id: &'static str| {
-            div()
-                .id(id)
-                .size(px(30.))
-                .flex_none()
-                .rounded(px(8.))
-                .flex()
-                .items_center()
-                .justify_center()
-        };
+        // Round 30 px buttons: stop / send, the mic, and voice mode's ✕ and ✓.
+        let square = |id: &'static str| look::circle(id);
+        let blue = palette::send(cx);
+        let on_blue = gpui_kit::white();
         // What the keys do, on the button: sending, a new line, and steer or queue mid-turn.
         let hint = delivery_hint(self.cmd_enter, follow_up, own_turn);
         let send = if running {
@@ -3612,7 +3617,8 @@ impl Render for Composer {
                     .build(window, cx)
                 })
                 .bg(palette::red(cx))
-                .child(div().size(px(10.)).rounded(px(2.)).bg(rgb(0xFFFFFF)))
+                .hover(|s| s.opacity(0.9))
+                .child(div().size(px(9.)).rounded(px(2.)).bg(on_blue))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(id) = thread_id.clone() {
                         this.workspace.update(cx, |ws, cx| ws.interrupt(&id, cx));
@@ -3625,17 +3631,15 @@ impl Render for Composer {
                 .tooltip(move |window, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(hint.clone()).build(window, cx)
                 })
-                .bg(if empty {
-                    theme.foreground.opacity(0.08)
-                } else {
-                    theme.foreground
-                })
-                .when(!empty, |el| el.cursor_pointer().hover(|s| s.opacity(0.85)))
-                .child(Icon::new(IconName::ArrowUp).small().text_color(if empty {
-                    theme.muted_foreground
-                } else {
-                    theme.background
-                }))
+                // Blue at rest too, as the design draws it; it only answers the pointer when
+                // there's something to send.
+                .bg(blue)
+                .when(!empty, |el| el.cursor_pointer().hover(|s| s.opacity(0.9)))
+                .child(
+                    Icon::new(IconName::ArrowUp)
+                        .size(px(16.))
+                        .text_color(on_blue),
+                )
                 .on_click(cx.listener(|this, _, window, cx| {
                     let input = this.input.clone();
                     this.submit(input, window, cx);
@@ -3650,6 +3654,7 @@ impl Render for Composer {
             square("dictate")
                 .test_support()
                 .cursor_pointer()
+                .hover(|s| s.bg(look::chip_fill(cx)))
                 .tooltip(move |window, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(if asking {
                         "Starting dictation…"
@@ -3665,7 +3670,7 @@ impl Render for Composer {
                         .into_any_element()
                 } else {
                     Icon::new(crate::assets::Lucide::Mic)
-                        .small()
+                        .size(px(look::ICON))
                         .text_color(theme.muted_foreground)
                         .into_any_element()
                 })
@@ -3677,19 +3682,20 @@ impl Render for Composer {
         // Voice mode: the waveform, ✕ and ✓ in place of the toolbar.
         let voice_row = self.voice.active().then(|| {
             let finishing = self.voice.phase == voice::Phase::Finishing;
+            // `#EDEDED`, a shade darker under the pointer.
+            let (rest, hover) = (look::pressed(cx), theme.foreground.opacity(0.12));
             let cancel = square("voice-cancel")
                 .test_support()
-                .rounded_full()
                 .cursor_pointer()
-                .bg(theme.foreground.opacity(0.08))
-                .hover(|s| s.bg(theme.foreground.opacity(0.14)))
+                .bg(rest)
+                .hover(move |s| s.bg(hover))
                 .tooltip(|window, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared("Discard (esc)"))
                         .build(window, cx)
                 })
                 .child(
                     Icon::new(IconName::Close)
-                        .small()
+                        .size(px(13.))
                         .text_color(theme.muted_foreground),
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
@@ -3697,8 +3703,7 @@ impl Render for Composer {
                 }));
             let confirm = square("voice-confirm")
                 .test_support()
-                .rounded_full()
-                .bg(theme.foreground)
+                .bg(blue)
                 .tooltip(move |window, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared(if finishing {
                         "Finishing…"
@@ -3710,17 +3715,17 @@ impl Render for Composer {
                 .child(if finishing {
                     gpui_kit::component::spinner::Spinner::new()
                         .xsmall()
-                        .color(theme.background)
+                        .color(on_blue)
                         .into_any_element()
                 } else {
                     Icon::new(IconName::Check)
-                        .small()
-                        .text_color(theme.background)
+                        .size(px(15.))
+                        .text_color(on_blue)
                         .into_any_element()
                 })
                 .when(!finishing, |el| {
                     el.cursor_pointer()
-                        .hover(|s| s.opacity(0.85))
+                        .hover(|s| s.opacity(0.9))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.voice_step(voice::Event::Confirm, window, cx)
                         }))
@@ -3731,18 +3736,22 @@ impl Render for Composer {
                     Animation::new(std::time::Duration::from_millis(800)),
                     |el, t| el.opacity(0.6 + 0.4 * t),
                 );
+            // The strip runs from the text's left edge to 16 px short of ✕; ✕ and ✓ sit where
+            // the mic and send were, 4 px apart.
             h_flex()
                 .id("voice-row")
                 .test_support()
-                .p(px(8.))
-                .pl(px(14.))
-                .gap(px(8.))
+                .px(px(look::PAD))
+                .pt(px(4.))
+                .pb(px(look::PAD))
                 .min_w_0()
                 .child(voice::waveform(
                     self.voice.levels.bars().collect(),
                     theme.muted_foreground,
                 ))
+                .child(div().w(px(16.)).flex_none())
                 .child(cancel)
+                .child(div().w(px(4.)).flex_none())
                 .child(confirm)
         });
 
@@ -3773,18 +3782,21 @@ impl Render for Composer {
             .relative()
             .child(measure)
             .w_full()
-            .rounded(px(16.))
-            .bg(if glass { theme.secondary.opacity(0.78) } else { theme.secondary })
+            // A near-white card on a 1 px hairline with a soft shadow (the design's composer).
+            .rounded(px(look::RADIUS))
+            .bg(if glass { look::card_fill(cx).opacity(0.82) } else { look::card_fill(cx) })
             .border_1()
-            .border_color(if hh == HandHolding::FullAccess { palette::amber(cx).opacity(0.3) } else { theme.input })
+            .border_color(if hh == HandHolding::FullAccess { palette::amber(cx).opacity(0.3) } else { look::hairline(cx) })
+            .shadow(look::card_shadow(cx))
             // Context row (threads): checkout, branch, activity.
             .when(!is_draft, |el| {
                 el.child(
                     h_flex()
-                        .h(px(38.))
-                        .px(px(8.))
+                        .h(px(40.))
+                        .pt(px(4.))
+                        .px(px(look::PAD - 4.))
                         .gap(px(8.))
-                        .text_sm()
+                        .text_size(px(look::LABEL))
                         .text_color(theme.muted_foreground)
                         .child(self.env_chips(false, cx))
                         .when(preparing, |el| {
@@ -3807,9 +3819,9 @@ impl Render for Composer {
             .when_some(missing, |el, (wt, id)| el.child(self.missing_worktree(&wt, id, cx)))
             .children(self.edit_banner(cx))
             .children(self.attachment_strip(cx))
-            .child(div().px(px(14.)).pt(px(if is_draft || !self.outbox.paths.is_empty() || self.editing.is_some() { 12. } else { 2. })).when(self.voice.active(), |el| el.pb(px(6.))).map(|el| if self.voice.active() { el.child(self.voice_preview(window, cx)) } else { el.relative().child(Textarea::new(&self.input).appearance(false).token(|token, _, cx| {
-                let accent = cx.theme().primary;
-                div().px(px(7.)).rounded_full().bg(accent.opacity(0.12)).text_color(accent).child(token.token().label().clone())
+            .child(div().px(px(look::PAD)).pt(px(if is_draft || !self.outbox.paths.is_empty() || self.editing.is_some() { look::PAD - 7. } else { 2. })).text_size(rems(look::TEXT)).when(self.voice.active(), |el| el.pb(px(6.))).map(|el| if self.voice.active() { el.child(self.voice_preview(window, cx)) } else { el.relative().child(Textarea::new(&self.input).appearance(false).text_size(rems(look::TEXT)).token(|token, _, cx| {
+                // An accepted `/` command or skill: plain blue text, no pill.
+                div().text_color(crate::palette::token(cx)).child(token.token().label().clone())
             }).on_paste({
                 let me = cx.entity().downgrade();
                 move |item, window, cx| match attachments::pasted(item) {
@@ -3824,9 +3836,12 @@ impl Render for Composer {
             })).children(pickers::slash_ghost_overlay(self, cx)) }))
             .when_some(voice_row, |el, row| el.child(row))
             .when(!self.voice.active(), |el| el.child(
+                // 30 px controls, 5 px apart, 13 px in from the card's edges.
                 h_flex()
-                    .p(px(8.))
-                    .gap(px(6.))
+                    .px(px(look::PAD))
+                    .pt(px(4.))
+                    .pb(px(look::PAD))
+                    .gap(px(look::GAP))
                     .min_w_0()
                     .overflow_hidden()
                     .child(self.plus_button(cx))
@@ -3835,9 +3850,10 @@ impl Render for Composer {
                     .when(self.restate, |el| {
                         el.child(
                             Pill::new("restate-pill")
+                                .chip()
                                 .selected(true)
                                 .tooltip("The agent says back what you asked, in its own words, before it does anything. Click to turn off.")
-                                .child(Icon::new(crate::assets::Lucide::MessageSquareQuote).small().text_color(theme.foreground.opacity(0.85)))
+                                .child(Icon::new(crate::assets::Lucide::MessageSquareQuote).size(px(look::ICON)).text_color(theme.foreground.opacity(0.85)))
                                 .when(!narrow, |p| p.child("Restate first"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.restate = false;
@@ -3849,10 +3865,11 @@ impl Render for Composer {
                     // The same pill on a new thread and in one under way (⇧⇥ either way).
                     .child(
                         Pill::new("plan-pill")
+                            .chip()
                             .selected(plan)
                             .tooltip(crate::keys::shared(if plan { "Plan mode is on: the agent plans before it changes anything (⇧⇥)" } else { "Plan mode: the agent plans before it changes anything (⇧⇥)" }))
-                            .child(Icon::new(crate::assets::Lucide::ListChecks).small().text_color(if plan { palette::indigo(cx) } else { theme.muted_foreground }))
-                            .when(!narrow, |p| p.child("Plan"))
+                            .child(Icon::new(crate::assets::Lucide::ListChecks).size(px(look::ICON)).text_color(if plan { palette::indigo(cx) } else { theme.muted_foreground }))
+                            .when(!narrow, |p| p.child(div().when(plan, |el| el.text_color(theme.foreground).font_medium()).child("Plan")))
                             .on_click(cx.listener(|this, _, _, cx| pickers::update_prefs(this, cx, |p| p.plan = !p.plan))),
                     )
                     .child(div().flex_1().min_w(px(4.)))
@@ -3863,7 +3880,17 @@ impl Render for Composer {
                             *used as f32 / *window as f32 >= crate::context_popover::QUIET
                                 || !matches!(self.compact, crate::context_popover::Compact::Idle)
                         }),
-                        |el, (used, window)| el.child(self.context_card(used, window, cx)),
+                        // The ring keeps its own trigger (`context_popover`); here it only gets
+                        // the toolbar's 30 px row.
+                        |el, (used, window)| {
+                            el.child(
+                                h_flex()
+                                    .h(px(look::CONTROL))
+                                    .flex_none()
+                                    .items_center()
+                                    .child(self.context_card(used, window, cx)),
+                            )
+                        },
                     )
                     .children(mic)
                     .child(send),
@@ -3894,7 +3921,7 @@ impl Render for Composer {
                         .bottom_full()
                         .left_0()
                         .w_full()
-                        .pb(px(6.))
+                        .pb(px(9.))
                         .child(p),
                 )
             })

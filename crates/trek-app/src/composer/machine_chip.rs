@@ -5,9 +5,8 @@
 
 use super::Composer;
 use crate::palette;
-use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::PathBuf;
@@ -53,27 +52,22 @@ impl Composer {
         let theme = cx.theme().clone();
         let ws_entity = self.workspace.clone();
         let composer = cx.entity();
-        gpui_kit::component::button::Button::new("machine-chip")
-            .ghost()
-            .small()
-            .child(
-                h_flex()
-                    .gap(px(6.))
-                    .text_color(theme.foreground.opacity(0.82))
-                    .child(match dot {
-                        Some(reachable) => reach_dot(reachable, cx).into_any_element(),
-                        None => Icon::new(crate::assets::Lucide::Laptop)
-                            .small()
-                            .text_color(theme.muted_foreground)
-                            .into_any_element(),
-                    })
-                    .child(label)
-                    .child(
-                        Icon::new(IconName::ChevronDown)
-                            .xsmall()
-                            .text_color(theme.muted_foreground),
-                    ),
-            )
+        // The design's Local / Remote place, as Trek has it: this Mac or a paired machine, from
+        // a menu (there can be several).
+        super::look::chip_button(
+            gpui_kit::component::button::Button::new("machine-chip"),
+            vec![
+                match dot {
+                    Some(reachable) => reach_dot(reachable, cx).into_any_element(),
+                    None => Icon::new(crate::assets::Lucide::Laptop)
+                        .size(px(super::look::ICON))
+                        .text_color(theme.muted_foreground)
+                        .into_any_element(),
+                },
+                div().child(label).into_any_element(),
+            ],
+            cx,
+        )
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
                 let pick = |host: Option<String>| {
                     let (ws, project) = (ws_entity.clone(), project.clone());
@@ -152,12 +146,12 @@ impl Composer {
             h_flex()
                 .id("env-machine")
                 .test_support()
-                .h(px(26.))
-                .px(px(8.))
+                .h(px(super::look::CONTROL))
+                .px(px(9.))
                 .gap(px(6.))
-                .rounded(px(7.))
-                .text_sm()
-                .text_color(theme.foreground.opacity(0.82))
+                .rounded_full()
+                .text_size(px(super::look::LABEL))
+                .text_color(theme.muted_foreground)
                 .child(reach_dot(reachable, cx))
                 .child(format!("On {name}"))
                 .when(!reachable, |el| {

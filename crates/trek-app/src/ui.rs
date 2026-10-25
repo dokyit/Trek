@@ -756,6 +756,7 @@ pub struct Pill {
     ghost: bool,
     flexible: bool,
     small: bool,
+    chip: bool,
     tooltip: Option<SharedString>,
     on_click: Option<std::rc::Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
 }
@@ -769,9 +770,17 @@ impl Pill {
             ghost: false,
             flexible: false,
             small: false,
+            chip: false,
             tooltip: None,
             on_click: None,
         }
+    }
+
+    /// The composer toolbar's chip (`composer::look`): a 30 px round pill, 12 px muted label,
+    /// a quiet fill (none when `ghost` until hovered), and a firmer one when selected.
+    pub fn chip(mut self) -> Self {
+        self.chip = true;
+        self
     }
 
     /// A side bar's size: shorter, with smaller text.
@@ -821,6 +830,9 @@ impl gpui_kit::component::Selectable for Pill {
 
 impl RenderOnce for Pill {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        if self.chip {
+            return self.render_chip(cx).into_any_element();
+        }
         let theme = cx.theme();
         h_flex()
             .id(self.id)
@@ -857,6 +869,47 @@ impl RenderOnce for Pill {
             .when_some(self.on_click, |el, f| {
                 el.on_click(move |e, w, cx| f(e, w, cx))
             })
+            .into_any_element()
+    }
+}
+
+impl Pill {
+    fn render_chip(self, cx: &App) -> AnyElement {
+        use crate::composer::look;
+        let (fill, hover, pressed) = (look::chip_fill(cx), look::chip_hover(cx), look::pressed(cx));
+        h_flex()
+            .id(self.id)
+            .test_support()
+            .h(px(look::CONTROL))
+            .px(px(11.))
+            .gap(px(6.))
+            .rounded_full()
+            .text_size(px(look::LABEL))
+            .text_color(cx.theme().muted_foreground)
+            .cursor_pointer()
+            .when(self.ghost, |el| el.px(px(9.)))
+            .when(self.small, |el| {
+                el.h(px(24.)).px(px(8.)).gap(px(4.)).text_size(px(11.5))
+            })
+            .map(|el| match (self.selected, self.ghost) {
+                (true, _) => el.bg(pressed),
+                (false, true) => el,
+                (false, false) => el.bg(fill),
+            })
+            .hover(move |s| s.bg(if self.selected { pressed } else { hover }))
+            .when(self.flexible, |el| el.min_w_0().flex_shrink(1.))
+            .when(!self.flexible, |el| el.flex_none())
+            .overflow_hidden()
+            .children(self.children)
+            .when_some(self.tooltip, |el, t| {
+                el.tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(t.clone()).build(window, cx)
+                })
+            })
+            .when_some(self.on_click, |el, f| {
+                el.on_click(move |e, w, cx| f(e, w, cx))
+            })
+            .into_any_element()
     }
 }
 

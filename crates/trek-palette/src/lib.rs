@@ -20,6 +20,11 @@ const INDIGO: (u32, u32) = (0x8B8CFF, 0x5B5BD6);
 const EMERALD: (u32, u32) = (0x3FCF8E, 0x177D4E);
 const RED: (u32, u32) = (0xFF5A5F, 0xCC343A);
 const SKY: (u32, u32) = (0x5AA9FF, 0x2B6CC4);
+/// The composer's send and voice ✓ buttons: a blue fill under a white glyph.
+const SEND: (u32, u32) = (0x3D6EEB, 0x2A5FE4);
+/// A `/` command or skill accepted into the composer: plain blue text (its ghost completion is
+/// the same blue, faded).
+const TOKEN: (u32, u32) = (0x86ABF5, 0x3E6DC2);
 /// Links in agent answers: ember, a shade darker on Paper so it reads as body-size text.
 pub const LINK: (u32, u32) = (0xFF7A3D, 0xC2410C);
 
@@ -40,6 +45,12 @@ pub fn red(cx: &App) -> Hsla {
 }
 pub fn sky(cx: &App) -> Hsla {
     pick(cx, SKY)
+}
+pub fn send(cx: &App) -> Hsla {
+    pick(cx, SEND)
+}
+pub fn token(cx: &App) -> Hsla {
+    pick(cx, TOKEN)
 }
 pub fn link(cx: &App) -> Hsla {
     pick(cx, LINK)
@@ -152,6 +163,7 @@ mod tests {
             ("red", RED),
             ("sky", SKY),
             ("link", LINK),
+            ("token", TOKEN),
         ] {
             for bg in &surfaces {
                 let ratio = contrast(paper, *bg);
