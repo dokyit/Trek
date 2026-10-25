@@ -3005,57 +3005,55 @@ impl Composer {
             ],
             cx,
         )
-            .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+        .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+            let ws = ws_entity.clone();
+            // A thread of its own, in no project: a folder of its own to work in.
+            let mut menu = menu
+                .min_w(px(280.))
+                .max_h(px(360.))
+                .scrollable(true)
+                .item(
+                    PopupMenuItem::new("No project")
+                        .checked(project.is_none())
+                        .on_click(move |_, _, cx| {
+                            ws.update(cx, |ws, cx| ws.navigate(Route::Draft { project: None }, cx))
+                        }),
+                )
+                .separator()
+                .label("Projects");
+            for (name, path) in projects.clone() {
                 let ws = ws_entity.clone();
-                // A thread of its own, in no project: a folder of its own to work in.
-                let mut menu = menu
-                    .min_w(px(280.))
-                    .max_h(px(360.))
-                    .scrollable(true)
-                    .item(
-                        PopupMenuItem::new("No project")
-                            .checked(project.is_none())
-                            .on_click(move |_, _, cx| {
-                                ws.update(cx, |ws, cx| {
-                                    ws.navigate(Route::Draft { project: None }, cx)
-                                })
-                            }),
-                    )
-                    .separator()
-                    .label("Projects");
-                for (name, path) in projects.clone() {
-                    let ws = ws_entity.clone();
-                    let checked = project.as_ref() == Some(&path);
-                    menu = menu.item(PopupMenuItem::new(name).checked(checked).on_click(
-                        move |_, _, cx| {
-                            let path = path.clone();
-                            ws.update(cx, |ws, cx| {
-                                ws.navigate(
-                                    Route::Draft {
-                                        project: Some(path),
-                                    },
-                                    cx,
-                                )
-                            })
-                        },
-                    ));
-                }
-                let ws = ws_entity.clone();
-                let c = composer.clone();
-                menu.separator()
-                    .item(
-                        PopupMenuItem::new("Open folder…")
-                            .icon(IconName::FolderOpen)
-                            .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.open_folder(cx))),
-                    )
-                    .item(
-                        PopupMenuItem::new("Clone from GitHub…")
-                            .icon(IconName::Github)
-                            .on_click(move |_, window, cx| {
-                                c.update(cx, |c, cx| c.open_clone_dialog(window, cx))
-                            }),
-                    )
-            })
+                let checked = project.as_ref() == Some(&path);
+                menu = menu.item(PopupMenuItem::new(name).checked(checked).on_click(
+                    move |_, _, cx| {
+                        let path = path.clone();
+                        ws.update(cx, |ws, cx| {
+                            ws.navigate(
+                                Route::Draft {
+                                    project: Some(path),
+                                },
+                                cx,
+                            )
+                        })
+                    },
+                ));
+            }
+            let ws = ws_entity.clone();
+            let c = composer.clone();
+            menu.separator()
+                .item(
+                    PopupMenuItem::new("Open folder…")
+                        .icon(IconName::FolderOpen)
+                        .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.open_folder(cx))),
+                )
+                .item(
+                    PopupMenuItem::new("Clone from GitHub…")
+                        .icon(IconName::Github)
+                        .on_click(move |_, window, cx| {
+                            c.update(cx, |c, cx| c.open_clone_dialog(window, cx))
+                        }),
+                )
+        })
     }
 
     /// Where a draft runs: the project folder, or a worktree of its own (git projects). A quiet
@@ -3090,39 +3088,36 @@ impl Composer {
             ],
             cx,
         )
-            .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
-                let pick = |label: &'static str, on: bool| {
-                    let (ws, scope) = (ws.clone(), scope.clone());
-                    PopupMenuItem::new(label)
-                        .checked(worktree == on)
-                        .on_click(move |_, _, cx| {
-                            ws.update(cx, |ws, cx| {
-                                let mut p = ws.prefs_in(&scope);
-                                p.worktree = on;
-                                ws.set_prefs_in(&scope, p, cx);
-                            })
+        .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+            let pick = |label: &'static str, on: bool| {
+                let (ws, scope) = (ws.clone(), scope.clone());
+                PopupMenuItem::new(label)
+                    .checked(worktree == on)
+                    .on_click(move |_, _, cx| {
+                        ws.update(cx, |ws, cx| {
+                            let mut p = ws.prefs_in(&scope);
+                            p.worktree = on;
+                            ws.set_prefs_in(&scope, p, cx);
                         })
-                };
-                // The items have icons, which would take the check's place on the left.
-                let menu = menu
-                    .min_w(px(240.))
-                    .check_side(gpui_kit::component::Side::Right)
-                    .label("New thread runs in")
-                    .item(
-                        pick("Local: the project folder", false)
-                            .icon(crate::assets::Lucide::Laptop),
-                    )
-                    .item(
-                        pick("New worktree: a branch of its own", true)
-                            .icon(crate::assets::Lucide::GitBranchPlus)
-                            .disabled(blocked.is_some() && !worktree),
-                    );
-                match blocked {
-                    Some(why) => menu.separator().label(why),
-                    None => menu,
-                }
-            })
-            .into_any_element()
+                    })
+            };
+            // The items have icons, which would take the check's place on the left.
+            let menu = menu
+                .min_w(px(240.))
+                .check_side(gpui_kit::component::Side::Right)
+                .label("New thread runs in")
+                .item(pick("Local: the project folder", false).icon(crate::assets::Lucide::Laptop))
+                .item(
+                    pick("New worktree: a branch of its own", true)
+                        .icon(crate::assets::Lucide::GitBranchPlus)
+                        .disabled(blocked.is_some() && !worktree),
+                );
+            match blocked {
+                Some(why) => menu.separator().label(why),
+                None => menu,
+            }
+        })
+        .into_any_element()
     }
 
     /// Where the agent runs (this Mac: the project folder or the thread's worktree) and on which
@@ -3289,40 +3284,41 @@ impl Composer {
                         ],
                         cx,
                     )
-                        .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, cx| {
-                            // Read as the menu opens: an agent may have started since the chip drew.
-                            let blocked = cwd
-                                .as_deref()
-                                .and_then(|c| ws_entity.read(cx).switch_blocked(c));
-                            menu =
-                                menu.min_w(px(220.)).max_h(px(320.)).scrollable(true).label(
-                                    blocked.clone().unwrap_or_else(|| "Switch branch".into()),
-                                );
-                            for b in branches.clone() {
-                                let (ws, cwd) = (ws_entity.clone(), cwd.clone());
-                                let is_current = Some(&b) == current.as_ref();
-                                // Git won't check out a branch another worktree has (a worktree thread's).
-                                let taken = elsewhere.contains(&b);
-                                let label = match (Some(&b) == default.as_ref(), taken) {
-                                    (_, true) => format!("{b}  (in another worktree)"),
-                                    (true, false) => format!("{b}  (default)"),
-                                    (false, false) => b.clone(),
-                                };
-                                menu = menu.item(
-                                    PopupMenuItem::new(label)
-                                        .checked(is_current)
-                                        .disabled(!is_current && (taken || blocked.is_some()))
-                                        .on_click(move |_, _, cx| {
-                                            let b = b.clone();
-                                            if let Some(cwd) = cwd.clone() {
-                                                ws.update(cx, |ws, cx| ws.switch_branch(cwd, b, cx))
-                                            }
-                                        }),
-                                );
-                            }
-                            menu
-                        })
-                        .into_any_element(),
+                    .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, cx| {
+                        // Read as the menu opens: an agent may have started since the chip drew.
+                        let blocked = cwd
+                            .as_deref()
+                            .and_then(|c| ws_entity.read(cx).switch_blocked(c));
+                        menu = menu
+                            .min_w(px(220.))
+                            .max_h(px(320.))
+                            .scrollable(true)
+                            .label(blocked.clone().unwrap_or_else(|| "Switch branch".into()));
+                        for b in branches.clone() {
+                            let (ws, cwd) = (ws_entity.clone(), cwd.clone());
+                            let is_current = Some(&b) == current.as_ref();
+                            // Git won't check out a branch another worktree has (a worktree thread's).
+                            let taken = elsewhere.contains(&b);
+                            let label = match (Some(&b) == default.as_ref(), taken) {
+                                (_, true) => format!("{b}  (in another worktree)"),
+                                (true, false) => format!("{b}  (default)"),
+                                (false, false) => b.clone(),
+                            };
+                            menu = menu.item(
+                                PopupMenuItem::new(label)
+                                    .checked(is_current)
+                                    .disabled(!is_current && (taken || blocked.is_some()))
+                                    .on_click(move |_, _, cx| {
+                                        let b = b.clone();
+                                        if let Some(cwd) = cwd.clone() {
+                                            ws.update(cx, |ws, cx| ws.switch_branch(cwd, b, cx))
+                                        }
+                                    }),
+                            );
+                        }
+                        menu
+                    })
+                    .into_any_element(),
                 )
                 .map(|branch| {
                     // What's changed, beside the branch: it opens Source control, where they are.

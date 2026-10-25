@@ -173,9 +173,7 @@ pub fn segmented<T: Copy + PartialEq + 'static>(
 ) -> AnyElement {
     let theme = cx.theme().clone();
     let thumb = card_fill(cx);
-    let ring = theme
-        .foreground
-        .opacity(if dark(cx) { 0.12 } else { 0.07 });
+    let ring = theme.foreground.opacity(if dark(cx) { 0.12 } else { 0.07 });
     h_flex()
         .h(px(CONTROL))
         .p(px(2.))
@@ -252,15 +250,18 @@ pub fn effort_bars(effort: Effort, cx: &App) -> Div {
         .h(px(12.))
         .items_end()
         .gap(px(1.5))
-        .children([4.5f32, 6.5, 8.5, 10.5, 12.].into_iter().enumerate().map(
-            move |(i, h)| {
-                div()
-                    .w(px(2.))
-                    .h(px(h))
-                    .rounded_t(px(1.))
-                    .bg(if i < n { on } else { off })
-            },
-        ))
+        .children(
+            [4.5f32, 6.5, 8.5, 10.5, 12.]
+                .into_iter()
+                .enumerate()
+                .map(move |(i, h)| {
+                    div()
+                        .w(px(2.))
+                        .h(px(h))
+                        .rounded_t(px(1.))
+                        .bg(if i < n { on } else { off })
+                }),
+        )
 }
 
 #[cfg(test)]

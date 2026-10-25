@@ -68,70 +68,70 @@ impl Composer {
             ],
             cx,
         )
-            .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
-                let pick = |host: Option<String>| {
-                    let (ws, project) = (ws_entity.clone(), project.clone());
-                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                        let host = host.clone();
-                        ws.update(cx, |ws, cx| ws.set_draft_machine(&project, host, cx))
-                    }
-                };
-                // Each item's text carries an id of its own, for the verify driver to click.
-                let here = capitalized(this);
-                let mut menu = menu
-                    .min_w(px(240.))
-                    .check_side(gpui_kit::component::Side::Right)
-                    .label("New thread runs on")
-                    .item(
-                        PopupMenuItem::element(move |_, _| {
-                            div()
-                                .id("machine-pick-here")
-                                .test_support()
-                                .child(here.clone())
-                        })
-                        .icon(crate::assets::Lucide::Laptop)
-                        .checked(chosen.is_none())
-                        .on_click(pick(None)),
-                    );
-                for (id, name, reachable) in machines.clone() {
-                    let checked = chosen.as_deref() == Some(id.as_str());
-                    let pick_id = SharedString::from(format!("machine-pick-{id}"));
-                    menu = menu.item(
-                        PopupMenuItem::element(move |_, cx| {
-                            h_flex()
-                                .id(pick_id.clone())
-                                .test_support()
-                                .gap(px(8.))
-                                .child(reach_dot(reachable, cx))
-                                .child(name.clone())
-                        })
-                        .checked(checked)
-                        .on_click(pick(Some(id.clone()))),
-                    );
+        .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+            let pick = |host: Option<String>| {
+                let (ws, project) = (ws_entity.clone(), project.clone());
+                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                    let host = host.clone();
+                    ws.update(cx, |ws, cx| ws.set_draft_machine(&project, host, cx))
                 }
-                let (c, project) = (composer.clone(), project.clone());
-                menu.separator().item(
-                    PopupMenuItem::element(|_, _| {
+            };
+            // Each item's text carries an id of its own, for the verify driver to click.
+            let here = capitalized(this);
+            let mut menu = menu
+                .min_w(px(240.))
+                .check_side(gpui_kit::component::Side::Right)
+                .label("New thread runs on")
+                .item(
+                    PopupMenuItem::element(move |_, _| {
                         div()
-                            .id("machine-add-to")
+                            .id("machine-pick-here")
                             .test_support()
-                            .child("Add to another machine…")
+                            .child(here.clone())
                     })
-                    .icon(IconName::Plus)
-                    .on_click(move |_, window, cx| {
-                        let project = project.clone();
-                        c.update(cx, |c, cx| {
-                            crate::machines::sheets::open_clone(
-                                c.workspace.clone(),
-                                project,
-                                window,
-                                cx,
-                            )
-                        })
-                    }),
-                )
-            })
-            .into_any_element()
+                    .icon(crate::assets::Lucide::Laptop)
+                    .checked(chosen.is_none())
+                    .on_click(pick(None)),
+                );
+            for (id, name, reachable) in machines.clone() {
+                let checked = chosen.as_deref() == Some(id.as_str());
+                let pick_id = SharedString::from(format!("machine-pick-{id}"));
+                menu = menu.item(
+                    PopupMenuItem::element(move |_, cx| {
+                        h_flex()
+                            .id(pick_id.clone())
+                            .test_support()
+                            .gap(px(8.))
+                            .child(reach_dot(reachable, cx))
+                            .child(name.clone())
+                    })
+                    .checked(checked)
+                    .on_click(pick(Some(id.clone()))),
+                );
+            }
+            let (c, project) = (composer.clone(), project.clone());
+            menu.separator().item(
+                PopupMenuItem::element(|_, _| {
+                    div()
+                        .id("machine-add-to")
+                        .test_support()
+                        .child("Add to another machine…")
+                })
+                .icon(IconName::Plus)
+                .on_click(move |_, window, cx| {
+                    let project = project.clone();
+                    c.update(cx, |c, cx| {
+                        crate::machines::sheets::open_clone(
+                            c.workspace.clone(),
+                            project,
+                            window,
+                            cx,
+                        )
+                    })
+                }),
+            )
+        })
+        .into_any_element()
     }
 
     /// In a thread on another machine: which, where the worktree chip would be.

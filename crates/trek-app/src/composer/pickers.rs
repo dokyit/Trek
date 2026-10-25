@@ -12,8 +12,7 @@ use gpui_kit::component::input::{InlineToken, Input, InputState, TextareaState};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, h_flex,
-    v_flex,
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -238,9 +237,7 @@ pub fn model_pill<H: PickerHost>(
                             .child(look::effort_bars(prefs.effort, cx))
                             .child(
                                 div()
-                                    .when(max, |el| {
-                                        el.text_color(palette::send(cx)).font_medium()
-                                    })
+                                    .when(max, |el| el.text_color(palette::send(cx)).font_medium())
                                     .child(prefs.effort.label()),
                             ),
                     )
@@ -640,7 +637,9 @@ fn model_panel<H: PickerHost>(
                     });
                 })),
         )
-        .when(selected, |el| el.child(Icon::new(IconName::Check).size(px(13.))))
+        .when(selected, |el| {
+            el.child(Icon::new(IconName::Check).size(px(13.)))
+        })
         .on_click(cx.listener(move |this: &mut H, _, _, cx| {
             let (agent, id) = (agent2.clone(), id.clone());
             update_prefs(this, cx, |p| {
@@ -1306,8 +1305,7 @@ pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement
                             .hover(move |s| s.bg(lit))
                             .when(files, |el| {
                                 el.rounded(px(8.)).child(
-                                    icon.size(px(look::ICON))
-                                        .text_color(theme.muted_foreground),
+                                    icon.size(px(look::ICON)).text_color(theme.muted_foreground),
                                 )
                             })
                             .child(
