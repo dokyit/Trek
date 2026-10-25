@@ -38,8 +38,14 @@ pub struct AiPane {
 }
 
 impl AiPane {
-    pub fn new(workspace: Entity<Workspace>, scope: Scope, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let transcript = cx.new(|cx| AiTranscript::new(workspace.clone(), scope.clone(), window, cx));
+    pub fn new(
+        workspace: Entity<Workspace>,
+        scope: Scope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let transcript =
+            cx.new(|cx| AiTranscript::new(workspace.clone(), scope.clone(), window, cx));
         let input = cx.new(|cx| AiInput::new(workspace.clone(), scope.clone(), window, cx));
         let subscriptions = vec![
             cx.observe(&workspace, |_, _, cx| cx.notify()),
@@ -65,7 +71,9 @@ impl AiPane {
                                 });
                             }
                         }
-                        WorkspaceEvent::CorrectRestatement { scope, thread } if *scope == this.scope => {
+                        WorkspaceEvent::CorrectRestatement { scope, thread }
+                            if *scope == this.scope =>
+                        {
                             if ws.read(cx).thread_id_in(&this.scope) == Some(thread.as_str()) {
                                 this.input.update(cx, |c, cx| c.correct(window, cx));
                             }
@@ -328,7 +336,8 @@ impl AiPane {
                             .context_menu(move |menu, _, _| {
                                 let (me1, me2, ws1, ws2, ws3) =
                                     (me.clone(), me.clone(), ws.clone(), ws.clone(), ws.clone());
-                                let (sc1, sc2, sc3) = (menu_scope.clone(), menu_scope.clone(), menu_scope.clone());
+                                let (sc1, sc2, sc3) =
+                                    (menu_scope.clone(), menu_scope.clone(), menu_scope.clone());
                                 let id = thread_id.clone();
                                 menu.min_w(px(200.))
                                     .item(
@@ -384,7 +393,8 @@ impl AiPane {
                         crate::ui::icon_button("ai-new-chat", IconName::Plus, "New chat (⌘N)")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let scope = this.scope.clone();
-                                this.workspace.update(cx, |ws, cx| ws.new_chat_in(&scope, cx))
+                                this.workspace
+                                    .update(cx, |ws, cx| ws.new_chat_in(&scope, cx))
                             })),
                     )
                     .child(self.history_button(cx))
@@ -443,17 +453,29 @@ impl AiPane {
             .ghost()
             .small()
             .icon(crate::assets::Lucide::RotateCcwClock)
-            .tooltip(if side { "Side chats in this project" } else { "Chats in this folder" })
+            .tooltip(if side {
+                "Side chats in this project"
+            } else {
+                "Chats in this folder"
+            })
             .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, cx| {
                 // Read as it opens, not on every frame of the side bar.
                 let ws = entity.read(cx);
-                let threads: Vec<(String, String, i64)> = if side { ws.side_threads() } else { ws.ide_threads() }
-                    .into_iter()
-                    .map(|t| (t.id.clone(), t.title.clone(), t.updated_at))
-                    .collect();
+                let threads: Vec<(String, String, i64)> = if side {
+                    ws.side_threads()
+                } else {
+                    ws.ide_threads()
+                }
+                .into_iter()
+                .map(|t| (t.id.clone(), t.title.clone(), t.updated_at))
+                .collect();
                 menu = menu.min_w(px(280.)).max_h(px(420.)).scrollable(true);
                 if threads.is_empty() {
-                    return menu.label(if side { "No side chats here yet" } else { "No chats in this folder yet" });
+                    return menu.label(if side {
+                        "No side chats here yet"
+                    } else {
+                        "No chats in this folder yet"
+                    });
                 }
                 let mut last: Option<&'static str> = None;
                 for (id, title, at) in threads.iter().take(60) {
@@ -536,15 +558,20 @@ impl AiPane {
                     })
                     .item({
                         let (ws, id, scope) = (ws.clone(), thread.clone(), scope.clone());
-                        PopupMenuItem::new("Fork Chat").disabled(id.is_none()).on_click(
-                            move |_, _, cx| {
+                        PopupMenuItem::new("Fork Chat")
+                            .disabled(id.is_none())
+                            .on_click(move |_, _, cx| {
                                 if let Some(id) = &id {
                                     ws.update(cx, |ws, cx| {
-                                        _ = ws.fork_thread(id, crate::workspace::ForkAt::End, &scope, cx)
+                                        _ = ws.fork_thread(
+                                            id,
+                                            crate::workspace::ForkAt::End,
+                                            &scope,
+                                            cx,
+                                        )
                                     });
                                 }
-                            },
-                        )
+                            })
                     })
                     .item({
                         let (ws, id) = (ws.clone(), thread.clone());
@@ -575,7 +602,11 @@ impl AiPane {
     fn draft_note(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let side = self.scope == Scope::Side;
-        let root = if side { self.workspace.read(cx).side_chat_folder() } else { self.workspace.read(cx).ide_root.clone() };
+        let root = if side {
+            self.workspace.read(cx).side_chat_folder()
+        } else {
+            self.workspace.read(cx).ide_root.clone()
+        };
         let folder = root.as_ref().map(|r| {
             r.file_name()
                 .map(|n| n.to_string_lossy().to_string())

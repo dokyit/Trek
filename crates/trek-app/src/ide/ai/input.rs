@@ -117,7 +117,12 @@ fn draft_key(ws: &Workspace, scope: &Scope) -> String {
 }
 
 impl AiInput {
-    pub fn new(workspace: Entity<Workspace>, scope: Scope, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: Entity<Workspace>,
+        scope: Scope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let cmd_enter = workspace.read(cx).settings.general.send_with_cmd_enter;
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -310,8 +315,9 @@ impl AiInput {
         let ws = self.workspace.read(cx);
         let text = context::with_context(text, chips, ws.cwd_in(&self.scope).as_deref());
         let scope = self.scope.clone();
-        self.workspace
-            .update(cx, |ws, cx| ws.send_chat_in(&scope, text, vec![], FollowUp::Queue, cx));
+        self.workspace.update(cx, |ws, cx| {
+            ws.send_chat_in(&scope, text, vec![], FollowUp::Queue, cx)
+        });
         cx.notify();
     }
 
@@ -480,7 +486,8 @@ impl AiInput {
         if super::commands::is_new_chat(&raw) && self.editing.is_none() {
             clear(self, window, cx);
             let scope = self.scope.clone();
-            self.workspace.update(cx, |ws, cx| ws.new_chat_in(&scope, cx));
+            self.workspace
+                .update(cx, |ws, cx| ws.new_chat_in(&scope, cx));
             return;
         }
         // `/consult <models>[: <message>]` picks consultants, and sends when there's a message.
@@ -585,8 +592,9 @@ impl AiInput {
                 self.chips.clear();
                 self.outbox.paths.clear();
                 let scope = self.scope.clone();
-                self.workspace
-                    .update(cx, |ws, cx| ws.send_chat_in(&scope, text, images, follow, cx));
+                self.workspace.update(cx, |ws, cx| {
+                    ws.send_chat_in(&scope, text, images, follow, cx)
+                });
                 true
             }
         };
@@ -931,7 +939,8 @@ impl AiInput {
                     .small(true)
                     .tooltip(crate::keys::shared("Mode (⇧Tab)"))
                     .child(icon(mode).size(px(12.)).text_color(tint))
-                    .when(!self.narrow, |el| el.child(mode.label()))
+                    // Named always, as Copilot Chat's "Agent ▾": it says what Return will do.
+                    .child(mode.label())
                     .child(
                         Icon::new(IconName::ChevronDown)
                             .size(px(10.))

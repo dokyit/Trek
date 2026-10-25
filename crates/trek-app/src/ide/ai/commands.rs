@@ -113,7 +113,12 @@ pub fn consultant_name(ws: &Workspace, c: &Consultant) -> String {
 }
 
 /// `text` with `consult`'s instructions for the agent, an arena's judge picked when none is.
-pub fn consult_prompt(ws: &Workspace, scope: &Scope, text: &str, consult: &Consult) -> Result<String, String> {
+pub fn consult_prompt(
+    ws: &Workspace,
+    scope: &Scope,
+    text: &str,
+    consult: &Consult,
+) -> Result<String, String> {
     let mut consult = consult.clone();
     if consult.style == Style::Arena && consult.judge.is_none() {
         let prefs = ws.prefs_in(scope);

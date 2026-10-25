@@ -156,6 +156,64 @@ fn a_project_has_one_colour_wherever_its_folders_show() {
 }
 
 #[test]
+fn the_side_chat_is_the_ai_side_bar_on_its_own_tabs() {
+    run(async |cx| {
+        let trek = open(cx);
+        let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
+        trek.window(cx, |window, cx| {
+            panel.update(cx, |p, cx| p.open_tool(PanelTool::SideChat, window, cx))
+        });
+        trek.render(cx);
+        // A new chat first: the AI side bar's, in the side chat's words.
+        assert!(trek.visible(cx, "ai-draft"));
+        trek.click(cx, "ai-input");
+        trek.type_live(cx, "Explain the startup");
+        trek.press_live(cx, "enter");
+        let side = |ws: &trek_app::workspace::Workspace| {
+            ws.threads
+                .iter()
+                .find(|t| t.side_of.is_some())
+                .map(|t| t.id.clone())
+        };
+        trek.wait(cx, "the side chat's answer", |ws| {
+            side(ws).is_some_and(|id| {
+                !ws.turn_running(&id)
+                    && ws.live.get(&id).is_some_and(|l| {
+                        l.items
+                            .iter()
+                            .any(|i| matches!(i, Item::Assistant { text } if !text.is_empty()))
+                    })
+            })
+        })
+        .await;
+        let id = trek.read(cx, |ws, _| side(ws)).unwrap();
+        trek.read(cx, |ws, _| {
+            // Its own tab, not the editor's; named for what was asked; off the sidebar.
+            assert_eq!(ws.side_chat.active_thread(), Some(id.as_str()));
+            assert!(ws.ide_chat.is_draft());
+            assert_ne!(ws.thread(&id).unwrap().title, "Side chat");
+            assert!(
+                ws.sections()
+                    .iter()
+                    .all(|(_, list)| list.iter().all(|t| t.id != id))
+            );
+        });
+        trek.render(cx);
+        // Copilot Chat's layout: the request under "You", the answer under its agent.
+        assert!((0..20usize).any(|n| trek.visible(cx, ("ai-user", n))));
+        assert!((0..20usize).any(|n| trek.visible(cx, ("ai-speaker", n))));
+        // + is a new side chat; the first stays a tab.
+        trek.click(cx, "ai-new-chat");
+        trek.render(cx);
+        trek.read(cx, |ws, _| {
+            assert!(ws.side_chat.is_draft());
+            assert_eq!(ws.side_chat.tabs.len(), 2);
+        });
+        assert!(trek.visible(cx, "ai-draft"));
+    });
+}
+
+#[test]
 fn a_side_chat_that_asks_to_run_something_shows_the_card_and_goes_on_once_allowed() {
     run(async |cx| {
         let trek = open(cx);
@@ -226,10 +284,9 @@ fn a_side_chat_at_work_says_a_trail_word() {
         assert!(!trek.visible(cx, "ai-working"));
         // Its answer reads as the transcript's do (Trek's markdown, path chips).
         assert!(
-            trek.read(cx, |ws, _| ws.live[&id]
-                .items
-                .iter()
-                .any(|i| matches!(i, Item::Assistant { text } if !text.is_empty()))),
+            trek.read(cx, |ws, _| ws.live[&id].items.iter().any(
+                |i| matches!(i, Item::Assistant { text } if !text.is_empty())
+            )),
             "an answer"
         );
         assert!((0..60usize).any(|n| trek.visible(cx, ("ai-answer", n))));

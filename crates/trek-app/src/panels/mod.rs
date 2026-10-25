@@ -157,11 +157,9 @@ impl RightPanel {
             PanelTool::Browser => {
                 View::Browser(cx.new(|cx| browser::BrowserPanel::new(ws, window, cx)))
             }
-            PanelTool::SideChat => {
-                View::SideChat(cx.new(|cx| {
-                    crate::ide::ai::AiPane::new(ws, crate::workspace::Scope::Side, window, cx)
-                }))
-            }
+            PanelTool::SideChat => View::SideChat(cx.new(|cx| {
+                crate::ide::ai::AiPane::new(ws, crate::workspace::Scope::Side, window, cx)
+            })),
             PanelTool::Simulator => {
                 View::Simulator(cx.new(|cx| simulator::SimulatorPanel::new(ws, window, cx)))
             }

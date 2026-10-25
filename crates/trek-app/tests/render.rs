@@ -615,9 +615,7 @@ fn the_cached_tools_panel_redraws_what_changes_inside_it() {
         });
         trek.click(cx, "ai-input");
         let height = |cx: &mut TestAppContext| {
-            trek.window(cx, |window, _| {
-                window.find("ai-input").bounds().size.height
-            })
+            trek.window(cx, |window, _| window.find("ai-input").bounds().size.height)
         };
         let one_line = height(cx);
         // GPUI redraws everything once when input switches from the mouse to the keyboard.

@@ -431,7 +431,12 @@ impl Workspace {
 
     /// The side chat's new chat sends its first message: a side chat starts beside the main
     /// window's thread (`create_side_chat`), with what was picked for it, and takes the tab.
-    pub(super) fn send_side_draft(&mut self, text: String, images: Vec<PathBuf>, cx: &mut Context<Self>) {
+    pub(super) fn send_side_draft(
+        &mut self,
+        text: String,
+        images: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         let text = text.trim().to_string();
         if text.is_empty() && images.is_empty() {
             return;
@@ -443,6 +448,9 @@ impl Workspace {
         if self.side_chat.draft_ask {
             self.live.entry(id.clone()).or_default().ask = true;
         }
+        // Named for its first message till its title comes (`maybe_auto_title`), as a thread is.
+        let title = trek_core::import_title(&text);
+        self.mutate_thread(&id, cx, |t| t.title = title);
         let ix = self.side_chat.active;
         match self.side_chat.tabs.get_mut(ix) {
             Some(tab @ IdeTab::Draft) => *tab = IdeTab::Thread(id.clone()),
@@ -659,7 +667,9 @@ impl Workspace {
                     }
                 }
             }
-            None if matches!(scope, Scope::Ide | Scope::Side) => self.chats_mut(scope).draft_ask = ask,
+            None if matches!(scope, Scope::Ide | Scope::Side) => {
+                self.chats_mut(scope).draft_ask = ask
+            }
             None => {}
         }
         cx.notify();

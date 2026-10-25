@@ -262,6 +262,12 @@ struct EditFile {
 
 /// A block, read out of the transcript for drawing (owned, so drawing can update the view).
 enum View {
+    /// Whose answer follows: the agent's logo, name and model, as Copilot Chat heads each
+    /// response.
+    Speaker {
+        agent: trek_core::AgentId,
+        label: String,
+    },
     User {
         key: String,
         text: String,
@@ -393,7 +399,12 @@ pub struct AiTranscript {
 }
 
 impl AiTranscript {
-    pub fn new(workspace: Entity<Workspace>, scope: Scope, _: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: Entity<Workspace>,
+        scope: Scope,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subscriptions = vec![
             cx.observe(&workspace, |this, _, cx| this.sync(cx)),
             cx.subscribe(
@@ -829,8 +840,33 @@ impl AiTranscript {
                     },
                 }
             })
-            .collect();
-        (views, earlier)
+            .collect::<Vec<View>>();
+        // Each answer under its agent's name and model, after the message it answers (and at the
+        // top, when what's shown starts mid-answer).
+        let label = {
+            let name = agent.display_name();
+            match ws.thread(id).map(|t| ws.model_label(t)) {
+                Some(model) if model != name => format!("{name} · {model}"),
+                _ => name,
+            }
+        };
+        let mut out = Vec::with_capacity(views.len() + 8);
+        let mut answered = false;
+        for v in views {
+            let user = matches!(v, View::User { .. } | View::Wake { .. });
+            if !user && !answered && !matches!(v, View::Notice(_)) {
+                out.push(View::Speaker {
+                    agent: agent.clone(),
+                    label: label.clone(),
+                });
+                answered = true;
+            }
+            if user {
+                answered = false;
+            }
+            out.push(v);
+        }
+        (out, earlier)
     }
 
     /// Ask before `ask` on `anchor` (a message for a rewind, a turn's end otherwise), and find
@@ -1296,7 +1332,10 @@ impl AiTranscript {
                                         let thread = t2.clone();
                                         let scope = scope.clone();
                                         ws2.update(cx, |_, cx| {
-                                            cx.emit(WorkspaceEvent::CorrectRestatement { scope, thread })
+                                            cx.emit(WorkspaceEvent::CorrectRestatement {
+                                                scope,
+                                                thread,
+                                            })
                                         });
                                     }
                                 }),
@@ -1674,8 +1713,39 @@ impl Render for AiTranscript {
                     })
                 })
         };
+        // An exploration's summary ("Read session.ts AgentTitle.tsx · searched “…”"): its words,
+        // and each file read as a chip.
+        let part_elements = |parts: Vec<Part>, n: usize, cx: &App| -> Vec<AnyElement> {
+            parts
+                .into_iter()
+                .enumerate()
+                .map(|(i, p)| match p {
+                    Part::Text(t) => div().child(t).into_any_element(),
+                    Part::File(f) => {
+                        file_chip(SharedString::from(format!("ai-read-{n}-{i}")), &f, None, cx)
+                            .into_any_element()
+                    }
+                })
+                .collect()
+        };
         for (n, view) in views.into_iter().enumerate() {
             let el: AnyElement = match view {
+                View::Speaker { agent, label } => h_flex()
+                    .id(("ai-speaker", n))
+                    .test_support()
+                    .pt(px(4.))
+                    .gap(px(6.))
+                    .text_size(px(12.))
+                    .child(crate::ui::agent_logo(&agent, px(16.), cx))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child(label),
+                    )
+                    .into_any_element(),
                 View::User {
                     key,
                     text,
@@ -1704,11 +1774,26 @@ impl Render for AiTranscript {
                         .id(("ai-user", n))
                         .test_support()
                         .group(group.clone())
-                        .pl(px(10.))
-                        .py(px(2.))
-                        .gap(px(3.))
-                        .border_l_2()
-                        .border_color(if aside { muted.opacity(0.4) } else { ember })
+                        .pt(px(4.))
+                        .gap(px(4.))
+                        .child(
+                            h_flex()
+                                .gap(px(6.))
+                                .text_size(px(12.))
+                                .child(
+                                    div()
+                                        .size(px(18.))
+                                        .flex_none()
+                                        .rounded_full()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .bg(if aside { muted.opacity(0.18) } else { ember.opacity(0.18) })
+                                        .child(Icon::new(crate::assets::Lucide::User).size(px(11.)).text_color(if aside { muted } else { ember })),
+                                )
+                                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme.foreground).child(if aside { "You (aside)" } else { "You" }))
+                                .children(at.map(|at| div().text_size(px(11.)).text_color(muted.opacity(0.7)).child(crate::time::clock(at)))),
+                        )
                         .child(div().text_size(ui).line_height(relative(1.45)).text_color(theme.foreground).when(long && !open, |el| el.line_clamp(8)).child(text))
                         .when(long, |el| {
                             el.child(
@@ -1747,7 +1832,6 @@ impl Render for AiTranscript {
                                             .on_click(move |_, window, cx| crate::image_preview::open(images.clone(), 0, window, cx)),
                                     )
                                 })
-                                .children(at.map(|at| div().text_color(muted.opacity(0.7)).child(crate::time::clock(at))))
                                 .child(
                                     h_flex()
                                         .gap(px(8.))
@@ -1870,20 +1954,31 @@ impl Render for AiTranscript {
                             } else {
                                 chevron(open).into_any_element()
                             })
-                            .children(parts.into_iter().enumerate().map(|(i, p)| {
-                                match p {
-                                    Part::Text(t) => div().child(t).into_any_element(),
-                                    Part::File(f) => file_chip(
-                                        SharedString::from(format!("ai-read-{n}-{i}")),
-                                        &f,
-                                        None,
-                                        cx,
-                                    )
-                                    .into_any_element(),
-                                }
-                            }))
+                            .when(!running, |el| {
+                                let count = calls.len().max(1);
+                                el.child(format!(
+                                    "Used {count} reference{}",
+                                    if count == 1 { "" } else { "s" }
+                                ))
+                            })
+                            .when(running, |el| {
+                                el.children(part_elements(parts.clone(), n, cx))
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| this.toggle(&key, cx))),
                     )
+                    .when(open && !running, |el| {
+                        el.child(
+                            h_flex()
+                                .ml(px(5.))
+                                .pl(px(10.))
+                                .pt(px(2.))
+                                .gap(px(5.))
+                                .flex_wrap()
+                                .text_size(px(12.))
+                                .text_color(muted)
+                                .children(part_elements(parts, n, cx)),
+                        )
+                    })
                     .when(open, |el| {
                         el.child(
                             v_flex()
@@ -1976,43 +2071,54 @@ impl Render for AiTranscript {
                             .into_any_element(),
                     };
                     let ws = self.workspace.clone();
-                    let has_tail = !tail.is_empty();
+                    let running = status == ToolStatus::Running;
+                    let has_tail = running && !tail.is_empty();
                     v_flex()
                         .id(("ai-command", n))
                         .test_support()
                         .w_full()
-                        .rounded(px(7.))
-                        .border_1()
-                        .border_color(theme.foreground.opacity(0.09))
-                        .bg(theme.foreground.opacity(0.025))
-                        .overflow_hidden()
-                        .font_family(theme.mono_font_family.clone())
-                        .text_size(px(11.5))
+                        .gap(px(3.))
+                        .text_size(px(12.))
                         .child(
                             h_flex()
                                 .id(("ai-command-head", n))
                                 .gap(px(6.))
-                                .px(px(8.))
-                                .py(px(4.))
                                 .text_color(muted)
                                 .cursor_pointer()
+                                .hover(|s| s.text_color(theme.foreground))
+                                .child(status_el)
+                                .child(div().flex_none().child(if running {
+                                    "Running"
+                                } else {
+                                    "Ran"
+                                }))
                                 .child(
                                     div()
-                                        .flex_1()
                                         .min_w_0()
                                         .truncate()
-                                        .child(format!("$ {command}")),
+                                        .px(px(5.))
+                                        .rounded(px(4.))
+                                        .bg(theme.foreground.opacity(0.06))
+                                        .font_family(theme.mono_font_family.clone())
+                                        .text_size(px(11.5))
+                                        .text_color(theme.foreground.opacity(0.85))
+                                        .child(command),
                                 )
-                                .child(status_el)
+                                .child(chevron(open))
                                 .on_click(cx.listener(move |this, _, _, cx| this.toggle(&key, cx))),
                         )
                         .when(has_tail || open, |el| {
                             el.child(
                                 v_flex()
+                                    .ml(px(17.))
                                     .px(px(8.))
                                     .py(px(4.))
-                                    .border_t_1()
-                                    .border_color(theme.foreground.opacity(0.07))
+                                    .rounded(px(6.))
+                                    .border_1()
+                                    .border_color(theme.foreground.opacity(0.08))
+                                    .bg(theme.foreground.opacity(0.025))
+                                    .font_family(theme.mono_font_family.clone())
+                                    .text_size(px(11.5))
                                     .text_color(theme.foreground.opacity(0.7))
                                     .map(|el| match output {
                                         Some(full) => el.child(
@@ -2287,6 +2393,7 @@ impl AiTranscript {
                 View::Notice(_) => "notice".into(),
                 View::Error(_) => "error".into(),
                 View::Limit(_) => "limit".into(),
+                View::Speaker { label, .. } => format!("speaker {label}"),
                 View::Handoff(_) => "handoff".into(),
             })
             .collect()

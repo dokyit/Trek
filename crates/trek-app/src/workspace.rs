@@ -7797,8 +7797,9 @@ impl Workspace {
             return;
         }
         let Some(t) = self.thread(id) else { return };
-        // Sub-agents are named by the agent that started them.
-        if t.source != ThreadSource::Trek || t.side_of.is_some() || t.parent_id.is_some() {
+        // Sub-agents are named by the agent that started them. Side chats are named as threads are:
+        // their tabs and history list them by it.
+        if t.source != ThreadSource::Trek || t.parent_id.is_some() {
             return;
         }
         let Some(live) = self.live.get(id) else {
