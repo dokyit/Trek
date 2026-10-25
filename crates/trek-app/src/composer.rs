@@ -2166,11 +2166,15 @@ impl Composer {
             .ghost()
             // A 30 px circle on the chips' fill.
             .with_size(px(look::CONTROL))
+            .w(px(look::CONTROL))
+            .h(px(look::CONTROL))
+            .p_0()
             .rounded(px(look::CONTROL / 2.))
             .bg(look::chip_fill(cx))
-            .icon(
+            // A child, not `.icon()`: the kit sizes an icon to 3/4 of its button.
+            .child(
                 Icon::new(IconName::Plus)
-                    .size(px(12.))
+                    .size(px(13.))
                     .text_color(theme.muted_foreground),
             )
             .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
@@ -3819,7 +3823,7 @@ impl Render for Composer {
             .when_some(missing, |el, (wt, id)| el.child(self.missing_worktree(&wt, id, cx)))
             .children(self.edit_banner(cx))
             .children(self.attachment_strip(cx))
-            .child(div().px(px(look::PAD)).pt(px(if is_draft || !self.outbox.paths.is_empty() || self.editing.is_some() { look::PAD - 7. } else { 2. })).text_size(rems(look::TEXT)).when(self.voice.active(), |el| el.pb(px(6.))).map(|el| if self.voice.active() { el.child(self.voice_preview(window, cx)) } else { el.relative().child(Textarea::new(&self.input).appearance(false).text_size(rems(look::TEXT)).token(|token, _, cx| {
+            .child(div().px(px(if self.voice.active() { look::PAD } else { look::PAD - look::INPUT_INSET })).pt(px(if is_draft || !self.outbox.paths.is_empty() || self.editing.is_some() { look::PAD - 7. } else { 2. })).text_size(rems(look::TEXT)).when(self.voice.active(), |el| el.pb(px(6.))).map(|el| if self.voice.active() { el.child(self.voice_preview(window, cx)) } else { el.relative().child(Textarea::new(&self.input).appearance(false).text_size(rems(look::TEXT)).token(|token, _, cx| {
                 // An accepted `/` command or skill: plain blue text, no pill.
                 div().text_color(crate::palette::token(cx)).child(token.token().label().clone())
             }).on_paste({

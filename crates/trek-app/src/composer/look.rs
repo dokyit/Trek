@@ -20,6 +20,9 @@ pub const GAP: f32 = 5.;
 pub const LABEL: f32 = 12.;
 /// A chip's icon, in px.
 pub const ICON: f32 = 14.;
+/// The kit's multi-line input pads its text by this much on each side; the composer takes it
+/// off its own padding, so the text lines up with the `+` under it.
+pub const INPUT_INSET: f32 = 10.;
 /// The prompt's text size and line height in rems: 13 px on 20 at the default 14 px UI size,
 /// and they grow with it.
 pub const TEXT: f32 = 13. / 14.;
