@@ -583,6 +583,14 @@ fn is_gh(words: &[String], sub: &[&str]) -> bool {
         && words[1..=sub.len()].iter().zip(sub).all(|(w, s)| w == s)
 }
 
+/// Whether the segment runs a script named `watch-run` (with or without `.sh`), as the command.
+fn watches_run(words: &[String]) -> bool {
+    words.first().is_some_and(|cmd| {
+        let name = cmd.rsplit('/').next().unwrap_or(cmd);
+        matches!(name, "watch-run" | "watch-run.sh")
+    })
+}
+
 /// The words after `gh <sub…>` (none when it isn't there).
 fn after<'a>(words: &'a [String], sub: &[&str]) -> &'a [String] {
     if is_gh(words, sub) {
@@ -739,6 +747,13 @@ fn call_in(words: &[String]) -> Option<Call> {
     }
     if is_gh(words, &["pr", "merge"]) {
         return Some(Call::PrMerge(pr_arg(words, &["pr", "merge"])));
+    }
+    // A run-watching script named for it (`~/.claude/bin/watch-run.sh <run id> [minutes]`, which
+    // ends at the first failed job where `gh run watch` waits for them all): a watch too.
+    if watches_run(words) {
+        return Some(Call::RunWatch(
+            positional(words).get(1).filter(|w| is_number(w)).cloned(),
+        ));
     }
     if is_gh(words, &["run", "watch"]) {
         let run = after(words, &["run", "watch"])

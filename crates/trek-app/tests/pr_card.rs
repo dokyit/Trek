@@ -88,6 +88,15 @@ fn finds_the_calls_it_cards() {
         ),
         Some(Call::RunWatch(Some("39779843418".into())))
     );
+    // A watcher script that ends at the first failed job: the run it names.
+    assert_eq!(
+        pr_card::call("Run command", "~/.claude/bin/watch-run.sh 40196082703 70"),
+        Some(Call::RunWatch(Some("40196082703".into())))
+    );
+    assert_eq!(
+        pr_card::call("Run command", "watch-run 40196082703"),
+        Some(Call::RunWatch(Some("40196082703".into())))
+    );
     // An id the shell fills in: known only from what `gh` prints.
     assert_eq!(
         pr_card::call(
