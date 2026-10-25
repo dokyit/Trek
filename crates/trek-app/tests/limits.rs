@@ -1004,7 +1004,7 @@ fn a_side_chat_shows_its_limit_and_carries_on() {
                 p.open_tool(trek_app::workspace::PanelTool::SideChat, window, cx)
             })
         });
-        trek.click(cx, "side-input");
+        trek.click(cx, "ai-input");
         trek.type_live(cx, "mock:limit 2m");
         trek.press_live(cx, "enter");
         let side = |ws: &trek_app::workspace::Workspace| {
@@ -1031,9 +1031,8 @@ fn a_side_chat_shows_its_limit_and_carries_on() {
             !items.iter().any(|i| matches!(i, Item::Error { .. })),
             "{items:?}"
         );
-        let ix = trek.item_ix(cx, &id, |i| matches!(i, Item::Limit { .. }));
         trek.render(cx);
-        assert!(trek.visible(cx, ("side-limit", ix)));
+        assert!((0..60usize).any(|n| trek.visible(cx, ("ai-limit", n))));
         // The next message goes to the agent (which meets its limit again), not to a queue.
         trek.update(cx, |ws, cx| {
             ws.send_to(&id, "explain the startup".into(), vec![], cx)

@@ -96,7 +96,7 @@ impl IdeWorkbench {
             }))
         });
         let search = cx.new(|cx| IdeSearch::new(workspace.clone(), window, cx));
-        let ai = cx.new(|cx| ai::AiPane::new(workspace.clone(), window, cx));
+        let ai = cx.new(|cx| ai::AiPane::new(workspace.clone(), crate::workspace::Scope::Ide, window, cx));
         let me = cx.weak_entity();
         let status = cx.new(|cx| status_bar::IdeStatus::new(workspace.clone(), me, cx));
         let (layout, files_seen, edits_seen, mode_seen) = {

@@ -102,9 +102,10 @@ struct Editing {
 }
 
 /// Which draft the AI side bar's tab in front has: its thread's, or the folder's new chat's.
-fn draft_key(ws: &Workspace) -> String {
-    match ws.ide_chat.active_thread() {
+fn draft_key(ws: &Workspace, scope: &Scope) -> String {
+    match ws.chats(scope).active_thread() {
         Some(id) => format!("thread:{id}"),
+        None if *scope == Scope::Side => "side-draft".into(),
         None => format!(
             "ide-draft:{}",
             ws.ide_root
@@ -116,7 +117,7 @@ fn draft_key(ws: &Workspace) -> String {
 }
 
 impl AiInput {
-    pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(workspace: Entity<Workspace>, scope: Scope, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cmd_enter = workspace.read(cx).settings.general.send_with_cmd_enter;
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -125,7 +126,7 @@ impl AiInput {
                 .placeholder(PLACEHOLDER)
         });
         let pickers = Pickers::new(window, cx);
-        let tab = draft_key(workspace.read(cx));
+        let tab = draft_key(workspace.read(cx), &scope);
         let subscriptions = vec![
             cx.subscribe_in(
                 &input,
@@ -150,8 +151,9 @@ impl AiInput {
                                 v.trim().len() >= 2 && !v.starts_with('/')
                             };
                             if typing && this.editing.is_none() {
+                                let scope = this.scope.clone();
                                 this.workspace
-                                    .update(cx, |ws, cx| ws.warm_up_in(&Scope::Ide, cx));
+                                    .update(cx, |ws, cx| ws.warm_up_in(&scope, cx));
                             }
                             cx.notify();
                         }
@@ -167,14 +169,14 @@ impl AiInput {
                         .update(cx, |s, cx| s.set_submit_on_enter(!cmd_enter, cx));
                 }
                 // Another chat tab came to the front: its own draft comes back.
-                let key = draft_key(ws.read(cx));
+                let key = draft_key(ws.read(cx), &this.scope);
                 if key != this.tab {
                     this.switch_draft(key, window, cx);
                 }
                 // The message being edited is gone (a rewind took it): what was put aside comes back.
                 let stale = this.editing.as_ref().is_some_and(|e| {
                     let ws = ws.read(cx);
-                    ws.thread_id_in(&Scope::Ide) != Some(e.thread.as_str())
+                    ws.thread_id_in(&this.scope) != Some(e.thread.as_str())
                         || ws
                             .live
                             .get(&e.thread)
@@ -191,7 +193,7 @@ impl AiInput {
         Self {
             workspace,
             narrow: false,
-            scope: Scope::Ide,
+            scope: scope.clone(),
             input,
             pickers,
             outbox: Outbox::default(),
@@ -306,9 +308,10 @@ impl AiInput {
     /// It goes to the chat in front, as Return would send it (queued while a turn runs).
     pub fn send_request(&mut self, text: &str, chips: &[ContextChip], cx: &mut Context<Self>) {
         let ws = self.workspace.read(cx);
-        let text = context::with_context(text, chips, ws.cwd_in(&Scope::Ide).as_deref());
+        let text = context::with_context(text, chips, ws.cwd_in(&self.scope).as_deref());
+        let scope = self.scope.clone();
         self.workspace
-            .update(cx, |ws, cx| ws.send_ide(text, vec![], FollowUp::Queue, cx));
+            .update(cx, |ws, cx| ws.send_chat_in(&scope, text, vec![], FollowUp::Queue, cx));
         cx.notify();
     }
 
@@ -373,7 +376,7 @@ impl AiInput {
         let said = sent.said.to_string();
         if sent.ask {
             self.workspace.update(cx, |ws, cx| {
-                ws.set_chat_mode_in(&Scope::Ide, ChatMode::Ask, cx)
+                ws.set_chat_mode_in(&self.scope, ChatMode::Ask, cx)
             });
         }
         let Some(item) = edit else {
@@ -476,7 +479,8 @@ impl AiInput {
         // `/new`, `/clear`: a new chat here (this one's draft stays with it, empty).
         if super::commands::is_new_chat(&raw) && self.editing.is_none() {
             clear(self, window, cx);
-            self.workspace.update(cx, |ws, cx| ws.ide_new_chat(cx));
+            let scope = self.scope.clone();
+            self.workspace.update(cx, |ws, cx| ws.new_chat_in(&scope, cx));
             return;
         }
         // `/consult <models>[: <message>]` picks consultants, and sends when there's a message.
@@ -484,6 +488,7 @@ impl AiInput {
         let mut text = raw.clone();
         let picked = super::commands::consult_command(
             self.workspace.read(cx),
+            &self.scope,
             &raw,
             self.consult.clone().unwrap_or(Consult {
                 implement: true,
@@ -507,7 +512,7 @@ impl AiInput {
         // for the first message.
         let mut restate = self.restate;
         let under_way =
-            self.editing.is_none() && self.workspace.read(cx).thread_in(&Scope::Ide).is_some();
+            self.editing.is_none() && self.workspace.read(cx).thread_in(&self.scope).is_some();
         match crate::composer::restate_command(&text) {
             Some(None) if under_way => {
                 restate = true;
@@ -528,18 +533,18 @@ impl AiInput {
         let command = text.trim_start().starts_with('/');
         if !command {
             text =
-                context::with_context(&text, &self.attached(), ws.cwd_in(&Scope::Ide).as_deref());
-            if ws.chat_mode_in(&Scope::Ide) == ChatMode::Ask {
+                context::with_context(&text, &self.attached(), ws.cwd_in(&self.scope).as_deref());
+            if ws.chat_mode_in(&self.scope) == ChatMode::Ask {
                 text = context::with_ask(&text);
             }
             if restate {
                 text = trek_core::restate::with_restate(&text);
             }
             if let Some(c) = consult.as_ref() {
-                if let Some(why) = ws.consult_unavailable(&ws.prefs_in(&Scope::Ide).agent) {
+                if let Some(why) = ws.consult_unavailable(&ws.prefs_in(&self.scope).agent) {
                     return toast(self, format!("Can't consult: {why}."), cx);
                 }
-                match super::commands::consult_prompt(ws, &text, c) {
+                match super::commands::consult_prompt(ws, &self.scope, &text, c) {
                     Ok(t) => text = t,
                     Err(why) => return toast(self, why, cx),
                 }
@@ -579,8 +584,9 @@ impl AiInput {
                 clear(self, window, cx);
                 self.chips.clear();
                 self.outbox.paths.clear();
+                let scope = self.scope.clone();
                 self.workspace
-                    .update(cx, |ws, cx| ws.send_ide(text, images, follow, cx));
+                    .update(cx, |ws, cx| ws.send_chat_in(&scope, text, images, follow, cx));
                 true
             }
         };
@@ -599,7 +605,7 @@ impl AiInput {
     /// changes pending review.
     fn state(&self, cx: &App) -> (Option<String>, bool, bool) {
         let ws = self.workspace.read(cx);
-        let thread = ws.thread_in(&Scope::Ide);
+        let thread = ws.thread_in(&self.scope);
         let own = thread
             .is_some_and(|t| matches!(t.run_state, RunState::Working | RunState::NeedsYou))
             || thread.is_some_and(|t| ws.turn_running(&t.id));
@@ -702,7 +708,7 @@ impl AiInput {
 
     fn set_mode(&mut self, mode: ChatMode, cx: &mut Context<Self>) {
         self.workspace
-            .update(cx, |ws, cx| ws.set_chat_mode_in(&Scope::Ide, mode, cx));
+            .update(cx, |ws, cx| ws.set_chat_mode_in(&self.scope, mode, cx));
         self.mode_open = false;
         cx.notify();
     }
@@ -899,7 +905,7 @@ impl AiInput {
 
     /// The mode pill: Agent, Plan or Ask.
     fn mode_pill(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mode = self.workspace.read(cx).chat_mode_in(&Scope::Ide);
+        let mode = self.workspace.read(cx).chat_mode_in(&self.scope);
         let theme = cx.theme().clone();
         let icon = |m: ChatMode| match m {
             ChatMode::Agent => Icon::new(crate::assets::Lucide::Infinity),
@@ -1096,7 +1102,7 @@ impl Attaching for AiInput {
     /// The tab a send held for images is for: its thread, or the new chat of this IDE folder (a
     /// send held across a folder change doesn't start a thread in the new one).
     fn target(&self, cx: &App) -> String {
-        draft_key(self.workspace.read(cx))
+        draft_key(self.workspace.read(cx), &self.scope)
     }
 
     fn send_held(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1126,7 +1132,7 @@ impl Render for AiInput {
             .as_ref()
             .and_then(|id| self.workspace.read(cx).live.get(id))
             .and_then(|l| l.context);
-        let hh = self.workspace.read(cx).prefs_in(&Scope::Ide).hand_holding;
+        let hh = self.workspace.read(cx).prefs_in(&self.scope).hand_holding;
         let model_pill = pickers::model_pill(self, narrow, true, true, cx);
         let access_pill = pickers::access_pill(self, true, true, cx);
         let mode_pill = self.mode_pill(cx);
@@ -1319,12 +1325,12 @@ impl Render for AiInput {
             .capture_action(cx.listener(|this, _: &OutdentInline, _, cx| {
                 if this.pickers.trigger.is_none() {
                     cx.stop_propagation();
-                    let next = this.workspace.read(cx).chat_mode_in(&Scope::Ide).next();
+                    let next = this.workspace.read(cx).chat_mode_in(&this.scope).next();
                     this.set_mode(next, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &crate::TogglePlan, _, cx| {
-                let mode = if this.workspace.read(cx).chat_mode_in(&Scope::Ide) == ChatMode::Plan {
+                let mode = if this.workspace.read(cx).chat_mode_in(&this.scope) == ChatMode::Plan {
                     ChatMode::Agent
                 } else {
                     ChatMode::Plan

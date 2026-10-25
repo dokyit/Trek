@@ -238,6 +238,8 @@ fn every_screen_renders_in_both_themes() {
                 });
                 trek.render(cx);
             }
+            // Put away for the next theme: the side chat's model pill is a second "model-pill".
+            panel.update(cx, |p, cx| p.toggle(cx));
             for page in &pages {
                 trek.update(cx, |ws, cx| ws.navigate(Route::Settings(*page), cx));
                 trek.render(cx);

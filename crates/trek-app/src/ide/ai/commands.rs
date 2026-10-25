@@ -20,6 +20,7 @@ pub fn is_new_chat(text: &str) -> bool {
 /// (`None`: just picked, for the next message). `None` overall when `text` isn't the command.
 pub fn consult_command(
     ws: &Workspace,
+    scope: &Scope,
     text: &str,
     mut consult: Consult,
 ) -> Option<Result<(Consult, Option<String>), String>> {
@@ -27,7 +28,7 @@ pub fn consult_command(
     if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
         return None;
     }
-    let agent = ws.prefs_in(&Scope::Ide).agent;
+    let agent = ws.prefs_in(scope).agent;
     if let Some(why) = ws.consult_unavailable(&agent) {
         return Some(Err(format!("Can't consult: {why}.")));
     }
@@ -112,10 +113,10 @@ pub fn consultant_name(ws: &Workspace, c: &Consultant) -> String {
 }
 
 /// `text` with `consult`'s instructions for the agent, an arena's judge picked when none is.
-pub fn consult_prompt(ws: &Workspace, text: &str, consult: &Consult) -> Result<String, String> {
+pub fn consult_prompt(ws: &Workspace, scope: &Scope, text: &str, consult: &Consult) -> Result<String, String> {
     let mut consult = consult.clone();
     if consult.style == Style::Arena && consult.judge.is_none() {
-        let prefs = ws.prefs_in(&Scope::Ide);
+        let prefs = ws.prefs_in(scope);
         let models = ws.models_for(&prefs.agent);
         let model = prefs
             .model

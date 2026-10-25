@@ -163,7 +163,7 @@ fn a_side_chat_that_asks_to_run_something_shows_the_card_and_goes_on_once_allowe
         trek.window(cx, |window, cx| {
             panel.update(cx, |p, cx| p.open_tool(PanelTool::SideChat, window, cx))
         });
-        trek.click(cx, "side-input");
+        trek.click(cx, "ai-input");
         trek.type_live(cx, "mock:permission");
         trek.press_live(cx, "enter");
         let side = |ws: &trek_app::workspace::Workspace| {
@@ -179,16 +179,16 @@ fn a_side_chat_that_asks_to_run_something_shows_the_card_and_goes_on_once_allowe
         let id = trek.read(cx, |ws, _| side(ws)).unwrap();
         trek.render(cx);
         // What it waits for, with Allow: not a working line that never ends.
-        assert!(trek.visible(cx, "side-request"));
+        assert!(trek.visible(cx, "ai-approval"));
         assert!(trek.visible(cx, "ai-allow"));
-        assert!(!trek.visible(cx, "side-working"));
+        assert!(!trek.visible(cx, "ai-working"));
         trek.click(cx, "ai-allow");
         trek.wait(cx, "the side chat to carry on and finish", |ws| {
             !ws.turn_running(&id) && ws.live.get(&id).is_some_and(|l| l.permissions.is_empty())
         })
         .await;
         trek.render(cx);
-        assert!(!trek.visible(cx, "side-request"));
+        assert!(!trek.visible(cx, "ai-approval"));
         assert_ne!(trek.run_state(cx, &id), trek_core::RunState::NeedsYou);
     });
 }
@@ -201,7 +201,7 @@ fn a_side_chat_at_work_says_a_trail_word() {
         trek.window(cx, |window, cx| {
             panel.update(cx, |p, cx| p.open_tool(PanelTool::SideChat, window, cx))
         });
-        trek.click(cx, "side-input");
+        trek.click(cx, "ai-input");
         trek.type_live(cx, "mock:long 8s");
         trek.press_live(cx, "enter");
         let side = |ws: &trek_app::workspace::Workspace| {
@@ -216,24 +216,23 @@ fn a_side_chat_at_work_says_a_trail_word() {
         .await;
         trek.render(cx);
         assert!(
-            trek.visible(cx, "side-working"),
+            trek.visible(cx, "ai-working"),
             "a trail word while it works"
         );
         let id = trek.read(cx, |ws, _| side(ws)).unwrap();
         trek.wait(cx, "the side chat to finish", |ws| !ws.turn_running(&id))
             .await;
         trek.render(cx);
-        assert!(!trek.visible(cx, "side-working"));
+        assert!(!trek.visible(cx, "ai-working"));
         // Its answer reads as the transcript's do (Trek's markdown, path chips).
-        let answer = trek
-            .read(cx, |ws, _| {
-                ws.live[&id]
-                    .items
-                    .iter()
-                    .position(|i| matches!(i, Item::Assistant { text } if !text.is_empty()))
-            })
-            .expect("an answer");
-        assert!(trek.visible(cx, ("side-answer", answer)));
+        assert!(
+            trek.read(cx, |ws, _| ws.live[&id]
+                .items
+                .iter()
+                .any(|i| matches!(i, Item::Assistant { text } if !text.is_empty()))),
+            "an answer"
+        );
+        assert!((0..60usize).any(|n| trek.visible(cx, ("ai-answer", n))));
     });
 }
 

@@ -88,6 +88,9 @@ pub enum Scope {
     Main,
     Thread(String),
     Ide,
+    /// The side chat in the right panel: chat tabs of its own (`side_chat`), each a thread
+    /// beside the one the main window shows, drawn as the editor's AI side bar is.
+    Side,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1463,6 +1466,8 @@ pub struct Workspace {
     pub ide_root: Option<PathBuf>,
     /// The editor's AI side bar: its chat tabs and what a new chat starts with.
     pub ide_chat: IdeChat,
+    /// The side chat's tabs (`Scope::Side`), for this run.
+    pub side_chat: IdeChat,
     /// The chat tabs as last kept in the store for the IDE folder (`chats_moved`).
     ide_chats_saved: Option<String>,
     /// What the language servers last said about each open file, for Problems and the status bar.
@@ -1833,6 +1838,7 @@ impl Workspace {
             live: HashMap::new(),
             route,
             ide_chat: IdeChat::new(draft_prefs.clone()),
+            side_chat: IdeChat::new(draft_prefs.clone()),
             ide_chats_saved: None,
             draft_prefs,
             updater: Default::default(),
@@ -2067,6 +2073,7 @@ impl Workspace {
     pub fn thread_id_in<'a>(&'a self, scope: &'a Scope) -> Option<&'a str> {
         match scope {
             Scope::Ide => self.ide_chat.active_thread(),
+            Scope::Side => self.side_chat.active_thread(),
             _ => scope_thread(scope, &self.route),
         }
     }
@@ -2079,6 +2086,7 @@ impl Workspace {
     pub fn is_draft_in(&self, scope: &Scope) -> bool {
         match scope {
             Scope::Ide => self.ide_chat.is_draft(),
+            Scope::Side => self.side_chat.is_draft(),
             _ => scope_is_draft(scope, &self.route),
         }
     }
@@ -2088,6 +2096,7 @@ impl Workspace {
     pub fn draft_project_in(&self, scope: &Scope) -> Option<PathBuf> {
         match (scope, &self.route) {
             (Scope::Ide, _) if self.ide_chat.is_draft() => self.ide_root.clone(),
+            (Scope::Side, _) if self.side_chat.is_draft() => self.side_chat_folder(),
             (Scope::Main, Route::Draft { project }) => project.clone(),
             _ => None,
         }
@@ -2102,6 +2111,10 @@ impl Workspace {
                 Some(id) => self.thread(id).and_then(|t| t.cwd.clone()),
                 None => self.ide_root.clone(),
             },
+            Scope::Side => match self.side_chat.active_thread() {
+                Some(id) => self.thread(id).and_then(|t| t.cwd.clone()),
+                None => self.current_cwd(),
+            },
         }
     }
 
@@ -2112,6 +2125,14 @@ impl Workspace {
     /// Where `id` is on screen: its own window, else the main window when it shows the thread.
     /// Its own window wins, so queued follow-ups go back to that window's composer.
     pub fn shown_in(&self, id: &str) -> Option<Scope> {
+        // The side chat's active tab, while the main window shows the harness.
+        if self.mode == Mode::Agents
+            && self.side_chat.active_thread() == Some(id)
+            && !self.thread_windows.contains_key(id)
+            && self.main_window.is_some()
+        {
+            return Some(Scope::Side);
+        }
         let main = match self.mode {
             Mode::Agents => Scope::Main,
             Mode::Editor => Scope::Ide,
@@ -2311,7 +2332,11 @@ impl Workspace {
         );
         let agent_id = AgentId::from_key(&agent);
         // The editor's new chats start from the same defaults as the harness's drafts.
-        for p in [&mut self.draft_prefs, &mut self.ide_chat.draft_prefs] {
+        for p in [
+            &mut self.draft_prefs,
+            &mut self.ide_chat.draft_prefs,
+            &mut self.side_chat.draft_prefs,
+        ] {
             if agent != old_agent && p.agent != agent_id {
                 p.agent = agent_id.clone();
                 p.model = model.clone();
@@ -3453,6 +3478,7 @@ impl Workspace {
                 worktree: t.worktree.is_some(),
             },
             None if *scope == Scope::Ide => self.ide_chat.draft_prefs.clone(),
+            None if *scope == Scope::Side => self.side_chat.draft_prefs.clone(),
             None => self.draft_prefs.clone(),
         }
     }
@@ -3605,6 +3631,7 @@ impl Workspace {
                 }
             }
             None if *scope == Scope::Ide => self.ide_chat.draft_prefs = prefs,
+            None if *scope == Scope::Side => self.side_chat.draft_prefs = prefs,
             None => self.draft_prefs = prefs,
         }
         cx.notify();
@@ -3895,12 +3922,18 @@ impl Workspace {
 
     /// Start a side chat next to `parent` (or the current draft's project). Hidden from the sidebar.
     pub fn create_side_chat(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        let mut p = self.prefs();
+        p.hand_holding = HandHolding::Supervised;
+        self.create_side_chat_with(p, cx)
+    }
+
+    /// `create_side_chat`, with the agent, model, effort and access picked for it.
+    pub fn create_side_chat_with(&mut self, p: Prefs, cx: &mut Context<Self>) -> Option<String> {
         let cwd = self.current_cwd();
         let parent = match &self.route {
             Route::Thread(id) => id.clone(),
             _ => "draft".into(),
         };
-        let p = self.prefs();
         // Same project as its thread, and the same folder (a worktree, maybe).
         let project = self
             .current_thread()
@@ -3913,7 +3946,7 @@ impl Workspace {
                 p.agent,
                 p.model,
                 p.effort,
-                HandHolding::Supervised,
+                p.hand_holding,
             )
             .ok()?;
         t.cwd = cwd;
@@ -4182,6 +4215,10 @@ impl Workspace {
             Scope::Ide => match self.ide_chat.active_thread().map(str::to_string) {
                 Some(id) => self.send_to(&id, text, images, cx),
                 None => self.send_ide_draft(text, images, cx),
+            },
+            Scope::Side => match self.side_chat.active_thread().map(str::to_string) {
+                Some(id) => self.send_to(&id, text, images, cx),
+                None => self.send_side_draft(text, images, cx),
             },
         }
     }
@@ -4763,6 +4800,11 @@ impl Workspace {
                 }
                 (None, None) => {}
             },
+            Scope::Side => {
+                if let Some(id) = self.side_chat.active_thread().map(str::to_string) {
+                    self.warm_thread(&id, cx);
+                }
+            }
         }
     }
 
@@ -7106,15 +7148,14 @@ impl Workspace {
         }
         let (fork_id, message) = self.fork_quietly(id, &at, cx)?;
         // The editor's fork opens as a chat tab beside the one it came from.
-        let into = if *scope == Scope::Ide {
-            Scope::Ide
-        } else {
-            Scope::Main
+        let into = match scope {
+            Scope::Ide | Scope::Side => scope.clone(),
+            _ => Scope::Main,
         };
         match scope {
             Scope::Main => self.navigate(Route::Thread(fork_id.clone()), cx),
             Scope::Thread(_) => self.show_in_main(Route::Thread(fork_id.clone()), cx),
-            Scope::Ide => self.ide_open_thread(&fork_id, cx),
+            Scope::Ide | Scope::Side => self.open_chat_in(scope, &fork_id, cx),
         }
         if let Some((text, images)) = message {
             // A main window reopened for the fork can't hear it yet: it takes the message itself.
@@ -7416,6 +7457,7 @@ impl Workspace {
         // Its chat tab in the editor goes too, and its sub-agents' (the main window may be on one
         // of them, opened from the transcript row: that thread is gone with its parent).
         self.ide_chat.forget(id);
+        self.side_chat.forget(id);
         for child in &sub_agents {
             self.ide_chat.forget(child);
         }
@@ -7617,6 +7659,7 @@ impl Workspace {
         );
         for t in &threads {
             self.ide_chat.forget(&t.id);
+            self.side_chat.forget(&t.id);
         }
         self.chats_moved();
         self.reload(cx);
@@ -8201,7 +8244,11 @@ impl Workspace {
                         this.probe_acp_agents(cx);
                         // Default to an agent that's actually installed.
                         let ready = this.ready_agents();
-                        for p in [&mut this.draft_prefs, &mut this.ide_chat.draft_prefs] {
+                        for p in [
+                            &mut this.draft_prefs,
+                            &mut this.ide_chat.draft_prefs,
+                            &mut this.side_chat.draft_prefs,
+                        ] {
                             if !ready.contains(&p.agent) {
                                 if let Some(a) = ready.first() {
                                     p.agent = a.clone();

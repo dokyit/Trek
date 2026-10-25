@@ -5,7 +5,6 @@ pub mod browser;
 pub mod explorer;
 pub mod git;
 pub mod ide_search;
-mod side_chat;
 mod simhid;
 mod simulator;
 pub mod terminal;
@@ -60,7 +59,8 @@ enum View {
     Explorer(Entity<explorer::ExplorerPanel>),
     Terminal(Entity<terminal::TerminalPanel>),
     Browser(Entity<browser::BrowserPanel>),
-    SideChat(Entity<side_chat::SideChatPanel>),
+    /// The side chat: the editor's AI side bar, on `Scope::Side`.
+    SideChat(Entity<crate::ide::ai::AiPane>),
     Simulator(Entity<simulator::SimulatorPanel>),
 }
 
@@ -127,11 +127,12 @@ impl RightPanel {
         cx.notify();
     }
 
-    /// Open a tool (reusing an existing tab except for terminals and side chats, which stack).
+    /// Open a tool (reusing an existing tab except for terminals, which stack; the side chat has
+    /// tabs of its own).
     pub fn open_tool(&mut self, tool: PanelTool, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
         self.launcher_open = false;
-        let reuse = !matches!(tool, PanelTool::Terminal | PanelTool::SideChat);
+        let reuse = !matches!(tool, PanelTool::Terminal);
         if reuse {
             if let Some(t) = self.tabs.iter().find(|t| t.tool == tool) {
                 self.active = Some(t.id);
@@ -157,7 +158,9 @@ impl RightPanel {
                 View::Browser(cx.new(|cx| browser::BrowserPanel::new(ws, window, cx)))
             }
             PanelTool::SideChat => {
-                View::SideChat(cx.new(|cx| side_chat::SideChatPanel::new(ws, window, cx)))
+                View::SideChat(cx.new(|cx| {
+                    crate::ide::ai::AiPane::new(ws, crate::workspace::Scope::Side, window, cx)
+                }))
             }
             PanelTool::Simulator => {
                 View::Simulator(cx.new(|cx| simulator::SimulatorPanel::new(ws, window, cx)))
@@ -209,10 +212,7 @@ impl RightPanel {
                 handle.focus(window, cx);
             }
             // A side chat is there to be typed in: the keys go to its box at once.
-            Some(View::SideChat(s)) => {
-                let handle = s.read(cx).focus_handle(cx);
-                handle.focus(window, cx);
-            }
+            Some(View::SideChat(s)) => s.update(cx, |p, cx| p.focus(window, cx)),
             _ => {}
         }
         cx.notify();

@@ -365,6 +365,8 @@ struct Seen {
 
 pub struct AiTranscript {
     workspace: Entity<Workspace>,
+    /// The editor's AI side bar, or the side chat.
+    scope: Scope,
     /// The thread shown.
     current: Option<String>,
     /// Blocks worked out for (thread, revision, items, thought streaming).
@@ -391,7 +393,7 @@ pub struct AiTranscript {
 }
 
 impl AiTranscript {
-    pub fn new(workspace: Entity<Workspace>, _: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(workspace: Entity<Workspace>, scope: Scope, _: &mut Window, cx: &mut Context<Self>) -> Self {
         let subscriptions = vec![
             cx.observe(&workspace, |this, _, cx| this.sync(cx)),
             cx.subscribe(
@@ -409,6 +411,7 @@ impl AiTranscript {
             ),
         ];
         let mut this = Self {
+            scope,
             workspace,
             current: None,
             blocks: Default::default(),
@@ -432,7 +435,7 @@ impl AiTranscript {
     /// shown moved.
     fn sync(&mut self, cx: &mut Context<Self>) {
         let ws = self.workspace.read(cx);
-        let id = ws.thread_id_in(&Scope::Ide).map(str::to_string);
+        let id = ws.thread_id_in(&self.scope).map(str::to_string);
         let running = id.as_ref().is_some_and(|id| ws.turn_running(id));
         let live = id.as_ref().and_then(|id| ws.live.get(id));
         let seen = Seen {
@@ -914,7 +917,7 @@ impl AiTranscript {
             };
             if let Some((text, images)) = back {
                 cx.emit(WorkspaceEvent::ComposeIn {
-                    scope: Scope::Ide,
+                    scope: self.scope.clone(),
                     thread,
                     text,
                     images,
@@ -1287,14 +1290,15 @@ impl AiTranscript {
                                 .xsmall()
                                 .ghost()
                                 .label("Not quite…")
-                                .on_click(move |_, _, cx| {
-                                    let thread = t2.clone();
-                                    ws2.update(cx, |_, cx| {
-                                        cx.emit(WorkspaceEvent::CorrectRestatement {
-                                            scope: Scope::Ide,
-                                            thread,
-                                        })
-                                    });
+                                .on_click({
+                                    let scope = self.scope.clone();
+                                    move |_, _, cx| {
+                                        let thread = t2.clone();
+                                        let scope = scope.clone();
+                                        ws2.update(cx, |_, cx| {
+                                            cx.emit(WorkspaceEvent::CorrectRestatement { scope, thread })
+                                        });
+                                    }
                                 }),
                         ),
                 )
@@ -1404,7 +1408,7 @@ impl AiTranscript {
                 p,
                 ws.thread(&id)?.agent.display_name(),
                 live.picks.clone(),
-                ws.cwd_in(&Scope::Ide),
+                ws.cwd_in(&self.scope),
             )
         };
         let card = match &p.prompt {
@@ -1760,7 +1764,8 @@ impl Render for AiTranscript {
                                                         _ => None,
                                                     }));
                                                     if let Some((text, images)) = msg {
-                                                        this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::ComposeIn { scope: Scope::Ide, thread, text, images, edit: Some(item) }));
+                                                        let scope = this.scope.clone();
+                                                        this.workspace.update(cx, |_, cx| cx.emit(WorkspaceEvent::ComposeIn { scope, thread, text, images, edit: Some(item) }));
                                                     }
                                                 })))
                                         })
@@ -2173,6 +2178,8 @@ impl Render for AiTranscript {
                     .child(text)
                     .into_any_element(),
                 View::Limit(text) => h_flex()
+                    .id(("ai-limit", n))
+                    .test_support()
                     .gap(px(6.))
                     .text_size(px(12.))
                     .text_color(palette::amber(cx))

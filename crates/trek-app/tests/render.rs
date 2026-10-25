@@ -613,10 +613,10 @@ fn the_cached_tools_panel_redraws_what_changes_inside_it() {
         trek.window(cx, |window, cx| {
             panel.update(cx, |p, cx| p.open_tool(PanelTool::SideChat, window, cx))
         });
-        trek.click(cx, "side-input");
+        trek.click(cx, "ai-input");
         let height = |cx: &mut TestAppContext| {
             trek.window(cx, |window, _| {
-                window.find("side-input").bounds().size.height
+                window.find("ai-input").bounds().size.height
             })
         };
         let one_line = height(cx);

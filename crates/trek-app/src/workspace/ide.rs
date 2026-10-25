@@ -283,13 +283,40 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The chat tabs of `scope`: the editor's AI side bar, or the side chat.
+    pub fn chats(&self, scope: &Scope) -> &IdeChat {
+        match scope {
+            Scope::Side => &self.side_chat,
+            _ => &self.ide_chat,
+        }
+    }
+
+    fn chats_mut(&mut self, scope: &Scope) -> &mut IdeChat {
+        match scope {
+            Scope::Side => &mut self.side_chat,
+            _ => &mut self.ide_chat,
+        }
+    }
+
+    /// The editor's tabs are kept with its folder; the side chat's last this run.
+    fn tabs_moved(&mut self, scope: &Scope) {
+        if *scope == Scope::Ide {
+            self.chats_moved();
+        }
+    }
+
     /// Open `id` in the AI side bar as its active chat tab.
     pub fn ide_open_thread(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.open_chat_in(&Scope::Ide, id, cx)
+    }
+
+    /// Open `id` as `scope`'s active chat tab.
+    pub fn open_chat_in(&mut self, scope: &Scope, id: &str, cx: &mut Context<Self>) {
         if self.thread(id).is_none() {
             return;
         }
-        self.ide_chat.show(id);
-        self.chats_moved();
+        self.chats_mut(scope).show(id);
+        self.tabs_moved(scope);
         self.thread_came_on_screen(id, cx);
         cx.notify();
     }
@@ -305,12 +332,18 @@ impl Workspace {
 
     /// Switch the AI side bar to tab `ix`.
     pub fn ide_select_chat(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if ix >= self.ide_chat.tabs.len() || ix == self.ide_chat.active {
+        self.select_chat_in(&Scope::Ide, ix, cx)
+    }
+
+    /// Switch `scope` to its tab `ix`.
+    pub fn select_chat_in(&mut self, scope: &Scope, ix: usize, cx: &mut Context<Self>) {
+        let chats = self.chats_mut(scope);
+        if ix >= chats.tabs.len() || ix == chats.active {
             return;
         }
-        self.ide_chat.active = ix;
-        self.chats_moved();
-        if let Some(id) = self.ide_chat.active_thread().map(str::to_string) {
+        chats.active = ix;
+        self.tabs_moved(scope);
+        if let Some(id) = self.chats(scope).active_thread().map(str::to_string) {
             self.thread_came_on_screen(&id, cx);
         }
         cx.emit(WorkspaceEvent::FocusAiInput);
@@ -319,9 +352,14 @@ impl Workspace {
 
     /// Close the AI side bar's tab `ix`. Its thread stays, in the inbox and the history.
     pub fn ide_close_chat(&mut self, ix: usize, cx: &mut Context<Self>) {
-        self.ide_chat.close(ix);
-        self.chats_moved();
-        if let Some(id) = self.ide_chat.active_thread().map(str::to_string) {
+        self.close_chat_in(&Scope::Ide, ix, cx)
+    }
+
+    /// Close `scope`'s tab `ix`; its thread stays.
+    pub fn close_chat_in(&mut self, scope: &Scope, ix: usize, cx: &mut Context<Self>) {
+        self.chats_mut(scope).close(ix);
+        self.tabs_moved(scope);
+        if let Some(id) = self.chats(scope).active_thread().map(str::to_string) {
             self.thread_came_on_screen(&id, cx);
         }
         cx.notify();
@@ -329,13 +367,19 @@ impl Workspace {
 
     /// Close every chat tab but `keep`.
     pub fn ide_close_other_chats(&mut self, keep: usize, cx: &mut Context<Self>) {
-        let Some(tab) = self.ide_chat.tabs.get(keep).cloned() else {
+        self.close_other_chats_in(&Scope::Ide, keep, cx)
+    }
+
+    /// Close every tab of `scope` but `keep`.
+    pub fn close_other_chats_in(&mut self, scope: &Scope, keep: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.chats(scope).tabs.get(keep).cloned() else {
             return;
         };
-        self.ide_chat.tabs = vec![tab];
-        self.ide_chat.active = 0;
-        self.chats_moved();
-        if let Some(id) = self.ide_chat.active_thread().map(str::to_string) {
+        let chats = self.chats_mut(scope);
+        chats.tabs = vec![tab];
+        chats.active = 0;
+        self.tabs_moved(scope);
+        if let Some(id) = self.chats(scope).active_thread().map(str::to_string) {
             self.thread_came_on_screen(&id, cx);
         }
         cx.notify();
@@ -344,19 +388,67 @@ impl Workspace {
     /// ⌘N in the editor, the side bar's +: a new chat in the IDE folder. There's one new chat at
     /// most: + goes back to it.
     pub fn ide_new_chat(&mut self, cx: &mut Context<Self>) {
-        match self.ide_chat.tabs.iter().position(|t| *t == IdeTab::Draft) {
-            Some(ix) => self.ide_chat.active = ix,
+        self.new_chat_in(&Scope::Ide, cx)
+    }
+
+    /// A new chat in `scope` (one at most: + goes back to it).
+    pub fn new_chat_in(&mut self, scope: &Scope, cx: &mut Context<Self>) {
+        let chats = self.chats_mut(scope);
+        match chats.tabs.iter().position(|t| *t == IdeTab::Draft) {
+            Some(ix) => chats.active = ix,
             None => {
-                self.ide_chat.tabs.push(IdeTab::Draft);
-                self.ide_chat.active = self.ide_chat.tabs.len() - 1;
+                chats.tabs.push(IdeTab::Draft);
+                chats.active = chats.tabs.len() - 1;
                 // Plan and fast are a thread's choice; a new chat starts without them.
-                self.ide_chat.draft_prefs.plan = false;
-                self.ide_chat.draft_prefs.fast = false;
-                self.ide_chat.draft_ask = false;
+                chats.draft_prefs.plan = false;
+                chats.draft_prefs.fast = false;
+                chats.draft_ask = false;
             }
         }
-        self.chats_moved();
+        self.tabs_moved(scope);
         cx.emit(WorkspaceEvent::FocusAiInput);
+        cx.notify();
+    }
+
+    /// The folder a new side chat starts in: the main window's thread's project (and folder: a
+    /// worktree, maybe), or its draft's.
+    pub fn side_chat_folder(&self) -> Option<PathBuf> {
+        self.current_cwd()
+    }
+
+    /// The side chats there have been beside the current project, newest first: its history.
+    pub fn side_threads(&self) -> Vec<&trek_core::store::Thread> {
+        let project = self.current_thread().and_then(|t| t.project_id.clone());
+        let mut list: Vec<_> = self
+            .threads
+            .iter()
+            .filter(|t| t.archived_at.is_none() && t.side_of.is_some())
+            .filter(|t| project.is_none() || t.project_id == project)
+            .collect();
+        list.sort_by_key(|t| -t.updated_at);
+        list
+    }
+
+    /// The side chat's new chat sends its first message: a side chat starts beside the main
+    /// window's thread (`create_side_chat`), with what was picked for it, and takes the tab.
+    pub(super) fn send_side_draft(&mut self, text: String, images: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let text = text.trim().to_string();
+        if text.is_empty() && images.is_empty() {
+            return;
+        }
+        let prefs = self.side_chat.draft_prefs.clone();
+        let Some(id) = self.create_side_chat_with(prefs, cx) else {
+            return;
+        };
+        if self.side_chat.draft_ask {
+            self.live.entry(id.clone()).or_default().ask = true;
+        }
+        let ix = self.side_chat.active;
+        match self.side_chat.tabs.get_mut(ix) {
+            Some(tab @ IdeTab::Draft) => *tab = IdeTab::Thread(id.clone()),
+            _ => self.side_chat.show(&id),
+        }
+        self.send_to(&id, text, images, cx);
         cx.notify();
     }
 
@@ -413,8 +505,22 @@ impl Workspace {
         follow: FollowUp,
         cx: &mut Context<Self>,
     ) {
-        match self.ide_chat.active_thread().map(str::to_string) {
+        self.send_chat_in(&Scope::Ide, text, images, follow, cx)
+    }
+
+    /// Send from `scope`'s chat panel: `follow` says what a message sent while a turn runs does
+    /// (Return queues it, ⌘Return steers the turn with it now).
+    pub fn send_chat_in(
+        &mut self,
+        scope: &Scope,
+        text: String,
+        images: Vec<PathBuf>,
+        follow: FollowUp,
+        cx: &mut Context<Self>,
+    ) {
+        match self.chats(scope).active_thread().map(str::to_string) {
             Some(id) => self.send_as(&id, text, images, Some(follow), cx),
+            None if *scope == Scope::Side => self.send_side_draft(text, images, cx),
             None => self.send_ide_draft(text, images, cx),
         }
     }
@@ -515,7 +621,7 @@ impl Workspace {
     pub fn chat_mode_in(&self, scope: &Scope) -> ChatMode {
         let ask = match self.thread_id_in(scope) {
             Some(id) => self.live.get(id).is_some_and(|l| l.ask),
-            None => *scope == Scope::Ide && self.ide_chat.draft_ask,
+            None => matches!(scope, Scope::Ide | Scope::Side) && self.chats(scope).draft_ask,
         };
         if ask {
             ChatMode::Ask
@@ -553,7 +659,7 @@ impl Workspace {
                     }
                 }
             }
-            None if *scope == Scope::Ide => self.ide_chat.draft_ask = ask,
+            None if matches!(scope, Scope::Ide | Scope::Side) => self.chats_mut(scope).draft_ask = ask,
             None => {}
         }
         cx.notify();

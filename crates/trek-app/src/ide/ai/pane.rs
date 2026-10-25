@@ -24,6 +24,8 @@ const TAB_MIN: f32 = 120.;
 
 pub struct AiPane {
     workspace: Entity<Workspace>,
+    /// The editor's AI side bar (`Scope::Ide`), or the side chat (`Scope::Side`).
+    scope: Scope,
     pub transcript: Entity<AiTranscript>,
     pub input: Entity<AiInput>,
     /// A chat tab being renamed: its thread and the title being typed.
@@ -36,36 +38,35 @@ pub struct AiPane {
 }
 
 impl AiPane {
-    pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let transcript = cx.new(|cx| AiTranscript::new(workspace.clone(), window, cx));
-        let input = cx.new(|cx| AiInput::new(workspace.clone(), window, cx));
+    pub fn new(workspace: Entity<Workspace>, scope: Scope, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let transcript = cx.new(|cx| AiTranscript::new(workspace.clone(), scope.clone(), window, cx));
+        let input = cx.new(|cx| AiInput::new(workspace.clone(), scope.clone(), window, cx));
         let subscriptions = vec![
             cx.observe(&workspace, |_, _, cx| cx.notify()),
             cx.subscribe_in(
                 &workspace,
                 window,
                 |this, ws, event: &WorkspaceEvent, window, cx| {
-                    let ide = ws.read(cx).ide();
+                    // What's meant for the panel in front: the AI side bar in the editor, the side
+                    // chat beside the harness.
+                    let ide = ws.read(cx).ide() == (this.scope == Scope::Ide);
                     match event {
                         WorkspaceEvent::FocusAiInput if ide => this.focus(window, cx),
                         WorkspaceEvent::ComposeIn {
-                            scope: Scope::Ide,
+                            scope,
                             thread,
                             text,
                             images,
                             edit,
-                        } => {
-                            if ws.read(cx).thread_id_in(&Scope::Ide) == Some(thread.as_str()) {
+                        } if *scope == this.scope => {
+                            if ws.read(cx).thread_id_in(&this.scope) == Some(thread.as_str()) {
                                 this.input.update(cx, |c, cx| {
                                     c.compose(thread, text, images, edit.clone(), window, cx)
                                 });
                             }
                         }
-                        WorkspaceEvent::CorrectRestatement {
-                            scope: Scope::Ide,
-                            thread,
-                        } => {
-                            if ws.read(cx).thread_id_in(&Scope::Ide) == Some(thread.as_str()) {
+                        WorkspaceEvent::CorrectRestatement { scope, thread } if *scope == this.scope => {
+                            if ws.read(cx).thread_id_in(&this.scope) == Some(thread.as_str()) {
                                 this.input.update(cx, |c, cx| c.correct(window, cx));
                             }
                         }
@@ -73,7 +74,7 @@ impl AiPane {
                             thread,
                             text,
                             images,
-                        } if ws.read(cx).shown_in(thread) == Some(Scope::Ide) => {
+                        } if ws.read(cx).shown_in(thread).as_ref() == Some(&this.scope) => {
                             this.input
                                 .update(cx, |c, cx| c.restore(text, images, window, cx));
                         }
@@ -93,6 +94,7 @@ impl AiPane {
         ];
         Self {
             workspace,
+            scope,
             transcript,
             input,
             renaming: None,
@@ -120,7 +122,7 @@ impl AiPane {
     /// Rename chat tab `ix`'s thread: its title becomes an input in the tab.
     pub fn begin_rename(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let ws = self.workspace.read(cx);
-        let Some(IdeTab::Thread(id)) = ws.ide_chat.tabs.get(ix).cloned() else {
+        let Some(IdeTab::Thread(id)) = ws.chats(&self.scope).tabs.get(ix).cloned() else {
             return;
         };
         let title = ws.thread(&id).map(|t| t.title.clone()).unwrap_or_default();
@@ -158,6 +160,7 @@ impl AiPane {
 
     /// The strip of chat tabs, then +, history and ⋯.
     fn header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let scope = self.scope.clone();
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
         let glass = ws.glass();
@@ -167,9 +170,9 @@ impl AiPane {
             theme.border
         };
         let editor_bg = crate::ui::panel_bg(glass, cx);
-        let active = ws.ide_chat.active;
+        let active = ws.chats(&self.scope).active;
         let tabs: Vec<(usize, IdeTab, String, Option<AnyElement>)> = ws
-            .ide_chat
+            .chats(&self.scope)
             .tabs
             .iter()
             .enumerate()
@@ -186,7 +189,7 @@ impl AiPane {
                 },
             })
             .collect();
-        let thread = ws.ide_chat.active_thread().map(str::to_string);
+        let thread = ws.chats(&self.scope).active_thread().map(str::to_string);
         let count = tabs.len();
         let listed: Vec<(usize, String)> = tabs
             .iter()
@@ -217,6 +220,7 @@ impl AiPane {
                     .overflow_x_scroll()
                     .track_scroll(&self.strip)
                     .children(tabs.into_iter().map(|(ix, tab, title, mark)| {
+                        let menu_scope = scope.clone();
                         let on = ix == active;
                         let group = SharedString::from(format!("ai-tab-{ix}"));
                         let tip = title.clone();
@@ -303,8 +307,9 @@ impl AiPane {
                                     // Closes the tab only: the thread stays, in the inbox and history.
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.stop_propagation();
+                                        let scope = this.scope.clone();
                                         this.workspace
-                                            .update(cx, |ws, cx| ws.ide_close_chat(ix, cx));
+                                            .update(cx, |ws, cx| ws.close_chat_in(&scope, ix, cx));
                                     })),
                             )
                             .tooltip(move |window, cx| {
@@ -313,8 +318,9 @@ impl AiPane {
                             })
                             // A double click renames the chat.
                             .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                                let scope = this.scope.clone();
                                 this.workspace
-                                    .update(cx, |ws, cx| ws.ide_select_chat(ix, cx));
+                                    .update(cx, |ws, cx| ws.select_chat_in(&scope, ix, cx));
                                 if e.click_count() >= 2 {
                                     this.begin_rename(ix, window, cx);
                                 }
@@ -322,6 +328,7 @@ impl AiPane {
                             .context_menu(move |menu, _, _| {
                                 let (me1, me2, ws1, ws2, ws3) =
                                     (me.clone(), me.clone(), ws.clone(), ws.clone(), ws.clone());
+                                let (sc1, sc2, sc3) = (menu_scope.clone(), menu_scope.clone(), menu_scope.clone());
                                 let id = thread_id.clone();
                                 menu.min_w(px(200.))
                                     .item(
@@ -347,12 +354,12 @@ impl AiPane {
                                     )
                                     .separator()
                                     .item(PopupMenuItem::new("Close").on_click(move |_, _, cx| {
-                                        ws2.update(cx, |ws, cx| ws.ide_close_chat(ix, cx))
+                                        ws2.update(cx, |ws, cx| ws.close_chat_in(&sc1, ix, cx))
                                     }))
                                     .item(PopupMenuItem::new("Close Others").on_click(
                                         move |_, _, cx| {
                                             ws3.update(cx, |ws, cx| {
-                                                ws.ide_close_other_chats(ix, cx)
+                                                ws.close_other_chats_in(&sc2, ix, cx)
                                             })
                                         },
                                     ))
@@ -360,7 +367,7 @@ impl AiPane {
                                         move |_, _, cx| {
                                             let _ = me2.update(cx, |this, cx| {
                                                 this.workspace
-                                                    .update(cx, |ws, cx| ws.ide_new_chat(cx))
+                                                    .update(cx, |ws, cx| ws.new_chat_in(&sc3, cx))
                                             });
                                         },
                                     ))
@@ -376,7 +383,8 @@ impl AiPane {
                     .child(
                         crate::ui::icon_button("ai-new-chat", IconName::Plus, "New chat (⌘N)")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.workspace.update(cx, |ws, cx| ws.ide_new_chat(cx))
+                                let scope = this.scope.clone();
+                                this.workspace.update(cx, |ws, cx| ws.new_chat_in(&scope, cx))
                             })),
                     )
                     .child(self.history_button(cx))
@@ -392,6 +400,7 @@ impl AiPane {
         _: &mut Context<Self>,
     ) -> impl IntoElement {
         let ws = self.workspace.clone();
+        let scope = self.scope.clone();
         Button::new("ai-tabs-menu")
             .ghost()
             .small()
@@ -404,14 +413,14 @@ impl AiPane {
                     .scrollable(true)
                     .label("Open chats");
                 for (ix, title) in &listed {
-                    let (ws, ix) = (ws.clone(), *ix);
+                    let (ws, ix, scope) = (ws.clone(), *ix, scope.clone());
                     let title = if title.chars().count() > 48 {
                         format!("{}…", title.chars().take(47).collect::<String>())
                     } else {
                         title.clone()
                     };
                     menu = menu.item(PopupMenuItem::new(title).checked(ix == active).on_click(
-                        move |_, _, cx| ws.update(cx, |ws, cx| ws.ide_select_chat(ix, cx)),
+                        move |_, _, cx| ws.update(cx, |ws, cx| ws.select_chat_in(&scope, ix, cx)),
                     ));
                 }
                 menu
@@ -420,6 +429,7 @@ impl AiPane {
 
     /// 🕘: this folder's threads, newest first, by day; one opens as a chat tab.
     fn history_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let scope = self.scope.clone();
         let entity = self.workspace.clone();
         let _ = cx;
         let today = chrono::Local::now()
@@ -428,22 +438,22 @@ impl AiPane {
             .and_then(|d| d.and_local_timezone(chrono::Local).single())
             .map_or(0, |d| d.timestamp_millis());
         let week = today - 6 * 86_400_000;
+        let side = scope == Scope::Side;
         Button::new("ai-history")
             .ghost()
             .small()
             .icon(crate::assets::Lucide::RotateCcwClock)
-            .tooltip("Chats in this folder")
+            .tooltip(if side { "Side chats in this project" } else { "Chats in this folder" })
             .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, cx| {
                 // Read as it opens, not on every frame of the side bar.
-                let threads: Vec<(String, String, i64)> = entity
-                    .read(cx)
-                    .ide_threads()
+                let ws = entity.read(cx);
+                let threads: Vec<(String, String, i64)> = if side { ws.side_threads() } else { ws.ide_threads() }
                     .into_iter()
                     .map(|t| (t.id.clone(), t.title.clone(), t.updated_at))
                     .collect();
                 menu = menu.min_w(px(280.)).max_h(px(420.)).scrollable(true);
                 if threads.is_empty() {
-                    return menu.label("No chats in this folder yet");
+                    return menu.label(if side { "No side chats here yet" } else { "No chats in this folder yet" });
                 }
                 let mut last: Option<&'static str> = None;
                 for (id, title, at) in threads.iter().take(60) {
@@ -461,14 +471,14 @@ impl AiPane {
                         menu = menu.label(group);
                         last = Some(group);
                     }
-                    let (ws, id) = (entity.clone(), id.clone());
+                    let (ws, id, scope) = (entity.clone(), id.clone(), scope.clone());
                     let title = if title.chars().count() > 48 {
                         format!("{}…", title.chars().take(47).collect::<String>())
                     } else {
                         title.clone()
                     };
                     menu = menu.item(PopupMenuItem::new(title).on_click(move |_, _, cx| {
-                        ws.update(cx, |ws, cx| ws.ide_open_thread(&id, cx))
+                        ws.update(cx, |ws, cx| ws.open_chat_in(&scope, &id, cx))
                     }));
                 }
                 menu
@@ -477,9 +487,10 @@ impl AiPane {
 
     /// ⋯: the active chat's actions.
     fn more_button(&self, thread: Option<String>, cx: &mut Context<Self>) -> impl IntoElement {
+        let scope = self.scope.clone();
         let ws = self.workspace.clone();
         let me = cx.weak_entity();
-        let active_ix = ws.read(cx).ide_chat.active;
+        let active_ix = ws.read(cx).chats(&self.scope).active;
         Button::new("ai-more")
             .ghost()
             .small()
@@ -523,9 +534,18 @@ impl AiPane {
                                 }
                             })
                     })
-                    .item(on_thread("Fork Chat", |ws, id, cx| {
-                        _ = ws.fork_thread(id, crate::workspace::ForkAt::End, &Scope::Ide, cx)
-                    }))
+                    .item({
+                        let (ws, id, scope) = (ws.clone(), thread.clone(), scope.clone());
+                        PopupMenuItem::new("Fork Chat").disabled(id.is_none()).on_click(
+                            move |_, _, cx| {
+                                if let Some(id) = &id {
+                                    ws.update(cx, |ws, cx| {
+                                        _ = ws.fork_thread(id, crate::workspace::ForkAt::End, &scope, cx)
+                                    });
+                                }
+                            },
+                        )
+                    })
                     .item({
                         let (ws, id) = (ws.clone(), thread.clone());
                         PopupMenuItem::new("Copy Transcript")
@@ -554,7 +574,9 @@ impl AiPane {
     /// A new chat, before its first message: where it will work, and what it becomes.
     fn draft_note(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let folder = self.workspace.read(cx).ide_root.as_ref().map(|r| {
+        let side = self.scope == Scope::Side;
+        let root = if side { self.workspace.read(cx).side_chat_folder() } else { self.workspace.read(cx).ide_root.clone() };
+        let folder = root.as_ref().map(|r| {
             r.file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| r.display().to_string())
@@ -570,11 +592,17 @@ impl AiPane {
             .gap(px(8.))
             .text_center()
             .child(Icon::new(crate::assets::Lucide::Sparkles).size(px(22.)).text_color(crate::palette::ember(cx)))
-            .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(match &folder {
-                Some(f) => format!("New chat in {f}"),
-                None => "New chat".into(),
+            .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(match (&folder, side) {
+                (Some(f), true) => format!("Side chat in {f}"),
+                (None, true) => "Side chat".into(),
+                (Some(f), false) => format!("New chat in {f}"),
+                (None, false) => "New chat".into(),
             }))
-            .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child("Ask about this code, or have an agent change it. It's a thread like any other: it shows in Agents too."))
+            .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(if side {
+                "A question on the side, in a session of its own: the main thread carries on undisturbed."
+            } else {
+                "Ask about this code, or have an agent change it. It's a thread like any other: it shows in Agents too."
+            }))
     }
 }
 
@@ -583,8 +611,8 @@ impl Render for AiPane {
         #[cfg(any(test, feature = "test-support"))]
         crate::test_support::rendered("AiPane");
         let ws = self.workspace.read(cx);
-        let draft = ws.ide_chat.is_draft();
-        let thread = ws.ide_chat.active_thread().map(str::to_string);
+        let draft = ws.chats(&self.scope).is_draft();
+        let thread = ws.chats(&self.scope).active_thread().map(str::to_string);
         let glass = ws.glass();
         let line = if glass.is_some() {
             crate::ui::panel_border(glass, cx)
